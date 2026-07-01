@@ -35,13 +35,13 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
     For both Gateway Mode and Tunnel Mode, follow the instructions in [sandbox-router](sandbox-router/README.md)
     to build, push, and apply the router image and resources.
 
-2.  **Create a Sandbox Template:**
+2.  **Create a Sandbox Warmpool:**
 
-    Ensure a `SandboxTemplate` exists in your target namespace. The [test_client.py](test_client.py)
+    Ensure a `SandboxWarmPool` exists in your target namespace. The test_client.py
     uses the [python-runtime-sandbox](../../../examples/python-runtime-sandbox/) image.
 
     ```bash
-    kubectl apply -f python-sandbox-template.yaml
+    kubectl apply -f python-sandbox-warmpool.yaml
     ```
 
 ## Installation
@@ -124,7 +124,7 @@ client = SandboxClient(
     )
 )
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     print(sandbox.commands.run("echo 'Hello from Cloud!'").stdout)
 finally:
@@ -145,7 +145,7 @@ client = SandboxClient(
     connection_config=SandboxLocalTunnelConnectionConfig()
 )
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     print(sandbox.commands.run("echo 'Hello from Local!'").stdout)
 finally:
@@ -182,7 +182,7 @@ connection_config = SandboxInClusterConnectionConfig()
 
 client = SandboxClient(connection_config=connection_config)
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     print(sandbox.commands.run("echo 'Hello from in-cluster!'").stdout)
 finally:
@@ -202,11 +202,11 @@ from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 
 client = SandboxClient(
     connection_config=SandboxDirectConnectionConfig(
-       api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+       api_url="http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080"
     )
 )
 
-sandbox = client.create_sandbox(template="python-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:
     sandbox.commands.run("ls -la")
 finally:
@@ -225,7 +225,7 @@ client = SandboxClient(
     connection_config=SandboxLocalTunnelConnectionConfig(server_port=3000)
 )
 
-sandbox = client.create_sandbox(template="node-sandbox-template", namespace="default")
+sandbox = client.create_sandbox(warmpool="node-sandbox-warmpool", namespace="default")
 ```
 
 ### 6. Async Client
@@ -251,12 +251,12 @@ from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 
 async def main():
     config = SandboxDirectConnectionConfig(
-        api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+        api_url="http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080"
     )
 
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
-            template="python-sandbox-template",
+            warmpool="python-sandbox-warmpool",
             namespace="default",
         )
         result = await sandbox.commands.run("echo 'Hello from async!'")
@@ -277,7 +277,7 @@ async def main():
 
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(
-            template="python-sandbox-template",
+            warmpool="python-sandbox-warmpool",
             namespace="default",
         )
         result = await sandbox.commands.run("echo 'Hello from async!'")
@@ -285,6 +285,69 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### 7. Labels and Pod Metadata
+
+`create_sandbox` lets you attach metadata at two different levels:
+
+- `labels`: Kubernetes labels on the **SandboxClaim object** itself
+  (`SandboxClaim.metadata.labels`). Useful for selecting/listing claims.
+- `pod_labels` / `pod_annotations`: labels and annotations stamped onto the
+  running Sandbox **Pod** via `spec.additionalPodMetadata`. Because they live on
+  the Pod, the workload can read them from inside the sandbox through the
+  [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)
+  (for example, to stamp a tenant or client identifier and reject requests that
+  don't belong to it).
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    labels={"team": "platform"},            # on the SandboxClaim object
+    pod_labels={"client-id": "tenant-a"},   # on the running Pod
+    pod_annotations={"owner": "tenant-a"},  # on the running Pod
+)
+```
+
+`pod_labels` are validated with the same Kubernetes label rules as `labels`. The
+same parameters are available on `AsyncSandboxClient.create_sandbox`.
+
+Behavioral notes:
+
+- A `pod_label` / `pod_annotation` whose key already exists on the warmpool
+  template with a different value is rejected by the controller's "No
+  Overrides" rule, and the reconcile errors.
+- Client-side validation only checks RFC-1123 label syntax. The controller's
+  domain allow-list and system-label restrictions are enforced server-side and
+  are not replicated client-side.
+
+### 8. Custom Volume Claim Templates
+
+You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    volume_claim_templates=[
+        {
+            "metadata": {
+                "name": "my-volume",
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": {
+                    "requests": {
+                        "storage": "1Gi",
+                    },
+                },
+            },
+        }
+    ],
+)
+```
+
+The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
 ## Testing
 

@@ -45,7 +45,6 @@ func TestSandboxShutdownTime(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
@@ -82,7 +81,6 @@ func TestSandboxShutdownTime(t *testing.T) {
 			// Service/ServiceFQDN should be cleared from status when the Service is deleted
 			Service:     "",
 			ServiceFQDN: "",
-			Replicas:    0,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -116,21 +114,19 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 			Name:      "retain-finished-sandbox",
 			Namespace: ns.Name,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Containers: []corev1.Container{{
-						Name:    "busybox",
-						Image:   "busybox:1.36",
-						Command: []string{"sh", "-c", "exit 0"},
-					}},
-				},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers: []corev1.Container{{
+					Name:    "busybox",
+					Image:   "busybox:1.36",
+					Command: []string{"sh", "-c", "exit 0"},
+				}},
 			},
-			Lifecycle: sandboxv1beta1.Lifecycle{
-				ShutdownTime:   &shutdown,
-				ShutdownPolicy: &policy,
-			},
+		}}, Lifecycle: sandboxv1beta1.Lifecycle{
+			ShutdownTime:   &shutdown,
+			ShutdownPolicy: &policy,
+		},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))
@@ -150,7 +146,7 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 		if err != nil || !finishedReasonMatches {
 			return false
 		}
-		return current.Status.Service == "" && current.Status.ServiceFQDN == "" && current.Status.Replicas == 0
+		return current.Status.Service == "" && current.Status.ServiceFQDN == ""
 	}, 60*time.Second, time.Second)
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace}}

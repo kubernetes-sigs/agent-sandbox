@@ -34,7 +34,7 @@ Key features of the `Sandbox` CRD include:
 The `extensions` module provides additional CRDs and controllers that build on the core `Sandbox` API to provide more advanced features.
 
 *   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
-*   `SandboxClaim`: Allows users to create Sandboxes from a template, abstracting away the details of the underlying Sandbox configuration.
+*   `SandboxClaim`: Allows users to create Sandboxes from a `SandboxWarmPool`, abstracting away the details of the underlying Sandbox configuration.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandboxes that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
 ## Architecture
@@ -68,7 +68,7 @@ flowchart LR
     User -->|creates| Claim
 
     %% Claim workflow
-    Claim -->|references| Template
+    WarmPool -->|references| Template
     Claim -->|adopts| Sandbox
 
     %% Pod handling
@@ -100,6 +100,17 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```
 
+### Go SDK
+
+To interact with the agent-sandbox programmatically from Go, use the Go SDK:
+
+```sh
+go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
+```
+
+The Go SDK currently ships from the repository's root Go module, so repository release tags such as `v0.1.0` are also the Go SDK versions.
+For detailed installation and usage instructions, please refer to the [Go SDK README](clients/go/README.md).
+
 ### Python SDK
 
 To interact with the agent-sandbox programmatically, you can use the Python SDK. This client library provides a high-level interface for creating and managing sandboxes.
@@ -115,7 +126,7 @@ For advanced scale and concurrency tuning (e.g., API QPS and worker counts), ple
 Once you have installed the controller, you can create a simple Sandbox by applying the following YAML to your cluster:
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: my-sandbox
@@ -166,13 +177,16 @@ This is a community-driven effort, and we welcome collaboration!
 
 ### AI-Assisted Code Reviews (Experimental)
 
-To help improve our review velocity, we are currently experimenting with AI-assisted code reviews, starting with GitHub Copilot as our automated first-pass reviewer. Here is the workflow:
+To help improve our review velocity, we are currently experimenting with AI-assisted code reviews using GitHub Copilot and CodeRabbit as our automated first-pass reviewers. Here is the workflow:
 
-1. Copilot will be assigned as the first reviewer of all open PRs (skipping PRs without a signed CLA)
-1. After Copilot reviews are posted, the PR will be labeled `action-required: resolve-copilot-comments`
-   * **⚠️ Important Contribution Note:** If you receive a code suggestion from Copilot in your PR, please don't directly apply suggestions via the GitHub UI. It will set Copilot as co-author and break the Kubernetes CLA requirements. For more information, read our [Contributing Guidelines](CONTRIBUTING.md). 
-1. After all of Copilot reviews are marked resolved, the PR will be labeled `ready-for-review`
-1. Maintainers will review `ready-for-review` PRs and provide final approval 
+1. Copilot and CodeRabbit will automatically review open PRs (skipping draft PRs and PRs without a signed CLA).
+1. After automated reviews are posted, the PR will be labeled `action-required: resolve-copilot-comments`.
+   * **⚠️ Important Contribution Note (CLA Requirement):** If you receive a code suggestion from Copilot or CodeRabbit in your PR, please don't directly apply suggestions via the GitHub UI. It will set the AI bot as co-author and break the Kubernetes CLA requirements. For more information, read our [Contributing Guidelines](CONTRIBUTING.md). 
+1. **Interacting with AI Reviewers:**
+   * **GitHub Copilot:** If your organization or account has Copilot enabled, you can interact with Copilot directly in PR comment threads by tagging `@copilot` or clicking the Copilot sparkle icon to ask questions, explain code, or suggest fixes.
+   * **CodeRabbit:** CodeRabbit provides high-level summaries and walkthroughs, and acts as an automated gatekeeper that approves the PR once all issues are resolved. You can interact with it by commenting `@coderabbitai` on your PR (e.g., `@coderabbitai review` to request an incremental re-review, or `@coderabbitai full review` to re-evaluate the entire PR from scratch).
+1. After automated review comments are addressed or marked resolved, the PR will be labeled `ready-for-review`.
+1. Maintainers will review `ready-for-review` PRs and provide final approval.
 
 We actively welcome your feedback on the quality, relevance, and helpfulness of these automated reviews! As we iterate on this process, we also plan to evaluate and test different AI review tools to find the best fit for our project's workflow.
 

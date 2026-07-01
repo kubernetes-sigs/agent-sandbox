@@ -32,16 +32,16 @@ import (
 
 // Span attribute keys in the sandbox.* namespace.
 var (
-	AttrClaimName        = attribute.Key("sandbox.claim.name")
-	AttrCommand          = attribute.Key("sandbox.command")
-	AttrExitCode         = attribute.Key("sandbox.exit_code")
-	AttrFilePath         = attribute.Key("sandbox.file.path")
-	AttrFileSize         = attribute.Key("sandbox.file.size")
-	AttrFileCount        = attribute.Key("sandbox.file.count")
-	AttrFileExists       = attribute.Key("sandbox.file.exists")
-	AttrGatewayName      = attribute.Key("sandbox.gateway.name")
-	AttrGatewayNamespace = attribute.Key("sandbox.gateway.namespace")
-	AttrRequestID        = attribute.Key("sandbox.request_id")
+	AttrClaimName         = attribute.Key("sandbox.claim.name")
+	AttrCommandExecutable = attribute.Key("sandbox.command.executable")
+	AttrExitCode          = attribute.Key("sandbox.exit_code")
+	AttrFilePath          = attribute.Key("sandbox.file.path")
+	AttrFileSize          = attribute.Key("sandbox.file.size")
+	AttrFileCount         = attribute.Key("sandbox.file.count")
+	AttrFileExists        = attribute.Key("sandbox.file.exists")
+	AttrGatewayName       = attribute.Key("sandbox.gateway.name")
+	AttrGatewayNamespace  = attribute.Key("sandbox.gateway.namespace")
+	AttrRequestID         = attribute.Key("sandbox.request_id")
 )
 
 // NewTracerProvider creates a TracerProvider with an OTLP/gRPC exporter.

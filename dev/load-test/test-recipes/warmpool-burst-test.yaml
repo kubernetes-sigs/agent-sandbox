@@ -44,6 +44,11 @@ steps:
       templateFillMap:
         TemplateName: perf-template-warm-0
         Replicas: {{$replicas}}
+    - basename: cold-warmpool
+      objectTemplatePath: "templates/cluster-loader-warmpool.yaml"
+      templateFillMap:
+        TemplateName: perf-template-cold-0
+        Replicas: 0
     waits:
     - type: Running
       labelSelector: "agents.x-k8s.io/pool"
@@ -60,7 +65,7 @@ steps:
     - basename: warmpool-claim
       objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
       templateFillMap:
-        TemplateName: perf-template-warm-0
+        WarmPoolName: warmpool-0
         LatencyType: warm # Labeled as warm to stay out of cold metrics
     waits:
     - type: Running
@@ -88,7 +93,7 @@ steps:
     - basename: cold-claim
       objectTemplatePath: templates/cluster-loader-sandbox-claim.yaml
       templateFillMap:
-        TemplateName: perf-template-cold-0
+        WarmPoolName: cold-warmpool-0
         LatencyType: cold # This matches the measurement selector
     waits:
     - type: Running
@@ -130,6 +135,8 @@ steps:
     tuningSet: RampDown
     objectBundle:
     - basename: warmpool
+      objectTemplatePath: "templates/cluster-loader-warmpool.yaml"
+    - basename: cold-warmpool
       objectTemplatePath: "templates/cluster-loader-warmpool.yaml"
     - basename: perf-template-warm
       objectTemplatePath: "templates/cluster-loader-sandbox-template.yaml"

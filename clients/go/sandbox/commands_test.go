@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,74 @@ func TestRun_Success(t *testing.T) {
 	}
 	if result.Stderr != "" {
 		t.Errorf("expected empty stderr, got %q", result.Stderr)
+	}
+}
+
+func TestRun_PropagatesTimeoutHeaderFromContextDeadline(t *testing.T) {
+	var timeoutHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		timeoutHeader = r.Header.Get(headerSandboxTimeout)
+		_ = json.NewEncoder(w).Encode(ExecutionResult{
+			Stdout:   "ok\n",
+			Stderr:   "",
+			ExitCode: 0,
+		})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := c.Run(ctx, "echo ok")
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if timeoutHeader == "" {
+		t.Fatal("expected X-Sandbox-Timeout header to be set")
+	}
+	seconds, err := strconv.ParseFloat(timeoutHeader, 64)
+	if err != nil {
+		t.Fatalf("failed to parse timeout header %q: %v", timeoutHeader, err)
+	}
+	if seconds <= 0 || seconds > 5.1 {
+		t.Fatalf("expected propagated timeout to be within (0, 5.1], got %f", seconds)
+	}
+}
+
+func TestRun_TimeoutHeaderCappedByPerAttemptTimeout(t *testing.T) {
+	var timeoutHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		timeoutHeader = r.Header.Get(headerSandboxTimeout)
+		_ = json.NewEncoder(w).Encode(ExecutionResult{
+			Stdout:   "ok\n",
+			Stderr:   "",
+			ExitCode: 0,
+		})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.connector.mu.Lock()
+	c.connector.perAttemptTimeout = 2 * time.Second
+	c.connector.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := c.Run(ctx, "echo ok")
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if timeoutHeader == "" {
+		t.Fatal("expected X-Sandbox-Timeout header to be set")
+	}
+	seconds, err := strconv.ParseFloat(timeoutHeader, 64)
+	if err != nil {
+		t.Fatalf("failed to parse timeout header %q: %v", timeoutHeader, err)
+	}
+	if seconds <= 0 || seconds > 2.1 {
+		t.Fatalf("expected propagated timeout to be within (0, 2.1], got %f", seconds)
 	}
 }
 

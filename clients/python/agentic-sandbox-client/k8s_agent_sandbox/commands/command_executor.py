@@ -17,6 +17,18 @@ from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import ExecutionResult
 from k8s_agent_sandbox.trace_manager import trace_span, trace
 
+def _extract_executable(command: str) -> str:
+    if not command:
+        return ""
+    for field in command.split():
+        # Skip leading inline environment variables (e.g., KEY=VALUE)
+        if "=" in field:
+            continue
+        # Extract base executable name (strip directory paths)
+        return field.split("/")[-1]
+    return ""
+
+
 class CommandExecutor:
     """
     Handles execution of commands within the sandbox.
@@ -30,7 +42,8 @@ class CommandExecutor:
     def run(self, command: str, timeout: int = 60) -> ExecutionResult:
         span = trace.get_current_span()
         if span.is_recording():
-            span.set_attribute("sandbox.command", command)
+            executable = _extract_executable(command)
+            span.set_attribute("sandbox.command.executable", executable)
 
         payload = {"command": command}
         response = self.connector.send_request(

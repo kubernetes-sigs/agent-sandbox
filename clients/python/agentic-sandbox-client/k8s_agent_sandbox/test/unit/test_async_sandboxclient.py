@@ -31,6 +31,7 @@ from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
+    SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
 )
@@ -46,7 +47,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.config = SandboxDirectConnectionConfig(
             api_url="http://test-router:8080", server_port=8888
         )
-        self.client = AsyncSandboxClient(connection_config=self.config)
+        # cleanup=False keeps tests hermetic; the new default (True) registers a global atexit hook.
+        self.client = AsyncSandboxClient(connection_config=self.config, cleanup=False)
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
@@ -62,11 +64,18 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
-            sandbox = await self.client.create_sandbox("test-template", "test-namespace")
+            sandbox = await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-template", "test-namespace", labels=None, lifecycle=None, warmpool=None
+                ANY,
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None
             )
+
             self.assertEqual(sandbox, mock_sandbox_instance)
 
             active = await self.client.list_active_sandboxes()
@@ -81,7 +90,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
 
             with self.assertRaises(Exception) as ctx:
-                await self.client.create_sandbox("test-template", "test-namespace")
+                await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             self.assertEqual(str(ctx.exception), "Timeout")
             mock_delete.assert_called_once()
@@ -96,7 +105,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
 
             with self.assertRaises(asyncio.CancelledError):
-                await self.client.create_sandbox("test-template", "test-namespace")
+                await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_delete.assert_called_once()
 
@@ -202,6 +211,63 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             AsyncSandboxClient(connection_config=None)
         self.assertIn("connection_config is required", str(ctx.exception))
 
+    def test_cleanup_default_registers_atexit(self):
+        """Constructing without cleanup= should default to True and register the hook."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            client = AsyncSandboxClient(connection_config=self.config)
+            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+
+    def test_cleanup_true_registers_atexit(self):
+        """cleanup=True should register the _atexit_cleanup method as an atexit handler."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            client = AsyncSandboxClient(connection_config=self.config, cleanup=True)
+            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+
+    def test_cleanup_false_does_not_register_atexit(self):
+        """cleanup=False should opt out and not register any atexit handler."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            AsyncSandboxClient(connection_config=self.config, cleanup=False)
+            mock_atexit.register.assert_not_called()
+
+    def test_atexit_cleanup_deletes_tracked_claims(self):
+        """_atexit_cleanup should open a fresh AsyncK8sHelper and delete all tracked claims."""
+        self.client._active_connection_sandboxes = {
+            ("default", "claim-abc"): MagicMock(),
+            ("other-ns", "claim-xyz"): MagicMock(),
+        }
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = AsyncMock()
+        mock_helper_instance.close = AsyncMock()
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+            self.client._atexit_cleanup()
+
+        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-abc", "default")
+        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-xyz", "other-ns")
+        mock_helper_instance.close.assert_called_once()
+
+    def test_atexit_cleanup_skips_when_no_sandboxes(self):
+        """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
+        self.client._active_connection_sandboxes = {}
+        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper") as MockHelper:
+            self.client._atexit_cleanup()
+            MockHelper.assert_not_called()
+
+    def test_atexit_cleanup_suppresses_errors(self):
+        """_atexit_cleanup should not propagate exceptions — cleanup is best-effort.
+        A warning is printed to stderr so the user knows a sandbox was orphaned."""
+        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = AsyncMock(side_effect=Exception("network error"))
+        mock_helper_instance.close = AsyncMock()
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+            with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
+                # Should not raise
+                self.client._atexit_cleanup()
+                # Should have printed a warning
+                mock_stderr.write.assert_called()
+
     async def test_validate_labels_rejects_invalid_value(self):
         with self.assertRaises(ValueError):
             await self.client.create_sandbox("t", labels={"agent": "invalid value!"})
@@ -209,6 +275,34 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_validate_labels_rejects_empty_key(self):
         with self.assertRaises(ValueError):
             await self.client.create_sandbox("t", labels={"": "v"})
+
+    async def test_create_sandbox_with_pod_metadata(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            await self.client.create_sandbox(
+                "test-warmpool", "test-namespace",
+                pod_labels={"client-id": "tenant-a"},
+                pod_annotations={"note": "owned-by-tenant-a"},
+            )
+
+            call_kwargs = mock_create.call_args[1]
+            self.assertEqual(
+                call_kwargs["pod_metadata"],
+                {
+                    "labels": {"client-id": "tenant-a"},
+                    "annotations": {"note": "owned-by-tenant-a"},
+                },
+            )
+
+    async def test_create_sandbox_rejects_invalid_pod_label(self):
+        with self.assertRaises(ValueError):
+            await self.client.create_sandbox("t", pod_labels={"bad key!": "v"})
 
     async def test_create_sandbox_with_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
@@ -220,7 +314,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
             await self.client.create_sandbox(
-                "test-template", "test-namespace", shutdown_after_seconds=300
+                "test-warmpool", "test-namespace", shutdown_after_seconds=300
             )
 
             mock_create.assert_called_once()
@@ -229,6 +323,58 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(lifecycle)
             self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
             self.assertIn("shutdownTime", lifecycle)
+
+    async def test_create_sandbox_with_volume_claim_templates(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        vcts = [{"metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "10Gi"}}}}]
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            await self.client.create_sandbox(
+                "test-warmpool",
+                "test-namespace",
+                volume_claim_templates=vcts,
+            )
+
+            mock_create.assert_called_once_with(
+                ANY,
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=vcts,
+                pod_metadata=None,
+            )
+
+    async def test_create_claim_with_volume_claim_templates(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
+
+        vcts = [{"metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "10Gi"}}}}]
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock()
+
+        await self.client._create_claim(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            volume_claim_templates=vcts,
+        )
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            annotations={"opentelemetry.io/trace-context": "trace-data"},
+            labels=None,
+            lifecycle=None,
+            volume_claim_templates=vcts,
+            pod_metadata=None,
+        )
 
     async def test_create_sandbox_without_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
@@ -239,7 +385,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
              patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
 
-            await self.client.create_sandbox("test-template", "test-namespace")
+            await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             call_kwargs = mock_create.call_args
             lifecycle = call_kwargs[1].get("lifecycle")
@@ -269,6 +415,38 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("connection_config is required", str(ctx.exception))
 
+    async def test_get_pod_ip(self):
+        """Tests that get_pod_ip returns the pod IP when present."""
+        mock_k8s_helper = AsyncMock()
+        mock_k8s_helper.get_sandbox = AsyncMock(return_value={
+            "status": {
+                "podIPs": ["10.244.0.42"]
+            }
+        })
+        sandbox = AsyncSandbox(
+            claim_name="test",
+            sandbox_id="test-id",
+            connection_config=MagicMock(),
+            k8s_helper=mock_k8s_helper,
+        )
+        self.assertEqual(await sandbox.get_pod_ip(), "10.244.0.42")
+
+    async def test_get_pod_ip_prioritization_and_normalization(self):
+        """Tests that get_pod_ip uses select_pod_ip to prioritize and normalize IPs."""
+        mock_k8s_helper = AsyncMock()
+        mock_k8s_helper.get_sandbox = AsyncMock(return_value={
+            "status": {
+                "podIPs": ["::ffff:10.244.0.42", "2001:db8::1"]
+            }
+        })
+        sandbox = AsyncSandbox(
+            claim_name="test",
+            sandbox_id="test-id",
+            connection_config=MagicMock(),
+            k8s_helper=mock_k8s_helper,
+        )
+        self.assertEqual(await sandbox.get_pod_ip(), "10.244.0.42")
+
 
 class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
@@ -279,13 +457,13 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
     async def test_in_cluster_config_accepted(self):
         config = SandboxInClusterConnectionConfig()
-        client = AsyncSandboxClient(connection_config=config)
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
 
     async def test_use_pod_ip_not_passed_as_kwarg(self):
         """AsyncSandbox derives use_pod_ip from connection_config internally."""
         config = SandboxInClusterConnectionConfig(use_pod_ip=True)
-        client = AsyncSandboxClient(connection_config=config)
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
         mock_k8s_helper = client.k8s_helper
         mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
 
@@ -295,7 +473,7 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(client, "_create_claim", new_callable=AsyncMock), \
              patch.object(client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
-            await client.create_sandbox("my-template")
+            await client.create_sandbox("my-warmpool")
 
         call_kwargs = mock_sandbox_class.call_args.kwargs
         self.assertNotIn("use_pod_ip", call_kwargs,
@@ -337,6 +515,53 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         url = await connector._resolve_base_url()
         self.assertEqual(url, "http://10.244.0.5:8888")
 
+    async def test_in_cluster_resolves_ipv6_pod_ip(self):
+        """IPv6 pod IPs must be bracketed in the base URL (RFC 3986)."""
+        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+            get_pod_ip=AsyncMock(return_value="2001:db8::1"),
+        )
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://[2001:db8::1]:8888")
+
+    async def test_gateway_resolves_ipv6(self):
+        """Gateway IPv6 addresses must be bracketed in the base URL."""
+        config = SandboxGatewayConnectionConfig(
+            gateway_name="test-gw",
+            gateway_namespace="default",
+        )
+        mock_k8s = MagicMock()
+        mock_k8s.wait_for_gateway_ip = AsyncMock(return_value="2001:db8::1")
+        connector = AsyncSandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=mock_k8s,
+        )
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://[2001:db8::1]")
+
+    async def test_gateway_does_not_bracket_ipv4(self):
+        """Gateway IPv4 addresses must NOT be bracketed."""
+        config = SandboxGatewayConnectionConfig(
+            gateway_name="test-gw",
+            gateway_namespace="default",
+        )
+        mock_k8s = MagicMock()
+        mock_k8s.wait_for_gateway_ip = AsyncMock(return_value="34.56.78.90")
+        connector = AsyncSandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=mock_k8s,
+        )
+        url = await connector._resolve_base_url()
+        self.assertEqual(url, "http://34.56.78.90")
+
     async def test_in_cluster_does_not_inject_router_headers(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(
@@ -356,6 +581,106 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
             k8s_helper=MagicMock(),
         )
         self.assertTrue(connector._inject_router_headers)
+
+    async def test_timeout_header_is_sent_for_router_requests(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        await connector.send_request("GET", "health", timeout=123)
+
+        _, call_kwargs = connector.client.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123")
+
+    async def test_timeout_object_uses_read_timeout_for_router_requests(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        await connector.send_request("GET", "health", timeout=httpx.Timeout(123.0))
+
+        _, call_kwargs = connector.client.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertEqual(sent_headers.get("X-Sandbox-Timeout"), "123.0")
+
+    async def test_timeout_object_without_read_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        await connector.send_request("GET", "health", timeout=httpx.Timeout(None))
+
+        _, call_kwargs = connector.client.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
+    async def test_unsupported_timeout_does_not_send_header(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        await connector.send_request("GET", "health", timeout=object())
+
+        _, call_kwargs = connector.client.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
+
+    async def test_timeout_header_is_not_sent_for_in_cluster_requests(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        await connector.send_request("GET", "health", timeout=123)
+
+        _, call_kwargs = connector.client.request.call_args
+        sent_headers = call_kwargs.get("headers", {})
+        self.assertNotIn("X-Sandbox-Timeout", sent_headers)
 
 
 class AsyncSandboxHandler(BaseHTTPRequestHandler):
@@ -422,6 +747,78 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             response = await connector.send_request("GET", "health")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["status"], "healthy")
+        finally:
+            await connector.close()
+
+    async def test_follow_redirects_is_false(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
+
+            call_args, call_kwargs = connector.client.request.call_args
+            self.assertFalse(call_kwargs.get("follow_redirects", True))
+        finally:
+            await connector.close()
+
+    async def test_follow_redirects_in_kwargs_popped(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health", follow_redirects=True)
+
+            call_args, call_kwargs = connector.client.request.call_args
+            self.assertFalse(call_kwargs.get("follow_redirects", True))
+        finally:
+            await connector.close()
+
+    async def test_redirect_raises_error(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 302
+        mock_response.is_redirect = True
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request("GET", "health")
+        finally:
+            await connector.close()
+
+    async def test_304_does_not_raise_redirect_error(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 304
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
+        finally:
+            await connector.close()
+
+    async def test_300_does_not_raise_redirect_error(self):
+        connector = self._make_connector()
+        mock_response = MagicMock()
+        mock_response.status_code = 300
+        mock_response.is_redirect = False
+        mock_response.raise_for_status = MagicMock()
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            await connector.send_request("GET", "health")
         finally:
             await connector.close()
 
@@ -495,7 +892,8 @@ class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
 
         self.config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
-        self.client = AsyncSandboxClient(connection_config=self.config)
+        # cleanup=False keeps tests hermetic; the new default (True) registers a global atexit hook.
+        self.client = AsyncSandboxClient(connection_config=self.config, cleanup=False)
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
@@ -534,7 +932,7 @@ class TestAsyncSandboxClientInClusterUsePodIP(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_passes_connection_config_for_non_incluster(self):
         """Verify connection_config is passed through for non-InCluster configs."""
         config = SandboxDirectConnectionConfig(api_url="http://test", server_port=8888)
-        client = AsyncSandboxClient(connection_config=config)
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
         client.k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         client.k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -572,6 +970,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         # Mock httpx client to return 404 on first request
         mock_response = MagicMock()
         mock_response.status_code = 404
+        mock_response.is_redirect = False
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
             "404 Not Found",
             request=MagicMock(),
@@ -658,6 +1057,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         # First request to establish base_url
         mock_response_ok = MagicMock()
         mock_response_ok.status_code = 200
+        mock_response_ok.is_redirect = False
         mock_response_ok.raise_for_status = MagicMock()
         connector.client.request = AsyncMock(return_value=mock_response_ok)
 
@@ -667,6 +1067,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         # Now return 503 error
         mock_response_error = MagicMock()
         mock_response_error.status_code = 503
+        mock_response_error.is_redirect = False
         mock_response_error.raise_for_status.side_effect = httpx.HTTPStatusError(
             "503 Service Unavailable",
             request=MagicMock(),

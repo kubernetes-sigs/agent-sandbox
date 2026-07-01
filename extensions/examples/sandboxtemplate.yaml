@@ -1,4 +1,4 @@
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: secure-datascience-template
@@ -25,6 +25,11 @@ spec:
         volumeMounts:
         - name: workspace
           mountPath: /workspace
+  # volumeClaimTemplatesPolicy specifies the policy for sandbox claims 
+  # to inject or override volume claim templates defined in the template.
+  # Valid values are: Disallowed, Allowed, Overrides
+  # Default value is Disallowed.
+  volumeClaimTemplatesPolicy: Overrides
   # volumeClaimTemplates creates persistent storage for each sandbox.
   # When used with SandboxWarmPool, PVCs are pre-provisioned with warm pods.
   volumeClaimTemplates:

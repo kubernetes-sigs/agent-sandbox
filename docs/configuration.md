@@ -5,11 +5,11 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 ## Concurrency Settings
 
 * `--sandbox-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the Sandbox controller.
-* `--sandbox-claim-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxClaim controller.
+* `--sandbox-claim-concurrent-workers` (default: 50): The maximum number of concurrent reconciles for the SandboxClaim controller.
 * `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller.
 * `--sandbox-warm-pool-max-batch-size` (default: 300): The maximum number of sandboxes the SandboxWarmPool controller will create/delete in a single batch.
-* `--kube-api-qps` (default: -1 ; no rate limiting): The maximum Queries Per Second (QPS) sent to the Kubernetes API server from the controller.
-* `--kube-api-burst` (default: 10): The maximum burst for throttle requests to the Kubernetes API server.
+* `--kube-api-qps` (default: -1, no client-side rate limiting): Client-side QPS limit for the Kubernetes API client.
+* `--kube-api-burst` (default: 10): The maximum burst for client-side throttling of the Kubernetes API client.
 
 ## Cluster Settings
 
@@ -30,8 +30,6 @@ If using the core controller, update `manifest.yaml`:
         args:
         - --leader-elect=true
         - --sandbox-concurrent-workers=10
-        - --kube-api-qps=50
-        - --kube-api-burst=100
 ```
 
 If you are deploying the extensions controller (which includes the core controllers + extensions), update the args in `extensions.yaml` instead:
@@ -44,11 +42,9 @@ If you are deploying the extensions controller (which includes the core controll
         - --leader-elect=true
         - --extensions
         - --sandbox-concurrent-workers=10
-        - --sandbox-claim-concurrent-workers=10
+        - --sandbox-claim-concurrent-workers=100
         - --sandbox-warm-pool-concurrent-workers=10
         - --sandbox-warm-pool-max-batch-size=500
-        - --kube-api-qps=50
-        - --kube-api-burst=100
 ```
 **Using `kubectl patch` (Live Cluster):**
 If you have already deployed the controller (e.g., via `make deploy-kind`) and want to apply these concurrency flags dynamically to the running cluster, you can use a JSON patch:
@@ -59,11 +55,9 @@ kubectl patch deployment agent-sandbox-controller \
   --type='json' \
   -p='[
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=10"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=100"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-concurrent-workers=10"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-max-batch-size=500"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kube-api-qps=50"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kube-api-burst=100"}
   ]'
 ```
 This method safely appends the new flags without overwriting existing necessary arguments like `--leader-elect=true` or `--extensions=true`.
@@ -85,11 +79,9 @@ spec:
       - name: agent-sandbox-controller
         args:
         - --sandbox-concurrent-workers=10
-        - --sandbox-claim-concurrent-workers=10
+        - --sandbox-claim-concurrent-workers=100
         - --sandbox-warm-pool-concurrent-workers=10
         - --sandbox-warm-pool-max-batch-size=500
-        - --kube-api-qps=50
-        - --kube-api-burst=100
 ```
 Then include the patch in your `kustomization.yaml`:
 ```yaml

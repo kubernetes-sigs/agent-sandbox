@@ -80,7 +80,6 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "vct-sandbox",
 			ServiceFQDN:   fmt.Sprintf("vct-sandbox.%s.svc.cluster.local", ns.Name),
-			Replicas:      1,
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
@@ -163,7 +162,9 @@ func TestSandboxVolumeClaimTemplatesImmutable(t *testing.T) {
 
 			sb := &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "vct-immutable", Namespace: ns.Name},
-				Spec:       sandboxv1beta1.SandboxSpec{PodTemplate: pausePod, VolumeClaimTemplates: c.initial},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: pausePod, VolumeClaimTemplates: c.initial},
+				},
 			}
 			require.NoError(t, tc.CreateWithCleanup(t.Context(), sb))
 

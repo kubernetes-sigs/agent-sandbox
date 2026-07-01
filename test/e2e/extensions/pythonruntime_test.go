@@ -86,8 +86,8 @@ kind: SandboxClaim
 metadata:
   name: python-sandbox-claim
 spec:
-  sandboxTemplateRef:
-    name: python-sandbox-template
+  warmPoolRef:
+    name: python-warmpool
 `
 
 const warmPoolManifest = `
@@ -212,6 +212,13 @@ func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	require.NoError(testingT, err)
 	sandboxTemplate.Namespace = ns.Name
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxTemplate))
+
+	sandboxWarmpool, err := sandboxWarmpoolFromManifest(warmPoolManifest)
+	require.NoError(testingT, err)
+	sandboxWarmpool.Namespace = ns.Name
+	replicas := int32(0)
+	sandboxWarmpool.Spec.Replicas = &replicas
+	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxWarmpool))
 
 	// Create the sandbox claim and wait for readiness
 	sandboxClaim, err := sandboxClaimFromManifest(claimManifest)

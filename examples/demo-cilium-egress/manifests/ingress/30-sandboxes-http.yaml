@@ -1,0 +1,59 @@
+# Ingress variant of the two sandboxes: same identities (sa + demo.identity label)
+# as manifests/30-sandboxes.yaml, but running the exec-server image so the
+# sandbox-router can drive them over HTTP (port 8888). __SANDBOX_IMAGE__ is
+# substituted by scripts/optional-gateway-routing.sh.
+#
+# Egress is still governed by the same CiliumNetworkPolicies (they select on the
+# demo.identity label), so team-a can clone github and team-b cannot — now
+# exercised through the gateway -> router -> sandbox path instead of kubectl exec.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: sandbox-team-a
+  namespace: sandbox-demo
+spec:
+  service: true # create a headless Service so the router can also reach it by DNS
+  podTemplate:
+    metadata:
+      labels:
+        demo.identity: team-a
+    spec:
+      serviceAccountName: sa-team-a
+      automountServiceAccountToken: false
+      containers:
+        - name: exec
+          image: __SANDBOX_IMAGE__
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8888
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: sandbox-team-b
+  namespace: sandbox-demo
+spec:
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        demo.identity: team-b
+    spec:
+      serviceAccountName: sa-team-b
+      automountServiceAccountToken: false
+      containers:
+        - name: exec
+          image: __SANDBOX_IMAGE__
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8888
+            initialDelaySeconds: 3
+            periodSeconds: 5

@@ -44,20 +44,30 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 			Name:      "obs-anno-template",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "pause",
-							Image: "registry.k8s.io/pause:3.10",
-						},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "pause",
+						Image: "registry.k8s.io/pause:3.10",
 					},
 				},
 			},
+		}},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "obs-anno-warmpool",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "obs-anno-template"},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
 	startTime := time.Now()
 
@@ -68,7 +78,7 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "obs-anno-template"},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "obs-anno-warmpool"},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))

@@ -24,6 +24,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,7 +39,7 @@ import (
 // newReadyTestSandbox creates a Sandbox that's already "connected" to the given server URL.
 func newReadyTestSandbox(serverURL string) *Sandbox {
 	opts := Options{
-		TemplateName:      "test-template",
+		WarmPoolName:      "test-warmpool",
 		Namespace:         "default",
 		APIURL:            serverURL,
 		ServerPort:        8888,
@@ -69,7 +70,7 @@ func newReadyTestSandbox(serverURL string) *Sandbox {
 // newUnreadyTestSandbox returns a Sandbox that has not been opened.
 func newUnreadyTestSandbox() *Sandbox {
 	opts := Options{
-		TemplateName:      "test-template",
+		WarmPoolName:      "test-warmpool",
 		Namespace:         "default",
 		APIURL:            "http://localhost:19999",
 		ServerPort:        8888,
@@ -428,16 +429,20 @@ func TestRetry_ServerErrorThenSuccess(t *testing.T) {
 }
 
 func TestHTTPHeaders_AllSet(t *testing.T) {
+	var mu sync.Mutex
 	var headers http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		headers = r.Header.Clone()
+		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
 	}))
 	defer server.Close()
 
 	c := newReadyTestSandbox(server.URL)
+	c.connector.SetIdentity("my-claim")
+	c.connector.SetPodIP("10.244.0.42")
 	c.connector.mu.Lock()
-	c.connector.sandboxID = "my-claim"
 	c.connector.namespace = "my-ns"
 	c.connector.serverPort = 9999
 	c.connector.mu.Unlock()
@@ -447,14 +452,68 @@ func TestHTTPHeaders_AllSet(t *testing.T) {
 		t.Fatalf("Exists() error: %v", err)
 	}
 
-	if headers.Get(headerSandboxID) != "my-claim" {
-		t.Errorf("wrong %s: %s", headerSandboxID, headers.Get(headerSandboxID))
+	mu.Lock()
+	capturedHeaders := headers.Clone()
+	mu.Unlock()
+
+	if capturedHeaders.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, capturedHeaders.Get(headerSandboxID))
 	}
-	if headers.Get(headerSandboxNamespace) != "my-ns" {
-		t.Errorf("wrong %s: %s", headerSandboxNamespace, headers.Get(headerSandboxNamespace))
+	if capturedHeaders.Get(headerSandboxNamespace) != "my-ns" {
+		t.Errorf("wrong %s: %s", headerSandboxNamespace, capturedHeaders.Get(headerSandboxNamespace))
 	}
-	if headers.Get(headerSandboxPort) != "9999" {
-		t.Errorf("wrong %s: %s", headerSandboxPort, headers.Get(headerSandboxPort))
+	if capturedHeaders.Get(headerSandboxPort) != "9999" {
+		t.Errorf("wrong %s: %s", headerSandboxPort, capturedHeaders.Get(headerSandboxPort))
+	}
+	if capturedHeaders.Get(headerSandboxPodIP) != "10.244.0.42" {
+		t.Errorf("wrong %s: %s", headerSandboxPodIP, capturedHeaders.Get(headerSandboxPodIP))
+	}
+}
+
+func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
+	var mu sync.Mutex
+	var headers http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headers = r.Header.Clone()
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.connector.SetIdentity("my-claim")
+	c.connector.SetPodIP("")
+	c.connector.mu.Lock()
+	c.connector.namespace = "my-ns"
+	c.connector.serverPort = 9999
+	c.connector.mu.Unlock()
+
+	_, err := c.Exists(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("Exists() error: %v", err)
+	}
+
+	mu.Lock()
+	capturedHeaders := headers.Clone()
+	mu.Unlock()
+
+	if capturedHeaders.Get(headerSandboxID) != "my-claim" {
+		t.Errorf("wrong %s: %s", headerSandboxID, capturedHeaders.Get(headerSandboxID))
+	}
+	if _, ok := capturedHeaders[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
+		t.Errorf("expected header %s to be absent, but it was present", headerSandboxPodIP)
+	}
+	timeoutHeader := headers.Get(headerSandboxTimeout)
+	if timeoutHeader == "" {
+		t.Fatalf("expected %s to be set", headerSandboxTimeout)
+	}
+	seconds, err := strconv.ParseFloat(timeoutHeader, 64)
+	if err != nil {
+		t.Fatalf("failed to parse timeout header %q: %v", timeoutHeader, err)
+	}
+	if seconds <= 0 {
+		t.Fatalf("expected propagated timeout to be positive, got %f", seconds)
 	}
 }
 

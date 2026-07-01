@@ -40,6 +40,7 @@ type Sandbox struct {
 	claimName   string
 	sandboxName string
 	podName     string
+	podIP       string
 	annotations map[string]string
 
 	lifecycleSem chan struct{}
@@ -237,7 +238,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Create claim.
-	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.TemplateName, s.tracer, s.traceServiceName)
+	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.tracer, s.traceServiceName)
 	if err != nil {
 		return err
 	}
@@ -265,6 +266,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 		return s.rollbackOpen(err)
 	}
 	s.setState(state)
+	s.connector.SetPodIP(state.PodIP)
 
 	// Connect transport.
 	if err := s.connector.Connect(openCtx); err != nil {
@@ -327,6 +329,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 	s.setState(state)
 
 	s.connector.SetIdentity(sandboxName)
+	s.connector.SetPodIP(state.PodIP)
 	if err := s.connector.Connect(reconnCtx); err != nil {
 		retErr := fmt.Errorf("sandbox: reconnect transport failed (sandbox is alive; retry Open): %w", err)
 		recordError(span, retErr)
@@ -350,6 +353,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	s.mu.Lock()
 	s.sandboxName = ""
 	s.podName = ""
+	s.podIP = ""
 	s.annotations = nil
 	if cleanupErr == nil {
 		s.claimName = ""
@@ -436,6 +440,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	s.draining = false
 	s.sandboxName = ""
 	s.podName = ""
+	s.podIP = ""
 	s.annotations = nil
 	if err != nil && s.claimName != "" {
 		s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
@@ -551,6 +556,12 @@ func (s *Sandbox) PodName() string {
 	return s.podName
 }
 
+func (s *Sandbox) PodIP() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.podIP
+}
+
 func (s *Sandbox) Annotations() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -593,5 +604,6 @@ func (s *Sandbox) setState(state *sandboxState) {
 	defer s.mu.Unlock()
 	s.sandboxName = state.SandboxName
 	s.podName = state.PodName
+	s.podIP = state.PodIP
 	s.annotations = state.Annotations
 }

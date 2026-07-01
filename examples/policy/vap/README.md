@@ -50,7 +50,7 @@ To verify the policy is active, try creating a non-compliant sandbox.
 1. Compliant Sandbox (Should Succeed):
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: secure-sandbox
@@ -120,7 +120,7 @@ spec:
 Since there's no `runtimeClassName` specified, the VAP will reject the creation of the Sandbox resource. 
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: insecure-sandbox
@@ -155,7 +155,7 @@ Attempt to create a Sandbox with a secure main container but a privileged init c
 
 **Manifest (`bad-init.yaml`):**
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:
   name: side-door-attack

@@ -21,13 +21,23 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def download_model():
     MODEL_ID = "Salesforce/codegen-350M-mono"
-    CACHE_DIR = Path("/models")
+    
+    # Respect HF_HOME override if specified, otherwise default to /models
+    cache_dir_env = os.getenv("HF_HOME")
+    if cache_dir_env:
+        CACHE_DIR = Path(cache_dir_env)
+    else:
+        CACHE_DIR = Path("/models")
+        
     HF_TOKEN = os.getenv("HF_TOKEN")
+    if HF_TOKEN == "<HF_TOKEN>":
+        HF_TOKEN = None
     
     if not HF_TOKEN:
-        print("ERROR: HF_TOKEN environment variable not set")
-        print("Set it with: export HF_TOKEN='your_token_here'")
-        sys.exit(1)
+        print("WARNING: HF_TOKEN environment variable is not set or contains the default placeholder.")
+        print("Downloads for gated or private models (like LLaMA) will fail.")
+        print("Salesforce/codegen models are open-source and should download successfully without a token.")
+        print("-" * 80)
     
     print(f"Cache directory: {CACHE_DIR}")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)

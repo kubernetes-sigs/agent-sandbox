@@ -13,13 +13,14 @@
 # limitations under the License.
 
 import argparse
+import os
 import time
 import logging
 import sys
 import subprocess
 from unittest.mock import MagicMock
 from pydantic import ValidationError
-from k8s_agent_sandbox import SandboxClient, SandboxTemplateNotFoundError
+from k8s_agent_sandbox import SandboxClient, SandboxWarmPoolNotFoundError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -149,21 +150,21 @@ def run_sandbox_tests(sandbox: Sandbox):
     test_command_execution(sandbox)
     test_file_operations(sandbox)
 
-def test_wrong_template_name(client: SandboxClient, namespace: str):
-    print("\n--- Testing Wrong Template Name ---")
-    wrong_template = "this-template-does-not-exist-123"
-    print(f"Attempting to create sandbox with non-existent template '{wrong_template}'...")
+def test_wrong_warmpool_name(client: SandboxClient, namespace: str):
+    print("\n--- Testing Wrong Warmpool Name ---")
+    wrong_warmpool = "this-warmpool-does-not-exist-123"
+    print(f"Attempting to create sandbox with non-existent warm pool '{wrong_warmpool}'...")
     try:
-        client.create_sandbox(wrong_template, namespace=namespace)
-        raise AssertionError("Expected SandboxTemplateNotFoundError was not raised")
-    except SandboxTemplateNotFoundError as e:
-        print(f"Caught expected SandboxTemplateNotFoundError: {e}")
-    print("--- Wrong Template Name Test Passed! ---")
+        client.create_sandbox(wrong_warmpool, namespace=namespace)
+        raise AssertionError("Expected SandboxWarmPoolNotFoundError was not raised")
+    except SandboxWarmPoolNotFoundError as e:
+        print(f"Caught expected SandboxWarmPoolNotFoundError: {e}")
+    print("--- Wrong Warmpool Name Test Passed! ---")
 
 
-def test_explicit_close_connection_and_persistence(client: SandboxClient, template_name: str, namespace: str):
+def test_explicit_close_connection_and_persistence(client: SandboxClient, warmpool_name: str, namespace: str):
     print("\n--- Testing Explicit Disconnect and Persistence ---")
-    persist_sandbox = client.create_sandbox(template_name, namespace=namespace)
+    persist_sandbox = client.create_sandbox(warmpool_name, namespace=namespace)
     persist_claim = persist_sandbox.claim_name
     
     print(f"Explicitly closing connection for sandbox '{persist_claim}'...")
@@ -185,13 +186,13 @@ def test_explicit_close_connection_and_persistence(client: SandboxClient, templa
     reattached_sandbox.terminate()
     print("--- Explicit Close Connection Test Passed ---")
 
-def test_creation_get_and_list_sandboxes(client: SandboxClient, template_name: str, namespace: str) -> tuple[Sandbox, Sandbox]:
-    print(f"Creating sandbox with template '{template_name}' in namespace '{namespace}'...")
-    sandbox = client.create_sandbox(template_name, namespace=namespace)
+def test_creation_get_and_list_sandboxes(client: SandboxClient, warmpool_name: str, namespace: str) -> tuple[Sandbox, Sandbox]:
+    print(f"Creating sandbox with warm pool '{warmpool_name}' in namespace '{namespace}'...")
+    sandbox = client.create_sandbox(warmpool_name, namespace=namespace)
     print(f"Sandbox created with claim name: {sandbox.claim_name}")
 
-    print(f"Creating second sandbox with template '{template_name}' in namespace '{namespace}'...")
-    sandbox2 = client.create_sandbox(template_name, namespace=namespace)
+    print(f"Creating second sandbox with warm pool '{warmpool_name}' in namespace '{namespace}'...")
+    sandbox2 = client.create_sandbox(warmpool_name, namespace=namespace)
     print(f"Sandbox 2 created with claim name: {sandbox2.claim_name}")
 
     print("\n--- Verifying Active Sandboxes ---")
@@ -283,24 +284,110 @@ def test_termination_and_deletion(client: SandboxClient, sandbox: Sandbox, sandb
             break
     print("--- Sandbox 2 Retrieval Failure Verified ---")
 
-def run_client_tests(client: SandboxClient, template_name: str, namespace: str):
-    # Test Create, Get and List sandboxes
-    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, template_name, namespace)
+def test_volume_claim_templates(client: SandboxClient, warmpool_name: str, namespace: str):
+    print("\n--- Testing Custom Volume Claim Templates on SandboxClaim ---")
+    
+    storage_class = os.getenv("SANDBOX_TEST_STORAGE_CLASS")
+    custom_vcts = [
+        {
+            "metadata": {
+                "name": "custom-workspace"
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": {
+                    "requests": {
+                        "storage": "4Gi"
+                    }
+                }
+            }
+        }
+    ]
+    if storage_class:
+        custom_vcts[0]["spec"]["storageClassName"] = storage_class
+    
+    print("Creating sandbox with custom volume claim templates...")
+    sandbox = client.create_sandbox(
+        warmpool_name,
+        namespace=namespace,
+        volume_claim_templates=custom_vcts
+    )
+    print(f"Sandbox created with claim name: {sandbox.claim_name}")
+    
+    try:
+        # Verify that volumeClaimTemplates was propagated to the SandboxClaim spec
+        print("Verifying SandboxClaim spec.volumeClaimTemplates...")
+        claim_res = client.k8s_helper.get_sandbox_claim(sandbox.claim_name, namespace)
+        assert claim_res is not None, f"SandboxClaim {sandbox.claim_name} should exist"
+        claim_spec = claim_res.get("spec", {})
+        claim_vcts = claim_spec.get("volumeClaimTemplates", [])
+        assert len(claim_vcts) == 1, f"Expected 1 volumeClaimTemplate on SandboxClaim, got {len(claim_vcts)}"
+        assert claim_vcts[0].get("metadata", {}).get("name") == "custom-workspace", "Volume claim template name mismatch in SandboxClaim"
 
-    # Test wrong template name
-    test_wrong_template_name(client, namespace)
+        # Verify that volumeClaimTemplates was propagated to the Sandbox spec
+        print("Verifying Sandbox spec.volumeClaimTemplates...")
+        sandbox_res = client.k8s_helper.get_sandbox(sandbox.sandbox_id, namespace)
+        assert sandbox_res is not None, f"Sandbox {sandbox.sandbox_id} should exist"
+        sandbox_spec = sandbox_res.get("spec", {})
+        sandbox_vcts = sandbox_spec.get("volumeClaimTemplates", [])
+        assert len(sandbox_vcts) == 2, f"Expected 2 volumeClaimTemplates in Sandbox, got {len(sandbox_vcts)}"
+        
+        # sandbox_vcts[0] is the template's default workspace
+        assert sandbox_vcts[0].get("metadata", {}).get("name") == "workspace"
+
+        # sandbox_vcts[1] is the custom one we passed
+        vct = sandbox_vcts[1]
+        assert vct.get("metadata", {}).get("name") == "custom-workspace", "Volume claim template name mismatch in Sandbox"
+        assert vct.get("spec", {}).get("accessModes") == ["ReadWriteOnce"], "Volume claim template accessModes mismatch in Sandbox"
+        if storage_class:
+            assert vct.get("spec", {}).get("storageClassName") == storage_class, "Volume claim template storageClassName mismatch in Sandbox"
+        else:
+            assert vct.get("spec", {}).get("storageClassName") is None or vct.get("spec", {}).get("storageClassName") == "", "Volume claim template storageClassName mismatch in Sandbox"
+        assert vct.get("spec", {}).get("resources", {}).get("requests", {}).get("storage") == "4Gi", "Volume claim template storage request mismatch in Sandbox"
+
+        # Verify that the PersistentVolumeClaim resource was created with the expected properties
+        print("Verifying PVC creation in cluster...")
+        pvc_name = f"custom-workspace-{sandbox.sandbox_id}"
+        pvc_res = client.k8s_helper.core_v1_api.read_namespaced_persistent_volume_claim(pvc_name, namespace)
+        assert pvc_res is not None, f"PVC {pvc_name} should exist"
+        assert pvc_res.spec.resources.requests is not None
+        assert pvc_res.spec.resources.requests.get("storage") == "4Gi", "PVC storage request mismatch in cluster"
+        if storage_class:
+            assert pvc_res.spec.storage_class_name == storage_class, "PVC storageClassName mismatch in cluster"
+        else:
+            assert pvc_res.spec.storage_class_name, "PVC storage_class_name should be set by the cluster default"
+
+        print("Running command to verify sandbox is operational...")
+        res = sandbox.commands.run("df -h")
+        print(f"Disk space output:\n{res.stdout}")
+        assert res.exit_code == 0, f"Command df -h failed with exit code {res.exit_code}: {res.stderr}"
+    finally:
+        print("Cleaning up sandbox...")
+        sandbox.terminate()
+    print("--- Volume Claim Templates Test Passed! ---")
+
+
+def run_client_tests(client: SandboxClient, warmpool_name: str, namespace: str):
+    # Test Create, Get and List sandboxes
+    sandbox, sandbox2 = test_creation_get_and_list_sandboxes(client, warmpool_name, namespace)
+
+    # Test wrong warmpool name
+    test_wrong_warmpool_name(client, namespace)
+
+    # Test custom volume claim templates
+    test_volume_claim_templates(client, warmpool_name, namespace)
 
     # Run Sandbox Tests
     run_sandbox_tests(sandbox)
 
     # Test persistence of Sandbox in Kubernetes cluster after client side disconnection
-    test_explicit_close_connection_and_persistence(client, template_name, namespace)
+    test_explicit_close_connection_and_persistence(client, warmpool_name, namespace)
 
     # Test Sandbox deletion at Kubernetes cluster
     test_termination_and_deletion(client, sandbox, sandbox2, namespace)
     
 
-def test_client_cleanup_flag(client: SandboxClient, template_name: str, namespace: str, connection_config):
+def test_client_cleanup_flag(client: SandboxClient, warmpool_name: str, namespace: str, connection_config):
     print("\n--- Testing SandboxClient cleanup flag (Subprocess Simulation) ---")
     
     # Reconstruct the connection config dynamically for the subprocess
@@ -309,7 +396,7 @@ def test_client_cleanup_flag(client: SandboxClient, template_name: str, namespac
     elif isinstance(connection_config, SandboxDirectConnectionConfig):
         conn_code = f"SandboxDirectConnectionConfig(api_url='{connection_config.api_url}', server_port={connection_config.server_port})"
     else:
-        conn_code = f"SandboxLocalTunnelConnectionConfig(server_port={connection_config.server_port})"
+        conn_code = f"SandboxLocalTunnelConnectionConfig(server_port={connection_config.server_port}, router_namespace='{connection_config.router_namespace}')"
 
     script = f"""
 from k8s_agent_sandbox import SandboxClient
@@ -320,7 +407,7 @@ cleanup_flag = sys.argv[1] == 'True'
 conn_config = {conn_code}
 client = SandboxClient(connection_config=conn_config, cleanup=cleanup_flag)
 
-sb = client.create_sandbox('{template_name}', namespace='{namespace}')
+sb = client.create_sandbox('{warmpool_name}', namespace='{namespace}')
 print(f"CLAIM_NAME:{{sb.claim_name}}")
 """
     
@@ -372,8 +459,8 @@ print(f"CLAIM_NAME:{{sb.claim_name}}")
     sb_false.terminate()
     print("--- SandboxClient cleanup flag Test Passed ---")
 
-def main(template_name: str, gateway_name: str | None, api_url: str | None, namespace: str,
-               server_port: int, enable_tracing: bool):
+def main(warmpool_name: str, gateway_name: str | None, api_url: str | None, namespace: str,
+               server_port: int, enable_tracing: bool, router_namespace: str):
     """
     Tests the Sandbox client by creating a sandbox, running a command,
     and then cleaning up.
@@ -401,7 +488,8 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
         )
     else:
         connection_config = SandboxLocalTunnelConnectionConfig(
-            server_port=server_port
+            server_port=server_port,
+            router_namespace=router_namespace
         )
 
     tracer_config = SandboxTracerConfig(
@@ -415,10 +503,10 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
         cleanup=True
     )
     
-    test_client_cleanup_flag(client, template_name, namespace, connection_config)
+    test_client_cleanup_flag(client, warmpool_name, namespace, connection_config)
 
     try:
-        run_client_tests(client, template_name, namespace)
+        run_client_tests(client, warmpool_name, namespace)
 
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")
@@ -430,9 +518,9 @@ def main(template_name: str, gateway_name: str | None, api_url: str | None, name
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test the Sandbox client.")
     parser.add_argument(
-        "--template-name",
-        default="python-sandbox-template",
-        help="The name of the sandbox template to use for the test."
+        "--warmpool-name",
+        default="python-sandbox-pool",
+        help="The name of the sandbox warm pool to use for the test."
     )
 
     # Default is None to allow testing the Port-Forward fallback
@@ -448,6 +536,8 @@ if __name__ == "__main__":
                         help="Namespace to create sandbox in")
     parser.add_argument("--server-port", type=int, default=8888,
                         help="Port the sandbox container listens on")
+    parser.add_argument("--router-namespace", default="default",
+                        help="Namespace where the Router service resides")
     parser.add_argument("--enable-tracing",
                         action="store_true",
                         help="Enable OpenTelemetry tracing in the agentic-sandbox-client."
@@ -456,10 +546,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(
-        template_name=args.template_name,
+        warmpool_name=args.warmpool_name,
         gateway_name=args.gateway_name,
         api_url=args.api_url,
         namespace=args.namespace,
         server_port=args.server_port,
-        enable_tracing=args.enable_tracing
+        enable_tracing=args.enable_tracing,
+        router_namespace=args.router_namespace
     )

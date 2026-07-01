@@ -77,16 +77,16 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 
 // CreateSandbox provisions a new sandbox and returns a managed handle.
 // On failure, the orphaned claim is cleaned up.
-func (c *Client) CreateSandbox(ctx context.Context, template, namespace string) (*Sandbox, error) {
-	if template == "" {
-		return nil, fmt.Errorf("sandbox: template name is required")
+func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string) (*Sandbox, error) {
+	if warmPoolName == "" {
+		return nil, fmt.Errorf("sandbox: warm pool name is required")
 	}
 	if namespace == "" {
 		namespace = defaultNamespace
 	}
 
 	sandboxOpts := c.opts
-	sandboxOpts.TemplateName = template
+	sandboxOpts.WarmPoolName = warmPoolName
 	sandboxOpts.Namespace = namespace
 	sandboxOpts.K8sHelper = c.k8s
 

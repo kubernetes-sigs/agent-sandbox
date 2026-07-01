@@ -131,3 +131,105 @@ func TestSimpleSandboxQueue_RemoveQueue_MemoryLeakFix(t *testing.T) {
 		t.Errorf("Expected queue to be completely removed, but it still existed")
 	}
 }
+
+func TestSimpleSandboxQueue_GetWithStrategy(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	hash := "template-hash-1"
+
+	key1 := SandboxKey{Namespace: "default", Name: "sb-1"}
+	key2 := SandboxKey{Namespace: "default", Name: "sb-2"}
+	key3 := SandboxKey{Namespace: "default", Name: "sb-3"}
+
+	q.Add(hash, key1)
+	q.Add(hash, key2)
+	q.Add(hash, key3)
+
+	// Custom strategy to pick key2 specifically
+	pickKey2 := func(items []SandboxKey) (SandboxKey, bool) {
+		for _, item := range items {
+			if item.Name == "sb-2" {
+				return item, true
+			}
+		}
+		return SandboxKey{}, false
+	}
+
+	// Pop with strategy
+	got, ok := q.GetWithStrategy(hash, pickKey2)
+	if !ok || got != key2 {
+		t.Errorf("Expected to pick %v, got %v (ok: %v)", key2, got, ok)
+	}
+
+	// First standard pop should be key1 (since key2 was removed)
+	got1, _ := q.Get(hash)
+	if got1 != key1 {
+		t.Errorf("Expected first remaining item to be %v, got %v", key1, got1)
+	}
+
+	// Second standard pop should be key3
+	got3, _ := q.Get(hash)
+	if got3 != key3 {
+		t.Errorf("Expected second remaining item to be %v, got %v", key3, got3)
+	}
+
+	// Queue should now be empty
+	_, ok3 := q.Get(hash)
+	if ok3 {
+		t.Errorf("Expected queue to be empty, but got an item")
+	}
+}
+
+func TestGetNamespacedWarmPoolName(t *testing.T) {
+	namespace := "my-ns"
+	wp := "my-wp"
+	expected := "my-ns/my-wp"
+	got := GetNamespacedWarmPoolName(namespace, wp)
+	if got != expected {
+		t.Errorf("Expected %q, got %q", expected, got)
+	}
+}
+
+func TestSimpleSandboxQueue_NoLegacyFallback(t *testing.T) {
+	q := NewSimpleSandboxQueue()
+	namespace := "my-ns"
+	wpName := "my-wp"
+	namespacedName := GetNamespacedWarmPoolName(namespace, wpName)
+
+	key1 := SandboxKey{Namespace: namespace, Name: "sb-1"}
+
+	// Store queue with namespace-aware warm pool name
+	q.Add(namespacedName, key1)
+
+	// Verify that namespace-agnostic warm pool name does NOT work to Get
+	_, ok := q.Get(wpName)
+	if ok {
+		t.Errorf("Expected Get with namespace-agnostic name to fail")
+	}
+
+	// Verify that namespace-agnostic warm pool name does NOT work to GetWithStrategy
+	_, ok = q.GetWithStrategy(wpName, func(items []SandboxKey) (SandboxKey, bool) {
+		return items[0], true
+	})
+	if ok {
+		t.Errorf("Expected GetWithStrategy with namespace-agnostic name to fail")
+	}
+
+	// Verify that namespace-agnostic warm pool name does NOT work to RemoveItem
+	q.RemoveItem(wpName, key1)
+	// We use GetWithStrategy without popping, or check queue length by standard Get.
+	// Since Get pops, let's check that Get(namespacedName) still succeeds and returns key1.
+	got, ok := q.Get(namespacedName)
+	if !ok || got != key1 {
+		t.Errorf("Expected item to still be in queue after RemoveItem with namespace-agnostic name")
+	}
+
+	// Re-add item since Get popped it
+	q.Add(namespacedName, key1)
+
+	// Verify that namespace-agnostic warm pool name does NOT work to RemoveQueue
+	q.RemoveQueue(wpName)
+	_, ok = q.Get(namespacedName)
+	if !ok {
+		t.Errorf("Expected queue to still exist after RemoveQueue with namespace-agnostic name")
+	}
+}

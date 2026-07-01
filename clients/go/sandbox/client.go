@@ -101,6 +101,16 @@ func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace stri
 
 	key := Key{Namespace: namespace, ClaimName: sb.ClaimName()}
 	c.mu.Lock()
+	if tracked := c.registry[key]; tracked != nil && tracked.IsReady() {
+		c.mu.Unlock()
+		// A concurrent caller already tracks a ready handle for this key. Our
+		// handle owns a distinct freshly-created claim, so Close() it (tears
+		// down transport + deletes the redundant claim) and return the tracked one.
+		if cerr := sb.Close(ctx); cerr != nil {
+			c.log.Error(cerr, "closing redundant handle after registry race", "claim", key.ClaimName, "namespace", namespace)
+		}
+		return tracked, nil
+	}
 	c.registry[key] = sb
 	c.mu.Unlock()
 
@@ -117,18 +127,17 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 
 	c.mu.Lock()
 	existing := c.registry[key]
-	c.mu.Unlock()
-
 	if existing != nil && existing.IsReady() {
+		c.mu.Unlock()
 		return existing, nil
 	}
-
-	// Evict stale handle.
+	// Evict stale handle atomically: we already know existing is nil or
+	// not-ready, and no concurrent caller can have changed it since we
+	// still hold the lock.
 	if existing != nil {
-		c.mu.Lock()
 		delete(c.registry, key)
-		c.mu.Unlock()
 	}
+	c.mu.Unlock()
 
 	sandboxOpts := c.opts
 	sandboxOpts.Namespace = namespace
@@ -158,7 +167,18 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 		return nil, fmt.Errorf("sandbox: failed to re-attach to claim %q in %q: %w", claimName, namespace, err)
 	}
 
+	// Re-check under the final lock: a concurrent GetSandbox/CreateSandbox for
+	// the same key may have installed a ready handle while we were attaching.
+	// If so, return the already-tracked handle and tear down our redundant
+	// transport WITHOUT deleting the shared claim (Disconnect, not Close).
 	c.mu.Lock()
+	if tracked := c.registry[key]; tracked != nil && tracked.IsReady() {
+		c.mu.Unlock()
+		if derr := sb.Disconnect(ctx); derr != nil {
+			c.log.Error(derr, "disconnecting redundant handle after registry race", "claim", claimName, "namespace", namespace)
+		}
+		return tracked, nil
+	}
 	c.registry[key] = sb
 	c.mu.Unlock()
 

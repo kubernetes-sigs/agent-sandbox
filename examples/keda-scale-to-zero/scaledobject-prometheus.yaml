@@ -1,0 +1,28 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: agent-warmpool-scaledobject
+  namespace: ${NAMESPACE} # Namespace of the SandboxWarmPool
+spec:
+  scaleTargetRef:
+    apiVersion: extensions.agents.x-k8s.io/v1beta1
+    kind: SandboxWarmPool
+    name: ${WARM_POOL_NAME}
+  # True scale-to-zero. Native HPA cannot do this (it enforces minReplicas >= 1);
+  # KEDA performs the 0 -> 1 activation itself and hands 1 -> N to an HPA it manages.
+  minReplicaCount: 0
+  maxReplicaCount: 100 # Hard budget ceiling (matches the HPA example).
+  pollingInterval: 15 # Align with the 15s GMP scrape interval.
+  cooldownPeriod: 300 # Seconds at/under the activation threshold before scaling back to 0.
+  triggers:
+    - type: prometheus
+      metadata:
+        # In-cluster GKE Managed Service for Prometheus query frontend (see README step 4).
+        serverAddress: http://frontend.${NAMESPACE}.svc:9090
+        # Rate of sandbox claims created for this warm pool, in claims/sec.
+        query: sum(rate(agent_sandbox_claim_creation_total{warmpool_name="${WARM_POOL_NAME}"}[1m]))
+        # 1 -> N scaling math: target 0.5 claims/sec per replica (matches the HPA example).
+        threshold: "0.5"
+        # 0 <-> 1 gate: any real claim activity lifts the pool off zero; it returns to zero
+        # only once the rate falls at/under this value for `cooldownPeriod`.
+        activationThreshold: "0.01"

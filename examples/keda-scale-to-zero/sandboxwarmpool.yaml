@@ -1,0 +1,13 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: ${WARM_POOL_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${WARM_POOL_NAME}
+spec:
+  # Start at 0: KEDA owns this field via the /scale subresource and will drive it
+  # between 0 and maxReplicaCount. 0 reflects the scaled-to-zero rest state.
+  replicas: 0
+  sandboxTemplateRef:
+    name: ${TEMPLATE_NAME}

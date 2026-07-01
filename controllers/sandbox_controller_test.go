@@ -17,6 +17,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,6 +48,17 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
 		WithRuntimeObjects(initialObjs...).
 		Build()
+}
+
+type failOnPodCreateClient struct {
+	client.WithWatch
+}
+
+func (c *failOnPodCreateClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		return k8serrors.NewInternalError(errors.New("simulated pod creation failure"))
+	}
+	return c.WithWatch.Create(ctx, obj, opts...)
 }
 
 const sandboxUID = types.UID("test-sandbox-uid")
@@ -3290,4 +3303,233 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
 	require.Len(t, got.Status.Conditions, 1,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}
+
+func TestReconcileEvents(t *testing.T) {
+	sandboxName := "sandbox-events"
+	sandboxNs := "default"
+
+	newSandbox := func(spec sandboxv1beta1.SandboxSpec) *sandboxv1beta1.Sandbox {
+		sb := &sandboxv1beta1.Sandbox{}
+		sb.Name = sandboxName
+		sb.Namespace = sandboxNs
+		sb.UID = sandboxUID
+		sb.Generation = 1
+		sb.Spec = spec
+		return sb
+	}
+
+	minimalSpec := sandboxv1beta1.SandboxSpec{
+		PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c"}},
+			},
+		},
+	}
+
+	drainEvents := func(ch chan string) []string {
+		var got []string
+		for {
+			select {
+			case e := <-ch:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+
+	t.Run("SandboxPodCreated emitted on new pod creation", func(t *testing.T) {
+		recorder := events.NewFakeRecorder(10)
+		sb := newSandbox(minimalSpec)
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+			Recorder:      recorder,
+		}
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+		got := drainEvents(recorder.Events)
+		require.Contains(t, got, `Normal SandboxPodCreated Created pod "sandbox-events"`)
+	})
+
+	t.Run("SandboxPodFailed emitted on pod creation failure", func(t *testing.T) {
+		recorder := events.NewFakeRecorder(10)
+		sb := newSandbox(minimalSpec)
+		r := SandboxReconciler{
+			Client:        &failOnPodCreateClient{WithWatch: newFakeClient(sb)},
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+			Recorder:      recorder,
+		}
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.Error(t, err)
+		got := drainEvents(recorder.Events)
+		require.NotEmpty(t, got, "expected at least one event")
+		found := false
+		for _, e := range got {
+			if strings.Contains(e, "SandboxPodFailed") {
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "expected SandboxPodFailed event, got: %v", got)
+	})
+
+	t.Run("SandboxReady emitted on first False to True Ready transition", func(t *testing.T) {
+		recorder := events.NewFakeRecorder(10)
+		// Seed a running, ready pod so the Ready condition becomes True.
+		existingPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				Labels:          map[string]string{"agents.x-k8s.io/sandbox-name-hash": NameHash(sandboxName)},
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}},
+			Status: corev1.PodStatus{
+				Phase:  corev1.PodRunning,
+				PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		sb := newSandbox(minimalSpec)
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb, existingPod),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+			Recorder:      recorder,
+		}
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+		got := drainEvents(recorder.Events)
+		require.Contains(t, got, "Normal SandboxReady Sandbox is ready")
+	})
+
+	t.Run("SandboxReady not re-emitted when already ready", func(t *testing.T) {
+		recorder := events.NewFakeRecorder(10)
+		existingPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				Labels:          map[string]string{"agents.x-k8s.io/sandbox-name-hash": NameHash(sandboxName)},
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}},
+			Status: corev1.PodStatus{
+				Phase:  corev1.PodRunning,
+				PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+		// Pre-set the sandbox Ready condition to True so it's already in that state.
+		sb := newSandbox(minimalSpec)
+		sb.Status.Conditions = []metav1.Condition{
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "DependenciesReady",
+				ObservedGeneration: 1,
+			},
+		}
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb, existingPod),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+			Recorder:      recorder,
+		}
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+		got := drainEvents(recorder.Events)
+		for _, e := range got {
+			require.NotContains(t, e, "SandboxReady", "SandboxReady must not re-emit when already ready")
+		}
+	})
+
+	t.Run("SandboxExpired emitted after cleanup with Retain policy", func(t *testing.T) {
+		recorder := events.NewFakeRecorder(10)
+		existingPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+		}
+		existingSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            sandboxName,
+				Namespace:       sandboxNs,
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			},
+		}
+		expiredSpec := sandboxv1beta1.SandboxSpec{
+			PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}},
+			},
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
+		}
+		sb := newSandbox(expiredSpec)
+		// Pre-populate live-resource status to simulate a sandbox that was running
+		// before it expired. handleSandboxExpiry clears these fields, so the
+		// status diff will detect the change and emit SandboxExpired.
+		sb.Status = sandboxv1beta1.SandboxStatus{
+			Service:       sandboxName,
+			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=test",
+		}
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb, existingPod, existingSvc),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+			Recorder:      recorder,
+		}
+		// First reconcile marks sandbox as expired.
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+		// Second reconcile performs cleanup and emits SandboxExpired.
+		_, err = r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+		got := drainEvents(recorder.Events)
+		require.Contains(t, got, "Normal SandboxExpired Sandbox has expired and child resources have been cleaned up")
+	})
+
+	t.Run("no events emitted when Recorder is nil", func(t *testing.T) {
+		// Sanity check: ensure nil Recorder doesn't panic.
+		sb := newSandbox(minimalSpec)
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+			Recorder:      nil,
+		}
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+	})
 }

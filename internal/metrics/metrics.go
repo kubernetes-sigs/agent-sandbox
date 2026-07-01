@@ -39,7 +39,6 @@ var (
 	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox.
 	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -48,13 +47,12 @@ var (
 			// Buckets for latency from 100ms to 4 minutes
 			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
-		[]string{"launch_type", "sandbox_template", "warmpool_name"},
+		[]string{"launch_type", "warmpool_name"},
 	)
 
 	// ClaimControllerStartupLatency measures the time from controller first observed timestamp to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox.
 	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
 	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -63,7 +61,7 @@ var (
 			// Buckets for latency from 100ms to 4 minutes
 			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
-		[]string{"launch_type", "sandbox_template", "warmpool_name"},
+		[]string{"launch_type", "warmpool_name"},
 	)
 
 	// SandboxCreationLatency measures the time from Sandbox creation to Pod Ready state.
@@ -141,15 +139,15 @@ func init() {
 }
 
 // RecordClaimStartupLatency records the duration since the provided start time.
-func RecordClaimStartupLatency(startTime time.Time, launchType, templateName, warmPoolName string) {
+func RecordClaimStartupLatency(startTime time.Time, launchType, warmPoolName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
-	ClaimStartupLatency.WithLabelValues(launchType, templateName, warmPoolName).Observe(duration)
+	ClaimStartupLatency.WithLabelValues(launchType, warmPoolName).Observe(duration)
 }
 
 // RecordClaimControllerStartupLatency records the duration since the provided controller start time.
-func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templateName, warmPoolName string) {
+func RecordClaimControllerStartupLatency(startTime time.Time, launchType, warmPoolName string) {
 	duration := float64(time.Since(startTime).Milliseconds())
-	ClaimControllerStartupLatency.WithLabelValues(launchType, templateName, warmPoolName).Observe(duration)
+	ClaimControllerStartupLatency.WithLabelValues(launchType, warmPoolName).Observe(duration)
 }
 
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.

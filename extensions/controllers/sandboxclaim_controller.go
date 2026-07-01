@@ -1724,7 +1724,7 @@ func getLaunchType(sandbox *v1beta1.Sandbox) string {
 }
 
 // recordClaimStartupLatency records the startup latency based on webhook annotation.
-func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string, warmPoolName string) {
+func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, warmPoolName string) {
 	logger := log.FromContext(ctx)
 	webhookSeenTimeStr := claim.Annotations[asmetrics.WebhookAnnotation]
 	if webhookSeenTimeStr == "" {
@@ -1741,11 +1741,11 @@ func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, 
 		logger.Error(errors.New("negative duration"), "Webhook seen time is in the future", "duration", duration, "webhookSeenTime", webhookSeenTime)
 		return
 	}
-	asmetrics.RecordClaimStartupLatency(webhookSeenTime, launchType, templateName, warmPoolName)
+	asmetrics.RecordClaimStartupLatency(webhookSeenTime, launchType, warmPoolName)
 }
 
 // recordControllerStartupLatency records the controller startup latency based on observed time.
-func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string, warmPoolName string) {
+func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, warmPoolName string) {
 	logger := log.FromContext(ctx)
 	if observedTimeString := claim.Annotations[asmetrics.ObservabilityAnnotation]; observedTimeString != "" {
 		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
@@ -1756,7 +1756,7 @@ func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Cont
 			logger.Error(err, "Failed to parse controller observation time", "value", observedTimeString)
 			return
 		}
-		asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, templateName, warmPoolName)
+		asmetrics.RecordClaimControllerStartupLatency(observedTime, launchType, warmPoolName)
 	}
 }
 
@@ -1813,8 +1813,8 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	logger.V(1).Info("SandboxClaim is marked as Ready", "claim", claim.Name, "sandbox", sandboxName, "duration", time.Since(claim.CreationTimestamp.Time))
 
-	r.recordClaimStartupLatency(ctx, claim, launchType, templateName, warmPoolName)
-	r.recordControllerStartupLatency(ctx, claim, launchType, templateName, warmPoolName)
+	r.recordClaimStartupLatency(ctx, claim, launchType, warmPoolName)
+	r.recordControllerStartupLatency(ctx, claim, launchType, warmPoolName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
 }
 

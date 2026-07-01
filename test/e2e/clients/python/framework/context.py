@@ -32,6 +32,9 @@ DEFAULT_TIMEOUT_SECONDS = 120
 
 class TestContext:
     """Context for E2E tests, managing Kubernetes interactions"""
+    # This is a helper class for tests, not a test class. Setting __test__ = False
+    # prevents pytest from warning about it due to the "Test" prefix.
+    __test__ = False
 
     def __init__(self, kubeconfig_path: Optional[str] = None):
         self.kubeconfig_path = kubeconfig_path or os.environ.get(

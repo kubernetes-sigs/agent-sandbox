@@ -45,7 +45,7 @@ kubectl exec -it nullclaw-sandbox -- nullclaw --help
 
 ## Configuration
 
--   The `nullclaw-config.yaml` ConfigMap provides the initial `config.json` (mounted at `/nullclaw-data/config.json`). Edit it to change the default AI provider or model.
+-   The `nullclaw-config.yaml` ConfigMap provides the initial `config.json` (mounted at `/nullclaw-data/config.json`). If you change the ConfigMap, restart the Sandbox/pod to pick up the updated file (it’s mounted via `subPath`). Edit it to change the default AI provider or model.
 -   The `NULLCLAW_ALLOW_PUBLIC_BIND` environment variable is required for the gateway to bind to all interfaces inside the pod.
 -   To configure a specific AI provider API key, add environment variables (e.g., `OPENROUTER_API_KEY`) to the Sandbox manifest.
 -   Persistent data (workspace, memory) is stored on a PVC mounted at `/nullclaw-data`.

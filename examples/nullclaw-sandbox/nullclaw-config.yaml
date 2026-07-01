@@ -14,7 +14,9 @@ data:
       },
       "models": {
         "providers": {
-          "openrouter": {}
+          "openrouter": {
+            "api_key": "<OPENROUTER_API_KEY>"
+          }
         }
       },
       "gateway": {

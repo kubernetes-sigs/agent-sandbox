@@ -216,8 +216,6 @@ def test_python_sdk_annotation(tc, temp_namespace, sandbox_coldpool):
 
         print("--- SandboxClaim Annotation Test Passed! ---")
 
-    except Exception as e:
-        pytest.fail(f"SDK test failed: {e}")
     finally:
         client.delete_all()
 

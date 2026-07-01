@@ -15,6 +15,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
+- [**openclaw-gvisor-sandbox**](./openclaw-gvisor-sandbox): A production-shaped, gVisor-isolated OpenClaw sandbox using the template/claim pattern and persistent storage.
 - [**openclaw-sandbox**](./openclaw-sandbox): An example of running OpenClaw (formerly Moltbot) inside the Agent Sandbox.
 - [**playwright-sandbox**](./playwright-sandbox): An example of running Playwright with Chromium in a sandbox for web scraping and screenshots.
 - [**policy**](./policy): Examples of using different policies with sandboxes.

@@ -61,6 +61,21 @@ tolerations: []
 
 affinity: {}
 
+# topologySpreadConstraints control how the controller pods are spread across
+# topology domains (e.g. nodes, zones). Default [] — only rendered when non-empty.
+# Useful with replicaCount > 1 to keep replicas off the same node/zone.
+topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: kubernetes.io/hostname
+  #   whenUnsatisfiable: ScheduleAnyway
+  #   labelSelector:
+  #     matchLabels:
+  #       # app.kubernetes.io/name defaults to the chart name, but if you set
+  #       # nameOverride it will use that value instead. To scope the spread to a
+  #       # single release, also add:
+  #       #   app.kubernetes.io/instance: <your-release-name>
+  #       app.kubernetes.io/name: agent-sandbox # or your nameOverride value
+
 # Pod-level securityContext (spec.template.spec.securityContext). Default null — omitted unless set.
 # Example for Kyverno / restricted Pod Security:
 # podSecurityContext:

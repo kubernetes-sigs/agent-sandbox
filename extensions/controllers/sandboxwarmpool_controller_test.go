@@ -251,6 +251,147 @@ func TestReconcilePool(t *testing.T) {
 	}
 }
 
+func TestReconcilePoolCreateRateLimit(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(5)
+
+	template := createTemplate(poolNamespace)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(template).
+			Build(),
+		Scheme:                 scheme,
+		MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
+		MaxCreateRatePerWindow: 2,
+		CreateRateWindow:       10 * time.Second,
+	}
+
+	countSandboxes := func(t *testing.T) int32 {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		err := r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		return int32(len(list.Items))
+	}
+
+	result, err := r.reconcilePoolWithResult(ctx, warmPool)
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.LessOrEqual(t, result.RequeueAfter, 10*time.Second)
+	require.Equal(t, int32(2), countSandboxes(t))
+
+	result, err = r.reconcilePoolWithResult(ctx, warmPool)
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.LessOrEqual(t, result.RequeueAfter, 10*time.Second)
+	require.Equal(t, int32(2), countSandboxes(t), "rate limit should prevent immediate next create batch")
+
+	key := types.NamespacedName{Name: poolName, Namespace: poolNamespace}
+	r.createRateMu.Lock()
+	r.createRateWindows[key] = createRateWindow{startedAt: time.Now().Add(-11 * time.Second)}
+	r.createRateMu.Unlock()
+
+	result, err = r.reconcilePoolWithResult(ctx, warmPool)
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.LessOrEqual(t, result.RequeueAfter, 10*time.Second)
+	require.Equal(t, int32(4), countSandboxes(t))
+}
+
+func TestReconcilePoolCreateRateLimitAcrossSingleDeficitReconciles(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(5)
+
+	template := createTemplate(poolNamespace)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	initialSandboxes := []runtime.Object{template}
+	for _, suffix := range []string{"-a", "-b", "-c", "-d"} {
+		initialSandboxes = append(initialSandboxes, createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix))
+	}
+
+	ctx := context.Background()
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(initialSandboxes...).
+			Build(),
+		Scheme:                 scheme,
+		MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
+		MaxCreateRatePerWindow: 2,
+		CreateRateWindow:       10 * time.Second,
+	}
+
+	countSandboxes := func(t *testing.T) int32 {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		err := r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		return int32(len(list.Items))
+	}
+	deleteOneSandbox := func(t *testing.T) {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		err := r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+		require.NotEmpty(t, list.Items)
+		err = r.Delete(ctx, &list.Items[0])
+		require.NoError(t, err)
+	}
+
+	result, err := r.reconcilePoolWithResult(ctx, warmPool)
+	require.NoError(t, err)
+	require.Zero(t, result.RequeueAfter)
+	require.Equal(t, int32(5), countSandboxes(t))
+
+	deleteOneSandbox(t)
+	result, err = r.reconcilePoolWithResult(ctx, warmPool)
+	require.NoError(t, err)
+	require.Zero(t, result.RequeueAfter)
+	require.Equal(t, int32(5), countSandboxes(t))
+
+	deleteOneSandbox(t)
+	result, err = r.reconcilePoolWithResult(ctx, warmPool)
+	require.NoError(t, err)
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.Equal(t, int32(4), countSandboxes(t), "rate limit should prevent a third create within the same window")
+}
+
 func TestReconcilePoolControllerRef(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"

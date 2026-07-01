@@ -16,14 +16,64 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from kubernetes import client
+from pydantic import ValidationError
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.models import SandboxClaimEnvVar
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
 @patch("k8s_agent_sandbox.k8s_helper.config")
 class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
+
+    def test_env_var_model_serializes_container_name_alias(self, mock_config, mock_api_cls, mock_core_cls):
+        env_var = SandboxClaimEnvVar(
+            name="FOO", value="bar", container_name="runtime"
+        )
+
+        self.assertEqual(
+            env_var.model_dump(by_alias=True, exclude_none=True),
+            {"name": "FOO", "value": "bar", "containerName": "runtime"},
+        )
+
+    def test_env_var_model_rejects_non_string_values(self, mock_config, mock_api_cls, mock_core_cls):
+        with self.assertRaises(ValidationError):
+            SandboxClaimEnvVar(name="FOO", value=1)
+
+    def test_env_var_model_accepts_kubernetes_env_var_names(self, mock_config, mock_api_cls, mock_core_cls):
+        valid_names = ["FOO", "_FOO", "my.env-name", "MY_ENV.NAME", "MyEnvName1"]
+
+        for name in valid_names:
+            self.assertEqual(SandboxClaimEnvVar(name=name, value="bar").name, name)
+
+    def test_env_var_model_rejects_invalid_names(self, mock_config, mock_api_cls, mock_core_cls):
+        invalid_names = ["", "1FOO", "BAD NAME", "BAD=NAME", ".", "..", "..FOO"]
+
+        for name in invalid_names:
+            with self.assertRaises(ValidationError):
+                SandboxClaimEnvVar(name=name, value="bar")
+
+    def test_env_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.create_sandbox_claim(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            env={"FOO": "bar", "DEBUG": "true"},
+        )
+
+        body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(
+            body["spec"]["env"],
+            [
+                {"name": "FOO", "value": "bar"},
+                {"name": "DEBUG", "value": "true"},
+            ],
+        )
 
     def test_labels_and_annotations_coexist_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()

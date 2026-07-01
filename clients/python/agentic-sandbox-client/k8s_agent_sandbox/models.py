@@ -16,6 +16,8 @@ import re
 from typing import Literal, Union
 from pydantic import BaseModel, Field, field_validator
 
+_ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
+
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
     stdout: str = ""  # Standard output from the command.
@@ -34,6 +36,20 @@ class SandboxClaimEnvVar(BaseModel):
     name: str  # Name of the environment variable.
     value: str  # Value of the environment variable.
     container_name: str | None = Field(default=None, serialization_alias="containerName")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not _ENV_VAR_NAME_RE.match(v):
+            raise ValueError(
+                "Invalid environment variable name: must consist of alphabetic "
+                "characters, digits, '_', '-', or '.', and must not start with a digit"
+            )
+        if v == "." or v == ".." or v.startswith(".."):
+            raise ValueError(
+                "Invalid environment variable name: must not be '.', '..', or start with '..'"
+            )
+        return v
 
 class SandboxDirectConnectionConfig(BaseModel):
     """Configuration for connecting directly to a Sandbox URL."""

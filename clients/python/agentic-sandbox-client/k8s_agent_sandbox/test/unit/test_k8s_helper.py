@@ -41,6 +41,19 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         with self.assertRaises(ValidationError):
             SandboxClaimEnvVar(name="FOO", value=1)
 
+    def test_env_var_model_accepts_kubernetes_env_var_names(self, mock_config, mock_api_cls, mock_core_cls):
+        valid_names = ["FOO", "_FOO", "my.env-name", "MY_ENV.NAME", "MyEnvName1"]
+
+        for name in valid_names:
+            self.assertEqual(SandboxClaimEnvVar(name=name, value="bar").name, name)
+
+    def test_env_var_model_rejects_invalid_names(self, mock_config, mock_api_cls, mock_core_cls):
+        invalid_names = ["", "1FOO", "BAD NAME", "BAD=NAME", ".", "..", "..FOO"]
+
+        for name in invalid_names:
+            with self.assertRaises(ValidationError):
+                SandboxClaimEnvVar(name=name, value="bar")
+
     def test_env_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):
         mock_api = MagicMock()
         mock_api_cls.return_value = mock_api

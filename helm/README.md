@@ -85,6 +85,7 @@ The following table lists the configurable parameters and their defaults.
 | `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |
 | `controller.leaderElect` | Enable leader election | `true` |
 | `controller.leaderElectionNamespace` | Namespace for the leader election resource (auto-detected if empty) | `""` |
+| `controller.watchNamespace` | Namespace(s) to watch; comma-separated for multi-namespace mode. Falls back to `WATCH_NAMESPACE` env var. Empty means cluster-scoped. In single-namespace mode, leader election is automatically scoped to the same namespace unless `leaderElectionNamespace` is set. | `""` |
 | `controller.clusterDomain` | Kubernetes cluster domain for service FQDN generation | `"cluster.local"` |
 | `controller.kubeApiQps` | Client-side QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |

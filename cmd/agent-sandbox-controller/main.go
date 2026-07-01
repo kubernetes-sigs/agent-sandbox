@@ -43,6 +43,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -80,6 +81,7 @@ func main() {
 	var webhookCertDir string
 	var webhookServiceName string
 	var webhookNamespace string
+	var watchNamespace string
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
@@ -88,6 +90,8 @@ func main() {
 	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&watchNamespace, "namespace", "",
+		"Namespace(s) to watch. Comma-separated for multiple. Falls back to WATCH_NAMESPACE env var. Empty means all namespaces.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
@@ -119,6 +123,13 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	watchNamespaces := parseWatchNamespaces(watchNamespace)
+
+	// In namespaced mode the controller cannot manage cluster-scoped resources
+	// (CRDs and their conversion webhooks), so webhooks and CRD CA-bundle
+	// patching are disabled. Those must be managed cluster-wide externally.
+	webhooksEnabled := len(watchNamespaces) == 0
 
 	if printVersion {
 		fmt.Println(version.Print("agent-sandbox-controller"))
@@ -238,35 +249,42 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
-	// Create a temporary client to patch the CRDs and access Secrets
-	tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
-	if err != nil {
-		setupLog.Error(err, "unable to create temporary client")
-		os.Exit(1)
+	if webhooksEnabled {
+		// Create a temporary client to patch the CRDs and access Secrets
+		tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "unable to create temporary client")
+			os.Exit(1)
+		}
+
+		// Generate or load self-signed TLS certificates for the webhook server
+		setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
+		caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
+		if err != nil {
+			setupLog.Error(err, "unable to prepare webhook certificates")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Patching CRDs with generated CA bundle")
+		if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
+			setupLog.Error(err, "failed to patch CRDs with CA bundle")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("namespaced mode: skipping webhook cert generation and CRD patching; " +
+			"CRDs and their conversion webhooks must be managed cluster-wide")
 	}
 
-	// Generate or load self-signed TLS certificates for the webhook server
-	setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
-	caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
-	if err != nil {
-		setupLog.Error(err, "unable to prepare webhook certificates")
-		os.Exit(1)
-	}
-
-	setupLog.Info("Patching CRDs with generated CA bundle")
-	if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
-		setupLog.Error(err, "failed to patch CRDs with CA bundle")
-		os.Exit(1)
-	}
-
-	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+	mgrOpts := ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsOpts,
 		HealthProbeBindAddress:  probeAddr,
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
-		WebhookServer: webhook.NewServer(webhook.Options{
+	}
+	if webhooksEnabled {
+		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
 			Port:    webhookPort,
 			CertDir: webhookCertDir,
 			TLSOpts: []func(*tls.Config){
@@ -274,8 +292,28 @@ func main() {
 					cfg.ClientAuth = tls.NoClientCert
 				},
 			},
-		}),
-	})
+		})
+	}
+	if len(watchNamespaces) > 0 {
+		defaultNamespaces := make(map[string]cache.Config, len(watchNamespaces))
+		for _, ns := range watchNamespaces {
+			defaultNamespaces[ns] = cache.Config{}
+		}
+		mgrOpts.Cache = cache.Options{
+			DefaultNamespaces: defaultNamespaces,
+		}
+		if enableLeaderElection && leaderElectionNamespace == "" {
+			if len(watchNamespaces) == 1 {
+				mgrOpts.LeaderElectionNamespace = watchNamespaces[0]
+			} else {
+				setupLog.Error(nil, "--leader-election-namespace must be set when watching multiple namespaces")
+				os.Exit(1)
+			}
+		}
+		setupLog.Info("running in namespaced mode", "namespaces", watchNamespaces)
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -294,10 +332,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = ctrl.NewWebhookManagedBy(mgr, &sandboxv1beta1.Sandbox{}).
-		Complete(); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
-		os.Exit(1)
+	if webhooksEnabled {
+		if err = ctrl.NewWebhookManagedBy(mgr, &sandboxv1beta1.Sandbox{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
+			os.Exit(1)
+		}
 	}
 
 	if extensions {
@@ -354,22 +394,24 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxClaim{}).
-			Complete(); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxClaim")
-			os.Exit(1)
-		}
+		if webhooksEnabled {
+			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxClaim{}).
+				Complete(); err != nil {
+				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxClaim")
+				os.Exit(1)
+			}
 
-		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxTemplate{}).
-			Complete(); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxTemplate")
-			os.Exit(1)
-		}
+			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxTemplate{}).
+				Complete(); err != nil {
+				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxTemplate")
+				os.Exit(1)
+			}
 
-		if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxWarmPool{}).
-			Complete(); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "SandboxWarmPool")
-			os.Exit(1)
+			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxWarmPool{}).
+				Complete(); err != nil {
+				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxWarmPool")
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -389,4 +431,29 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// parseWatchNamespaces returns the list of namespaces to watch, following the
+// Operator SDK convention: flag value takes precedence, then WATCH_NAMESPACE env var,
+// empty means cluster-scoped. Accepts comma-separated values for multi-namespace mode.
+func parseWatchNamespaces(flagValue string) []string {
+	v := flagValue
+	if v == "" {
+		v = os.Getenv("WATCH_NAMESPACE")
+	}
+	if v == "" {
+		return nil
+	}
+	var result []string
+	seen := map[string]struct{}{}
+	for ns := range strings.SplitSeq(v, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			if _, ok := seen[ns]; ok {
+				continue
+			}
+			seen[ns] = struct{}{}
+			result = append(result, ns)
+		}
+	}
+	return result
 }

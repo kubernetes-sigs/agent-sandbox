@@ -11,6 +11,50 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 * `--kube-api-qps` (default: -1, no client-side rate limiting): Client-side QPS limit for the Kubernetes API client.
 * `--kube-api-burst` (default: 10): The maximum burst for client-side throttling of the Kubernetes API client.
 
+## Namespace Scoping
+
+By default the controller watches all namespaces. Use `--namespace` (or the `WATCH_NAMESPACE` environment variable) to restrict it to one or more namespaces.
+
+* `--namespace` (default: `""`, cluster-scoped): Comma-separated list of namespaces to watch. When set, the controller only caches and reconciles resources in those namespaces. Falls back to the `WATCH_NAMESPACE` environment variable when the flag is not provided.
+
+> **Webhooks are disabled in namespaced mode.** Webhook certificate generation, CRD CA-bundle patching, and the conversion webhooks are all skipped when `--namespace` (or `WATCH_NAMESPACE`) is set. These operate on cluster-scoped resources (`CustomResourceDefinition`s and their conversion webhooks), which a namespace-scoped deployment cannot manage. As a result the controller needs **no cluster-scoped RBAC** and can run with only a `Role`/`RoleBinding`. The CRDs and their conversion webhooks must instead be installed and managed cluster-wide — by a cluster admin or a separate cluster-scoped controller instance.
+
+### Single-namespace mode
+
+```yaml
+      containers:
+      - name: agent-sandbox-controller
+        image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller
+        args:
+        - --leader-elect=true
+        - --namespace=my-team-ns
+```
+
+When a single namespace is given and `--leader-election-namespace` is not set, the leader election Lease is automatically created in the same namespace, keeping RBAC fully scoped to that namespace.
+
+### Multi-namespace mode
+
+```yaml
+        args:
+        - --leader-elect=true
+        - --namespace=team-a,team-b,team-c
+        - --leader-election-namespace=agent-sandbox-system
+```
+
+For multi-namespace deployments you must set `--leader-election-namespace` explicitly, as the controller cannot pick an unambiguous namespace for the lease.
+
+### Downward API / environment variable
+
+The `WATCH_NAMESPACE` environment variable follows the [Operator SDK convention](https://sdk.operatorframework.io/docs/building-operators/golang/operator-scope/) and is useful for Helm or OLM deployments where the watched namespace is the pod's own namespace:
+
+```yaml
+        env:
+        - name: WATCH_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+```
+
 ## Cluster Settings
 
 * `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to

@@ -8,6 +8,9 @@
 {{- if .Values.controller.leaderElectionNamespace }}
 - --leader-election-namespace={{ .Values.controller.leaderElectionNamespace }}
 {{- end }}
+{{- if .Values.controller.watchNamespace }}
+- --namespace={{ .Values.controller.watchNamespace }}
+{{- end }}
 {{- if .Values.controller.extensions }}
 - --extensions={{ .Values.controller.extensions }}
 {{- end }}

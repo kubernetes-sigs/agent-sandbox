@@ -23,8 +23,8 @@ if [ -n "$1" ]; then
 fi
 
 # Configuration defaults (overridable via environment variables)
-BURST_SIZE="${BURST_SIZE:-1000}"
-QPS="${QPS:-1000}"
+BURST_SIZE="${BURST_SIZE:-400}"
+QPS="${QPS:-400}"
 TOTAL_BURSTS="${TOTAL_BURSTS:-10}"
 WARMPOOL_SIZE="${WARMPOOL_SIZE:-1000}"
 RUNTIME_CLASS="${RUNTIME_CLASS:-}" # Change to "gvisor" if your cluster supports it

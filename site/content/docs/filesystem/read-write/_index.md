@@ -37,110 +37,35 @@ sandbox.terminate()
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
+	"context"
+	"log"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
-const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
-
-type SandboxClient struct {
-	http    *http.Client
-	baseURL string
-}
-
-func NewSandboxClient() *SandboxClient {
-	return &SandboxClient{http: &http.Client{}, baseURL: sandboxAPIBase}
-}
-
-type Sandbox struct {
-	ID     string
-	client *SandboxClient
-}
-
-type FileService struct {
-	sandbox *Sandbox
-}
-
-func (c *SandboxClient) CreateSandbox(template, namespace string) (*Sandbox, error) {
-	body, _ := json.Marshal(map[string]string{"template": template, "namespace": namespace})
-	resp, err := c.http.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &Sandbox{ID: result.ID, client: c}, nil
-}
-
-// WriteText writes a UTF-8 string to a file in the sandbox.
-func (f *FileService) WriteText(path, content string) error {
-	return f.writeRaw(path, []byte(content), "text/plain; charset=utf-8")
-}
-
-// WriteBinary writes raw bytes to a file in the sandbox.
-func (f *FileService) WriteBinary(path string, data []byte) error {
-	return f.writeRaw(path, data, "application/octet-stream")
-}
-
-func (f *FileService) writeRaw(path string, data []byte, contentType string) error {
-	url := fmt.Sprintf("%s/sandboxes/%s/files%s", f.sandbox.client.baseURL, f.sandbox.ID, path)
-	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", contentType)
-	resp, err := f.sandbox.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("write file %s: %w", path, err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
-func (s *Sandbox) Files() *FileService {
-	return &FileService{sandbox: s}
-}
-
-func (s *Sandbox) Terminate() error {
-	url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
-	resp, err := s.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("terminate: %w", err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
 func main() {
-	client := NewSandboxClient()
-	sandbox, err := client.CreateSandbox("python-sandbox-template", "default")
+	ctx := context.Background()
+
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	defer sandbox.Terminate()
+	defer client.DeleteAll(ctx)
 
-	files := sandbox.Files()
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-template", "default")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	// Write a text file (string, UTF-8 encoded)
-	if err := files.WriteText("/home/user/greeting.txt", "Hello, world!"); err != nil {
-		panic(err)
+	// Write() takes a plain filename (no directory separators); the file
+	// lands in the sandbox's working directory.
+	if err := sb.Files().Write(ctx, "greeting.txt", []byte("Hello, world!")); err != nil {
+		log.Fatal(err)
 	}
 
 	// Write binary content
-	if err := files.WriteBinary("/home/user/data.bin", []byte{0x00, 0x01, 0x02, 0x03}); err != nil {
-		panic(err)
+	if err := sb.Files().Write(ctx, "data.bin", []byte{0x00, 0x01, 0x02, 0x03}); err != nil {
+		log.Fatal(err)
 	}
 }
   {{< /blocks/tab >}}
@@ -181,113 +106,40 @@ sandbox.terminate()
 package main
 
 import (
-     "fmt"
-     "io"
-     "net/http"
-     "bytes"
-     "encoding/json"
+	"context"
+	"fmt"
+	"log"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
-const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
-
-type SandboxClient struct {
-     http    *http.Client
-     baseURL string
-}
-
-func NewSandboxClient() *SandboxClient {
-     return &SandboxClient{http: &http.Client{}, baseURL: sandboxAPIBase}
-}
-
-type Sandbox struct {
-     ID     string
-     client *SandboxClient
-}
-
-type FileService struct {
-     sandbox *Sandbox
-}
-
-func (s *Sandbox) Files() *FileService {
-     return &FileService{sandbox: s}
-}
-
-func (c *SandboxClient) CreateSandbox(template, namespace string) (*Sandbox, error) {
-    body, _ := json.Marshal(map[string]string{
-        "template":  template,
-        "namespace": namespace,
-    })
-    resp, err := c.http.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
-    if err != nil {
-        return nil, fmt.Errorf("create sandbox: %w", err)
-    }
-    defer resp.Body.Close()
-
-    var result struct {
-        ID string `json:"id"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-        return nil, fmt.Errorf("decode sandbox response: %w", err)
-    }
-    return &Sandbox{ID: result.ID, client: c}, nil
-}
-
-// Read returns the raw bytes of a file in the sandbox.
-// For text files, call string(data) or use ReadText below.
-func (f *FileService) Read(path string) ([]byte, error) {
-     url := fmt.Sprintf("%s/sandboxes/%s/files%s", f.sandbox.client.baseURL, f.sandbox.ID, path)
-     resp, err := f.sandbox.client.http.Get(url)
-     if err != nil {
-        return nil, fmt.Errorf("read file %s: %w", path, err)
-     }
-     defer resp.Body.Close()
-     return io.ReadAll(resp.Body)
-}
-
-// ReadText is a convenience wrapper that decodes the file bytes as UTF-8.
-func (f *FileService) ReadText(path string) (string, error) {
-     data, err := f.Read(path)
-     if err != nil {
-        return "", err
-     }
-     return string(data), nil
-}
-
-func (s *Sandbox) Terminate() error {
-     url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
-     req, _ := http.NewRequest(http.MethodDelete, url, nil)
-     resp, err := s.client.http.Do(req)
-     if err != nil {
-        return fmt.Errorf("terminate: %w", err)
-     }
-     io.Copy(io.Discard, resp.Body)
-     resp.Body.Close()
-     return nil
-}
-
 func main() {
-     client := NewSandboxClient()
-     sandbox, err := client.CreateSandbox("python-sandbox-template", "default")
-     if err != nil {
-        panic(err)
-     }
-     defer sandbox.Terminate()
+	ctx := context.Background()
 
-     files := sandbox.Files()
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.DeleteAll(ctx)
 
-     // Read a text file
-     text, err := files.ReadText("/home/user/greeting.txt")
-     if err != nil {
-        panic(err)
-     }
-     fmt.Println(text) // Hello, world!
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-template", "default")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-     // Read a binary file
-     data, err := files.Read("/home/user/data.bin")
-     if err != nil {
-        panic(err)
-     }
-     fmt.Println(data) // [0 1 2 3]
+	// Read a text file
+	text, err := sb.Files().Read(ctx, "greeting.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(string(text)) // Hello, world!
+
+	// Read a binary file
+	data, err := sb.Files().Read(ctx, "data.bin")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(data) // [0 1 2 3]
 }
   {{< /blocks/tab >}}
 {{< /blocks/tabs >}}
@@ -333,142 +185,45 @@ sandbox.terminate()
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
+	"log"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
-const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
-
-type SandboxClient struct {
-	http    *http.Client
-	baseURL string
-}
-
-func NewSandboxClient() *SandboxClient {
-	return &SandboxClient{http: &http.Client{}, baseURL: sandboxAPIBase}
-}
-
-type Sandbox struct {
-	ID     string
-	client *SandboxClient
-}
-
-func (s *Sandbox) Files() *FileService       { return &FileService{sandbox: s} }
-func (s *Sandbox) Commands() *CommandService { return &CommandService{sandbox: s} }
-
-// --- FileService ---
-
-type FileService struct{ sandbox *Sandbox }
-
-func (f *FileService) WriteText(path, content string) error {
-	return f.writeRaw(path, []byte(content), "text/plain; charset=utf-8")
-}
-
-func (f *FileService) writeRaw(path string, data []byte, contentType string) error {
-	url := fmt.Sprintf("%s/sandboxes/%s/files%s", f.sandbox.client.baseURL, f.sandbox.ID, path)
-	req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(data))
-	req.Header.Set("Content-Type", contentType)
-	resp, err := f.sandbox.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("write file %s: %w", path, err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
-// --- CommandService ---
-
-type CommandService struct{ sandbox *Sandbox }
-
-type CommandResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-}
-
-func (c *CommandService) Run(cmd string) (CommandResult, error) {
-	body, _ := json.Marshal(map[string]string{"command": cmd})
-	url := fmt.Sprintf("%s/sandboxes/%s/commands", c.sandbox.client.baseURL, c.sandbox.ID)
-	resp, err := c.sandbox.client.http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return CommandResult{}, fmt.Errorf("run command: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode int    `json:"exit_code"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return CommandResult{}, fmt.Errorf("decode response: %w", err)
-	}
-	return CommandResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-	}, nil
-}
-
-// --- Sandbox lifecycle ---
-
-func (c *SandboxClient) CreateSandbox(template, namespace string) (*Sandbox, error) {
-	body, _ := json.Marshal(map[string]string{"template": template, "namespace": namespace})
-	resp, err := c.http.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &Sandbox{ID: result.ID, client: c}, nil
-}
-
-func (s *Sandbox) Terminate() error {
-	url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
-	resp, err := s.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("terminate: %w", err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
-// --- main ---
-
-func main() {
-	client := NewSandboxClient()
-	sandbox, err := client.CreateSandbox("python-sandbox-template", "default")
-	if err != nil {
-		panic(err)
-	}
-	defer sandbox.Terminate()
-
-	// Write a Python script
-	script := `
+const runScript = `
 import json
 data = {"result": 42, "status": "ok"}
 print(json.dumps(data))
 `
-	if err := sandbox.Files().WriteText("/home/user/run.py", script); err != nil {
-		panic(err)
+
+func main() {
+	ctx := context.Background()
+
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.DeleteAll(ctx)
+
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-template", "default")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Write a Python script
+	if err := sb.Files().Write(ctx, "run.py", []byte(runScript)); err != nil {
+		log.Fatal(err)
 	}
 
 	// Execute it
-	result, err := sandbox.Commands().Run("python3 /home/user/run.py")
+	result, err := sb.Commands().Run(ctx, "python3 run.py")
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		log.Fatalf("run.py exited with code %d: %s", result.ExitCode, result.Stderr)
 	}
 	fmt.Println(result.Stdout)   // {"result": 42, "status": "ok"}
 	fmt.Println(result.ExitCode) // 0
@@ -507,138 +262,58 @@ asyncio.run(main())
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"log"
+	"sync"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
-// --- Config ---
-
-type SandboxDirectConnectionConfig struct {
-	APIURL string
-}
-
-// --- AsyncSandboxClient ---
-// Go has no async/await; concurrency is via goroutines + context.
-// The Python "async with" context manager maps to NewClient / defer client.Close().
-
-type AsyncSandboxClient struct {
-	http    *http.Client
-	baseURL string
-}
-
-func NewAsyncSandboxClient(cfg SandboxDirectConnectionConfig) *AsyncSandboxClient {
-	return &AsyncSandboxClient{
-		http:    &http.Client{},
-		baseURL: cfg.APIURL,
-	}
-}
-
-func (c *AsyncSandboxClient) Close() error { return nil } // hook for connection pool teardown
-
-// --- Sandbox ---
-
-type AsyncSandbox struct {
-	ID     string
-	client *AsyncSandboxClient
-}
-
-func (s *AsyncSandbox) Files() *AsyncFileService { return &AsyncFileService{sandbox: s} }
-
-func (c *AsyncSandboxClient) CreateSandbox(ctx context.Context, template, namespace string) (*AsyncSandbox, error) {
-	body := []byte(fmt.Sprintf(`{"template":%q,"namespace":%q}`, template, namespace))
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sandboxes", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// parse sandbox ID from response
-	var result struct{ ID string `json:"id"` }
-	if err := decodeJSON(resp.Body, &result); err != nil {
-		return nil, err
-	}
-	return &AsyncSandbox{ID: result.ID, client: c}, nil
-}
-
-func (s *AsyncSandbox) Terminate(ctx context.Context) error {
-	url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
-	resp, err := s.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("terminate: %w", err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
-// --- AsyncFileService ---
-
-type AsyncFileService struct{ sandbox *AsyncSandbox }
-
-func (f *AsyncFileService) Write(ctx context.Context, path, content string) error {
-	url := fmt.Sprintf("%s/sandboxes/%s/files%s", f.sandbox.client.baseURL, f.sandbox.ID, path)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader([]byte(content)))
-	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-	resp, err := f.sandbox.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("write file %s: %w", path, err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
-func (f *AsyncFileService) Read(ctx context.Context, path string) ([]byte, error) {
-	url := fmt.Sprintf("%s/sandboxes/%s/files%s", f.sandbox.client.baseURL, f.sandbox.ID, path)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	resp, err := f.sandbox.client.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("read file %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
-}
-
-// --- helpers ---
-
-func decodeJSON(r io.Reader, v any) error {
-	import_bytes, _ := io.ReadAll(r)
-	return json.Unmarshal(import_bytes, v)
-}
-
-// --- main ---
+// Go has no async/await. Every SDK method already takes a context.Context
+// for cancellation/timeouts and is safe to call concurrently from multiple
+// goroutines, which is Go's equivalent of Python's async client.
 
 func main() {
 	ctx := context.Background()
 
-	cfg := SandboxDirectConnectionConfig{
-		APIURL: "http://sandbox-router-svc.default.svc.cluster.local:8080",
-	}
-
-	client := NewAsyncSandboxClient(cfg)
-	defer client.Close()
-
-	sandbox, err := client.CreateSandbox(ctx, "python-sandbox-template", "default")
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	defer sandbox.Terminate(ctx)
+	defer client.DeleteAll(ctx)
 
-	if err := sandbox.Files().Write(ctx, "/tmp/hello.txt", "Hello async!"); err != nil {
-		panic(err)
-	}
-
-	content, err := sandbox.Files().Read(ctx, "/tmp/hello.txt")
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-template", "default")
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
+	}
+
+	// Write a few files concurrently.
+	files := map[string]string{
+		"hello.txt": "Hello async!",
+		"a.txt":     "first",
+		"b.txt":     "second",
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(files))
+	for name, content := range files {
+		wg.Add(1)
+		go func(name, content string) {
+			defer wg.Done()
+			if err := sb.Files().Write(ctx, name, []byte(content)); err != nil {
+				errs <- err
+			}
+		}(name, content)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		log.Fatal(err)
+	}
+
+	content, err := sb.Files().Read(ctx, "hello.txt")
+	if err != nil {
+		log.Fatal(err)
 	}
 	fmt.Println(string(content)) // Hello async!
 }

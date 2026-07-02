@@ -118,165 +118,90 @@ if __name__ == "__main__":
 package main
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
+	"log"
 	"time"
+
+	"github.com/go-logr/logr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
-const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
-
-// --- SandboxClient ---
-
-type SandboxClient struct {
-	http    *http.Client
-	baseURL string
-}
-
-func NewSandboxClient() *SandboxClient {
-	return &SandboxClient{http: &http.Client{}, baseURL: sandboxAPIBase}
-}
-
-// CreateSandboxOptions mirrors the keyword arguments on client.create_sandbox().
-type CreateSandboxOptions struct {
-	SandboxReadyTimeout  int // seconds to wait for sandbox to become ready
-	ShutdownAfterSeconds int // TTL before the cluster auto-deletes the sandbox
-}
-
-func (c *SandboxClient) CreateSandbox(template string, opts CreateSandboxOptions) (*Sandbox, error) {
-	payload := map[string]any{
-		"template":               template,
-		"sandbox_ready_timeout":  opts.SandboxReadyTimeout,
-		"shutdown_after_seconds": opts.ShutdownAfterSeconds,
-	}
-	body, _ := json.Marshal(payload)
-	resp, err := c.http.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &Sandbox{ID: result.ID, client: c}, nil
-}
-
-// --- Sandbox ---
-
-type Sandbox struct {
-	ID     string
-	client *SandboxClient
-}
-
-func (s *Sandbox) Commands() *CommandService { return &CommandService{sandbox: s} }
-
-func (s *Sandbox) Terminate() error {
-	url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
-	resp, err := s.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("terminate: %w", err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
-// --- CommandService ---
-
-type CommandService struct{ sandbox *Sandbox }
-
-type CommandResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-}
-
-func (r CommandResult) String() string {
-	return fmt.Sprintf("CommandResult{ExitCode: %d, Stdout: %q}", r.ExitCode, r.Stdout)
-}
-
-// ErrSandboxExpired is returned when a command is run on a sandbox that has been
-// auto-deleted by the cluster's shutdown policy — mirrors the Python exception.
-var ErrSandboxExpired = errors.New("sandbox no longer accessible: shutdown policy triggered")
-
-func (c *CommandService) Run(cmd string) (CommandResult, error) {
-	body, _ := json.Marshal(map[string]string{"command": cmd})
-	url := fmt.Sprintf("%s/sandboxes/%s/commands", c.sandbox.client.baseURL, c.sandbox.ID)
-	resp, err := c.sandbox.client.http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		// Network-level failure after TTL expiry — the pod is gone.
-		return CommandResult{}, fmt.Errorf("%w: %w", ErrSandboxExpired, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		return CommandResult{}, ErrSandboxExpired
-	}
-
-	var result struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode int    `json:"exit_code"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return CommandResult{}, fmt.Errorf("decode response: %w", err)
-	}
-	return CommandResult{Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode}, nil
-}
-
-// --- verify lifecycle ---
-
-func verifySandboxLifecycle() {
-	client := NewSandboxClient()
+// The SDK's CreateSandbox has no shutdown-TTL parameter yet, so build our
+// own K8sHelper and pass it into Options — this keeps a reference we can use
+// to patch the SandboxClaim's spec.lifecycle directly, the same field the
+// kubectl example above sets.
+func main() {
+	ctx := context.Background()
+	namespace := "default"
 	ttl := 5 * time.Second
 
-	fmt.Printf("Creating sandbox with a %s TTL...\n", ttl)
+	helper, err := sandbox.NewK8sHelper(nil, logr.Discard())
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	// 1. Verify creation and sandbox_ready_timeout
-	sandbox, err := client.CreateSandbox("simple-sandbox-template", CreateSandboxOptions{
-		SandboxReadyTimeout:  15,
-		ShutdownAfterSeconds: int(ttl.Seconds()),
+	client, err := sandbox.NewClient(ctx, sandbox.Options{
+		Namespace:           namespace,
+		K8sHelper:           helper,
+		SandboxReadyTimeout: 15 * time.Second,
 	})
 	if err != nil {
-		panic(fmt.Sprintf("failed to create sandbox: %v", err))
+		log.Fatal(err)
+	}
+	defer client.DeleteAll(ctx)
+
+	fmt.Printf("Creating sandbox with a %s TTL...\n", ttl)
+	sb, err := client.CreateSandbox(ctx, "simple-sandbox-template", namespace)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Schedule automatic cleanup by setting the claim's shutdownTime.
+	claim, err := helper.ExtensionsClient.SandboxClaims(namespace).Get(ctx, sb.ClaimName(), metav1.GetOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	shutdownAt := metav1.NewTime(time.Now().Add(ttl))
+	claim.Spec.Lifecycle = &extensionsv1alpha1.Lifecycle{
+		ShutdownPolicy: extensionsv1alpha1.ShutdownPolicyDelete,
+		ShutdownTime:   &shutdownAt,
+	}
+	if _, err := helper.ExtensionsClient.SandboxClaims(namespace).Update(ctx, claim, metav1.UpdateOptions{}); err != nil {
+		log.Fatal(err)
 	}
 
 	fmt.Println("Sandbox created successfully! Running initial command...")
-	response, err := sandbox.Commands().Run("echo 'Sandbox is alive!'")
+	result, err := sb.Run(ctx, "echo 'Sandbox is alive!'")
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	fmt.Printf("Output: %s\n\n", response)
+	if result.ExitCode != 0 {
+		log.Fatalf("command failed with exit code %d: %s", result.ExitCode, result.Stderr)
+	}
+	fmt.Printf("Output: %s\n\n", result.Stdout)
 
-	// 2. Verify shutdown_after_seconds (auto-deletion)
+	// Verify auto-deletion: wait past the TTL, then check the claim directly
+	// rather than inferring shutdown from a command error, which could also
+	// mean a transient/unrelated failure.
 	waitTime := ttl + 3*time.Second // buffer for Kubernetes controller sync
 	fmt.Printf("Waiting %s for the cluster to auto-delete the sandbox...\n", waitTime)
 	time.Sleep(waitTime)
 
-	fmt.Println("Attempting to run a command on the expired sandbox...")
-	_, err = sandbox.Commands().Run("echo 'Is anyone there?'")
-	if err != nil {
-		if errors.Is(err, ErrSandboxExpired) {
-			fmt.Println("✅ SUCCESS: Sandbox is no longer accessible! The cluster cleaned it up.")
-		} else {
-			fmt.Println("✅ SUCCESS: Sandbox is no longer accessible! The cluster cleaned it up.")
-		}
-		fmt.Printf("   Error received: %v\n", err)
-	} else {
-		fmt.Println("❌ FAILED: Sandbox is still alive! The shutdown policy did not trigger.")
+	fmt.Println("Checking whether the cluster cleaned up the claim...")
+	_, err = helper.ExtensionsClient.SandboxClaims(namespace).Get(ctx, sb.ClaimName(), metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		fmt.Println("✅ SUCCESS: SandboxClaim is gone. The cluster enforced the shutdown policy.")
+	case err != nil:
+		log.Fatalf("unexpected error checking claim: %v", err)
+	default:
+		fmt.Println("❌ FAILED: SandboxClaim still exists! The shutdown policy did not trigger.")
 	}
-}
-
-func main() {
-	verifySandboxLifecycle()
 }
   {{< /blocks/tab >}}
 {{< /blocks/tabs >}}

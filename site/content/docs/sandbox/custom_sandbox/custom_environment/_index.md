@@ -139,8 +139,12 @@ func executeCommand(w http.ResponseWriter, r *http.Request) {
 
 	// shlex.split — split on whitespace, respecting quoted tokens
 	args, err := shellSplit(expanded)
-	if err != nil || len(args) == 0 {
+	if err != nil {
 		writeJSON(w, http.StatusOK, ExecuteResponse{Stderr: "invalid command: " + err.Error(), ExitCode: 1})
+		return
+	}
+	if len(args) == 0 {
+		writeJSON(w, http.StatusOK, ExecuteResponse{Stderr: "invalid command: empty command", ExitCode: 1})
 		return
 	}
 
@@ -378,6 +382,12 @@ func (r CommandResult) String() string {
 }
 
 // Run accepts a CommandPayload, matching the Python SDK's dict-based payload.
+//
+// This custom runtime's /execute endpoint takes a structured payload (command
+// + env), which differs from the published Go SDK's Commands().Run(ctx, cmd
+// string) — that method only supports a plain shell string, with no field for
+// injecting per-call environment variables. Talk to the custom endpoint
+// directly until the SDK grows support for structured payloads.
 func (c *CommandService) Run(payload CommandPayload) (CommandResult, error) {
 	// The outer wrapper {"command": payload} matches the server's ExecuteRequest shape.
 	body, _ := json.Marshal(map[string]any{"command": payload})
@@ -388,133 +398,10 @@ func (c *CommandService) Run(payload CommandPayload) (CommandResult, error) {
 	}
 	defer resp.Body.Close()
 
-	var result CommandResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return CommandResult{}, fmt.Errorf("decode response: %w", err)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return CommandResult{}, fmt.Errorf("run command: server returned status %d: %s", resp.StatusCode, body)
 	}
-	return result, nil
-}
-
-// --- main ---
-
-func main() {
-	// 1. Initialize the client
-	client := NewSandboxClient()
-
-	// 2. Create the sandbox
-	sandbox, err := client.CreateSandbox("simple-sandbox-template")
-	if err != nil {
-		panic(err)
-	}
-	defer sandbox.Terminate()
-
-	// 3. Run a command and inject environment variables via the payload
-	var payload CommandPayload
-	payload.Command.Content = "echo $TEST"
-	payload.Env = map[string]string{"TEST": "True"}
-
-	response, err := sandbox.Commands().Run(payload)
-	if err != nil {
-		panic(err)
-	}
-
-	// 4. Verify the output — prints: True
-	fmt.Println(response.Stdout)
-}package main
-
-import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-)
-
-const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
-
-// --- SandboxClient ---
-
-type SandboxClient struct {
-	http    *http.Client
-	baseURL string
-}
-
-func NewSandboxClient() *SandboxClient {
-	return &SandboxClient{http: &http.Client{}, baseURL: sandboxAPIBase}
-}
-
-func (c *SandboxClient) CreateSandbox(template string) (*Sandbox, error) {
-	body, _ := json.Marshal(map[string]string{"template": template})
-	resp, err := c.http.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	return &Sandbox{ID: result.ID, client: c}, nil
-}
-
-// --- Sandbox ---
-
-type Sandbox struct {
-	ID     string
-	client *SandboxClient
-}
-
-func (s *Sandbox) Commands() *CommandService { return &CommandService{sandbox: s} }
-
-func (s *Sandbox) Terminate() error {
-	url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
-	resp, err := s.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("terminate: %w", err)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	return nil
-}
-
-// --- CommandService ---
-
-type CommandService struct{ sandbox *Sandbox }
-
-// CommandPayload mirrors the ExecuteRequest model from the FastAPI runtime server.
-// Command.Content maps to {"command": {"content": "..."}}.
-// Env injects environment variables: {"env": {"KEY": "VALUE"}}.
-type CommandPayload struct {
-	Command struct {
-		Content string `json:"content"`
-	} `json:"command"`
-	Env map[string]string `json:"env,omitempty"`
-}
-
-type CommandResult struct {
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	ExitCode int    `json:"exitCode"`
-}
-
-func (r CommandResult) String() string {
-	return fmt.Sprintf("CommandResult{ExitCode: %d, Stdout: %q}", r.ExitCode, r.Stdout)
-}
-
-// Run accepts a CommandPayload, matching the Python SDK's dict-based payload.
-func (c *CommandService) Run(payload CommandPayload) (CommandResult, error) {
-	// The outer wrapper {"command": payload} matches the server's ExecuteRequest shape.
-	body, _ := json.Marshal(map[string]any{"command": payload})
-	url := fmt.Sprintf("%s/sandboxes/%s/commands", c.sandbox.client.baseURL, c.sandbox.ID)
-	resp, err := c.sandbox.client.http.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return CommandResult{}, fmt.Errorf("run command: %w", err)
-	}
-	defer resp.Body.Close()
 
 	var result CommandResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

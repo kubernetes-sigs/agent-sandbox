@@ -134,7 +134,7 @@ type Sandbox struct {
 
 func (s *Sandbox) String() string { return fmt.Sprintf("Sandbox{ID: %s}", s.ID) }
 
-func (s *Sandbox) Commands() *CommandService  { return &CommandService{sandbox: s} }
+func (s *Sandbox) Commands() *CommandService   { return &CommandService{sandbox: s} }
 func (s *Sandbox) Snapshots() *SnapshotService { return &SnapshotService{sandbox: s} }
 
 func (s *Sandbox) IsRestoredFromSnapshot(snapshotUID string) (bool, error) {
@@ -271,12 +271,18 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	if !isRestored {
+		panic(fmt.Sprintf("snapshot %s was not restored", snapshotResponse.SnapshotUID))
+	}
 	fmt.Printf("Is restored?\nAnswer: %v\n", isRestored)
 
 	// 7. Verify the filesystem state was preserved
 	result, err := restoredSandbox.Commands().Run("cat /tmp/data/status.txt")
 	if err != nil {
 		panic(err)
+	}
+	if result.ExitCode != 0 {
+		panic(fmt.Errorf("command failed: exit code %d: %s", result.ExitCode, result.Stderr))
 	}
 	fmt.Print(result.Stdout) // Should output 'session_active'
 }

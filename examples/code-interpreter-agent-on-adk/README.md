@@ -57,175 +57,97 @@ The guide walks you through the process of creating a simple [ADK](https://googl
 package main
 
 import (
-     "bytes"
-     "context"
-     "encoding/json"
-     "fmt"
-     "io"
-     "log"
-     "net/http"
-     "os"
+	"context"
+	"fmt"
+	"log"
+	"os"
 
-     "google.golang.org/adk/agent"
-        "google.golang.org/adk/cmd/launcher/full"
-     "google.golang.org/adk/agent/llmagent"
-     "google.golang.org/adk/cmd/launcher"
-     "google.golang.org/adk/model/gemini"
-     "google.golang.org/adk/tool"
-     "google.golang.org/adk/tool/functiontool"
-     "google.golang.org/genai"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/full"
+	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/genai"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 )
 
-const sandboxAPIBase = "http://sandbox-service.default.svc.cluster.local"
-
-type SandboxClient struct {
-     httpClient *http.Client
-     baseURL    string
-}
-
-func NewSandboxClient() *SandboxClient {
-     return &SandboxClient{
-        httpClient: &http.Client{},
-        baseURL:    sandboxAPIBase,
-     }
-}
-
-type Sandbox struct {
-     ID     string
-     client *SandboxClient
-}
-
-func (c *SandboxClient) CreateSandbox(template, namespace string) (*Sandbox, error) {
-     body, _ := json.Marshal(map[string]string{
-        "template":  template,
-        "namespace": namespace,
-     })
-     resp, err := c.httpClient.Post(c.baseURL+"/sandboxes", "application/json", bytes.NewReader(body))
-     if err != nil {
-        return nil, fmt.Errorf("create sandbox: %w", err)
-     }
-     defer resp.Body.Close()
-
-     var result struct {
-        ID string `json:"id"`
-     }
-     if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-        return nil, fmt.Errorf("decode sandbox response: %w", err)
-     }
-     return &Sandbox{ID: result.ID, client: c}, nil
-}
-
-func (s *Sandbox) WriteFile(filename, content string) error {
-     body, _ := json.Marshal(map[string]string{"content": content})
-     url := fmt.Sprintf("%s/sandboxes/%s/files/%s", s.client.baseURL, s.ID, filename)
-     req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
-     req.Header.Set("Content-Type", "application/json")
-     resp, err := s.client.httpClient.Do(req)
-     if err != nil {
-        return fmt.Errorf("write file: %w", err)
-     }
-     defer resp.Body.Close()
-     return nil
-}
-
-func (s *Sandbox) RunCommand(cmd string) (string, error) {
-     body, _ := json.Marshal(map[string]string{"command": cmd})
-     url := fmt.Sprintf("%s/sandboxes/%s/commands", s.client.baseURL, s.ID)
-     resp, err := s.client.httpClient.Post(url, "application/json", bytes.NewReader(body))
-     if err != nil {
-        return "", fmt.Errorf("run command: %w", err)
-     }
-     defer resp.Body.Close()
-
-     var result struct {
-        Stdout string `json:"stdout"`
-        Stderr string `json:"stderr"`
-     }
-     if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-        return "", fmt.Errorf("decode command response: %w", err)
-     }
-     return result.Stdout, nil
-}
-
-func (s *Sandbox) Terminate() error {
-     url := fmt.Sprintf("%s/sandboxes/%s", s.client.baseURL, s.ID)
-     req, _ := http.NewRequest(http.MethodDelete, url, nil)
-     resp, err := s.client.httpClient.Do(req)
-     if err != nil {
-        return fmt.Errorf("terminate sandbox: %w", err)
-     }
-     io.Copy(io.Discard, resp.Body)
-     resp.Body.Close()
-     return nil
-}
-
 type executePythonArgs struct {
-     Code string `json:"code" jsonschema:"The Python code to execute in the sandbox."`
+	Code string `json:"code" jsonschema:"The Python code to execute in the sandbox."`
 }
 
 type executePythonResult struct {
-     Stdout string `json:"stdout"`
-     Error  string `json:"error,omitempty"`
+	Stdout string `json:"stdout"`
+	Error  string `json:"error,omitempty"`
 }
 
 func executePython(_ tool.Context, args executePythonArgs) (executePythonResult, error) {
-     sb := NewSandboxClient()
+	ctx := context.Background()
 
-     sandbox, err := sb.CreateSandbox("python-sandbox-template", "default")
-     if err != nil {
-        return executePythonResult{Error: err.Error()}, nil
-     }
-     defer sandbox.Terminate()
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
+	if err != nil {
+		return executePythonResult{Error: err.Error()}, nil
+	}
 
-     if err := sandbox.WriteFile("run.py", args.Code); err != nil {
-        return executePythonResult{Error: err.Error()}, nil
-     }
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-template", "default")
+	if err != nil {
+		return executePythonResult{Error: err.Error()}, nil
+	}
+	defer sb.Close(ctx)
 
-     stdout, err := sandbox.RunCommand("python3 run.py")
-     if err != nil {
-        return executePythonResult{Error: err.Error()}, nil
-     }
-     return executePythonResult{Stdout: stdout}, nil
+	if err := sb.Files().Write(ctx, "run.py", []byte(args.Code)); err != nil {
+		return executePythonResult{Error: err.Error()}, nil
+	}
+
+	result, err := sb.Commands().Run(ctx, "python3 run.py")
+	if err != nil {
+		return executePythonResult{Error: err.Error()}, nil
+	}
+	if result.ExitCode != 0 {
+		return executePythonResult{Error: fmt.Sprintf("run.py exited with code %d: %s", result.ExitCode, result.Stderr)}, nil
+	}
+	return executePythonResult{Stdout: result.Stdout}, nil
 }
+
 func main() {
-    ctx := context.Background()
+	ctx := context.Background()
 
-    model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-        APIKey: os.Getenv("GOOGLE_API_KEY"),
-    })
-    if err != nil {
-        log.Fatalf("create model: %v", err)
-    }
+	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+		APIKey: os.Getenv("GOOGLE_API_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("create model: %v", err)
+	}
 
-    pythonTool, err := functiontool.New(functiontool.Config{
-        Name:        "execute_python",
-        Description: "Writes the provided Python code to a file and executes it in an isolated sandbox, returning stdout.",
-    }, executePython)
-    if err != nil {
-        log.Fatalf("create tool: %v", err)
-    }
+	pythonTool, err := functiontool.New(functiontool.Config{
+		Name:        "execute_python",
+		Description: "Writes the provided Python code to a file and executes it in an isolated sandbox, returning stdout.",
+	}, executePython)
+	if err != nil {
+		log.Fatalf("create tool: %v", err)
+	}
 
-    rootAgent, err := llmagent.New(llmagent.Config{
-        Name:        "coding_agent",
-        Model:       model,
-        Description: "Writes Python code and executes it in a sandbox.",
-        Instruction: "You are a helpful assistant that can write Python code and execute it in the sandbox. Use the 'execute_python' tool for this purpose.",
-        Tools:       []tool.Tool{pythonTool},
-    })
-    if err != nil {
-        log.Fatalf("create agent: %v", err)
-    }
+	rootAgent, err := llmagent.New(llmagent.Config{
+		Name:        "coding_agent",
+		Model:       model,
+		Description: "Writes Python code and executes it in a sandbox.",
+		Instruction: "You are a helpful assistant that can write Python code and execute it in the sandbox. Use the 'execute_python' tool for this purpose.",
+		Tools:       []tool.Tool{pythonTool},
+	})
+	if err != nil {
+		log.Fatalf("create agent: %v", err)
+	}
 
-    // FIX 1: AgentLoader field with NewSingleLoader
-    config := &launcher.Config{
-        AgentLoader: agent.NewSingleLoader(rootAgent),
-    }
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(rootAgent),
+	}
 
-    // FIX 2: NewLauncher() + Execute(), not full.Run()
-    l := full.NewLauncher()
-    if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-        log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
-    }
+	l := full.NewLauncher()
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	}
 }
   {{< /blocks/tab >}}
 {{< /blocks/tabs >}}

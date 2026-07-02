@@ -175,14 +175,22 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
+	// Initialize trace ID and observability annotation for active resources missing them (inline, no re-reconcile)
 	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	needTraceContextPatch := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
+	needObservabilityPatch := sandbox.Annotations == nil || sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] == ""
+
+	if needTraceContextPatch || needObservabilityPatch {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if needTraceContextPatch {
+			sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+		}
+		if needObservabilityPatch {
+			sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+		}
 
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
@@ -221,6 +229,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else if metricsErr := r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus); metricsErr != nil {
+			err = errors.Join(err, metricsErr)
 		}
 	}
 	// return errors seen
@@ -455,6 +465,95 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// recordSandboxCreationMetrics detects the first transition to Ready=True and records
+// sandbox lifecycle metrics (creation latency, ready latency). It stamps the
+// sandbox-first-ready-at annotation to prevent duplicate recording on re-Ready
+// events (e.g. readiness probe flaps). Returns an error if the annotation patch
+// fails so that the reconciler retries; the retry is safe because the status
+// already persists Ready=True, so the oldReady guard will skip metric recording.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) error {
+	logger := log.FromContext(ctx)
+
+	// Only record on the first transition to Ready=True.
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		return nil
+	}
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
+		return nil
+	}
+
+	// Skip if metrics were already recorded for this Sandbox (guards against
+	// re-Ready events, e.g. after a readiness probe flap).
+	if sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] != "" {
+		return nil
+	}
+
+	// Resolve metric labels.
+	launchType := asmetrics.LaunchTypeCold
+	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	templateName := "unknown"
+	if tmpl, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
+		templateName = tmpl
+	}
+
+	ownedBy := resolveOwnedBy(sandbox)
+
+	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType, "ownedBy", ownedBy)
+
+	// 1. Creation latency (Sandbox.CreationTimestamp → Ready.LastTransitionTime).
+	if !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
+		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+		if latency >= 0 {
+			asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
+		}
+	}
+
+	// 2. Ready latency (observability annotation → now).
+	if observedTimeStr := sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation]; observedTimeStr != "" {
+		observedTime, parseErr := time.Parse(time.RFC3339Nano, observedTimeStr)
+		if parseErr != nil {
+			logger.Error(parseErr, "Failed to parse sandbox observability annotation, skipping ready latency metric", "value", observedTimeStr)
+		} else {
+			latency := time.Since(observedTime)
+			if latency >= 0 {
+				asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
+			}
+		}
+	}
+
+	// Stamp the first-ready annotation to prevent duplicate recording on re-Ready events.
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return fmt.Errorf("stamp first-ready annotation: %w", err)
+	}
+	return nil
+}
+
+// resolveOwnedBy determines the owner of a Sandbox from its controller owner reference.
+func resolveOwnedBy(sandbox *sandboxv1beta1.Sandbox) string {
+	controllerRef := metav1.GetControllerOf(sandbox)
+	if controllerRef != nil && controllerRef.APIVersion == extensionsv1beta1.GroupVersion.String() {
+		switch controllerRef.Kind {
+		case "SandboxClaim":
+			return asmetrics.OwnedBySandboxClaim
+		case "SandboxWarmPool":
+			return asmetrics.OwnedBySandboxWarmPool
+		default:
+			return asmetrics.OwnedByNone
+		}
+	}
+	return asmetrics.OwnedByNone
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.

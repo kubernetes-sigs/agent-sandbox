@@ -1,10 +1,3 @@
----
-title: "SDK Reference"
-linkTitle: "SDK Reference"
-weight: 15
-description: >
-  This page contains references for Python and Go SDK.
----
 <a id="k8s_agent_sandbox.sandbox_client"></a>
 
 ## k8s\_agent\_sandbox.sandbox\_client
@@ -102,11 +95,20 @@ def get_sandbox(claim_name: str,
 Retrieves an existing sandbox handle given a sandbox claim name.
 If the handle is closed or missing, it re-attaches to the infrastructure.
 
+**Arguments**:
+
+- `claim_name` - Name of the SandboxClaim to attach to.
+- `namespace` - Kubernetes namespace the claim lives in.
+- `resolve_timeout` - Seconds to wait while resolving the sandbox
+  name from the claim status.
+
 **Example**:
 
   
   >>> client = SandboxClient()
-  >>> sandbox = client.get_sandbox("sandbox-claim-1234abcd")
+  >>> sandbox = client.get_sandbox(
+  ...     "sandbox-claim-1234abcd",
+  ... )
   >>> sandbox.commands.run("ls -la")
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.list_active_sandboxes"></a>
@@ -132,11 +134,20 @@ Returns a list of tuples containing (namespace, claim_name) currently managed by
 ##### list\_all\_sandboxes
 
 ```python
-def list_all_sandboxes(namespace: str = "default") -> List[str]
+def list_all_sandboxes(namespace: str = "default",
+                       label_selector: str | None = None) -> List[str]
 ```
 
 Lists all SandboxClaim names currently existing in the Kubernetes cluster
 for the given namespace.
+
+**Arguments**:
+
+- `namespace` - Kubernetes namespace to list claims in.
+- `label_selector` - Optional Kubernetes label selector string
+  (e.g. ``"app=myapp"``). When set, only claims matching
+  the selector are returned.
+  
 
 **Example**:
 
@@ -179,6 +190,16 @@ Cleanup all tracked sandboxes managed by this client.
   >>> client.create_sandbox("python-sandbox-pool")
   >>> client.create_sandbox("python-sandbox-pool")
   >>> client.delete_all()
+
+<a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_sandbox_claim_warmpool_name"></a>
+
+##### get\_sandbox\_claim\_warmpool\_name
+
+```python
+def get_sandbox_claim_warmpool_name(claim_name: str, namespace: str) -> str
+```
+
+Get warmpool name of a sandbox claim.
 
 <a id="k8s_agent_sandbox.models"></a>
 
@@ -324,6 +345,40 @@ Timeout in seconds to wait for port-forward to be ready.
 
 Port the sandbox container listens on.
 
+<a id="k8s_agent_sandbox.models.SandboxLocalTunnelConnectionConfig.router_namespace"></a>
+
+##### router\_namespace
+
+Namespace where the Router service resides.
+
+<a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
+
+### SandboxInClusterConnectionConfig Objects
+
+```python
+class SandboxInClusterConnectionConfig(BaseModel)
+```
+
+Configuration for direct in-cluster connection to the sandbox pod, bypassing the router.
+
+By default, connects via stable K8s DNS:
+    http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}
+
+When use_pod_ip=True, connects directly to the pod IP from the Sandbox status,
+avoiding DNS resolution at the cost of needing a K8s API call to retrieve the IP.
+
+<a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig.server_port"></a>
+
+##### server\_port
+
+Port the sandbox container listens on.
+
+<a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig.use_pod_ip"></a>
+
+##### use\_pod\_ip
+
+If True, connect via pod IP instead of cluster DNS.
+
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig"></a>
 
 ### SandboxTracerConfig Objects
@@ -332,7 +387,7 @@ Port the sandbox container listens on.
 class SandboxTracerConfig(BaseModel)
 ```
 
-Configuration for tracer-level information
+Configuration for tracer level information
 
 <a id="k8s_agent_sandbox.models.SandboxTracerConfig.enable_tracing"></a>
 
@@ -345,3 +400,4 @@ Whether to enable OpenTelemetry tracing.
 ##### trace\_service\_name
 
 Service name used for traces.
+

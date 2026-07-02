@@ -74,7 +74,7 @@ When creating a new sandbox via the `k8s_agent_sandbox` SDK, you can customize i
 The following example demonstrates how to pass these parameters. Notice how the SDK handles the cluster cleanup policy for you:
 
 
-{{< blocks/tabs name="basic-workflow-example-python-sdk" >}}
+{{< blocks/tabs name="basic-workflow-example" >}}
   {{< blocks/tab name="Python" codelang="python" >}}
 import time
 from k8s_agent_sandbox import SandboxClient
@@ -200,7 +200,7 @@ func main() {
 	case err != nil:
 		log.Fatalf("unexpected error checking claim: %v", err)
 	default:
-		fmt.Println("❌ FAILED: SandboxClaim still exists! The shutdown policy did not trigger.")
+		log.Fatal("❌ FAILED: SandboxClaim still exists! The shutdown policy did not trigger.")
 	}
 }
   {{< /blocks/tab >}}

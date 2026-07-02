@@ -3483,6 +3483,29 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 				"unexpected SandboxCreationLatency count")
 			assert.Equal(t, tc.expectedControllerLatencyCount, testutil.CollectAndCount(asmetrics.SandboxReadyLatency),
 				"unexpected SandboxReadyLatency count")
+
+			// Verify owned_by label flows correctly through the full reconcile path.
+			if tc.expectedControllerLatencyCount > 0 {
+				launchType := asmetrics.LaunchTypeCold
+				if sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+					launchType = asmetrics.LaunchTypeWarm
+				}
+				templateName := "unknown"
+				if tmpl, ok := sb.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
+					templateName = tmpl
+				}
+				// CurryWith returns a curried histogram that only matches the specified labels.
+				// CollectAndCount == 1 confirms exactly one observation with these label values.
+				curried, curryErr := asmetrics.SandboxReadyLatency.CurryWith(map[string]string{
+					"namespace":        sandboxNs,
+					"launch_type":      launchType,
+					"sandbox_template": templateName,
+					"owned_by":         tc.expectedOwnedBy,
+				})
+				require.NoError(t, curryErr)
+				assert.Equal(t, 1, testutil.CollectAndCount(curried),
+					"SandboxReadyLatency with owned_by=%q should have exactly one observation", tc.expectedOwnedBy)
+			}
 		})
 	}
 }

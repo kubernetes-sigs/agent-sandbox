@@ -3551,6 +3551,7 @@ func TestRecordSandboxCreationMetrics_AlreadyReady(t *testing.T) {
 	_, err := r.Reconcile(t.Context(), req)
 	require.NoError(t, err)
 	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "first reconcile should record creation latency")
+	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxReadyLatency), "first reconcile should record ready latency")
 
 	// Verify first-ready annotation was stamped.
 	var got sandboxv1beta1.Sandbox

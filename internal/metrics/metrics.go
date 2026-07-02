@@ -46,6 +46,10 @@ const (
 	OwnedByNone            = "None"            // Sandbox not owned by any extension controller
 )
 
+// sandboxLatencyBuckets defines the shared histogram bucket boundaries (in milliseconds)
+// for sandbox-level latency metrics, covering 50ms to 10 minutes.
+var sandboxLatencyBuckets = []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000}
+
 var (
 	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
 	// Labels:
@@ -84,10 +88,9 @@ var (
 	// - sandbox_template: the SandboxTemplateRef.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_creation_latency_ms",
-			Help: "Latency from Sandbox creation to Pod Ready state in milliseconds.",
-			// Buckets for latency from 50ms to 10 minutes
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+			Name:    "agent_sandbox_creation_latency_ms",
+			Help:    "Latency from Sandbox creation to Pod Ready state in milliseconds.",
+			Buckets: sandboxLatencyBuckets,
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},
 	)
@@ -100,10 +103,9 @@ var (
 	// - owned_by: "SandboxClaim", "SandboxWarmPool", "None".
 	SandboxReadyLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_ready_latency_ms",
-			Help: "Latency from controller first observed Sandbox to Ready state in milliseconds.",
-			// Buckets for latency from 50ms to 10 minutes
-			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+			Name:    "agent_sandbox_ready_latency_ms",
+			Help:    "Latency from controller first observed Sandbox to Ready state in milliseconds.",
+			Buckets: sandboxLatencyBuckets,
 		},
 		[]string{"namespace", "launch_type", "sandbox_template", "owned_by"},
 	)

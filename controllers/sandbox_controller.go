@@ -229,8 +229,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
-		} else {
-			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
+		} else if metricsErr := r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus); metricsErr != nil {
+			err = errors.Join(err, metricsErr)
 		}
 	}
 	// return errors seen
@@ -457,24 +457,26 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 // recordSandboxCreationMetrics detects the first transition to Ready=True and records
 // sandbox lifecycle metrics (creation latency, ready latency). It stamps the
 // sandbox-first-ready-at annotation to prevent duplicate recording on re-Ready
-// events (e.g. readiness probe flaps).
-func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+// events (e.g. readiness probe flaps). Returns an error if the annotation patch
+// fails so that the reconciler retries; the retry is safe because the status
+// already persists Ready=True, so the oldReady guard will skip metric recording.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) error {
 	logger := log.FromContext(ctx)
 
 	// Only record on the first transition to Ready=True.
 	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		return
+		return nil
 	}
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
-		return
+		return nil
 	}
 
 	// Skip if metrics were already recorded for this Sandbox (guards against
 	// re-Ready events, e.g. after a readiness probe flap).
 	if sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] != "" {
-		return
+		return nil
 	}
 
 	// Resolve metric labels.
@@ -502,14 +504,14 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 
 	// 2. Ready latency (observability annotation → now).
 	if observedTimeStr := sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation]; observedTimeStr != "" {
-		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeStr)
-		if err != nil {
-			logger.Error(err, "Failed to parse sandbox observability annotation", "value", observedTimeStr)
-			return
-		}
-		latency := time.Since(observedTime)
-		if latency >= 0 {
-			asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
+		observedTime, parseErr := time.Parse(time.RFC3339Nano, observedTimeStr)
+		if parseErr != nil {
+			logger.Error(parseErr, "Failed to parse sandbox observability annotation, skipping ready latency metric", "value", observedTimeStr)
+		} else {
+			latency := time.Since(observedTime)
+			if latency >= 0 {
+				asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
+			}
 		}
 	}
 
@@ -520,8 +522,9 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 	}
 	sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		logger.Error(err, "Failed to stamp first-ready annotation")
+		return fmt.Errorf("stamp first-ready annotation: %w", err)
 	}
+	return nil
 }
 
 // resolveOwnedBy determines the owner of a Sandbox from its controller owner reference.

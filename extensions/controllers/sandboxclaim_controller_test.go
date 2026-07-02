@@ -1988,6 +1988,21 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		return sb
 	}
 
+	// matchingPodTemplateHash is the pod template hash the warm pool controller would stamp on a
+	// fresh pod for this template; a candidate carrying it is considered current under Recreate.
+	matchingPodTemplateHash, hashErr := computePodTemplateHash(template)
+	if hashErr != nil {
+		t.Fatalf("failed to compute pod template hash: %v", hashErr)
+	}
+
+	// withStrategyAndHash stamps the warm pool update strategy and pod template hash labels that
+	// the SandboxClaim controller inspects when deciding whether a candidate is fresh (issue #764).
+	withStrategyAndHash := func(sb *sandboxv1beta1.Sandbox, strategy extensionsv1beta1.SandboxWarmPoolUpdateStrategyType, podTemplateHash string) *sandboxv1beta1.Sandbox {
+		sb.Labels[extensionsv1beta1.SandboxWarmPoolUpdateStrategyLabel] = string(strategy)
+		sb.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel] = podTemplateHash
+		return sb
+	}
+
 	testCases := []struct {
 		name                    string
 		existingObjects         []client.Object
@@ -2190,6 +2205,53 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectSandboxAdoption:   false,
 			expectNewSandboxCreated: true,
+		},
+		{
+			name: "skips stale candidate under Recreate strategy and cold starts",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withStrategyAndHash(createWarmPoolSandbox("stale-recreate", metav1.Now(), true), extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType, "stale-hash"),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
+		},
+		{
+			name: "adopts fresh candidate under Recreate strategy",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withStrategyAndHash(createWarmPoolSandbox("fresh-recreate", metav1.Now(), true), extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType, matchingPodTemplateHash),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "fresh-recreate",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "adopts stale candidate under OnReplenish strategy (no regression)",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withStrategyAndHash(createWarmPoolSandbox("stale-onreplenish", metav1.Now(), true), extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType, "stale-hash"),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "stale-onreplenish",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "adopts stale candidate when strategy label missing (backward compat)",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("legacy-stale", metav1.Now(), true)
+					sb.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel] = "stale-hash"
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "legacy-stale",
+			expectNewSandboxCreated: false,
 		},
 	}
 

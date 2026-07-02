@@ -662,6 +662,25 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	var fallbackKey queue.SandboxKey
 	var adoptingFallback bool
 
+	// Lazily resolve the expected pod template hash. We only pay the SandboxTemplate lookup
+	// when we actually encounter a candidate created under the Recreate strategy, so the default
+	// OnReplenish path keeps its fast, template-free adoption behavior (see issue #764).
+	var expectedPodTemplateHash string
+	var expectedHashErr error
+	var expectedHashComputed bool
+	computeExpectedHash := func() (string, error) {
+		if !expectedHashComputed {
+			expectedHashComputed = true
+			template, err := r.getTemplate(ctx, claim)
+			if err != nil {
+				expectedHashErr = err
+			} else {
+				expectedPodTemplateHash, expectedHashErr = computePodTemplateHash(template)
+			}
+		}
+		return expectedPodTemplateHash, expectedHashErr
+	}
+
 	// Instantly returns unused keys the moment we find a valid/ready candidate!
 	defer func() {
 		for _, key := range skipped {
@@ -758,6 +777,28 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 				skipped = append(skipped, adoptedKey)
 			}
 			continue
+		}
+
+		// Under the Recreate strategy the pool must only serve pods reflecting the current
+		// template. During an in-place template update, stale pods are still being deleted, so
+		// reject any candidate whose pod template hash no longer matches to avoid adopting a
+		// stale version (issue #764). OnReplenish deliberately allows stale adoption and is
+		// left untouched; candidates predating this label carry no strategy and are treated as
+		// OnReplenish for backward compatibility.
+		if adopted.Labels[extensionsv1beta1.SandboxWarmPoolUpdateStrategyLabel] == string(extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType) {
+			expectedHash, err := computeExpectedHash()
+			if err != nil {
+				// We cannot verify freshness; under Recreate it is safer to skip this candidate
+				// and let the claim retry or cold start than to risk adopting a stale pod.
+				logger.V(1).Info("Skipping Recreate candidate: unable to compute expected pod template hash", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "error", err.Error())
+				continue
+			}
+			if adopted.Labels[v1beta1.SandboxPodTemplateHashLabel] != expectedHash {
+				// Stale pod being recreated. Drop it (do not requeue): the warm pool controller
+				// is deleting it and will enqueue fresh replacements via the Sandbox watch.
+				logger.V(1).Info("Skipping stale candidate under Recreate strategy", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
+				continue
+			}
 		}
 
 		// Candidate is valid! Now check if it is Ready

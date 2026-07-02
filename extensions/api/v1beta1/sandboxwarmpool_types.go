@@ -27,6 +27,12 @@ const (
 	// Warning: This path must exactly match the JSON tag path of SandboxWarmPoolSpec.TemplateRef.Name.
 	// If the JSON tags are changed, this constant must be updated to avoid indexer failures.
 	TemplateRefField = ".spec.sandboxTemplateRef.name"
+
+	// SandboxWarmPoolUpdateStrategyLabel records the owning SandboxWarmPool's update strategy on
+	// each pooled Sandbox. It lets the SandboxClaim controller decide whether to enforce pod
+	// template version consistency before adoption without fetching the SandboxWarmPool: under
+	// Recreate it must reject stale pods, while under OnReplenish stale pods remain adoptable.
+	SandboxWarmPoolUpdateStrategyLabel = "agents.x-k8s.io/warm-pool-update-strategy"
 )
 
 // SandboxTemplateRef references a SandboxTemplate.

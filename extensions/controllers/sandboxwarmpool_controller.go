@@ -232,12 +232,26 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	return allErrors
 }
 
+// resolveUpdateStrategy returns the effective update strategy for the warm pool,
+// defaulting to OnReplenish when unspecified or unknown.
+func resolveUpdateStrategy(warmPool *extensionsv1beta1.SandboxWarmPool) extensionsv1beta1.SandboxWarmPoolUpdateStrategyType {
+	if warmPool.Spec.UpdateStrategy == nil {
+		return extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	}
+	switch warmPool.Spec.UpdateStrategy.Type {
+	case extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType:
+		return extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType
+	default:
+		return extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	}
+}
+
 // adoptSandbox sets this warmpool as the owner of an orphaned sandbox.
 func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sb *sandboxv1beta1.Sandbox) error {
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
 		return err
 	}
-	setWarmLaunchTypeLabelIfNeeded(sb)
+	setWarmPoolManagedLabels(sb, resolveUpdateStrategy(warmPool))
 	return r.Update(ctx, sb)
 }
 
@@ -252,6 +266,19 @@ func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
 	return true
 }
 
+// setWarmPoolManagedLabels ensures the warm launch-type label and the update-strategy label
+// are present and current on the Sandbox. It returns true if any label was changed so callers
+// can persist the update. Keeping the strategy label in sync lets the SandboxClaim controller
+// converge quickly when a pool's update strategy changes.
+func setWarmPoolManagedLabels(sb *sandboxv1beta1.Sandbox, strategy extensionsv1beta1.SandboxWarmPoolUpdateStrategyType) bool {
+	changed := setWarmLaunchTypeLabelIfNeeded(sb)
+	if sb.Labels[extensionsv1beta1.SandboxWarmPoolUpdateStrategyLabel] != string(strategy) {
+		sb.Labels[extensionsv1beta1.SandboxWarmPoolUpdateStrategyLabel] = string(strategy)
+		changed = true
+	}
+	return changed
+}
+
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
 func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
@@ -261,21 +288,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 	vettedHashes := make(map[string]bool)
 
 	// Determine the update strategy, defaulting to OnReplenish if not specified or unknown.
-	var updateStrategyType extensionsv1beta1.SandboxWarmPoolUpdateStrategyType
-	if warmPool.Spec.UpdateStrategy != nil {
-		updateStrategyType = warmPool.Spec.UpdateStrategy.Type
-	}
-
-	var updateStrategy extensionsv1beta1.SandboxWarmPoolUpdateStrategyType
-	switch updateStrategyType {
-	case extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType:
-		updateStrategy = extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType
-	case extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType, "":
-		updateStrategy = extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
-	default:
-		logger.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", updateStrategyType)
-		updateStrategy = extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
-	}
+	updateStrategy := resolveUpdateStrategy(warmPool)
 
 	for _, sb := range sandboxes {
 		if !sb.DeletionTimestamp.IsZero() {
@@ -302,9 +315,9 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 			}
 		}
 
-		if isControlledByPool && setWarmLaunchTypeLabelIfNeeded(&sb) {
+		if isControlledByPool && setWarmPoolManagedLabels(&sb, updateStrategy) {
 			if err := r.Update(ctx, &sb); err != nil {
-				logger.Error(err, "Failed to update sandbox launch type label", "sandbox", sb.Name)
+				logger.Error(err, "Failed to update sandbox managed labels", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
 				continue
 			}
@@ -351,10 +364,11 @@ func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, wa
 // buildSandboxCR constructs the base Sandbox CR (with pod template and volume claim templates) for the warm pool.
 func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.SandboxWarmPool, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash string) (*sandboxv1beta1.Sandbox, error) {
 	sandboxLabels := map[string]string{
-		warmPoolSandboxLabel:                       poolNameHash,
-		sandboxTemplateRefHash:                     SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
-		sandboxv1beta1.SandboxLaunchTypeLabel:      sandboxv1beta1.SandboxLaunchTypeWarm,
-		sandboxv1beta1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
+		warmPoolSandboxLabel:                                 poolNameHash,
+		sandboxTemplateRefHash:                               SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
+		sandboxv1beta1.SandboxLaunchTypeLabel:                sandboxv1beta1.SandboxLaunchTypeWarm,
+		sandboxv1beta1.SandboxPodTemplateHashLabel:           currentPodTemplateHash,
+		extensionsv1beta1.SandboxWarmPoolUpdateStrategyLabel: string(resolveUpdateStrategy(warmPool)),
 	}
 
 	// Build annotations for the Sandbox CR

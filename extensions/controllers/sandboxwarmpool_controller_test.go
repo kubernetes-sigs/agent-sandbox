@@ -481,6 +481,68 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 	})
 }
 
+func TestBuildSandboxCRStampsUpdateStrategyLabel(t *testing.T) {
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}},
+			},
+		}}},
+	}
+
+	recreate := extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType
+	onReplenish := extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+
+	testCases := []struct {
+		name          string
+		strategy      *extensionsv1beta1.SandboxWarmPoolUpdateStrategy
+		expectedLabel string
+	}{
+		{
+			name:          "Recreate strategy is stamped",
+			strategy:      &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: recreate},
+			expectedLabel: string(recreate),
+		},
+		{
+			name:          "explicit OnReplenish strategy is stamped",
+			strategy:      &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: onReplenish},
+			expectedLabel: string(onReplenish),
+		},
+		{
+			name:          "nil strategy defaults to OnReplenish",
+			strategy:      nil,
+			expectedLabel: string(onReplenish),
+		},
+		{
+			name:          "unknown strategy defaults to OnReplenish",
+			strategy:      &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: "Bogus"},
+			expectedLabel: string(onReplenish),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			warmPool := &extensionsv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "warmpool-uid-123"},
+				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+					TemplateRef:    extensionsv1beta1.SandboxTemplateRef{Name: "test-template"},
+					UpdateStrategy: tc.strategy,
+				},
+			}
+
+			r := SandboxWarmPoolReconciler{Scheme: newTestScheme()}
+			sb, err := r.buildSandboxCR(warmPool, sandboxcontrollers.NameHash("test-pool"), template, "pod-template-hash")
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedLabel, sb.Labels[extensionsv1beta1.SandboxWarmPoolUpdateStrategyLabel],
+				"top-level strategy label must be stamped for claim controller to read")
+			// The internal strategy label must NOT leak onto the user-facing pod template.
+			_, exists := sb.Spec.PodTemplate.ObjectMeta.Labels[extensionsv1beta1.SandboxWarmPoolUpdateStrategyLabel]
+			require.False(t, exists, "strategy label must not be propagated to the pod template")
+		})
+	}
+}
+
 func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"

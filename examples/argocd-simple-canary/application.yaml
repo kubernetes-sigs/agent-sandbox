@@ -1,0 +1,22 @@
+# This file defines the Argo CD Application that deploys the simple canary resources.
+# Apply this manifest to your cluster (where Argo CD is running) to manage the rollout via GitOps.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agent-sandbox-simple-canary
+  namespace: argocd # The namespace where Argo CD is installed
+spec:
+  project: default
+  source:
+    # The git repository containing the manifests.
+    # In your production GitOps setup, point this to your own configuration repository.
+    repoURL: 'https://github.com/kubernetes-sigs/agent-sandbox.git'
+    targetRevision: main # Target branch or tag
+    path: examples/argocd-simple-canary
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: default # Target namespace where SandboxWarmPools are deployed
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

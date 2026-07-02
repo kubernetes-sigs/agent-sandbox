@@ -18,19 +18,20 @@ package fake
 
 import (
 	gentype "k8s.io/client-go/gentype"
-	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/api/v1beta1"
+	typedapiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
 	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // fakeSandboxTemplates implements SandboxTemplateInterface
 type fakeSandboxTemplates struct {
-	*gentype.FakeClientWithList[*v1beta1.SandboxTemplate, *v1beta1.SandboxTemplateList]
+	*gentype.FakeClientWithListAndApply[*v1beta1.SandboxTemplate, *v1beta1.SandboxTemplateList, *apiv1beta1.SandboxTemplateApplyConfiguration]
 	Fake *FakeExtensionsV1beta1
 }
 
-func newFakeSandboxTemplates(fake *FakeExtensionsV1beta1, namespace string) apiv1beta1.SandboxTemplateInterface {
+func newFakeSandboxTemplates(fake *FakeExtensionsV1beta1, namespace string) typedapiv1beta1.SandboxTemplateInterface {
 	return &fakeSandboxTemplates{
-		gentype.NewFakeClientWithList[*v1beta1.SandboxTemplate, *v1beta1.SandboxTemplateList](
+		gentype.NewFakeClientWithListAndApply[*v1beta1.SandboxTemplate, *v1beta1.SandboxTemplateList, *apiv1beta1.SandboxTemplateApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v1beta1.SchemeGroupVersion.WithResource("sandboxtemplates"),

@@ -18,19 +18,20 @@ package fake
 
 import (
 	gentype "k8s.io/client-go/gentype"
-	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/api/v1beta1"
+	typedapiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
 	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // fakeSandboxClaims implements SandboxClaimInterface
 type fakeSandboxClaims struct {
-	*gentype.FakeClientWithList[*v1beta1.SandboxClaim, *v1beta1.SandboxClaimList]
+	*gentype.FakeClientWithListAndApply[*v1beta1.SandboxClaim, *v1beta1.SandboxClaimList, *apiv1beta1.SandboxClaimApplyConfiguration]
 	Fake *FakeExtensionsV1beta1
 }
 
-func newFakeSandboxClaims(fake *FakeExtensionsV1beta1, namespace string) apiv1beta1.SandboxClaimInterface {
+func newFakeSandboxClaims(fake *FakeExtensionsV1beta1, namespace string) typedapiv1beta1.SandboxClaimInterface {
 	return &fakeSandboxClaims{
-		gentype.NewFakeClientWithList[*v1beta1.SandboxClaim, *v1beta1.SandboxClaimList](
+		gentype.NewFakeClientWithListAndApply[*v1beta1.SandboxClaim, *v1beta1.SandboxClaimList, *apiv1beta1.SandboxClaimApplyConfiguration](
 			fake.Fake,
 			namespace,
 			v1beta1.SchemeGroupVersion.WithResource("sandboxclaims"),

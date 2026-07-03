@@ -366,7 +366,6 @@ func runPodTests(ctx context.Context, testingT *testing.T, testContext *framewor
 			// Perform execute check
 			executeURL := "http://localhost:8888/execute"
 			err = checkExecute(ctx, executeURL)
-			portForwardCancel()
 
 			if err != nil {
 				testingT.Logf("failed to verify execute endpoint: %v", err)
@@ -376,8 +375,20 @@ func runPodTests(ctx context.Context, testingT *testing.T, testContext *framewor
 			}
 			testingT.Logf("Execute endpoint check successful: url - %s", executeURL)
 
-			// Both checks passed
-			testingT.Logf("Both health and execute checks passed.")
+			// Verify the health endpoint stays responsive while a
+			// long-running command is executing.
+			err = checkConcurrentExecute(ctx, executeURL, healthURL)
+			portForwardCancel()
+
+			if err != nil {
+				testingT.Logf("failed to verify concurrent execute: %v", err)
+				time.Sleep(pollDuration)
+				continue
+			}
+			testingT.Logf("Concurrent execute check successful.")
+
+			// All checks passed
+			testingT.Logf("Health, execute, and concurrent execute checks passed.")
 			return nil
 		}
 	}
@@ -455,4 +466,59 @@ func checkExecute(ctx context.Context, url string) error {
 		return fmt.Errorf("unexpected stdout in response: got %q, want %q", stdout, "hello world\n")
 	}
 	return nil
+}
+
+// checkConcurrentExecute verifies that the health endpoint stays responsive
+// while a long-running command is executing, guarding against the execute
+// endpoint blocking the server event loop.
+func checkConcurrentExecute(ctx context.Context, executeURL, healthURL string) error {
+	const sleepSeconds = 5
+
+	executeDone := make(chan error, 1)
+	go func() {
+		httpClient := &http.Client{}
+		httpClient.Timeout = (sleepSeconds + 5) * time.Second
+
+		payload := fmt.Sprintf(`{"command": "sleep %d"}`, sleepSeconds)
+		req, err := http.NewRequestWithContext(ctx, "POST", executeURL, strings.NewReader(payload))
+		if err != nil {
+			executeDone <- fmt.Errorf("failed to create HTTP request: %w", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		response, err := httpClient.Do(req)
+		if err != nil {
+			executeDone <- fmt.Errorf("error sending HTTP request to execute endpoint: %w", err)
+			return
+		}
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			executeDone <- fmt.Errorf("non-200 response from execute endpoint: %d", response.StatusCode)
+			return
+		}
+		executeDone <- nil
+	}()
+
+	// Poll the health endpoint while the long-running command is in flight.
+	// checkHealth uses a short timeout, so a blocked event loop surfaces as
+	// an error here instead of the poll silently waiting out the command.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled")
+		case err := <-executeDone:
+			if err != nil {
+				return fmt.Errorf("long-running execute failed: %w", err)
+			}
+			return nil
+		case <-ticker.C:
+			if err := checkHealth(ctx, healthURL); err != nil {
+				return fmt.Errorf("health endpoint unresponsive during long-running execute: %w", err)
+			}
+		}
+	}
 }

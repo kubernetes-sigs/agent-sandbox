@@ -81,6 +81,8 @@ const (
 	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
 	// SandboxTemplateRefHashLabel identifies which SandboxTemplate a Sandbox originated from.
 	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
+	// SandboxNameHashLabel is the label used to select the Pod, Service, and PVCs belonging to a Sandbox.
+	SandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
 
 type PodMetadata struct {

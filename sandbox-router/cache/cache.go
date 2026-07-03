@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -40,6 +39,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 const (
@@ -50,15 +50,6 @@ const (
 
 	// SandboxKind is the kind of the controlling resource for sandbox Pods.
 	SandboxKind = "Sandbox"
-
-	// PodSandboxNameHashLabel is the label every sandbox-owned Pod carries
-	// (its value is hash(sandbox.Name)). We use it as a label-selector
-	// filter on the Pod informer so we only get events for sandbox Pods.
-	//
-	// The constant is duplicated here because the controller defines it as
-	// a package-private string (controllers.sandboxLabel). Future work:
-	// promote it to api/v1beta1 so we can import it directly.
-	PodSandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 
 	// defaultResync is the informer relist period. Short enough to catch
 	// missed events; long enough to not hammer the API server. Matches
@@ -119,7 +110,7 @@ func New(o Options) (*Cache, error) {
 	// Server-side filter: only Pods carrying the sandbox-name-hash label.
 	// Reduces informer memory and API traffic substantially in mixed
 	// clusters where most Pods are NOT sandboxes.
-	hashSel, err := labels.NewRequirement(PodSandboxNameHashLabel, selection.Exists, nil)
+	hashSel, err := labels.NewRequirement(sandboxv1beta1.SandboxNameHashLabel, selection.Exists, nil)
 	if err != nil {
 		return nil, err
 	}

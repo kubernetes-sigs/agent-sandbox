@@ -961,7 +961,8 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 
 	// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 	delete(adopted.Labels, warmPoolSandboxLabel)
-	delete(adopted.Labels, v1beta1.SandboxPodTemplateHashLabel)
+	delete(adopted.Labels, v1beta1.DeprecatedSandboxPodTemplateHashLabel)
+	delete(adopted.Labels, v1beta1.SandboxTemplateHashLabel)
 	if adopted.Labels == nil {
 		adopted.Labels = make(map[string]string)
 	}

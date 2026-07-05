@@ -36,6 +36,26 @@ def validate_label_name(name: str, context: str):
         )
 
 
+_DNS1123_SUBDOMAIN_RE = re.compile(
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+)
+DNS1123_SUBDOMAIN_MAX_LENGTH = 253
+
+
+def validate_claim_name(name: str):
+    """Validates an explicit SandboxClaim name as a DNS-1123 subdomain."""
+    if (
+        not name
+        or len(name) > DNS1123_SUBDOMAIN_MAX_LENGTH
+        or not _DNS1123_SUBDOMAIN_RE.match(name)
+    ):
+        raise ValueError(
+            f"Claim name '{name}' must be a valid DNS-1123 subdomain "
+            f"(lowercase alphanumerics, '-' and '.', starting and ending with an "
+            f"alphanumeric; max {DNS1123_SUBDOMAIN_MAX_LENGTH} characters)."
+        )
+
+
 def validate_labels(labels: dict[str, str]):
     """Validates label keys and values against Kubernetes constraints."""
     for key, value in labels.items():

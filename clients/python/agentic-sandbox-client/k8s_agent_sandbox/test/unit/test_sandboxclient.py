@@ -24,9 +24,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from kubernetes import config as k8s_config
+from kubernetes.client.rest import ApiException
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.pod_metadata import validate_labels
+from k8s_agent_sandbox.pod_metadata import validate_claim_name, validate_labels
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxInClusterConnectionConfig,
@@ -96,6 +97,91 @@ class TestSandboxClient(unittest.TestCase):
             self.assertEqual(str(context.exception), "Timeout Error")
             # Ensure delete_sandbox_claim is called to cleanup orphan claim on failure
             self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
+
+    def test_create_sandbox_with_explicit_claim_name(self):
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+            sandbox = self.client.create_sandbox(
+                "test-warmpool", "test-namespace", claim_name="sandbox-my-task"
+            )
+
+            mock_create_claim.assert_called_once_with(
+                "sandbox-my-task",
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None,
+            )
+            self.assertEqual(sandbox, mock_sandbox_instance)
+            self.assertIn(
+                ("test-namespace", "sandbox-my-task"),
+                self.client._active_connection_sandboxes,
+            )
+
+    def test_create_sandbox_rejects_invalid_claim_name(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.client.create_sandbox("test-warmpool", claim_name="Invalid_Name")
+        self.assertIn("DNS-1123", str(ctx.exception))
+        self.mock_k8s_helper.create_sandbox_claim.assert_not_called()
+
+    def test_create_sandbox_adopts_existing_claim_on_409(self):
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, '_create_claim', side_effect=ApiException(status=409)), \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+            sandbox = self.client.create_sandbox(
+                "test-warmpool",
+                "test-namespace",
+                claim_name="sandbox-my-task",
+                adopt_existing=True,
+            )
+
+            self.assertEqual(sandbox, mock_sandbox_instance)
+            self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with(
+                "sandbox-my-task", "test-namespace", 180
+            )
+
+    def test_create_sandbox_409_raises_without_adopt_existing(self):
+        with patch.object(self.client, '_create_claim', side_effect=ApiException(status=409)):
+            with self.assertRaises(ApiException):
+                self.client.create_sandbox(
+                    "test-warmpool", "test-namespace", claim_name="sandbox-my-task"
+                )
+        # The claim was never created by this call, so there is nothing to clean up
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_create_sandbox_non_409_not_adopted(self):
+        with patch.object(self.client, '_create_claim', side_effect=ApiException(status=403)):
+            with self.assertRaises(ApiException):
+                self.client.create_sandbox(
+                    "test-warmpool",
+                    "test-namespace",
+                    claim_name="sandbox-my-task",
+                    adopt_existing=True,
+                )
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_create_sandbox_adopted_claim_not_deleted_on_failure(self):
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = Exception("Timeout Error")
+
+        with patch.object(self.client, '_create_claim', side_effect=ApiException(status=409)):
+            with self.assertRaises(Exception):
+                self.client.create_sandbox(
+                    "test-warmpool",
+                    "test-namespace",
+                    claim_name="sandbox-my-task",
+                    adopt_existing=True,
+                )
+        # An adopted claim belongs to a prior attempt — never delete it on failure
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
@@ -392,6 +478,41 @@ class TestSandboxClient(unittest.TestCase):
 
     def test_validate_labels_accepts_valid(self):
         validate_labels({"agent": "code-agent", "team": "platform-123"})
+
+    def test_validate_claim_name_accepts_valid(self):
+        validate_claim_name("sandbox-task-123")
+        validate_claim_name("a")
+        validate_claim_name("sandbox.task-1.example")
+
+    def test_validate_claim_name_rejects_empty(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_claim_name("")
+        self.assertIn("DNS-1123", str(ctx.exception))
+
+    def test_validate_claim_name_rejects_uppercase(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_claim_name("Sandbox-Task")
+        self.assertIn("DNS-1123", str(ctx.exception))
+
+    def test_validate_claim_name_rejects_underscore(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_claim_name("sandbox_task")
+        self.assertIn("DNS-1123", str(ctx.exception))
+
+    def test_validate_claim_name_rejects_leading_hyphen(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_claim_name("-leading")
+        self.assertIn("DNS-1123", str(ctx.exception))
+
+    def test_validate_claim_name_rejects_trailing_hyphen(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_claim_name("trailing-")
+        self.assertIn("DNS-1123", str(ctx.exception))
+
+    def test_validate_claim_name_rejects_too_long(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_claim_name("a" * 254)
+        self.assertIn("DNS-1123", str(ctx.exception))
 
     def test_wait_for_sandbox_ready(self):
         self.client._wait_for_sandbox_ready("sandbox-id", "test-namespace", 45)

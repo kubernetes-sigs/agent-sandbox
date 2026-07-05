@@ -27,10 +27,12 @@ import time
 import uuid
 from typing import Generic, TypeVar
 
+from kubernetes_asyncio.client.exceptions import ApiException
+
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
-from .pod_metadata import build_pod_metadata, validate_labels
+from .pod_metadata import build_pod_metadata, validate_claim_name, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
@@ -145,6 +147,8 @@ class AsyncSandboxClient(Generic[T]):
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
         *,
+        claim_name: str | None = None,
+        adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_labels: dict[str, str] | None = None,
@@ -158,6 +162,18 @@ class AsyncSandboxClient(Generic[T]):
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim object
                 (``SandboxClaim.metadata.labels``).
+            claim_name: Optional explicit name for the SandboxClaim. When
+                omitted, a random ``sandbox-claim-<uuid8>`` name is generated
+                (existing behaviour). Supplying a deterministic name lets
+                durable-workflow engines (Restate, Temporal, Step Functions)
+                make sandbox creation idempotent: a retried step re-uses the
+                same name and, with ``adopt_existing=True``, attaches to the
+                claim a prior attempt already created. Must be a valid
+                DNS-1123 subdomain.
+            adopt_existing: When True, a 409 AlreadyExists on claim creation
+                attaches to the existing claim instead of raising, making
+                ``create_sandbox`` safe to retry (at-least-once semantics).
+                Only meaningful together with an explicit ``claim_name``.
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -188,18 +204,31 @@ class AsyncSandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        if claim_name is None:
+            claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        else:
+            validate_claim_name(claim_name)
 
+        claim_created = False
         try:
-            await self._create_claim(
-                claim_name,
-                warmpool,
-                namespace,
-                labels=labels,
-                lifecycle=lifecycle,
-                volume_claim_templates=volume_claim_templates,
-                pod_metadata=pod_metadata
-            )
+            try:
+                await self._create_claim(
+                    claim_name,
+                    warmpool,
+                    namespace,
+                    labels=labels,
+                    lifecycle=lifecycle,
+                    volume_claim_templates=volume_claim_templates,
+                    pod_metadata=pod_metadata
+                )
+                claim_created = True
+            except ApiException as e:
+                if not (adopt_existing and e.status == 409):
+                    raise
+                logger.info(
+                    "SandboxClaim %s already exists; adopting (adopt_existing=True)",
+                    claim_name,
+                )
             start_time = time.monotonic()
             sandbox_id = await self.k8s_helper.resolve_sandbox_name(
                 claim_name, namespace, sandbox_ready_timeout
@@ -219,7 +248,10 @@ class AsyncSandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
             )
         except (Exception, asyncio.CancelledError):
-            await asyncio.shield(self._delete_claim(claim_name, namespace))
+            # Don't leave an orphaned claim — but never delete a pre-existing
+            # claim we merely adopted.
+            if claim_created:
+                await asyncio.shield(self._delete_claim(claim_name, namespace))
             raise
 
         async with self._lock:

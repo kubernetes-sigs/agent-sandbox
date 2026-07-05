@@ -24,6 +24,8 @@ import time
 import logging
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
+from kubernetes.client.rest import ApiException
+
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
     create_tracer_manager, initialize_tracer, trace_span, trace
@@ -35,13 +37,15 @@ from .models import (
     SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
-from .pod_metadata import build_pod_metadata, validate_labels
+from .pod_metadata import build_pod_metadata, validate_claim_name, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .exceptions import SandboxNotFoundError
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     stream=sys.stdout)
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar('T', bound=Sandbox)
 
@@ -98,6 +102,8 @@ class SandboxClient(Generic[T]):
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
         *,
+        claim_name: str | None = None,
+        adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_labels: dict[str, str] | None = None, 
@@ -112,6 +118,18 @@ class SandboxClient(Generic[T]):
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim object
                 (``SandboxClaim.metadata.labels``).
+            claim_name: Optional explicit name for the SandboxClaim. When
+                omitted, a random ``sandbox-claim-<uuid8>`` name is generated
+                (existing behaviour). Supplying a deterministic name lets
+                durable-workflow engines (Restate, Temporal, Step Functions)
+                make sandbox creation idempotent: a retried step re-uses the
+                same name and, with ``adopt_existing=True``, attaches to the
+                claim a prior attempt already created. Must be a valid
+                DNS-1123 subdomain.
+            adopt_existing: When True, a 409 AlreadyExists on claim creation
+                attaches to the existing claim instead of raising, making
+                ``create_sandbox`` safe to retry (at-least-once semantics).
+                Only meaningful together with an explicit ``claim_name``.
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -142,18 +160,31 @@ class SandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        if claim_name is None:
+            claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        else:
+            validate_claim_name(claim_name)
 
+        claim_created = False
         try:
-            self._create_claim(
-                claim_name,
-                warmpool,
-                namespace,
-                labels=labels,
-                lifecycle=lifecycle,
-                volume_claim_templates=volume_claim_templates,
-                pod_metadata=pod_metadata,
-            )
+            try:
+                self._create_claim(
+                    claim_name,
+                    warmpool,
+                    namespace,
+                    labels=labels,
+                    lifecycle=lifecycle,
+                    volume_claim_templates=volume_claim_templates,
+                    pod_metadata=pod_metadata,
+                )
+                claim_created = True
+            except ApiException as e:
+                if not (adopt_existing and e.status == 409):
+                    raise
+                logger.info(
+                    "SandboxClaim %s already exists; adopting (adopt_existing=True)",
+                    claim_name,
+                )
             # Resolve the sandbox id from the sandbox claim object.
             # In case of warmpool, sandbox id is not the same as claim name.
             start_time = time.monotonic()
@@ -175,8 +206,10 @@ class SandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
             )
         except Exception:
-            # If creation or waiting fails, ensure we don't leave an orphaned claim
-            self._delete_claim(claim_name, namespace)
+            # If creation or waiting fails, ensure we don't leave an orphaned
+            # claim — but never delete a pre-existing claim we merely adopted.
+            if claim_created:
+                self._delete_claim(claim_name, namespace)
             raise
 
         self._active_connection_sandboxes[(namespace, claim_name)] = sandbox

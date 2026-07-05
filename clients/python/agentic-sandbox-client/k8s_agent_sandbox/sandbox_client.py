@@ -23,6 +23,8 @@ import sys
 import logging
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
+from kubernetes import client
+
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
     create_tracer_manager, initialize_tracer, trace_span, trace
@@ -57,6 +59,7 @@ class SandboxClient(Generic[T]):
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = False,
+        api_client: client.ApiClient | None = None,
     ):
         """
         Initializes the SandboxClient.
@@ -70,6 +73,8 @@ class SandboxClient(Generic[T]):
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
             cleanup: If True, registers an atexit hook to automatically delete 
                 all tracked sandboxes when the program terminates. Defaults to False.
+            api_client: Optional pre-configured Kubernetes ``ApiClient`` forwarded
+                to the underlying ``K8sHelper`` to target a specific cluster/context.
         """
         # Sandbox related configuration
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
@@ -81,7 +86,7 @@ class SandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         # Downstream Kubernetes Configuration
-        self.k8s_helper = K8sHelper()
+        self.k8s_helper = K8sHelper(api_client=api_client)
         
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}

@@ -38,10 +38,10 @@ from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
 class AsyncK8sHelper:
     """Async helper class for Kubernetes API interactions using kubernetes_asyncio."""
 
-    def __init__(self):
+    def __init__(self, api_client: client.ApiClient | None = None):
         self._initialized = False
         self._init_lock = asyncio.Lock()
-        self._api_client: client.ApiClient | None = None
+        self._api_client: client.ApiClient | None = api_client
 
     async def _ensure_initialized(self):
         if self._initialized:
@@ -49,11 +49,12 @@ class AsyncK8sHelper:
         async with self._init_lock:
             if self._initialized:
                 return
-            try:
-                config.load_incluster_config()
-            except config.ConfigException:
-                await config.load_kube_config()
-            self._api_client = client.ApiClient()
+            if self._api_client is None:
+                try:
+                    config.load_incluster_config()
+                except config.ConfigException:
+                    await config.load_kube_config()
+                self._api_client = client.ApiClient()
             self.custom_objects_api = client.CustomObjectsApi(self._api_client)
             self.core_v1_api = client.CoreV1Api(self._api_client)
             self._initialized = True

@@ -27,6 +27,7 @@ import uuid
 from types import TracebackType
 from typing import Generic, TypeVar
 
+from kubernetes_asyncio import client as async_client
 from kubernetes_asyncio.client import ApiException
 
 from .claim_adoption import validate_claim_name, validate_claim_for_adoption
@@ -89,6 +90,7 @@ class AsyncSandboxClient(Generic[T]):
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = True,
+        api_client: async_client.ApiClient | None = None,
     ) -> None:
         """
         Args:
@@ -108,6 +110,9 @@ class AsyncSandboxClient(Generic[T]):
                 sandboxes are not leaked when a caller forgets to clean up;
                 pass ``cleanup=False`` to opt out. Note this differs from the
                 synchronous ``SandboxClient``, which defaults to False.
+            api_client: Optional pre-configured ``kubernetes_asyncio`` ``ApiClient``
+                forwarded to the underlying ``AsyncK8sHelper`` to target a specific
+                cluster/context.
         """
         if connection_config is None:
             raise ValueError(
@@ -126,7 +131,7 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = AsyncK8sHelper()
+        self.k8s_helper = AsyncK8sHelper(api_client=api_client)
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()

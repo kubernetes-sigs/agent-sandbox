@@ -31,6 +31,17 @@ const (
 	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
 	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
+	// SandboxObservabilityAnnotation is the annotation key for the time the controller first observed the sandbox.
+	SandboxObservabilityAnnotation = "agents.x-k8s.io/sandbox-controller-first-observed-at"
+
+	// SandboxFirstReadyAnnotation is the annotation key for the time the sandbox first reached Ready state.
+	// Used to prevent duplicate metric recording on re-Ready events (e.g. readiness probe flaps).
+	SandboxFirstReadyAnnotation = "agents.x-k8s.io/sandbox-first-ready-at"
+
+	// ClaimFirstReadyAnnotation is the annotation key for the time the SandboxClaim first reached Ready state.
+	// Used to prevent duplicate startup latency metric recording on readiness flaps.
+	ClaimFirstReadyAnnotation = "agents.x-k8s.io/claim-first-ready-at"
+
 	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )

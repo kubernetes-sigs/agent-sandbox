@@ -647,6 +647,23 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
         mock_custom_cls.assert_called_once_with(injected)
         mock_core_cls.assert_called_once_with(injected)
 
+        # A caller-injected client must not be closed by the helper.
+        await helper.close()
+        injected.close.assert_not_awaited()
+
+    async def test_internally_created_api_client_is_closed(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        created = AsyncMock(name="ApiClient")
+        mock_api_client_cls.return_value = created
+        helper = AsyncK8sHelper()
+        await helper._ensure_initialized()
+        mock_api_client_cls.assert_called_once_with()
+
+        # A client the helper created must be closed.
+        await helper.close()
+        created.close.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

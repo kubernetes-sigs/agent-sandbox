@@ -22,8 +22,8 @@ from kubernetes import client, config
 NAMESPACE = os.getenv("NAMESPACE", "keda-test")
 WARMPOOL = os.getenv("WARM_POOL_NAME", "python-sdk-warmpool")
 RATE_PER_SECOND = 5
-TEST_DURATION_MINUTES = 10
-CLAIM_TTL_SECONDS = 60
+TEST_DURATION_MINUTES = 5
+CLAIM_TTL_SECONDS = 300
 
 # Initialize K8s Client
 try:

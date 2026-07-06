@@ -27,6 +27,6 @@ spec:
         resources:
           requests:
             cpu: "250m"
-            memory: "512Mi"
-            ephemeral-storage: "512Mi"
+            memory: "256Mi"
+            ephemeral-storage: "256Mi"
       restartPolicy: "OnFailure"

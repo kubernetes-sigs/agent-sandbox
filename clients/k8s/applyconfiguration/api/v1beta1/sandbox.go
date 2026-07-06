@@ -19,7 +19,10 @@ package v1beta1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
+	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	internal "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/internal"
 )
 
 // SandboxApplyConfiguration represents a declarative configuration of the Sandbox type for use
@@ -45,6 +48,47 @@ func Sandbox(name, namespace string) *SandboxApplyConfiguration {
 	b.WithKind("Sandbox")
 	b.WithAPIVersion("agents.x-k8s.io/v1beta1")
 	return b
+}
+
+// ExtractSandboxFrom extracts the applied configuration owned by fieldManager from
+// sandbox for the specified subresource. Pass an empty string for subresource to extract
+// the main resource. Common subresources include "status", "scale", etc.
+// sandbox must be a unmodified Sandbox API object that was retrieved from the Kubernetes API.
+// ExtractSandboxFrom provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandboxFrom(sandbox *apiv1beta1.Sandbox, fieldManager string, subresource string) (*SandboxApplyConfiguration, error) {
+	b := &SandboxApplyConfiguration{}
+	err := managedfields.ExtractInto(sandbox, internal.Parser().Type("io.k8s.sigs.agent-sandbox.api.v1beta1.Sandbox"), fieldManager, b, subresource)
+	if err != nil {
+		return nil, err
+	}
+	b.WithName(sandbox.Name)
+	b.WithNamespace(sandbox.Namespace)
+
+	b.WithKind("Sandbox")
+	b.WithAPIVersion("agents.x-k8s.io/v1beta1")
+	return b, nil
+}
+
+// ExtractSandbox extracts the applied configuration owned by fieldManager from
+// sandbox. If no managedFields are found in sandbox for fieldManager, a
+// SandboxApplyConfiguration is returned with only the Name, Namespace (if applicable),
+// APIVersion and Kind populated. It is possible that no managed fields were found for because other
+// field managers have taken ownership of all the fields previously owned by fieldManager, or because
+// the fieldManager never owned fields any fields.
+// sandbox must be a unmodified Sandbox API object that was retrieved from the Kubernetes API.
+// ExtractSandbox provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandbox(sandbox *apiv1beta1.Sandbox, fieldManager string) (*SandboxApplyConfiguration, error) {
+	return ExtractSandboxFrom(sandbox, fieldManager, "")
+}
+
+// ExtractSandboxStatus extracts the applied configuration owned by fieldManager from
+// sandbox for the status subresource.
+func ExtractSandboxStatus(sandbox *apiv1beta1.Sandbox, fieldManager string) (*SandboxApplyConfiguration, error) {
+	return ExtractSandboxFrom(sandbox, fieldManager, "status")
 }
 
 func (b SandboxApplyConfiguration) IsApplyConfiguration() {}

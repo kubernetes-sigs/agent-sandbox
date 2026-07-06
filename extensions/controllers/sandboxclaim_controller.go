@@ -1792,6 +1792,27 @@ func (r *SandboxClaimReconciler) drainObservedTime(claim *extensionsv1beta1.Sand
 	}
 }
 
+// backfillFirstReadyAnnotation stamps the ClaimFirstReadyAnnotation with a
+// sentinel value when the claim was previously Ready but the annotation is
+// missing (e.g. a prior Patch failed). This arms the persistent guard so that
+// future readiness flaps cannot double-count metrics. The sentinel "unknown"
+// is used instead of a timestamp to signal that the actual first-ready time
+// is unknown.
+func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
+		return nil
+	}
+	patch := client.MergeFrom(claim.DeepCopy())
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = "unknown"
+	if err := r.Patch(ctx, claim, patch); err != nil {
+		return fmt.Errorf("backfill claim first-ready annotation: %w", err)
+	}
+	return nil
+}
+
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 // It returns an error when the first-ready annotation fails to persist so that
 // the reconciler retries. The retry is safe because the status already has
@@ -1806,16 +1827,24 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	newStatus := &claim.Status
 	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1beta1.SandboxConditionReady))
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1beta1.SandboxConditionReady))
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+
 	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		// Not Ready yet. If the claim was previously Ready but the annotation
+		// is missing (prior Patch failed), backfill it now so the persistent
+		// guard is armed before the claim can flap back to Ready.
+		if wasReady {
+			return r.backfillFirstReadyAnnotation(ctx, claim)
+		}
 		return nil
 	}
 
-	// Do not record creation metric if we have already seen the ready state.
-	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1beta1.SandboxConditionReady))
-	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
-		// Already Ready before this reconcile; drain any entry re-added by a post-Ready UpdateFunc.
+	if wasReady {
+		// Already Ready before this reconcile; drain any entry re-added by a
+		// post-Ready UpdateFunc and backfill the annotation if needed.
 		r.drainObservedTime(claim)
-		return nil
+		return r.backfillFirstReadyAnnotation(ctx, claim)
 	}
 
 	// Persistent guard: if the first-ready annotation is already set, metrics were

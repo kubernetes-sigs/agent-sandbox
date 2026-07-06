@@ -2813,8 +2813,9 @@ func TestRecordCreationLatencyMetric_ClaimFirstReadyAnnotation(t *testing.T) {
 		scheme := newScheme(t)
 		warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
 		inner := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, claim).Build()
-		// Wrap the client so Patch always fails for SandboxClaim objects.
-		fc := &claimPatchFailClient{Client: inner, err: fmt.Errorf("simulated patch failure")}
+		// Fail only the first Patch (the annotation stamp in the happy path),
+		// then succeed on subsequent Patches (the backfill in the retry).
+		fc := &claimPatchFailClient{Client: inner, err: fmt.Errorf("simulated patch failure"), maxFailures: 1}
 		r := &SandboxClaimReconciler{Client: fc}
 
 		key := types.NamespacedName{Name: "patch-fail", Namespace: "default"}
@@ -2829,30 +2830,120 @@ func TestRecordCreationLatencyMetric_ClaimFirstReadyAnnotation(t *testing.T) {
 		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency), "metrics should be recorded before Patch")
 		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency), "controller metrics should be recorded before Patch")
 
+		// Re-read the claim from the fake client to simulate a real reconciler
+		// re-fetching the object (the in-memory annotation was set but not persisted).
+		retryClaim := &extensionsv1beta1.SandboxClaim{}
+		require.NoError(t, inner.Get(ctx, key, retryClaim))
+		require.Empty(t, retryClaim.Annotations[asmetrics.ClaimFirstReadyAnnotation], "annotation should not be persisted after failed Patch")
+
 		// Simulate the retry reconcile: updateStatus already persisted Ready=True,
 		// so on retry originalClaimStatus will show Ready=True. The oldReady guard
-		// should prevent duplicate recording.
+		// prevents duplicate recording and backfills the annotation.
 		retryOldStatus := &extensionsv1beta1.SandboxClaimStatus{
 			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
 		}
-		err = r.recordCreationLatencyMetric(ctx, claim, retryOldStatus, nil)
+		err = r.recordCreationLatencyMetric(ctx, retryClaim, retryOldStatus, nil)
 		require.NoError(t, err)
 
 		// Counts should remain at 1 — no duplicate recording on retry.
 		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency), "retry should not double-count")
 		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency), "retry should not double-count controller metrics")
+
+		// Verify the backfill annotation was stamped.
+		updated := &extensionsv1beta1.SandboxClaim{}
+		require.NoError(t, inner.Get(ctx, key, updated))
+		require.Equal(t, "unknown", updated.Annotations[asmetrics.ClaimFirstReadyAnnotation], "retry should backfill annotation")
+	})
+
+	t.Run("patch failure followed by mid-flap backfills annotation and prevents double-count", func(t *testing.T) {
+		asmetrics.ClaimStartupLatency.Reset()
+		asmetrics.ClaimControllerStartupLatency.Reset()
+
+		claim := &extensionsv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "flap-patch-fail",
+				Namespace:         "default",
+				UID:               "uid-flap-patch-fail",
+				CreationTimestamp: pastTime,
+				Annotations: map[string]string{
+					asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				},
+			},
+			Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+			Status: extensionsv1beta1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+		}
+
+		scheme := newScheme(t)
+		warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+		inner := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, claim).Build()
+		// Fail the first Patch (happy-path annotation stamp), succeed on the second (backfill).
+		fc := &claimPatchFailClient{Client: inner, err: fmt.Errorf("simulated patch failure"), maxFailures: 1}
+		r := &SandboxClaimReconciler{Client: fc}
+
+		key := types.NamespacedName{Name: "flap-patch-fail", Namespace: "default"}
+		r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-flap-patch-fail"})
+
+		// Step 1: First Ready transition. Metrics recorded, Patch fails.
+		err := r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil)
+		require.Error(t, err)
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency))
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency))
+
+		// Re-read the claim to simulate a real reconciler re-fetching.
+		// The in-memory annotation was set but not persisted.
+		flapClaim := &extensionsv1beta1.SandboxClaim{}
+		require.NoError(t, inner.Get(ctx, key, flapClaim))
+		require.Empty(t, flapClaim.Annotations[asmetrics.ClaimFirstReadyAnnotation])
+
+		// Step 2: Mid-flap — claim went not-Ready, but was previously Ready.
+		// newReady=False, oldReady=True, annotation missing → backfill fires.
+		flapClaim.Status.Conditions = []metav1.Condition{{
+			Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		}}
+		readyOldStatus := &extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		}
+		err = r.recordCreationLatencyMetric(ctx, flapClaim, readyOldStatus, nil)
+		require.NoError(t, err)
+
+		// Verify backfill was stamped.
+		updated := &extensionsv1beta1.SandboxClaim{}
+		require.NoError(t, inner.Get(ctx, key, updated))
+		require.Equal(t, "unknown", updated.Annotations[asmetrics.ClaimFirstReadyAnnotation])
+
+		// Step 3: Flap back to Ready — newReady=True, oldReady=False.
+		// The annotation guard should prevent re-recording.
+		updated.Status.Conditions = []metav1.Condition{{
+			Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue,
+		}}
+		r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-flap-patch-fail"})
+		err = r.recordCreationLatencyMetric(ctx, updated, &extensionsv1beta1.SandboxClaimStatus{}, nil)
+		require.NoError(t, err)
+
+		// Counts should remain at 1 — no double-count despite the flap.
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency), "mid-flap backfill should prevent double-count")
+		require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency), "mid-flap backfill should prevent double-count")
 	})
 }
 
-// claimPatchFailClient wraps a client.Client and fails Patch calls for SandboxClaim objects.
+// claimPatchFailClient wraps a client.Client and fails the first maxFailures
+// Patch calls for SandboxClaim objects, then delegates to the inner client.
 type claimPatchFailClient struct {
 	client.Client
-	err error
+	err         error
+	failures    int
+	maxFailures int // 0 means fail forever
 }
 
 func (c *claimPatchFailClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 	if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
-		return c.err
+		if c.maxFailures == 0 || c.failures < c.maxFailures {
+			c.failures++
+			return c.err
+		}
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }

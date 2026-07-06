@@ -19,7 +19,10 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
+	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	internal "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/internal"
+	apiv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 // SandboxClaimApplyConfiguration represents a declarative configuration of the SandboxClaim type for use
@@ -45,6 +48,47 @@ func SandboxClaim(name, namespace string) *SandboxClaimApplyConfiguration {
 	b.WithKind("SandboxClaim")
 	b.WithAPIVersion("extensions.agents.x-k8s.io/v1alpha1")
 	return b
+}
+
+// ExtractSandboxClaimFrom extracts the applied configuration owned by fieldManager from
+// sandboxClaim for the specified subresource. Pass an empty string for subresource to extract
+// the main resource. Common subresources include "status", "scale", etc.
+// sandboxClaim must be a unmodified SandboxClaim API object that was retrieved from the Kubernetes API.
+// ExtractSandboxClaimFrom provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandboxClaimFrom(sandboxClaim *apiv1alpha1.SandboxClaim, fieldManager string, subresource string) (*SandboxClaimApplyConfiguration, error) {
+	b := &SandboxClaimApplyConfiguration{}
+	err := managedfields.ExtractInto(sandboxClaim, internal.Parser().Type("io.k8s.sigs.agent-sandbox.extensions.api.v1alpha1.SandboxClaim"), fieldManager, b, subresource)
+	if err != nil {
+		return nil, err
+	}
+	b.WithName(sandboxClaim.Name)
+	b.WithNamespace(sandboxClaim.Namespace)
+
+	b.WithKind("SandboxClaim")
+	b.WithAPIVersion("extensions.agents.x-k8s.io/v1alpha1")
+	return b, nil
+}
+
+// ExtractSandboxClaim extracts the applied configuration owned by fieldManager from
+// sandboxClaim. If no managedFields are found in sandboxClaim for fieldManager, a
+// SandboxClaimApplyConfiguration is returned with only the Name, Namespace (if applicable),
+// APIVersion and Kind populated. It is possible that no managed fields were found for because other
+// field managers have taken ownership of all the fields previously owned by fieldManager, or because
+// the fieldManager never owned fields any fields.
+// sandboxClaim must be a unmodified SandboxClaim API object that was retrieved from the Kubernetes API.
+// ExtractSandboxClaim provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandboxClaim(sandboxClaim *apiv1alpha1.SandboxClaim, fieldManager string) (*SandboxClaimApplyConfiguration, error) {
+	return ExtractSandboxClaimFrom(sandboxClaim, fieldManager, "")
+}
+
+// ExtractSandboxClaimStatus extracts the applied configuration owned by fieldManager from
+// sandboxClaim for the status subresource.
+func ExtractSandboxClaimStatus(sandboxClaim *apiv1alpha1.SandboxClaim, fieldManager string) (*SandboxClaimApplyConfiguration, error) {
+	return ExtractSandboxClaimFrom(sandboxClaim, fieldManager, "status")
 }
 
 func (b SandboxClaimApplyConfiguration) IsApplyConfiguration() {}

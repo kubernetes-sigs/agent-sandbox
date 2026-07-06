@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -57,9 +56,6 @@ import (
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
-const workspaceContainerName = "workspace"
-const bytesPerMiB = 1024 * 1024
-const bytesPerGiB = 1024 * 1024 * 1024
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -89,6 +85,9 @@ var ErrVolumeClaimTemplatesOverrideForbidden = errors.New("overriding volume cla
 // ErrVolumeClaimTemplatesInvalid is a sentinel error indicating that the volumeClaimTemplates configuration is invalid.
 var ErrVolumeClaimTemplatesInvalid = errors.New("invalid volume claim templates")
 
+// ErrWorkspaceResourcesInvalid is a sentinel error indicating that workspaceResources are invalid for the template.
+var ErrWorkspaceResourcesInvalid = errors.New("invalid workspace resources")
+
 var suppressErrors = []error{
 	ErrInvalidMetadata,
 	ErrSandboxNotOwned,
@@ -96,6 +95,7 @@ var suppressErrors = []error{
 	ErrVolumeClaimTemplatesDisallowed,
 	ErrVolumeClaimTemplatesOverrideForbidden,
 	ErrVolumeClaimTemplatesInvalid,
+	ErrWorkspaceResourcesInvalid,
 }
 
 // observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
@@ -556,6 +556,15 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				ObservedGeneration: claim.Generation,
 			}
 		}
+		if errors.Is(err, ErrWorkspaceResourcesInvalid) {
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "WorkspaceResourcesInvalid",
+				Message:            err.Error(),
+				ObservedGeneration: claim.Generation,
+			}
+		}
 		return metav1.Condition{
 			Type:               string(v1beta1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
@@ -656,49 +665,34 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 	return labels
 }
 
-// hasWorkspaceResourceOverrides reports whether the claim asks for any actual
-// override of the workspace container's resources. Returns false when the
-// struct is nil or all its fields are unset (e.g. `workspaceResources: {}`),
-// so callers can distinguish "user explicitly asked for sizing" from "user
-// included an empty struct that would be a no-op".
+// hasWorkspaceResourceOverrides reports whether the claim asks to merge any
+// resource requirement into the target container. A nil workspaceResources
+// field and an empty `workspaceResources: {}` both return false.
 func hasWorkspaceResourceOverrides(claim *extensionsv1beta1.SandboxClaim) bool {
 	r := claim.Spec.WorkspaceResources
 	if r == nil {
 		return false
 	}
-	return r.CPUMillicores > 0 || r.MemoryMiB > 0 || r.DiskGiB > 0
+	return len(r.Resources.Requests) > 0 || len(r.Resources.Limits) > 0 || len(r.Resources.Claims) > 0
 }
 
 func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *extensionsv1beta1.WorkspaceResources) {
 	if overrides == nil {
 		return
 	}
-	// No-op when the override struct exists but has no positive values
-	// (e.g. user submitted `workspaceResources: {}`). Avoid initialising empty
-	// Requests/Limits maps on the container when nothing is going to be set.
-	if overrides.CPUMillicores <= 0 && overrides.MemoryMiB <= 0 && overrides.DiskGiB <= 0 {
+	if len(overrides.Resources.Requests) == 0 && len(overrides.Resources.Limits) == 0 && len(overrides.Resources.Claims) == 0 {
 		return
 	}
-	if container.Resources.Requests == nil {
+	if len(overrides.Resources.Requests) > 0 && container.Resources.Requests == nil {
 		container.Resources.Requests = corev1.ResourceList{}
 	}
-	if container.Resources.Limits == nil {
+	if len(overrides.Resources.Limits) > 0 && container.Resources.Limits == nil {
 		container.Resources.Limits = corev1.ResourceList{}
 	}
-	if overrides.CPUMillicores > 0 {
-		qty := *resource.NewMilliQuantity(int64(overrides.CPUMillicores), resource.DecimalSI)
-		container.Resources.Requests[corev1.ResourceCPU] = qty
-		container.Resources.Limits[corev1.ResourceCPU] = qty
-	}
-	if overrides.MemoryMiB > 0 {
-		qty := *resource.NewQuantity(int64(overrides.MemoryMiB)*bytesPerMiB, resource.BinarySI)
-		container.Resources.Requests[corev1.ResourceMemory] = qty
-		container.Resources.Limits[corev1.ResourceMemory] = qty
-	}
-	if overrides.DiskGiB > 0 {
-		qty := *resource.NewQuantity(int64(overrides.DiskGiB)*bytesPerGiB, resource.BinarySI)
-		container.Resources.Requests[corev1.ResourceEphemeralStorage] = qty
-		container.Resources.Limits[corev1.ResourceEphemeralStorage] = qty
+	maps.Copy(container.Resources.Requests, overrides.Resources.Requests)
+	maps.Copy(container.Resources.Limits, overrides.Resources.Limits)
+	if len(overrides.Resources.Claims) > 0 {
+		container.Resources.Claims = append([]corev1.ResourceClaim(nil), overrides.Resources.Claims...)
 	}
 }
 
@@ -706,15 +700,19 @@ func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensio
 	if !hasWorkspaceResourceOverrides(claim) {
 		return nil
 	}
+	targetContainerName := claim.Spec.WorkspaceResources.ContainerName
+	if targetContainerName == "" {
+		return fmt.Errorf("%w: containerName is required", ErrWorkspaceResourcesInvalid)
+	}
 	for i := range spec.Containers {
 		container := &spec.Containers[i]
-		if container.Name != workspaceContainerName {
+		if container.Name != targetContainerName {
 			continue
 		}
 		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
 		return nil
 	}
-	return fmt.Errorf("workspaceResources requires a container named %q in the SandboxTemplate", workspaceContainerName)
+	return fmt.Errorf("%w: target container %q not found in the SandboxTemplate", ErrWorkspaceResourcesInvalid, targetContainerName)
 }
 
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, error) {
@@ -1328,6 +1326,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// per-claim sizing is persisted into the initial pod template.
 	if err := applyClaimWorkspaceResourcesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim); err != nil {
 		logger.Error(err, "Workspace resource override rejected", "claimName", claim.Name)
+		if r.Recorder != nil && errors.Is(err, ErrWorkspaceResourcesInvalid) {
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeWarning, "WorkspaceResourcesInvalid", "Rejected", "%s", err.Error())
+		}
 		return nil, err
 	}
 

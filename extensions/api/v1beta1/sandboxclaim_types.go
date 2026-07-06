@@ -15,6 +15,7 @@
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -105,27 +106,20 @@ type EnvVar struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
-// WorkspaceResources defines per-claim resource overrides for the container named "workspace".
-// Fields left unset keep the values from the SandboxTemplate; fields that are set
-// force the workspace container request and limit to the same value.
+// WorkspaceResources defines per-claim resource requirement overrides for a container.
+// Requests and limits are merged by resource name; claims replace the target
+// container's resource claims when set.
 type WorkspaceResources struct {
-	// cpuMillicores is the desired CPU request/limit for the workspace container.
-	// Zero leaves the CPU resources from the SandboxTemplate unchanged.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	CPUMillicores int32 `json:"cpuMillicores,omitempty"`
+	// containerName specifies the target container for the resource override.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	ContainerName string `json:"containerName"`
 
-	// memoryMiB is the desired memory request/limit for the workspace container, in mebibytes (1 MiB = 1024*1024 B).
-	// Zero leaves the memory resources from the SandboxTemplate unchanged.
+	// resources specifies resource requirements to merge into the target container.
+	// Request and limit entries left unset keep the values from the SandboxTemplate.
+	// Claims replace the target container's resource claims when specified.
 	// +optional
-	// +kubebuilder:validation:Minimum=0
-	MemoryMiB int32 `json:"memoryMiB,omitempty"`
-
-	// diskGiB is the desired ephemeral-storage request/limit for the workspace container, in gibibytes (1 GiB = 1024*1024*1024 B).
-	// Zero leaves the ephemeral-storage resources from the SandboxTemplate unchanged.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	DiskGiB int32 `json:"diskGiB,omitempty"`
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // SandboxClaimSpec defines the desired state of Sandbox.
@@ -156,8 +150,8 @@ type SandboxClaimSpec struct {
 	// +listType=atomic
 	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
-	// workspaceResources overrides resource requests/limits for the container named "workspace" at claim time.
-	// Unset fields keep the values from the SandboxTemplate; set fields force request=limit for that resource.
+	// workspaceResources overrides resource requirements for a named container at claim time.
+	// Unset request and limit entries keep the values from the SandboxTemplate.
 	// Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
 	// +optional
 	WorkspaceResources *WorkspaceResources `json:"workspaceResources,omitempty"`

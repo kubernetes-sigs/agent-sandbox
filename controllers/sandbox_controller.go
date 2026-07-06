@@ -872,7 +872,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// The warm pool label is required by the capacity buffer to identify the warm pool pods.
 	if ref := metav1.GetControllerOf(sandbox); ref != nil {
 		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == extensionsv1beta1.SandboxWarmPoolKind {
 			if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
 				podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
 			}
@@ -1011,7 +1011,7 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	var expectedWarmPoolHash string
 	if ref := metav1.GetControllerOf(sandbox); ref != nil {
 		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == "SandboxWarmPool" {
+		if gvk.Group == extensionsv1beta1.GroupVersion.Group && gvk.Kind == extensionsv1beta1.SandboxWarmPoolKind {
 			expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
 		}
 	}

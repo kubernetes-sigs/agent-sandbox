@@ -2352,8 +2352,9 @@ func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 			Name:      "ghost-pod",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				Kind: extensionsv1beta1.SandboxWarmPoolKind,
-				Name: warmPoolName,
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+				Name:       warmPoolName,
 			}},
 		},
 	}
@@ -3500,8 +3501,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize

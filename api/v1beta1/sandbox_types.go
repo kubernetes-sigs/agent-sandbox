@@ -147,20 +147,44 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
+// SandboxBlueprint defines the configuration shared between Sandbox and SandboxTemplate.
+// It deliberately excludes runtime-only fields (operatingMode, lifecycle).
+type SandboxBlueprint struct {
+	// podTemplate describes the pod that will be created in the sandbox.
+	// Note: When provisioned via a SandboxTemplate (such as by a SandboxClaim or SandboxWarmPool),
+	// if AutomountServiceAccountToken is not specified in the PodSpec, the controller defaults it
+	// to false to ensure a secure-by-default environment.
+	// +required
+	PodTemplate PodTemplate `json:"podTemplate"`
+
+	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
+	// When creating a sandbox, PVCs will be created from these templates.
+	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
+	// +optional
+	// +listType=atomic
+	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+
+	// service controls whether the controller should automatically create a
+	// headless Service for the Sandbox workload.
+	// When unset, the controller preserves existing Services for backward
+	// compatibility but does not create new ones. Set to true to enable or false
+	// to explicitly disable and remove the Service.
+	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
+	// +optional
+	Service *bool `json:"service,omitempty"`
+}
+
 // SandboxSpec defines the desired state of Sandbox.
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// podTemplate describes the pod spec that will be used to create an agent sandbox.
-	// +required
-	PodTemplate PodTemplate `json:"podTemplate"`
-
-	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
-	// Every claim in this list must have at least one matching access mode with a provisioner volume.
-	// +optional
-	// +listType=atomic
-	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+	// SandboxBlueprint defines the workload configuration shared with SandboxTemplate.
+	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
+	// Since moving fields out is breaking, if unsure whether a new field should be shared,
+	// define it in SandboxSpec (or SandboxTemplateSpec) first and promote it here later.
+	SandboxBlueprint `json:",inline"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.
 	// +optional
@@ -172,15 +196,6 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
-
-	// service controls whether the controller should automatically create a
-	// headless Service for this Sandbox.
-	// When unset, the controller preserves existing Services for backward
-	// compatibility but does not create new ones. Set to true to enable or false
-	// to explicitly disable and remove the Service.
-	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
-	// +optional
-	Service *bool `json:"service,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.
@@ -242,6 +257,9 @@ type SandboxStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandbox
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
 // +kubebuilder:conversion:strategy=Webhook
 // Sandbox is the Schema for the sandboxes API.

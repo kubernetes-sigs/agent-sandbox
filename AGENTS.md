@@ -14,6 +14,7 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 
 | Path | What lives there |
 | --- | --- |
+| [**.agents/skills/**](.agents/skills/) | Specialized instructions for you (AI agents). See "Agent Skills" section below. |
 | [api/v1beta1/](api/v1beta1/) | Core `Sandbox` types and kubebuilder markers. |
 | [extensions/api/v1beta1/](extensions/api/v1beta1/) | `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` types. |
 | [controllers/](controllers/) | Core `Sandbox` reconciler + tests. |
@@ -32,6 +33,10 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 | [site/](site/) | Hugo + Docsy source for https://agent-sandbox.sigs.k8s.io. Many pages are thin wrappers that `include-file` from the repo via mounts in [site/hugo.yaml](site/hugo.yaml) — see "Docs site mounts" below. Native page sources (lifecycle, snapshots, use-cases, runtime-templates, getting started, etc.) live only here. |
 
 When in doubt about ownership, check the nearest `OWNERS` file.
+
+## Agent Skills
+
+This repository provides specialized instructions for AI agents in the standard [`.agents/skills/`](.agents/skills/) directory, following the Agent Skills specification.
 
 ## Build, test, lint
 

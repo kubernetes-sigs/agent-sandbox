@@ -42,7 +42,7 @@ func (r *Registry) Add(tool Tool) {
 	if tool == nil {
 		panic("registered tool must not be nil")
 	}
-	if reflect.TypeOf(tool).Kind() != reflect.Ptr {
+	if reflect.TypeOf(tool).Kind() != reflect.Pointer {
 		panic(fmt.Sprintf("registered tool %T must be a pointer", tool))
 	}
 	schema := tool.Schema()

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig, SandboxTracerConfig
+from k8s_agent_sandbox.utils import select_pod_ip
 
 
 class TestSandbox(unittest.TestCase):
@@ -252,6 +253,24 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(self.sandbox.get_sandbox_name_hash(), "mycachedhash")
         self.mock_k8s_helper.get_sandbox.assert_not_called()
 
+    def test_get_pod_ip(self):
+        """Tests that get_pod_ip returns the pod IP when present."""
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "podIPs": ["10.244.0.42"]
+            }
+        }
+        self.assertEqual(self.sandbox.get_pod_ip(), "10.244.0.42")
+
+    def test_get_pod_ip_prioritization_and_normalization(self):
+        """Tests that get_pod_ip uses select_pod_ip to prioritize and normalize IPs."""
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "status": {
+                "podIPs": ["::ffff:10.244.0.42", "2001:db8::1"]
+            }
+        }
+        self.assertEqual(self.sandbox.get_pod_ip(), "10.244.0.42")
+
 
 class TestSandboxTerminateIdempotent(unittest.TestCase):
     """`Sandbox.terminate()` must be idempotent — a second call must not
@@ -263,9 +282,6 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
     @patch('k8s_agent_sandbox.sandbox.SandboxConnector')
     def _build_sandbox(self, mock_connector, mock_tracer, mock_cmd, mock_files):
         mock_tracer.return_value = (MagicMock(), MagicMock())
-        from k8s_agent_sandbox.models import (
-            SandboxLocalTunnelConnectionConfig, SandboxTracerConfig,
-        )
         k8s_helper = MagicMock()
         return Sandbox(
             claim_name="my-claim",
@@ -307,6 +323,56 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
         sandbox.terminate()
         self.assertEqual(helper.delete_sandbox_claim.call_count, 2)
         self.assertIsNone(sandbox.claim_name)
+
+
+
+class TestSelectPodIP(unittest.TestCase):
+    def test_select_pod_ip_empty(self):
+        self.assertIsNone(select_pod_ip(None))
+        self.assertIsNone(select_pod_ip([]))
+        self.assertIsNone(select_pod_ip(["", "   "]))
+
+    def test_select_pod_ip_single_ipv4(self):
+        self.assertEqual(select_pod_ip(["10.244.0.42"]), "10.244.0.42")
+
+    def test_select_pod_ip_single_ipv6(self):
+        self.assertEqual(select_pod_ip(["2001:db8::1"]), "2001:db8::1")
+
+    def test_select_pod_ip_dual_stack_ipv4_first(self):
+        self.assertEqual(select_pod_ip(["10.244.0.42", "2001:db8::1"]), "10.244.0.42")
+
+    def test_select_pod_ip_dual_stack_ipv6_first(self):
+        self.assertEqual(select_pod_ip(["2001:db8::1", "10.244.0.42"]), "10.244.0.42")
+
+    def test_select_pod_ip_multiple_ipv6_selects_first(self):
+        self.assertEqual(select_pod_ip(["2001:db8::1", "2001:db8::2"]), "2001:db8::1")
+
+    def test_select_pod_ip_skips_invalid(self):
+        self.assertEqual(select_pod_ip(["not-a-valid-ip", "10.244.0.42"]), "10.244.0.42")
+        self.assertEqual(select_pod_ip(["not-a-valid-ip", "2001:db8::1"]), "2001:db8::1")
+        self.assertIsNone(select_pod_ip(["not-a-valid-ip", "bad-address"]))
+
+    def test_select_pod_ip_whitespace_normalization(self):
+        self.assertEqual(select_pod_ip(["  192.168.1.1  "]), "192.168.1.1")
+
+    def test_select_pod_ip_ipv6_compression_normalization(self):
+        self.assertEqual(select_pod_ip(["2001:db8:0:0:0:0:2:1"]), "2001:db8::2:1")
+
+    def test_select_pod_ip_ipv4_mapped_ipv6_normalization(self):
+        self.assertEqual(select_pod_ip(["::ffff:10.0.0.1"]), "10.0.0.1")
+
+    def test_select_pod_ip_non_string(self):
+        class ObjWithIP:
+            def __init__(self, ip: str):
+                self.ip = ip
+
+        mixed_ips = [
+            None,
+            123,
+            {"ip": "2001:db8::1"},
+            ObjWithIP("10.244.0.42"),
+        ]
+        self.assertEqual(select_pod_ip(mixed_ips), "10.244.0.42")
 
 
 if __name__ == '__main__':

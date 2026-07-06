@@ -173,6 +173,8 @@ class AsyncSandboxClient(Generic[T]):
             adopt_existing: When True, a 409 AlreadyExists on claim creation
                 attaches to the existing claim instead of raising, making
                 ``create_sandbox`` safe to retry (at-least-once semantics).
+                The existing claim must reference the same ``warmpool``;
+                a mismatch raises ``ValueError`` without touching the claim.
                 Only meaningful together with an explicit ``claim_name``.
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
@@ -204,12 +206,17 @@ class AsyncSandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        if claim_name is None:
+        generated_claim_name = claim_name is None
+        if generated_claim_name:
             claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
         else:
             validate_claim_name(claim_name)
 
-        claim_created = False
+        # A generated name is unambiguously ours, so failure cleanup is safe
+        # even if the create call errors after the API server persisted the
+        # claim. An explicit name is only cleaned up once creation definitely
+        # succeeded — it may belong to a prior attempt we should not tear down.
+        cleanup_claim_on_failure = generated_claim_name
         try:
             try:
                 await self._create_claim(
@@ -221,10 +228,26 @@ class AsyncSandboxClient(Generic[T]):
                     volume_claim_templates=volume_claim_templates,
                     pod_metadata=pod_metadata
                 )
-                claim_created = True
+                cleanup_claim_on_failure = True
             except ApiException as e:
                 if not (adopt_existing and e.status == 409):
                     raise
+                cleanup_claim_on_failure = False
+                claim_object = await self.k8s_helper.get_sandbox_claim(
+                    claim_name, namespace
+                )
+                existing_warmpool = (
+                    (claim_object or {})
+                    .get("spec", {})
+                    .get("warmPoolRef", {})
+                    .get("name")
+                )
+                if existing_warmpool != warmpool:
+                    raise ValueError(
+                        f"SandboxClaim '{claim_name}' in namespace '{namespace}' "
+                        f"references warmpool '{existing_warmpool}', not "
+                        f"'{warmpool}'. Refusing to adopt."
+                    )
                 logger.info(
                     "SandboxClaim %s already exists; adopting (adopt_existing=True)",
                     claim_name,
@@ -248,9 +271,10 @@ class AsyncSandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
             )
         except (Exception, asyncio.CancelledError):
-            # Don't leave an orphaned claim — but never delete a pre-existing
-            # claim we merely adopted.
-            if claim_created:
+            # Best-effort orphan cleanup for claims this call created (or, for
+            # generated names, may have created) — never a claim we adopted or
+            # an explicit-named claim whose creation never confirmed.
+            if cleanup_claim_on_failure:
                 await asyncio.shield(self._delete_claim(claim_name, namespace))
             raise
 

@@ -1270,6 +1270,18 @@ func isPodReady(pod *corev1.Pod) bool {
 // Pod enters Terminating), Phase, Ready, and PodIPs (the Ready condition is
 // gated on PodIPs being populated, so a PodIPs change must trigger a reconcile
 // even when Phase and Ready are unchanged).
+//
+// This intentionally ignores Pod label and annotation changes, which has one
+// known side effect: updatePodMetadata self-heals drift in propagated pod
+// labels/annotations, so external tampering with those keys is not corrected
+// immediately but on the next Phase/Ready/PodIPs transition or the periodic
+// resync. Folding a metadata check into this predicate in a churn-safe way is
+// not free: a naive "any label/annotation changed" comparison would reconcile
+// on every third-party write (service meshes, sidecar injectors) that annotates
+// the Pod, so it would have to be scoped to just the controller-managed keys,
+// coupling this predicate to the propagation scheme. For a rare case that
+// always self-corrects, eventual consistency is an acceptable trade-off here;
+// revisit if the drift window ever matters in practice.
 func podStatusChanged(oldPod, newPod *corev1.Pod) bool {
 	if oldPod.DeletionTimestamp.IsZero() != newPod.DeletionTimestamp.IsZero() {
 		return true
@@ -1313,7 +1325,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&sandboxv1beta1.Sandbox{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&sandboxv1beta1.Sandbox{}).
 		Owns(&corev1.Pod{}, builder.WithPredicates(predicate.And(labelSelectorPredicate, podStatusChangedPredicate))).
 		// Services use only the label selector predicate; unlike Pods, they are
 		// stable and don't receive frequent status writes. If a service-mesh or

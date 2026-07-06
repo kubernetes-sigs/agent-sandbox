@@ -64,8 +64,8 @@ def _get_snapshot_info(snapshot_obj: dict[str, Any]) -> SnapshotResult:
             snapshot_created = status.get("snapshotCreated") or {}
             snapshot_uid = snapshot_created.get("name")
             snapshot_timestamp = condition.get("lastTransitionTime")
-            if not snapshot_uid or not snapshot_timestamp:
-                raise RuntimeError("Snapshot completed without required metadata.")
+            if not isinstance(snapshot_uid, str) or not isinstance(snapshot_timestamp, str):
+                raise ValueError("Snapshot completed without required metadata.")
             return SnapshotResult(
                 snapshot_uid=snapshot_uid,
                 snapshot_timestamp=snapshot_timestamp,

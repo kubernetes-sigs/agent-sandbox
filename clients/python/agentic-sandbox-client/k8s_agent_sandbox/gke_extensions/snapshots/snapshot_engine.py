@@ -361,9 +361,10 @@ class SnapshotEngine:
                     continue
 
                 try:
+                    if not (name := metadata.get("name")): continue
                     valid_snapshots.append(
                         SnapshotDetail(
-                            snapshot_uid=metadata.get("name") or "",
+                            snapshot_uid=name,
                             source_pod=metadata.get("annotations", {}).get(
                                 PODSNAPSHOT_POD_NAME_ANNOTATION, "Unknown"
                             ),

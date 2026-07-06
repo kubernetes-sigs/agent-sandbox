@@ -49,10 +49,6 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
-// testNetworkedPodIP is a placeholder Pod IP used by warm-pool sandbox
-// fixtures to mark "backing Pod exists and is networked".
-const testNetworkedPodIP = "10.244.0.5"
-
 func TestSandboxClaimReconcile(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
@@ -1857,6 +1853,10 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 		t.Errorf("expected storage %s, got %s", expectedStorage.String(), actualStorage.String())
 	}
 }
+
+// testNetworkedPodIP is a placeholder Pod IP used by warm-pool sandbox
+// fixtures to mark "backing Pod exists and is networked".
+const testNetworkedPodIP = "10.244.0.5"
 
 func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{

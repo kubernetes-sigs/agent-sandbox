@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package process.v1;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1";
+option java_multiple_files = true;
+option java_package = "io.sandboxd.packages.sandboxd.spec.process";
+
+service ProcessService {
+  rpc Start(StartRequest) returns (stream StartResponse);
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  rpc WriteStdin(WriteStdinRequest) returns (WriteStdinResponse);
+  rpc SendSignal(SendSignalRequest) returns (SendSignalResponse);
+  rpc ResizeTTY(ResizeTTYRequest) returns (ResizeTTYResponse);
+}
+
+enum Signal {
+  SIGNAL_UNSPECIFIED = 0;
+  SIGNAL_SIGINT      = 2;
+  SIGNAL_SIGKILL     = 9;
+  SIGNAL_SIGTERM     = 15;
+}
+
+message PTY {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message ProcessConfig {
+  repeated string command = 1;
+  map<string, string> env_vars = 2;
+  optional string cwd = 3;
+}
+
+message StartRequest {
+  ProcessConfig config = 1;
+  optional PTY pty = 2;
+}
+
+message InitEvent {
+  int32 process_id = 1;
+}
+
+message ExitEvent {
+  int32 exit_code = 1;
+}
+
+message StartResponse {
+  oneof event {
+    InitEvent init = 1;
+    bytes stdout = 2;
+    bytes stderr = 3;
+    ExitEvent exit = 4;
+  }
+}
+
+message ExecuteRequest {
+  ProcessConfig config = 1;
+}
+
+message ExecuteResponse {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+}
+
+message WriteStdinRequest {
+  int32 process_id = 1;
+  oneof payload {
+    bytes input = 2;
+    google.protobuf.Empty eof = 3;
+  }
+}
+
+message WriteStdinResponse {
+}
+
+message SendSignalRequest {
+  int32 process_id = 1;
+  Signal signal = 2;
+}
+
+message SendSignalResponse {
+}
+
+message ResizeTTYRequest {
+  int32 process_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message ResizeTTYResponse {
+}
+

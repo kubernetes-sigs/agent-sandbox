@@ -87,7 +87,7 @@ func main() {
 	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "The directory that contains the certificates.")
 	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
 	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
-	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Enable the controller to automatically generate certificates and patch CRDs. Set to false if certificates and webhooks are managed externally (e.g., in GKE).")
+	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Manage webhook serving certs and patch CRD conversion caBundles on startup. Set to false when certs and CRD/webhook configuration are managed externally (e.g., GKE Dynamic Certificate Delivery).")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -262,7 +262,11 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		setupLog.Info("Webhook certificate management and CRD patching is disabled")
+		setupLog.Info("Webhook cert management and CRD conversion caBundle patching disabled; expecting existing tls.crt/tls.key in certDir and CRDs patched externally",
+			"certDir", webhookCertDir,
+			"serviceName", webhookServiceName,
+			"namespace", webhookNamespace,
+		)
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{

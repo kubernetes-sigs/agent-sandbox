@@ -36,7 +36,7 @@ func main() {
 		rootDir    string
 	)
 
-	flag.StringVar(&socketPath, "socket-path", "/var/run/sandboxd.sock", "Path to Unix Domain Socket for sandboxd")
+	flag.StringVar(&socketPath, "socket-path", "/var/run/sandboxd/sandboxd.sock", "Path to Unix Domain Socket for sandboxd")
 	flag.StringVar(&rootDir, "root-dir", "/", "Root directory path for sandbox file I/O")
 	klog.InitFlags(nil)
 	flag.Parse()

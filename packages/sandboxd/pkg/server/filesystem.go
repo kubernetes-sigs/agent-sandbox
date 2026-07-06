@@ -73,17 +73,21 @@ func (s *FilesystemServer) Write(stream filesystemv1.FilesystemService_WriteServ
 	}
 
 	// Create a temporary file in the same directory for atomic write
-	tmpPath := finalPath + ".tmp." + fmt.Sprintf("%d", os.Getpid())
-	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	tmpFile, err := os.CreateTemp(filepath.Dir(finalPath), ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	if err := os.Chmod(tmpFile.Name(), mode); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpFile.Name())
+		return fmt.Errorf("failed to set temp file mode: %w", err)
 	}
 
 	// Cleanup temp file on error or context cancellation
 	defer func() {
 		_ = tmpFile.Close()
 		if err != nil || stream.Context().Err() != nil {
-			_ = os.Remove(tmpPath)
+			_ = os.Remove(tmpFile.Name())
 		}
 	}()
 
@@ -116,7 +120,7 @@ func (s *FilesystemServer) Write(stream filesystemv1.FilesystemService_WriteServ
 	}
 
 	// Atomically move temp file to final destination
-	if err = os.Rename(tmpPath, finalPath); err != nil {
+	if err = os.Rename(tmpFile.Name(), finalPath); err != nil {
 		return fmt.Errorf("failed to rename temp file to final destination: %w", err)
 	}
 
@@ -215,11 +219,11 @@ func (s *FilesystemServer) Stat(ctx context.Context, req *filesystemv1.StatReque
 		return nil, fmt.Errorf("failed to stat path: %w", err)
 	}
 
+	// Note: Symlinks are resolved inside pathutil.SanitizePath,
+	// so os.Stat will always see the target file/directory type.
 	fileType := filesystemv1.FileType_FILE_TYPE_FILE
 	if info.IsDir() {
 		fileType = filesystemv1.FileType_FILE_TYPE_DIRECTORY
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		fileType = filesystemv1.FileType_FILE_TYPE_SYMLINK
 	}
 
 	return &filesystemv1.StatResponse{

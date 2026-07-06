@@ -145,6 +145,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	}
 
 	var streamWg sync.WaitGroup
+	var sendMu sync.Mutex
 
 	// Helper to stream output chunks to client
 	streamOutput := func(reader io.Reader, isStderr bool) {
@@ -161,7 +162,10 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 				} else {
 					event = &processv1.StartResponse{Event: &processv1.StartResponse_Stdout{Stdout: chunk}}
 				}
-				if sErr := stream.Send(event); sErr != nil {
+				sendMu.Lock()
+				sErr := stream.Send(event)
+				sendMu.Unlock()
+				if sErr != nil {
 					return
 				}
 			}

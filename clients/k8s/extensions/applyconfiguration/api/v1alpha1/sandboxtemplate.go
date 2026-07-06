@@ -19,7 +19,10 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
+	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	internal "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/internal"
+	apiv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
 // SandboxTemplateApplyConfiguration represents a declarative configuration of the SandboxTemplate type for use
@@ -43,6 +46,41 @@ func SandboxTemplate(name, namespace string) *SandboxTemplateApplyConfiguration 
 	b.WithKind("SandboxTemplate")
 	b.WithAPIVersion("extensions.agents.x-k8s.io/v1alpha1")
 	return b
+}
+
+// ExtractSandboxTemplateFrom extracts the applied configuration owned by fieldManager from
+// sandboxTemplate for the specified subresource. Pass an empty string for subresource to extract
+// the main resource. Common subresources include "status", "scale", etc.
+// sandboxTemplate must be a unmodified SandboxTemplate API object that was retrieved from the Kubernetes API.
+// ExtractSandboxTemplateFrom provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandboxTemplateFrom(sandboxTemplate *apiv1alpha1.SandboxTemplate, fieldManager string, subresource string) (*SandboxTemplateApplyConfiguration, error) {
+	b := &SandboxTemplateApplyConfiguration{}
+	err := managedfields.ExtractInto(sandboxTemplate, internal.Parser().Type("io.k8s.sigs.agent-sandbox.extensions.api.v1alpha1.SandboxTemplate"), fieldManager, b, subresource)
+	if err != nil {
+		return nil, err
+	}
+	b.WithName(sandboxTemplate.Name)
+	b.WithNamespace(sandboxTemplate.Namespace)
+
+	b.WithKind("SandboxTemplate")
+	b.WithAPIVersion("extensions.agents.x-k8s.io/v1alpha1")
+	return b, nil
+}
+
+// ExtractSandboxTemplate extracts the applied configuration owned by fieldManager from
+// sandboxTemplate. If no managedFields are found in sandboxTemplate for fieldManager, a
+// SandboxTemplateApplyConfiguration is returned with only the Name, Namespace (if applicable),
+// APIVersion and Kind populated. It is possible that no managed fields were found for because other
+// field managers have taken ownership of all the fields previously owned by fieldManager, or because
+// the fieldManager never owned fields any fields.
+// sandboxTemplate must be a unmodified SandboxTemplate API object that was retrieved from the Kubernetes API.
+// ExtractSandboxTemplate provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandboxTemplate(sandboxTemplate *apiv1alpha1.SandboxTemplate, fieldManager string) (*SandboxTemplateApplyConfiguration, error) {
+	return ExtractSandboxTemplateFrom(sandboxTemplate, fieldManager, "")
 }
 
 func (b SandboxTemplateApplyConfiguration) IsApplyConfiguration() {}

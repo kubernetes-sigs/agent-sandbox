@@ -19,7 +19,10 @@ package v1beta1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
+	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
 	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	internal "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/internal"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // SandboxWarmPoolApplyConfiguration represents a declarative configuration of the SandboxWarmPool type for use
@@ -45,6 +48,47 @@ func SandboxWarmPool(name, namespace string) *SandboxWarmPoolApplyConfiguration 
 	b.WithKind("SandboxWarmPool")
 	b.WithAPIVersion("extensions.agents.x-k8s.io/v1beta1")
 	return b
+}
+
+// ExtractSandboxWarmPoolFrom extracts the applied configuration owned by fieldManager from
+// sandboxWarmPool for the specified subresource. Pass an empty string for subresource to extract
+// the main resource. Common subresources include "status", "scale", etc.
+// sandboxWarmPool must be a unmodified SandboxWarmPool API object that was retrieved from the Kubernetes API.
+// ExtractSandboxWarmPoolFrom provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandboxWarmPoolFrom(sandboxWarmPool *apiv1beta1.SandboxWarmPool, fieldManager string, subresource string) (*SandboxWarmPoolApplyConfiguration, error) {
+	b := &SandboxWarmPoolApplyConfiguration{}
+	err := managedfields.ExtractInto(sandboxWarmPool, internal.Parser().Type("io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPool"), fieldManager, b, subresource)
+	if err != nil {
+		return nil, err
+	}
+	b.WithName(sandboxWarmPool.Name)
+	b.WithNamespace(sandboxWarmPool.Namespace)
+
+	b.WithKind("SandboxWarmPool")
+	b.WithAPIVersion("extensions.agents.x-k8s.io/v1beta1")
+	return b, nil
+}
+
+// ExtractSandboxWarmPool extracts the applied configuration owned by fieldManager from
+// sandboxWarmPool. If no managedFields are found in sandboxWarmPool for fieldManager, a
+// SandboxWarmPoolApplyConfiguration is returned with only the Name, Namespace (if applicable),
+// APIVersion and Kind populated. It is possible that no managed fields were found for because other
+// field managers have taken ownership of all the fields previously owned by fieldManager, or because
+// the fieldManager never owned fields any fields.
+// sandboxWarmPool must be a unmodified SandboxWarmPool API object that was retrieved from the Kubernetes API.
+// ExtractSandboxWarmPool provides a way to perform a extract/modify-in-place/apply workflow.
+// Note that an extracted apply configuration will contain fewer fields than what the fieldManager previously
+// applied if another fieldManager has updated or force applied any of the previously applied fields.
+func ExtractSandboxWarmPool(sandboxWarmPool *apiv1beta1.SandboxWarmPool, fieldManager string) (*SandboxWarmPoolApplyConfiguration, error) {
+	return ExtractSandboxWarmPoolFrom(sandboxWarmPool, fieldManager, "")
+}
+
+// ExtractSandboxWarmPoolStatus extracts the applied configuration owned by fieldManager from
+// sandboxWarmPool for the status subresource.
+func ExtractSandboxWarmPoolStatus(sandboxWarmPool *apiv1beta1.SandboxWarmPool, fieldManager string) (*SandboxWarmPoolApplyConfiguration, error) {
+	return ExtractSandboxWarmPoolFrom(sandboxWarmPool, fieldManager, "status")
 }
 
 func (b SandboxWarmPoolApplyConfiguration) IsApplyConfiguration() {}

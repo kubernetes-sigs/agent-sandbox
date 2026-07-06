@@ -30,9 +30,8 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
 )
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
-from .utils import select_pod_ip
+from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
 logger = logging.getLogger(__name__)
-
 
 class AsyncK8sHelper:
     """Async helper class for Kubernetes API interactions using kubernetes_asyncio."""
@@ -65,6 +64,7 @@ class AsyncK8sHelper:
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
+        volume_claim_templates: list[dict] | None = None,
         pod_metadata: dict | None = None,
     ):
         """Creates a SandboxClaim custom resource.
@@ -91,6 +91,8 @@ class AsyncK8sHelper:
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
+        if volume_claim_templates:
+            spec["volumeClaimTemplates"] = volume_claim_templates
         if pod_metadata:
             spec["additionalPodMetadata"] = pod_metadata
 
@@ -327,11 +329,22 @@ class AsyncK8sHelper:
                         gateway_object = event["object"]
                         status = gateway_object.get("status") or {}
                         addresses = status.get("addresses", [])
-                        if addresses:
-                            ip_address = addresses[0].get("value")
-                            if ip_address:
-                                logger.info(f"Gateway ready. IP: {ip_address}")
-                                return ip_address
+                        for address in addresses:
+                            if not isinstance(address, dict):
+                                continue
+                            ip_address = address.get("value")
+                            if not ip_address:
+                                continue
+                            
+                            if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
+                                logger.warning(
+                                    "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
+                                    ip_address,
+                                )
+                                continue
+                                
+                            logger.info(f"Gateway ready. IP: {ip_address}")
+                            return ip_address
             finally:
                 await w.close()
 

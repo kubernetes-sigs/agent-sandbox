@@ -1145,21 +1145,27 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Track the sandbox template ref to be used by metrics collector
 	sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] = template.Name
 
-	template.Spec.PodTemplate.DeepCopyInto(&sandbox.Spec.PodTemplate)
-	sandbox.Spec.Service = template.Spec.Service
+	sandbox.Spec.SandboxBlueprint = *template.Spec.SandboxBlueprint.DeepCopy()
 	// Merge volumeClaimTemplates from template and claim according to the template policy
-	resolvedVCTs, err := mergeVolumeClaimTemplates(
-		template.Spec.VolumeClaimTemplates,
-		claim.Spec.VolumeClaimTemplates,
-		template.Spec.VolumeClaimTemplatesPolicy,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to merge volume claim templates: %w", err)
-	}
-	if len(resolvedVCTs) > 0 {
-		sandbox.Spec.VolumeClaimTemplates = make([]v1beta1.PersistentVolumeClaimTemplate, len(resolvedVCTs))
-		for i, vct := range resolvedVCTs {
-			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
+	if len(claim.Spec.VolumeClaimTemplates) > 0 {
+		resolvedVCTs, err := mergeVolumeClaimTemplates(
+			template.Spec.VolumeClaimTemplates,
+			claim.Spec.VolumeClaimTemplates,
+			template.Spec.VolumeClaimTemplatesPolicy,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge volume claim templates: %w", err)
+		}
+		if len(resolvedVCTs) > 0 {
+			sandbox.Spec.VolumeClaimTemplates = make([]v1beta1.PersistentVolumeClaimTemplate, len(resolvedVCTs))
+			for i, vct := range resolvedVCTs {
+				vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
+			}
+		}
+	} else {
+		// Validate the VolumeClaimTemplates from the SandboxTemplate.
+		if err := validateVolumeClaimTemplates(template.Spec.VolumeClaimTemplates); err != nil {
+			return nil, fmt.Errorf("invalid volume claim templates in template: %w", err)
 		}
 	}
 

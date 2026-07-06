@@ -336,6 +336,19 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		return readyCondition
 	}
 
+	if pod != nil {
+		switch pod.Status.Phase {
+		case corev1.PodSucceeded:
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonPodSucceeded
+			readyCondition.Message = "Pod completed successfully"
+			return readyCondition
+		case corev1.PodFailed:
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonPodFailed
+			readyCondition.Message = "Pod failed"
+			return readyCondition
+		}
+	}
+
 	message := ""
 	podReady := false
 	if pod != nil {

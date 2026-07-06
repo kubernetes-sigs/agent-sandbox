@@ -67,8 +67,15 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             sandbox = await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_create.assert_called_once_with(
-                ANY, "test-warmpool", "test-namespace", labels=None, lifecycle=None, pod_metadata=None
+                ANY,
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None
             )
+
             self.assertEqual(sandbox, mock_sandbox_instance)
 
             active = await self.client.list_active_sandboxes()
@@ -316,6 +323,58 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(lifecycle)
             self.assertEqual(lifecycle["shutdownPolicy"], "Delete")
             self.assertIn("shutdownTime", lifecycle)
+
+    async def test_create_sandbox_with_volume_claim_templates(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        vcts = [{"metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "10Gi"}}}}]
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            await self.client.create_sandbox(
+                "test-warmpool",
+                "test-namespace",
+                volume_claim_templates=vcts,
+            )
+
+            mock_create.assert_called_once_with(
+                ANY,
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=vcts,
+                pod_metadata=None,
+            )
+
+    async def test_create_claim_with_volume_claim_templates(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
+
+        vcts = [{"metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "10Gi"}}}}]
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock()
+
+        await self.client._create_claim(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            volume_claim_templates=vcts,
+        )
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            annotations={"opentelemetry.io/trace-context": "trace-data"},
+            labels=None,
+            lifecycle=None,
+            volume_claim_templates=vcts,
+            pod_metadata=None,
+        )
 
     async def test_create_sandbox_without_shutdown_after_seconds(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")

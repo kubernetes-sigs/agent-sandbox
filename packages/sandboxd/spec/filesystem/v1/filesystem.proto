@@ -50,6 +50,7 @@ message ListRequest {
 
 message ListResponse {
   repeated FileEntry entries = 1;
+  bool truncated = 2;
 }
 
 message FileEntry {

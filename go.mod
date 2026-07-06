@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.4
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/felixge/fgprof v0.9.5
 	github.com/go-logr/logr v1.4.3
 	github.com/google/go-cmp v0.7.0

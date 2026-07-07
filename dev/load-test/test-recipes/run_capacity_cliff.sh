@@ -31,7 +31,9 @@ HOLD_DURATION="${HOLD_DURATION:-2m}"
 CONVERGENCE_TIMEOUT="${CONVERGENCE_TIMEOUT:-30m}"
 KWOK_NODES="${KWOK_NODES:-false}"
 PROVIDER="${PROVIDER:-gke}"
-KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+# Exported so the pre-flight kubectl checks below target the same cluster as
+# the clusterloader2 run (which receives it via --kubeconfig).
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 # Must be pullable from the cluster's nodes. Private GKE nodes without Cloud
 # NAT cannot reach registry.k8s.io — use a gcr.io/pkg.dev-hosted image there.
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-registry.k8s.io/pause:3.10}"
@@ -101,23 +103,36 @@ echo "=== Starting Sandbox Capacity Cliff Test (up to ${MAX_SANDBOXES} sandboxes
 echo "Step Size: $STEP_SIZE, Total Steps: $TOTAL_STEPS, Namespaces: $NAMESPACES, QPS: $QPS"
 echo "Hold: $HOLD_DURATION, Convergence Timeout: $CONVERGENCE_TIMEOUT, kwok Nodes: $KWOK_NODES"
 
-# Create overrides specifying the CL2 parameters
-cat <<JSON_EOF > "${LOGS_DIR}/testoverrides.json"
-{
-  "CL2_STEP_SIZE": $STEP_SIZE,
-  "CL2_TOTAL_STEPS": $TOTAL_STEPS,
-  "CL2_QPS": $QPS,
-  "CL2_NAMESPACES": $NAMESPACES,
-  "CL2_HOLD_DURATION": "$HOLD_DURATION",
-  "CL2_CONVERGENCE_TIMEOUT": "$CONVERGENCE_TIMEOUT",
-  "CL2_KWOK_NODES": "$KWOK_NODES",
-  "CL2_SANDBOX_IMAGE": "$SANDBOX_IMAGE",
-  "CL2_NETWORK_POLICY": "$NETWORK_POLICY",
-  "CL2_PROMETHEUS_MEMORY_LIMIT_FACTOR": $PROMETHEUS_MEMORY_LIMIT_FACTOR,
-  "CL2_PROMETHEUS_NODE_SELECTOR": "$PROMETHEUS_NODE_SELECTOR",
-  "CL2_PROMETHEUS_SLOW_APISERVER": $PROMETHEUS_SLOW_APISERVER
-}
-JSON_EOF
+# Create overrides specifying the CL2 parameters (jq handles JSON escaping —
+# PROMETHEUS_NODE_SELECTOR is a YAML fragment that may contain quotes or
+# newlines, which a heredoc would embed as invalid JSON).
+jq -n \
+  --argjson step_size "$STEP_SIZE" \
+  --argjson total_steps "$TOTAL_STEPS" \
+  --argjson qps "$QPS" \
+  --argjson namespaces "$NAMESPACES" \
+  --arg hold_duration "$HOLD_DURATION" \
+  --arg convergence_timeout "$CONVERGENCE_TIMEOUT" \
+  --arg kwok_nodes "$KWOK_NODES" \
+  --arg sandbox_image "$SANDBOX_IMAGE" \
+  --arg network_policy "$NETWORK_POLICY" \
+  --argjson prometheus_memory_limit_factor "$PROMETHEUS_MEMORY_LIMIT_FACTOR" \
+  --arg prometheus_node_selector "$PROMETHEUS_NODE_SELECTOR" \
+  --argjson prometheus_slow_apiserver "$PROMETHEUS_SLOW_APISERVER" \
+  '{
+    CL2_STEP_SIZE: $step_size,
+    CL2_TOTAL_STEPS: $total_steps,
+    CL2_QPS: $qps,
+    CL2_NAMESPACES: $namespaces,
+    CL2_HOLD_DURATION: $hold_duration,
+    CL2_CONVERGENCE_TIMEOUT: $convergence_timeout,
+    CL2_KWOK_NODES: $kwok_nodes,
+    CL2_SANDBOX_IMAGE: $sandbox_image,
+    CL2_NETWORK_POLICY: $network_policy,
+    CL2_PROMETHEUS_MEMORY_LIMIT_FACTOR: $prometheus_memory_limit_factor,
+    CL2_PROMETHEUS_NODE_SELECTOR: $prometheus_node_selector,
+    CL2_PROMETHEUS_SLOW_APISERVER: $prometheus_slow_apiserver
+  }' > "${LOGS_DIR}/testoverrides.json"
 
 # Execute using the cluster loader2 test.
 # Exec service is disabled: no measurement in this test execs into pods, and

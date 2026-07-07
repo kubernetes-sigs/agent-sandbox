@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Plot degradation curves from sandbox-capacity-cliff-test run artifacts.
 
 Usage:
@@ -35,7 +49,15 @@ def load_run(run_dir):
     counts, conv, metrics = [], {}, {}
     junit = os.path.join(run_dir, "junit.xml")
     if os.path.exists(junit):
-        root = ET.parse(junit).getroot()
+        with open(junit) as fh:
+            text = fh.read()
+        # Tolerate a license comment prepended above the XML declaration
+        # (repo boilerplate tooling does this to artifacts left in the tree),
+        # which is invalid XML if parsed as-is.
+        start = text.find("<?xml")
+        if start == -1:
+            start = text.find("<testsuite")
+        root = ET.fromstring(text[max(start, 0):])
         suite = root if root.tag == "testsuite" else root.find("testsuite")
         for tc in suite.iter("testcase"):
             m = re.search(r"Wait for (\d+) Sandboxes", tc.get("name", ""))
@@ -46,7 +68,8 @@ def load_run(run_dir):
         if not m:
             continue
         count = int(m.group(1))
-        data = json.load(open(f))
+        with open(f) as fh:
+            data = json.load(fh)
         items = data.get("dataItems") or [{}]
         metrics[count] = items[0].get("data", {})
     counts = sorted(set(conv) | set(metrics))
@@ -75,6 +98,8 @@ def main():
     ap.add_argument("-o", "--out", default="capacity-degradation.png")
     ap.add_argument("--labels", nargs="*", help="one label per run dir for the convergence panel")
     args = ap.parse_args()
+    if args.labels and len(args.labels) != len(args.run_dirs):
+        ap.error(f"--labels has {len(args.labels)} entries but {len(args.run_dirs)} run_dirs were given")
 
     runs = [(d, *load_run(d)) for d in args.run_dirs]
     labels = args.labels or [os.path.basename(os.path.normpath(d)) for d in args.run_dirs]

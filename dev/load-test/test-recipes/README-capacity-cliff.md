@@ -31,6 +31,8 @@ headless Service (`service: false`) and uses no `volumeClaimTemplates`, and the 
 - **Source Code Repositories**: Cloned to your local machine, typically in `$HOME`:
   - `perf-tests`: The official Kubernetes performance testing repository containing ClusterLoader2.
   - `agent-sandbox`: The main project repository.
+- **Command-line Tools**: `jq` (used by the runner to build the CL2 overrides file and by the kwok
+  install snippet below, which also uses `curl`).
 - **`agent-sandbox-controller`**: Installed in the target cluster **without** the `--extensions`
   flag. See [README-rapid-burst.md](README-rapid-burst.md) for how to build/push a local image and
   generate manifests. Recommended controller args for this test:
@@ -147,6 +149,10 @@ Overridable via environment variables on `run_capacity_cliff.sh`:
   means "cannot converge", never "converged slowly".
 - **`KWOK_NODES`**: Set to `true` to pin sandbox pods to kwok fake nodes (default: `false`).
 - **`PROVIDER`**: CL2 provider, e.g. `gke` or `kind` (default: `gke`).
+- **`SANDBOX_IMAGE`**: Sandbox pod container image (default: `registry.k8s.io/pause:3.10`). Must
+  be pullable from the cluster's nodes — private GKE nodes without Cloud NAT cannot reach
+  `registry.k8s.io`, so point this at a `gcr.io`/`pkg.dev`-hosted image there (e.g.
+  `gcr.io/google-containers/pause:3.2`).
 - **`NETWORK_POLICY`**: Set to `true` to apply one NetworkPolicy per test namespace selecting all
   sandbox pods (default: `false`). The policy mirrors the SandboxTemplate extension's "Secure by
   Default" spec (ingress from the sandbox-router only, egress to public internet with private and

@@ -18,10 +18,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
@@ -249,6 +252,91 @@ func TestReconcilePool(t *testing.T) {
 			require.Equal(t, expectedSelector, warmPool.Status.Selector, "Status.Selector mismatch")
 		})
 	}
+}
+
+func TestReconcilePoolCreatesExplicitUUIDNames(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(4)
+
+	template := createTemplate(poolNamespace)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-123",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas: replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+				Name: templateName,
+			},
+		},
+	}
+
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithRuntimeObjects(template).
+			Build(),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+
+	ctx := context.Background()
+	err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	list := &sandboxv1beta1.SandboxList{}
+	err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+	require.NoError(t, err)
+	require.Len(t, list.Items, int(replicas))
+
+	seenNames := make(map[string]struct{}, replicas)
+	for _, sb := range list.Items {
+		require.Empty(t, sb.GenerateName, "warm-pool sandboxes must not rely on Kubernetes GenerateName")
+		require.NotEmpty(t, sb.Name)
+		require.LessOrEqual(t, len(sb.Name), validation.DNS1123LabelMaxLength)
+		require.Empty(t, validation.IsDNS1123Label(sb.Name))
+		require.True(t, strings.HasPrefix(sb.Name, poolName+"-"))
+
+		suffix := strings.TrimPrefix(sb.Name, poolName+"-")
+		require.Len(t, suffix, 36, "suffix should be a full UUID string")
+		parsedSuffix, err := uuid.Parse(suffix)
+		require.NoError(t, err)
+		require.Equal(t, 7, int(parsedSuffix.Version()), "suffix should be UUIDv7-derived")
+
+		_, exists := seenNames[sb.Name]
+		require.False(t, exists, "sandbox name should be unique")
+		seenNames[sb.Name] = struct{}{}
+	}
+}
+
+func TestWarmPoolSandboxNameTrimsLongPoolNames(t *testing.T) {
+	suffix := "018f0f2d-1d3c-7abc-9def-0123456789ab"
+
+	poolName := strings.Repeat("a", 26) + "-" + strings.Repeat("b", 36)
+	name := warmPoolSandboxName(poolName, suffix)
+	require.Equal(t, strings.Repeat("a", 26)+"-"+suffix, name)
+	require.Len(t, name, validation.DNS1123LabelMaxLength)
+	require.Empty(t, validation.IsDNS1123Label(name))
+
+	poolNameWithTrimmedHyphen := strings.Repeat("a", 25) + "-" + strings.Repeat("b", 37)
+	name = warmPoolSandboxName(poolNameWithTrimmedHyphen, suffix)
+	require.Equal(t, strings.Repeat("a", 25)+"-"+suffix, name)
+	require.NotContains(t, name, "--")
+	require.Empty(t, validation.IsDNS1123Label(name))
+}
+
+func TestWarmPoolSandboxNameSanitizesPoolName(t *testing.T) {
+	suffix := "018f0f2d-1d3c-7abc-9def-0123456789ab"
+
+	name := warmPoolSandboxName("TN.Claw_WarmPool", suffix)
+
+	require.Equal(t, "tn-claw-warmpool-"+suffix, name)
+	require.Empty(t, validation.IsDNS1123Label(name))
 }
 
 func TestReconcilePoolControllerRef(t *testing.T) {

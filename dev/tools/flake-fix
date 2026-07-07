@@ -32,7 +32,8 @@ set -euo pipefail
 LIMIT=${LIMIT:-1}                                  # max issues to fix per run
 REPO=${REPO:-"kubernetes-sigs/agent-sandbox"}
 PUSH_REMOTE=${PUSH_REMOTE:-"origin"}               # where fix branches are pushed
-BASE_REMOTE=${BASE_REMOTE:-"upstream"}             # where main is fetched from
+BASE_REMOTE=${BASE_REMOTE:-"origin"}               # where main is fetched from; set to
+                                                   # e.g. "upstream" in fork checkouts
 # Adjust permission flags to taste for unattended runs.
 CLAUDE_FLAGS=${CLAUDE_FLAGS:-"--permission-mode acceptEdits"}
 

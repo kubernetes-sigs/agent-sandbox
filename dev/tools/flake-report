@@ -271,6 +271,27 @@ def find_existing_issue(existing_issues, marker):
     return None
 
 
+def merge_flaky_by_test(flaky):
+    """Merges findings for the same test across tabs into one entry.
+
+    One flaky test gets exactly one issue even when it flakes in several
+    jobs; the issue tracks the full set of affected tabs.
+    """
+    merged = {}
+    for f in flaky:
+        m = merged.get(f["test"])
+        if m is None:
+            merged[f["test"]] = dict(f, tabs=[f["tab"]],
+                                     job_histories=[f["job_history"]])
+            continue
+        for key in ("fails", "passes", "retest_flips", "flaky_cells"):
+            m[key] += f[key]
+        m["last_failure_ts"] = max(m["last_failure_ts"], f["last_failure_ts"])
+        m["tabs"].append(f["tab"])
+        m["job_histories"].append(f["job_history"])
+    return list(merged.values())
+
+
 def issue_body_for_flake(f, marker):
     return f"""{marker}
 **Flaky test detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
@@ -278,11 +299,11 @@ def issue_body_for_flake(f, marker):
 | | |
 |---|---|
 | Test | `{f['test']}` |
-| Job tab | `{f['tab']}` |
+| Job tab(s) | {', '.join(f'`{t}`' for t in f['tabs'])} |
 | Failures in window | {f['fails']} (vs {f['passes']} passes) |
 | Retest flips (same PR failed then passed) | {f['retest_flips']} |
 | Last failure | {fmt_ts(f['last_failure_ts'])} |
-| Job history | {f['job_history']} |
+| Job history | {' • '.join(f['job_histories'])} |
 
 A retest flip means the same PR/commit failed this test and then passed it on
 a bare rerun — a definite flake, not a product regression.
@@ -303,7 +324,7 @@ def update_issues(repo, flaky, infra, dry_run):
         )
     )
     actions = []
-    for f in flaky:
+    for f in merge_flaky_by_test(flaky):
         marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
         issue = find_existing_issue(existing, marker)
         if issue:
@@ -323,7 +344,7 @@ def update_issues(repo, flaky, infra, dry_run):
             actions.append(f"create: [FLAKE] {f['short']}")
             if not dry_run:
                 gh("issue", "create", "--repo", repo,
-                   "--title", f"[FLAKE] {f['short']} ({f['tab']})",
+                   "--title", f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})",
                    "--label", "kind/flake", "--body", body)
 
     for i in infra:
@@ -384,15 +405,23 @@ def main():
 
     tabs = list_tabs(args.dashboard) if args.tabs == "all" else args.tabs.split(",")
     flaky, consistent, infra = [], [], []
+    analyzed = 0
     for tab in tabs:
         try:
             f, c, i = analyze_tab(args.dashboard, tab, args.window)
         except Exception as e:  # a missing/renamed tab shouldn't kill the report
             print(f"warning: skipping tab {tab}: {e}", file=sys.stderr)
             continue
+        analyzed += 1
         flaky += f
         consistent += c
         infra.append(i)
+
+    if analyzed == 0:
+        # An all-tabs failure is an outage (or a broken dashboard name), not
+        # a clean "no flakes" result; don't let cron mistake it for success.
+        print("error: no TestGrid tabs could be analyzed", file=sys.stderr)
+        return 1
 
     report = render_report(args.dashboard, flaky, consistent, infra, args.window)
     print(report)

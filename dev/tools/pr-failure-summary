@@ -49,7 +49,9 @@ LOG_TAIL_BYTES = 16384
 
 
 def run(cmd, input_text=None, check=True):
-    result = subprocess.run(cmd, capture_output=True, text=True, input=input_text)
+    # timeout so a hung API call can't wedge the whole cron run
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            input=input_text, timeout=120)
     if check and result.returncode != 0:
         raise RuntimeError(f"{' '.join(cmd[:3])}... failed: {result.stderr.strip()}")
     return result.stdout
@@ -72,14 +74,22 @@ def fetch(url, byte_range=None):
 
 
 def gcs_list(bucket, prefix):
-    url = (
-        f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?"
-        + urllib.parse.urlencode({"prefix": prefix, "fields": "items(name)"})
-    )
-    data = fetch(url)
-    if not data:
-        return []
-    return [item["name"] for item in json.loads(data).get("items", [])]
+    names, page_token = [], None
+    while True:
+        params = {"prefix": prefix, "fields": "items(name),nextPageToken"}
+        if page_token:
+            params["pageToken"] = page_token
+        data = fetch(
+            f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?"
+            + urllib.parse.urlencode(params)
+        )
+        if not data:
+            return names
+        payload = json.loads(data)
+        names += [item["name"] for item in payload.get("items", [])]
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            return names
 
 
 def gcs_read(bucket, name, byte_range=None):
@@ -90,7 +100,7 @@ def gcs_read(bucket, name, byte_range=None):
 
 
 def parse_junit(xml_text):
-    """Returns [(test_name, message)] for failed testcases in a junit file."""
+    """Returns [(classname, test_name, message)] for failed testcases."""
     failures = []
     try:
         root = ET.fromstring(xml_text)
@@ -100,7 +110,9 @@ def parse_junit(xml_text):
         for child in case:
             if child.tag in ("failure", "error"):
                 msg = (child.text or child.get("message") or "").strip()
-                failures.append((case.get("name", "?"), msg[:MAX_ERROR_CHARS]))
+                failures.append((case.get("classname", ""),
+                                 case.get("name", "?"),
+                                 msg[:MAX_ERROR_CHARS]))
                 break
     return failures
 
@@ -146,7 +158,7 @@ def collect_job_failures(job):
 
 
 def known_flakes(repo):
-    """Maps short test name -> issue number from open kind/flake issues."""
+    """Maps fully-qualified test name -> issue number from open kind/flake issues."""
     issues = json.loads(
         gh("issue", "list", "--repo", repo, "--label", "kind/flake",
            "--state", "open", "--limit", "200", "--json", "number,title,body")
@@ -155,26 +167,51 @@ def known_flakes(repo):
     for issue in issues:
         m = re.search(r"<!-- flake-report:test=(\S+) -->", issue.get("body", ""))
         if m:
-            mapping[m.group(1).rsplit(".", 1)[-1]] = issue["number"]
+            mapping[m.group(1)] = issue["number"]
         else:
-            # Fall back to the [FLAKE] <name> title convention.
+            # Fall back to the [FLAKE] <name> title convention (manual issues,
+            # usually a bare short name).
             t = re.match(r"\[FLAKE\]\s+(\S+)", issue.get("title", ""))
             if t:
                 mapping[t.group(1)] = issue["number"]
     return mapping
 
 
+def match_flake(classname, name, flakes):
+    """Finds the flake issue for a junit testcase, or None.
+
+    Prefer the fully-qualified identity (classname.name) so identically-named
+    tests in different packages don't cross-match; fall back to a short-name
+    match only when it's unambiguous across the known flakes.
+    """
+    base = name.split("/", 1)[0]  # go subtests share the parent's flake issue
+    full_ids = {f"{classname}.{name}", f"{classname}.{base}"} if classname else set()
+    for full, number in flakes.items():
+        if full in full_ids:
+            return number
+    candidates = {number for full, number in flakes.items()
+                  if full.rsplit(".", 1)[-1].split("/", 1)[0] == base}
+    if len(candidates) == 1:
+        return candidates.pop()
+    return None
+
+
+_source_dirs_cache = {}
+
+
 def test_source_dirs(test_name):
     """Best-effort map from a test name to repo dirs containing its source."""
     base = test_name.split("/", 1)[0]  # strip go subtest suffix
-    patterns = [f"func {base}(", f"def {base}("]
+    if base in _source_dirs_cache:
+        return _source_dirs_cache[base]
     dirs = set()
-    for pat in patterns:
+    for pat in (f"func {base}(", f"def {base}("):
         result = subprocess.run(
             ["git", "grep", "-l", "-F", pat], capture_output=True, text=True
         )
         for path in result.stdout.splitlines():
             dirs.add("/".join(path.split("/")[:2]))
+    _source_dirs_cache[base] = dirs
     return dirs
 
 
@@ -185,20 +222,40 @@ def pr_changed_dirs(repo, number):
     return {"/".join(f["path"].split("/")[:2]) for f in files}
 
 
-def classify(test_name, flakes, changed_dirs):
-    short = test_name.rsplit(".", 1)[-1].split("/", 1)[0]
-    if short in flakes:
-        return f"🎲 known flake ([#{flakes[short]}](https://github.com/kubernetes-sigs/agent-sandbox/issues/{flakes[short]})) — likely not caused by this PR", True
+def classify(classname, test_name, flakes, changed_dirs):
+    issue = match_flake(classname, test_name, flakes)
+    if issue:
+        return f"🎲 known flake ([#{issue}](https://github.com/kubernetes-sigs/agent-sandbox/issues/{issue})) — likely not caused by this PR", True
     overlap = test_source_dirs(test_name) & changed_dirs
     if overlap:
         return f"⚠️ exercises code this PR touches (`{sorted(overlap)[0]}`) — likely related to your change", False
     return "❓ not a known flake — check the error below", False
 
 
+def code_fence(text):
+    """A backtick fence longer than any backtick run in text, so junit output
+    containing ``` can't break out of the block and inject markdown."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def details_block(summary, text, max_lines=30):
+    fence = code_fence(text)
+    return ["", f"  <details><summary>{summary}</summary>", "",
+            f"  {fence}", *(f"  {l}" for l in text.splitlines()[:max_lines]),
+            f"  {fence}", "  </details>", ""]
+
+
 def build_comment(sha, jobs_summaries, all_known_flakes):
-    state = f"{sha[:12]}:" + hashlib.sha256(
-        ",".join(sorted(j["run_id"] for j, _, _ in jobs_summaries)).encode()
-    ).hexdigest()[:12]
+    # The state fingerprint includes the verdicts, not just the run IDs, so
+    # the comment refreshes when a failure later becomes a known flake (e.g.
+    # after the nightly flake-report files an issue for it).
+    fingerprint = ",".join(sorted(
+        [j["run_id"] for j, _, _ in jobs_summaries]
+        + [f"{name}:{verdict}" for _, failures, _ in jobs_summaries
+           for name, _, verdict, _ in failures]
+    ))
+    state = f"{sha[:12]}:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:12]
     lines = [
         MARKER,
         f"<!-- state={state} -->",
@@ -211,9 +268,7 @@ def build_comment(sha, jobs_summaries, all_known_flakes):
             for name, msg, verdict, _ in failures:
                 lines.append(f"- `{name}` — {verdict}")
                 if msg:
-                    lines += ["", "  <details><summary>error</summary>", "",
-                              "  ```", *(f"  {l}" for l in msg.splitlines()[:30]),
-                              "  ```", "  </details>", ""]
+                    lines += details_block("error", msg)
         else:
             lines.append(
                 "- The job failed **before tests ran** (cluster bring-up / "
@@ -221,9 +276,7 @@ def build_comment(sha, jobs_summaries, all_known_flakes):
                 "not your change — comment `/retest`."
             )
             if log_tail:
-                lines += ["", "  <details><summary>end of build log</summary>", "",
-                          "  ```", *(f"  {l}" for l in log_tail.splitlines()),
-                          "  ```", "  </details>", ""]
+                lines += details_block("end of build log", log_tail, max_lines=25)
         lines.append("")
     if all_known_flakes:
         lines.append("**Every failure matches a known flake or infrastructure "
@@ -285,33 +338,41 @@ def main():
         )
 
     flakes = known_flakes(args.repo)
+    errors = 0
     for pr in prs:
         number, sha = pr["number"], pr["headRefOid"]
-        jobs = failing_prow_statuses(args.repo, sha)
-        if not jobs:
+        # Isolate per-PR failures so one bad PR (rate limit, missing
+        # artifacts) doesn't abort summaries for the rest of the batch.
+        try:
+            jobs = failing_prow_statuses(args.repo, sha)
+            if not jobs:
+                continue
+
+            changed_dirs = pr_changed_dirs(args.repo, number)
+            summaries = []
+            all_ok_to_retest = True
+            for job in jobs:
+                failures, log_tail = collect_job_failures(job)
+                classified = []
+                for classname, name, msg in failures:
+                    verdict, is_flake = classify(classname, name, flakes, changed_dirs)
+                    if not is_flake:
+                        all_ok_to_retest = False
+                    classified.append((name, msg, verdict, is_flake))
+                summaries.append((job, classified, log_tail))
+
+            body, state = build_comment(sha, summaries, all_ok_to_retest)
+            action = upsert_comment(args.repo, number, body, state, args.post)
+        except Exception as e:
+            errors += 1
+            print(f"error: PR #{number}: {e}", file=sys.stderr)
             continue
-
-        changed_dirs = pr_changed_dirs(args.repo, number)
-        summaries = []
-        all_ok_to_retest = True
-        for job in jobs:
-            failures, log_tail = collect_job_failures(job)
-            classified = []
-            for name, msg in failures:
-                verdict, is_flake = classify(name, flakes, changed_dirs)
-                if not is_flake:
-                    all_ok_to_retest = False
-                classified.append((name, msg, verdict, is_flake))
-            summaries.append((job, classified, log_tail))
-
-        body, state = build_comment(sha, summaries, all_ok_to_retest)
-        action = upsert_comment(args.repo, number, body, state, args.post)
         prefix = "" if args.post else "[preview] "
         print(f"{prefix}PR #{number}: {action} "
               f"({len(jobs)} failing job(s))", file=sys.stderr)
         if not args.post and action != "unchanged":
             print(f"\n----- PR #{number} -----\n{body}\n")
-    return 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

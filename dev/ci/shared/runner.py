@@ -60,6 +60,8 @@ class TestRunner:
         idempotent applies), so one retry recovers transient failures without
         masking persistent breakage.
         """
+        if attempts < 1:
+            raise ValueError(f"attempts must be >= 1, got {attempts}")
         result = None
         for attempt in range(1, attempts + 1):
             result = subprocess.run(cmd)

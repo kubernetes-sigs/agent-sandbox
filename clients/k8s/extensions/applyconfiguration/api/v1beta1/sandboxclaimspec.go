@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	apiv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	applyconfigurationapiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1beta1"
 )
 
 // SandboxClaimSpecApplyConfiguration represents a declarative configuration of the SandboxClaimSpec type for use
@@ -38,7 +39,7 @@ type SandboxClaimSpecApplyConfiguration struct {
 	Env []EnvVarApplyConfiguration `json:"env,omitempty"`
 	// volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.
 	// Specifying this field forces a cold start because warm pool pods will not have these volumes.
-	VolumeClaimTemplates []apiv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+	VolumeClaimTemplates []applyconfigurationapiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
 }
 
 // SandboxClaimSpecApplyConfiguration constructs a declarative configuration of the SandboxClaimSpec type for use with
@@ -87,9 +88,12 @@ func (b *SandboxClaimSpecApplyConfiguration) WithEnv(values ...*EnvVarApplyConfi
 // WithVolumeClaimTemplates adds the given value to the VolumeClaimTemplates field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the VolumeClaimTemplates field.
-func (b *SandboxClaimSpecApplyConfiguration) WithVolumeClaimTemplates(values ...apiv1beta1.PersistentVolumeClaimTemplate) *SandboxClaimSpecApplyConfiguration {
+func (b *SandboxClaimSpecApplyConfiguration) WithVolumeClaimTemplates(values ...*applyconfigurationapiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
 	for i := range values {
-		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, values[i])
+		if values[i] == nil {
+			panic("nil value passed to WithVolumeClaimTemplates")
+		}
+		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, *values[i])
 	}
 	return b
 }

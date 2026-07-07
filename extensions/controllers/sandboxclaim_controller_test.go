@@ -2983,8 +2983,9 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 
 // TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp pins the no-op
 // behavior when workspaceResources names a container but has no resource
-// entries. The helper must not mutate the container's Requests / Limits maps in
-// that case; they should remain whatever the template specified, including nil.
+// entries. The helper must not mutate the container's Requests / Limits maps or
+// Claims in that case; they should remain whatever the template specified,
+// including nil.
 func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -3001,6 +3002,7 @@ func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
 			current: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")},
+				Claims:   []corev1.ResourceClaim{{Name: "template-claim"}},
 			},
 			override: extensionsv1beta1.WorkspaceResources{ContainerName: workspaceContainerName},
 		},
@@ -3013,6 +3015,45 @@ func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
 				t.Fatalf("expected resources unchanged when override has no resource entries\n  got:    %#v\n  wanted: %#v", container.Resources, tc.current)
 			}
 		})
+	}
+}
+
+func TestHasWorkspaceResourceOverridesEmptyClaimsIsOverride(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Claims: []corev1.ResourceClaim{},
+				},
+			},
+		},
+	}
+	if !hasWorkspaceResourceOverrides(claim) {
+		t.Fatal("expected explicit empty claims list to count as an override")
+	}
+}
+
+func TestApplyWorkspaceResourceOverridesEmptyClaimsClearsTemplateClaims(t *testing.T) {
+	container := &corev1.Container{
+		Name: workspaceContainerName,
+		Resources: corev1.ResourceRequirements{
+			Claims: []corev1.ResourceClaim{{Name: "template-claim", Request: "gpu"}},
+		},
+	}
+
+	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResources{
+		ContainerName: workspaceContainerName,
+		Resources: corev1.ResourceRequirements{
+			Claims: []corev1.ResourceClaim{},
+		},
+	})
+
+	if container.Resources.Claims == nil {
+		t.Fatal("expected explicit empty claims list to be preserved")
+	}
+	if len(container.Resources.Claims) != 0 {
+		t.Fatalf("expected template claims to be cleared, got %#v", container.Resources.Claims)
 	}
 }
 

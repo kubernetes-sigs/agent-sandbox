@@ -1174,7 +1174,8 @@ _Appears in:_
 
 WorkspaceResources defines per-claim resource requirement overrides for a
 named PodSpec container or init container. Requests and limits are merged by
-resource name; claims replace the target container's resource claims when set.
+resource name; claims replace the target container's resource claims when set,
+including an empty list.
 
 
 
@@ -1184,6 +1185,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `containerName` _string_ | containerName specifies the target regular container or init container for<br />the resource override. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#resourcerequirements-v1-core)_ | resources specifies resource requirements to merge into the target container.<br />Request and limit entries left unset keep the values from the SandboxTemplate.<br />Claims replace the target container's resource claims when specified. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#resourcerequirements-v1-core)_ | resources specifies resource requirements to merge into the target container.<br />Request and limit entries left unset keep the values from the SandboxTemplate.<br />Claims replace the target container's resource claims when specified,<br />including an empty list. |  | Optional: \{\} <br /> |
 
 

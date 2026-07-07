@@ -667,20 +667,20 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 
 // hasWorkspaceResourceOverrides reports whether the claim asks to merge any
 // resource requirement into the target container. A nil workspaceResources
-// field or a workspaceResources object with no resource entries returns false.
+// field or an object with no requests, limits, or claims field returns false.
 func hasWorkspaceResourceOverrides(claim *extensionsv1beta1.SandboxClaim) bool {
 	r := claim.Spec.WorkspaceResources
 	if r == nil {
 		return false
 	}
-	return len(r.Resources.Requests) > 0 || len(r.Resources.Limits) > 0 || len(r.Resources.Claims) > 0
+	return len(r.Resources.Requests) > 0 || len(r.Resources.Limits) > 0 || r.Resources.Claims != nil
 }
 
 func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *extensionsv1beta1.WorkspaceResources) {
 	if overrides == nil {
 		return
 	}
-	if len(overrides.Resources.Requests) == 0 && len(overrides.Resources.Limits) == 0 && len(overrides.Resources.Claims) == 0 {
+	if len(overrides.Resources.Requests) == 0 && len(overrides.Resources.Limits) == 0 && overrides.Resources.Claims == nil {
 		return
 	}
 	if len(overrides.Resources.Requests) > 0 && container.Resources.Requests == nil {
@@ -695,8 +695,8 @@ func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *ext
 	if len(overrides.Resources.Limits) > 0 {
 		maps.Copy(container.Resources.Limits, overrides.Resources.Limits)
 	}
-	if len(overrides.Resources.Claims) > 0 {
-		container.Resources.Claims = append([]corev1.ResourceClaim(nil), overrides.Resources.Claims...)
+	if overrides.Resources.Claims != nil {
+		container.Resources.Claims = slices.Clone(overrides.Resources.Claims)
 	}
 }
 

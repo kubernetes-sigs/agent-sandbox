@@ -108,7 +108,8 @@ type EnvVar struct {
 
 // WorkspaceResources defines per-claim resource requirement overrides for a
 // named PodSpec container or init container. Requests and limits are merged by
-// resource name; claims replace the target container's resource claims when set.
+// resource name; claims replace the target container's resource claims when set,
+// including an empty list.
 type WorkspaceResources struct {
 	// containerName specifies the target regular container or init container for
 	// the resource override.
@@ -118,7 +119,8 @@ type WorkspaceResources struct {
 
 	// resources specifies resource requirements to merge into the target container.
 	// Request and limit entries left unset keep the values from the SandboxTemplate.
-	// Claims replace the target container's resource claims when specified.
+	// Claims replace the target container's resource claims when specified,
+	// including an empty list.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }

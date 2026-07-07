@@ -82,6 +82,57 @@ def get_release_info(tag):
     sys.exit(1)
 
 
+def _kustomization_resource_paths(path):
+    """Resource file paths listed under `resources:` in a kustomization file.
+
+    Deliberately stdlib-only (the release tool has no third-party deps): this
+    parses the simple `resources:` list this repo uses rather than pulling in
+    PyYAML.
+    """
+    paths = set()
+    in_resources = False
+    with open(path) as f:
+        for raw in f:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not raw[:1].isspace():
+                # A top-level key ends the resources block unless this *is* it.
+                in_resources = stripped == "resources:"
+                continue
+            if in_resources and stripped.startswith("- "):
+                paths.add(stripped[2:].strip())
+    return paths
+
+
+def check_install_manifest_drift(all_yaml_files):
+    """Fail loudly if k8s/kustomization.yaml drifts from the flat release assets.
+
+    manifest.yaml/extensions.yaml are concatenated from every k8s/**/*.yaml
+    (except kustomization.yaml); install.yaml is rendered from
+    kustomization.yaml, whose `resources:` list is hand-maintained. Both assemble
+    whole files, so they stay in sync iff kustomization.yaml lists exactly those
+    globbed files -- minus extensions.controller.yaml, the intentionally-excluded
+    duplicate controller Deployment (the core controller.yaml is patched
+    instead). Without this guard, a new file dropped into k8s/ would land in the
+    flat assets automatically yet be silently missing from install.yaml.
+    """
+    globbed = {os.path.relpath(f, "k8s") for f in all_yaml_files}
+    globbed.discard("extensions.controller.yaml")
+    listed = _kustomization_resource_paths("k8s/kustomization.yaml")
+
+    missing = globbed - listed
+    extra = listed - globbed
+    if missing or extra:
+        print("❌ k8s/kustomization.yaml has drifted from the flat release assets:")
+        for f in sorted(missing):
+            print(f"   - {f}: in manifest/extensions.yaml but not listed in kustomization.yaml")
+        for f in sorted(extra):
+            print(f"   - {f}: listed in kustomization.yaml but not a k8s asset file")
+        print("   Update k8s/kustomization.yaml so install.yaml stays in sync.")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate release manifests.")
     parser.add_argument("--tag", required=True, help="The git tag for the release.")
@@ -161,10 +212,29 @@ def main():
     # are meant for sequential `kubectl apply -f` (last-write-wins). That duplicate
     # resource id is rejected by kustomize/Config Sync/Argo CD, so we also publish a
     # single collision-free asset rendered from k8s/kustomization.yaml.
+    #
+    # Guard first: kustomization.yaml's resource list is hand-maintained, so make
+    # sure it hasn't drifted from the glob the flat assets are built from.
+    check_install_manifest_drift(all_yaml_files)
+
     print("INFO: Preparing all-in-one install.yaml")
-    result = subprocess.run(
-        ["kubectl", "kustomize", "k8s"], check=True, capture_output=True, text=True
-    )
+    try:
+        result = subprocess.run(
+            ["kubectl", "kustomize", "k8s"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print("Error: 'kubectl' was not found in PATH; cannot render install.yaml.")
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        print("Error: 'kubectl kustomize k8s' failed while rendering install.yaml.")
+        for stream in (e.stderr, e.stdout):
+            if stream and stream.strip():
+                print(stream.strip())
+        sys.exit(1)
+
     print(f"INFO: Replacing image placeholder in install.yaml with: {image_url}")
     with open("release_assets/install.yaml", "w") as file:
         file.write(replace_image(result.stdout))

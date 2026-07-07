@@ -26,7 +26,18 @@ resources:
 
 patches:
   # Enable the extensions controllers on the single controller Deployment, and
-  # mount the optional agent-sandbox-config ConfigMap (matches extensions.controller.yaml).
+  # mount the optional agent-sandbox-config ConfigMap. This makes the patched
+  # controller equivalent to extensions.controller.yaml: same args, same volumes,
+  # and -- because the patch only adds to the core controller.yaml Deployment --
+  # the webhook containerPort 9443 (which agent-sandbox-webhook-service targets)
+  # is preserved here too. extensions.controller.yaml now declares that port as
+  # well, so install.yaml and the sequential `kubectl apply` path converge on the
+  # same Deployment spec.
+  #
+  # Keep this patch in lockstep with extensions.controller.yaml: if its args or
+  # volumes change, update them here as well (the release tool's drift guard only
+  # checks that the resource file set stays in sync, not the controller's
+  # container spec).
   - patch: |-
       apiVersion: apps/v1
       kind: Deployment

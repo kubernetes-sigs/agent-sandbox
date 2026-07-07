@@ -510,14 +510,18 @@ func (x *ExecuteRequest) GetConfig() *ProcessConfig {
 	return nil
 }
 
+// ExecuteResponse contains the complete output of a synchronously executed command.
 type ExecuteResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	ExitCode int32  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	Stdout   []byte `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`
-	Stderr   []byte `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`
+	// Process exit code (0 indicates success).
+	ExitCode int32 `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	// Combined standard output buffer produced during execution.
+	Stdout []byte `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`
+	// Combined standard error buffer produced during execution.
+	Stderr []byte `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`
 }
 
 func (x *ExecuteResponse) Reset() {
@@ -755,6 +759,8 @@ func (x *SendSignalRequest) GetSignal() Signal {
 	return Signal_SIGNAL_UNSPECIFIED
 }
 
+// SendSignalResponse is returned on successful delivery of a signal.
+// Failure cases are communicated via gRPC status codes rather than fields in this message.
 type SendSignalResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

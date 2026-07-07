@@ -44,10 +44,20 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ProcessServiceClient interface {
+	// Start runs a command and streams its stdout/stderr events in real time.
+	// Use for long-running or interactive processes (shells, servers, interactive commands).
+	// The stream remains open until the process terminates and sends an ExitEvent.
 	Start(ctx context.Context, in *StartRequest, opts ...grpc.CallOption) (ProcessService_StartClient, error)
+	// Execute runs a short-lived command synchronously to completion and returns stdout,
+	// stderr, and the exit code atomically. Use when real-time streaming is not required.
 	Execute(ctx context.Context, in *ExecuteRequest, opts ...grpc.CallOption) (*ExecuteResponse, error)
+	// WriteStdin sends standard input bytes or EOF to an active running process.
 	WriteStdin(ctx context.Context, in *WriteStdinRequest, opts ...grpc.CallOption) (*WriteStdinResponse, error)
+	// SendSignal delivers a POSIX signal to a running process group.
+	// Errors (e.g., process not found or permission denied) are surfaced via standard
+	// gRPC status codes (NOT_FOUND, PERMISSION_DENIED).
 	SendSignal(ctx context.Context, in *SendSignalRequest, opts ...grpc.CallOption) (*SendSignalResponse, error)
+	// ResizeTTY dynamically resizes the pseudo-terminal window of a running process.
 	ResizeTTY(ctx context.Context, in *ResizeTTYRequest, opts ...grpc.CallOption) (*ResizeTTYResponse, error)
 }
 
@@ -131,10 +141,20 @@ func (c *processServiceClient) ResizeTTY(ctx context.Context, in *ResizeTTYReque
 // All implementations must embed UnimplementedProcessServiceServer
 // for forward compatibility
 type ProcessServiceServer interface {
+	// Start runs a command and streams its stdout/stderr events in real time.
+	// Use for long-running or interactive processes (shells, servers, interactive commands).
+	// The stream remains open until the process terminates and sends an ExitEvent.
 	Start(*StartRequest, ProcessService_StartServer) error
+	// Execute runs a short-lived command synchronously to completion and returns stdout,
+	// stderr, and the exit code atomically. Use when real-time streaming is not required.
 	Execute(context.Context, *ExecuteRequest) (*ExecuteResponse, error)
+	// WriteStdin sends standard input bytes or EOF to an active running process.
 	WriteStdin(context.Context, *WriteStdinRequest) (*WriteStdinResponse, error)
+	// SendSignal delivers a POSIX signal to a running process group.
+	// Errors (e.g., process not found or permission denied) are surfaced via standard
+	// gRPC status codes (NOT_FOUND, PERMISSION_DENIED).
 	SendSignal(context.Context, *SendSignalRequest) (*SendSignalResponse, error)
+	// ResizeTTY dynamically resizes the pseudo-terminal window of a running process.
 	ResizeTTY(context.Context, *ResizeTTYRequest) (*ResizeTTYResponse, error)
 	mustEmbedUnimplementedProcessServiceServer()
 }

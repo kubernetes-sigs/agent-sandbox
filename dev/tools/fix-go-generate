@@ -35,9 +35,18 @@ def main():
         ("google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0", "protoc-gen-go-grpc"),
     ]
 
-    # Check if we need to install/update tools
-    # If they all exist, we skip to save time and allow offline runs
+    # Check if we need to install/update tools by comparing against a version stamp file
+    stamp_file = os.path.join(local_bin, ".tools_stamp")
+    expected_stamp = "\n".join([import_path for import_path, _ in tools])
     needs_install = False
+
+    if not os.path.exists(stamp_file):
+        needs_install = True
+    else:
+        with open(stamp_file, "r") as f:
+            if f.read().strip() != expected_stamp.strip():
+                needs_install = True
+
     for _, binary_name in tools:
         if not os.path.exists(os.path.join(local_bin, binary_name)):
             needs_install = True
@@ -48,11 +57,14 @@ def main():
         # Configure GOBIN to install tools locally into the repo's bin directory
         env = os.environ.copy()
         env["GOBIN"] = local_bin
-        
+
         for import_path, binary_name in tools:
             print(f"  Installing {binary_name} ({import_path.split('@')[1]})...")
             # Running go install outside the main module context to avoid modifying go.mod
             subprocess.check_call(["go", "install", import_path], env=env, cwd=repo_root)
+
+        with open(stamp_file, "w") as f:
+            f.write(expected_stamp + "\n")
         print("Tools installed successfully.")
 
     # Add local bin to PATH so go generate (and buf generate) can find them

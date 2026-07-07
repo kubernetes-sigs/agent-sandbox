@@ -27,7 +27,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
@@ -82,9 +81,8 @@ func chromeSandbox(namespace string) *sandboxv1beta1.Sandbox {
 					ImagePullPolicy: corev1.PullIfNotPresent,
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
-							HTTPGet: &corev1.HTTPGetAction{
-								Path: "/json/version",
-								Port: intstr.FromInt(9222),
+							Exec: &corev1.ExecAction{
+								Command: []string{"/chrome-sandbox-entrypoint", "probe"},
 							},
 						},
 						InitialDelaySeconds: 1,

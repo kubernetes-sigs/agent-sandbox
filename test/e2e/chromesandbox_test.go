@@ -87,6 +87,7 @@ func chromeSandbox(namespace string) *sandboxv1beta1.Sandbox {
 						},
 						InitialDelaySeconds: 1,
 						PeriodSeconds:       1,
+						TimeoutSeconds:      2,
 					},
 				},
 			},

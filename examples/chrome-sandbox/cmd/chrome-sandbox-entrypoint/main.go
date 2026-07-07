@@ -32,7 +32,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "probe" {
 		client := &http.Client{Timeout: 2 * time.Second}
 		resp, err := client.Get("http://localhost:9222/json/version")
-		if err != nil || resp.StatusCode != http.StatusOK {
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
 			os.Exit(1)
 		}
 		os.Exit(0)

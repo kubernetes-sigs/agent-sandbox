@@ -1945,7 +1945,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
 				ObjectMeta: sandboxv1beta1.PodMetadata{
 					Annotations: map[string]string{
-						warmPoolEvictionAnnotation: "true",
+						autoscalerSafeToEvictAnnotation: "true",
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -2166,13 +2166,13 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					if tCopy.Spec.PodTemplate.ObjectMeta.Annotations == nil {
 						tCopy.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
 					}
-					tCopy.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "false"
+					tCopy.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation] = "false"
 					return tCopy
 				}(),
 				claim,
 				func() client.Object {
 					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
-					sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "false"
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation] = "false"
 					return sb
 				}(),
 				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
@@ -2180,7 +2180,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectSandboxAdoption:  true,
 			expectedAdoptedSandbox: "pool-sb-1",
 			expectedPodAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "false",
+				autoscalerSafeToEvictAnnotation: "false",
 			},
 			expectNewSandboxCreated: false,
 		},
@@ -2190,7 +2190,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				claim,
 				func() client.Object {
 					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
-					sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "false"
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation] = "false"
 					return sb
 				}(),
 				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
@@ -2198,7 +2198,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectSandboxAdoption:  true,
 			expectedAdoptedSandbox: "pool-sb-1",
 			expectedPodAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "false",
+				autoscalerSafeToEvictAnnotation: "false",
 			},
 			expectNewSandboxCreated: false,
 		},
@@ -2362,7 +2362,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						}
 					}
 				} else {
-					if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; exists {
+					if _, exists := adoptedSandbox.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation]; exists {
 						t.Errorf("expected eviction annotation to be removed from adopted sandbox")
 					}
 				}

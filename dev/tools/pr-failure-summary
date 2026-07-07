@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Posts digestible CI-failure summaries on open PRs.
+
+For each open PR whose Prow presubmits are failing, this pulls the junit
+results (and, for infra failures, the build log tail) from the job's GCS
+artifacts, classifies each failure as a known flake (matching an open
+`kind/flake` issue) or as likely related to the PR's changes, and maintains a
+single sticky comment on the PR summarizing all of it — so contributors don't
+have to dig through Spyglass.
+
+Stateless and idempotent: the comment itself records which head SHA and run
+IDs it covers, so reruns are no-ops until something changes. Requires `gh`
+to be authenticated.
+
+Typical cron usage:
+    dev/tools/pr-failure-summary --post
+
+Read-only preview (prints the comments it would post):
+    dev/tools/pr-failure-summary
+"""
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import urllib.parse
+import xml.etree.ElementTree as ET
+
+MARKER = "<!-- agent-sandbox/pr-failure-summary -->"
+STATE_RE = re.compile(r"<!-- state=([0-9a-zA-Z:-]+) -->")
+MAX_ERROR_CHARS = 1500
+LOG_TAIL_BYTES = 16384
+
+
+def run(cmd, input_text=None, check=True):
+    result = subprocess.run(cmd, capture_output=True, text=True, input=input_text)
+    if check and result.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:3])}... failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def gh(*args, input_text=None):
+    return run(["gh", *args], input_text=input_text)
+
+
+def fetch(url, byte_range=None):
+    cmd = ["curl", "-fsSL", "--max-time", "60", url]
+    if byte_range:
+        cmd += ["-r", byte_range]
+    # Decode leniently: a byte-range fetch can split a multibyte character,
+    # and build logs sometimes contain raw binary.
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def gcs_list(bucket, prefix):
+    url = (
+        f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?"
+        + urllib.parse.urlencode({"prefix": prefix, "fields": "items(name)"})
+    )
+    data = fetch(url)
+    if not data:
+        return []
+    return [item["name"] for item in json.loads(data).get("items", [])]
+
+
+def gcs_read(bucket, name, byte_range=None):
+    return fetch(
+        f"https://storage.googleapis.com/{bucket}/{urllib.parse.quote(name)}",
+        byte_range=byte_range,
+    )
+
+
+def parse_junit(xml_text):
+    """Returns [(test_name, message)] for failed testcases in a junit file."""
+    failures = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return failures
+    for case in root.iter("testcase"):
+        for child in case:
+            if child.tag in ("failure", "error"):
+                msg = (child.text or child.get("message") or "").strip()
+                failures.append((case.get("name", "?"), msg[:MAX_ERROR_CHARS]))
+                break
+    return failures
+
+
+def failing_prow_statuses(repo, sha):
+    """Failing Prow contexts for a commit, with their GCS artifact paths."""
+    combined = json.loads(gh("api", f"repos/{repo}/commits/{sha}/status"))
+    statuses = combined.get("statuses", [])
+    out = []
+    for s in statuses:
+        if s.get("state") not in ("failure", "error"):
+            continue
+        target = s.get("target_url") or ""
+        if "/view/gs/" not in target:
+            continue  # not a Prow job
+        gcs_path = target.split("/view/gs/", 1)[1].rstrip("/")
+        bucket, _, path = gcs_path.partition("/")
+        out.append({
+            "context": s["context"],
+            "url": target,
+            "bucket": bucket,
+            "path": path,
+            "run_id": path.rsplit("/", 1)[-1],
+        })
+    return out
+
+
+def collect_job_failures(job):
+    """Returns (test_failures, log_tail). Empty test_failures => infra failure."""
+    failures = []
+    for name in gcs_list(job["bucket"], job["path"] + "/artifacts/"):
+        if re.search(r"junit.*\.xml$", name):
+            failures += parse_junit(gcs_read(job["bucket"], name))
+    if failures:
+        return failures, ""
+    tail = gcs_read(job["bucket"], job["path"] + "/build-log.txt",
+                    byte_range=f"-{LOG_TAIL_BYTES}")
+    lines = [l for l in tail.splitlines() if l.strip()]
+    # Prefer error-looking lines from the tail; fall back to the last lines.
+    errors = [l for l in lines
+              if re.search(r"(?i)\b(error|fail|fatal|panic|timed?\s?out)\b", l)]
+    return [], "\n".join((errors or lines)[-25:])
+
+
+def known_flakes(repo):
+    """Maps short test name -> issue number from open kind/flake issues."""
+    issues = json.loads(
+        gh("issue", "list", "--repo", repo, "--label", "kind/flake",
+           "--state", "open", "--limit", "200", "--json", "number,title,body")
+    )
+    mapping = {}
+    for issue in issues:
+        m = re.search(r"<!-- flake-report:test=(\S+) -->", issue.get("body", ""))
+        if m:
+            mapping[m.group(1).rsplit(".", 1)[-1]] = issue["number"]
+        else:
+            # Fall back to the [FLAKE] <name> title convention.
+            t = re.match(r"\[FLAKE\]\s+(\S+)", issue.get("title", ""))
+            if t:
+                mapping[t.group(1)] = issue["number"]
+    return mapping
+
+
+def test_source_dirs(test_name):
+    """Best-effort map from a test name to repo dirs containing its source."""
+    base = test_name.split("/", 1)[0]  # strip go subtest suffix
+    patterns = [f"func {base}(", f"def {base}("]
+    dirs = set()
+    for pat in patterns:
+        result = subprocess.run(
+            ["git", "grep", "-l", "-F", pat], capture_output=True, text=True
+        )
+        for path in result.stdout.splitlines():
+            dirs.add("/".join(path.split("/")[:2]))
+    return dirs
+
+
+def pr_changed_dirs(repo, number):
+    files = json.loads(
+        gh("pr", "view", str(number), "--repo", repo, "--json", "files")
+    ).get("files", [])
+    return {"/".join(f["path"].split("/")[:2]) for f in files}
+
+
+def classify(test_name, flakes, changed_dirs):
+    short = test_name.rsplit(".", 1)[-1].split("/", 1)[0]
+    if short in flakes:
+        return f"🎲 known flake ([#{flakes[short]}](https://github.com/kubernetes-sigs/agent-sandbox/issues/{flakes[short]})) — likely not caused by this PR", True
+    overlap = test_source_dirs(test_name) & changed_dirs
+    if overlap:
+        return f"⚠️ exercises code this PR touches (`{sorted(overlap)[0]}`) — likely related to your change", False
+    return "❓ not a known flake — check the error below", False
+
+
+def build_comment(sha, jobs_summaries, all_known_flakes):
+    state = f"{sha[:12]}:" + hashlib.sha256(
+        ",".join(sorted(j["run_id"] for j, _, _ in jobs_summaries)).encode()
+    ).hexdigest()[:12]
+    lines = [
+        MARKER,
+        f"<!-- state={state} -->",
+        f"## CI failure summary for `{sha[:9]}`",
+        "",
+    ]
+    for job, failures, log_tail in jobs_summaries:
+        lines.append(f"### ❌ `{job['context']}` — [full logs]({job['url']})")
+        if failures:
+            for name, msg, verdict, _ in failures:
+                lines.append(f"- `{name}` — {verdict}")
+                if msg:
+                    lines += ["", "  <details><summary>error</summary>", "",
+                              "  ```", *(f"  {l}" for l in msg.splitlines()[:30]),
+                              "  ```", "  </details>", ""]
+        else:
+            lines.append(
+                "- The job failed **before tests ran** (cluster bring-up / "
+                "image build / timeout). This is an infrastructure failure, "
+                "not your change — comment `/retest`."
+            )
+            if log_tail:
+                lines += ["", "  <details><summary>end of build log</summary>", "",
+                          "  ```", *(f"  {l}" for l in log_tail.splitlines()),
+                          "  ```", "  </details>", ""]
+        lines.append("")
+    if all_known_flakes:
+        lines.append("**Every failure matches a known flake or infrastructure "
+                     "issue — commenting `/retest` should go green.**")
+    lines += [
+        "",
+        "<sub>Generated by [`dev/tools/pr-failure-summary`](https://github.com/"
+        "kubernetes-sigs/agent-sandbox/blob/main/dev/tools/pr-failure-summary). "
+        "It refreshes automatically on new failures.</sub>",
+    ]
+    return "\n".join(lines), state
+
+
+def find_sticky_comment(repo, number):
+    # --slurp wraps each page in an outer array so multi-page output stays
+    # valid JSON.
+    pages = json.loads(
+        gh("api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp")
+    )
+    for c in (c for page in pages for c in page):
+        if MARKER in c.get("body", ""):
+            return c
+    return None
+
+
+def upsert_comment(repo, number, body, state, post):
+    existing = find_sticky_comment(repo, number)
+    if existing:
+        m = STATE_RE.search(existing["body"])
+        if m and m.group(1) == state:
+            return "unchanged"
+        if post:
+            gh("api", "-X", "PATCH",
+               f"repos/{repo}/issues/comments/{existing['id']}",
+               "-f", f"body={body}")
+        return "updated"
+    if post:
+        gh("api", f"repos/{repo}/issues/{number}/comments", "-f", f"body={body}")
+    return "created"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--repo", default="kubernetes-sigs/agent-sandbox")
+    parser.add_argument("--limit", type=int, default=30,
+                        help="max open PRs to scan (newest first)")
+    parser.add_argument("--pr", type=int, help="only process this PR number")
+    parser.add_argument("--post", action="store_true",
+                        help="post/update comments (default: print what would be posted)")
+    args = parser.parse_args()
+
+    if args.pr:
+        prs = [json.loads(gh("pr", "view", str(args.pr), "--repo", args.repo,
+                             "--json", "number,headRefOid"))]
+    else:
+        prs = json.loads(
+            gh("pr", "list", "--repo", args.repo, "--state", "open",
+               "--limit", str(args.limit), "--json", "number,headRefOid")
+        )
+
+    flakes = known_flakes(args.repo)
+    for pr in prs:
+        number, sha = pr["number"], pr["headRefOid"]
+        jobs = failing_prow_statuses(args.repo, sha)
+        if not jobs:
+            continue
+
+        changed_dirs = pr_changed_dirs(args.repo, number)
+        summaries = []
+        all_ok_to_retest = True
+        for job in jobs:
+            failures, log_tail = collect_job_failures(job)
+            classified = []
+            for name, msg in failures:
+                verdict, is_flake = classify(name, flakes, changed_dirs)
+                if not is_flake:
+                    all_ok_to_retest = False
+                classified.append((name, msg, verdict, is_flake))
+            summaries.append((job, classified, log_tail))
+
+        body, state = build_comment(sha, summaries, all_ok_to_retest)
+        action = upsert_comment(args.repo, number, body, state, args.post)
+        prefix = "" if args.post else "[preview] "
+        print(f"{prefix}PR #{number}: {action} "
+              f"({len(jobs)} failing job(s))", file=sys.stderr)
+        if not args.post and action != "unchanged":
+            print(f"\n----- PR #{number} -----\n{body}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

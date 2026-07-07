@@ -1,0 +1,59 @@
+#!/bin/bash
+set -euo pipefail
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Local scheduled job that fixes flaky tests.
+#
+# Thin wrapper: all of the actual logic lives in the fix-flakes agent skill
+# (.agents/skills/fix-flakes/SKILL.md). This script just prepares a clean
+# worktree and invokes a headless agent with that skill, so the procedure is
+# reviewable/editable as a skill rather than baked into shell.
+#
+# Requires: gh (authenticated), git, claude. e2e reproduction additionally
+# needs docker + kind (see AGENTS.md).
+#
+# To run this in a crontab, provide absolute paths, e.g.:
+#   0 7 * * *  cd /path/to/agent-sandbox && dev/tools/flake-fix >> ~/flake-fix.log 2>&1
+# Pair it with the nightly report that files the issues this job consumes:
+#   0 6 * * *  cd /path/to/agent-sandbox && dev/tools/flake-report --update-issues
+
+LIMIT=${LIMIT:-1}                                  # max issues to fix per run
+REPO=${REPO:-"kubernetes-sigs/agent-sandbox"}
+PUSH_REMOTE=${PUSH_REMOTE:-"origin"}               # where fix branches are pushed
+BASE_REMOTE=${BASE_REMOTE:-"upstream"}             # where main is fetched from
+# Adjust permission flags to taste for unattended runs.
+CLAUDE_FLAGS=${CLAUDE_FLAGS:-"--permission-mode acceptEdits"}
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+git fetch "$BASE_REMOTE" main
+
+# Work in a throwaway worktree so a half-finished fix never dirties the main
+# checkout; the skill creates one flake-fix/issue-<n> branch per issue.
+worktree=$(mktemp -d)/agent-sandbox-flake-fix
+git worktree add --detach "$worktree" "$BASE_REMOTE/main"
+cleanup() {
+  git worktree remove --force "$worktree" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+cd "$worktree"
+
+# shellcheck disable=SC2086
+claude -p $CLAUDE_FLAGS "Use the fix-flakes skill (.agents/skills/fix-flakes/SKILL.md) in scheduled mode.
+Repo: $REPO. Process at most $LIMIT open kind/flake issue(s).
+Push fix branches to the '$PUSH_REMOTE' remote and open PRs against $REPO main.
+Finish with the scheduled-mode report described in the skill."

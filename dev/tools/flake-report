@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Nightly flake report for agent-sandbox Prow jobs.
+
+Pulls recent results from the TestGrid JSON API, classifies each failing test
+as flaky (intermittent), consistently failing, or an infrastructure failure
+(the job died before tests ran), and prints a markdown report.
+
+With --update-issues it also files or refreshes one `kind/flake` GitHub issue
+per flaky test, so the issue tracker is the durable state: reruns are
+idempotent and no local files are written. Requires `gh` to be authenticated
+for --update-issues.
+
+Typical cron usage:
+    dev/tools/flake-report --update-issues
+
+Read-only preview:
+    dev/tools/flake-report
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import urllib.parse
+from datetime import datetime, timezone
+
+TESTGRID = "https://testgrid.k8s.io"
+
+# TestGrid cell status values (see testgrid test_status proto).
+PASS_STATUSES = {1, 2, 3, 4}
+FAIL_STATUSES = {12}
+FLAKY_STATUS = 13  # failed, then passed on a rerun of the same column
+
+# Rows like "<job>.Overall" and "<job>.Pod" describe the prow job itself, not
+# an individual test.
+JOB_LEVEL_ROW = re.compile(r"\.(Overall|Pod)$")
+
+ISSUE_MARKER_PREFIX = "<!-- flake-report:test="
+INFRA_MARKER_PREFIX = "<!-- flake-report:infra-tab="
+
+
+def fetch_json(url):
+    # curl rather than urllib: python installs without CA bundles (common on
+    # macOS) fail TLS verification, and curl is already a repo-tooling
+    # prerequisite alongside gh and jq.
+    result = subprocess.run(
+        ["curl", "-fsSL", "--max-time", "60", url],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"fetch {url} failed: {result.stderr.strip()}")
+    return json.loads(result.stdout)
+
+
+def gh(*args, input_text=None):
+    result = subprocess.run(
+        ["gh", *args], capture_output=True, text=True, input=input_text
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def list_tabs(dashboard):
+    summary = fetch_json(f"{TESTGRID}/{urllib.parse.quote(dashboard)}/summary")
+    return sorted(summary.keys())
+
+
+def decode_statuses(rle):
+    """Expands TestGrid's run-length-encoded status list into a flat list."""
+    out = []
+    for run in rle:
+        out.extend([run["value"]] * run["count"])
+    return out
+
+
+def short_name(test_name):
+    """'sigs.k8s.io/.../e2e.TestFoo' -> 'TestFoo', 'pytest.test_bar' -> 'test_bar'."""
+    return test_name.rsplit(".", 1)[-1]
+
+
+def analyze_tab(dashboard, tab, window):
+    """Returns (flaky, consistent, infra) findings for one TestGrid tab."""
+    table = fetch_json(
+        f"{TESTGRID}/{urllib.parse.quote(dashboard)}/table?"
+        + urllib.parse.urlencode({"tab": tab, "width": window})
+    )
+    tests = table.get("tests") or []
+    if not tests:
+        return [], [], None
+
+    changelists = table.get("changelists") or []
+    timestamps = table.get("timestamps") or []
+    # e.g. "kubernetes-ci-logs/pr-logs/directory/presubmit-agent-sandbox-e2e-test"
+    gcs_query = table.get("query", "")
+    job_history = f"https://prow.k8s.io/job-history/gs/{gcs_query}" if gcs_query else ""
+
+    rows = {t["name"]: decode_statuses(t["statuses"]) for t in tests}
+    overall = next((v for k, v in rows.items() if k.endswith(".Overall")), None)
+    test_rows = {k: v for k, v in rows.items() if not JOB_LEVEL_ROW.search(k)}
+    ncols = max((len(v) for v in rows.values()), default=0)
+
+    def cell(statuses, i):
+        return statuses[i] if i < len(statuses) else 0
+
+    # Columns where a large fraction of tests failed at once are a broken PR
+    # or an environment-wide breakage, not per-test flakiness; exclude them
+    # from flake counting so one bad run doesn't file dozens of issues.
+    mass_cols = set()
+    if test_rows:
+        threshold = max(3, len(test_rows) // 4)
+        for i in range(ncols):
+            failed = sum(1 for s in test_rows.values() if cell(s, i) in FAIL_STATUSES)
+            if failed >= threshold:
+                mass_cols.add(i)
+
+    flaky, consistent = [], []
+    for name, statuses in test_rows.items():
+        fail_cols = [i for i in range(ncols)
+                     if cell(statuses, i) in FAIL_STATUSES and i not in mass_cols]
+        pass_cols = [i for i in range(ncols) if cell(statuses, i) in PASS_STATUSES]
+        flaky_cells = [i for i in range(ncols) if cell(statuses, i) == FLAKY_STATUS]
+        if not fail_cols and not flaky_cells:
+            continue
+
+        # Definite flake: the same changelist (PR) both failed and passed this
+        # test across runs, i.e. a bare retest changed the outcome.
+        retest_flips = 0
+        if changelists:
+            by_cl = {}
+            for i in fail_cols:
+                if i < len(changelists):
+                    by_cl.setdefault(changelists[i], set()).add("fail")
+            for i in pass_cols:
+                if i < len(changelists):
+                    by_cl.setdefault(changelists[i], set()).add("pass")
+            retest_flips = sum(1 for v in by_cl.values() if v == {"fail", "pass"})
+
+        # On presubmit tabs a failure on a single PR is usually that PR's own
+        # bug; flakiness means failures spread across distinct changelists.
+        distinct_cls = len(
+            {changelists[i] for i in fail_cols if i < len(changelists)}
+        ) if changelists else len(fail_cols)
+
+        finding = {
+            "tab": tab,
+            "test": name,
+            "short": short_name(name),
+            "fails": len(fail_cols) + len(flaky_cells),
+            "passes": len(pass_cols),
+            "distinct_changelists": distinct_cls,
+            "retest_flips": retest_flips,
+            "flaky_cells": len(flaky_cells),
+            "last_failure_ts": max(
+                (timestamps[i] for i in fail_cols + flaky_cells if i < len(timestamps)),
+                default=0,
+            ),
+            "job_history": job_history,
+        }
+
+        # Recent non-empty results all failing => hard breakage, not a flake.
+        recent = [s for s in statuses if s != 0][:3]
+        if recent and all(s in FAIL_STATUSES for s in recent):
+            consistent.append(finding)
+        elif (
+            retest_flips
+            or flaky_cells
+            or (distinct_cls >= 2 and len(pass_cols) > len(fail_cols))
+        ):
+            flaky.append(finding)
+
+    # A flaky parent test drags all its failing subtests along; keep only the
+    # parent so we file one issue, not one per subtest.
+    parents = {f["test"] for f in flaky}
+    flaky = [
+        f for f in flaky
+        if not any(f["test"].startswith(p + "/") for p in parents if p != f["test"])
+    ]
+
+    # Infra failure: the job went red but no individual test failed in that
+    # column (cluster bring-up, image push, timeouts before junit was written).
+    # Only meaningful on tabs that report per-test rows; on junit-less tabs
+    # (lint, autogen) a red run is indistinguishable from a legitimately
+    # failing PR.
+    infra = None
+    if overall is not None and test_rows:
+        infra_cols = [
+            i
+            for i in range(ncols)
+            if cell(overall, i) in FAIL_STATUSES
+            and not any(cell(s, i) in FAIL_STATUSES for s in test_rows.values())
+        ]
+        total_red = sum(1 for i in range(ncols) if cell(overall, i) in FAIL_STATUSES)
+        if total_red:
+            infra = {
+                "tab": tab,
+                "red_runs": total_red,
+                "infra_runs": len(infra_cols),
+                "total_runs": sum(1 for i in range(ncols) if cell(overall, i) != 0),
+                "last_failure_ts": max(
+                    (timestamps[i] for i in infra_cols if i < len(timestamps)),
+                    default=0,
+                ),
+                "job_history": job_history,
+            }
+    return flaky, consistent, infra
+
+
+def fmt_ts(ms):
+    if not ms:
+        return "unknown"
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def render_report(dashboard, flaky, consistent, infra, window):
+    lines = [
+        f"# Flake report: {dashboard}",
+        f"Window: last {window} runs per tab. Generated from {TESTGRID}/{dashboard}.",
+        "",
+        "## Flaky tests",
+    ]
+    if flaky:
+        for f in sorted(flaky, key=lambda f: -f["fails"]):
+            lines.append(
+                f"- `{f['test']}` ({f['tab']}): {f['fails']} failure(s) across "
+                f"{f['distinct_changelists']} PR(s)/commit(s), {f['passes']} pass(es), "
+                f"{f['retest_flips']} retest flip(s); "
+                f"last failed {fmt_ts(f['last_failure_ts'])}"
+            )
+    else:
+        lines.append("- none detected")
+    lines += ["", "## Consistently failing (not flakes — investigate as breakage)"]
+    if consistent:
+        for f in consistent:
+            lines.append(f"- `{f['test']}` ({f['tab']}): failing at head")
+    else:
+        lines.append("- none")
+    lines += ["", "## Infrastructure failures (job failed before tests ran)"]
+    infra_tabs = [i for i in infra if i and i["infra_runs"]]
+    if infra_tabs:
+        for i in infra_tabs:
+            lines.append(
+                f"- {i['tab']}: {i['infra_runs']} of {i['red_runs']} red runs "
+                f"(out of {i['total_runs']} total) had no failing test — "
+                f"see {i['job_history']}"
+            )
+    else:
+        lines.append("- none")
+    return "\n".join(lines) + "\n"
+
+
+def find_existing_issue(existing_issues, marker):
+    for issue in existing_issues:
+        if marker in issue.get("body", ""):
+            return issue
+    return None
+
+
+def issue_body_for_flake(f, marker):
+    return f"""{marker}
+**Flaky test detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
+
+| | |
+|---|---|
+| Test | `{f['test']}` |
+| Job tab | `{f['tab']}` |
+| Failures in window | {f['fails']} (vs {f['passes']} passes) |
+| Retest flips (same PR failed then passed) | {f['retest_flips']} |
+| Last failure | {fmt_ts(f['last_failure_ts'])} |
+| Job history | {f['job_history']} |
+
+A retest flip means the same PR/commit failed this test and then passed it on
+a bare rerun — a definite flake, not a product regression.
+
+To pick this up, follow the `fix-flakes` agent skill in
+[`.agents/skills/fix-flakes/`](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/.agents/skills/fix-flakes)
+or triage manually per [docs/testing.md](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/testing.md).
+
+/kind flake
+"""
+
+
+def update_issues(repo, flaky, infra, dry_run):
+    existing = json.loads(
+        gh(
+            "issue", "list", "--repo", repo, "--label", "kind/flake",
+            "--state", "open", "--limit", "200", "--json", "number,title,body",
+        )
+    )
+    actions = []
+    for f in flaky:
+        marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
+        issue = find_existing_issue(existing, marker)
+        if issue:
+            # Only bump the issue when there is a failure newer than the last
+            # one we reported, so a quiet flake doesn't get daily noise.
+            m = re.search(r"last-reported-failure=(\d+)", issue["body"])
+            if m and int(m.group(1)) >= f["last_failure_ts"]:
+                actions.append(f"skip #{issue['number']} (no new failures): {f['short']}")
+                continue
+            body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
+            actions.append(f"update #{issue['number']}: {f['short']}")
+            if not dry_run:
+                gh("issue", "edit", str(issue["number"]), "--repo", repo,
+                   "--body", body)
+        else:
+            body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
+            actions.append(f"create: [FLAKE] {f['short']}")
+            if not dry_run:
+                gh("issue", "create", "--repo", repo,
+                   "--title", f"[FLAKE] {f['short']} ({f['tab']})",
+                   "--label", "kind/flake", "--body", body)
+
+    for i in infra:
+        if not i or not i["infra_runs"]:
+            continue
+        marker = f"{INFRA_MARKER_PREFIX}{i['tab']} -->"
+        issue = find_existing_issue(existing, marker)
+        body = f"""{marker}
+**Infrastructure flakes detected by `dev/tools/flake-report`** on `{i['tab']}`:
+{i['infra_runs']} of {i['red_runs']} recent red runs failed before any test ran
+(cluster bring-up, image push, or job timeout — no failing test in junit).
+
+Job history: {i['job_history']}
+
+These are not fixed by editing tests; look at `dev/ci/shared/runner.py` retries,
+image prepulls, or job resources. Note the count is an upper bound: a PR that
+fails before tests run (e.g. does not compile) also produces a red run with no
+junit failures.
+
+/kind flake
+<!-- last-reported-failure={i['last_failure_ts']} -->
+"""
+        if issue:
+            m = re.search(r"last-reported-failure=(\d+)", issue["body"])
+            if m and int(m.group(1)) >= i["last_failure_ts"]:
+                actions.append(f"skip #{issue['number']} (no new failures): infra {i['tab']}")
+                continue
+            actions.append(f"update #{issue['number']}: infra {i['tab']}")
+            if not dry_run:
+                gh("issue", "edit", str(issue["number"]), "--repo", repo, "--body", body)
+        else:
+            actions.append(f"create: [FLAKE] {i['tab']}: infra failures before tests ran")
+            if not dry_run:
+                gh("issue", "create", "--repo", repo,
+                   "--title", f"[FLAKE] {i['tab']}: infrastructure failures before tests ran",
+                   "--label", "kind/flake", "--body", body)
+    return actions
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dashboard", default="sig-apps-agent-sandbox")
+    parser.add_argument("--tabs", default="all",
+                        help="comma-separated TestGrid tab names, or 'all'")
+    parser.add_argument("--window", type=int, default=100,
+                        help="how many recent runs per tab to analyze")
+    parser.add_argument("--repo", default="kubernetes-sigs/agent-sandbox")
+    parser.add_argument("--min-flakes", type=int, default=2,
+                        help="minimum flake events before an issue is filed "
+                             "(retest flips always qualify)")
+    parser.add_argument("--update-issues", action="store_true",
+                        help="file/refresh kind/flake GitHub issues (default: report only)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --update-issues, print planned issue actions only")
+    parser.add_argument("--json", dest="json_out", metavar="PATH",
+                        help="also write findings as JSON to PATH ('-' for stdout)")
+    args = parser.parse_args()
+
+    tabs = list_tabs(args.dashboard) if args.tabs == "all" else args.tabs.split(",")
+    flaky, consistent, infra = [], [], []
+    for tab in tabs:
+        try:
+            f, c, i = analyze_tab(args.dashboard, tab, args.window)
+        except Exception as e:  # a missing/renamed tab shouldn't kill the report
+            print(f"warning: skipping tab {tab}: {e}", file=sys.stderr)
+            continue
+        flaky += f
+        consistent += c
+        infra.append(i)
+
+    report = render_report(args.dashboard, flaky, consistent, infra, args.window)
+    print(report)
+
+    if args.json_out:
+        payload = json.dumps(
+            {"flaky": flaky, "consistent": consistent,
+             "infra": [i for i in infra if i]}, indent=2)
+        if args.json_out == "-":
+            print(payload)
+        else:
+            with open(args.json_out, "w") as fh:
+                fh.write(payload)
+
+    if args.update_issues:
+        issue_worthy = [
+            f for f in flaky
+            if f["retest_flips"] or f["flaky_cells"] or f["fails"] >= args.min_flakes
+        ]
+        actions = update_issues(args.repo, issue_worthy, infra, args.dry_run)
+        prefix = "[dry-run] " if args.dry_run else ""
+        for a in actions:
+            print(f"{prefix}{a}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

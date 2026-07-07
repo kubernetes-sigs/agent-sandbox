@@ -31,6 +31,9 @@ EXT_API_PKG_COMMAS="sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1,sigs.k8s.i
 EXT_API_PKG_SPACES="sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1 sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 EXT_CLIENT_PKG="sigs.k8s.io/agent-sandbox/clients/k8s/extensions"
 EXT_APPLYCONFIG_PKG="${EXT_CLIENT_PKG}/applyconfiguration"
+EXT_APPLYCONFIG_EXTERNALS="sigs.k8s.io/agent-sandbox/api/v1beta1.SandboxBlueprint:${APPLYCONFIG_PKG}/api/v1beta1"
+EXT_APPLYCONFIG_EXTERNALS+=",sigs.k8s.io/agent-sandbox/api/v1beta1.PodTemplate:${APPLYCONFIG_PKG}/api/v1beta1"
+EXT_APPLYCONFIG_EXTERNALS+=",sigs.k8s.io/agent-sandbox/api/v1beta1.PersistentVolumeClaimTemplate:${APPLYCONFIG_PKG}/api/v1beta1"
 OPENAPI_WORK_DIR=""
 
 cleanup_openapi_work() {
@@ -150,6 +153,7 @@ ${CMD}/cmd/applyconfiguration-gen \
   --output-dir "clients/k8s/extensions/applyconfiguration" \
   --output-pkg "${EXT_APPLYCONFIG_PKG}" \
   --openapi-schema "${OPENAPI_SCHEMA}" \
+  --external-applyconfigurations "${EXT_APPLYCONFIG_EXTERNALS}" \
   ${EXT_API_PKG_SPACES}
 
 echo "Generating extensions clientset..."

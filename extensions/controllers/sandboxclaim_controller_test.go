@@ -2856,6 +2856,98 @@ func TestSandboxClaimCreateRejectsWorkspaceResourcesWithoutWorkspaceContainer(t 
 	}
 }
 
+func TestSandboxClaimCreateRejectsWorkspaceResourcesWithRequestAboveLimit(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  workspaceContainerName,
+							Image: "workspace:latest",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("1000m"),
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("2000m"),
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	recorder := events.NewFakeRecorder(10)
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("expected invalid workspaceResources to be recorded in status without reconcile error, got %v", err)
+	}
+
+	var sandbox sandboxv1beta1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); !k8errors.IsNotFound(err) {
+		t.Fatalf("expected no sandbox to be created, got sandbox=%v err=%v", sandbox.Name, err)
+	}
+
+	var updatedClaim extensionsv1beta1.SandboxClaim
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
+		t.Fatalf("failed to get updated claim: %v", err)
+	}
+	condition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if condition == nil {
+		t.Fatal("expected Ready condition to be set")
+	}
+	if condition.Status != metav1.ConditionFalse || condition.Reason != "WorkspaceResourcesInvalid" {
+		t.Fatalf("expected Ready=False WorkspaceResourcesInvalid, got %#v", condition)
+	}
+	if !strings.Contains(condition.Message, "request for cpu (2) exceeds limit (1)") {
+		t.Fatalf("expected request above limit message, got %q", condition.Message)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "Warning") || !strings.Contains(event, "WorkspaceResourcesInvalid") {
+			t.Fatalf("expected WorkspaceResourcesInvalid warning event, got %q", event)
+		}
+	default:
+		t.Fatal("expected WorkspaceResourcesInvalid warning event")
+	}
+}
+
 // TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption verifies that a claim
 // setting workspaceResources bypasses warm-pool adoption and falls through to
 // cold creation. Adopting a warm-pool sandbox would mutate its podTemplate to
@@ -3019,20 +3111,20 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 	}
 }
 
-// TestApplyWorkspaceResourceOverridesEmptyOverridesIsNoOp pins the no-op
-// behavior when a claim sets `workspaceResources: {}` (struct present, no
-// resource entries). The helper must not mutate the container's Requests / Limits
-// maps in that case — they should remain whatever the template specified
-// (including nil), so the override behaves like "I didn't ask for anything".
-func TestApplyWorkspaceResourceOverridesEmptyOverridesIsNoOp(t *testing.T) {
+// TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp pins the no-op
+// behavior when workspaceResources names a container but has no resource
+// entries. The helper must not mutate the container's Requests / Limits maps in
+// that case; they should remain whatever the template specified, including nil.
+func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
 	cases := []struct {
 		name     string
 		current  corev1.ResourceRequirements
 		override extensionsv1beta1.WorkspaceResources
 	}{
 		{
-			name:    "nil current resources stay nil",
-			current: corev1.ResourceRequirements{},
+			name:     "nil current resources stay nil",
+			current:  corev1.ResourceRequirements{},
+			override: extensionsv1beta1.WorkspaceResources{ContainerName: workspaceContainerName},
 		},
 		{
 			name: "populated current resources stay populated and unchanged",
@@ -3040,6 +3132,7 @@ func TestApplyWorkspaceResourceOverridesEmptyOverridesIsNoOp(t *testing.T) {
 				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")},
 			},
+			override: extensionsv1beta1.WorkspaceResources{ContainerName: workspaceContainerName},
 		},
 	}
 	for _, tc := range cases {
@@ -3050,6 +3143,80 @@ func TestApplyWorkspaceResourceOverridesEmptyOverridesIsNoOp(t *testing.T) {
 				t.Fatalf("expected resources unchanged when override has no resource entries\n  got:    %#v\n  wanted: %#v", container.Resources, tc.current)
 			}
 		})
+	}
+}
+
+func TestApplyWorkspaceResourceOverridesInitializesOnlyOverriddenMaps(t *testing.T) {
+	cases := []struct {
+		name         string
+		override     extensionsv1beta1.WorkspaceResources
+		wantRequests bool
+		wantLimits   bool
+	}{
+		{
+			name: "requests only leaves limits nil",
+			override: extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				},
+			},
+			wantRequests: true,
+		},
+		{
+			name: "limits only leaves requests nil",
+			override: extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")},
+				},
+			},
+			wantLimits: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			container := &corev1.Container{Name: workspaceContainerName}
+			applyWorkspaceResourceOverrides(container, &tc.override)
+			if got := container.Resources.Requests != nil; got != tc.wantRequests {
+				t.Fatalf("requests nil state mismatch: got initialized=%t want %t", got, tc.wantRequests)
+			}
+			if got := container.Resources.Limits != nil; got != tc.wantLimits {
+				t.Fatalf("limits nil state mismatch: got initialized=%t want %t", got, tc.wantLimits)
+			}
+		})
+	}
+}
+
+func TestApplyClaimWorkspaceResourcesToPodSpecTargetsInitContainer(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: "workspace-sidecar",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+				},
+			},
+		},
+	}
+	spec := &corev1.PodSpec{
+		InitContainers: []corev1.Container{{
+			Name: "workspace-sidecar",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+			},
+		}},
+		Containers: []corev1.Container{{Name: workspaceContainerName}},
+	}
+
+	if err := applyClaimWorkspaceResourcesToPodSpec(spec, claim); err != nil {
+		t.Fatalf("expected init container override to apply, got %v", err)
+	}
+	if got := spec.InitContainers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("512Mi")) != 0 {
+		t.Fatalf("expected init container memory request 512Mi, got %s", got.String())
+	}
+	if len(spec.Containers[0].Resources.Requests) != 0 {
+		t.Fatalf("expected regular container resources to remain unchanged, got %v", spec.Containers[0].Resources.Requests)
 	}
 }
 

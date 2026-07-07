@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -267,6 +268,14 @@ func main() {
 			"serviceName", webhookServiceName,
 			"namespace", webhookNamespace,
 		)
+		for _, f := range []string{"tls.crt", "tls.key"} {
+			p := filepath.Join(webhookCertDir, f)
+			if _, err := os.Stat(p); err != nil {
+				setupLog.Error(err, "required webhook cert file missing", "path", p,
+					"hint", "with --manage-webhook-certs=false you must pre-provision tls.crt/tls.key via cert-manager, GKE, or similar")
+				os.Exit(1)
+			}
+		}
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{

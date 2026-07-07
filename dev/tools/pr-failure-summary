@@ -206,9 +206,16 @@ def test_source_dirs(test_name):
         return _source_dirs_cache[base]
     dirs = set()
     for pat in (f"func {base}(", f"def {base}("):
-        result = subprocess.run(
-            ["git", "grep", "-l", "-F", pat], capture_output=True, text=True
-        )
+        try:
+            result = subprocess.run(
+                ["git", "grep", "-l", "-F", pat],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            # Degrade to "source unknown" (classification falls through to
+            # ❓) rather than wedging the cron; cached so a stuck git isn't
+            # re-invoked for every failure.
+            break
         for path in result.stdout.splitlines():
             dirs.add("/".join(path.split("/")[:2]))
     _source_dirs_cache[base] = dirs

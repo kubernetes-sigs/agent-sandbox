@@ -50,9 +50,8 @@ import (
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
 	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
-	// value on Pods, so per-reconcile pod lookups are O(1) instead of a
-	// linear label-match over every pod in the namespace.
-	podSandboxNameHashIndex = ".metadata.labels[agents.x-k8s.io/sandbox-name-hash]"
+	// value on Pods, so per-reconcile pod lookups are O(1).
+	podSandboxNameHashIndex = ".metadata.labels[" + sandboxLabel + "]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )
@@ -687,9 +686,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
 	defer end()
 
-	// List all pods with the pool label matching the warm pool name hash,
-	// via the cache field index registered in SetupWithManager — a plain
-	// label-selector List here degrades to an O(pods-in-namespace) scan.
+	// List all pods carrying this sandbox's tracking label (sandboxLabel),
+	// via the cache field index registered in SetupWithManager.
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,

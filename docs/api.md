@@ -928,7 +928,7 @@ _Appears in:_
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 | `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.<br />Specifying this field forces a cold start because warm pool pods will not have these volumes. |  | Optional: \{\} <br /> |
-| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requirements for a named container at claim time.<br />Unset request and limit entries keep the values from the SandboxTemplate.<br />Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing. |  | Optional: \{\} <br /> |
+| `workspaceResources` _[WorkspaceResources](#workspaceresources)_ | workspaceResources overrides resource requirements for a named PodSpec container or init container at claim time.<br />Unset request and limit entries keep the values from the SandboxTemplate.<br />Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing. |  | Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -1172,9 +1172,9 @@ _Appears in:_
 
 
 
-WorkspaceResources defines per-claim resource requirement overrides for a container.
-Requests and limits are merged by resource name; claims replace the target
-container's resource claims when set.
+WorkspaceResources defines per-claim resource requirement overrides for a
+named PodSpec container or init container. Requests and limits are merged by
+resource name; claims replace the target container's resource claims when set.
 
 
 
@@ -1183,7 +1183,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `containerName` _string_ | containerName specifies the target container for the resource override. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `containerName` _string_ | containerName specifies the target regular container or init container for<br />the resource override. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#resourcerequirements-v1-core)_ | resources specifies resource requirements to merge into the target container.<br />Request and limit entries left unset keep the values from the SandboxTemplate.<br />Claims replace the target container's resource claims when specified. |  | Optional: \{\} <br /> |
 
 

@@ -106,11 +106,12 @@ type EnvVar struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
-// WorkspaceResources defines per-claim resource requirement overrides for a container.
-// Requests and limits are merged by resource name; claims replace the target
-// container's resource claims when set.
+// WorkspaceResources defines per-claim resource requirement overrides for a
+// named PodSpec container or init container. Requests and limits are merged by
+// resource name; claims replace the target container's resource claims when set.
 type WorkspaceResources struct {
-	// containerName specifies the target container for the resource override.
+	// containerName specifies the target regular container or init container for
+	// the resource override.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	ContainerName string `json:"containerName"`
@@ -150,7 +151,7 @@ type SandboxClaimSpec struct {
 	// +listType=atomic
 	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
-	// workspaceResources overrides resource requirements for a named container at claim time.
+	// workspaceResources overrides resource requirements for a named PodSpec container or init container at claim time.
 	// Unset request and limit entries keep the values from the SandboxTemplate.
 	// Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
 	// +optional

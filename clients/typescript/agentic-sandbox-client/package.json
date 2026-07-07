@@ -1,5 +1,6 @@
 {
   "name": "agentic-sandbox-client",
+  "private": true,
   "version": "0.1.0",
   "description": "A client library to interact with the Agentic Sandbox on Kubernetes.",
   "type": "module",

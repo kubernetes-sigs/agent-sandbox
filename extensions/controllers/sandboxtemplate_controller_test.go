@@ -40,15 +40,14 @@ import (
 func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	templateDefault := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
-			},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c1", Image: "img"}}},
+		}},
 		},
 	}
 
 	templateWithNP := &extensionsv1beta1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom", Namespace: "default", UID: "template-custom-uid"},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
 			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
 				Ingress: []networkingv1.NetworkPolicyIngressRule{
@@ -70,7 +69,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	}
 
 	templateOptOut := &extensionsv1beta1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout", Namespace: "default", UID: "template-optout-uid"},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
 			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
 			NetworkPolicy: &extensionsv1beta1.NetworkPolicySpec{
@@ -80,16 +79,42 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	}
 
 	existingNPToDelete := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-optout-network-policy", Namespace: "default"},
-		Spec:       networkingv1.NetworkPolicySpec{},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template-optout-network-policy",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+					Kind:       "SandboxTemplate",
+					Name:       templateOptOut.Name,
+					UID:        templateOptOut.UID,
+					Controller: new(bool),
+				},
+			},
+		},
+		Spec: networkingv1.NetworkPolicySpec{},
 	}
+	*existingNPToDelete.OwnerReferences[0].Controller = true
 
 	outdatedNPToUpdate := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-template-custom-network-policy", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template-custom-network-policy",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+					Kind:       "SandboxTemplate",
+					Name:       templateWithNP.Name,
+					UID:        templateWithNP.UID,
+					Controller: new(bool),
+				},
+			},
+		},
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"old-label": "outdated"}}, // Will be overwritten
 		},
 	}
+	*outdatedNPToUpdate.OwnerReferences[0].Controller = true
 
 	testCases := []struct {
 		name                  string
@@ -243,4 +268,105 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
+	scheme := newScheme(t)
+
+	t.Run("Does not delete unowned NetworkPolicy when Unmanaged", func(t *testing.T) {
+		template := &extensionsv1beta1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "victim", Namespace: "default"},
+			Spec: extensionsv1beta1.SandboxTemplateSpec{
+				NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+			},
+		}
+
+		// This NetworkPolicy is NOT owned by the template
+		unownedNP := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "victim-network-policy",
+				Namespace: "default",
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"keep": "me"}},
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, unownedNP).Build()
+		reconciler := &SandboxTemplateReconciler{
+			Client:   client,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "victim", Namespace: "default"},
+		}
+
+		_, err := reconciler.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("reconcile: (%v)", err)
+		}
+
+		// Check if unownedNP still exists
+		var np networkingv1.NetworkPolicy
+		err = client.Get(context.Background(), types.NamespacedName{Name: "victim-network-policy", Namespace: "default"}, &np)
+		if err != nil {
+			if k8errors.IsNotFound(err) {
+				t.Errorf("VULNERABILITY: Unowned NetworkPolicy was deleted!")
+			} else {
+				t.Fatalf("failed to get network policy: %v", err)
+			}
+		}
+	})
+
+	t.Run("Does not update unowned NetworkPolicy", func(t *testing.T) {
+		template := &extensionsv1beta1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "victim", Namespace: "default"},
+			Spec: extensionsv1beta1.SandboxTemplateSpec{
+				NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementManaged,
+			},
+		}
+
+		// This NetworkPolicy is NOT owned by the template
+		unownedNP := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "victim-network-policy",
+				Namespace: "default",
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"keep": "me"}},
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, unownedNP).Build()
+		reconciler := &SandboxTemplateReconciler{
+			Client:   client,
+			Scheme:   scheme,
+			Recorder: events.NewFakeRecorder(10),
+			Tracer:   asmetrics.NewNoOp(),
+		}
+
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "victim", Namespace: "default"},
+		}
+
+		_, err := reconciler.Reconcile(context.Background(), req)
+		// We expect an error here once fixed, but currently it might succeed and overwrite
+		if err != nil {
+			t.Logf("Reconcile returned error (expected after fix): %v", err)
+		}
+
+		// Check if unownedNP was updated
+		var np networkingv1.NetworkPolicy
+		err = client.Get(context.Background(), types.NamespacedName{Name: "victim-network-policy", Namespace: "default"}, &np)
+		if err != nil {
+			t.Fatalf("failed to get network policy: %v", err)
+		}
+
+		if _, ok := np.Spec.PodSelector.MatchLabels["keep"]; !ok {
+			t.Errorf("VULNERABILITY: Unowned NetworkPolicy was updated/overwritten!")
+		}
+	})
 }

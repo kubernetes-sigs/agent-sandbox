@@ -29,11 +29,11 @@ reviews:
 
     - path: "controllers/**/*.go"
       instructions: |
-        Enforce controller-runtime best practices. Reconcile loops must be idempotent, respect context cancellation, and never mutate the primary Custom Resource spec. Verify RBAC markers.
+        Enforce controller-runtime best practices: idempotent Reconcile loops, context cancellation, error wrapping, event recording, never mutating primary CR specs, and verify RBAC markers. Enforce low Prometheus metric cardinality (no unbounded labels like pod names or UIDs). In Reconcile loops, reserve logger.Info/V(0) for major lifecycle events and require V(4) for routine checks or cache lookups. When modifying helpers or predicates, audit all call sites for downstream side effects.
 
     - path: "extensions/controllers/**/*.go"
       instructions: |
-        Enforce controller-runtime best practices for extension reconcilers. Ensure proper error wrapping and event recording.
+        Enforce controller-runtime best practices: idempotent Reconcile loops, context cancellation, error wrapping, event recording, never mutating primary CR specs, and verify RBAC markers. Enforce low Prometheus metric cardinality (no unbounded labels like pod names or UIDs). In Reconcile loops, reserve logger.Info/V(0) for major lifecycle events and require V(4) for routine checks or cache lookups. When modifying helpers or predicates, audit all call sites for downstream side effects.
 
     - path: "clients/python/agentic-sandbox-client/**/*.py"
       instructions: |

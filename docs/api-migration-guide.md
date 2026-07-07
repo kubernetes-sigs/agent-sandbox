@@ -55,7 +55,7 @@ See [Recovery from backup](#recovery-from-backup) in the Troubleshooting section
 
 ## Migration flows
 
-Pick one of three flows depending on how you manage installs.
+Pick one of the two flows depending on how you manage installs.
 
 ### Flow A — Manual via kubectl (default)
 

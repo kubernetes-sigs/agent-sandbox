@@ -91,8 +91,19 @@ class SandboxClient(Generic[T]):
         if cleanup:
             atexit.register(self.delete_all)
 
-    def create_sandbox(self, warmpool: str, namespace: str = "default", sandbox_ready_timeout: int = 180, labels: dict[str, str] | None = None, *, shutdown_after_seconds: int | None = None, pod_labels: dict[str, str] | None = None, pod_annotations: dict[str, str] | None = None) -> T:
-        """Provisions new Sandbox claim and returns a Sandbox handle which tracks
+    def create_sandbox(
+        self,
+        warmpool: str,
+        namespace: str = "default",
+        sandbox_ready_timeout: int = 180,
+        labels: dict[str, str] | None = None,
+        *,
+        shutdown_after_seconds: int | None = None,
+        volume_claim_templates: list[dict] | None = None,
+        pod_labels: dict[str, str] | None = None, 
+        pod_annotations: dict[str, str] | None = None
+    ) -> T:
+        """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
            the underlying infrastructure.
 
         Args:
@@ -106,6 +117,8 @@ class SandboxClient(Generic[T]):
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
                 of ``"Delete"``, so the controller auto-deletes the claim on
                 expiry. Must be a positive integer.
+            volume_claim_templates: Optional list of volume claim templates
+                to override/merge with the sandbox template.
             pod_labels: Optional labels stamped onto the running Sandbox **Pod**
                 via ``spec.additionalPodMetadata.labels``. Unlike ``labels``
                 (which land on the claim object), these are readable from inside
@@ -132,7 +145,15 @@ class SandboxClient(Generic[T]):
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
         try:
-            self._create_claim(claim_name, warmpool, namespace, labels=labels, lifecycle=lifecycle, pod_metadata=pod_metadata)
+            self._create_claim(
+                claim_name,
+                warmpool,
+                namespace,
+                labels=labels,
+                lifecycle=lifecycle,
+                volume_claim_templates=volume_claim_templates,
+                pod_metadata=pod_metadata,
+            )
             # Resolve the sandbox id from the sandbox claim object.
             # In case of warmpool, sandbox id is not the same as claim name.
             start_time = time.monotonic()
@@ -295,7 +316,16 @@ class SandboxClient(Generic[T]):
                 )
 
     @trace_span("create_claim")
-    def _create_claim(self, claim_name: str, warmpool_name: str, namespace: str, labels: dict[str, str] | None = None, lifecycle: dict | None = None, pod_metadata: dict | None = None):
+    def _create_claim(
+        self,
+        claim_name: str,
+        warmpool_name: str,
+        namespace: str,
+        labels: dict[str, str] | None = None,
+        lifecycle: dict | None = None,
+        volume_claim_templates: list[dict] | None = None,
+        pod_metadata: dict | None = None,
+    ):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
         if span.is_recording():
@@ -310,7 +340,16 @@ class SandboxClient(Generic[T]):
             if trace_context_str:
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
-        self.k8s_helper.create_sandbox_claim(claim_name, warmpool_name, namespace, annotations=annotations, labels=labels, lifecycle=lifecycle, pod_metadata=pod_metadata)
+        self.k8s_helper.create_sandbox_claim(
+            claim_name,
+            warmpool_name,
+            namespace,
+            annotations=annotations,
+            labels=labels,
+            lifecycle=lifecycle,
+            volume_claim_templates=volume_claim_templates,
+            pod_metadata=pod_metadata,
+        )
 
     @trace_span("wait_for_sandbox_ready")
     def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):

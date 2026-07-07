@@ -115,7 +115,7 @@ fleet = SandboxFleet(FleetConfig(
     max_concurrent=8, max_warmpool_size=32, placement="image-affinity"))
 fleet.load_tasks(SweBenchSource(limit=8))
 
-# strategy: none | naive | sliding   (concurrency defaults to max_concurrent)
+# strategy: none | naive | sliding | pipelined   (concurrency defaults to max_concurrent)
 results = fleet.run(swebench_probe, strategy="sliding", concurrency=8)
 ```
 
@@ -164,16 +164,36 @@ python run_swebench_fleet.py
 | **SandboxFleet** / **AsyncSandboxFleet** | The orchestrator (sync / async). |
 | **SandboxHandle** | A claimed sandbox: `hostname`, `pod_name`, `pod_ip`, `endpoint(port)`, `exec(cmd)`, `release()`. |
 | **Placement** | Which cluster serves an image: `round-robin`, `least-loaded`, `capacity-weighted`, `image-affinity`. |
-| **Strategy** | *When* pools exist: `none`, `naive`, `sliding`. |
+| **Strategy** | *When* pools exist: `none`, `naive`, `sliding`, `pipelined`. |
 | **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`). |
 
 ## Warm-pool strategies
 
-| Strategy | Behavior | Footprint |
-| :--- | :--- | :--- |
-| `naive` | Pre-warm every image up front; process all (parallel); tear down. | Highest (all pools at once). |
-| `sliding` | Keep only a window of image pools warm, rolling forward. | Bounded (~`window`); window auto-sizes to `max_concurrent`. |
-| `none` | One size-1 pool per image on demand, torn down after. | Lowest (cold-start per image). |
+| Strategy | Behavior | Footprint | Best for |
+| :--- | :--- | :--- | :--- |
+| `naive` | Pre-warm every image up front; process all (parallel); tear down. | Highest (all pools at once). | Small/medium image sets; RL (with `warm_per_task`). |
+| `sliding` | Keep only a window of image pools warm, rolling forward. | Bounded (~`window`); window auto-sizes to `max_concurrent`. | Large image sets on limited disk. |
+| `pipelined` | Like `sliding`, but **prefetch** window N+1's pools while window N's tasks run, so image pull overlaps execution. | Bounded (≤ 2 windows; the window is halved so peak ≈ `max_concurrent`). | **Pull-bound eval sweeps** (many distinct images, 1 task each). |
+| `none` | One size-1 pool per image on demand, torn down after. | Lowest (cold-start per image). | Tiny runs / debugging. |
+
+`pipelined` is the throughput pick **when image pull dominates** — e.g. a 1:1
+**eval** sweep over hundreds of distinct images — because it hides each window's
+pull behind the previous window's execution. It is *not* the pick for RL rollouts
+that warm many replicas per image (see [Eval vs RL](#eval-vs-rl--recommended-recipes)).
+For repeated passes over the same dataset (RL epochs), use **`epochs=N`** to keep
+pools resident between passes (re-pulls then hit the node layer cache — see
+[Strategies & tuning](docs/strategies.md)), or **`keep_warm=True`** to drive your
+own loop:
+
+```python
+# 3 epochs over all tasks, pools reused between them, torn down once at the end
+results = fleet.run(process_fn, strategy="pipelined", epochs=3)   # -> list[list]
+
+# or keep pools warm for your own training loop, then clean up explicitly
+fleet.run(process_fn, strategy="naive", keep_warm=True)
+# ... reuse warm pools across your own iterations ...
+fleet.teardown()
+```
 
 ## Replica sizing
 
@@ -200,6 +220,75 @@ The naive (warm-everything) baseline holds 92 pods regardless; sizing pools to t
 concurrency budget cuts that to 8–32 for the same throughput, and `sliding` bounds
 it further to a window.
 
+### Instant-claim mode (RL)
+
+The default sizing optimizes for *cost* (fewest warm pods for a given throughput).
+For RL rollouts, **claim latency** (time-to-sandbox) often matters more — and RL
+hits the *same* image repeatedly, so the 2nd concurrent rollout on an image
+shouldn't queue behind the 1st. Two opt-in levers (both default off, so existing
+behavior is unchanged):
+
+```python
+fleet = SandboxFleet(FleetConfig(
+    clusters=[ClusterConfig(name="rl", namespace="rl")],
+    max_concurrent=50, max_warmpool_size=16,
+    warm_per_task=True,                          # 1 warm replica per task
+    template=TemplateSpec(colocate_replicas=True)))  # pack a pool's replicas on one node
+fleet.run(process_fn, strategy="naive")          # warm everything, full depth, packed
+```
+
+- **`warm_per_task`** sizes each pool to `min(tasks_image, max_warmpool_size)` —
+  one ready replica per task — so every task claims immediately. Raise
+  `max_warmpool_size` for images with more tasks than the cap (it warns and clamps
+  otherwise).
+- **`colocate_replicas`** adds a soft pod-affinity so a pool's replicas prefer the
+  **same node**: only the first replica pulls the image, the rest start from the
+  node's containerd layer cache (pairs with the default `image_pull_policy:
+  IfNotPresent`). Soft, so it spills to other nodes instead of dead-locking when a
+  node fills. Size the node for `replicas × cpu_request` (e.g. 50 × 250m ≈ 13 vCPU).
+
+> **When does this help?** Only when an image carries **more than one task**. A 1:1
+> eval sweep (one image per task — see below) gets `min(1, …) = 1` replica, so
+> `warm_per_task` is a **no-op** there. The payoff is **RL rollouts**, where the same
+> problem image is claimed by *G* rollouts at once.
+>
+> It improves **claim latency (time-to-sandbox), not batch wall** — wall is bounded by
+> `max_concurrent`, which the default sizing already saturates. The win is the *tail*:
+> every rollout gets its own ready sandbox instead of queueing, which in a synchronous
+> RL step (you wait for the slowest of *G* rollouts) directly cuts straggler delay.
+> Measured (10 problems × 8 rollouts, 15 s each): `naive` claim tail 9 s → 6 s,
+> wall ≈ flat.
+>
+> **Use `naive` or `sliding` with `warm_per_task` — not `pipelined`.** With deep
+> per-image replicas the pipelined window shrinks to keep its footprint bounded, which
+> serializes problems and underfills `max_concurrent` once rollouts do real work
+> (measured: pipelined wall 55 s → 97 s). `pipelined` is for the 1:1 eval case.
+
+### Eval vs RL — recommended recipes
+
+The two workloads pull in opposite directions: **eval** is *pull-bound* (many distinct
+images, one task each), **RL** is *claim-bound* per problem (one image, many rollouts).
+
+| Job | Image : task | Strategy | Sizing levers | Why |
+| :-- | :-- | :-- | :-- | :-- |
+| **Eval** (SWE-bench sweep) | **1 : 1** | `pipelined` | default (concurrency-aware) + `epochs`/`keep_warm` + `IfNotPresent` + in-region mirror | Pull-bound. Overlap pulls and reuse the node cache. `warm_per_task` *and* `colocate_replicas` are both no-ops at 1 task/image (one replica → nothing to co-locate). |
+| **RL rollouts** (GRPO / deepswe) | **1 : G** | `naive` or `sliding` | `warm_per_task=True` (+ `max_warmpool_size ≥ G`) + `colocate_replicas=True` | Every rollout claims instantly → lowest straggler tail. Avoid `pipelined` (window shrinks, serializes problems). |
+
+```python
+# Eval: 1:1 sweep, pull-bound — overlap pulls, reuse cache
+fleet = SandboxFleet(FleetConfig(clusters=[...], max_concurrent=40))
+fleet.run(eval_fn, strategy="pipelined", epochs=1)
+
+# RL: G rollouts/problem — instant claims, no window shrinkage
+fleet = SandboxFleet(FleetConfig(
+    clusters=[...], max_concurrent=40, max_warmpool_size=8,   # >= rollouts/problem
+    warm_per_task=True, template=TemplateSpec(colocate_replicas=True)))
+fleet.run(rollout_fn, strategy="naive", keep_warm=True)       # reuse across steps
+```
+
+The [load test](tests/loadtest.py) reproduces both: `--tasks-per-image 1` (eval) vs
+`--tasks-per-image G --warm-per-task --colocate` (RL).
+
 ## Multi-cluster
 
 Pass several `ClusterConfig`s (different `context`/`kubeconfig`) + a `placement`;
@@ -210,14 +299,34 @@ caller's concern (see the integration guide).
 ## Configuration reference
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
-(8), `window_size` (None=auto), `ready_timeout` (900), `template` (`TemplateSpec`),
-`template_name_prefix` (`r2e-img-`), `labels`.
+(8), `warm_per_task` (False — one warm replica per task for instant claims),
+`window_size` (None=auto), `ready_timeout` (900), `template` (`TemplateSpec`),
+`template_name_prefix` (`r2e-img-`), `labels`. Disk-aware sizing (optional):
+`avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
+(None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
+images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct images
+spread across nodes) instead of a single node's (None = conservative single-node
+bound; the capacity planner sets it from the probed node count).
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,
 `node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`.
 
 **TemplateSpec:** `resources` (cpu/memory), `keepalive_command` (`sleep infinity`),
-`runtime_class`, `node_selector`, `image_pull_secret`, `extra_pod_spec`.
+`runtime_class`, `node_selector`, `image_pull_secret`, `image_pull_policy`
+(`IfNotPresent` — reuses the node layer cache across epochs), `colocate_replicas`
+(False — prefer scheduling a pool's replicas on one node for cache reuse),
+`extra_pod_spec`.
+
+**Image rewriting (optional):** redirect task images at an in-region mirror /
+pull-through cache without touching the source:
+
+```python
+from agent_sandbox_rl import make_rewriter
+fleet.load_tasks(source, image_rewrite=make_rewriter(
+    registry="us-docker.pkg.dev", project="my-proj", repo="swebench-mirror"))
+# docker.io/... -> us-docker.pkg.dev/my-proj/swebench-mirror/...
+# (original preserved in metadata['original_image'])
+```
 
 ## Operational features
 
@@ -228,7 +337,8 @@ caller's concern (see the integration guide).
   task images on every node so warm pools skip the multi-GB pull. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report
   shows it as ~34 s of a 48 s run), so pre-pulling (or a persistent node-level
-  image cache) is the single biggest lever for repeated/RL runs.
+  image cache) is the single biggest lever for repeated/RL runs. See
+  [docs/strategies.md §4](docs/strategies.md#4-caching--amortization-levers-avoid-the-pull).
 - **Watch-based readiness**: `wait_for_pool_ready` watches the WarmPool and
   returns at the `readyReplicas` event (near-exact timing, no fixed poll grid),
   reconnecting and falling back to a short re-check on watch drops.
@@ -298,6 +408,103 @@ Three layers, mirroring the `k8s-agent-sandbox` SDK so traces/metrics interopera
    (`asyncio.to_thread` doesn't auto-propagate OTel context — under
    `AsyncSandboxFleet`, metrics + `RunReport` are exact; nested SDK spans are a
    documented follow-up.)
+
+## Performance tuning
+
+**[docs/strategies.md](docs/strategies.md)** is the consolidated reference — every
+strategy, sizing mode, and caching/infra lever, with the workload each fits and the
+exact flag. It opens with a [decision table](docs/strategies.md#1-pick-your-config-decision-table)
+(workload → strategy → flags) and an
+[all-levers-at-a-glance](docs/strategies.md#all-levers-at-a-glance) table.
+
+For **eval** (1:1 sweeps), wall-clock is dominated by **image pull**, not task work.
+The levers — `pipelined` (overlap pull with execution), `epochs`/`keep_warm` +
+`IfNotPresent` (amortize pulls across passes via the node layer cache), **pre-pull**
+(`fleet.prepull()` — a DaemonSet that caches images on every node before the hot
+path), an in-region Artifact Registry mirror (the `image_rewrite` hook), GKE Image
+Streaming, and disk-aware window sizing — are all detailed there.
+
+For **RL** (G rollouts per problem), the lever is instant claims —
+[`warm_per_task` + `colocate_replicas`](#eval-vs-rl--recommended-recipes) with
+`naive`/`sliding`, which minimize the per-rollout claim tail (the synchronous
+straggler) rather than batch wall.
+
+### Capacity-aware planning (full batches)
+
+The planner reads a node pool's CPU + ephemeral storage + pod density and computes the
+**optimal preload plan** for running all *N* tasks — strategy, `max_concurrent`, and
+per-image replicas/window — so every image is pulled + *uncompressed* and the sandboxes
+are warm **before** the task phase. It picks `naive` (warm everything) when the whole set
+fits the pool's disk/CPU/pods, else a disk-bounded `pipelined` window, and reports the
+binding bottleneck (cpu / disk / pods). For RL shapes (`tasks_per_image > 1`) it enables
+`warm_per_task` + `colocate_replicas`. Three ways to use it:
+
+**1. Importable API** (`agent_sandbox_rl.capacity`):
+
+```python
+from agent_sandbox_rl import (Cluster, ClusterConfig, probe_capacity,
+                              plan_benchmark, render_plan)
+core = Cluster(ClusterConfig(context="my-ctx")).core_api
+cap  = probe_capacity(core, "cloud.google.com/gke-nodepool=my-pool")
+plan = plan_benchmark(cap, n_images=500, tasks_per_image=1, avg_image_gb=10)
+print(render_plan(cap, plan))      # capacity + recommended strategy/concurrency/replicas
+# -> plan.strategy, plan.max_concurrent, plan.replicas_per_image, plan.bottleneck ...
+```
+
+**2. Interactive wizard** — consults you (cluster, node pool, batch shape), prints the
+plan, and offers to run it. Plan-only/read-only by default:
+
+```bash
+python examples/plan_capacity.py            # prompts; or pass flags + --non-interactive
+```
+
+**3. Benchmark CLI** — plan + optional timed run (preload vs task), writes a report:
+
+```bash
+PYTHONPATH=. python tests/run_full_swebench_benchmark.py \
+  --context <ctx> --namespace <ns> \
+  --node-selector cloud.google.com/gke-nodepool=<pool> \
+  --n-images 500 --avg-image-gb 10            # add --execute to actually run
+```
+
+## Setting your controller to high scale
+
+The fleet can fan out hundreds–thousands of concurrent claims, but throughput is
+ultimately bounded by the **Agent Sandbox controller's** reconcile concurrency, not
+this package. The controller ships with conservative defaults: the **Sandbox**
+controller reconciles at **1 worker** and **SandboxClaim** at **50** — so a
+1000-wide `max_concurrent` run still has its sandbox state transitions serialized
+one at a time. For large eval/RL batches, raise the controller's worker flags (on
+the controller Deployment's container args, namespace `agent-sandbox-system`):
+
+| flag | default | recommended (high scale) | why |
+|---|---:|---:|---|
+| `--kube-api-qps` | `-1` | **`-1`** (leave) | `-1` disables client-side rate limiting entirely — already optimal. |
+| `--kube-api-burst` | `10` | n/a | **Moot while `qps=-1`** (burst is only consulted when QPS > 0). Only raise if you set a positive QPS. |
+| `--sandbox-concurrent-workers` | `1` | **`1000`** | Sandbox reconciles (claim binding → Ready) are the main serializer; match your peak concurrent sandboxes. |
+| `--sandbox-claim-concurrent-workers` | `50` | **`1000`** | Concurrent `SandboxClaim` reconciles; match peak in-flight claims. |
+| `--sandbox-warm-pool-concurrent-workers` | `1` | **`1000`** | Parallel warm-pool reconciles (one per image pool); raise so many pools warm at once. |
+| `--sandbox-template-concurrent-workers` | `1` | **`1000`** | Parallel template reconciles. |
+| `--sandbox-warm-pool-max-batch-size` | `300` | **`1000`** | Parallel pod create/delete *within* one warm-pool reconcile. |
+
+**Key point:** `--kube-api-qps`/`--kube-api-burst` are *not* the lever — the
+controller's API client is already uncapped at `qps=-1`. The **worker concurrency**
+flags are what unblock high-scale claims. Size them to your `max_concurrent`. Also
+size this package's client pool (`build_api_client` defaults the urllib3
+`connection_pool_maxsize` to 1000) to match — otherwise the driver throttles before
+the controller does.
+
+Example patch:
+
+```bash
+kubectl -n agent-sandbox-system patch deploy agent-sandbox-controller --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-claim-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-template-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-max-batch-size=1000"}
+]'
+```
 
 ## Troubleshooting
 

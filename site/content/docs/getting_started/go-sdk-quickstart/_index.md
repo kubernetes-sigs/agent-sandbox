@@ -12,7 +12,7 @@ Agent Sandbox is a quick and easy way to start secure containers that will let a
 
 - A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview/_index.md#installation" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
-- A *SandboxTemplate* created in the target namespace, for example [python-sandbox-template](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/python-sandbox-template.yaml).
+- A `SandboxWarmPool` in the target namespace (for example `python-sandbox-pool` backed by `python-sandbox-template`). See the [Filesystem]({{< ref "/docs/filesystem" >}}) guide for a minimal `kubectl apply` example, or apply [python-sandbox-template.yaml](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/python-sandbox-template.yaml) and create a matching `SandboxWarmPool` whose `spec.sandboxTemplateRef.name` is `python-sandbox-template`.
 - Go 1.26+ and Agent Sandbox Go client: `go get sigs.k8s.io/agent-sandbox/clients/go/sandbox`.
 
 ## Connection Modes
@@ -36,12 +36,13 @@ import (
 func main() {
 	ctx := context.Background()
 
-	templateName := "my-sandbox-template"
+	warmPoolName := "python-sandbox-pool"
+	namespace := "default"
 
-	// Create client with shared configuration.
+	// Create client with shared configuration (Port-Forward mode by default).
 	client, err := sandbox.NewClient(ctx, sandbox.Options{
-		TemplateName: templateName,
-		Namespace:    "default",
+		WarmPoolName: warmPoolName,
+		Namespace:    namespace,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -50,8 +51,8 @@ func main() {
 	defer stop()
 	defer client.DeleteAll(ctx)
 
-	// Create a sandbox.
-	sb, err := client.CreateSandbox(ctx, templateName, "default")
+	// Create a sandbox from the warm pool.
+	sb, err := client.CreateSandbox(ctx, warmPoolName, namespace)
 	if err != nil {
 		log.Fatal(err)
 	}

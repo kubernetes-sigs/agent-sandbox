@@ -32,6 +32,7 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
 )
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
 
 
 class AsyncK8sHelper:
@@ -65,6 +66,7 @@ class AsyncK8sHelper:
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
+        volume_claim_templates: list[dict] | None = None,
         pod_metadata: dict | None = None,
     ):
         """Creates a SandboxClaim custom resource.
@@ -91,6 +93,8 @@ class AsyncK8sHelper:
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
+        if volume_claim_templates:
+            spec["volumeClaimTemplates"] = volume_claim_templates
         if pod_metadata:
             spec["additionalPodMetadata"] = pod_metadata
 
@@ -175,8 +179,8 @@ class AsyncK8sHelper:
     async def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
-        Returns the first pod IP from the sandbox status when ready, or None if
-        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        Returns the selected pod IP from the sandbox status when ready, or None if
+        no valid IP can be selected.
         """
         await self._ensure_initialized()
 
@@ -207,7 +211,7 @@ class AsyncK8sHelper:
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
                                 logger.info(f"Sandbox {name} is ready.")
                                 pod_ips = status.get("podIPs", [])
-                                return pod_ips[0] if pod_ips else None
+                                return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
                         logger.error(f"Sandbox {name} was deleted before becoming ready.")
                         raise SandboxNotFoundError(
@@ -325,11 +329,22 @@ class AsyncK8sHelper:
                         gateway_object = event["object"]
                         status = gateway_object.get("status") or {}
                         addresses = status.get("addresses", [])
-                        if addresses:
-                            ip_address = addresses[0].get("value")
-                            if ip_address:
-                                logger.info(f"Gateway ready. IP: {ip_address}")
-                                return ip_address
+                        for address in addresses:
+                            if not isinstance(address, dict):
+                                continue
+                            ip_address = address.get("value")
+                            if not ip_address:
+                                continue
+                            
+                            if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
+                                logger.warning(
+                                    "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
+                                    ip_address,
+                                )
+                                continue
+                                
+                            logger.info(f"Gateway ready. IP: {ip_address}")
+                            return ip_address
             finally:
                 await w.close()
 

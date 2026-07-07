@@ -8,6 +8,133 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 Initial implementation (design phases 1–7), live-verified on GKE against Agent
 Sandbox `v0.5.0rc1` (v1beta1).
 
+### Added (performance & scale)
+- **`pipelined` strategy** (`strategies.py`, `async_fleet.py`): double-buffered
+  sliding window — prefetch window N+1's pools (background thread / `asyncio.Task`)
+  while window N's tasks run, so image pull overlaps execution. Footprint bounded
+  ≤ 2 windows; new `prefetch` phase in the `RunReport`.
+- **Cross-epoch warm cache** (`fleet.py`, `async_fleet.py`): `run(..., epochs=N)`
+  runs N passes keeping pools resident between them (re-pulls hit the node layer
+  cache), tearing down once at the end (returns `list[list]`); `keep_warm=True`
+  leaves pools up for a caller-driven loop. `warm_image`/`start_warmpools` gained a
+  reuse guard so reuse never re-creates or double-reserves.
+- **Async fleet dedicated thread pool** (`async_fleet.py`): `AsyncSandboxFleet` runs
+  all blocking k8s calls on its own `ThreadPoolExecutor` sized to `max_concurrent`
+  (`min(1024, max(64, max_concurrent + 2×window + 16))`) instead of
+  `asyncio.to_thread`'s shared default pool (`min(32, cpu+4)`). The default pool is
+  tied to the driver's CPU count, not concurrency: under `pipelined` (which overlaps
+  prefetch + process + unwarm, and `wait_for_pool_ready` holds a thread) it starved
+  teardown and **deadlocked** at scale. Fixes that; live-validated (100/100 where it
+  previously hung). `close()` shuts the pool down (called from `__aexit__`).
+- **Parallel pool warming, all strategies** (`fleet.py`, `strategies.py`):
+  `start_warmpools` and the **windowed strategies** (`sliding`/`pipelined`) now warm
+  pools **concurrently** (bounded by `max_concurrent`). Extracted the fan-out into
+  `fleet._warm_entries` and added `fleet.warm_images(images)` (a window warmed in
+  parallel); `_run_windowed`/`_run_pipelined` use it instead of warming one image at a
+  time. Measured at 500 images: `sliding` dropped **2556s → 279s (9.2×)**, making the
+  windowed strategies competitive with `naive` (the async path was already concurrent).
+- **Node-aware disk window sizing** (`sizing.py`, `config.py`, `fleet.py`):
+  `recommend_window_disk` / `recommend_window_pipelined` gained a `nodes` arg so the
+  disk budget is the **whole pool's** usable disk (distinct images spread across nodes),
+  not a single node's. New `FleetConfig.cluster_nodes` feeds it (None = conservative
+  single-node bound). On a 30-node pool this lifted the auto window from 25 → 500 images;
+  the capacity planner sets it from the probed node count.
+- **Instant-claim mode for RL** (`config.py`, `sizing.py`, `fleet.py`,
+  `resources.py`): two opt-in levers (both default off) that trade resources for
+  near-zero claim latency. **`FleetConfig.warm_per_task`** sizes each pool to
+  `min(tasks_image, max_warmpool_size)` (one warm replica per task), so every task
+  claims immediately (`compute_replicas(..., per_task=True)`, threaded through the
+  window/disk sizing so windows shrink for the deeper pools; warns+clamps when an
+  image has more tasks than `max_warmpool_size`). **`TemplateSpec.colocate_replicas`**
+  adds a soft `podAffinity` (`topologyKey: kubernetes.io/hostname` on the shared
+  `sandbox=<template>` label) so a pool's replicas prefer one node — only the first
+  pulls the image, the rest start from the node layer cache. These target **RL**
+  (G rollouts per problem image); for **1:1 eval** they're no-ops. They cut the
+  per-rollout claim *tail* (the synchronous straggler), not batch wall. Pair with
+  `naive`/`sliding`, **not** `pipelined` (deep replicas shrink its window and
+  serialize problems). See the README "Eval vs RL" recipes.
+- **`TemplateSpec.image_pull_policy`** (`config.py`, `resources.py`): default
+  `IfNotPresent` so the node layer cache is reused across runs/epochs.
+- **Disk-aware window sizing** (`sizing.py`, `config.py`, `fleet.py`):
+  `recommend_window_disk` / `recommend_window_pipelined`, with
+  `FleetConfig.avg_image_gb` / `node_ephemeral_gb` / `disk_headroom`; caps the auto
+  window so resident images fit node disk.
+- **Image rewriting** (`registry_rewrite.py`): `rewrite_image` / `make_rewriter`
+  + a `load_tasks(image_rewrite=...)` hook to redirect images at an in-region
+  mirror / pull-through cache (original kept in `metadata['original_image']`).
+- **Load-test harness** (`tests/loadtest.py`): parameterized SWE-bench-style load
+  test — `--images N --tasks-per-image K --strategies all|… --image-template …
+  [--task-duration S]` against a live cluster — emitting a self-explanatory report:
+  a **methodology** section, cluster/nodes, image list, warm-pool plan, a per-stage
+  benchmark per strategy (prep create+wait, pool-ready avg/max, **claim latency
+  avg/max = time-to-sandbox**, claims, net task time, warm-pool peak/total/created,
+  wall, efficiency), and a **metric glossary** for the raw RunReport phases. Pure
+  helpers unit-tested in `tests/test_loadtest.py`.
+- **Capacity-aware preload planner** (`agent_sandbox_rl/capacity.py`): a first-class,
+  importable API — `probe_capacity` (reads a pool's allocatable CPU + ephemeral storage +
+  pod density), `plan_benchmark` (optimal plan: strategy `naive` warm-all when it fits, else
+  a disk-bounded `pipelined` window; `max_concurrent`; per-image replicas; binding
+  bottleneck cpu/disk/pods), and `render_plan` (no extra deps). Exposed via
+  `from agent_sandbox_rl import probe_capacity, plan_benchmark, render_plan`. Three entry
+  points: the API, an **interactive wizard** (`examples/plan_capacity.py` — prompts for
+  cluster/pool/batch, prints the plan, offers to run; plan-only/read-only by default), and
+  the benchmark CLI (`tests/run_full_swebench_benchmark.py`, plan-only by default;
+  `--execute` runs it and reports **preload vs task** wall separately). Pure helpers
+  unit-tested in `tests/test_capacity.py`.
+- **Docs**: `docs/strategies.md` — consolidated strategies / sizing / tuning guide
+  (decision table, all-levers table, the four strategies, instant-claim sizing,
+  caching levers incl. pre-pull, Image Streaming, AR mirror, secondary boot disk);
+  README `pipelined`/`epochs`/`keep_warm` + Performance tuning section.
+
+### Fixed (from PR #1049 review)
+- **Async `close()` blocks + cancels by default** (`async_fleet.py`): explicit
+  `close()` / `__aexit__` now `shutdown(wait=True, cancel_futures=True)` so no
+  non-daemon worker thread outlives the close; `__del__` keeps `wait=False` to
+  avoid hanging during GC/finalization.
+- **Explicit empty registry honored** (`fleet.py`): `SandboxFleet(..., registry=ClusterRegistry([]))`
+  no longer falls back to a default ambient `Cluster` (which loads kube-config and
+  failed CI where none exists). `ClusterRegistry` defines `__len__`, so the old
+  `registry or default` treated an empty registry as falsy — now `is not None`.
+  This was the failing `presubmit-agent-sandbox-unit-test` (two `test_registry_rewrite`
+  tests passed locally only because a kube-config was present).
+- **Pipelined peak-pod estimate** (`capacity.py`): `plan.total_warm_pods` for the
+  pipelined branch now reports `2 × window × replicas` (double-buffered: current +
+  prefetch window), matching the x2 per-node disk estimate, instead of one window.
+- **`_warm_entry` honors `wait=True` on reuse** (`fleet.py`): an already-warm image
+  no longer skips the readiness wait when re-warmed with `wait=True` (a prior warm
+  may have used `wait=False`), so the "optionally wait for readiness" contract holds.
+- **`plan_benchmark` validates numeric args** (`capacity.py`): raises `ValueError`
+  for `cpu_request_milli < 1` (was `ZeroDivisionError`), `max_pool < 1`,
+  `avg_image_gb <= 0`, and `disk_headroom` outside `[0, 1)`.
+- **`_disk_spec` docstring corrected** (`fleet.py`): documents that `usable` is
+  `None` (disk cap disabled) unless *both* disk hints are set.
+- **Epoch teardown on failure** (`fleet.py`, `async_fleet.py`): a non-final
+  `epochs>1` pass that raised left warm pools/claims resident (only the last epoch
+  carried `teardown=True`). Both fleets now tear down on a mid-run epoch error when
+  `keep_warm=False`.
+- **Warm-pool replica reconcile + delta reserve** (`resources.py`, `fleet.py`):
+  `create_warmpool(..., reconcile=True)` upserts `spec.replicas` on 409 so a reused
+  pool that needs *more* replicas converges instead of being pinned at its old size
+  (which hung `wait_for_pool_ready`); `_warm_entry` reserves only the delta so reuse
+  never double-counts `active_replicas`. The on-demand claim path keeps the prior
+  idempotent-no-op behavior (no patch on every reused claim).
+- **Bounded async window warming** (`async_fleet.py`): `sliding`/`pipelined` warm a
+  window via `fleet.warm_images` (capped by `max_concurrent`) instead of one
+  `to_thread` per image, so a large window can't fan out hundreds of concurrent API
+  watches.
+- **Registry rewrite normalizes explicit Docker Hub official images**
+  (`registry_rewrite.py`): `docker.io/ubuntu` now mirrors to the same
+  `library/ubuntu` path as the implicit `ubuntu` form.
+- **`warm_images` de-duplicates** its input (`fleet.py`) so a caller's duplicate
+  image can't warm the same pool from two threads at once.
+- **Capacity pipelined disk estimate is per-node** (`capacity.py`): reports
+  `ceil(window/nodes) * replicas * gb * 2` (double-buffer) instead of a cluster
+  total, matching the planner's per-node fit budget.
+- **Tooling**: the capacity wizard forwards `--cpu-request`/`--max-warmpool-size`
+  to the runner (`plan_capacity.py`); the load-test harness closes its fleet even
+  if planning fails (`loadtest.py`); the SWE-bench runner rejects
+  `--tasks-per-image > 1` (it executes one task/image — use `loadtest.py`).
+
 ### Changed / hardening (from PR #1000 review)
 - **Prometheus is now an optional `metrics` extra** (`pyproject.toml`,
   `observability.py`): moved off the core deps, and the `asrl_*` collectors are
@@ -93,7 +220,7 @@ Sandbox `v0.5.0rc1` (v1beta1).
   `examples/deepswe_eval_nb.ipynb` (no-model R2E-Gym-on-warm-pools demo),
   `examples/rl_integration.md` (tunix / R2E-Gym / TorchRL / SkyRL).
 - **Docs**: README, `docs/architecture.md`, this changelog.
-- **Tests**: 114 mocked unit tests (sizing, config, resources incl. watch-based
+- **Tests**: 220 mocked unit tests (sizing incl. disk-aware, config, resources incl. watch-based
   pool readiness + fail-fast on terminal errors, cluster, sources, placement,
   fleet incl. 2-cluster routing + acquire rollback + idempotent release,
   strategies/parallel, preflight, prepull, async, swebench incl. `keep_row`,

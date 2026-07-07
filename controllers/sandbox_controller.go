@@ -29,7 +29,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -50,6 +49,10 @@ import (
 
 const (
 	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
+	// value on Pods, so per-reconcile pod lookups are O(1) instead of a
+	// linear label-match over every pod in the namespace.
+	podSandboxNameHashIndex = ".metadata.labels[agents.x-k8s.io/sandbox-name-hash]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )
@@ -684,17 +687,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
 	defer end()
 
-	// List all pods with the pool label matching the warm pool name hash
+	// List all pods with the pool label matching the warm pool name hash,
+	// via the cache field index registered in SetupWithManager — a plain
+	// label-selector List here degrades to an O(pods-in-namespace) scan.
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxLabel: nameHash,
-	})
-
-	if err := r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     sandbox.Namespace,
-	}); err != nil {
+	if err := r.List(ctx, podList,
+		client.InNamespace(sandbox.Namespace),
+		client.MatchingFields{podSandboxNameHashIndex: nameHash},
+	); err != nil {
 		logger.Error(err, "Failed to list pods")
 	}
 
@@ -1288,6 +1289,16 @@ func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, podSandboxNameHashIndex,
+		func(obj client.Object) []string {
+			if v, ok := obj.GetLabels()[sandboxLabel]; ok {
+				return []string{v}
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("failed to index pods by sandbox label: %w", err)
+	}
+
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{

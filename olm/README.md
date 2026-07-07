@@ -29,7 +29,7 @@ CRDs, ClusterRoles, and the controller Deployment in this module are **copies** 
 | --- | --- | --- |
 | API types and kubebuilder markers | [`api/`](../api/), [`extensions/api/`](../extensions/api/) | Edit Go types and controller RBAC markers |
 | Generated install YAML | [`k8s/`](../k8s/) (`crds/`, `rbac.generated.yaml`, `controller.yaml`, `extensions.controller.yaml`, …) | From the **repo root**: `make fix-go-generate` (or `make all`) |
-| Operator SDK / OLM config | `olm/config/` | From **this directory**: `make manifests` or `make copy-k8s-config` |
+| Operator SDK / OLM config | `olm/config/` | From the **repo root**: `make fix-go-generate` (or `make fix-olm-manifests`); equivalent to `make manifests` in this directory |
 
 Contributors should **not** hand-edit the synced paths below. Change the upstream API or manifests, regenerate `k8s/`, then refresh the operator config.
 
@@ -55,9 +55,8 @@ Other `make` targets (`test`, `deploy`, `bundle`, …) depend on `manifests` and
 
 ### Typical workflow
 
-1. Change API or controller code in the parent repo; run `make fix-go-generate` at the repo root and commit the updated `k8s/` output.
-2. `cd olm` and run `make manifests`.
-3. Commit the updated `config/crd/bases/`, `config/rbac/`, and `config/manager/manager.yaml` together with any OLM bundle changes (`make bundle` when publishing).
+1. Change API or controller code in the parent repo; run `make fix-go-generate` at the repo root. This regenerates `k8s/` and syncs `olm/config/` (via [`dev/tools/sync-olm-manifests`](../dev/tools/sync-olm-manifests) in [`codegen.go`](../codegen.go)).
+2. Commit the updated `k8s/` output and synced `config/crd/bases/`, `config/rbac/`, and `config/manager/manager.yaml` together with any OLM bundle changes (`make bundle` when publishing).
 
 ### Operator-only config (safe to edit)
 

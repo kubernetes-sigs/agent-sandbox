@@ -42,7 +42,7 @@ This repository provides specialized instructions for AI agents in the standard 
 
 All standard tasks go through the [Makefile](Makefile). Prefer `make` targets over invoking tools directly so CI and local runs stay consistent.
 
-- `make all` — runs `fix-go-generate`, `fix-api-docs`, `build`, `lint-go`, `lint-api`, `test-unit`, `toc-verify`. Run this before sending a PR.
+- `make all` — runs `fix-go-generate`, `fix-api-docs`, `build`, `lint-go`, `lint-api`, `test-unit`, `toc-verify`, `verify-olm`. Run this before sending a PR.
 - `make build` — compiles `bin/manager` from `cmd/agent-sandbox-controller`.
 - `make test-unit` — runs Go unit tests with `-race` enabled and the Python unit test suites via `dev/tools/test-unit`.
 - `make test-e2e` / `make test-e2e-race` — e2e suite against a kind cluster (much slower; e2e is not raced by default).
@@ -51,7 +51,7 @@ All standard tasks go through the [Makefile](Makefile). Prefer `make` targets ov
 - `make toc-verify` / `make toc-update` — keep markdown TOCs in sync.
 - `make deploy-kind` — create a local kind cluster named `agent-sandbox`, build images, deploy the controller, and write the kubeconfig to `bin/KUBECONFIG` (which the e2e suite expects). `EXTENSIONS=true make deploy-kind` to include the extension controllers; `CONTROLLER_ARGS="..."` passes flags to the controller; `CONTROLLER_ONLY=true` builds/pushes only the controller image (skipping example sidecars). `make delete-kind` tears it down.
 
-After editing anything in [api/](api/), [extensions/api/](extensions/api/), or kubebuilder markers in [controllers/](controllers/) / [extensions/controllers/](extensions/controllers/), run `make all` (or at least `make fix-go-generate`) to regenerate CRDs in [k8s/crds/](k8s/crds/), RBAC manifests in [k8s/](k8s/), deepcopy code, and the typed clients. The exact directives live in [codegen.go](codegen.go). Commit the regenerated output alongside the source change — never hand-edit `zz_generated_*.go`, `*.generated.yaml`, or files under [clients/k8s/](clients/k8s/).
+After editing anything in [api/](api/), [extensions/api/](extensions/api/), or kubebuilder markers in [controllers/](controllers/) / [extensions/controllers/](extensions/controllers/), run `make all` (or at least `make fix-go-generate`) to regenerate CRDs in [k8s/crds/](k8s/crds/), RBAC manifests in [k8s/](k8s/), deepcopy code, the typed clients, and synced OLM config under [olm/config/](olm/config/). The exact directives live in [codegen.go](codegen.go). Commit the regenerated output alongside the source change — never hand-edit `zz_generated_*.go`, `*.generated.yaml`, or files under [clients/k8s/](clients/k8s/).
 
 ## Docs site mounts
 

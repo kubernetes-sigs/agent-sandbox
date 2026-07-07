@@ -100,20 +100,22 @@ help: ## Display this help.
 
 # Parent k8s/ tree (repo root, one level above this module).
 K8S_ROOT ?= ../k8s
+# Output tree for copy-k8s-config (default config/; override for verify dry-runs).
+CONFIG_DIR ?= config
 
 .PHONY: copy-k8s-config
 copy-k8s-config: ## Copy ../k8s into config/ (CRDs, RBAC .generated.yaml → role names, extensions binding, support/manager).
-	mkdir -p config/crd/bases
-	rm -rf config/crd/bases/*
-	cp $(K8S_ROOT)/crds/*.yaml config/crd/bases/
+	mkdir -p $(CONFIG_DIR)/crd/bases
+	rm -rf $(CONFIG_DIR)/crd/bases/*
+	cp $(K8S_ROOT)/crds/*.yaml $(CONFIG_DIR)/crd/bases/
 	@{ \
 		echo 'resources:'; \
-		for f in config/crd/bases/*.yaml; do echo "- bases/$$(basename "$$f")"; done; \
-	} > config/crd/kustomization.yaml
-	cp $(K8S_ROOT)/rbac.generated.yaml config/rbac/role.yaml
-	cp $(K8S_ROOT)/extensions-rbac.generated.yaml config/rbac/extensions_role.yaml
-	cp $(K8S_ROOT)/extensions.yaml config/rbac/extensions_role_binding.yaml
-	go run ./hack/sync-k8s-manifests -controller $(K8S_ROOT)/controller.yaml -extensions $(K8S_ROOT)/extensions.controller.yaml -support-out config/rbac/support.yaml -manager-out config/manager/manager.yaml
+		for f in $(CONFIG_DIR)/crd/bases/*.yaml; do echo "- bases/$$(basename "$$f")"; done; \
+	} > $(CONFIG_DIR)/crd/kustomization.yaml
+	cp $(K8S_ROOT)/rbac.generated.yaml $(CONFIG_DIR)/rbac/role.yaml
+	cp $(K8S_ROOT)/extensions-rbac.generated.yaml $(CONFIG_DIR)/rbac/extensions_role.yaml
+	cp $(K8S_ROOT)/extensions.yaml $(CONFIG_DIR)/rbac/extensions_role_binding.yaml
+	go run ./hack/sync-k8s-manifests -controller $(K8S_ROOT)/controller.yaml -extensions $(K8S_ROOT)/extensions.controller.yaml -support-out $(CONFIG_DIR)/rbac/support.yaml -manager-out $(CONFIG_DIR)/manager/manager.yaml
 
 .PHONY: manifests
 manifests: copy-k8s-config ## Refresh config/ YAML from $(K8S_ROOT) (same layout as manual copy from k8s/).
@@ -300,6 +302,7 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	$(OPERATOR_SDK) bundle validate ./bundle
+	hack/strip-csv-webhookdefs bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml webhookdefinitions
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.

@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import os
-import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from kubernetes import client, config
 
@@ -65,8 +65,10 @@ def create_claim(index):
             plural="sandboxclaims",
             body=body
         )
+        return True
     except Exception as e:
         print(f"Error creating {name}: {e}")
+        return False
 
 if __name__ == "__main__":
     print(f"Starting load test: {RATE_PER_SECOND} claim/sec for {TEST_DURATION_MINUTES}m")
@@ -75,29 +77,37 @@ if __name__ == "__main__":
     end_time = start_time + (TEST_DURATION_MINUTES * 60)
     interval = 1.0 / RATE_PER_SECOND
     next_t = start_time
-    counter = 0
+    attempts = 0
+    successes = 0
+    futures = []
 
     try:
-        while time.time() < end_time:
-            # Fire and forget the creation in a thread to avoid blocking the clock
-            threading.Thread(target=create_claim, args=(counter,), daemon=True).start()
-            counter += 1
+        # Limit concurrency to RATE_PER_SECOND * 2 workers
+        with ThreadPoolExecutor(max_workers=RATE_PER_SECOND * 2) as executor:
+            while time.time() < end_time:
+                # Submit claim creation to the pool
+                futures.append(executor.submit(create_claim, attempts))
+                attempts += 1
 
-            next_t += interval
-            delay = next_t - time.time()
-            if delay > 0:
-                time.sleep(delay)
-            else:
-                next_t = time.time()  # fell behind; don't burst to catch up
+                next_t += interval
+                delay = next_t - time.time()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    next_t = time.time()  # fell behind; don't burst to catch up
 
-            if counter % 10 == 0:
-                print(f"Progress: {counter} claims created...")
-
+                if attempts % 10 == 0:
+                    print(f"Progress: {attempts} claim attempts scheduled...")
     except KeyboardInterrupt:
         print("Test stopped by user.")
 
-    print(f"Load test complete. Total claims created: {counter}")
-    # The last claims expire CLAIM_TTL_SECONDS after they were created; wait that long so
-    # shutdownPolicy=Delete can clean up the final batch (claims + sandboxes) before exit.
-    print(f"Waiting {CLAIM_TTL_SECONDS}s for the final claims to expire and self-delete...")
-    time.sleep(CLAIM_TTL_SECONDS)
+    # Wait for all scheduled tasks to complete and count successes
+    # This runs even if loop was interrupted, after the executor shutdown completes
+    for future in as_completed(futures):
+        try:
+            if future.result():
+                successes += 1
+        except Exception as e:
+            print(f"Unhandled error in create_claim task: {e}")
+
+    print(f"Load test complete. {successes}/{attempts} claims created successfully.")

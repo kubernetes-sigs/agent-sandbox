@@ -6,6 +6,8 @@ metadata:
   labels:
     app: ${WARM_POOL_NAME}
 spec:
-  replicas: 0
+  # replicas is omitted so that KEDA autoscaling can control it.
+  # If specified here, any re-application of this manifest would stomp
+  # the replica count back to that value.
   sandboxTemplateRef:
     name: ${TEMPLATE_NAME}

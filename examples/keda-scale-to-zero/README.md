@@ -65,7 +65,7 @@ ready supply ahead of demand.
    envsubst < sandboxwarmpool.yaml | kubectl apply -f -
    ```
 
-   The warm pool starts at `replicas: 0` — KEDA takes ownership of this field.
+   The warm pool starts at `replicas: 1` (the default when omitted) before KEDA's ScaledObject is applied. Once KEDA is applied, it takes ownership of this field. We omit `replicas` in the manifest to avoid stomping the autoscaled count back to 0 on subsequent updates.
 
 3. **Expose the controller metric via GMP.** Apply `pod-monitoring.yaml` to scrape the controller's
    `/metrics` endpoint. This ingests `agent_sandbox_claim_creation_total{warmpool_name="..."}` into
@@ -103,7 +103,7 @@ ready supply ahead of demand.
      sandboxes"; set it ≥ your per-sandbox replenishment time.
    - **`activationThreshold`** — the 0 ↔ 1 gate, compared to the **raw** total rate.
    - **query** — `sum(rate(...) >= 0) or vector(0)`; the `>= 0` per-series filter drops stale
-     `NaN` sub-series (see Troubleshooting).
+     `NaN` sub-series.
 
 6. **Generate load** to trigger scaling:
 
@@ -115,7 +115,7 @@ ready supply ahead of demand.
 
    ```bash
    kubectl get scaledobject -n $NAMESPACE
-   kubectl get hpa -n $NAMESPACE -w   # the KEDA-managed HPA exists only while replicas >= 1
+   kubectl get hpa -n $NAMESPACE -w   # the KEDA-managed HPA persists even at zero replicas
    kubectl get swp -n $NAMESPACE -w   # pool: 0 -> N under load, back to 0 after load + cooldownPeriod
    ```
 
@@ -133,9 +133,10 @@ ready supply ahead of demand.
   held as ready sandboxes. Set `threshold ≈ 1/T`, where `T` is the per-sandbox replenishment time
   (Sandbox → Pod `Ready`, from `agent_sandbox_creation_latency_ms`). Lower `threshold` → bigger pool.
   Because `pool = rate × T`, cutting `T` (pre-pull the image) helps more than shrinking `threshold`.
-- **Activation is instant; full size isn't**: KEDA wakes `0 → 1` immediately, but the HPA scales
-  `1 → N` only once `rate(...[1m])` fills its ~1-minute window — so the first burst after idle ramps
-  over ~1–2 min and may cold-start meanwhile.
+- **Activation is not instant; full size takes time too**: The first-ever activation takes ~1 scrape
+  interval for the counter series to be born. KEDA wakes `0 → 1` once the metric is scraped and
+  queryable, but the HPA scales `1 → N` only once `rate(...[1m])` fills its window — so the first burst
+  after idle ramps over ~1–2 min and may cold-start meanwhile.
 - **Idle is free**: with no claims the rate falls to 0 and KEDA scales the pool back to 0 after
   `cooldownPeriod`.
 

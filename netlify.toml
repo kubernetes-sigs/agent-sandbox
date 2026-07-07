@@ -4,7 +4,7 @@
   command = "npm ci && hugo build -e production"
 
 [build.environment]
-  HUGO_VERSION = "0.150.0"
+  HUGO_VERSION = "0.163.3"
 
 [context.production.environment]
   HUGO_ENV = "production"

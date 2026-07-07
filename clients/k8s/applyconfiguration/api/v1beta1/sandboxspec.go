@@ -26,22 +26,16 @@ import (
 //
 // SandboxSpec defines the desired state of Sandbox.
 type SandboxSpecApplyConfiguration struct {
-	// podTemplate describes the pod spec that will be used to create an agent sandbox.
-	PodTemplate *PodTemplateApplyConfiguration `json:"podTemplate,omitempty"`
-	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
-	// Every claim in this list must have at least one matching access mode with a provisioner volume.
-	VolumeClaimTemplates []PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
+	// SandboxBlueprint defines the workload configuration shared with SandboxTemplate.
+	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
+	// Since moving fields out is breaking, if unsure whether a new field should be shared,
+	// define it in SandboxSpec (or SandboxTemplateSpec) first and promote it here later.
+	SandboxBlueprintApplyConfiguration `json:",inline"`
 	// Lifecycle defines when and how the sandbox should be shut down.
 	LifecycleApplyConfiguration `json:",inline"`
 	// operatingMode specifies the desired operational state of the Sandbox.
 	// Defaults to Running if not specified.
 	OperatingMode *apiv1beta1.SandboxOperatingMode `json:"operatingMode,omitempty"`
-	// service controls whether the controller should automatically create a
-	// headless Service for this Sandbox.
-	// When unset, the controller preserves existing Services for backward
-	// compatibility but does not create new ones. Set to true to enable or false
-	// to explicitly disable and remove the Service.
-	Service *bool `json:"service,omitempty"`
 }
 
 // SandboxSpecApplyConfiguration constructs a declarative configuration of the SandboxSpec type for use with
@@ -54,7 +48,7 @@ func SandboxSpec() *SandboxSpecApplyConfiguration {
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the PodTemplate field is set to the value of the last call.
 func (b *SandboxSpecApplyConfiguration) WithPodTemplate(value *PodTemplateApplyConfiguration) *SandboxSpecApplyConfiguration {
-	b.PodTemplate = value
+	b.SandboxBlueprintApplyConfiguration.PodTemplate = value
 	return b
 }
 
@@ -66,8 +60,16 @@ func (b *SandboxSpecApplyConfiguration) WithVolumeClaimTemplates(values ...*Pers
 		if values[i] == nil {
 			panic("nil value passed to WithVolumeClaimTemplates")
 		}
-		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, *values[i])
+		b.SandboxBlueprintApplyConfiguration.VolumeClaimTemplates = append(b.SandboxBlueprintApplyConfiguration.VolumeClaimTemplates, *values[i])
 	}
+	return b
+}
+
+// WithService sets the Service field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Service field is set to the value of the last call.
+func (b *SandboxSpecApplyConfiguration) WithService(value bool) *SandboxSpecApplyConfiguration {
+	b.SandboxBlueprintApplyConfiguration.Service = &value
 	return b
 }
 
@@ -92,13 +94,5 @@ func (b *SandboxSpecApplyConfiguration) WithShutdownPolicy(value apiv1beta1.Shut
 // If called multiple times, the OperatingMode field is set to the value of the last call.
 func (b *SandboxSpecApplyConfiguration) WithOperatingMode(value apiv1beta1.SandboxOperatingMode) *SandboxSpecApplyConfiguration {
 	b.OperatingMode = &value
-	return b
-}
-
-// WithService sets the Service field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the Service field is set to the value of the last call.
-func (b *SandboxSpecApplyConfiguration) WithService(value bool) *SandboxSpecApplyConfiguration {
-	b.Service = &value
 	return b
 }

@@ -48,10 +48,10 @@ import (
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
 	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
 	// value on Pods, so per-reconcile pod lookups are O(1).
-	podSandboxNameHashIndex = ".metadata.labels[" + sandboxLabel + "]"
+	podSandboxNameHashIndex     = ".metadata.labels[" + sandboxLabel + "]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )

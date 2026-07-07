@@ -44,6 +44,7 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 	return fake.NewClientBuilder().
 		WithScheme(Scheme).
 		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
 		WithRuntimeObjects(initialObjs...).
 		Build()
 }

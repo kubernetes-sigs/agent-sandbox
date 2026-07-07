@@ -695,6 +695,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		client.MatchingFields{podSandboxNameHashIndex: nameHash},
 	); err != nil {
 		logger.Error(err, "Failed to list pods")
+		return nil, fmt.Errorf("pod list failed: %w", err)
 	}
 
 	if len(podList.Items) > 1 {
@@ -1285,15 +1286,20 @@ func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
 }
 
+// podSandboxNameHashIndexer extracts the sandboxLabel value for the
+// podSandboxNameHashIndex cache field index. Shared with tests so fake
+// clients register the same index the manager does.
+func podSandboxNameHashIndexer(obj client.Object) []string {
+	if v, ok := obj.GetLabels()[sandboxLabel]; ok {
+		return []string{v}
+	}
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, podSandboxNameHashIndex,
-		func(obj client.Object) []string {
-			if v, ok := obj.GetLabels()[sandboxLabel]; ok {
-				return []string{v}
-			}
-			return nil
-		}); err != nil {
+		podSandboxNameHashIndexer); err != nil {
 		return fmt.Errorf("failed to index pods by sandbox label: %w", err)
 	}
 

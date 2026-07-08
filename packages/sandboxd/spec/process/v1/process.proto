@@ -20,6 +20,8 @@ service ProcessService {
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
 
   // WriteStdin sends standard input bytes or EOF to an active running process.
+  // Note: Any stdout/stderr produced by the process in response to this input
+  // flows continuously through the active Start stream rather than WriteStdinResponse.
   rpc WriteStdin(WriteStdinRequest) returns (WriteStdinResponse);
 
   // SendSignal delivers a POSIX signal to a running process group.
@@ -93,6 +95,9 @@ message WriteStdinRequest {
   }
 }
 
+// WriteStdinResponse is returned on successful delivery of standard input.
+// It is intentionally empty because process output (stdout/stderr) streams
+// continuously through the StartResponse stream to prevent race conditions.
 message WriteStdinResponse {
 }
 

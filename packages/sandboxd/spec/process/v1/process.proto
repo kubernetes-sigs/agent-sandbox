@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package process.v1;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1";
+option java_multiple_files = true;
+option java_package = "io.sandboxd.packages.sandboxd.spec.process";
+
+// ProcessService manages process execution, lifecycle, signals, and interactive terminals (PTY).
+service ProcessService {
+  // Start runs a command and streams its stdout/stderr events in real time.
+  // Use for long-running or interactive processes (shells, servers, interactive commands).
+  // The stream remains open until the process terminates and sends an ExitEvent.
+  rpc Start(StartRequest) returns (stream StartResponse);
+
+  // Execute runs a short-lived command synchronously to completion and returns stdout,
+  // stderr, and the exit code atomically. Use when real-time streaming is not required.
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+
+  // WriteStdin sends standard input bytes or EOF to an active running process.
+  // Note: Any stdout/stderr produced by the process in response to this input
+  // flows continuously through the active Start stream rather than WriteStdinResponse.
+  rpc WriteStdin(WriteStdinRequest) returns (WriteStdinResponse);
+
+  // SendSignal delivers a POSIX signal to a running process group.
+  // Errors (e.g., process not found or permission denied) are surfaced via standard
+  // gRPC status codes (NOT_FOUND, PERMISSION_DENIED).
+  rpc SendSignal(SendSignalRequest) returns (SendSignalResponse);
+
+  // ResizeTTY dynamically resizes the pseudo-terminal window of a running process.
+  rpc ResizeTTY(ResizeTTYRequest) returns (ResizeTTYResponse);
+}
+
+enum Signal {
+  SIGNAL_UNSPECIFIED = 0;
+  SIGNAL_SIGINT      = 2;
+  SIGNAL_SIGKILL     = 9;
+  SIGNAL_SIGTERM     = 15;
+}
+
+message PTY {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message ProcessConfig {
+  repeated string command = 1;
+  map<string, string> env_vars = 2;
+  optional string cwd = 3;
+}
+
+message StartRequest {
+  ProcessConfig config = 1;
+  optional PTY pty = 2;
+}
+
+message InitEvent {
+  int32 process_id = 1;
+}
+
+message ExitEvent {
+  int32 exit_code = 1;
+}
+
+message StartResponse {
+  oneof event {
+    InitEvent init = 1;
+    bytes stdout = 2;
+    bytes stderr = 3;
+    ExitEvent exit = 4;
+  }
+}
+
+message ExecuteRequest {
+  ProcessConfig config = 1;
+}
+
+// ExecuteResponse contains the complete output of a synchronously executed command.
+message ExecuteResponse {
+  // Process exit code (0 indicates success).
+  int32 exit_code = 1;
+  // Combined standard output buffer produced during execution.
+  bytes stdout = 2;
+  // Combined standard error buffer produced during execution.
+  bytes stderr = 3;
+}
+
+message WriteStdinRequest {
+  int32 process_id = 1;
+  oneof payload {
+    bytes input = 2;
+    google.protobuf.Empty eof = 3;
+  }
+}
+
+// WriteStdinResponse is returned on successful delivery of standard input.
+// It is intentionally empty because process output (stdout/stderr) streams
+// continuously through the StartResponse stream to prevent race conditions.
+message WriteStdinResponse {
+}
+
+message SendSignalRequest {
+  int32 process_id = 1;
+  Signal signal = 2;
+}
+
+// SendSignalResponse is returned on successful delivery of a signal.
+// Failure cases are communicated via gRPC status codes rather than fields in this message.
+message SendSignalResponse {
+}
+
+message ResizeTTYRequest {
+  int32 process_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message ResizeTTYResponse {
+}
+

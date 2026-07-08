@@ -5,7 +5,7 @@
 ### Prerequisites
 - Running **GKE** cluster (**Standard** or **Autopilot**))
 - `kubectl` access to a Kubernetes **GKE Standard** or **GKE Autopilot** cluster
-- Agent-sandbox installed on GKE. Here is the ([Installation Guide](../../getting_started/))
+- Agent-sandbox installed on GKE. Here is the [Installation Guide](https://agent-sandbox.sigs.k8s.io/docs/getting_started/install_prerequisites/)
 
 ## Deploy analytics tools
 
@@ -99,7 +99,7 @@ print(f"<IMG>{img_str}</IMG>")
 
 In the end the code prints an encoded image. Inside the tool definition the regex expression is used to extract this string, decode, and plot it.
 
-![](imgs/analytics-output.png)
+![Analytics output showing a bar chart of purchase amounts by location](https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/examples/analytics-tool/imgs/analytics-output.png)
 
 ## Cleanup
 

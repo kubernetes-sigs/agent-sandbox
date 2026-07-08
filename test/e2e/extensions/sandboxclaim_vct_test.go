@@ -222,13 +222,15 @@ func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, na
 		Spec: extensionsv1beta1.SandboxTemplateSpec{
 			NetworkPolicyManagement:    extensionsv1beta1.NetworkPolicyManagementUnmanaged,
 			VolumeClaimTemplatesPolicy: policy,
-			VolumeClaimTemplates:       vcts,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "pause",
-							Image: "registry.k8s.io/pause:3.10",
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: vcts,
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "pause",
+								Image: "registry.k8s.io/pause:3.10",
+							},
 						},
 					},
 				},

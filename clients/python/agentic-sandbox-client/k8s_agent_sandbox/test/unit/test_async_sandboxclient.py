@@ -29,6 +29,9 @@ import pytest
 httpx = pytest.importorskip("httpx")
 pytest.importorskip("kubernetes_asyncio")
 
+from kubernetes import client as sync_client
+from kubernetes_asyncio import client as async_client
+
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient, _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
@@ -288,6 +291,43 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_helper_instance.delete_sandbox_claim.assert_any_call(
             "claim-xyz", "other-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
         )
+
+    def test_atexit_cleanup_does_not_fall_back_to_default_kubeconfig_with_injected_api_client(self):
+        """Atexit cleanup should preserve the cluster targeted by an injected ApiClient.
+
+        The atexit hook uses the synchronous K8sHelper (see
+        _sync_configuration_from_async), so this asserts on a real sync
+        kubernetes.client.Configuration mirroring the injected async one,
+        rather than object identity across the two client libraries.
+        """
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.verify_ssl = False
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {"Impersonate-User": "tenant-a"}
+        injected_api_client.cookie = "session=abc"
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper:
+            client._atexit_cleanup()
+
+        MockHelper.assert_called_once()
+        atexit_api_client = MockHelper.call_args.kwargs["api_client"]
+        self.assertIsInstance(atexit_api_client, sync_client.ApiClient)
+        self.assertEqual(atexit_api_client.configuration.host, "https://tenant-a.example.com")
+        self.assertFalse(atexit_api_client.configuration.verify_ssl)
+        self.assertEqual(atexit_api_client.cookie, "session=abc")
+        self.assertEqual(atexit_api_client.default_headers.get("Impersonate-User"), "tenant-a")
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""

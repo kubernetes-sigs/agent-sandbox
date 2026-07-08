@@ -17,19 +17,21 @@ set -e
 
 export KIND_CLUSTER_NAME="agent-sandbox"
 
-# Navigate to root to build/deploy controller if needed
-# Assuming this script is run from examples/nullclaw-sandbox
-cd ../../
+# Resolve paths from the script location so it works from any cwd
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+cd "${REPO_ROOT}"
 # Only build/deploy if user asks or if we want to ensure latest controller
 # make build
 # make deploy-kind
-cd examples/nullclaw-sandbox
+cd "${SCRIPT_DIR}"
 
-echo "Pulling ghcr.io/nullclaw/nullclaw:latest..."
-docker pull ghcr.io/nullclaw/nullclaw:latest
+echo "Pulling ghcr.io/nullclaw/nullclaw:v2026.5.29..."
+docker pull ghcr.io/nullclaw/nullclaw:v2026.5.29
 
-echo "Loading ghcr.io/nullclaw/nullclaw:latest into kind cluster..."
-kind load docker-image ghcr.io/nullclaw/nullclaw:latest --name "${KIND_CLUSTER_NAME}"
+echo "Loading ghcr.io/nullclaw/nullclaw:v2026.5.29 into kind cluster..."
+kind load docker-image ghcr.io/nullclaw/nullclaw:v2026.5.29 --name "${KIND_CLUSTER_NAME}"
 
 echo "Applying config and sandbox resources..."
 kubectl apply -f nullclaw-config.yaml
@@ -56,6 +58,11 @@ trap "kill $PF_PID" EXIT
 sleep 5
 
 echo "Checking Gateway health..."
-curl -sf http://127.0.0.1:3000/health && echo "" || echo "Gateway health check failed"
+if ! curl -sf http://127.0.0.1:3000/health; then
+    echo ""
+    echo "Gateway health check failed" >&2
+    exit 1
+fi
+echo ""
 
 echo "Test finished."

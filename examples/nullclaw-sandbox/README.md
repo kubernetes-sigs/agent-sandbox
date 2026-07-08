@@ -11,7 +11,7 @@ This example demonstrates how to run [Nullclaw](https://github.com/nullclaw/null
 
 1.  (If using Kind) Load the image into Kind:
     ```bash
-    kind load docker-image ghcr.io/nullclaw/nullclaw:latest
+    kind load docker-image ghcr.io/nullclaw/nullclaw:v2026.5.29
     ```
 
 2.  Apply the Sandbox resources:

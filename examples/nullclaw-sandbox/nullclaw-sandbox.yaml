@@ -9,13 +9,18 @@ spec:
         sandbox: nullclaw-sandbox
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
       containers:
         - name: nullclaw
-          image: ghcr.io/nullclaw/nullclaw:latest
+          image: ghcr.io/nullclaw/nullclaw:v2026.5.29
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
+            runAsNonRoot: true
             capabilities:
               drop:
                 - ALL

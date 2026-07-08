@@ -523,19 +523,24 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 
 	readyType := string(sandboxv1beta1.SandboxConditionReady)
 	if meta.IsStatusConditionTrue(sandbox.Status.Conditions, readyType) {
-		// Ready: record a resume only if we anchored one (i.e. it followed a suspend) and the UIDs match.
-		if entry, ok := r.resumeStartTimes.Load(key); ok && entry.uid == sandbox.UID {
+		// Ready: record a resume only if we anchored one (i.e. it followed a suspend).
+		// Always clear the entry once loaded — including a stale one whose UID no
+		// longer matches (left by a same-named predecessor) — so it cannot block a
+		// future LoadOrStore anchor for this key.
+		if entry, ok := r.resumeStartTimes.Load(key); ok {
 			r.resumeStartTimes.Delete(key)
-			templateName := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]
-			if templateName == "" {
-				templateName = "unknown"
+			if entry.uid == sandbox.UID {
+				templateName := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]
+				if templateName == "" {
+					templateName = "unknown"
+				}
+				// launch_type persists on the Sandbox
+				launchType := sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel]
+				if launchType == "" {
+					launchType = asmetrics.LaunchTypeUnknown
+				}
+				asmetrics.RecordResumeLatency(entry.timestamp, sandbox.Namespace, templateName, launchType)
 			}
-			// launch_type persists on the Sandbox
-			launchType := sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel]
-			if launchType == "" {
-				launchType = asmetrics.LaunchTypeUnknown
-			}
-			asmetrics.RecordResumeLatency(entry.timestamp, sandbox.Namespace, templateName, launchType)
 		}
 		return
 	}
@@ -543,11 +548,15 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 	// Not yet Ready. Anchor a resume start once, only when leaving a suspended
 	// state (the prior status still carries a Suspended condition, removed later
 	// this reconcile).
-	if meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended)) != nil {
-		r.resumeStartTimes.LoadOrStore(key, resumeTimeEntry{
-			timestamp: time.Now(),
-			uid:       sandbox.UID,
-		})
+	cond := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if cond != nil && cond.Status == metav1.ConditionTrue {
+		newEntry := resumeTimeEntry{timestamp: time.Now(), uid: sandbox.UID}
+		// If a stale entry from a same-named predecessor is present (different UID),
+		// overwrite it so this resume is timed from a fresh start rather than being
+		// blocked by LoadOrStore keeping the old value.
+		if existing, loaded := r.resumeStartTimes.LoadOrStore(key, newEntry); loaded && existing.uid != sandbox.UID {
+			r.resumeStartTimes.Store(key, newEntry)
+		}
 	}
 }
 

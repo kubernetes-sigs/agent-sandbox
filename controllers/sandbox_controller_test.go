@@ -3276,7 +3276,8 @@ func TestRecordResumeLatency(t *testing.T) {
 		sandbox          *sandboxv1beta1.Sandbox
 		oldStatus        *sandboxv1beta1.SandboxStatus
 		wantObservations int
-		wantEntry        bool // whether a timer entry should remain afterwards
+		wantEntry        bool      // whether a timer entry should remain afterwards
+		wantEntryUID     types.UID // if set, the remaining entry must carry this UID
 	}{
 		{
 			name:             "anchors start when leaving suspended, not yet Ready",
@@ -3284,6 +3285,16 @@ func TestRecordResumeLatency(t *testing.T) {
 			oldStatus:        withSuspended(),
 			wantObservations: 0,
 			wantEntry:        true,
+			wantEntryUID:     sandboxUID,
+		},
+		{
+			name:             "overwrites a stale predecessor anchor when leaving suspended",
+			seed:             &resumeTimeEntry{timestamp: time.Now().Add(-time.Hour), uid: types.UID("other-uid")},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus:        withSuspended(),
+			wantObservations: 0,
+			wantEntry:        true,
+			wantEntryUID:     sandboxUID,
 		},
 		{
 			name:             "records latency once Ready after an anchor",
@@ -3308,6 +3319,20 @@ func TestRecordResumeLatency(t *testing.T) {
 			wantEntry:        false,
 		},
 		{
+			name:    "does not anchor if prior Suspended condition was False (canceled suspend)",
+			sandbox: sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus: &sandboxv1beta1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+						Status: metav1.ConditionFalse,
+					},
+				},
+			},
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
 			name:             "suspend clears an in-flight resume timer",
 			seed:             &resumeTimeEntry{timestamp: time.Now(), uid: sandboxUID},
 			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeSuspended, false),
@@ -3321,7 +3346,7 @@ func TestRecordResumeLatency(t *testing.T) {
 			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, true),
 			oldStatus:        empty(),
 			wantObservations: 0,
-			wantEntry:        true,
+			wantEntry:        false,
 		},
 	}
 
@@ -3338,8 +3363,12 @@ func TestRecordResumeLatency(t *testing.T) {
 			if got := testutil.CollectAndCount(asmetrics.ResumeLatency); got != tc.wantObservations {
 				t.Errorf("ResumeLatency observations = %d, want %d", got, tc.wantObservations)
 			}
-			if _, ok := r.resumeStartTimes.Load(key); ok != tc.wantEntry {
+			entry, ok := r.resumeStartTimes.Load(key)
+			if ok != tc.wantEntry {
 				t.Errorf("resumeStartTimes entry present = %v, want %v", ok, tc.wantEntry)
+			}
+			if tc.wantEntryUID != "" && entry.uid != tc.wantEntryUID {
+				t.Errorf("resumeStartTimes entry uid = %v, want %v", entry.uid, tc.wantEntryUID)
 			}
 		})
 	}

@@ -117,6 +117,13 @@ class AsyncSandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         self.k8s_helper = AsyncK8sHelper(api_client=api_client)
+        self._atexit_api_client_configuration = (
+            api_client.configuration if api_client is not None else None
+        )
+        self._atexit_api_client_default_headers = (
+            dict(api_client.default_headers) if api_client is not None else {}
+        )
+        self._atexit_api_client_cookie = api_client.cookie if api_client is not None else None
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
@@ -377,7 +384,9 @@ class AsyncSandboxClient(Generic[T]):
 
         Uses a snapshot of the tracked claims and a fresh :class:`AsyncK8sHelper`
         so that no loop-bound objects from the original client are reused across
-        event loop boundaries. Per-claim failures and top-level errors emit
+        event loop boundaries. When an ApiClient was injected, its Configuration
+        is reused to target the same cluster from the fresh cleanup loop.
+        Per-claim failures and top-level errors emit
         warnings to ``sys.stderr`` rather than raising — atexit cleanup is
         best-effort.
         """
@@ -386,7 +395,15 @@ class AsyncSandboxClient(Generic[T]):
             return
 
         async def _do_cleanup():
-            helper = AsyncK8sHelper()
+            atexit_api_client = None
+            if self._atexit_api_client_configuration is not None:
+                atexit_api_client = async_client.ApiClient(
+                    configuration=self._atexit_api_client_configuration,
+                    cookie=self._atexit_api_client_cookie,
+                )
+                for name, value in self._atexit_api_client_default_headers.items():
+                    atexit_api_client.set_default_header(name, value)
+            helper = AsyncK8sHelper(api_client=atexit_api_client)
             try:
                 async def _delete_one(ns, claim_name):
                     try:
@@ -402,6 +419,8 @@ class AsyncSandboxClient(Generic[T]):
                 await asyncio.gather(*(_delete_one(ns, claim_name) for ns, claim_name in claims))
             finally:
                 await helper.close()
+                if atexit_api_client is not None:
+                    await atexit_api_client.close()
 
         try:
             asyncio.run(_do_cleanup())

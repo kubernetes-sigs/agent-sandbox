@@ -252,6 +252,44 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-xyz", "other-ns")
         mock_helper_instance.close.assert_called_once()
 
+    def test_atexit_cleanup_does_not_fall_back_to_default_kubeconfig_with_injected_api_client(self):
+        """Atexit cleanup should preserve the cluster targeted by an injected ApiClient."""
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_configuration = MagicMock(name="InjectedConfiguration")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {"Impersonate-User": "tenant-a"}
+        injected_api_client.cookie = "session=abc"
+        atexit_api_client = MagicMock(name="AtexitApiClient")
+        atexit_api_client.close = AsyncMock()
+        atexit_api_client.set_default_header = MagicMock()
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = AsyncMock()
+        mock_helper_instance.close = AsyncMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper, patch(
+            "k8s_agent_sandbox.async_sandbox_client.async_client.ApiClient",
+            return_value=atexit_api_client,
+        ) as MockApiClient:
+            client._atexit_cleanup()
+
+        MockApiClient.assert_called_once_with(
+            configuration=injected_configuration,
+            cookie="session=abc",
+        )
+        atexit_api_client.set_default_header.assert_called_once_with(
+            "Impersonate-User", "tenant-a"
+        )
+        MockHelper.assert_called_once_with(api_client=atexit_api_client)
+
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
         self.client._active_connection_sandboxes = {}

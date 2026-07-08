@@ -1795,9 +1795,12 @@ func (r *SandboxClaimReconciler) drainObservedTime(claim *extensionsv1beta1.Sand
 // backfillFirstReadyAnnotation stamps the ClaimFirstReadyAnnotation with a
 // sentinel value when the claim was previously Ready but the annotation is
 // missing (e.g. a prior Patch failed). This arms the persistent guard so that
-// future readiness flaps cannot double-count metrics. The sentinel "unknown"
-// is used instead of a timestamp to signal that the actual first-ready time
-// is unknown.
+// future readiness flaps are highly unlikely to double-count metrics. Double
+// counting would only happen if both the original happy-path stamp and this
+// backfill Patch fail exactly at the transitions between both NotReady->Ready
+// and Ready->NotReady, as well as all reconcile cycles where it stays Ready. The
+// sentinel "unknown" is used instead of a timestamp to signal that the actual
+// first-ready time is unknown.
 func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
 	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
 		return nil

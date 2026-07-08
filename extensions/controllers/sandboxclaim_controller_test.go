@@ -38,6 +38,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -3531,16 +3532,20 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
 
-	// Run reconcile
-	_, err := reconciler.Reconcile(context.Background(), req)
-	expectedErr := "triggered adoption completion for sandbox adopted-sb, retry"
-	if err == nil {
-		t.Fatal("Expected reconcile to fail with cache lag error, but it succeeded")
-	} else if err.Error() != expectedErr {
-		t.Errorf("Expected error %q, got: %q", expectedErr, err.Error())
+	// Run reconcile. Adoption is triggered on this pass, but the sandbox is not yet
+	// observed as controlled by the claim (cache lag), so the reconcile must NOT finalize
+	// the claim and must requeue to try again. Post-#1107 the requeue is a bounded
+	// fixed-delay requeue with a nil error (not an exponentially-rate-limited error), so
+	// the compounding backoff that inflated adoption tail latency no longer occurs.
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected reconcile to requeue without error during cache lag, got error: %v", err)
+	}
+	if res.RequeueAfter != adoptionCacheLagRequeueDelay {
+		t.Fatalf("Expected the bounded cache-lag requeue (%v), got RequeueAfter=%v", adoptionCacheLagRequeueDelay, res.RequeueAfter)
 	}
 
-	// Verify that the claim status was NOT updated with the sandbox name (due to error)
+	// Verify that the claim status was NOT updated with the sandbox name (adoption deferred)
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 		t.Fatalf("failed to get claim: %v", err)
@@ -3603,6 +3608,133 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	}
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
 		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
+	}
+}
+
+// TestSandboxClaimAdoptionCacheLagDoesNotRepatch verifies that while the informer cache
+// keeps returning the stale (warm-pool-owned) view of an already-adopted sandbox, the
+// bounded cache-lag requeues wait for convergence WITHOUT re-sending the adoption patch
+// on every pass.
+func TestSandboxClaimAdoptionCacheLagDoesNotRepatch(t *testing.T) {
+	scheme := newScheme(t)
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "adopted-sb",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "img"}},
+			},
+		}},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "warmpool-uid-123"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	adoptedSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sb",
+			Namespace: "default",
+			UID:       "adopted-sb-uid",
+			Labels: map[string]string{
+				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
+				sandboxTemplateRefHash:           sandboxcontrollers.NameHash("test-template"),
+				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			ObjectMeta: sandboxv1beta1.PodMetadata{
+				Labels: map[string]string{
+					extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
+				},
+			},
+		}},
+		},
+	}
+
+	// Frozen warm-pool-owned view: served on every Get to simulate an informer
+	// cache that has not converged yet, no matter what was patched.
+	staleSandbox := adoptedSandbox.DeepCopy()
+
+	sandboxPatches := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adoptedSandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == "adopted-sb" {
+					staleSandbox.DeepCopyInto(sb)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+					sandboxPatches++
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+
+	// Pass 1: adoption is triggered (patches the sandbox) and defers via bounded requeue.
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("pass 1: expected nil error, got: %v", err)
+	}
+	if res.RequeueAfter != adoptionCacheLagRequeueDelay {
+		t.Fatalf("pass 1: expected RequeueAfter=%v, got %v", adoptionCacheLagRequeueDelay, res.RequeueAfter)
+	}
+	patchesAfterFirstPass := sandboxPatches
+	if patchesAfterFirstPass == 0 {
+		t.Fatal("pass 1: expected the adoption patch to be sent")
+	}
+
+	// Passes 2 and 3: cache still stale — must keep requeueing WITHOUT re-patching.
+	for pass := 2; pass <= 3; pass++ {
+		res, err = reconciler.Reconcile(context.Background(), req)
+		if err != nil {
+			t.Fatalf("pass %d: expected nil error, got: %v", pass, err)
+		}
+		if res.RequeueAfter != adoptionCacheLagRequeueDelay {
+			t.Fatalf("pass %d: expected RequeueAfter=%v, got %v", pass, adoptionCacheLagRequeueDelay, res.RequeueAfter)
+		}
+		if sandboxPatches != patchesAfterFirstPass {
+			t.Fatalf("pass %d: expected no additional sandbox patches while cache lags, got %d (was %d)", pass, sandboxPatches, patchesAfterFirstPass)
+		}
 	}
 }
 

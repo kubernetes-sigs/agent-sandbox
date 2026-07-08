@@ -42,6 +42,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 const (
@@ -238,7 +239,9 @@ func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *
 		return err
 	}
 	setWarmLaunchTypeLabelIfNeeded(sb)
-	return r.Update(ctx, sb)
+	return asmetrics.InstrumentWrite("warmpool", "owner_adopt", "metadata", "update", func() error {
+		return r.Update(ctx, sb)
+	})
 }
 
 func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {

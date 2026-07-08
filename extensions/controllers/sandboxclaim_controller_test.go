@@ -3555,6 +3555,16 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Error("expected claim status to NOT be updated with 'adopted-sb' during cache lag")
 	}
 
+	// The cache-lag retry is a benign signal: the Ready condition must report the
+	// specific AdoptionPending reason, not a generic reconciler failure.
+	readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if readyCondition == nil {
+		t.Fatal("expected Ready condition to be set during cache lag")
+	}
+	if readyCondition.Reason != "AdoptionPending" {
+		t.Errorf("expected Ready condition reason %q during cache lag, got %q (message: %q)", "AdoptionPending", readyCondition.Reason, readyCondition.Message)
+	}
+
 	// Verify that the extra warm sandbox was NOT adopted (it should still have its warm pool labels)
 	var extra sandboxv1beta1.Sandbox
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {

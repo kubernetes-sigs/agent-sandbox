@@ -353,7 +353,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// not finalized with the sandbox on this pass (sandbox is nil here), preserving the
 	// duplicate-adoption protection during cache lag.
 	if errors.Is(reconcileErr, errAdoptionTriggeredRetry) {
-		logger.V(1).Info("Adoption triggered; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
+		logger.V(4).Info("Adoption triggered; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
 		requeueDelay := adoptionCacheLagRequeueDelay
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
@@ -577,6 +577,17 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				Status:             metav1.ConditionFalse,
 				Reason:             reason,
 				Message:            fmt.Sprintf("SandboxWarmPool %q not found", claim.Spec.WarmPoolRef.Name),
+				ObservedGeneration: claim.Generation,
+			}
+		}
+		if errors.Is(err, errAdoptionTriggeredRetry) {
+			// Benign retry signal, not a claim failure: adoption was patched and we
+			// are only waiting for the informer cache to converge before finalizing.
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "AdoptionPending",
+				Message:            "Warm-pool sandbox adoption triggered; waiting for cache to converge",
 				ObservedGeneration: claim.Generation,
 			}
 		}
@@ -1522,7 +1533,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 					// requeue without re-sending the (idempotent but redundant) patch.
 					adoptionKey := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
 					if prev, ok := r.triggeredAdoptions.Load(adoptionKey); ok && prev.uid == claim.UID && prev.sandbox == sbName {
-						logger.V(1).Info("Adoption already triggered, waiting for cache to converge", "sandbox", sbName, "claim", claim.Name)
+						logger.V(4).Info("Adoption already triggered, waiting for cache to converge", "sandbox", sbName, "claim", claim.Name)
 						return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
 					}
 					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {

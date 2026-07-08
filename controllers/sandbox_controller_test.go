@@ -17,6 +17,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -3871,5 +3872,301 @@ func TestFirstReadyAnnotationStamping(t *testing.T) {
 
 		_, ok := got.Annotations[asmetrics.SandboxFirstReadyAnnotation]
 		assert.False(t, ok, "first-ready annotation should not be set when sandbox is not Ready")
+	})
+}
+
+// sandboxPatchFailClient wraps a client.Client and fails Patch calls for
+// Sandbox objects. It skips the first skipPatches calls (delegating to the inner
+// client), then fails the next maxFailures calls, then delegates again.
+type sandboxPatchFailClient struct {
+	client.Client
+	err         error
+	calls       int
+	skipPatches int // number of initial Patch calls to let through
+	maxFailures int // number of Patch calls to fail after skip; 0 means fail forever
+}
+
+func (c *sandboxPatchFailClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+		c.calls++
+		if c.calls <= c.skipPatches {
+			return c.Client.Patch(ctx, obj, patch, opts...)
+		}
+		failedSoFar := c.calls - c.skipPatches
+		if c.maxFailures == 0 || failedSoFar <= c.maxFailures {
+			return c.err
+		}
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+func TestBackfillFirstReadyAnnotation(t *testing.T) {
+	sandboxNs := "default"
+	pastTime := metav1.NewTime(time.Now().Add(-10 * time.Second))
+
+	t.Run("backfill stamps sentinel when oldReady and annotation missing", func(t *testing.T) {
+		// Simulates the case where a sandbox was already Ready before this
+		// controller version (pre-upgrade) or a prior Patch failed: the sandbox
+		// has Ready=True persisted in status but no SandboxFirstReadyAnnotation.
+		// On the next reconcile (oldReady=true, newReady=true), the backfill
+		// should stamp the "unknown" sentinel.
+		sandboxName := "sandbox-backfill"
+		nameHash := NameHash(sandboxName)
+
+		readyPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: sandboxNs,
+				Labels: map[string]string{
+					"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+					sandboxv1beta1.SandboxAdoptableLabel: "true",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test-container"}},
+			},
+			Status: corev1.PodStatus{
+				PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}},
+				Phase:  corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+
+		// Sandbox already has Ready=True in status but no first-ready annotation.
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              sandboxName,
+				Namespace:         sandboxNs,
+				UID:               sandboxUID,
+				Generation:        1,
+				CreationTimestamp: pastTime,
+				Annotations: map[string]string{
+					asmetrics.SandboxObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				},
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			Status: sandboxv1beta1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(sandboxv1beta1.SandboxConditionReady),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+		}
+
+		asmetrics.SandboxCreationLatency.Reset()
+		asmetrics.SandboxReadyLatency.Reset()
+
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb, readyPod),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}}
+		_, err := r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+
+		// No metrics should have been recorded (sandbox was already Ready).
+		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "should not record creation latency for already-Ready sandbox")
+		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxReadyLatency), "should not record ready latency for already-Ready sandbox")
+
+		// The sentinel annotation should be backfilled.
+		var got sandboxv1beta1.Sandbox
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, &got))
+		assert.Equal(t, "unknown", got.Annotations[asmetrics.SandboxFirstReadyAnnotation], "backfill should stamp sentinel value")
+	})
+
+	t.Run("backfill is no-op when annotation already set", func(t *testing.T) {
+		// When the annotation is already set (happy path worked), backfill
+		// should not overwrite it.
+		sandboxName := "sandbox-backfill-noop"
+		nameHash := NameHash(sandboxName)
+		existingTimestamp := time.Now().Add(-30 * time.Second).Format(time.RFC3339Nano)
+
+		readyPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: sandboxNs,
+				Labels: map[string]string{
+					"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+					sandboxv1beta1.SandboxAdoptableLabel: "true",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test-container"}},
+			},
+			Status: corev1.PodStatus{
+				PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}},
+				Phase:  corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              sandboxName,
+				Namespace:         sandboxNs,
+				UID:               sandboxUID,
+				Generation:        1,
+				CreationTimestamp: pastTime,
+				Annotations: map[string]string{
+					asmetrics.SandboxObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					asmetrics.SandboxFirstReadyAnnotation:    existingTimestamp,
+				},
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			Status: sandboxv1beta1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(sandboxv1beta1.SandboxConditionReady),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+		}
+
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb, readyPod),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}}
+		_, err := r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+
+		var got sandboxv1beta1.Sandbox
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, &got))
+		assert.Equal(t, existingTimestamp, got.Annotations[asmetrics.SandboxFirstReadyAnnotation], "existing annotation should not be overwritten")
+	})
+
+	t.Run("patch failure then flap does not double-count", func(t *testing.T) {
+		// Full three-step sequence:
+		// 1. First Ready transition: metrics recorded, but Patch fails (annotation not stamped).
+		// 2. Retry reconcile: oldReady=true, newReady=true → backfill fires, stamps sentinel.
+		// 3. Simulated flap back to Ready: annotation guard prevents re-recording.
+		sandboxName := "sandbox-patch-fail-flap"
+		nameHash := NameHash(sandboxName)
+
+		readyPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: sandboxNs,
+				Labels: map[string]string{
+					"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+					sandboxv1beta1.SandboxAdoptableLabel: "true",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test-container"}},
+			},
+			Status: corev1.PodStatus{
+				PodIPs: []corev1.PodIP{{IP: "10.244.0.5"}},
+				Phase:  corev1.PodRunning,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		}
+
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              sandboxName,
+				Namespace:         sandboxNs,
+				UID:               sandboxUID,
+				Generation:        1,
+				CreationTimestamp: pastTime,
+				Annotations: map[string]string{
+					asmetrics.SandboxObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				},
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+		}
+
+		asmetrics.SandboxCreationLatency.Reset()
+		asmetrics.SandboxReadyLatency.Reset()
+
+		// Step 1: First reconcile with patch failure on the second sandbox Patch.
+		// The first Patch call is for the observability annotation stamping
+		// (in Reconcile itself), and the second is for the first-ready annotation
+		// (in recordSandboxCreationMetrics). We want only the second to fail.
+		// skipPatches=1 lets the first Patch through, then fails the next one.
+		inner := newFakeClient(sb, readyPod)
+		fc := &sandboxPatchFailClient{Client: inner, err: fmt.Errorf("simulated patch failure"), skipPatches: 1, maxFailures: 1}
+		r := SandboxReconciler{
+			Client:        fc,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}}
+		_, err := r.Reconcile(t.Context(), req)
+		// The reconcile should return an error because the annotation patch failed.
+		require.Error(t, err, "reconcile should surface patch failure")
+
+		// Step 2: Retry reconcile with patches working. The sandbox now has
+		// Ready=True persisted in status (from updateStatus in step 1's reconcile)
+		// but no first-ready annotation. The backfill should fire.
+		asmetrics.SandboxCreationLatency.Reset()
+		asmetrics.SandboxReadyLatency.Reset()
+
+		r2 := SandboxReconciler{
+			Client:        inner,
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err = r2.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+
+		// No metrics should be recorded on retry (oldReady == newReady == true).
+		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "retry reconcile should not re-record creation latency")
+		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxReadyLatency), "retry reconcile should not re-record ready latency")
+
+		// The sentinel should be backfilled.
+		var got sandboxv1beta1.Sandbox
+		require.NoError(t, r2.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, &got))
+		assert.Equal(t, "unknown", got.Annotations[asmetrics.SandboxFirstReadyAnnotation], "backfill should stamp sentinel after patch failure recovery")
+
+		// Step 3: Verify annotation guard holds — a subsequent reconcile
+		// (simulating a flap-back to Ready) should not record metrics.
+		asmetrics.SandboxCreationLatency.Reset()
+		asmetrics.SandboxReadyLatency.Reset()
+
+		_, err = r2.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+
+		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxCreationLatency), "post-backfill reconcile should not record creation latency")
+		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxReadyLatency), "post-backfill reconcile should not record ready latency")
 	})
 }

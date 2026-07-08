@@ -689,6 +689,13 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 }
 
 func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) {
+	// A cache-lag adoption retry is a benign look-again, not a state change. If the
+	// claim status was already finalized with a sandbox (the adoption pass itself, or
+	// a controller restart racing a stale informer), leave the recorded Name/PodIPs
+	// and existing conditions untouched instead of transiently wiping them.
+	if sandbox == nil && errors.Is(err, errAdoptionTriggeredRetry) && claim.Status.SandboxStatus.Name != "" {
+		return
+	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 	r.syncFinishedCondition(claim, sandbox, isClaimExpired)
@@ -910,6 +917,14 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 
 			logger.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
+
+			// Record the completed adoption so a later pass that still sees the
+			// stale warm-pool-owned view (informer cache lag) waits via the
+			// bounded requeue instead of re-sending the adoption patch.
+			r.triggeredAdoptions.Store(
+				types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
+				triggeredAdoptionEntry{uid: claim.UID, sandbox: adopted.Name},
+			)
 
 			if r.Recorder != nil {
 				r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxAdopted", "Adoption", "Adopted warm pool Sandbox %q", adopted.Name)

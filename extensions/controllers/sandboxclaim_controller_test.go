@@ -2622,6 +2622,30 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			expectedObservations:           0,
 			expectedControllerObservations: 1,
 		},
+		{
+			name: "does not re-record when creation latency already marked (e.g. after resume)",
+			claim: &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "resumed",
+					CreationTimestamp: pastTime,
+					Annotations: map[string]string{
+						asmetrics.CreationLatencyRecordedAnnotation: "true",
+						asmetrics.WebhookAnnotation:                 time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+						asmetrics.ObservabilityAnnotation:           time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+				Status: extensionsv1beta1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			// Simulate resume: Ready went False (suspended) -> True again.
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse}},
+			},
+			expectedObservations:           0,
+			expectedControllerObservations: 0,
+		},
 	}
 
 	for _, tc := range testCases {

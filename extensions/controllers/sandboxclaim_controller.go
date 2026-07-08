@@ -1796,11 +1796,20 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		return
 	}
 
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+
+	// Record startup/creation latency at most once per claim.
+	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
+		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
+			r.observedTimes.Delete(key)
+		}
+		return
+	}
+
 	// Do not record creation metric if we have already seen the ready state.
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1beta1.SandboxConditionReady))
 	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
 		// Already Ready before this reconcile; drain any entry re-added by a post-Ready UpdateFunc.
-		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
 		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
 			r.observedTimes.Delete(key)
 		}
@@ -1822,6 +1831,26 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName, warmPoolName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName, warmPoolName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
+
+	// Mark the claim so a later Ready transition (e.g. a resume) does not re-record.
+	if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
+		logger.V(1).Info("Failed to stamp creation-latency-recorded annotation; a resume may re-record creation latency", "claim", claim.Name, "error", err)
+	}
+}
+
+// markCreationLatencyRecorded stamps the one-shot annotation that prevents the
+// creation/startup latency histograms from being re-recorded on a later Ready
+// transition.
+func (r *SandboxClaimReconciler) markCreationLatencyRecorded(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
+		return nil
+	}
+	patch := client.MergeFrom(claim.DeepCopy())
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] = "true"
+	return r.Patch(ctx, claim, patch)
 }
 
 func hasSandboxExpiredCondition(conditions []metav1.Condition) bool {

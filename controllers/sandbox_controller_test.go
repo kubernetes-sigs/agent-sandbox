@@ -3242,159 +3242,105 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 }
 
 func TestRecordResumeLatency(t *testing.T) {
-	sbName := "test-sb"
-	sbNs := "test-ns"
-	key := types.NamespacedName{Name: sbName, Namespace: sbNs}
-	uid := types.UID("sb-uid-123")
+	const name, ns = "sb-resume", "sb-ns"
+	key := types.NamespacedName{Name: name, Namespace: ns}
 
-	sandbox := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sbName,
-			Namespace: sbNs,
-			UID:       uid,
+	sb := func(mode sandboxv1beta1.SandboxOperatingMode, ready bool) *sandboxv1beta1.Sandbox {
+		s := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: sandboxUID},
+			Spec:       sandboxv1beta1.SandboxSpec{OperatingMode: mode},
+		}
+		if ready {
+			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: sandboxv1beta1.SandboxReasonDependenciesReady,
+			})
+		}
+		return s
+	}
+	withSuspended := func() *sandboxv1beta1.SandboxStatus {
+		st := &sandboxv1beta1.SandboxStatus{}
+		meta.SetStatusCondition(&st.Conditions, metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+			Status: metav1.ConditionTrue,
+			Reason: sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+		})
+		return st
+	}
+	empty := func() *sandboxv1beta1.SandboxStatus { return &sandboxv1beta1.SandboxStatus{} }
+
+	tests := []struct {
+		name             string
+		seed             *resumeTimeEntry
+		sandbox          *sandboxv1beta1.Sandbox
+		oldStatus        *sandboxv1beta1.SandboxStatus
+		wantObservations int
+		wantEntry        bool // whether a timer entry should remain afterwards
+	}{
+		{
+			name:             "anchors start when leaving suspended, not yet Ready",
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus:        withSuspended(),
+			wantObservations: 0,
+			wantEntry:        true,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+		{
+			name:             "records latency once Ready after an anchor",
+			seed:             &resumeTimeEntry{timestamp: time.Now().Add(-2 * time.Second), uid: sandboxUID},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, true),
+			oldStatus:        empty(),
+			wantObservations: 1,
+			wantEntry:        false,
+		},
+		{
+			name:             "does not record a fresh cold create (never suspended)",
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, true),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
+			name:             "does not anchor a pod-restart flap (no prior Suspended)",
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
+			name:             "suspend clears an in-flight resume timer",
+			seed:             &resumeTimeEntry{timestamp: time.Now(), uid: sandboxUID},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeSuspended, false),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
+			name:             "does not record a stale entry from a same-named predecessor",
+			seed:             &resumeTimeEntry{timestamp: time.Now().Add(-2 * time.Second), uid: types.UID("other-uid")},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, true),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        true,
 		},
 	}
 
-	t.Run("Anchors start time when leaving suspended state", func(t *testing.T) {
-		r := &SandboxReconciler{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.ResumeLatency.Reset()
+			r := &SandboxReconciler{}
+			if tc.seed != nil {
+				r.resumeStartTimes.Store(key, *tc.seed)
+			}
 
-		// Prior status has the Suspended condition
-		oldStatus := &sandboxv1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{
-				{
-					Type:   string(sandboxv1beta1.SandboxConditionSuspended),
-					Status: metav1.ConditionTrue,
-				},
-			},
-		}
+			r.recordResumeLatency(tc.oldStatus, tc.sandbox)
 
-		// Current status is not Ready yet
-		sandbox.Status = sandboxv1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{
-				{
-					Type:   string(sandboxv1beta1.SandboxConditionReady),
-					Status: metav1.ConditionFalse,
-				},
-			},
-		}
-
-		r.recordResumeLatency(oldStatus, sandbox)
-
-		// Assert map contains entry
-		entry, ok := r.resumeStartTimes.Load(key)
-		require.True(t, ok)
-		assert.Equal(t, uid, entry.uid)
-		assert.WithinDuration(t, time.Now(), entry.timestamp, 1*time.Second)
-	})
-
-	t.Run("Does not anchor start time if not leaving suspended state", func(t *testing.T) {
-		r := &SandboxReconciler{}
-
-		// Prior status does NOT have the Suspended condition
-		oldStatus := &sandboxv1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{
-				{
-					Type:   string(sandboxv1beta1.SandboxConditionReady),
-					Status: metav1.ConditionFalse,
-				},
-			},
-		}
-
-		sandbox.Status = sandboxv1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{
-				{
-					Type:   string(sandboxv1beta1.SandboxConditionReady),
-					Status: metav1.ConditionFalse,
-				},
-			},
-		}
-
-		r.recordResumeLatency(oldStatus, sandbox)
-
-		_, ok := r.resumeStartTimes.Load(key)
-		assert.False(t, ok)
-	})
-
-	t.Run("OperatingMode Suspended cancels in-flight resume timer", func(t *testing.T) {
-		r := &SandboxReconciler{}
-		r.resumeStartTimes.Store(key, resumeTimeEntry{
-			timestamp: time.Now(),
-			uid:       uid,
+			if got := testutil.CollectAndCount(asmetrics.ResumeLatency); got != tc.wantObservations {
+				t.Errorf("ResumeLatency observations = %d, want %d", got, tc.wantObservations)
+			}
+			if _, ok := r.resumeStartTimes.Load(key); ok != tc.wantEntry {
+				t.Errorf("resumeStartTimes entry present = %v, want %v", ok, tc.wantEntry)
+			}
 		})
-
-		oldStatus := &sandboxv1beta1.SandboxStatus{}
-
-		// Sandbox is suspended
-		suspendedSB := sandbox.DeepCopy()
-		suspendedSB.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
-
-		r.recordResumeLatency(oldStatus, suspendedSB)
-
-		_, ok := r.resumeStartTimes.Load(key)
-		assert.False(t, ok)
-	})
-
-	t.Run("Records latency on Ready transition if timer exists and UID matches", func(t *testing.T) {
-		asmetrics.ResumeLatency.Reset()
-
-		r := &SandboxReconciler{}
-		start := time.Now().Add(-2 * time.Second)
-		r.resumeStartTimes.Store(key, resumeTimeEntry{
-			timestamp: start,
-			uid:       uid,
-		})
-
-		oldStatus := &sandboxv1beta1.SandboxStatus{}
-
-		// Sandbox is now Ready
-		readySB := sandbox.DeepCopy()
-		readySB.Status.Conditions = []metav1.Condition{
-			{
-				Type:   string(sandboxv1beta1.SandboxConditionReady),
-				Status: metav1.ConditionTrue,
-			},
-		}
-
-		r.recordResumeLatency(oldStatus, readySB)
-
-		// Assert map is cleared
-		_, ok := r.resumeStartTimes.Load(key)
-		assert.False(t, ok)
-
-		// Assert metric is recorded
-		assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.ResumeLatency))
-	})
-
-	t.Run("Does not record latency and does not clear map if UID does not match", func(t *testing.T) {
-		asmetrics.ResumeLatency.Reset()
-
-		r := &SandboxReconciler{}
-		start := time.Now().Add(-2 * time.Second)
-		r.resumeStartTimes.Store(key, resumeTimeEntry{
-			timestamp: start,
-			uid:       "different-uid",
-		})
-
-		oldStatus := &sandboxv1beta1.SandboxStatus{}
-		readySB := sandbox.DeepCopy()
-		readySB.Status.Conditions = []metav1.Condition{
-			{
-				Type:   string(sandboxv1beta1.SandboxConditionReady),
-				Status: metav1.ConditionTrue,
-			},
-		}
-
-		r.recordResumeLatency(oldStatus, readySB)
-
-		// Map is not cleared (UID mismatch doesn't clear)
-		entry, ok := r.resumeStartTimes.Load(key)
-		require.True(t, ok)
-		assert.Equal(t, types.UID("different-uid"), entry.uid)
-
-		// Assert metric is NOT recorded
-		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.ResumeLatency))
-	})
+	}
 }

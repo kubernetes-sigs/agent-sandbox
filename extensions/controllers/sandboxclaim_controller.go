@@ -264,7 +264,9 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
+	if err := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Determine Result
 	var result ctrl.Result
@@ -1787,13 +1789,13 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1beta1.SandboxClaim,
 	oldStatus *extensionsv1beta1.SandboxClaimStatus,
 	sandbox *v1beta1.Sandbox,
-) {
+) error {
 	logger := log.FromContext(ctx)
 
 	newStatus := &claim.Status
 	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1beta1.SandboxConditionReady))
 	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		return
+		return nil
 	}
 
 	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
@@ -1803,7 +1805,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
 			r.observedTimes.Delete(key)
 		}
-		return
+		return nil
 	}
 
 	// Do not record creation metric if we have already seen the ready state.
@@ -1813,7 +1815,12 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
 			r.observedTimes.Delete(key)
 		}
-		return
+		// Backfill the annotation if missing so a future suspend/resume doesn't re-record.
+		if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
+			logger.Error(err, "Failed to stamp creation-latency-recorded annotation on already-Ready claim", "claim", claim.Name)
+			return err
+		}
+		return nil
 	}
 
 	launchType := getLaunchType(sandbox)
@@ -1834,8 +1841,10 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	// Mark the claim so a later Ready transition (e.g. a resume) does not re-record.
 	if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
-		logger.V(1).Info("Failed to stamp creation-latency-recorded annotation; a resume may re-record creation latency", "claim", claim.Name, "error", err)
+		logger.Error(err, "Failed to stamp creation-latency-recorded annotation; a resume may re-record creation latency", "claim", claim.Name)
+		return err
 	}
+	return nil
 }
 
 // markCreationLatencyRecorded stamps the one-shot annotation that prevents the

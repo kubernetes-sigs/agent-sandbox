@@ -81,6 +81,26 @@ var (
 		[]string{"namespace", "launch_type", "sandbox_template"},
 	)
 
+	// ResumeLatency measures the time from a resume request to Sandbox Ready. The
+	// controller self-times it: the start is anchored when the controller first
+	// observes the Sandbox leaving a suspended state (operatingMode set back to
+	// Running), and the end is when the Ready condition becomes True. This is
+	// effectively a cold Pod create from a suspended baseline (reschedule + image
+	// pull + readiness).
+	// Labels:
+	// - namespace: the namespace of the sandbox
+	// - sandbox_template: the SandboxTemplateRef (or "unknown").
+	// - launch_type: how the Sandbox originated, "warm" | "cold" | "unknown".
+	ResumeLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "agent_sandbox_resume_latency_ms",
+			Help: "Latency from resume request (operatingMode=Running) to Sandbox Ready state in milliseconds.",
+			// Buckets for latency from 50ms to 10 minutes; resume recreates the Pod.
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
+		},
+		[]string{"namespace", "sandbox_template", "launch_type"},
+	)
+
 	// SandboxClaimCreationTotal calculates the total number of SandboxClaims created.
 	// Labels:
 	// - namespace: the namespace of the claim
@@ -136,6 +156,7 @@ func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
+	metrics.Registry.MustRegister(ResumeLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 	metrics.Registry.MustRegister(BuildInfo)
 }
@@ -155,6 +176,12 @@ func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templa
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.
 func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType, templateName string) {
 	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
+}
+
+// RecordResumeLatency records the duration since the provided resume-start time.
+func RecordResumeLatency(startTime time.Time, namespace, templateName, launchType string) {
+	duration := float64(time.Since(startTime).Milliseconds())
+	ResumeLatency.WithLabelValues(namespace, templateName, launchType).Observe(duration)
 }
 
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.

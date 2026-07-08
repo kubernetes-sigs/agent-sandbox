@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -3238,4 +3239,162 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
 	require.Len(t, got.Status.Conditions, 1,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}
+
+func TestRecordResumeLatency(t *testing.T) {
+	sbName := "test-sb"
+	sbNs := "test-ns"
+	key := types.NamespacedName{Name: sbName, Namespace: sbNs}
+	uid := types.UID("sb-uid-123")
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbName,
+			Namespace: sbNs,
+			UID:       uid,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+		},
+	}
+
+	t.Run("Anchors start time when leaving suspended state", func(t *testing.T) {
+		r := &SandboxReconciler{}
+
+		// Prior status has the Suspended condition
+		oldStatus := &sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+					Status: metav1.ConditionTrue,
+				},
+			},
+		}
+
+		// Current status is not Ready yet
+		sandbox.Status = sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+				},
+			},
+		}
+
+		r.recordResumeLatency(oldStatus, sandbox)
+
+		// Assert map contains entry
+		entry, ok := r.resumeStartTimes.Load(key)
+		require.True(t, ok)
+		assert.Equal(t, uid, entry.uid)
+		assert.WithinDuration(t, time.Now(), entry.timestamp, 1*time.Second)
+	})
+
+	t.Run("Does not anchor start time if not leaving suspended state", func(t *testing.T) {
+		r := &SandboxReconciler{}
+
+		// Prior status does NOT have the Suspended condition
+		oldStatus := &sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+				},
+			},
+		}
+
+		sandbox.Status = sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+				},
+			},
+		}
+
+		r.recordResumeLatency(oldStatus, sandbox)
+
+		_, ok := r.resumeStartTimes.Load(key)
+		assert.False(t, ok)
+	})
+
+	t.Run("OperatingMode Suspended cancels in-flight resume timer", func(t *testing.T) {
+		r := &SandboxReconciler{}
+		r.resumeStartTimes.Store(key, resumeTimeEntry{
+			timestamp: time.Now(),
+			uid:       uid,
+		})
+
+		oldStatus := &sandboxv1beta1.SandboxStatus{}
+
+		// Sandbox is suspended
+		suspendedSB := sandbox.DeepCopy()
+		suspendedSB.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+
+		r.recordResumeLatency(oldStatus, suspendedSB)
+
+		_, ok := r.resumeStartTimes.Load(key)
+		assert.False(t, ok)
+	})
+
+	t.Run("Records latency on Ready transition if timer exists and UID matches", func(t *testing.T) {
+		asmetrics.ResumeLatency.Reset()
+
+		r := &SandboxReconciler{}
+		start := time.Now().Add(-2 * time.Second)
+		r.resumeStartTimes.Store(key, resumeTimeEntry{
+			timestamp: start,
+			uid:       uid,
+		})
+
+		oldStatus := &sandboxv1beta1.SandboxStatus{}
+
+		// Sandbox is now Ready
+		readySB := sandbox.DeepCopy()
+		readySB.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			},
+		}
+
+		r.recordResumeLatency(oldStatus, readySB)
+
+		// Assert map is cleared
+		_, ok := r.resumeStartTimes.Load(key)
+		assert.False(t, ok)
+
+		// Assert metric is recorded
+		assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.ResumeLatency))
+	})
+
+	t.Run("Does not record latency and does not clear map if UID does not match", func(t *testing.T) {
+		asmetrics.ResumeLatency.Reset()
+
+		r := &SandboxReconciler{}
+		start := time.Now().Add(-2 * time.Second)
+		r.resumeStartTimes.Store(key, resumeTimeEntry{
+			timestamp: start,
+			uid:       "different-uid",
+		})
+
+		oldStatus := &sandboxv1beta1.SandboxStatus{}
+		readySB := sandbox.DeepCopy()
+		readySB.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			},
+		}
+
+		r.recordResumeLatency(oldStatus, readySB)
+
+		// Map is not cleared (UID mismatch doesn't clear)
+		entry, ok := r.resumeStartTimes.Load(key)
+		require.True(t, ok)
+		assert.Equal(t, types.UID("different-uid"), entry.uid)
+
+		// Assert metric is NOT recorded
+		assert.Equal(t, 0, testutil.CollectAndCount(asmetrics.ResumeLatency))
+	})
 }

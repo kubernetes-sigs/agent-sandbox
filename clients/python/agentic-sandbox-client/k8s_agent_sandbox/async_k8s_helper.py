@@ -355,10 +355,10 @@ class AsyncK8sHelper:
     async def close(self):
         """Closes the shared Kubernetes API client session.
 
-        A caller-injected ``api_client`` is left open (the caller owns its
-        lifecycle); only a client created internally is closed here.
+        A caller-injected ``api_client`` is left open and remains attached to
+        this helper. Only a client created internally is closed and cleared.
         """
         if self._api_client and self._owns_api_client:
             await self._api_client.close()
-        self._api_client = None
-        self._initialized = False
+            self._api_client = None
+            self._initialized = False

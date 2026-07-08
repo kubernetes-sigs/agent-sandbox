@@ -651,6 +651,21 @@ class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
         await helper.close()
         injected.close.assert_not_awaited()
 
+    async def test_injected_api_client_still_used_after_close(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        injected = AsyncMock(name="ApiClient")
+        helper = AsyncK8sHelper(api_client=injected)
+
+        await helper.close()
+        await helper._ensure_initialized()
+
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+        mock_api_client_cls.assert_not_called()
+        mock_custom_cls.assert_called_once_with(injected)
+        mock_core_cls.assert_called_once_with(injected)
+
     async def test_internally_created_api_client_is_closed(
         self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
     ):

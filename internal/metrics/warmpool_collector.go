@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// nolint:revive
 package metrics
 
 import (
@@ -21,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,6 +85,7 @@ func (c *WarmPoolCollector) Collect(ch chan<- prometheus.Metric) {
 		Name      string
 		Namespace string
 		Template  string
+		UID       types.UID
 	}
 	poolMap := make(map[string]poolInfo)
 	counts := make(map[WarmPoolSizeMetricKey]int)
@@ -95,6 +98,7 @@ func (c *WarmPoolCollector) Collect(ch chan<- prometheus.Metric) {
 			Name:      pool.Name,
 			Namespace: pool.Namespace,
 			Template:  pool.Spec.TemplateRef.Name,
+			UID:       pool.UID,
 		}
 
 		// Pre-populate counts map with zero entries for every status.
@@ -118,13 +122,15 @@ func (c *WarmPoolCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, sb := range sandboxList.Items {
 		// Resolve the owning warm pool via the sandbox's controlling OwnerReference.
 		ctrl := metav1.GetControllerOf(&sb)
-		if ctrl == nil || ctrl.Kind != "SandboxWarmPool" {
+		if ctrl == nil ||
+			ctrl.Kind != "SandboxWarmPool" ||
+			ctrl.APIVersion != extensionsv1beta1.GroupVersion.String() {
 			continue
 		}
 
 		pool, exists := poolMap[sb.Namespace+"/"+ctrl.Name]
-		if !exists {
-			// Orphaned sandbox from a deleted pool, skip.
+		if !exists || ctrl.UID != pool.UID {
+			// Orphaned sandbox from a deleted pool, or deleted-and-recreated pool race. Skip.
 			continue
 		}
 

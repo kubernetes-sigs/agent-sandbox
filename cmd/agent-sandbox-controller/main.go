@@ -302,7 +302,6 @@ func main() {
 
 	// Register the custom Sandbox metric collector globally.
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
-	asmetrics.RegisterWarmPoolCollector(mgr.GetClient(), mgr.GetLogger().WithName("warmpool-collector"))
 
 	if err = (&controllers.SandboxReconciler{
 		Client:        mgr.GetClient(),
@@ -321,6 +320,11 @@ func main() {
 	}
 
 	if extensions {
+		// Warm-pool collector lists extensionsv1beta1.SandboxWarmPoolList, whose
+		// scheme is only registered when extensions are enabled. Register here so
+		// scrapes don't fail with "no kind is registered" in non-extensions builds.
+		asmetrics.RegisterWarmPoolCollector(mgr.GetClient(), mgr.GetLogger().WithName("warmpool-collector"))
+
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
 		var allowedDomains []string

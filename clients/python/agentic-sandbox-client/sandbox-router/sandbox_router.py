@@ -25,7 +25,7 @@ import httpx
 import websockets
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, PayloadTooBig
 
 # Initialize the FastAPI application
 app = FastAPI()
@@ -40,6 +40,9 @@ DEFAULT_PROXY_TIMEOUT = 180.0
 DEFAULT_WEBSOCKET_IDLE_TIMEOUT = 3600.0
 DEFAULT_WEBSOCKET_MAX_LIFETIME = 86400.0
 DEFAULT_WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT = 64
+# Matches uvicorn's default --ws-max-size so client->router and backend->router
+# directions use the same bound unless overridden.
+DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 DEFAULT_CLUSTER_DOMAIN = "cluster.local"
 DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
 
@@ -434,6 +437,10 @@ websocket_max_connections_per_client = _get_non_negative_int_env(
     DEFAULT_WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT,
     allow_zero=True,
 )
+websocket_max_message_bytes = _get_non_negative_int_env(
+    "WEBSOCKET_MAX_MESSAGE_BYTES",
+    DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES,
+)
 client = httpx.AsyncClient(
     timeout=proxy_timeout,
     limits=httpx.Limits(max_keepalive_connections=max_keepalive_connections),
@@ -464,6 +471,10 @@ if websocket_max_connections_per_client:
     )
 else:
     print("Sandbox router WebSocket max connections per client: disabled")
+print(
+    "Sandbox router WebSocket max message size: "
+    f"{websocket_max_message_bytes} bytes"
+)
 if trusted_proxy_networks:
     print(
         "Sandbox router trusted proxy CIDRs for X-Forwarded-For: "
@@ -502,6 +513,7 @@ async def _relay_websocket(
 ) -> None:
     """Bidirectionally relay messages between client and backend WebSockets."""
     client_close: tuple[int, str] | None = None
+    message_too_big = False
     started_at = time.monotonic()
     last_activity = started_at
 
@@ -529,6 +541,7 @@ async def _relay_websocket(
             client_close = (exc.code, exc.reason or "")
 
     async def backend_to_client() -> None:
+        nonlocal message_too_big
         try:
             async for message in backend_ws:
                 touch()
@@ -538,6 +551,8 @@ async def _relay_websocket(
                     await client_ws.send_bytes(message)
         except ConnectionClosed:
             pass
+        except PayloadTooBig:
+            message_too_big = True
 
     async def watchdog() -> str | None:
         while True:
@@ -585,6 +600,15 @@ async def _relay_websocket(
             pass
         try:
             await backend_ws.close(code=1001, reason=watchdog_reason)
+        except Exception:
+            pass
+    elif message_too_big:
+        try:
+            await client_ws.close(code=1009, reason="message too big")
+        except RuntimeError:
+            pass
+        try:
+            await backend_ws.close(code=1009, reason="message too big")
         except Exception:
             pass
     elif backend_to_client_task in done:
@@ -650,7 +674,7 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
             additional_headers=_proxy_headers(websocket.headers, websocket=True),
             subprotocols=subprotocols,
             open_timeout=proxy_timeout,
-            max_size=None,
+            max_size=websocket_max_message_bytes,
         ) as backend_ws:
             selected_subprotocol = backend_ws.subprotocol
             await websocket.accept(subprotocol=selected_subprotocol)

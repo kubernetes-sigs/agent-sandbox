@@ -835,19 +835,23 @@ class TestWebSocketResourceLimits:
         assert mod.DEFAULT_WEBSOCKET_IDLE_TIMEOUT == 3600.0
         assert mod.DEFAULT_WEBSOCKET_MAX_LIFETIME == 86400.0
         assert mod.DEFAULT_WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT == 64
+        assert mod.DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES == 16 * 1024 * 1024
         assert mod.websocket_idle_timeout == 3600.0
         assert mod.websocket_max_lifetime == 86400.0
         assert mod.websocket_max_connections_per_client == 64
+        assert mod.websocket_max_message_bytes == 16 * 1024 * 1024
 
     def test_env_vars_override_websocket_limits(self, isolated_sandbox_router):
         mod = isolated_sandbox_router(
             WEBSOCKET_IDLE_TIMEOUT_SECONDS="120",
             WEBSOCKET_MAX_LIFETIME_SECONDS="600",
             WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT="8",
+            WEBSOCKET_MAX_MESSAGE_BYTES="33554432",
         )
         assert mod.websocket_idle_timeout == 120.0
         assert mod.websocket_max_lifetime == 600.0
         assert mod.websocket_max_connections_per_client == 8
+        assert mod.websocket_max_message_bytes == 33554432
 
     def test_zero_disables_websocket_limits(self, isolated_sandbox_router):
         mod = isolated_sandbox_router(
@@ -863,7 +867,11 @@ class TestWebSocketResourceLimits:
         mod = isolated_sandbox_router(WEBSOCKET_MAX_CONNECTIONS_PER_CLIENT="0.5")
         assert mod.websocket_max_connections_per_client == 64
 
-    def test_backend_websocket_connect_uses_unlimited_max_frame_size(self):
+    def test_invalid_message_size_falls_back_to_default(self, isolated_sandbox_router):
+        mod = isolated_sandbox_router(WEBSOCKET_MAX_MESSAGE_BYTES="0")
+        assert mod.websocket_max_message_bytes == 16 * 1024 * 1024
+
+    def test_backend_websocket_connect_uses_configured_max_message_bytes(self):
         captured_kwargs: dict = {}
 
         @asynccontextmanager
@@ -884,7 +892,7 @@ class TestWebSocketResourceLimits:
                     headers={"X-Sandbox-ID": "my-sandbox"},
                 ):
                     pass
-            assert captured_kwargs.get("max_size") is None
+            assert captured_kwargs.get("max_size") == 16 * 1024 * 1024
 
     def test_client_connection_key_uses_forwarded_for_from_trusted_proxy(self):
         websocket = MagicMock()
@@ -1001,6 +1009,39 @@ class TestWebSocketResourceLimits:
             code=1001,
             reason="idle timeout exceeded",
         )
+
+    def test_oversized_backend_message_closes_client_with_1009(self):
+        from websockets.exceptions import PayloadTooBig
+
+        class OversizedBackendWebSocket(_MockBackendWebSocket):
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise PayloadTooBig(100, 200)
+
+        client_ws = AsyncMock()
+
+        async def hang_on_receive() -> None:
+            await asyncio.Event().wait()
+
+        client_ws.receive = hang_on_receive
+        backend_ws = OversizedBackendWebSocket()
+
+        async def run_relay() -> None:
+            await sandbox_router._relay_websocket(
+                client_ws,
+                backend_ws,
+                idle_timeout=0.0,
+                max_lifetime=0.0,
+            )
+
+        asyncio.run(run_relay())
+        client_ws.close.assert_awaited_once_with(
+            code=1009,
+            reason="message too big",
+        )
+        assert backend_ws.closed_with == (1009, "message too big")
 
 
 class TestWebSocketRelayClose:

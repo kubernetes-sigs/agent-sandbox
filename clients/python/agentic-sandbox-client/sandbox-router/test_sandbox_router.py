@@ -645,3 +645,39 @@ class TestProxyRouting:
         assert hasattr(
             sent_request.stream, "__aiter__"
         ), "Content should be an async iterable"
+
+
+class TestMaxKeepaliveConnections:
+    def test_default_max_keepalive_connections(self):
+        assert sandbox_router.DEFAULT_MAX_KEEPALIVE_CONNECTIONS == 20
+
+    def test_env_var_overrides(self):
+        with patch.dict(os.environ, {"MAX_KEEPALIVE_CONNECTIONS": "50"}):
+            importlib.reload(sandbox_router)
+            assert sandbox_router.max_keepalive_connections == 50
+
+    def test_default_when_env_var_unset(self):
+        with patch.dict(os.environ, {"ALLOW_UNAUTHENTICATED_ROUTER": "true"}, clear=True):
+            importlib.reload(sandbox_router)
+            assert sandbox_router.max_keepalive_connections == 20
+
+    def test_invalid_env_var_falls_back_to_default(self, capsys):
+        with patch.dict(os.environ, {"MAX_KEEPALIVE_CONNECTIONS": "not-a-number"}):
+            result = sandbox_router._get_max_keepalive_connections()
+        assert result == 20
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.out
+        assert "MAX_KEEPALIVE_CONNECTIONS" in captured.out
+
+    def test_negative_env_var_falls_back_to_default(self, capsys):
+        with patch.dict(os.environ, {"MAX_KEEPALIVE_CONNECTIONS": "-1"}):
+            result = sandbox_router._get_max_keepalive_connections()
+        assert result == 20
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.out
+        assert "MAX_KEEPALIVE_CONNECTIONS" in captured.out
+
+    def test_zero_disables_pooling(self):
+        with patch.dict(os.environ, {"MAX_KEEPALIVE_CONNECTIONS": "0"}):
+            result = sandbox_router._get_max_keepalive_connections()
+        assert result == 0

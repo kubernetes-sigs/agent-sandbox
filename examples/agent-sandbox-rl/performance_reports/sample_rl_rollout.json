@@ -1,0 +1,166 @@
+{
+  "params": {
+    "images": 10,
+    "tasks_per_image": 8,
+    "total_tasks": 80,
+    "strategies": "naive",
+    "max_concurrent": 40,
+    "max_warmpool_size": 8,
+    "warm_per_task": true,
+    "colocate_replicas": true,
+    "window_size": null,
+    "task_duration_s": 15.0,
+    "image_template": "REGISTRY/PROJECT/swebench-mirror/bench:img{i:03d}"
+  },
+  "plan": [
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img000",
+      "pool": "pool-r2e-img-1afdd43e943c",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img001",
+      "pool": "pool-r2e-img-84e70362d8ea",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img002",
+      "pool": "pool-r2e-img-f32f0a9c4d96",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img003",
+      "pool": "pool-r2e-img-ef990e5b7f14",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img004",
+      "pool": "pool-r2e-img-aaa007687338",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img005",
+      "pool": "pool-r2e-img-499c653fff24",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img006",
+      "pool": "pool-r2e-img-492cda9a7643",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img007",
+      "pool": "pool-r2e-img-1dea5bc381df",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img008",
+      "pool": "pool-r2e-img-d0d187b45a8c",
+      "replicas": 8,
+      "cluster": "loadtest"
+    },
+    {
+      "image": "REGISTRY/PROJECT/swebench-mirror/bench:img009",
+      "pool": "pool-r2e-img-215cfcaa3401",
+      "replicas": 8,
+      "cluster": "loadtest"
+    }
+  ],
+  "environment": {
+    "loadtest": {
+      "context": "gke_<project>_<region>_<cluster>",
+      "namespace": "agent-sandbox-rl",
+      "k8s_version": "v1.3x.x-gke.xxxx",
+      "nodes": null,
+      "node_pools": [
+        "<node-pool>"
+      ],
+      "instance_types": [
+        "e2-standard-16"
+      ],
+      "region": "<region>"
+    }
+  },
+  "results": [
+    {
+      "strategy": "naive",
+      "wall_s": 54.05,
+      "ok": 80,
+      "total": 80,
+      "report": {
+        "strategy": "naive",
+        "total_s": 54.05,
+        "phases": {
+          "preflight": {
+            "count": 1,
+            "total_s": 1.25,
+            "max_s": 1.25
+          },
+          "plan": {
+            "count": 1,
+            "total_s": 0.0,
+            "max_s": 0.0
+          },
+          "create_warmpool": {
+            "count": 10,
+            "total_s": 6.23,
+            "max_s": 0.7
+          },
+          "wait_pool_ready": {
+            "count": 10,
+            "total_s": 80.54,
+            "max_s": 9.43
+          },
+          "claim": {
+            "count": 80,
+            "total_s": 210.92,
+            "max_s": 5.96
+          },
+          "process": {
+            "count": 80,
+            "total_s": 1200.09,
+            "max_s": 15.0
+          },
+          "release": {
+            "count": 80,
+            "total_s": 12.63,
+            "max_s": 0.34
+          },
+          "teardown": {
+            "count": 1,
+            "total_s": 3.56,
+            "max_s": 3.56
+          }
+        },
+        "claims": 80,
+        "tasks_ok": 80,
+        "tasks_err": 0,
+        "warm_replicas_total": 80,
+        "warm_replicas_peak": 80,
+        "environment": {
+          "loadtest": {
+            "context": "gke_<project>_<region>_<cluster>",
+            "namespace": "agent-sandbox-rl",
+            "k8s_version": "v1.3x.x-gke.xxxx",
+            "nodes": null,
+            "node_pools": [
+              "<node-pool>"
+            ],
+            "instance_types": [
+              "e2-standard-16"
+            ],
+            "region": "<region>"
+          }
+        }
+      }
+    }
+  ]
+}

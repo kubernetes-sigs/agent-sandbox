@@ -523,42 +523,44 @@ func (h *Harness) CreateSandbox(ctx context.Context, session *Session) (*Sandbox
 			Namespace: id.Namespace,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						AutomountServiceAccountToken: new(false),
+						Containers: []corev1.Container{
+							{
+								Name:    "sandbox",
+								Image:   image,
+								Command: []string{"sleep", "infinity"},
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										Name:      "home",
+										MountPath: homeDir,
+									},
+								},
+								Env: []corev1.EnvVar{
+									{
+										Name:  "HOME",
+										Value: homeDir,
+									},
+								},
+							},
+						},
+						Volumes: []corev1.Volume{
+							{
+								Name: "home",
+								VolumeSource: corev1.VolumeSource{
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
+								},
+							},
+						},
+						RestartPolicy: corev1.RestartPolicyNever,
+					},
+				},
+			},
 			Lifecycle: sandboxv1beta1.Lifecycle{
 				ShutdownTime:   &metav1.Time{Time: time.Now().Add(SandboxInactivityTimeout)},
 				ShutdownPolicy: &policy,
-			},
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					AutomountServiceAccountToken: new(false),
-					Containers: []corev1.Container{
-						{
-							Name:    "sandbox",
-							Image:   image,
-							Command: []string{"sleep", "infinity"},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "home",
-									MountPath: homeDir,
-								},
-							},
-							Env: []corev1.EnvVar{
-								{
-									Name:  "HOME",
-									Value: homeDir,
-								},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "home",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
-						},
-					},
-					RestartPolicy: corev1.RestartPolicyNever,
-				},
 			},
 		},
 	}

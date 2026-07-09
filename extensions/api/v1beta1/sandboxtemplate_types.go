@@ -87,21 +87,11 @@ type NetworkPolicySpec struct {
 
 // SandboxTemplateSpec defines the desired state of Sandbox.
 type SandboxTemplateSpec struct {
-	// podTemplate defines the object template that describes the pod spec that will be used to create
-	// an agent sandbox.
-	// If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false
-	// to ensure a secure-by-default environment.
-	// +required
-	PodTemplate sandboxv1beta1.PodTemplate `json:"podTemplate"`
-
-	// volumeClaimTemplates is a list of claims that pods created from this template
-	// are allowed to reference. When a SandboxClaim or SandboxWarmPool creates a sandbox
-	// from this template, PVCs will be created from these templates.
-	// Every claim in this list must have at least one matching access mode with a provisioner volume.
-	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
-	// +optional
-	// +listType=atomic
-	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+	// SandboxBlueprint defines the workload configuration shared with SandboxSpec.
+	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.
+	// Since moving fields out is breaking, if unsure whether a new field should be shared,
+	// define it in SandboxTemplateSpec (or SandboxSpec) first and promote it here later.
+	sandboxv1beta1.SandboxBlueprint `json:",inline"`
 
 	// networkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template. A single shared NetworkPolicy is created per Template.
@@ -148,15 +138,6 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:default=Disallowed
 	// +optional
 	VolumeClaimTemplatesPolicy VolumeClaimTemplatesPolicy `json:"volumeClaimTemplatesPolicy,omitempty"`
-
-	// service controls whether the controller should automatically create a
-	// headless Service for Sandboxes created from this template.
-	// When unset, the controller preserves existing Services for backward
-	// compatibility but does not create new ones. Set to true to enable or false
-	// to explicitly disable and remove the Service.
-	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
-	// +optional
-	Service *bool `json:"service,omitempty"`
 }
 
 // +genclient

@@ -1,0 +1,51 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: nullclaw-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: nullclaw-sandbox
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      containers:
+        - name: nullclaw
+          image: ghcr.io/nullclaw/nullclaw:v2026.5.29
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: NULLCLAW_ALLOW_PUBLIC_BIND
+              value: "1"
+          ports:
+            - containerPort: 3000
+              name: gateway
+          volumeMounts:
+            - mountPath: /nullclaw-data
+              name: data
+            - mountPath: /nullclaw-data/config.json
+              name: config
+              subPath: config.json
+      volumes:
+        - name: config
+          configMap:
+            name: nullclaw-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi

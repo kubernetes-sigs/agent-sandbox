@@ -47,6 +47,7 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 	return fake.NewClientBuilder().
 		WithScheme(Scheme).
 		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
 		WithRuntimeObjects(initialObjs...).
 		Build()
 }
@@ -204,7 +205,7 @@ func TestComputeConditions(t *testing.T) {
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
 			expectedConditions: []metav1.Condition{
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Failed; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 			},
 		},
 		{
@@ -214,7 +215,7 @@ func TestComputeConditions(t *testing.T) {
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 			expectedConditions: []metav1.Condition{
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Succeeded; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 			},
 		},
 		{
@@ -305,16 +306,15 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "minimal sandbox spec creates Pod but not Service by default",
 			// Input sandbox spec
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
+			}},
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
@@ -354,8 +354,7 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "minimal sandbox spec with Pod and Service",
 			// Input sandbox spec
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -364,7 +363,7 @@ func TestReconcile(t *testing.T) {
 							},
 						},
 					},
-				},
+				}},
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
@@ -424,8 +423,7 @@ func TestReconcile(t *testing.T) {
 		{
 			name: "sandbox spec with PVC, Pod, and Service",
 			// Input sandbox spec
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -459,7 +457,7 @@ func TestReconcile(t *testing.T) {
 							},
 						},
 					},
-				},
+				}},
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
@@ -580,13 +578,12 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container"}},
 					},
-				},
+				}},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
@@ -648,13 +645,12 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				Service: new(true),
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "test-container"}},
 					},
-				},
+				}},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
@@ -716,12 +712,11 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
+			}},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
@@ -757,20 +752,18 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -810,20 +803,18 @@ func TestReconcile(t *testing.T) {
 			sandboxAnnotations: map[string]string{
 				sandboxv1beta1.SandboxPodNameAnnotation: "warmpool-abc-xyz",
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -860,20 +851,18 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name: "test-container",
-							},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
 						},
 					},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyDelete),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-30 * time.Minute))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyDelete),
+			},
 			},
 			wantDeletedObjs: []client.Object{
 				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
@@ -910,16 +899,14 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -959,16 +946,14 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 			},
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -990,16 +975,14 @@ func TestReconcile(t *testing.T) {
 		},
 		{
 			name: "sandbox expired with no matching pod or service",
-			sandboxSpec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
-					},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-				Lifecycle: sandboxv1beta1.Lifecycle{
-					ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
-					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-				},
+			}}, Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   new(metav1.NewTime(time.Now().Add(-1 * time.Hour))),
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
@@ -1097,25 +1080,23 @@ func TestReconcilePod(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name: "test-container",
-						},
-					},
-				},
-				ObjectMeta: sandboxv1beta1.PodMetadata{
-					Labels: map[string]string{
-						"custom-label": "label-val",
-					},
-					Annotations: map[string]string{
-						"custom-annotation": "anno-val",
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: "test-container",
 					},
 				},
 			},
+			ObjectMeta: sandboxv1beta1.PodMetadata{
+				Labels: map[string]string{
+					"custom-label": "label-val",
+				},
+				Annotations: map[string]string{
+					"custom-annotation": "anno-val",
+				},
+			},
+		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
 	testCases := []struct {
@@ -1317,27 +1298,25 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							// Attacker attempts to hijack another Sandbox's routing label
+							// and to spoof an extensions-prefixed system label.
+							"agents.x-k8s.io/sandbox-name-hash":          "malicious-hijacked-hash",
+							"extensions.agents.x-k8s.io/warm-pool-spoof": "evil",
+							"custom-label": "label-val",
 						},
-						ObjectMeta: sandboxv1beta1.PodMetadata{
-							Labels: map[string]string{
-								// Attacker attempts to hijack another Sandbox's routing label
-								// and to spoof an extensions-prefixed system label.
-								"agents.x-k8s.io/sandbox-name-hash":          "malicious-hijacked-hash",
-								"extensions.agents.x-k8s.io/warm-pool-spoof": "evil",
-								"custom-label": "label-val",
-							},
-							Annotations: map[string]string{
-								"agents.x-k8s.io/pod-name":       "malicious-pod-name",
-								asmetrics.TraceContextAnnotation: "spoofed-trace",
-								"custom-annotation":              "anno-val",
-							},
+						Annotations: map[string]string{
+							"agents.x-k8s.io/pod-name":       "malicious-pod-name",
+							asmetrics.TraceContextAnnotation: "spoofed-trace",
+							"custom-annotation":              "anno-val",
 						},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1430,12 +1409,10 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxWarmPoolLabel: "pool-hash",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1464,17 +1441,15 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{
-							Labels: map[string]string{
-								"custom-label":                      "label-val",
-								sandboxv1beta1.SandboxWarmPoolLabel: "pool-hash",
-							},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							"custom-label":                      "label-val",
+							sandboxv1beta1.SandboxWarmPoolLabel: "pool-hash",
 						},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1515,12 +1490,10 @@ func TestReconcilePod(t *testing.T) {
 						},
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1571,12 +1544,10 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1642,12 +1613,10 @@ func TestReconcilePod(t *testing.T) {
 						},
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
-						ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
-					},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1741,17 +1710,15 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name: "test-container",
-								},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "test-container",
 							},
 						},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -1947,13 +1914,11 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: "foreign-pod",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
-						},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod:                nil,
@@ -2023,21 +1988,19 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						ObjectMeta: sandboxv1beta1.PodMetadata{
-							Labels: map[string]string{
-								"keep-label": "value",
-							},
-							Annotations: map[string]string{
-								"keep-annotation": "value",
-							},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							"keep-label": "value",
 						},
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
+						Annotations: map[string]string{
+							"keep-annotation": "value",
 						},
 					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod: &corev1.Pod{
@@ -2089,13 +2052,11 @@ func TestReconcilePod(t *testing.T) {
 						sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
-						},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
 					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 				},
 			},
 			wantPod:                nil,
@@ -2182,10 +2143,7 @@ func TestReconcileService(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			Service:       new(true),
-		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true)}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning},
 	}
 
 	testCases := []struct {
@@ -2548,9 +2506,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					Service: new(false),
-				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(false)}},
 			},
 			wantNilService:        true,
 			wantServiceDeleted:    true,
@@ -2574,9 +2530,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					Service: new(false),
-				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(false)}},
 			},
 			wantNilService:        true,
 			wantStatusService:     "",
@@ -2787,20 +2741,19 @@ func TestReconcilePVCs(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
-				{
-					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: pvcTemplateName},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{
-								corev1.ResourceStorage: resource.MustParse("1Gi"),
-							},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+			{
+				EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: pvcTemplateName},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
 						},
 					},
 				},
 			},
+		}},
 		},
 	}
 
@@ -3036,17 +2989,15 @@ func TestSandboxShutdownExpiryUsesTwoPassAndPreservesFinishedCondition(t *testin
 					UID:        sandboxUID,
 					Generation: 1,
 				},
-				Spec: sandboxv1beta1.SandboxSpec{
-					Service: new(true),
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true),
 					PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "test-container"}},
 						},
-					},
-					Lifecycle: sandboxv1beta1.Lifecycle{
-						ShutdownTime:   &shutdownTime,
-						ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
-					},
+					}}, Lifecycle: sandboxv1beta1.Lifecycle{
+					ShutdownTime:   &shutdownTime,
+					ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+				},
 				},
 			}
 
@@ -3232,13 +3183,11 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 			UID:        sandboxUID,
 			Generation: 1,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "c", Image: "img"}},
-				},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "img"}},
 			},
+		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
 

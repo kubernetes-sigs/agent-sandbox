@@ -46,8 +46,25 @@ class TemplateSpec(BaseModel):
   runtime_class: str | None = None          # e.g. "gvisor"
   node_selector: dict[str, str] | None = None
   image_pull_secret: str | None = None
+  # Default IfNotPresent so a node's containerd layer cache is reused across
+  # runs/epochs (benchmark images are immutable/pinned). Set "Always" if a tag
+  # mutates and you need to re-pull each time.
+  image_pull_policy: str = "IfNotPresent"
+  # Prefer scheduling a pool's replicas onto the *same* node (soft podAffinity on
+  # the shared `sandbox=<template>` label) so only the first replica pulls the
+  # image and the rest start from the node's containerd layer cache. Soft, so it
+  # spills to other nodes instead of dead-locking when a node is full. Pairs with
+  # image_pull_policy=IfNotPresent and warm_per_task (RL "instant-claim" mode).
+  colocate_replicas: bool = False
   # Escape hatch: extra keys merged into the pod spec (e.g. tolerations).
   extra_pod_spec: dict = Field(default_factory=dict)
+
+  @field_validator("image_pull_policy")
+  @classmethod
+  def _valid_pull_policy(cls, v: str) -> str:
+    if v not in ("Always", "IfNotPresent", "Never"):
+      raise ValueError("image_pull_policy must be Always|IfNotPresent|Never")
+    return v
 
 
 class ObservabilityConfig(BaseModel):
@@ -95,12 +112,27 @@ class FleetConfig(BaseModel):
   placement: str = "image-affinity"         # round-robin|least-loaded|capacity-weighted|image-affinity
   max_concurrent: int = 1                    # concurrency budget: sizes pools AND parallelizes claims
   max_warmpool_size: int = 8                 # hard cap on replicas per image pool
+  # Warm one replica per task for each image (replicas = min(tasks_image,
+  # max_warmpool_size)) instead of concurrency-proportional sizing, so every task
+  # claims a sandbox immediately (RL "instant-claim"). Trades resources for claim
+  # latency; raise max_warmpool_size for images with more tasks than the cap.
+  warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
   template: TemplateSpec = Field(default_factory=TemplateSpec)
   template_name_prefix: str = "r2e-img-"
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))
   observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+  # Disk-aware window sizing (all optional; when avg_image_gb is None it's a no-op
+  # and sizing falls back to the concurrency-only window). node_ephemeral_gb is the
+  # usable ephemeral storage per node; disk_headroom reserves a fraction of it.
+  avg_image_gb: float | None = None
+  node_ephemeral_gb: float | None = None
+  disk_headroom: float = 0.25
+  # Node count of the target pool. Lets disk-aware window sizing use the *cluster's*
+  # usable disk (distinct images spread across nodes) instead of a single node's.
+  # None => conservative single-node bound (safe when the pool size is unknown).
+  cluster_nodes: int | None = None
 
   @field_validator("max_concurrent", "max_warmpool_size")
   @classmethod
@@ -109,11 +141,25 @@ class FleetConfig(BaseModel):
       raise ValueError("must be >= 1")
     return v
 
-  @field_validator("window_size")
+  @field_validator("avg_image_gb", "node_ephemeral_gb")
+  @classmethod
+  def _disk_positive(cls, v: float | None) -> float | None:
+    if v is not None and v <= 0:
+      raise ValueError("disk size hints must be > 0 or None")
+    return v
+
+  @field_validator("disk_headroom")
+  @classmethod
+  def _headroom_fraction(cls, v: float) -> float:
+    if not (0 <= v < 1):
+      raise ValueError("disk_headroom must be in [0, 1)")
+    return v
+
+  @field_validator("window_size", "cluster_nodes")
   @classmethod
   def _window_positive(cls, v: int | None) -> int | None:
     if v is not None and v < 1:
-      raise ValueError("window_size must be >= 1 or None (auto)")
+      raise ValueError("must be >= 1 or None")
     return v
 
   @field_validator("template_name_prefix")

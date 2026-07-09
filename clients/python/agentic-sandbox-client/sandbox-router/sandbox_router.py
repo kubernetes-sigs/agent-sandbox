@@ -34,6 +34,7 @@ DEFAULT_SANDBOX_PORT = 8888
 DEFAULT_NAMESPACE = "default"
 DEFAULT_PROXY_TIMEOUT = 180.0
 DEFAULT_CLUSTER_DOMAIN = "cluster.local"
+DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
 
 
 def _get_proxy_timeout() -> float:
@@ -62,6 +63,23 @@ def _get_cluster_domain() -> str:
               f"falling back to {DEFAULT_CLUSTER_DOMAIN}")
         return DEFAULT_CLUSTER_DOMAIN
     return cluster_domain
+
+
+def _get_max_keepalive_connections() -> int:
+    raw = os.environ.get("MAX_KEEPALIVE_CONNECTIONS")
+    if raw is None:
+        return DEFAULT_MAX_KEEPALIVE_CONNECTIONS
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        print(f"WARNING: Invalid MAX_KEEPALIVE_CONNECTIONS='{raw}', "
+              f"falling back to {DEFAULT_MAX_KEEPALIVE_CONNECTIONS}")
+        return DEFAULT_MAX_KEEPALIVE_CONNECTIONS
+    if value < 0:
+        print(f"WARNING: MAX_KEEPALIVE_CONNECTIONS must be >= 0, got {value}, "
+              f"falling back to {DEFAULT_MAX_KEEPALIVE_CONNECTIONS}")
+        return DEFAULT_MAX_KEEPALIVE_CONNECTIONS
+    return value
 
 
 def _get_request_timeout(request: Request) -> float:
@@ -108,12 +126,17 @@ def _env_var_is_truthy(name: str) -> bool:
         return False
     return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 proxy_timeout = _get_proxy_timeout()
-client = httpx.AsyncClient(timeout=proxy_timeout)
+max_keepalive_connections = _get_max_keepalive_connections()
+client = httpx.AsyncClient(
+    timeout=proxy_timeout,
+    limits=httpx.Limits(max_keepalive_connections=max_keepalive_connections),
+)
 
 ROUTER_AUTH_TOKEN = os.environ.get("ROUTER_AUTH_TOKEN", "").strip() or None
 ALLOW_UNAUTHENTICATED_ROUTER = _env_var_is_truthy("ALLOW_UNAUTHENTICATED_ROUTER")
 
 print(f"Sandbox router configured with proxy timeout: {proxy_timeout}s")
+print(f"Sandbox router configured with max_keepalive_connections: {max_keepalive_connections}")
 print(f"Sandbox router configured with cluster_domain: {cluster_domain}")
 if ROUTER_AUTH_TOKEN:
     print("Authentication enabled: requests must include valid Bearer token.")

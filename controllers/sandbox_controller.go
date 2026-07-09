@@ -29,7 +29,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,7 +48,10 @@ import (
 )
 
 const (
-	sandboxLabel                = "agents.x-k8s.io/sandbox-name-hash"
+	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
+	// value on Pods, so per-reconcile pod lookups are O(1).
+	podSandboxNameHashIndex     = ".metadata.labels[" + sandboxLabel + "]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )
@@ -344,6 +346,19 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			readyCondition.Message = "Sandbox is suspended"
 		}
 		return readyCondition
+	}
+
+	if pod != nil {
+		switch pod.Status.Phase {
+		case corev1.PodSucceeded:
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonPodSucceeded
+			readyCondition.Message = "Pod completed successfully"
+			return readyCondition
+		case corev1.PodFailed:
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonPodFailed
+			readyCondition.Message = "Pod failed"
+			return readyCondition
+		}
 	}
 
 	message := ""
@@ -812,18 +827,16 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
 	defer end()
 
-	// List all pods with the pool label matching the warm pool name hash
+	// List all pods carrying this sandbox's tracking label (sandboxLabel),
+	// via the cache field index registered in SetupWithManager.
 	// TODO: find a better way to make sure one sandbox has at most one pod
 	podList := &corev1.PodList{}
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		sandboxLabel: nameHash,
-	})
-
-	if err := r.List(ctx, podList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     sandbox.Namespace,
-	}); err != nil {
+	if err := r.List(ctx, podList,
+		client.InNamespace(sandbox.Namespace),
+		client.MatchingFields{podSandboxNameHashIndex: nameHash},
+	); err != nil {
 		logger.Error(err, "Failed to list pods")
+		return nil, fmt.Errorf("pod list failed: %w", err)
 	}
 
 	if len(podList.Items) > 1 {
@@ -968,7 +981,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, err
 		}
 
-		// TODO - Do we enfore (change) spec if a pod exists ?
+		// TODO - Do we enforce (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
 		return pod, nil
 	}
@@ -1414,8 +1427,23 @@ func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
 }
 
+// podSandboxNameHashIndexer extracts the sandboxLabel value for the
+// podSandboxNameHashIndex cache field index. Shared with tests so fake
+// clients register the same index the manager does.
+func podSandboxNameHashIndexer(obj client.Object) []string {
+	if v, ok := obj.GetLabels()[sandboxLabel]; ok {
+		return []string{v}
+	}
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, podSandboxNameHashIndex,
+		podSandboxNameHashIndexer); err != nil {
+		return fmt.Errorf("failed to index pods by sandbox label: %w", err)
+	}
+
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{

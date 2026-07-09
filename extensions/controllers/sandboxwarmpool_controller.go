@@ -523,7 +523,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	// In this case, we should log an error and treat it as NOT stale to avoid
 	// mass-deleting existing sandboxes due to a marshal failure.
 	if currentSandboxBlueprintHash == "" {
-		log.FromContext(ctx).Error(nil, "currentSandboxHash is empty, skipping staleness check", "sandbox", sandbox.Name)
+		log.FromContext(ctx).Error(nil, "currentSandboxBlueprintHash is empty, skipping staleness check", "sandbox", sandbox.Name)
 		return false
 	}
 
@@ -560,8 +560,11 @@ func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.
 	return equality.Semantic.DeepEqual(expectedSpec, actualSandboxSpec)
 }
 
-// compareVolumeClaimTemplates checks if the volume claim templates in the sandbox are equal to the template,
-// only comparing the VolumeClaimTemplates names and specs, as changes in metadata (like labels, annotations) are not tracked for staleness.
+// compareVolumeClaimTemplates checks if the volume claim templates in the sandbox are equal to the template.
+// Only each entry's name and spec are compared, as changes in metadata (like labels, annotations) are not tracked for staleness.
+// Note: Comparison is index-based (order-sensitive) to stay consistent with computeSandboxBlueprintHash (+listType=atomic).
+// Making this comparison order-independent without also sorting the templates in computeSandboxBlueprintHash
+// would cause reordered warm sandboxes to fail the hash label check on every reconcile.
 func (r *SandboxWarmPoolReconciler) compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, actualVCTs []sandboxv1beta1.PersistentVolumeClaimTemplate) bool {
 	if len(template.Spec.SandboxBlueprint.VolumeClaimTemplates) != len(actualVCTs) {
 		return false

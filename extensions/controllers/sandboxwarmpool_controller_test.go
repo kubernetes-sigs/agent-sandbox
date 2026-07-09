@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2231,4 +2233,26 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			require.Equal(t, tt.expectedResult, result)
 		})
 	}
+}
+
+// TestSandboxBlueprintFieldsAreCompared verifies that compareSandboxBlueprint()
+// accounts for all fields in the SandboxBlueprint struct. A field missing from the
+// comparison logic is not tracked for drift, so a warm sandbox will not be detected
+// as stale when that field changes.
+func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
+	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service"}
+
+	var actualFields []string
+	blueprintType := reflect.TypeFor[sandboxv1beta1.SandboxBlueprint]()
+	for field := range blueprintType.Fields() {
+		actualFields = append(actualFields, field.Name)
+	}
+
+	slices.Sort(expectedFields)
+	slices.Sort(actualFields)
+
+	require.Equal(t, expectedFields, actualFields,
+		"SandboxBlueprint fields have changed. Update compareSandboxBlueprint() in "+
+			"sandboxwarmpool_controller.go to compare the new field for staleness detection, then update the "+
+			"expected field list in this test to include it.")
 }

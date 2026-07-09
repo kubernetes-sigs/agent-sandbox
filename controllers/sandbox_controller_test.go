@@ -3409,9 +3409,11 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 					OwnerReferences:   tc.ownerRefs,
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
-					PodTemplate: sandboxv1beta1.PodTemplate{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{{Name: "test-container"}},
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test-container"}},
+							},
 						},
 					},
 				},
@@ -3503,9 +3505,11 @@ func TestRecordSandboxCreationMetrics_AlreadyReady(t *testing.T) {
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "test-container"}},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
 				},
 			},
 		},
@@ -3555,9 +3559,11 @@ func TestObservabilityAnnotationStamping(t *testing.T) {
 				Generation: 1,
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},
@@ -3598,9 +3604,11 @@ func TestObservabilityAnnotationStamping(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},
@@ -3733,9 +3741,11 @@ func TestFirstReadyAnnotationStamping(t *testing.T) {
 				CreationTimestamp: pastTime,
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},
@@ -3796,9 +3806,11 @@ func TestFirstReadyAnnotationStamping(t *testing.T) {
 				CreationTimestamp: pastTime,
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},
@@ -3896,9 +3908,11 @@ func TestBackfillFirstReadyAnnotation(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},
@@ -3978,9 +3992,11 @@ func TestBackfillFirstReadyAnnotation(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},
@@ -4052,9 +4068,11 @@ func TestBackfillFirstReadyAnnotation(t *testing.T) {
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "test-container"}},
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},

@@ -1,0 +1,227 @@
+openapi: "3.0.3"
+info:
+  title: sandboxd Filesystem & Runtime REST API
+  description: >
+    Stateless REST interface for sandbox file system operations and runtime metadata (ASRP).
+    High-performance raw file transfers (read/write) are served over HTTP REST, while interactive
+    process execution is served over gRPC on a dedicated port.
+    Security note: sandboxd listens strictly on localhost or Unix Domain Socket within the isolated
+    container network namespace and must never be exposed on public interfaces.
+  version: "v1"
+
+servers:
+  - url: http://localhost:8080/v1
+    description: sandboxd REST server (default port 8080 or Unix Domain Socket)
+
+paths:
+  /files/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+        description: >
+          Sandbox-relative path (e.g. workspace/main.py or workspace/src/).
+          Requests that attempt directory traversal outside the sandbox root are rejected with 403.
+
+    get:
+      summary: Read a file or list a directory
+      description: >
+        If the path points to a file, returns raw file bytes (application/octet-stream).
+        If the path points to a directory, returns a structured directory listing (application/json).
+      responses:
+        "200":
+          description: File contents or directory listing
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectoryListing"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Write or overwrite a file (Idempotent)
+      description: >
+        Atomically writes request body to the given path using a temporary file and rename strategy.
+        Parent directories are created automatically. Supports both new file creation and overwriting.
+      parameters:
+        - name: mode
+          in: query
+          required: false
+          schema:
+            type: string
+            default: "0644"
+          description: Octal permission bits applied to the written file (e.g. "0755" or "0644").
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "204":
+          description: File written successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    delete:
+      summary: Remove a file or directory
+      parameters:
+        - name: recursive
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: If true, recursively removes directory and all its contents.
+      responses:
+        "204":
+          description: Removed successfully
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /health:
+    get:
+      summary: Sandbox readiness and heartbeat check
+      description: >
+        Used by orchestrators and Kubernetes liveness/readiness probes to verify sandboxd is healthy.
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /metadata:
+    get:
+      summary: Runtime environment metadata
+      description: >
+        Returns dynamic environment variables and configuration secrets injected by the orchestrator.
+        Security note: This endpoint is strictly restricted to local loopback (localhost) or Unix Domain
+        Socket access within the isolated pod network namespace and must never be exposed externally.
+      responses:
+        "200":
+          description: Runtime metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetadataResponse"
+
+components:
+  schemas:
+    DirectoryListing:
+      type: object
+      required:
+        - path
+        - entries
+      properties:
+        path:
+          type: string
+          example: "/workspace"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileEntry"
+
+    FileEntry:
+      type: object
+      required:
+        - name
+        - size
+        - type
+        - modified_at
+      properties:
+        name:
+          type: string
+          example: "main.py"
+        size:
+          type: integer
+          format: int64
+          example: 1024
+        type:
+          type: string
+          enum: [file, directory]
+          example: "file"
+        modified_at:
+          type: string
+          format: date-time
+        mode:
+          type: string
+          description: Octal permission bits
+          example: "0644"
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - uptime_seconds
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          example: "ok"
+        uptime_seconds:
+          type: integer
+          example: 3600
+
+    MetadataResponse:
+      type: object
+      properties:
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Key-value environment variables injected by the orchestrator.
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          example: "PERMISSION_DENIED"
+        message:
+          type: string
+          example: "Path traversal outside sandbox root is forbidden."
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters or payload
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Path escapes sandbox root or permission denied
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Path does not exist within the sandbox
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

@@ -61,7 +61,7 @@ def main():
         for import_path, binary_name in tools:
             print(f"  Installing {binary_name} ({import_path.split('@')[1]})...")
             # Running go install outside the main module context to avoid modifying go.mod
-            subprocess.check_call(["go", "install", import_path], env=env, cwd=repo_root)
+            subprocess.check_call(["go", "install", import_path], env=env, cwd=os.path.expanduser("~"))
 
         with open(stamp_file, "w") as f:
             f.write(expected_stamp + "\n")

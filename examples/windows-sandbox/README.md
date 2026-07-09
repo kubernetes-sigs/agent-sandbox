@@ -1,6 +1,6 @@
 # Windows Sandbox Example
 
-This example demonstrates how to run a Windows guest inside the Agent Sandbox using the [`dockur/windows`](https://github.com/dockur/windows) image. The container runs KVM/QEMU to boot a full Windows OS (Windows 11 by default) nested inside a Linux container.
+This example demonstrates how to run a Windows guest inside the Agent Sandbox using the [`dockurr/windows`](https://hub.docker.com/r/dockurr/windows) image from the [`dockur/windows`](https://github.com/dockur/windows) project. The container runs KVM/QEMU to boot a full Windows OS (Windows 11 by default) nested inside a Linux container.
 
 ## Prerequisites
 

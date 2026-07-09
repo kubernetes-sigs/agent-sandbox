@@ -3373,3 +3373,33 @@ func TestRecordResumeLatency(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcile_CleanUpResumeStartTimesOnNotFound(t *testing.T) {
+	sbName := "stale-sb"
+	sbNs := "default"
+	key := types.NamespacedName{Name: sbName, Namespace: sbNs}
+
+	// Create a reconciler with an empty fake client (so Get returns NotFound)
+	fc := fake.NewClientBuilder().WithScheme(Scheme).Build()
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+
+	// Seed the map with a stale entry
+	r.resumeStartTimes.Store(key, resumeTimeEntry{
+		timestamp: time.Now(),
+		uid:       "stale-uid",
+	})
+
+	// Run Reconcile (will return early with NotFound)
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: key}
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	// Assert the map entry has been cleaned up
+	_, ok := r.resumeStartTimes.Load(key)
+	assert.False(t, ok, "expected resumeStartTimes entry to be deleted when sandbox is not found")
+}

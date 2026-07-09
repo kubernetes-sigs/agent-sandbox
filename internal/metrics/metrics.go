@@ -94,7 +94,7 @@ var (
 	ResumeLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_resume_latency_ms",
-			Help: "Latency from resume request (operatingMode=Running) to Sandbox Ready state in milliseconds.",
+			Help: "Latency from the controller first observing operatingMode=Running (after a fully-suspended state) to Sandbox Ready, in milliseconds.",
 			// Buckets for latency from 50ms to 10 minutes; resume recreates the Pod.
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
 		},

@@ -1,7 +1,7 @@
 ---
 title: "Windows Sandbox Example"
 linkTitle: "Windows Sandbox"
-weight: 2
+weight: 3
 description: >
   This example demonstrates how to run a Windows guest inside the Agent Sandbox via KVM/QEMU using the dockur/windows image.
 ---

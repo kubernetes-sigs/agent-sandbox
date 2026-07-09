@@ -3,12 +3,12 @@ kind: Sandbox
 metadata:
   name: windows-sandbox
 spec:
-  terminationGracePeriodSeconds: 120
   podTemplate:
     metadata:
       labels:
         sandbox: windows-sandbox
     spec:
+      terminationGracePeriodSeconds: 120
       automountServiceAccountToken: false
       containers:
         - name: windows

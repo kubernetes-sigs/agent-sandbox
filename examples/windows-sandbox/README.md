@@ -75,7 +75,7 @@ The sandbox pod requests 2 CPU / 4Gi memory and limits to 4 CPU / 8Gi memory. A 
 ## Limitations
 
 -   **KVM required**: Requires `/dev/kvm` on the host node. Does not work on Kind or most managed Kubernetes services without nested virtualization. For arm64 Windows, use the separate [`dockur/windows-arm`](https://github.com/dockur/windows-arm) image instead.
--   **Privileged container**: Requires `privileged: true` and `hostPath` device mounts. Clusters enforcing the `restricted` Pod Security profile or policy engines (Kyverno, OPA Gatekeeper, VAP) will block this manifest. Use a namespace with the `privileged` or `baseline` profile.
+-   **Privileged container**: Requires `privileged: true` and `hostPath` device mounts. Clusters enforcing the `restricted` or `baseline` Pod Security profile, or policy engines (Kyverno, OPA Gatekeeper, VAP), will block this manifest. Use a namespace with the `privileged` Pod Security profile.
 -   **`hostPath` is node-specific**: The pod will only schedule on nodes that have `/dev/kvm` and `/dev/net/tun`. If needed, add a `nodeSelector` or `nodeAffinity` to target specific nodes.
 
 ## Troubleshooting

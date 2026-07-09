@@ -296,10 +296,16 @@ def main():
 #### Core & Extensions
 ```bash
 # To install only the core components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/sandbox.yaml
 
-# To install the extensions components:
+# To additionally install the extensions components:
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/extensions.yaml
+```
+
+#### All-in-one (kustomize / GitOps)
+```bash
+# Core + extensions in a single collision-free asset:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/sandbox-with-extensions.yaml
 ```
 
 #### Python SDK

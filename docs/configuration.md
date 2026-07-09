@@ -21,7 +21,7 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 
 To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. 
 
-If using the core controller, update `manifest.yaml`:
+If using the core controller, update `sandbox.yaml`:
 
 ```yaml
       containers:

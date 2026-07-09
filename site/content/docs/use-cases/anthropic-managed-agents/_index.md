@@ -202,7 +202,7 @@ controller gets onto the cluster:
 
 |                               | Agent Sandbox add-on (GKE)        | OSS install (any cluster)                                                                                                                                            |
 | ----------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Deployment**                | `gcloud … --enable-agent-sandbox` | `kubectl apply -f …/manifest.yaml` then `…/extensions.yaml` for `SandboxWarmPool`/`SandboxTemplate`/`SandboxClaim` (or Helm with `--set controller.extensions=true`) |
+| **Deployment**                | `gcloud … --enable-agent-sandbox` | `kubectl apply -f …/sandbox.yaml` then `…/extensions.yaml` for `SandboxWarmPool`/`SandboxTemplate`/`SandboxClaim` (or Helm with `--set controller.extensions=true`) |
 | **Who runs the controller**   | Google-managed                    | You                                                                                                                                                                  |
 | **API version served**        | `v1alpha1` (currently)            | `v1beta1`                                                                                                                                                            |
 | **gVisor + admission policy** | provisioned by GKE                | you bring `runtimeClassName` / node pool and any admission policy                                                                                                    |

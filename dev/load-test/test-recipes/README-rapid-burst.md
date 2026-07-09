@@ -58,7 +58,7 @@ Before running this test, ensure the following prerequisites are met:
   - Apply your modified manifests to your cluster to install the agent-sandbox controller.
     ```bash
     cd ~/agent-sandbox
-    kubectl apply -f release_assets/manifest.yaml
+    kubectl apply -f release_assets/sandbox.yaml
     kubectl apply -f release_assets/extensions.yaml
     ```
 

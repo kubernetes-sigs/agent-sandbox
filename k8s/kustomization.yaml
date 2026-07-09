@@ -1,12 +1,12 @@
 # All-in-one (core + extensions) assembly for kustomize / GitOps consumers.
 #
-# Unlike `manifest.yaml` + `extensions.yaml` (which are designed for sequential
+# Unlike `sandbox.yaml` + `extensions.yaml` (which are designed for sequential
 # `kubectl apply -f` and therefore both declare the agent-sandbox-controller
 # Deployment), this kustomization declares the controller exactly once and turns
 # on extensions via a patch -- so it has no duplicate resource ids and can be
 # consumed directly by kustomize, Config Sync, Argo CD, etc.
 #
-# The release tooling renders this into a single collision-free `install.yaml`
+# The release tooling renders this into a single collision-free `sandbox-with-extensions.yaml`
 # release asset (with the ko:// image replaced by the published controller image).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -31,7 +31,7 @@ patches:
   # and -- because the patch only adds to the core controller.yaml Deployment --
   # the webhook containerPort 9443 (which agent-sandbox-webhook-service targets)
   # is preserved here too. extensions.controller.yaml now declares that port as
-  # well, so install.yaml and the sequential `kubectl apply` path converge on the
+  # well, so sandbox-with-extensions.yaml and the sequential `kubectl apply` path converge on the
   # same Deployment spec.
   #
   # Keep this patch in lockstep with extensions.controller.yaml: if its args or

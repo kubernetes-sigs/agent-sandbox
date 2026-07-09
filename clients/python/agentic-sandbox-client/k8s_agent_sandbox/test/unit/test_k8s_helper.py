@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 from kubernetes import client
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.constants import CLIENT_REQUEST_TIME_ANNOTATION
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
@@ -38,7 +39,8 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
 
         mock_api.create_namespaced_custom_object.assert_called_once()
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
-        self.assertEqual(body["metadata"]["annotations"], {"opentelemetry.io/trace-context": "trace-data"})
+        self.assertEqual(body["metadata"]["annotations"]["opentelemetry.io/trace-context"], "trace-data")
+        self.assertIn(CLIENT_REQUEST_TIME_ANNOTATION, body["metadata"]["annotations"])
         self.assertEqual(body["metadata"]["labels"], {"agent": "code-agent", "team": "platform"})
 
     def test_labels_only_no_annotations(self, mock_config, mock_api_cls, mock_core_cls):
@@ -52,7 +54,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         )
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
-        self.assertEqual(body["metadata"]["annotations"], {})
+        self.assertEqual(set(body["metadata"]["annotations"].keys()), {CLIENT_REQUEST_TIME_ANNOTATION})
         self.assertEqual(body["metadata"]["labels"], {"agent": "code-agent"})
 
     def test_no_labels_no_annotations(self, mock_config, mock_api_cls, mock_core_cls):
@@ -63,7 +65,7 @@ class TestK8sHelperCreateSandboxClaim(unittest.TestCase):
         helper.create_sandbox_claim("test-claim", "test-warmpool", "test-namespace")
 
         body = mock_api.create_namespaced_custom_object.call_args.kwargs["body"]
-        self.assertEqual(body["metadata"]["annotations"], {})
+        self.assertEqual(set(body["metadata"]["annotations"].keys()), {CLIENT_REQUEST_TIME_ANNOTATION})
         self.assertNotIn("labels", body["metadata"])
 
     def test_lifecycle_included_in_manifest(self, mock_config, mock_api_cls, mock_core_cls):

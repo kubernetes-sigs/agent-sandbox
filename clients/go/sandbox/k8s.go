@@ -40,6 +40,8 @@ import (
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
+const clientAnnotation = "agents.x-k8s.io/client-first-requested-at"
+
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
 type sandboxState struct {
 	SandboxName string
@@ -132,6 +134,10 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 			"opentelemetry.io/trace-context": traceCtx,
 		}
 	}
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[clientAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 
 	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{

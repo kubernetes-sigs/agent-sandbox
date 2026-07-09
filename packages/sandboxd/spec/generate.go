@@ -14,4 +14,4 @@
 
 package spec
 
-//go:generate sh -c "buf generate && ../../../dev/tools/fix-boilerplate"
+//go:generate sh -c "cd ../../.. && python3 dev/tools/fix-go-generate --install-only && bin/buf generate && dev/tools/fix-boilerplate"

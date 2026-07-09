@@ -64,8 +64,11 @@ const (
 	SandboxLaunchTypeCold = "cold"
 	// SandboxLaunchTypeWarm indicates the Sandbox was pre-provisioned by or adopted from a SandboxWarmPool.
 	SandboxLaunchTypeWarm = "warm"
-	// SandboxPodTemplateHashLabel is the label used to track the pod template hash.
-	SandboxPodTemplateHashLabel = "agents.x-k8s.io/sandbox-pod-template-hash"
+	// DeprecatedSandboxPodTemplateHashLabel is the label used to track the pod template hash.
+	// Deprecated: Use SandboxTemplateHashLabel instead.
+	DeprecatedSandboxPodTemplateHashLabel = "agents.x-k8s.io/sandbox-pod-template-hash"
+	// SandboxTemplateHashLabel is the label used to track the blueprint hash.
+	SandboxTemplateHashLabel = "agents.x-k8s.io/sandbox-template-hash"
 	// SandboxPropagatedLabelsAnnotation is the annotation used to track the labels explicitly propagated from sandbox spec to pod.
 	SandboxPropagatedLabelsAnnotation = "agents.x-k8s.io/propagated-labels"
 	// SandboxPropagatedAnnotationsAnnotation is the annotation used to track the annotations explicitly propagated from sandbox spec to pod.
@@ -146,6 +149,11 @@ const (
 	// SandboxOperatingModeSuspended indicates the sandbox should be suspended.
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
+
+// NOTE: When adding, removing, or renaming a field in SandboxBlueprint,
+// also update compareSandboxBlueprint() in extensions/controllers/sandboxwarmpool_controller.go
+// so the SandboxWarmPool staleness check accounts for it. A field left out of that comparison
+// is not tracked for drift, so warm sandboxes will not be detected as stale when it changes.
 
 // SandboxBlueprint defines the configuration shared between Sandbox and SandboxTemplate.
 // It deliberately excludes runtime-only fields (operatingMode, lifecycle).

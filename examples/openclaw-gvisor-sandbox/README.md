@@ -4,10 +4,6 @@ Runs [OpenClaw](https://github.com/openclaw/openclaw) inside the Agent Sandbox u
 `SandboxTemplate` + `SandboxWarmPool` + `SandboxClaim` pattern, under gVisor, with a
 persistent workspace PVC. Ships access flows for both kind (NodePort) and GKE (LoadBalancer + IAP tunnel).
 
-If you just want the minimal port-forward flow with a plain `Sandbox` CR, see
-[`examples/openclaw-sandbox`](../openclaw-sandbox/). This directory is the
-production-shaped variant.
-
 ## What you get
 
 - `SandboxTemplate` with `runtimeClassName: gvisor`, an init container that seeds

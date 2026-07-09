@@ -223,10 +223,14 @@ func TestOperations_URLEncodesSpecialChars(t *testing.T) {
 		callOp   func(*Sandbox, string) error
 	}{
 		{"Read_spaces", "path with spaces/file.txt", "path%20with%20spaces%2Ffile.txt", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
+		{"Read_dot", ".", "%2E", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
+		{"Read_dotdot", "..", "%2E%2E", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
 		{"List_spaces", "path with spaces/dir", "path%20with%20spaces%2Fdir", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
 		{"List_dot", ".", "%2E", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
 		{"List_dotdot", "..", "%2E%2E", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
 		{"Exists_special", "file@special!.txt", "file%40special%21.txt", func(c *Sandbox, p string) error { _, err := c.Exists(context.Background(), p); return err }},
+		{"Exists_dot", ".", "%2E", func(c *Sandbox, p string) error { _, err := c.Exists(context.Background(), p); return err }},
+		{"Exists_dotdot", "..", "%2E%2E", func(c *Sandbox, p string) error { _, err := c.Exists(context.Background(), p); return err }},
 		{"Read_slashes", "subdir/nested/file.txt", "subdir%2Fnested%2Ffile.txt", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
 	}
 	for _, tc := range cases {

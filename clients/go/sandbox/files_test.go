@@ -225,6 +225,7 @@ func TestOperations_URLEncodesSpecialChars(t *testing.T) {
 		{"Read_spaces", "path with spaces/file.txt", "path%20with%20spaces%2Ffile.txt", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
 		{"List_spaces", "path with spaces/dir", "path%20with%20spaces%2Fdir", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
 		{"List_dot", ".", "%2E", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
+		{"List_dotdot", "..", "%2E%2E", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
 		{"Exists_special", "file@special!.txt", "file%40special%21.txt", func(c *Sandbox, p string) error { _, err := c.Exists(context.Background(), p); return err }},
 		{"Read_slashes", "subdir/nested/file.txt", "subdir%2Fnested%2Ffile.txt", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
 	}
@@ -264,7 +265,8 @@ func TestList_DotPathDoesNotRedirect(t *testing.T) {
 			return
 		}
 		if r.URL.EscapedPath() != "/list/%2E" {
-			t.Fatalf("expected /list/%%2E, got %s", r.URL.EscapedPath())
+			t.Errorf("expected /list/%%2E, got %s", r.URL.EscapedPath())
+			return
 		}
 		_ = json.NewEncoder(w).Encode([]FileEntry{})
 	}))

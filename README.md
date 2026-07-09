@@ -84,37 +84,33 @@ flowchart LR
 
 ## Installation
 
-### Core Components & Extensions
+### Standard Install (Core + Extensions)
 
-You can install the agent-sandbox controller and its CRDs with the following command.
+Recommended for most users and GitOps engines (Argo CD, Config Sync, kustomize).
+`sandbox-with-extensions.yaml` is a single, collision-free asset (the controller is
+declared once with extensions enabled):
 
 ```sh
 # Replace "vX.Y.Z" with a specific version tag (e.g., "v0.1.0") from
 # https://github.com/kubernetes-sigs/agent-sandbox/releases
 export VERSION="vX.Y.Z"
 
-# To install only the core components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
-
-# To install the extensions components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
-```
-
-### GitOps / kustomize (Config Sync, Argo CD)
-
-`sandbox.yaml` and `extensions.yaml` are designed for sequential `kubectl apply -f`,
-so they both declare the `agent-sandbox-controller` Deployment (the extensions copy
-adds `--extensions`). `kubectl apply` tolerates this (last write wins), but kustomize
-and GitOps engines reject the duplicate resource id.
-
-For those consumers, each release also publishes a single, collision-free `sandbox-with-extensions.yaml`
-(core + extensions, controller declared once with extensions enabled):
-
-```sh
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
 ```
 
 You can also render it directly from source with `kubectl kustomize k8s/`.
+
+### Selective Install
+
+If you prefer to install components separately:
+
+```sh
+# Core only:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
+
+# Extensions (opt-in):
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+```
 
 ### Go SDK
 

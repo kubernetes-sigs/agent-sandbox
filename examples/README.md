@@ -24,3 +24,4 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
+- [**windows-sandbox**](./windows-sandbox): An example of running a Windows guest inside the Agent Sandbox via KVM/QEMU.

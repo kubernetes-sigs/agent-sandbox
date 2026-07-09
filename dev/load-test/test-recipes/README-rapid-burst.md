@@ -34,7 +34,7 @@ Before running this test, ensure the following prerequisites are met:
   - Generate the manifests using `cd ~/agent-sandbox && make release-manifests TAG=123`. The
     manifests will be generated in `~/agent-sandbox/release_assets`. Search for the
     `image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:123` line in the generated
-    extensions and manifest files and replace the image with your image:tag.
+    extensions and sandbox files and replace the image with your image:tag.
   - We recommend adding and adjusting the below configurations in the `extensions.yaml` generated
     manifest to whatever values are appropriate for your cluster size:
     ```yaml

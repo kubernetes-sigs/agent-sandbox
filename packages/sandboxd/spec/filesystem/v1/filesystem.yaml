@@ -2,7 +2,8 @@ openapi: "3.0.3"
 info:
   title: sandboxd Filesystem & Runtime REST API
   description: >
-    Stateless REST interface for sandbox file system operations and runtime metadata (ASRP).
+    Stateless REST interface for sandbox file system operations and runtime metadata.
+    Part of the Agent Runtime Protocol hybrid gRPC/REST architecture.
     High-performance raw file transfers (read/write) are served over HTTP REST, while interactive
     process execution is served over gRPC on a dedicated port.
     Security note: sandboxd listens strictly on localhost or Unix Domain Socket within the isolated
@@ -23,7 +24,9 @@ paths:
           type: string
         description: >
           Sandbox-relative path (e.g. workspace/main.py or workspace/src/).
-          Requests that attempt directory traversal outside the sandbox root are rejected with 403.
+          Path segments containing '/' must be URL-encoded (%2F) by clients
+          when constructing the request URL. The server decodes the full path
+          before resolving it against the sandbox root.
 
     get:
       summary: Read a file or list a directory
@@ -57,6 +60,7 @@ paths:
           required: false
           schema:
             type: string
+            pattern: "^0[0-7]{3}$"
             default: "0644"
           description: Octal permission bits applied to the written file (e.g. "0755" or "0644").
       requestBody:
@@ -69,6 +73,8 @@ paths:
           multipart/form-data:
             schema:
               type: object
+              required:
+                - file
               properties:
                 file:
                   type: string
@@ -111,14 +117,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service unavailable or not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /metadata:
     get:
       summary: Runtime environment metadata
       description: >
-        Returns dynamic environment variables and configuration secrets injected by the orchestrator.
-        Security note: This endpoint is strictly restricted to local loopback (localhost) or Unix Domain
-        Socket access within the isolated pod network namespace and must never be exposed externally.
+        Returns dynamic environment variables and secrets injected by the orchestrator.
+        This endpoint is intentionally reachable only via localhost or Unix Domain Socket
+        and must not be exposed on a public network interface. No additional authentication
+        is applied beyond network-level containment.
       responses:
         "200":
           description: Runtime metadata
@@ -174,7 +187,6 @@ components:
       type: object
       required:
         - status
-        - uptime_seconds
       properties:
         status:
           type: string

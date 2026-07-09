@@ -103,11 +103,18 @@ func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace stri
 	c.mu.Lock()
 	if tracked := c.registry[key]; tracked != nil && tracked.IsReady() {
 		c.mu.Unlock()
-		// A concurrent caller already tracks a ready handle for this key. Our
-		// handle owns a distinct freshly-created claim, so Close() it (tears
-		// down transport + deletes the redundant claim) and return the tracked one.
-		if cerr := sb.Close(ctx); cerr != nil {
-			c.log.Error(cerr, "closing redundant handle after registry race", "claim", key.ClaimName, "namespace", namespace)
+		// A ready handle is already tracked for this key. The registry key is
+		// built from the server-assigned (GenerateName) claim name, which is
+		// unique to this sb, so a hit means tracked and sb reference the SAME
+		// claim — a concurrent GetSandbox attached to the claim we just created
+		// (e.g. after spotting it via ListAllSandboxes) and registered first.
+		// Tear down only our redundant transport (Disconnect); Close() would
+		// deleteClaim on the shared claim and destroy the sandbox out from under
+		// the tracked handle we return. Use a detached context: the caller's ctx
+		// may already be cancelled/near-deadline, which would make Disconnect bail
+		// before tearing down the transport — leaking the very handle we discard.
+		if derr := sb.Disconnect(context.Background()); derr != nil {
+			c.log.Error(derr, "disconnecting redundant handle after registry race", "claim", key.ClaimName, "namespace", namespace)
 		}
 		return tracked, nil
 	}
@@ -170,11 +177,13 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	// Re-check under the final lock: a concurrent GetSandbox/CreateSandbox for
 	// the same key may have installed a ready handle while we were attaching.
 	// If so, return the already-tracked handle and tear down our redundant
-	// transport WITHOUT deleting the shared claim (Disconnect, not Close).
+	// transport WITHOUT deleting the shared claim (Disconnect, not Close). Use a
+	// detached context so a cancelled/near-deadline caller ctx can't make
+	// Disconnect bail before the transport is torn down, leaking it.
 	c.mu.Lock()
 	if tracked := c.registry[key]; tracked != nil && tracked.IsReady() {
 		c.mu.Unlock()
-		if derr := sb.Disconnect(ctx); derr != nil {
+		if derr := sb.Disconnect(context.Background()); derr != nil {
 			c.log.Error(derr, "disconnecting redundant handle after registry race", "claim", claimName, "namespace", namespace)
 		}
 		return tracked, nil

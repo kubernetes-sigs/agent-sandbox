@@ -139,23 +139,27 @@ def analyze_tab(dashboard, tab, window):
             continue
 
         # Definite flake: the same changelist (PR) both failed and passed this
-        # test across runs, i.e. a bare retest changed the outcome.
+        # test across runs, i.e. a bare retest changed the outcome. Periodic
+        # tabs report changelists as empty strings — those runs aren't the
+        # same PR, so they must not be grouped as one changelist.
         retest_flips = 0
         if changelists:
             by_cl = {}
             for i in fail_cols:
-                if i < len(changelists):
+                if i < len(changelists) and changelists[i]:
                     by_cl.setdefault(changelists[i], set()).add("fail")
             for i in pass_cols:
-                if i < len(changelists):
+                if i < len(changelists) and changelists[i]:
                     by_cl.setdefault(changelists[i], set()).add("pass")
             retest_flips = sum(1 for v in by_cl.values() if v == {"fail", "pass"})
 
         # On presubmit tabs a failure on a single PR is usually that PR's own
         # bug; flakiness means failures spread across distinct changelists.
-        distinct_cls = len(
-            {changelists[i] for i in fail_cols if i < len(changelists)}
-        ) if changelists else len(fail_cols)
+        # Without usable changelists (periodics), every failing run is a
+        # distinct commit, so count the runs themselves.
+        fail_cls = {changelists[i] for i in fail_cols
+                    if i < len(changelists) and changelists[i]}
+        distinct_cls = len(fail_cls) if fail_cls else len(fail_cols)
 
         finding = {
             "tab": tab,
@@ -264,10 +268,21 @@ def render_report(dashboard, flaky, consistent, infra, window):
     return "\n".join(lines) + "\n"
 
 
-def find_existing_issue(existing_issues, marker):
+def find_existing_issue(existing_issues, marker, test_name=None):
+    """Finds the open issue tracking a flake, or None.
+
+    Matches our own HTML marker first; falls back to the `[FLAKE] <name>`
+    title convention so a manually filed issue doesn't get a duplicate.
+    """
     for issue in existing_issues:
         if marker in issue.get("body", ""):
             return issue
+    if test_name:
+        names = {test_name, test_name.split("/", 1)[0]}
+        for issue in existing_issues:
+            m = re.match(r"\[FLAKE\]\s+(\S+)", issue.get("title", ""))
+            if m and m.group(1) in names:
+                return issue
     return None
 
 
@@ -326,7 +341,13 @@ def update_issues(repo, flaky, infra, dry_run):
     actions = []
     for f in merge_flaky_by_test(flaky):
         marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
-        issue = find_existing_issue(existing, marker)
+        issue = find_existing_issue(existing, marker, f["short"])
+        if issue and marker not in issue.get("body", ""):
+            # Matched by title only: a maintainer filed it by hand. Don't
+            # clobber their body with our template — just don't duplicate it.
+            actions.append(
+                f"skip #{issue['number']} (manually filed): {f['short']}")
+            continue
         if issue:
             # Only bump the issue when there is a failure newer than the last
             # one we reported, so a quiet flake doesn't get daily noise.

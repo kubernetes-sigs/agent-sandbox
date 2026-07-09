@@ -28,9 +28,12 @@ whose failure output you have not read.
    Fetch a failing run's junit + build log from the GCS links to read the real
    error before touching anything.
 2. Locate the test: `git grep -n "func <TestName>("` (Go) or
-   `git grep -n "def <test_name>("` (Python SDK e2e).
+   `git grep -n "def <test_name>("` (Python SDK e2e). For a Go subtest
+   (`TestFoo/subtest`), grep for the parent (`func TestFoo(`) only — the part
+   before the first `/` — then find the `t.Run("subtest", ...)` inside it.
 3. Stress it:
    - Unit tests: `go test ./<package>/... -run '^<TestName>$' -race -count=50`
+     (for a subtest, `-run '^TestFoo$/^subtest$'`)
    - e2e tests need a cluster: `make deploy-kind` first (see AGENTS.md), then
      `go test ./test/e2e/... -run '^<TestName>$' -count=10` with
      `KUBECONFIG=bin/KUBECONFIG`.

@@ -44,10 +44,12 @@ git fetch "$BASE_REMOTE" main
 
 # Work in a throwaway worktree so a half-finished fix never dirties the main
 # checkout; the skill creates one flake-fix/issue-<n> branch per issue.
-worktree=$(mktemp -d)/agent-sandbox-flake-fix
+worktree_parent=$(mktemp -d)
+worktree=$worktree_parent/agent-sandbox-flake-fix
 git worktree add --detach "$worktree" "$BASE_REMOTE/main"
 cleanup() {
   git worktree remove --force "$worktree" 2>/dev/null || true
+  rm -rf "$worktree_parent"
 }
 trap cleanup EXIT
 

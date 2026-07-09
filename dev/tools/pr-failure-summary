@@ -199,6 +199,15 @@ def match_flake(classname, name, flakes):
 _source_dirs_cache = {}
 
 
+def top_dirs(path):
+    """'controllers/foo_test.go' -> 'controllers', 'test/e2e/x/y.go' -> 'test/e2e'.
+
+    Drops the filename before truncating so foo.go and foo_test.go in the same
+    package map to the same dir; top-level files map to '' (callers drop it).
+    """
+    return "/".join(path.split("/")[:-1][:2])
+
+
 def test_source_dirs(test_name):
     """Best-effort map from a test name to repo dirs containing its source."""
     base = test_name.split("/", 1)[0]  # strip go subtest suffix
@@ -216,8 +225,7 @@ def test_source_dirs(test_name):
             # ❓) rather than wedging the cron; cached so a stuck git isn't
             # re-invoked for every failure.
             break
-        for path in result.stdout.splitlines():
-            dirs.add("/".join(path.split("/")[:2]))
+        dirs.update(d for d in map(top_dirs, result.stdout.splitlines()) if d)
     _source_dirs_cache[base] = dirs
     return dirs
 
@@ -226,7 +234,7 @@ def pr_changed_dirs(repo, number):
     files = json.loads(
         gh("pr", "view", str(number), "--repo", repo, "--json", "files")
     ).get("files", [])
-    return {"/".join(f["path"].split("/")[:2]) for f in files}
+    return {d for d in (top_dirs(f["path"]) for f in files) if d}
 
 
 def classify(classname, test_name, flakes, changed_dirs):
@@ -237,6 +245,23 @@ def classify(classname, test_name, flakes, changed_dirs):
     if overlap:
         return f"⚠️ exercises code this PR touches (`{sorted(overlap)[0]}`) — likely related to your change", False
     return "❓ not a known flake — check the error below", False
+
+
+# Output that shows the job died on the PR's own code (compile error, vet or
+# lint finding) rather than on infrastructure — no junit either way, so the
+# log tail is the only way to tell them apart.
+BUILD_FAILURE_RE = re.compile(
+    r"\.go:\d+:\d+:|\bundefined:|\bsyntax error\b|\bcannot find package\b"
+    r"|\bgolangci-lint\b|\bvet: "
+)
+
+
+def looks_like_pr_fault(job, log_tail):
+    """True when a junit-less failure is likely the PR's fault, not infra."""
+    # Lint/verify jobs never write junit; their failures are ~always the PR's.
+    if re.search(r"\b(lint|verify)\b", job["context"]):
+        return True
+    return bool(BUILD_FAILURE_RE.search(log_tail))
 
 
 def code_fence(text):
@@ -258,8 +283,8 @@ def build_comment(sha, jobs_summaries, all_known_flakes):
     # the comment refreshes when a failure later becomes a known flake (e.g.
     # after the nightly flake-report files an issue for it).
     fingerprint = ",".join(sorted(
-        [j["run_id"] for j, _, _ in jobs_summaries]
-        + [f"{name}:{verdict}" for _, failures, _ in jobs_summaries
+        [j["run_id"] for j, _, _, _ in jobs_summaries]
+        + [f"{name}:{verdict}" for _, failures, _, _ in jobs_summaries
            for name, _, verdict, _ in failures]
     ))
     state = f"{sha[:12]}:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:12]
@@ -269,18 +294,26 @@ def build_comment(sha, jobs_summaries, all_known_flakes):
         f"## CI failure summary for `{sha[:9]}`",
         "",
     ]
-    for job, failures, log_tail in jobs_summaries:
+    for job, failures, log_tail, pr_fault in jobs_summaries:
         lines.append(f"### ❌ `{job['context']}` — [full logs]({job['url']})")
         if failures:
             for name, msg, verdict, _ in failures:
                 lines.append(f"- `{name}` — {verdict}")
                 if msg:
                     lines += details_block("error", msg)
+        elif pr_fault:
+            lines.append(
+                "- The job failed **without producing test results** — the "
+                "log ends in what looks like a build/vet/lint failure, so it "
+                "is likely caused by this PR. See the log below."
+            )
+            if log_tail:
+                lines += details_block("end of build log", log_tail, max_lines=25)
         else:
             lines.append(
                 "- The job failed **before tests ran** (cluster bring-up / "
-                "image build / timeout). This is an infrastructure failure, "
-                "not your change — comment `/retest`."
+                "image build / timeout). This looks like an infrastructure "
+                "failure, not your change — comment `/retest`."
             )
             if log_tail:
                 lines += details_block("end of build log", log_tail, max_lines=25)
@@ -366,7 +399,10 @@ def main():
                     if not is_flake:
                         all_ok_to_retest = False
                     classified.append((name, msg, verdict, is_flake))
-                summaries.append((job, classified, log_tail))
+                pr_fault = not failures and looks_like_pr_fault(job, log_tail)
+                if pr_fault:
+                    all_ok_to_retest = False
+                summaries.append((job, classified, log_tail, pr_fault))
 
             body, state = build_comment(sha, summaries, all_ok_to_retest)
             action = upsert_comment(args.repo, number, body, state, args.post)

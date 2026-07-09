@@ -1696,8 +1696,8 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 		// Verify this policy was actually created by this controller
 		// before deleting it. We check if the SandboxClaim is the controller.
 		controllerRef := metav1.GetControllerOf(existingNP)
-		isControlledByClaim := controllerRef != nil && controllerRef.UID == claim.UID &&
-			utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind)
+		isControlledByClaim := utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind) &&
+			controllerRef.UID == claim.UID
 
 		if !isControlledByClaim {
 			// A user manually created a policy with our reserved name. We should not delete it, but log a warning so it can be resolved.

@@ -21,7 +21,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 # Derive the image tag from the template so the two never drift.
-IMAGE="$(grep -E '^\s+image:' openclaw-template.yaml | head -1 | awk '{print $2}')"
+# `|| true` swallows the pipeline exit status so `set -euo pipefail` doesn't
+# abort before the friendly error check below can fire (e.g., if grep matches
+# nothing because the template's `image:` line moved).
+IMAGE="$(grep -E '^\s+image:' openclaw-template.yaml | head -1 | awk '{print $2}' || true)"
 if [ -z "${IMAGE}" ]; then
   echo "ERROR: could not read image tag from openclaw-template.yaml" >&2
   exit 1

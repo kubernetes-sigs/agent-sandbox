@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -130,6 +131,7 @@ type SandboxReconciler struct {
 	Scheme        *runtime.Scheme
 	Tracer        asmetrics.Instrumenter
 	ClusterDomain string
+	Recorder      events.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -138,7 +140,8 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;update;patch,resourceNames=sandboxes.agents.x-k8s.io;sandboxclaims.extensions.agents.x-k8s.io;sandboxtemplates.extensions.agents.x-k8s.io;sandboxwarmpools.extensions.agents.x-k8s.io
 
@@ -194,6 +197,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	oldStatus := sandbox.Status.DeepCopy()
 	var err error
 	sandboxDeleted := false
+	ranCleanup := false
 	result := ctrl.Result{}
 
 	expired, _ := checkSandboxExpiry(sandbox, time.Now())
@@ -208,6 +212,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 		logger.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
 		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
+		// ranCleanup is true when cleanup succeeded and the sandbox was not self-deleted.
+		ranCleanup = !sandboxDeleted && err == nil
+
 	} else {
 		err = r.reconcileChildResources(ctx, sandbox)
 		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
@@ -218,11 +225,34 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	// Detect Ready transition before the status update persists the new conditions.
+	readyTransitioned := false
+	if err == nil && r.Recorder != nil {
+		oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+		newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+		readyTransitioned = newReady != nil && newReady.Status == metav1.ConditionTrue &&
+			(oldReady == nil || oldReady.Status != metav1.ConditionTrue)
+	}
+
+	// Suppress ranCleanup if the status did not actually change — this means
+	// cleanup already ran on a prior reconcile and the event was already emitted.
+	if ranCleanup && reflect.DeepEqual(oldStatus, &sandbox.Status) {
+		ranCleanup = false
+	}
+
 	if !sandboxDeleted {
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else if r.Recorder != nil {
+			// Emit lifecycle events only after the status update has been persisted.
+			if readyTransitioned {
+				r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, "SandboxReady", "Ready", "Sandbox is ready")
+			}
+			if ranCleanup {
+				r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, "SandboxExpired", "Expiry", "Sandbox has expired and child resources have been cleaned up")
+			}
 		}
 	}
 	// return errors seen
@@ -939,7 +969,17 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, "SandboxPodFailed", "PodCreation", "Failed to create pod %q: %v", pod.Name, err)
+		}
 		return nil, err
+	}
+
+	// Emit the SandboxPodCreated event immediately after successful pod creation,
+	// before any subsequent metadata updates, so the event is recorded even if
+	// annotation or tracing operations temporarily fail.
+	if r.Recorder != nil {
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, "SandboxPodCreated", "PodCreation", "Created pod %q", pod.Name)
 	}
 
 	if err := ensurePodNameAnnotation(pod.Name); err != nil {

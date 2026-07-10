@@ -128,7 +128,7 @@ trap cleanup EXIT
 # For a ~10k pod stress run, use something like NODE_COUNT=100 and a larger
 # control plane (e.g. CONTROL_PLANE_SIZE=n2-standard-16), and scale the
 # STRESS_* variables below to match.
-NODE_COUNT="${NODE_COUNT:-10}"
+NODE_COUNT="${NODE_COUNT:-20}"
 NODE_SIZE="${NODE_SIZE:-n2-standard-8}"
 CONTROL_PLANE_SIZE="${CONTROL_PLANE_SIZE:-n2-standard-8}"
 

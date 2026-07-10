@@ -197,6 +197,21 @@ def report(con):
         ORDER BY blocked_s DESC LIMIT 20
     """).fetchdf().to_string(index=False))
 
+    print("\n== slow openat (>=1ms) blocked time by path bucket (throughput phase) ==")
+    print("   (empty for runs whose profiler predates the openat classifier)")
+    print(con.execute("""
+        SELECT comm, key AS path_bucket,
+               round(sum(CASE WHEN map = 'slow_open_us' THEN delta END)/1e6, 2) AS blocked_s,
+               sum(CASE WHEN map = 'slow_open_calls' THEN delta END) AS slow_calls,
+               round(sum(CASE WHEN map = 'slow_open_us' THEN delta END)/1e3
+                     / nullif(sum(CASE WHEN map = 'slow_open_calls' THEN delta END), 0), 1)
+                 AS mean_ms
+        FROM deltas
+        WHERE map LIKE 'slow_open%' AND phase = 'throughput'
+        GROUP BY 1, 2 HAVING blocked_s > 0
+        ORDER BY blocked_s DESC LIMIT 15
+    """).fetchdf().to_string(index=False))
+
     print("\n== the same, waits included, for scale ==")
     print(con.execute(f"""
         SELECT comm, key AS syscall,

@@ -27,6 +27,11 @@
 #     per syscall (>=1ms only) for containerd*/runc*/kubelet. Translate the
 #     syscall numbers offline, e.g. `ausyscall x86_64 <nr>` or
 #     `python3 -c "import ctypes..."` / the syscall_64.tbl for the kernel.
+#     Slow opens (>=1ms) are additionally classified by path-prefix bucket
+#     (FIFO rendezvous under /run/containerd vs snapshotter work under
+#     /var/lib/containerd vs cgroupfs, ...), since an open's meaning depends
+#     on what is being opened.
+#     Analyze with test/stress/profiler/analyze-fsync.py.
 #   - ctr-events: the containerd event stream (ms-precision timestamps for
 #     task/container lifecycle). Joined offline against the API-side pod
 #     status updates in watch.jsonl.gz (join key: containerID in
@@ -81,6 +86,44 @@ data:
       delete(@start[tid]);
     }
 
+    // Classify slow opens by path prefix. openat topped the first run's
+    // work-syscall ranking (~67ms mean), but the path decides what it means:
+    // an open under /run/containerd (shim stdio FIFOs) is a rendezvous wait
+    // for the peer to attach, while /var/lib/containerd is snapshotter or
+    // content-store work and /sys/fs/cgroup is cgroup setup. Bounded buckets
+    // keep map cardinality safe for always-on capture (exact paths are
+    // unique per container); zoom with a targeted capture if a bucket
+    // dominates. Deliberately independent ifs, later (more specific) wins:
+    // portable across bpftrace versions without else-if support.
+    kprobe:do_sys_openat2
+    /strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 || comm == "kubelet"/
+    {
+      @open_start[tid] = nsecs;
+      @open_path[tid] = str(uptr(arg1));
+    }
+
+    kretprobe:do_sys_openat2
+    /@open_start[tid]/
+    {
+      $us = (nsecs - @open_start[tid]) / 1000;
+      if ($us >= 1000) {
+        $p = @open_path[tid];
+        $bucket = "other";
+        if (strncmp($p, "/sys", 4) == 0) { $bucket = "/sys"; }
+        if (strncmp($p, "/sys/fs/cgroup", 14) == 0) { $bucket = "/sys/fs/cgroup"; }
+        if (strncmp($p, "/proc", 5) == 0) { $bucket = "/proc"; }
+        if (strncmp($p, "/dev", 4) == 0) { $bucket = "/dev"; }
+        if (strncmp($p, "/var/log", 8) == 0) { $bucket = "/var/log"; }
+        if (strncmp($p, "/var/lib/kubelet", 16) == 0) { $bucket = "/var/lib/kubelet"; }
+        if (strncmp($p, "/var/lib/containerd", 19) == 0) { $bucket = "/var/lib/containerd"; }
+        if (strncmp($p, "/run/containerd", 15) == 0) { $bucket = "/run/containerd"; }
+        @slow_open_us[comm, $bucket] = sum($us);
+        @slow_open_calls[comm, $bucket] = count();
+      }
+      delete(@open_start[tid]);
+      delete(@open_path[tid]);
+    }
+
     // Complement to the fsync-only numbers above: blocked time per syscall
     // for the pod-start path processes, so fsync can be ranked against every
     // other blocking source. Only syscalls blocking >= 1ms are recorded:
@@ -118,6 +161,8 @@ data:
       print(@latency_us);
       print(@slow_syscall_us_total);
       print(@slow_syscall_calls);
+      print(@slow_open_us);
+      print(@slow_open_calls);
     }
 ---
 apiVersion: apps/v1

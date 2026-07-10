@@ -200,6 +200,10 @@ if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
   kubectl rollout status daemonset/stress-node-profiler --namespace stress-node-profiler --timeout=2m || true
 fi
 
+# Prometheus metrics from the apiserver, kube-controller-manager,
+# kube-scheduler, the sandbox controller, and kubelets are collected by the
+# stress tool itself (metrics.jsonl.gz; see --collect-metrics).
+
 echo "Running stress test"
 go run ./test/stress \
   --fill-count="${STRESS_FILL_COUNT:-150}" \

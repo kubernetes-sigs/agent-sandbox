@@ -31,6 +31,9 @@
 //   - sandboxes.jsonl: per-sandbox lifecycle milestones (client + server timestamps)
 //   - timeseries.jsonl: per-second event counts and gauges
 //   - watch.jsonl.gz: full watch streams (pods, nodes, events, sandboxes) for offline analysis
+//   - metrics.jsonl.gz: Prometheus samples scraped from the apiserver,
+//     kube-controller-manager, kube-scheduler, the sandbox controller, and
+//     kubelets, in a long format for direct DuckDB ingestion
 package main
 
 import (
@@ -83,6 +86,9 @@ type Config struct {
 
 	ThroughputCount int `json:"throughputCount"`
 	MaxInFlight     int `json:"maxInFlight"`
+
+	CollectMetrics  bool          `json:"collectMetrics"`
+	MetricsInterval time.Duration `json:"-"`
 }
 
 // MarshalJSON renders durations as strings for readability.
@@ -93,11 +99,13 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		Timeout           string `json:"timeout"`
 		PerSandboxTimeout string `json:"perSandboxTimeout"`
 		ProbeInterval     string `json:"probeInterval"`
+		MetricsInterval   string `json:"metricsInterval"`
 	}{
 		alias:             alias(c),
 		Timeout:           c.Timeout.String(),
 		PerSandboxTimeout: c.PerSandboxTimeout.String(),
 		ProbeInterval:     c.ProbeInterval.String(),
+		MetricsInterval:   c.MetricsInterval.String(),
 	})
 }
 
@@ -167,6 +175,8 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.ProbeInterval, "probe-interval", 0, "Delay between latency probes")
 	flag.IntVar(&cfg.ThroughputCount, "throughput-count", 200, "Number of Sandboxes to churn through in the throughput phase (0 to skip)")
 	flag.IntVar(&cfg.MaxInFlight, "max-in-flight", 50, "Maximum Sandboxes alive at once during the throughput phase; keep below spare cluster pod capacity")
+	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
+	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
 	flag.Parse()
 
 	if cfg.FillCount < 0 || cfg.ProbeCount < 0 || cfg.ThroughputCount < 0 {
@@ -298,6 +308,23 @@ func run(ctx context.Context) error {
 		})
 	}
 
+	// Periodically scrape Prometheus metrics from the control plane, the
+	// sandbox controller, and kubelets. Cumulative counters snapshotted on
+	// an interval can be diffed per phase offline.
+	var scraper *promScraper
+	if cfg.CollectMetrics {
+		scraper, err = newPromScraper(restConfig, filepath.Join(cfg.OutputDir, "metrics.jsonl.gz"))
+		if err != nil {
+			return fmt.Errorf("failed to start metrics scraper: %w", err)
+		}
+		defer scraper.Close()
+		scraper.ScrapeAll(ctx) // baseline snapshot before any load
+		taskRunner.RunPeriodic(ctx, cfg.MetricsInterval, func() error {
+			scraper.ScrapeAll(ctx)
+			return nil
+		})
+	}
+
 	// Wait briefly for watches to establish
 	time.Sleep(2 * time.Second)
 
@@ -357,6 +384,11 @@ func run(ctx context.Context) error {
 	// Give the watchers a moment to observe trailing events.
 	if ctx.Err() == nil {
 		time.Sleep(2 * time.Second)
+	}
+
+	// Final metrics snapshot so cumulative counters cover the whole run.
+	if scraper != nil && ctx.Err() == nil {
+		scraper.ScrapeAll(ctx)
 	}
 
 	// Write outputs even if a phase failed: partial data is still useful.
@@ -453,7 +485,12 @@ func inspectCluster(ctx context.Context, restConfig *rest.Config, dynamicClient 
 	}
 	for i := range podList.Items {
 		nodeName, _, _ := unstructured.NestedString(podList.Items[i].Object, "spec", "nodeName")
+		if nodeName == "" {
+			// Ignore pods that are not scheduled to a node.
+			continue
+		}
 		if _, onControlPlane := controlPlaneNodes[nodeName]; onControlPlane {
+			// Ignore pods that are scheduled to a control-plane node.
 			continue
 		}
 		info.PreexistingPods++

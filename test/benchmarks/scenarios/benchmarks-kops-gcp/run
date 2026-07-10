@@ -34,7 +34,7 @@ export KUBECONFIG="${WORKDIR}/kubeconfig"
 
 # Install kOps to bin dir
 echo "Installing kOps to ${BINDIR}..."
-GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.35.0
+GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.36.0-beta.1
 
 # Install resourcectl to bin dir
 echo "Installing resourcectl to ${BINDIR}..."

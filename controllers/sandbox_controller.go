@@ -1402,6 +1402,23 @@ func hasSandboxControllerRef(obj client.Object, name string) bool {
 	return group == sandboxv1beta1.GroupVersion.Group
 }
 
+// sandboxUpdatePredicate admits Sandbox UPDATE events only when the spec
+// changed (metadata.generation). Status-only updates are the controller's
+// own writes echoed back through the watch: without this filter every
+// status write re-enqueues the key, which measured as ~44 reconciles per
+// sandbox lifecycle under churn. Creates, deletes, and pod events (via
+// Owns) are unaffected.
+//
+// Pod metadata propagation is NOT affected: it reads
+// spec.podTemplate.metadata (Deployment-style), and podTemplate edits bump
+// the generation. Warm-pool adoption also passes for the same reason (the
+// SandboxClaim controller mutates spec.podTemplate during adoption). The
+// only filtered edits are to the Sandbox's own top-level labels and
+// annotations, which the reconciler does not act on apart from mirroring
+// two system labels (created-by, warm-pool hash) that are set at
+// creation/adoption time anyway.
+var sandboxUpdatePredicate predicate.Predicate = predicate.GenerationChangedPredicate{}
+
 // podSandboxNameHashIndexer extracts the sandboxLabel value for the
 // podSandboxNameHashIndex cache field index. Shared with tests so fake
 // clients register the same index the manager does.
@@ -1433,7 +1450,7 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&sandboxv1beta1.Sandbox{}).
+		For(&sandboxv1beta1.Sandbox{}, builder.WithPredicates(sandboxUpdatePredicate)).
 		Owns(&corev1.Pod{}, builder.WithPredicates(labelSelectorPredicate)).
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).

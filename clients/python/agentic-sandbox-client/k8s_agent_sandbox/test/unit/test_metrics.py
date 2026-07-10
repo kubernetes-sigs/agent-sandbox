@@ -103,5 +103,18 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(after_count_port_forward, before_count_port_forward)
         self.assertEqual(after_count_gateway, before_count_gateway)
 
+    @patch('builtins.print')
+    def test_metrics_utils(self, mock_print):
+        from k8s_agent_sandbox.metrics_utils import get_metrics, print_metrics
+        
+        # Test get_metrics
+        metrics_output = get_metrics()
+        self.assertIsInstance(metrics_output, str)
+        self.assertIn("sandbox_client_discovery_latency_ms", metrics_output)
+        
+        # Test print_metrics
+        print_metrics()
+        mock_print.assert_called_once_with(metrics_output)
+
 if __name__ == '__main__':
     unittest.main()

@@ -381,10 +381,68 @@ def main(
     except Exception as e:
         print(f"\n--- An error occurred during the test: {e} ---")
     finally:
+        try:
+            display_prometheus_latency_metrics()
+        except Exception as metrics_err:
+            print(f"Failed to display Prometheus metrics: {metrics_err}")
+            
         print("Cleaning up all sandboxes...")
         if client:
             client.delete_all()
         print("\n--- Sandbox Client Test Finished ---")
+
+
+def display_prometheus_latency_metrics():
+    import prometheus_client
+    print("\n======= Prometheus Client Latency Metrics =======")
+    
+    def calculate_quantile(q: float, buckets: list[tuple[float, float]], total_count: float) -> float:
+        if total_count == 0:
+            return 0.0
+        sorted_buckets = sorted(buckets, key=lambda x: x[0])
+        rank = q * total_count
+        prev_le = 0.0
+        prev_count = 0.0
+        for le, count in sorted_buckets:
+            if count >= rank:
+                if le == float('inf'):
+                    return prev_le
+                if count == prev_count:
+                    return le
+                fraction = (rank - prev_count) / (count - prev_count)
+                return prev_le + (le - prev_le) * fraction
+            prev_le = le
+            prev_count = count
+        return sorted_buckets[-1][0] if sorted_buckets else 0.0
+
+    for metric in prometheus_client.REGISTRY.collect():
+        if metric.name in (
+            "sandbox_client_suspend_latency_ms",
+            "sandbox_client_resume_latency_ms",
+            "sandbox_client_restore_latency_ms",
+        ):
+            print(f"\nMetric: {metric.name}")
+            
+            count_val = 0.0
+            buckets = []
+            
+            for sample in metric.samples:
+                if sample.name.endswith("_count"):
+                    count_val = sample.value
+                elif sample.name.endswith("_bucket"):
+                    le_str = sample.labels.get("le")
+                    le_val = float('inf') if le_str == "+Inf" else float(le_str)
+                    buckets.append((le_val, sample.value))
+            
+            if count_val > 0:
+                p50 = calculate_quantile(0.5, buckets, count_val)
+                p90 = calculate_quantile(0.9, buckets, count_val)
+                p99 = calculate_quantile(0.99, buckets, count_val)
+                print(f"  p50: {p50:.2f} ms")
+                print(f"  p90: {p90:.2f} ms")
+                print(f"  p99: {p99:.2f} ms")
+            else:
+                print("  No metrics recorded (Count: 0)")
 
 
 if __name__ == "__main__":

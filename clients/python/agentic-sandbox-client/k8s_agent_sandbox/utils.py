@@ -16,7 +16,38 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+import functools
 import ipaddress
+import time
+
+
+def record_latency(metric):
+    """Decorator to measure and record execution latency to a Prometheus metric.
+
+    Does not record metrics if self._skip_latency_metric is set to True during execution.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            self._skip_latency_metric = False
+            start_time = time.perf_counter()
+            response = None
+            try:
+                response = func(self, *args, **kwargs)
+                return response
+            except Exception as e:
+                if not getattr(self, "_skip_latency_metric", False):
+                    status = "failure"
+                    duration = (time.perf_counter() - start_time) * 1000.0
+                    metric.labels(status=status).observe(duration)
+                raise e
+            finally:
+                if response is not None and not getattr(self, "_skip_latency_metric", False):
+                    duration = (time.perf_counter() - start_time) * 1000.0
+                    status = "success" if getattr(response, "success", False) else "failure"
+                    metric.labels(status=status).observe(duration)
+        return wrapper
+    return decorator
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:

@@ -506,7 +506,7 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 
 	// Verify ownership before delete action
 	if !metav1.IsControlledBy(sandbox, claim) {
-		logger.V(4).Info("Skipping deletion: Sandbox is not controlled by this claim", "sandbox", sandbox.Name, "claim", claim.Name)
+		logger.Info("Skipping deletion: Sandbox is not controlled by this claim", "sandbox", sandbox.Name, "claim", claim.Name)
 		return nil, fmt.Errorf("%w: sandbox %q is not owned by claim %q", ErrSandboxNotOwned, sandbox.Name, claim.Name)
 	}
 	// Sandbox exists, delete it.
@@ -875,7 +875,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			return nil, err
 		}
 		if adopted == nil {
-			logger.V(4).Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
+			logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
 			return nil, nil // Warm pool is truly empty, fall completely to cold start
 		}
 
@@ -945,7 +945,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		}
 	}
 
-	logger.V(4).Info("Failed to adopt sandbox after max retries", "claim", claim.Name)
+	logger.Info("Failed to adopt sandbox after max retries", "claim", claim.Name)
 	return nil, nil
 }
 
@@ -1199,10 +1199,10 @@ func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev
 				logger.Error(err, "Environment variable override rejected", "claimName", claimName, "envName", claimEnv.Name)
 				return err
 			}
-			logger.V(4).Info("Overriding existing environment variable", "envName", claimEnv.Name, "container", container.Name)
+			logger.Info("Overriding existing environment variable", "envName", claimEnv.Name, "container", container.Name)
 			container.Env[existingIdx] = corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value}
 		} else {
-			logger.V(4).Info("Appending new environment variable", "envName", claimEnv.Name, "container", container.Name)
+			logger.Info("Appending new environment variable", "envName", claimEnv.Name, "container", container.Name)
 			container.Env = append(container.Env, corev1.EnvVar{Name: claimEnv.Name, Value: claimEnv.Value})
 		}
 	}
@@ -1217,7 +1217,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		return nil, ErrTemplateNotFound
 	}
 
-	logger.V(4).Info("creating sandbox from template", "template", template.Name)
+	logger.Info("creating sandbox from template", "template", template.Name)
 	sandbox := &v1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: claim.Namespace,
@@ -1515,7 +1515,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 					if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
 						logger.Error(err, "Failed to migrate legacy sandbox label to annotation (non-fatal)", "claim", claim.Name)
 					} else {
-						logger.V(4).Info("Successfully migrated legacy sandbox label to annotation", "claim", claim.Name)
+						logger.Info("Successfully migrated legacy sandbox label to annotation", "claim", claim.Name)
 					}
 				}
 				if err := r.initializeSandboxLaunchTypeLabel(ctx, sandbox, v1beta1.SandboxLaunchTypeWarm); err != nil {
@@ -1527,9 +1527,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			controllerRef := metav1.GetControllerOf(sandbox)
 			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
 				// Still in warm pool. Try to complete adoption!
-				logger.V(4).Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
+				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
 				if err := verifySandboxCandidate(sandbox, claim); err != nil {
-					logger.V(4).Info("Sandbox recorded in claim metadata cannot be adopted, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "reason", err.Error())
+					logger.Info("Sandbox recorded in claim metadata cannot be adopted, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "reason", err.Error())
 					patch := client.MergeFrom(claim.DeepCopy())
 					if fromLabel {
 						delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
@@ -1560,7 +1560,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 							if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
 								logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 							} else {
-								logger.V(4).Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
+								logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 							}
 						}
 						// Adoption was completed in-place (completeAdoption patched our controllerRef
@@ -1568,14 +1568,14 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						// controlled by us once the cache converges. Returned as a sentinel so
 						// Reconcile requeues immediately with a bounded delay rather than routing
 						// through the exponential failure rate limiter (#1107).
-						logger.V(4).Info("Triggered adoption completion for sandbox, retry", "sandbox", sbName, "claim", claim.Name)
+						logger.Info("Triggered adoption completion for sandbox, retry", "sandbox", sbName, "claim", claim.Name)
 						return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
 					}
 				}
 			}
 			logger.V(4).Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
 		} else if k8errors.IsNotFound(err) {
-			logger.V(4).Info("Sandbox recorded in claim metadata not found, removing stale reference", "sandboxName", sbName, "claim", claim.Name)
+			logger.Info("Sandbox recorded in claim metadata not found, removing stale reference", "sandboxName", sbName, "claim", claim.Name)
 			patch := client.MergeFrom(claim.DeepCopy())
 			if fromLabel {
 				delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
@@ -1585,7 +1585,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if err := r.Patch(ctx, claim, patch); err != nil {
 				return nil, fmt.Errorf("failed to remove stale sandbox reference from claim metadata: %w", err)
 			}
-			logger.V(4).Info("Successfully removed stale sandbox reference from claim metadata", "sandbox", sbName, "claim", claim.Name)
+			logger.Info("Successfully removed stale sandbox reference from claim metadata", "sandbox", sbName, "claim", claim.Name)
 		} else {
 			return nil, fmt.Errorf("failed to get sandbox %q for sandbox name lookup: %w", sbName, err)
 		}
@@ -1622,7 +1622,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	// Implicit Cold Start Detection (Bypassing the Queue):
 	// If len(claim.Spec.Env) > 0 or len(claim.Spec.VolumeClaimTemplates) > 0, the controller immediately bypasses the warm pool queue.
 	if len(claim.Spec.Env) > 0 || len(claim.Spec.VolumeClaimTemplates) > 0 {
-		logger.V(4).Info("Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)", "claim", claim.Name)
+		logger.Info("Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)", "claim", claim.Name)
 		return nil, nil
 	}
 
@@ -1815,7 +1815,7 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 			logger.Error(deleteErr, "Failed to clean up deprecated per-claim NetworkPolicy")
 			return deleteErr
 		}
-		logger.V(4).Info("Cleaned up deprecated per-claim NetworkPolicy in favor of shared Template policy", "name", existingNP.Name)
+		logger.Info("Cleaned up deprecated per-claim NetworkPolicy in favor of shared Template policy", "name", existingNP.Name)
 	} else if !k8errors.IsNotFound(err) {
 		logger.Error(err, "Failed to check cache for deprecated per-claim NetworkPolicy")
 		return err

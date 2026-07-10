@@ -134,6 +134,16 @@ CONTROL_PLANE_SIZE="${CONTROL_PLANE_SIZE:-n2-standard-8}"
 
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
+#
+# authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
+# kube-controller-manager and kube-scheduler so the stress test can scrape
+# them through the apiserver pod proxy (the apiserver strips the
+# Authorization header after authenticating, so the proxied request is
+# anonymous and the default delegated authorization rejects it with 403).
+# The health probe paths must be repeated because setting the field replaces
+# the upstream default, and kOps liveness probes hit /healthz.
+# Ports 10257/10259 are not internet-reachable: kOps GCE creates a
+# deny-by-default VPC and only control-plane instances can reach them.
 kops create cluster \
   --cloud=gce \
   --gce-service-account=default \
@@ -143,7 +153,15 @@ kops create cluster \
   --control-plane-count=1 \
   --control-plane-size="${CONTROL_PLANE_SIZE}" \
   --node-count="${NODE_COUNT}" \
-  --node-size="${NODE_SIZE}"
+  --node-size="${NODE_SIZE}" \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/healthz \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/readyz \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/livez \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/metrics \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/healthz \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/readyz \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics
 
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes

@@ -20,18 +20,21 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -188,6 +191,13 @@ func (s *promScraper) scrapeOne(ctx context.Context, src promSource) error {
 	ts := time.Now()
 	raw, err := s.kube.CoreV1().RESTClient().Get().AbsPath(src.path).DoRaw(ctx)
 	if err != nil {
+		// Component metrics endpoints often return non-Status error bodies,
+		// which client-go reports as just "unknown"; include the HTTP code
+		// and body so failures (401/403 vs 503) are distinguishable in CI.
+		var statusErr *apierrors.StatusError
+		if errors.As(err, &statusErr) {
+			return fmt.Errorf("HTTP %d: %s (%w)", statusErr.Status().Code, strings.TrimSpace(string(raw)), err)
+		}
 		return err
 	}
 

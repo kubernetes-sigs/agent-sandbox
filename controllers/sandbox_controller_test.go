@@ -3455,9 +3455,11 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "test-container", Image: "nginx"}},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container", Image: "nginx"}},
+					},
 				},
 			},
 		},

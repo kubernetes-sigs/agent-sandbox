@@ -2191,6 +2191,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					return sb
 				}(),
 			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
 		},
 		{
 			name: "propagates and overwrites created-by label during adoption",

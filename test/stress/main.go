@@ -513,18 +513,18 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 	return summary
 }
 
-// sandboxRecordJSON builds the sandboxes.jsonl object for a record:
-// zero times and empty strings are omitted, and *Ms offsets from CreateCalled
-// are added for convenient offline analysis.
-func sandboxRecordJSON(rec *SandboxRecord) map[string]any {
-	out := map[string]any{
-		"name":      rec.Name,
-		"namespace": rec.Namespace,
-		"phase":     rec.Phase,
-	}
-	if rec.Error != "" {
-		out["error"] = rec.Error
-	}
+// sandboxRecordExport is the sandboxes.jsonl shape: SandboxRecord fields
+// (flattened via embedding; zeros omitted by omitempty/omitzero tags) plus
+// *Ms offsets from CreateCalled for offline analysis.
+type sandboxRecordExport struct {
+	*SandboxRecord
+	CreateAckMs    *float64 `json:"createAckMs,omitempty"`
+	PodCreatedMs   *float64 `json:"podCreatedMs,omitempty"`
+	PodScheduledMs *float64 `json:"podScheduledMs,omitempty"`
+	PodRunningMs   *float64 `json:"podRunningMs,omitempty"`
+	PodReadyMs     *float64 `json:"podReadyMs,omitempty"`
+	SandboxReadyMs *float64 `json:"sandboxReadyMs,omitempty"`
+}
 
 func sandboxRecordJSON(rec *SandboxRecord) sandboxRecordExport {
 	msSinceCreate := func(t time.Time) *float64 {

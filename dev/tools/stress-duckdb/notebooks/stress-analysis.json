@@ -1,0 +1,85 @@
+{
+  "notebookSerializationFormat": 3,
+  "cells": [
+    {
+      "cellId": 1,
+      "query": "-- Stress analysis\n--\n-- Starter notebook for agent-sandbox stress-test artifacts loaded by\n-- stress-duckdb. Views (v_runs, v_launch_latency, \u2026) are created on\n-- register/pr. Run cells top-to-bottom; tweak run_id filters as needed.\n\nSELECT table_name\nFROM information_schema.tables\nWHERE table_schema = 'main'\nORDER BY table_name;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 2,
+      "query": "-- Headline numbers per run (the trend table).\nSELECT * FROM v_runs;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 3,
+      "query": "-- Launch latency by phase: probe = clean latency at fill;\n-- throughput = under closed-loop churn.\nSELECT * FROM v_launch_latency;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 4,
+      "query": "-- Where does launch time go? Segment p50 (ms) by phase.\n-- scheduled\u2192running is the node-side pod start cost;\n-- under churn it used to dominate, then deletion took over.\nSELECT phase,\n       count(*) AS n,\n       round(quantile_cont(createAckMs, 0.50), 0) AS ack_p50,\n       round(quantile_cont(podCreatedMs - createAckMs, 0.50), 0) AS to_pod_p50,\n       round(quantile_cont(podScheduledMs - podCreatedMs, 0.50), 0) AS to_sched_p50,\n       round(quantile_cont(podRunningMs - podScheduledMs, 0.50), 0) AS sched_to_run_p50,\n       round(quantile_cont(podReadyMs - podRunningMs, 0.50), 0) AS run_to_ready_p50,\n       round(quantile_cont(sandboxReadyMs - podReadyMs, 0.50), 0) AS ready_to_sb_p50,\n       round(quantile_cont(sandboxReadyMs, 0.50), 0) AS e2e_p50,\n       round(quantile_cont(sandboxReadyMs, 0.90), 0) AS e2e_p90\nFROM sandboxes\nWHERE sandboxReadyMs IS NOT NULL\n  AND podRunningMs IS NOT NULL\n  AND podScheduledMs IS NOT NULL\nGROUP BY phase\nORDER BY phase;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 5,
+      "query": "-- Deletion cost: deleteCalled \u2192 pod gone from the API.\n-- Under churn this has been the cycle-time ceiling (~9s p50),\n-- mostly waiting on kube-controller-manager garbage collection.\nSELECT * FROM v_deletion;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 6,
+      "query": "-- KCM garbage-collector workqueue depth by phase.\n-- A deep/saturated GC queue during throughput supports the\n-- \"churn ceiling is GC/KCM QPS, not per-node start\" hypothesis.\nSELECT p.phase,\n       g.queue,\n       count(*) AS samples,\n       round(avg(g.depth), 1) AS avg_depth,\n       max(g.depth) AS max_depth\nFROM v_gc_queue_depth g\nJOIN phases p\n  ON g.run_id = p.run_id\n AND g.ts::TIMESTAMPTZ BETWEEN p.start_ts AND p.end_ts\nGROUP BY p.phase, g.queue\nORDER BY p.phase, g.queue;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 7,
+      "query": "-- GC queue depth over time (latest run), for charting.\nWITH latest AS (SELECT run_id FROM v_runs ORDER BY run_ts DESC LIMIT 1)\nSELECT g.ts::TIMESTAMPTZ AS ts,\n       p.phase,\n       g.queue,\n       g.depth\nFROM v_gc_queue_depth g\nJOIN latest USING (run_id)\nLEFT JOIN phases p\n  ON g.run_id = p.run_id\n AND g.ts::TIMESTAMPTZ BETWEEN p.start_ts AND p.end_ts\nORDER BY ts;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 8,
+      "query": "-- All workqueue depths during throughput (controller + KCM + \u2026).\n-- Look for sandbox / garbage_collector queues climbing.\nSELECT p.phase,\n       w.source,\n       w.queue,\n       round(avg(w.depth), 1) AS avg_depth,\n       max(w.depth) AS max_depth\nFROM v_workqueue_depth w\nJOIN phases p\n  ON w.run_id = p.run_id\n AND w.ts::TIMESTAMPTZ BETWEEN p.start_ts AND p.end_ts\nWHERE p.phase = 'throughput'\nGROUP BY p.phase, w.source, w.queue\nHAVING max(w.depth) > 0\nORDER BY max_depth DESC;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 9,
+      "query": "-- Ready throughput from the per-second timeseries (latest run).\n-- Compare overall vs best windows in summary; this shows the shape.\nWITH latest AS (SELECT run_id FROM v_runs ORDER BY run_ts DESC LIMIT 1),\nraw AS (\n  SELECT t.offsetSeconds,\n         t.sandboxReady,\n         t.sandboxReady - lag(t.sandboxReady) OVER (ORDER BY t.offsetSeconds) AS ready_delta,\n         t.livePods\n  FROM timeseries t\n  JOIN latest USING (run_id)\n)\nSELECT offsetSeconds,\n       ready_delta AS ready_per_s,\n       livePods\nFROM raw\nWHERE ready_delta IS NOT NULL\nORDER BY offsetSeconds;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 10,
+      "query": "-- Per-node ready count in throughput (load balance / hot nodes).\nSELECT nodeName,\n       count(*) AS ready_n,\n       round(quantile_cont(sandboxReadyMs, 0.50), 0) AS e2e_p50_ms,\n       round(quantile_cont(podRunningMs - podScheduledMs, 0.50), 0) AS sched_to_run_p50_ms\nFROM sandboxes\nWHERE phase = 'throughput'\n  AND sandboxReadyMs IS NOT NULL\n  AND nodeName IS NOT NULL\nGROUP BY nodeName\nORDER BY ready_n DESC;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 11,
+      "query": "-- Apiserver request rate by verb during throughput (latest run).\n-- Useful when checking whether churn is API-QPS bound.\nWITH latest AS (SELECT run_id FROM v_runs ORDER BY run_ts DESC LIMIT 1)\nSELECT r.metric,\n       r.labels['verb'] AS verb,\n       r.labels['resource'] AS resource,\n       round(avg(r.rate_per_s), 1) AS avg_rate,\n       round(max(r.rate_per_s), 1) AS max_rate\nFROM v_metric_rate r\nJOIN latest USING (run_id)\nJOIN phases p\n  ON r.run_id = p.run_id\n AND r.ts::TIMESTAMPTZ BETWEEN p.start_ts AND p.end_ts\nWHERE p.phase = 'throughput'\n  AND r.source = 'kube-apiserver'\n  AND r.metric = 'apiserver_request_total'\nGROUP BY 1, 2, 3\nHAVING max(r.rate_per_s) > 1\nORDER BY max_rate DESC\nLIMIT 40;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 12,
+      "query": "-- Watch stream coverage (pods / nodes / events / sandboxes).\nSELECT resource, type AS event_type, count(*) AS n\nFROM watch\nGROUP BY 1, 2\nORDER BY 1, 2;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 13,
+      "query": "-- Latest pod phase per name (from watch), latest run.\nWITH latest AS (SELECT run_id FROM v_runs ORDER BY run_ts DESC LIMIT 1),\nranked AS (\n  SELECT *,\n         row_number() OVER (PARTITION BY namespace, name ORDER BY ts DESC) AS rn\n  FROM v_watch_pods\n  JOIN latest USING (run_id)\n)\nSELECT namespace, name, node_name, phase, event_type, ts, container_id\nFROM ranked\nWHERE rn = 1\nORDER BY phase, name\nLIMIT 100;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 14,
+      "query": "-- Node inventory from watch (latest observation per node).\nWITH latest AS (SELECT run_id FROM v_runs ORDER BY run_ts DESC LIMIT 1),\nranked AS (\n  SELECT *,\n         row_number() OVER (PARTITION BY name ORDER BY ts DESC) AS rn\n  FROM v_watch_nodes\n  JOIN latest USING (run_id)\n)\nSELECT name, kubelet_version, capacity_pods, allocatable_pods, event_type, ts\nFROM ranked\nWHERE rn = 1\nORDER BY name;",
+      "runMode": "default"
+    },
+    {
+      "cellId": 15,
+      "query": "-- Warning/Error Events during throughput (latest run).\nWITH latest AS (SELECT run_id FROM v_runs ORDER BY run_ts DESC LIMIT 1)\nSELECT e.ts, e.namespace, e.involved_kind, e.involved_name, e.reason, e.k8s_type, e.message\nFROM v_watch_events e\nJOIN latest USING (run_id)\nJOIN phases p\n  ON e.run_id = p.run_id\n AND e.ts BETWEEN p.start_ts AND p.end_ts\nWHERE p.phase = 'throughput'\n  AND e.k8s_type IN ('Warning', 'Error')\nORDER BY e.ts\nLIMIT 200;",
+      "runMode": "default"
+    }
+  ],
+  "currentDatabase": null,
+  "viewMode": {
+    "mode": "default"
+  },
+  "version": 1
+}

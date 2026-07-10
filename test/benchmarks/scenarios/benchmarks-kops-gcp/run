@@ -79,7 +79,7 @@ export IMAGE_TAG
 echo "Using image tag: ${IMAGE_TAG}"
 
 # Push images
-for image in "agent-sandbox-controller" "chrome-sandbox"; do
+for image in "agent-sandbox-controller" "chrome-sandbox" "bpftrace"; do
   echo "Pushing ${image} to ${IMAGE_PREFIX}..."
   dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
 done
@@ -186,6 +186,20 @@ echo "Benchmark completed successfully."
 #   STRESS_CREATE_CONCURRENCY=100 STRESS_TIMEOUT=2h
 STRESS_OUTPUT_DIR="${ARTIFACTS:-.}/stress-test/"
 mkdir -p "${STRESS_OUTPUT_DIR}"
+
+# Deploy the node profiler (bpftrace fsync tracing + containerd event stream)
+# so node-side pod startup/teardown costs are captured during the stress test.
+# See test/stress/profiler/profiler.yaml for what is recorded and why.
+STRESS_NODE_PROFILER="${STRESS_NODE_PROFILER:-true}"
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Deploying node profiler..."
+  # bpftrace:latest → ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG} (images/bpftrace).
+  sed "s|image: bpftrace:latest|image: ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG}|g" \
+    test/stress/profiler/profiler.yaml | kubectl apply -f -
+  # Best-effort: a missing image or unsupported kernel should not fail the run.
+  kubectl rollout status daemonset/stress-node-profiler --namespace stress-node-profiler --timeout=2m || true
+fi
+
 echo "Running stress test"
 go run ./test/stress \
   --fill-count="${STRESS_FILL_COUNT:-150}" \
@@ -196,6 +210,18 @@ go run ./test/stress \
   --timeout="${STRESS_TIMEOUT:-30m}" \
   --output-dir="${STRESS_OUTPUT_DIR}"
 echo "Stress test completed successfully."
+
+# Harvest per-node profiler logs into the artifacts directory.
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Harvesting node profiler logs..."
+  kubectl get pods --namespace stress-node-profiler \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}' | \
+  while read -r pod node; do
+    kubectl logs --namespace stress-node-profiler "${pod}" -c fsync-trace > "${STRESS_OUTPUT_DIR}/profiler-fsync-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c ctr-events > "${STRESS_OUTPUT_DIR}/profiler-ctr-events-${node}.log" || true
+  done
+  kubectl delete -f test/stress/profiler/profiler.yaml --wait=false || true
+fi
 
 # Capture controller diagnostics alongside the stress test results.
 echo "Capturing controller diagnostics..."

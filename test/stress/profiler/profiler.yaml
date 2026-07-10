@@ -1,0 +1,172 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# stress-node-profiler captures node-side data while the stress test runs,
+# to explain where pod startup/teardown time goes on the node
+# (kubelet / containerd / runc / CNI), which API-side watch data cannot see.
+#
+# Per worker node it records:
+#
+#   - fsync-trace: bpftrace histogram of fsync/fdatasync/sync_file_range
+#     calls: who calls them, how often, and total blocked time. This is
+#     off-CPU blocking time, which CPU profilers (perf record) mostly miss.
+#     By construction this counts only fsync-family time; to rank it against
+#     other blocking sources (e.g. cgroup operations, which are writes /
+#     mkdirs on cgroupfs), the same tracer also records total blocked time
+#     per syscall (>=1ms only) for containerd*/runc*/kubelet. Translate the
+#     syscall numbers offline, e.g. `ausyscall x86_64 <nr>` or
+#     `python3 -c "import ctypes..."` / the syscall_64.tbl for the kernel.
+#   - ctr-events: the containerd event stream (ms-precision timestamps for
+#     task/container lifecycle). Joined offline against the API-side pod
+#     status updates in watch.jsonl.gz (join key: containerID in
+#     containerStatuses), the delta distribution exposes timer-driven poll
+#     loops: a flat histogram over [0, interval] means kubelet polled at
+#     that interval; a spike near zero means event-driven.
+#
+# Deployed by test/benchmarks/scenarios/benchmarks-kops-gcp/run (gated by
+# STRESS_NODE_PROFILER); per-node logs are harvested into the artifacts
+# directory after the stress test.
+#
+# The pods are privileged with hostPID: bpftrace needs kernel tracepoint
+# access (Ubuntu kernels ship BTF, so no headers are needed), and ctr runs
+# on the host via nsenter into PID 1's mount namespace.
+#
+# Image: bpftrace:latest is rewritten at deploy time to
+# ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG} (built from images/bpftrace/).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stress-node-profiler
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: profiler-scripts
+  namespace: stress-node-profiler
+data:
+  fsync.bt: |
+    // Trace fsync-family syscalls: callers, rates, and blocked time.
+    BEGIN
+    {
+      printf("fsync tracer started\n");
+    }
+
+    tracepoint:syscalls:sys_enter_fsync,
+    tracepoint:syscalls:sys_enter_fdatasync,
+    tracepoint:syscalls:sys_enter_sync_file_range
+    {
+      @start[tid] = nsecs;
+      @calls[comm, probe] = count();
+    }
+
+    tracepoint:syscalls:sys_exit_fsync,
+    tracepoint:syscalls:sys_exit_fdatasync,
+    tracepoint:syscalls:sys_exit_sync_file_range
+    /@start[tid]/
+    {
+      $us = (nsecs - @start[tid]) / 1000;
+      @latency_us[comm] = hist($us);
+      @blocked_us_total[comm] = sum($us);
+      delete(@start[tid]);
+    }
+
+    // Complement to the fsync-only numbers above: blocked time per syscall
+    // for the pod-start path processes, so fsync can be ranked against every
+    // other blocking source. Only syscalls blocking >= 1ms are recorded:
+    // this bounds tracer overhead and map size, and anything relevant to a
+    // ~2 pods/s/node limit is far above 1ms. Syscall numbers are printed
+    // numerically; translate offline (e.g. ausyscall x86_64 <nr>).
+    // strncmp prefixes catch containerd-shim-* and runc:[2:INIT] etc.
+    tracepoint:raw_syscalls:sys_enter
+    /strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 || comm == "kubelet"/
+    {
+      @sys_start[tid] = nsecs;
+      @sys_nr[tid] = args->id;
+    }
+
+    tracepoint:raw_syscalls:sys_exit
+    /@sys_start[tid]/
+    {
+      $us = (nsecs - @sys_start[tid]) / 1000;
+      if ($us >= 1000) {
+        @slow_syscall_us_total[comm, @sys_nr[tid]] = sum($us);
+        @slow_syscall_calls[comm, @sys_nr[tid]] = count();
+      }
+      delete(@sys_start[tid]);
+      delete(@sys_nr[tid]);
+    }
+
+    // Periodic snapshots give a time series aligned with the test phases.
+    // Logs are harvested while the tracer is still running, so everything
+    // must be printed here; the END block may never reach the logs.
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
+      print(@calls);
+      print(@blocked_us_total);
+      print(@latency_us);
+      print(@slow_syscall_us_total);
+      print(@slow_syscall_calls);
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: stress-node-profiler
+  namespace: stress-node-profiler
+spec:
+  selector:
+    matchLabels:
+      app: stress-node-profiler
+  template:
+    metadata:
+      labels:
+        app: stress-node-profiler
+    spec:
+      # No control-plane toleration: we only profile worker nodes.
+      hostPID: true
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: fsync-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/fsync.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: ctr-events
+        image: bpftrace:latest
+        # Run the host's ctr binary in the host mount namespace. Events are
+        # timestamped by ctr as they arrive; keep the container alive on
+        # failure so the DaemonSet stays healthy and the log is inspectable.
+        command:
+        - sh
+        - -c
+        - |
+          nsenter -t 1 -m -- sh -c 'ctr --namespace k8s.io events' 2>&1 || echo "ctr events failed"
+          sleep infinity
+        securityContext:
+          privileged: true
+      volumes:
+      - name: scripts
+        configMap:
+          name: profiler-scripts
+      - name: sys
+        hostPath:
+          path: /sys

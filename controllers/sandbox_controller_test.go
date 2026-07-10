@@ -3486,3 +3486,136 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
 }
+
+// TestFastPathDeleteChildren verifies that reconciling a Sandbox that no
+// longer exists best-effort deletes the children it left behind (the fake
+// client has no garbage collector, so any deletion observed here was issued
+// by the fast path), and — critically — that it never deletes objects the
+// dead Sandbox did not own (orphaned or foreign objects).
+func TestFastPathDeleteChildren(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := NameHash(sandboxName)
+
+	podMeta := func(name string, ownerRef *metav1.OwnerReference) metav1.ObjectMeta {
+		meta := metav1.ObjectMeta{
+			Name:      name,
+			Namespace: sandboxNs,
+			Labels:    map[string]string{sandboxLabel: nameHash},
+		}
+		if ownerRef != nil {
+			meta.OwnerReferences = []metav1.OwnerReference{*ownerRef}
+		}
+		return meta
+	}
+	sandboxRef := sandboxControllerRef(sandboxName)
+	otherSandboxRef := sandboxControllerRef("other-sandbox")
+	deploymentRef := metav1.OwnerReference{
+		APIVersion: "apps/v1", Kind: "Deployment", Name: sandboxName,
+		UID: "deploy-uid", Controller: new(true),
+	}
+
+	testCases := []struct {
+		name         string
+		initialObjs  []runtime.Object
+		wantDeleted  []client.Object
+		wantSurvives []client.Object
+	}{
+		{
+			name: "owned pod and service are fast-path deleted",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, &sandboxRef)},
+				&corev1.Service{ObjectMeta: podMeta(sandboxName, &sandboxRef)},
+			},
+			wantDeleted: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "replacement pod with a different name is found via the label index",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName+"-replacement", &sandboxRef)},
+			},
+			wantDeleted: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName + "-replacement", Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "orphaned pod (ownerRef stripped by orphan propagation) survives",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, nil)},
+				&corev1.Service{ObjectMeta: podMeta(sandboxName, nil)},
+			},
+			wantSurvives: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "pod owned by a different controller kind survives",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, &deploymentRef)},
+			},
+			wantSurvives: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "pod owned by a different sandbox survives",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, &otherSandboxRef)},
+			},
+			wantSurvives: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			fc := newFakeClient(tc.initialObjs...)
+			r := SandboxReconciler{
+				Client:        fc,
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
+			}
+
+			// Reconcile the (nonexistent) Sandbox: the NotFound path runs the fast-path deletion.
+			_, err := r.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+			})
+			require.NoError(t, err)
+
+			for _, obj := range tc.wantDeleted {
+				err := fc.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+				require.True(t, k8serrors.IsNotFound(err),
+					"expected %T %s to be fast-path deleted, got err=%v", obj, obj.GetName(), err)
+			}
+			for _, obj := range tc.wantSurvives {
+				require.NoError(t, fc.Get(ctx, client.ObjectKeyFromObject(obj), obj),
+					"expected %T %s to survive the fast path", obj, obj.GetName())
+			}
+		})
+	}
+}
+
+func TestHasSandboxControllerRef(t *testing.T) {
+	ref := sandboxControllerRef("sb")
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "sb", OwnerReferences: []metav1.OwnerReference{ref},
+	}}
+	require.True(t, hasSandboxControllerRef(pod, "sb"))
+	require.False(t, hasSandboxControllerRef(pod, "other"))
+
+	// Same kind name in a different API group must not match.
+	foreign := pod.DeepCopy()
+	foreign.OwnerReferences[0].APIVersion = "example.com/v1"
+	require.False(t, hasSandboxControllerRef(foreign, "sb"))
+
+	// Non-controller ownerRef must not match.
+	nonController := pod.DeepCopy()
+	nonController.OwnerReferences[0].Controller = nil
+	require.False(t, hasSandboxControllerRef(nonController, "sb"))
+}

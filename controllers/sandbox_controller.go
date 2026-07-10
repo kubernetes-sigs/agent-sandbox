@@ -157,7 +157,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	sandbox := &sandboxv1beta1.Sandbox{}
 	if err := r.Get(ctx, req.NamespacedName, sandbox); err != nil {
 		if k8serrors.IsNotFound(err) {
-			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
+			// V(1): this fires for every Sandbox deletion and for stale queue
+			// entries, which is very chatty under churn.
+			logger.V(1).Info("Sandbox not found; fast-path deleting any children it left behind")
+			r.fastPathDeleteChildren(ctx, req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -1311,6 +1314,92 @@ func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
+}
+
+// fastPathDeleteChildren best-effort deletes the Pod and Service left behind
+// by a deleted Sandbox. Without this, children are only deleted by the
+// kube-controller-manager garbage collector, whose queue adds multiple
+// seconds of deletion latency under churn (measured ~9s at ~19 sandbox
+// cycles/s, with node-side teardown taking well under 1s). Correctness
+// never depends on this fast path: any error or lost race is resolved by
+// the garbage collector exactly as before, so failures are logged and never
+// returned — returning an error would only put a doomed key into requeue
+// backoff.
+//
+// Safety: only objects whose controllerRef names a Sandbox with this name
+// are deleted. The Sandbox was just observed absent, so such a controllerRef
+// necessarily points at a dead UID and the object is already doomed for the
+// garbage collector; deleting it early is identical to what the GC will do.
+// Each delete carries a UID precondition so a concurrently recreated object
+// (new Sandbox, new Pod with the same name) cannot be hit. Orphan
+// propagation is preserved: the orphan finalizer strips children's
+// ownerReferences before the owner object disappears, so orphaned children
+// fail the controllerRef check by the time this runs.
+func (r *SandboxReconciler) fastPathDeleteChildren(ctx context.Context, id types.NamespacedName) {
+	logger := log.FromContext(ctx)
+
+	// Pods carry the name-hash label and are indexed on it, which also
+	// catches replacement pods whose name differs from the Sandbox name.
+	// The List is served from the informer cache: no API call.
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(id.Namespace),
+		client.MatchingFields{podSandboxNameHashIndex: NameHash(id.Name)}); err != nil {
+		logger.V(1).Info("fast-path delete: listing pods failed", "error", err)
+		return
+	}
+	for i := range podList.Items {
+		r.fastPathDeleteChild(ctx, &podList.Items[i], "pods", id)
+	}
+
+	service := &corev1.Service{}
+	err := r.Get(ctx, id, service)
+	switch {
+	case k8serrors.IsNotFound(err):
+	case err != nil:
+		logger.V(1).Info("fast-path delete: getting service failed", "error", err)
+	default:
+		r.fastPathDeleteChild(ctx, service, "services", id)
+	}
+}
+
+// fastPathDeleteChild deletes obj if its controller owner is the deleted
+// Sandbox named id.Name, using a UID precondition to avoid racing a
+// concurrent recreation. Best-effort; see fastPathDeleteChildren.
+func (r *SandboxReconciler) fastPathDeleteChild(ctx context.Context, obj client.Object, resource string, id types.NamespacedName) {
+	logger := log.FromContext(ctx)
+	if !hasSandboxControllerRef(obj, id.Name) {
+		return
+	}
+	if !obj.GetDeletionTimestamp().IsZero() {
+		// Someone (GC, or a previous fast-path pass) already deleted it.
+		return
+	}
+	uid := obj.GetUID()
+	err := r.Delete(ctx, obj, client.Preconditions{UID: &uid})
+	switch {
+	case err == nil:
+		logger.V(1).Info("fast-path deleted child of deleted Sandbox", "resource", resource, "child", obj.GetName())
+		asmetrics.FastPathDeletionTotal.WithLabelValues(resource, "deleted").Inc()
+	case k8serrors.IsNotFound(err) || k8serrors.IsConflict(err):
+		// Already gone, or replaced by a new object (UID precondition).
+	default:
+		logger.V(1).Info("fast-path delete failed; the garbage collector will handle it",
+			"resource", resource, "child", obj.GetName(), "error", err)
+		asmetrics.FastPathDeletionTotal.WithLabelValues(resource, "error").Inc()
+	}
+}
+
+// hasSandboxControllerRef reports whether obj's controller owner is a
+// Sandbox with the given name. The owner UID is deliberately not compared:
+// callers have just observed that no Sandbox with this name exists, so any
+// such controllerRef refers to a deleted owner regardless of its UID.
+func hasSandboxControllerRef(obj client.Object, name string) bool {
+	ref := metav1.GetControllerOf(obj)
+	if ref == nil || ref.Name != name || ref.Kind != "Sandbox" {
+		return false
+	}
+	group, _, _ := strings.Cut(ref.APIVersion, "/")
+	return group == sandboxv1beta1.GroupVersion.Group
 }
 
 // podSandboxNameHashIndexer extracts the sandboxLabel value for the

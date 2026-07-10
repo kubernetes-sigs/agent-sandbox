@@ -45,6 +45,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -85,7 +86,9 @@ type Config struct {
 	ProbeInterval    time.Duration `json:"-"`
 
 	ThroughputCount int `json:"throughputCount"`
-	MaxInFlight     int `json:"maxInFlight"`
+	// MaxInFlight holds one or more in-flight caps; each runs as its own
+	// back-to-back throughput level (a concurrency sweep within one run).
+	MaxInFlight []int `json:"maxInFlight"`
 
 	CollectMetrics  bool          `json:"collectMetrics"`
 	MetricsInterval time.Duration `json:"-"`
@@ -126,6 +129,9 @@ type PhaseSummary struct {
 	Ready           int     `json:"ready"`
 	Failed          int     `json:"failed"`
 	DurationSeconds float64 `json:"durationSeconds"`
+	// StartOffsetSeconds is the phase's start relative to Summary.StartTime;
+	// phases run sequentially in Summary.PhaseOrder.
+	StartOffsetSeconds float64 `json:"startOffsetSeconds"`
 
 	Latency LatencyBreakdown `json:"latency"`
 
@@ -139,12 +145,13 @@ type PhaseSummary struct {
 
 // Summary is written to summary.json at the end of the test.
 type Summary struct {
-	RunID     string                  `json:"runID"`
-	StartTime time.Time               `json:"startTime"`
-	EndTime   time.Time               `json:"endTime"`
-	Config    Config                  `json:"config"`
-	Cluster   *ClusterInfo            `json:"cluster,omitempty"`
-	Phases    map[Phase]*PhaseSummary `json:"phases"`
+	RunID      string                  `json:"runID"`
+	StartTime  time.Time               `json:"startTime"`
+	EndTime    time.Time               `json:"endTime"`
+	Config     Config                  `json:"config"`
+	Cluster    *ClusterInfo            `json:"cluster,omitempty"`
+	PhaseOrder []Phase                 `json:"phaseOrder"`
+	Phases     map[Phase]*PhaseSummary `json:"phases"`
 }
 
 func main() {
@@ -174,7 +181,7 @@ func run(ctx context.Context) error {
 	flag.IntVar(&cfg.ProbeConcurrency, "probe-concurrency", 1, "Number of concurrent latency probes; keep low for clean latency numbers")
 	flag.DurationVar(&cfg.ProbeInterval, "probe-interval", 0, "Delay between latency probes")
 	flag.IntVar(&cfg.ThroughputCount, "throughput-count", 200, "Number of Sandboxes to churn through in the throughput phase (0 to skip)")
-	flag.IntVar(&cfg.MaxInFlight, "max-in-flight", 50, "Maximum Sandboxes alive at once during the throughput phase; keep below spare cluster pod capacity")
+	maxInFlightFlag := flag.String("max-in-flight", "50", "Maximum Sandboxes alive at once during the throughput phase; keep below spare cluster pod capacity. A comma-separated list (e.g. 200,100,50) runs one throughput level per value, back to back")
 	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
 	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
 	flag.Parse()
@@ -191,8 +198,15 @@ func run(ctx context.Context) error {
 	if cfg.ProbeCount > 0 && cfg.ProbeConcurrency <= 0 {
 		return fmt.Errorf("--probe-concurrency must be > 0 when --probe-count > 0")
 	}
-	if cfg.ThroughputCount > 0 && cfg.MaxInFlight <= 0 {
-		return fmt.Errorf("--max-in-flight must be > 0 when --throughput-count > 0")
+	for part := range strings.SplitSeq(*maxInFlightFlag, ",") {
+		level, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return fmt.Errorf("invalid --max-in-flight %q: %w", *maxInFlightFlag, err)
+		}
+		cfg.MaxInFlight = append(cfg.MaxInFlight, level)
+	}
+	if cfg.ThroughputCount > 0 && slices.Min(cfg.MaxInFlight) <= 0 {
+		return fmt.Errorf("--max-in-flight values must be > 0 when --throughput-count > 0")
 	}
 
 	if cfg.FillCount+cfg.ProbeCount+cfg.ThroughputCount == 0 {
@@ -211,7 +225,7 @@ func run(ctx context.Context) error {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create run directory %s: %w", cfg.OutputDir, err)
 	}
-	log.Printf("Starting stress test run %s: fill=%d probe=%d throughput=%d (max-in-flight=%d), writing results to %s",
+	log.Printf("Starting stress test run %s: fill=%d probe=%d throughput=%d (max-in-flight=%v), writing results to %s",
 		runID, cfg.FillCount, cfg.ProbeCount, cfg.ThroughputCount, cfg.MaxInFlight, cfg.OutputDir)
 
 	// Initialize kubernetes client config
@@ -334,11 +348,9 @@ func run(ctx context.Context) error {
 		counts := tracker.Snapshot()
 		var line strings.Builder
 		fmt.Fprintf(&line, "[progress +%s]", time.Since(testStartTime).Round(time.Second))
-		for _, phase := range []Phase{PhaseFill, PhaseProbe, PhaseThroughput} {
-			c, ok := counts[phase]
-			if !ok {
-				continue
-			}
+		phases := slices.Sorted(maps.Keys(counts))
+		for _, phase := range phases {
+			c := counts[phase]
 			fmt.Fprintf(&line, " %s: created=%d ready=%d deleted=%d failed=%d |",
 				phase, c.Created, c.Ready, c.Deleted, c.Failed)
 		}
@@ -360,17 +372,34 @@ func run(ctx context.Context) error {
 		}).Namespace(cfg.Namespace),
 	}
 
-	// Run the phases, recording wall-clock windows for throughput calculations.
-	phaseDurations := make(map[Phase]time.Duration)
-	var phaseErr error
-	for _, phase := range []struct {
+	// Run the phases, recording wall-clock windows for throughput
+	// calculations. One throughput level runs per --max-in-flight value;
+	// with several values this is a concurrency sweep within a single run.
+	type phaseRun struct {
 		name Phase
 		fn   func(context.Context) error
-	}{
+	}
+	phaseRuns := []phaseRun{
 		{PhaseFill, test.runFillPhase},
 		{PhaseProbe, test.runProbePhase},
-		{PhaseThroughput, test.runThroughputPhase},
-	} {
+	}
+	for _, maxInFlight := range cfg.MaxInFlight {
+		name := PhaseThroughput
+		if len(cfg.MaxInFlight) > 1 {
+			name = Phase(fmt.Sprintf("%s-mif%d", PhaseThroughput, maxInFlight))
+		}
+		phaseRuns = append(phaseRuns, phaseRun{name, func(ctx context.Context) error {
+			return test.runThroughputLevel(ctx, name, maxInFlight)
+		}})
+	}
+
+	phaseDurations := make(map[Phase]time.Duration)
+	phaseOffsets := make(map[Phase]time.Duration)
+	phaseOrder := make([]Phase, 0, len(phaseRuns))
+	var phaseErr error
+	for _, phase := range phaseRuns {
+		phaseOffsets[phase.name] = time.Since(testStartTime)
+		phaseOrder = append(phaseOrder, phase.name)
 		start := time.Now()
 		if err := phase.fn(ctx); err != nil {
 			phaseErr = fmt.Errorf("%s phase: %w", phase.name, err)
@@ -392,7 +421,7 @@ func run(ctx context.Context) error {
 	}
 
 	// Write outputs even if a phase failed: partial data is still useful.
-	summary := buildSummary(runID, testStartTime, cfg, clusterInfo, tracker, phaseDurations)
+	summary := buildSummary(runID, testStartTime, cfg, clusterInfo, tracker, phaseDurations, phaseOffsets, phaseOrder)
 	if err := writeOutputs(cfg.OutputDir, summary, tracker); err != nil {
 		if phaseErr == nil {
 			phaseErr = err
@@ -425,8 +454,8 @@ func checkClusterCapacity(cfg Config, info *ClusterInfo) {
 	if cfg.ProbeCount > 0 && cfg.ProbeConcurrency > extra {
 		extra = cfg.ProbeConcurrency
 	}
-	if cfg.ThroughputCount > 0 && cfg.MaxInFlight > extra {
-		extra = cfg.MaxInFlight
+	if cfg.ThroughputCount > 0 && slices.Max(cfg.MaxInFlight) > extra {
+		extra = slices.Max(cfg.MaxInFlight)
 	}
 	needed := cfg.FillCount + extra
 	spare := int(info.PodCapacity) - info.PreexistingPods
@@ -514,22 +543,30 @@ func isControlPlaneNode(u *unstructured.Unstructured) bool {
 	return false
 }
 
-func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *ClusterInfo, tracker *Tracker, phaseDurations map[Phase]time.Duration) *Summary {
+func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *ClusterInfo, tracker *Tracker,
+	phaseDurations map[Phase]time.Duration, phaseOffsets map[Phase]time.Duration, phaseOrder []Phase) *Summary {
 	records := tracker.Records()
 
-	requested := map[Phase]int{
-		PhaseFill:       cfg.FillCount,
-		PhaseProbe:      cfg.ProbeCount,
-		PhaseThroughput: cfg.ThroughputCount,
+	requested := func(phase Phase) int {
+		switch phase {
+		case PhaseFill:
+			return cfg.FillCount
+		case PhaseProbe:
+			return cfg.ProbeCount
+		default:
+			// Throughput phases (one per max-in-flight level).
+			return cfg.ThroughputCount
+		}
 	}
 
 	summary := &Summary{
-		RunID:     runID,
-		StartTime: startTime,
-		EndTime:   time.Now(),
-		Config:    cfg,
-		Cluster:   clusterInfo,
-		Phases:    make(map[Phase]*PhaseSummary),
+		RunID:      runID,
+		StartTime:  startTime,
+		EndTime:    time.Now(),
+		Config:     cfg,
+		Cluster:    clusterInfo,
+		PhaseOrder: phaseOrder,
+		Phases:     make(map[Phase]*PhaseSummary),
 	}
 
 	recordsByPhase := make(map[Phase][]SandboxRecord)
@@ -539,9 +576,10 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 
 	for phase, phaseRecords := range recordsByPhase {
 		ps := &PhaseSummary{
-			Requested:       requested[phase],
-			DurationSeconds: phaseDurations[phase].Seconds(),
-			Latency:         computeLatencyBreakdown(phaseRecords),
+			Requested:          requested(phase),
+			DurationSeconds:    phaseDurations[phase].Seconds(),
+			StartOffsetSeconds: phaseOffsets[phase].Seconds(),
+			Latency:            computeLatencyBreakdown(phaseRecords),
 		}
 		var createTimes, readyTimes []time.Time
 		for i := range phaseRecords {
@@ -721,7 +759,7 @@ func printReport(summary *Summary, clusterInfo *ClusterInfo) {
 		fmt.Printf("    END-TO-END (create -> ready):  %s\n", formatLatency(b.EndToEndReady))
 	}
 
-	for _, phase := range []Phase{PhaseFill, PhaseProbe, PhaseThroughput} {
+	for _, phase := range summary.PhaseOrder {
 		ps, ok := summary.Phases[phase]
 		if !ok {
 			continue

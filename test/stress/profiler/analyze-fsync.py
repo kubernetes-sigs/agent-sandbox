@@ -110,15 +110,24 @@ def load(con, artifacts_dir):
     summary = json.load(open(os.path.join(artifacts_dir, "summary.json")))
     start = datetime.fromisoformat(summary["startTime"].replace("Z", "+00:00"))
 
-    # Phases run sequentially from startTime.
-    phases, t = [], start
-    for name in ("fill", "probe", "throughput"):
-        p = summary["phases"].get(name)
-        if not p:
-            continue
-        end = t + timedelta(seconds=p["durationSeconds"])
-        phases.append((name, t, end, p.get("created", 0)))
-        t = end
+    # Phases run sequentially from startTime. Newer summaries carry explicit
+    # startOffsetSeconds (needed for max-in-flight sweeps with dynamic phase
+    # names); older ones imply order fill -> probe -> throughput.
+    phases = []
+    entries = summary["phases"]
+    if all("startOffsetSeconds" in p for p in entries.values()):
+        for name, p in sorted(entries.items(), key=lambda kv: kv[1]["startOffsetSeconds"]):
+            st = start + timedelta(seconds=p["startOffsetSeconds"])
+            phases.append((name, st, st + timedelta(seconds=p["durationSeconds"]), p.get("created", 0)))
+    else:
+        t = start
+        for name in ("fill", "probe", "throughput"):
+            p = entries.get(name)
+            if not p:
+                continue
+            end = t + timedelta(seconds=p["durationSeconds"])
+            phases.append((name, t, end, p.get("created", 0)))
+            t = end
 
     rows = []
     for path in sorted(glob.glob(os.path.join(artifacts_dir, "profiler-fsync-*.log"))):
@@ -167,14 +176,14 @@ def report(con):
         GROUP BY 1, 2 HAVING sum(delta) > 0 ORDER BY phase, blocked_s_total DESC
     """).fetchdf().to_string(index=False))
 
-    print("\n== fsync-family calls and mean latency (throughput phase) ==")
+    print("\n== fsync-family calls and mean latency (throughput phases) ==")
     print(con.execute("""
         WITH calls AS (
           SELECT comm, key, sum(delta) AS n FROM deltas
-          WHERE map = 'calls' AND phase = 'throughput' GROUP BY 1, 2
+          WHERE map = 'calls' AND phase LIKE 'throughput%' GROUP BY 1, 2
         ), blocked AS (
           SELECT comm, sum(delta) AS us FROM deltas
-          WHERE map = 'blocked_us_total' AND phase = 'throughput' GROUP BY 1
+          WHERE map = 'blocked_us_total' AND phase LIKE 'throughput%' GROUP BY 1
         )
         SELECT c.comm, c.key, c.n AS calls,
                round(b.us / nullif((SELECT sum(n) FROM calls x WHERE x.comm = c.comm), 0), 0)
@@ -191,7 +200,7 @@ def report(con):
                  AS blocked_s,
                sum(CASE WHEN map = 'slow_syscall_calls' THEN delta END) AS slow_calls
         FROM deltas
-        WHERE map LIKE 'slow_syscall%' AND phase = 'throughput'
+        WHERE map LIKE 'slow_syscall%' AND phase LIKE 'throughput%'
           AND key NOT IN ({','.join(f"'{s}'" for s in sorted(WAIT_SYSCALLS))})
         GROUP BY 1, 2 HAVING blocked_s > 0
         ORDER BY blocked_s DESC LIMIT 20
@@ -207,7 +216,7 @@ def report(con):
                      / nullif(sum(CASE WHEN map = 'slow_open_calls' THEN delta END), 0), 1)
                  AS mean_ms
         FROM deltas
-        WHERE map LIKE 'slow_open%' AND phase = 'throughput'
+        WHERE map LIKE 'slow_open%' AND phase LIKE 'throughput%'
         GROUP BY 1, 2 HAVING blocked_s > 0
         ORDER BY blocked_s DESC LIMIT 15
     """).fetchdf().to_string(index=False))
@@ -218,7 +227,7 @@ def report(con):
                round(sum(delta)/1e6, 2) AS blocked_s,
                key IN ({','.join(f"'{s}'" for s in sorted(WAIT_SYSCALLS))}) AS is_wait
         FROM deltas
-        WHERE map = 'slow_syscall_us_total' AND phase = 'throughput'
+        WHERE map = 'slow_syscall_us_total' AND phase LIKE 'throughput%'
         GROUP BY 1, 2 HAVING blocked_s > 1
         ORDER BY blocked_s DESC LIMIT 12
     """).fetchdf().to_string(index=False))

@@ -217,23 +217,28 @@ func (s *stressTest) runProbePhase(ctx context.Context) error {
 // is only truly recycled once the pod is gone, and churn-heavy agent
 // workloads pay this cost too. If we ever want pure launch throughput,
 // release the slot at Ready instead and gate creates on a live-pod count.
-func (s *stressTest) runThroughputPhase(ctx context.Context) error {
+// runThroughputLevel runs one closed-loop churn level at the given
+// max-in-flight cap. Multiple levels run back-to-back as separate phases
+// (a max-in-flight sweep within a single run): each level fully drains
+// (every pod observed deleted) before the next begins, so levels do not
+// contaminate each other.
+func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInFlight int) error {
 	count := s.cfg.ThroughputCount
 	if count == 0 {
 		return nil
 	}
-	log.Printf("[throughput] churning %d sandboxes (max-in-flight=%d, create-concurrency=%d)", count, s.cfg.MaxInFlight, s.cfg.CreateConcurrency)
+	log.Printf("[%s] churning %d sandboxes (max-in-flight=%d, create-concurrency=%d)", phase, count, maxInFlight, s.cfg.CreateConcurrency)
 
-	if s.cfg.MaxInFlight < 1 {
-		return fmt.Errorf("[throughput] invalid max-in-flight=%d (must be >= 1)", s.cfg.MaxInFlight)
+	if maxInFlight < 1 {
+		return fmt.Errorf("[%s] invalid max-in-flight=%d (must be >= 1)", phase, maxInFlight)
 	}
 
-	slots := make(chan struct{}, s.cfg.MaxInFlight)
+	slots := make(chan struct{}, maxInFlight)
 	var lifecycleWG sync.WaitGroup
 
 	names := make([]types.NamespacedName, 0, count)
 	for i := range count {
-		names = append(names, types.NamespacedName{Name: fmt.Sprintf("tp-%d", i), Namespace: s.namespace})
+		names = append(names, types.NamespacedName{Name: fmt.Sprintf("tp%d-%d", maxInFlight, i), Namespace: s.namespace})
 	}
 
 	if _, err := ForkJoin(ctx, names, s.cfg.CreateConcurrency, func(id types.NamespacedName) (struct{}, error) {
@@ -243,7 +248,7 @@ func (s *stressTest) runThroughputPhase(ctx context.Context) error {
 			return struct{}{}, nil
 		}
 
-		if err := s.createSandbox(ctx, id, PhaseThroughput); err != nil {
+		if err := s.createSandbox(ctx, id, phase); err != nil {
 			<-slots
 			return struct{}{}, nil
 		}
@@ -253,13 +258,13 @@ func (s *stressTest) runThroughputPhase(ctx context.Context) error {
 
 			if err := s.tracker.WaitReady(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
 				s.tracker.MarkError(id, err.Error())
-				log.Printf("[throughput] %s: %v", id.Name, err)
+				log.Printf("[%s] %s: %v", phase, id.Name, err)
 			}
 
 			s.deleteSandbox(ctx, id)
 			if err := s.tracker.WaitGone(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
 				s.tracker.MarkError(id, err.Error())
-				log.Printf("[throughput] %s: %v", id.Name, err)
+				log.Printf("[%s] %s: %v", phase, id.Name, err)
 			}
 		})
 		return struct{}{}, nil
@@ -271,7 +276,7 @@ func (s *stressTest) runThroughputPhase(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	counts := s.tracker.Snapshot()[PhaseThroughput]
-	log.Printf("[throughput] done: %d created, %d ready, %d failed", counts.Created, counts.Ready, counts.Failed)
+	counts := s.tracker.Snapshot()[phase]
+	log.Printf("[%s] done: %d created, %d ready, %d failed", phase, counts.Created, counts.Ready, counts.Failed)
 	return nil
 }

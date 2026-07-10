@@ -763,6 +763,18 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	ensurePodNameAnnotation := func(podName string) error {
+		if podName == sandbox.Name {
+			// The default pod name needs no tracking annotation
+			// (resolvePodName falls back to the sandbox name). Writing it
+			// anyway costs a PATCH plus a watch event per sandbox, and under
+			// load the patch-triggered reconcile can race a stale pod
+			// informer cache into the "clear annotation to recover" path,
+			// creating a write/event feedback loop (observed as the
+			// annotation being added and removed on every churned sandbox,
+			// with 409 AlreadyExists pod-create retries).
+			return nil
+		}
+
 		annotatedPodName := ""
 		if sandbox.Annotations != nil {
 			annotatedPodName = sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]

@@ -155,10 +155,13 @@ func (s *promScraper) resolveSources(ctx context.Context) []promSource {
 	forPods("kube-system", "kube-scheduler", "https", 10259, "k8s-app=kube-scheduler", "component=kube-scheduler")
 	forPods("agent-sandbox-system", "agent-sandbox-controller", "http", 8080, "app=agent-sandbox-controller")
 	// cilium-agent: CNI ADD/DEL latency lives here (RunPodSandbox is the
-	// dominant node-side cost under churn). Port 9962 serves plain-HTTP
-	// metrics when prometheus is enabled in the cilium config; best-effort
-	// like everything else if it is not.
+	// dominant node-side cost under churn). Requires prometheus metrics to
+	// be enabled in the cilium config (the kOps scenario sets
+	// enablePrometheusMetrics). The port differs across cilium/kOps
+	// versions (9090 historically, 9962 in newer cilium); try both,
+	// best-effort like everything else.
 	forPods("kube-system", "cilium-agent", "http", 9962, "k8s-app=cilium")
+	forPods("kube-system", "cilium-agent", "http", 9090, "k8s-app=cilium")
 
 	nodes, err := s.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {

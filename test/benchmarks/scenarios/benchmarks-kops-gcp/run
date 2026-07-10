@@ -161,7 +161,8 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
-  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
+  --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
 
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes

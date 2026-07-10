@@ -176,7 +176,12 @@ kops validate cluster --wait 10m
 
 # Deploy to cluster
 echo "Deploying to cluster..."
-dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions
+# Debug logging exposes per-reconcile detail (including the V(1) fast-path
+# deletion logs) for correlating with the reconcile-amplification metrics.
+# zap is cheap relative to the API-bound reconciles (~41ms) being measured;
+# set STRESS_CONTROLLER_LOG_LEVEL=info if perturbation is ever suspected.
+dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
+  --controller-args="--zap-log-level=${STRESS_CONTROLLER_LOG_LEVEL:-debug}"
 
 # Wait for controller to be ready
 echo "Waiting for controller to be ready..."
@@ -249,7 +254,8 @@ fi
 
 # Capture controller diagnostics alongside the stress test results.
 echo "Capturing controller diagnostics..."
-kubectl logs deployment/agent-sandbox-controller --namespace agent-sandbox-system --tail=-1 > "${STRESS_OUTPUT_DIR}/controller.log" || true
+# gzip: debug-level logs during churn are large (thousands of reconciles/s).
+kubectl logs deployment/agent-sandbox-controller --namespace agent-sandbox-system --tail=-1 | gzip > "${STRESS_OUTPUT_DIR}/controller.log.gz" || true
 kubectl get pods -A -o wide > "${STRESS_OUTPUT_DIR}/pods.txt" || true
 kubectl get nodes -o wide > "${STRESS_OUTPUT_DIR}/nodes.txt" || true
 kubectl top nodes > "${STRESS_OUTPUT_DIR}/top-nodes.txt" 2>/dev/null || true

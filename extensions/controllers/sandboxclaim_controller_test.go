@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -5547,4 +5548,115 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
+}
+
+func TestCreateSandboxToleratesAlreadyExists(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "already-exists-claim"
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: claimName},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	// Pre-create the sandbox owned by this claim to simulate a previous successful create.
+	existingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxClaim",
+				Name:       claimName,
+				UID:        "claim-uid",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	// Simulate cache lag: during the first reconcile ALL sandbox Gets return
+	// NotFound (the informer cache hasn't seen the sandbox yet), which causes
+	// createSandbox to call Create and get AlreadyExists from the API server.
+	// After the first reconcile returns we flip the flag so the second
+	// reconcile's Gets succeed, simulating the cache catching up.
+	cacheStale := true
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, warmPool, template, existingSandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == claimName && cacheStale {
+					return k8errors.NewNotFound(
+						schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+						key.Name,
+					)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	// First reconcile: cache miss triggers AlreadyExists, converted to bounded requeue.
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err, "sentinel should be converted to nil error")
+	require.Equal(t, cacheLagRequeueDelay, result.RequeueAfter, "expected bounded requeue delay")
+
+	// The computeAndSetStatus guard detects errSandboxAlreadyExists with a
+	// pre-existing SandboxStatus.Name and short-circuits — no conditions are
+	// set or wiped. Verify the guard preserved the status intact.
+	pendingClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, pendingClaim))
+	require.Equal(t, claimName, pendingClaim.Status.SandboxStatus.Name, "SandboxStatus.Name should not be wiped during cache lag")
+
+	// Cache has caught up — sandbox will be visible on the next reconcile.
+	cacheStale = false
+
+	// Second reconcile: cache has caught up, sandbox is found and returned.
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	// Verify the claim status points to the existing sandbox.
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, claimName, updatedClaim.Status.SandboxStatus.Name)
+
+	// Verify the Ready condition is set now that the sandbox is visible.
+	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond, "expected Ready condition after cache converged")
+	require.NotEqual(t, "SandboxCreatePending", readyCond.Reason, "expected pending reason to clear once cache converged")
 }

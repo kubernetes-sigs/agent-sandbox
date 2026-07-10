@@ -70,6 +70,18 @@ var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 // ErrWarmPoolNotFound is a sentinel error indicating a SandboxWarmPool was not found.
 var ErrWarmPoolNotFound = errors.New("SandboxWarmPool not found")
 
+// errSandboxAlreadyExists signals that a cold-start Create returned AlreadyExists
+// because the informer cache had not yet indexed a sandbox created by an earlier
+// reconcile pass. It is converted to a bounded requeue so the exponential failure
+// rate limiter is not engaged (#1042).
+var errSandboxAlreadyExists = errors.New("sandbox already exists (cache lag)")
+
+// cacheLagRequeueDelay is how long to wait before re-checking that a
+// just-created sandbox is visible in the informer cache. Long enough to
+// cover typical watch latency (so most claims converge in one extra pass),
+// but far below the multi-second exponential backoff it replaces.
+const cacheLagRequeueDelay = 50 * time.Millisecond
+
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}
 
@@ -299,6 +311,19 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// TODO: This 1-minute requeue creates a latency regression vs an immediate watch trigger.
 		// Consider adding a lightweight SandboxTemplate -> claims map watch to reconcile promptly.
 		requeueDelay := 1 * time.Minute
+		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
+			requeueDelay = result.RequeueAfter
+		}
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil
+	}
+
+	// Cold-start Create returned AlreadyExists because the informer cache had
+	// not yet indexed a sandbox created by an earlier pass. Bounded requeue
+	// with nil error to reset the failure counter instead of engaging the
+	// exponential backoff (#1042).
+	if errors.Is(reconcileErr, errSandboxAlreadyExists) {
+		logger.V(4).Info("Sandbox already exists; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
+		requeueDelay := cacheLagRequeueDelay
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
 		}
@@ -545,6 +570,15 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				ObservedGeneration: claim.Generation,
 			}
 		}
+		if errors.Is(err, errSandboxAlreadyExists) {
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "SandboxCreatePending",
+				Message:            "Sandbox already created; waiting for cache to converge",
+				ObservedGeneration: claim.Generation,
+			}
+		}
 		if errors.Is(err, ErrInvalidMetadata) {
 			reason = "InvalidMetadata"
 			return metav1.Condition{
@@ -643,6 +677,13 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 }
 
 func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) {
+	// A cache-lag retry is a benign look-again, not a state change. If the
+	// claim status was already finalized with a sandbox, leave the recorded
+	// Name/PodIPs and existing conditions untouched instead of transiently
+	// wiping them while the cache converges.
+	if sandbox == nil && errors.Is(err, errSandboxAlreadyExists) && claim.Status.SandboxStatus.Name != "" {
+		return
+	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 	r.syncFinishedCondition(claim, sandbox, isClaimExpired)
@@ -1315,6 +1356,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("%w: %w", errSandboxAlreadyExists, err)
+		}
 		err = fmt.Errorf("sandbox create error: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
 		return nil, err

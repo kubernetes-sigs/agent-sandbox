@@ -122,11 +122,13 @@ cleanup() {
 trap cleanup EXIT
 
 # Cluster size is overridable so the same script can drive large-scale runs.
-# The default (3 x n2-standard-8, ~110 pods/node) gives roughly 330 pod slots.
+# The default (10 x n2-standard-8, ~110 pods/node) gives roughly 1100 pod slots.
+# Node-side pod startup (~2 sandboxes/s per node) is the throughput bottleneck,
+# so sandbox launch throughput scales with worker count.
 # For a ~10k pod stress run, use something like NODE_COUNT=100 and a larger
 # control plane (e.g. CONTROL_PLANE_SIZE=n2-standard-16), and scale the
 # STRESS_* variables below to match.
-NODE_COUNT="${NODE_COUNT:-3}"
+NODE_COUNT="${NODE_COUNT:-10}"
 NODE_SIZE="${NODE_SIZE:-n2-standard-8}"
 CONTROL_PLANE_SIZE="${CONTROL_PLANE_SIZE:-n2-standard-8}"
 
@@ -177,7 +179,9 @@ echo "Benchmark completed successfully."
 #
 # Keep fill-count + max-in-flight below the cluster's spare pod capacity
 # (roughly NODE_COUNT * 110 minus system pods); the test warns if they don't fit.
-# Defaults below are sized for the default 3-node cluster. For a ~10k pod run:
+# Defaults below are sized for the default 10-node cluster: enough in-flight
+# pods per node to saturate node-side pod startup, while staying well below
+# capacity. For a ~10k pod run:
 #   NODE_COUNT=100 STRESS_FILL_COUNT=10000 STRESS_MAX_IN_FLIGHT=500 \
 #   STRESS_CREATE_CONCURRENCY=100 STRESS_TIMEOUT=2h
 STRESS_OUTPUT_DIR="${ARTIFACTS:-.}/stress-test/"
@@ -186,8 +190,8 @@ echo "Running stress test"
 go run ./test/stress \
   --fill-count="${STRESS_FILL_COUNT:-150}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
-  --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \
-  --max-in-flight="${STRESS_MAX_IN_FLIGHT:-100}" \
+  --throughput-count="${STRESS_THROUGHPUT_COUNT:-1000}" \
+  --max-in-flight="${STRESS_MAX_IN_FLIGHT:-200}" \
   --create-concurrency="${STRESS_CREATE_CONCURRENCY:-50}" \
   --timeout="${STRESS_TIMEOUT:-30m}" \
   --output-dir="${STRESS_OUTPUT_DIR}"

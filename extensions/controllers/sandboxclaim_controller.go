@@ -1523,7 +1523,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						// which re-sends the same idempotent patch. And once the cache absorbs
 						// the ownership change, the Owns(&Sandbox{}) watch enqueues this claim
 						// again anyway, so convergence is event-driven (#1107).
-						logger.Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
+						logger.V(1).Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
 						return sandbox, nil
 					}
 				}

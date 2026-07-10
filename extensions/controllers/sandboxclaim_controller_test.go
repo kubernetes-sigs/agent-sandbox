@@ -3646,10 +3646,24 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		},
 	}
 
+	// Simulate informer cache lag: while cacheStale is true, every Get of the
+	// adopted sandbox returns the frozen warm-pool-owned view, no matter what
+	// was patched.
+	cacheStale := true
+	staleSandbox := adoptedSandbox.DeepCopy()
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(template, warmPool, claim, adoptedSandbox, extraSandbox).
 		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == "adopted-sb" && cacheStale {
+					staleSandbox.DeepCopyInto(sb)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
 		Build()
 
 	warmSandboxQueue := queue.NewSimpleSandboxQueue()
@@ -3711,11 +3725,32 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Error("expected extra warm sandbox to still have warm pool label, meaning it was not incorrectly adopted during cache lag")
 	}
 
-	// Run reconcile AGAIN. The adoption patch already transferred ownership, so the
-	// second pass takes the fast path (status lookup, IsControlledBy) and is stable.
+	// Run reconcile AGAIN while the cache is STILL stale. The pass re-sends the
+	// idempotent adoption patch and must neither error, nor wipe the finalized
+	// status, nor adopt the extra warm sandbox.
 	_, err = reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Fatalf("Expected second Reconcile to succeed, but failed: %v", err)
+		t.Fatalf("Expected stale-cache Reconcile to succeed, but failed: %v", err)
+	}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+		t.Errorf("expected claim status to remain 'adopted-sb' during cache lag, got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {
+		t.Fatalf("failed to get extra warm sandbox: %v", err)
+	}
+	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected extra warm sandbox to still have warm pool label during cache lag (should not have been adopted)")
+	}
+
+	// Cache converges: the next pass takes the fast path (status lookup,
+	// IsControlledBy) and is stable.
+	cacheStale = false
+	_, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected post-convergence Reconcile to succeed, but failed: %v", err)
 	}
 
 	// Verify that the claim status is unchanged.
@@ -3723,7 +3758,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
-		t.Errorf("expected claim status to remain 'adopted-sb' on 2nd pass, got %q", updatedClaim.Status.SandboxStatus.Name)
+		t.Errorf("expected claim status to remain 'adopted-sb' after convergence, got %q", updatedClaim.Status.SandboxStatus.Name)
 	}
 
 	var adopted sandboxv1beta1.Sandbox
@@ -3739,7 +3774,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Fatalf("failed to get extra warm sandbox: %v", err)
 	}
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
-		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
+		t.Error("expected extra warm sandbox to still have warm pool label after convergence (should not have been adopted)")
 	}
 }
 

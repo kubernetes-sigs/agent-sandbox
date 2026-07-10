@@ -119,17 +119,6 @@ data:
         if (strncmp($p, "/run/containerd", 15) == 0) { $bucket = "/run/containerd"; }
         @slow_open_us[comm, $bucket] = sum($us);
         @slow_open_calls[comm, $bucket] = count();
-        // Attribute the dominant /proc bucket (containerd blocked ~70ms mean
-        // there, ~2 opens per pod cycle): exact path plus the userspace call
-        // stack for the slowest opens. Go binaries keep frame pointers, so
-        // containerd stacks usually symbolize; a stripped binary degrades to
-        // addresses, harmlessly. Both maps are printed AND CLEARED every
-        // snapshot: paths embed pids, so cardinality is only bounded per
-        // window, not per run.
-        if ($us >= 20000 && strncmp($p, "/proc", 5) == 0) {
-          @slow_proc_paths[comm, $p] = count();
-          @slow_proc_stacks[comm, ustack] = count();
-        }
       }
       delete(@open_start[tid]);
       delete(@open_path[tid]);
@@ -174,10 +163,51 @@ data:
       print(@slow_syscall_calls);
       print(@slow_open_us);
       print(@slow_open_calls);
+    }
+  extra.bt: |
+    // EXPERIMENTAL probes live in their own bpftrace process (the
+    // extra-trace container) so a load failure on a CI kernel cannot take
+    // down the proven fsync.bt data: a kretprobe verifier rejection cost us
+    // a full run's core data when these shared one script.
+    //
+    // Attribute the dominant /proc openat blocking (containerd, ~70ms mean,
+    // ~2 opens per pod cycle): exact paths for opens blocked >= 20ms.
+    // Printed AND CLEARED every snapshot: paths embed pids, so cardinality
+    // is only bounded per window, not per run.
+    BEGIN
+    {
+      printf("extra tracer started\n");
+    }
+
+    kprobe:do_sys_openat2
+    /strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 || comm == "kubelet"/
+    {
+      @xopen_start[tid] = nsecs;
+      @xopen_path[tid] = str(uptr(arg1));
+    }
+
+    kretprobe:do_sys_openat2
+    /@xopen_start[tid]/
+    {
+      $us = (nsecs - @xopen_start[tid]) / 1000;
+      if ($us >= 20000) {
+        $p = @xopen_path[tid];
+        if (strncmp($p, "/proc", 5) == 0) {
+          @slow_proc_paths[comm, $p] = count();
+          @slow_proc_us[comm, $p] = sum($us);
+        }
+      }
+      delete(@xopen_start[tid]);
+      delete(@xopen_path[tid]);
+    }
+
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
       print(@slow_proc_paths);
-      print(@slow_proc_stacks);
+      print(@slow_proc_us);
       clear(@slow_proc_paths);
-      clear(@slow_proc_stacks);
+      clear(@slow_proc_us);
     }
 ---
 apiVersion: apps/v1
@@ -201,6 +231,18 @@ spec:
       - name: fsync-trace
         image: bpftrace:latest
         command: ["bpftrace", "/scripts/fsync.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: extra-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/extra.bt"]
         securityContext:
           privileged: true
         volumeMounts:

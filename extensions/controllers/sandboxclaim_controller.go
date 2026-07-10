@@ -1568,7 +1568,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						// controlled by us once the cache converges. Returned as a sentinel so
 						// Reconcile requeues immediately with a bounded delay rather than routing
 						// through the exponential failure rate limiter (#1107).
-						logger.Info("Triggered adoption completion for sandbox, retry", "sandbox", sbName, "claim", claim.Name)
+						logger.Info("Triggered adoption completion for sandbox, requeueing", "sandbox", sbName, "claim", claim.Name)
 						return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
 					}
 				}

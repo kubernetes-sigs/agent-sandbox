@@ -19,8 +19,9 @@ from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
+from .utils import select_pod_ip
 
 
 class AsyncSandbox:
@@ -114,17 +115,17 @@ class AsyncSandbox:
         return None
 
     async def get_pod_ip(self) -> str | None:
-        """Fetches the first pod IP from the Sandbox status.
+        """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
 
         Always queries the K8s API for the latest IP — the pod IP can change
-        after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed 
+        after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed
         via setting spec.operatingMode to Running).
-        Returns None if the controller does not populate podIPs.
+        Returns None if no valid IP can be selected.
         """
         sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
         status_data = sandbox_object.get("status") or {}
         pod_ips = status_data.get("podIPs", [])
-        return pod_ips[0] if pod_ips else None
+        return select_pod_ip(pod_ips)
 
     async def status(self) -> tuple[str, str]:
         """

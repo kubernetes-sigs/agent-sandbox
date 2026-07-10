@@ -44,17 +44,16 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 			Name:      "obs-anno-template",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "pause",
-							Image: "registry.k8s.io/pause:3.10",
-						},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "pause",
+						Image: "registry.k8s.io/pause:3.10",
 					},
 				},
 			},
+		}},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))

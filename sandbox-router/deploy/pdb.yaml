@@ -1,0 +1,18 @@
+# Prevent voluntary disruptions (drain, autoscaler eviction) from taking
+# the entire router fleet offline. Tune for your replica count: with N
+# replicas, minAvailable: max(1, N-1) keeps you served during single-node
+# events while still allowing node drains.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sandbox-router
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-router
+      app.kubernetes.io/component: sandbox-router

@@ -1,0 +1,74 @@
+# RBAC for the sandbox-router's Pod-IP cache (KEP-NNNN fast path).
+#
+# The router watches sandbox-owned Pods so it can dial the live PodIP
+# instead of hitting cluster DNS on every request. Sandboxes can land
+# in any user namespace, so the informer needs get/list/watch on Pods
+# cluster-wide. If your deployment pins sandboxes to a single namespace,
+# narrow this to a Role + RoleBinding in that namespace and set
+# --cache-namespace=<ns> on the router.
+#
+# Skip these manifests entirely when running the router with
+# --cache-enabled=false (the DNS-only default).
+#
+# A note for auditors reading this grant:
+#
+#   The grant is "get/list/watch on Pods in every namespace", which on
+#   paper includes kube-system / kube-public / kube-node-lease. K8s RBAC
+#   has no negative-namespace primitive, so the grant cannot be
+#   expressed as "everywhere except the system namespaces."
+#
+#   At runtime, however, the informer issues its LIST/WATCH with the
+#   server-side label selector
+#
+#       agents.x-k8s.io/sandbox-name-hash
+#
+#   which the sandbox controller stamps on every sandbox-owned Pod (and
+#   nothing else). System-namespace Pods do not carry this label, so the
+#   apiserver never returns them and the router's cache never stores
+#   them. The grant is the upper bound on what the SA *could* read; the
+#   informer filter is what it actually does read.
+#
+#   If you need the grant itself to match the runtime behavior, the only
+#   options today are (a) per-namespace RoleBindings enumerated from
+#   your allow-list of tenant namespaces, or (b) a Kyverno / OPA
+#   admission policy that rejects list/watch on Pods from this SA in
+#   namespaces matching a deny pattern.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-router
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+rules:
+# Pod read access for the informer cache. The cache uses a server-side
+# label selector to narrow the actual watch to sandbox-owned Pods (see
+# the header comment); the API permission grant itself cannot be
+# label-scoped.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-router
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-router
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: default
+#
+# The ClusterRoleBinding granting system:auth-delegator (needed for
+# --authz-mode=tokenreview) lives in a separate file —
+# rbac-tokenreview.yaml — so the default-mode deployment (which is
+# --authz-mode=allow-all) doesn't carry the broader create permissions
+# on tokenreviews.authentication.k8s.io and
+# subjectaccessreviews.authorization.k8s.io. Apply that file in
+# addition to this one only when you enable --authz-mode=tokenreview.

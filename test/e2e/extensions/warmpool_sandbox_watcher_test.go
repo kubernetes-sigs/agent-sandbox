@@ -164,7 +164,8 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	warmPool.Name = "test-warmpool"
 	warmPool.Namespace = ns.Name
 	warmPool.Spec.TemplateRef.Name = template.Name
-	warmPool.Spec.Replicas = 1
+	replicas := int32(1)
+	warmPool.Spec.Replicas = &replicas
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
 	// Wait for warm pool Sandbox to become ready
@@ -256,7 +257,8 @@ func TestWarmPoolPodNameAnnotationBeforeReady(t *testing.T) {
 	warmPool.Name = "test-warmpool"
 	warmPool.Namespace = ns.Name
 	warmPool.Spec.TemplateRef.Name = template.Name
-	warmPool.Spec.Replicas = 1
+	replicas := int32(1)
+	warmPool.Spec.Replicas = &replicas
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
 	// Start from a Ready warm-pool Sandbox so the claim reconcile path must adopt it

@@ -16,6 +16,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // NOTE: json tags are required. Any new fields you add must have json tags for the fields to be serialized.
@@ -39,9 +40,10 @@ type SandboxTemplateRef struct {
 type SandboxWarmPoolSpec struct {
 	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
-	// +required
+	// +optional
+	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
-	Replicas int32 `json:"replicas"`
+	Replicas *int32 `json:"replicas,omitempty"`
 
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
@@ -59,10 +61,10 @@ type SandboxWarmPoolSpec struct {
 type SandboxWarmPoolUpdateStrategyType string
 
 const (
-	// RecreateSandboxWarmPoolUpdateStrategyType indicates that stale pods are deleted immediately to ensure the pool only contains fresh pods.
-	// Note: This applies to PodTemplate spec changes only. Changes to annotations or labels in the template do not trigger recreate.
+	// RecreateSandboxWarmPoolUpdateStrategyType indicates that stale sandboxes are deleted immediately to ensure the pool only contains fresh sandboxes.
+	// Note: This applies to changes in the template's SandboxBlueprint only. Changes to annotations, labels, or template-level policies do not trigger recreate.
 	RecreateSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "Recreate"
-	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale pods are only replaced when they are manually deleted or when these stale pods are adopted by sandboxclaims and hence replaced by fresh pods.
+	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale sandboxes are only replaced when they are manually deleted or when these stale sandboxes are adopted by sandboxclaims and hence replaced by fresh sandboxes.
 	OnReplenishSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "OnReplenish"
 )
 
@@ -96,7 +98,10 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyReplicas"
+// +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".spec.replicas"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:storageversion
+// +kubebuilder:conversion:strategy=Webhook
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.
 type SandboxWarmPool struct {
 	metav1.TypeMeta `json:",inline"`
@@ -123,5 +128,8 @@ type SandboxWarmPoolList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxWarmPool{}, &SandboxWarmPoolList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxWarmPool{}, &SandboxWarmPoolList{})
+		return nil
+	})
 }

@@ -246,3 +246,80 @@ def test_python_sdk_gateway_mode_warmpool(
         pytest.fail(f"SDK test with warmpool failed: {e}")
     finally:
         client.delete_all()
+
+
+def test_python_sdk_volume_claim_templates(
+    tc, temp_namespace, sandbox_template, deploy_router, sandbox_warmpool
+):
+    """Tests volume claim template propagation and operation in the Python SDK."""
+    storage_class = os.getenv("SANDBOX_TEST_STORAGE_CLASS")
+    custom_vcts = [
+        {
+            "metadata": {
+                "name": "custom-workspace"
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": {
+                    "requests": {
+                        "storage": "1Gi"
+                    }
+                }
+            }
+        }
+    ]
+    if storage_class:
+        custom_vcts[0]["spec"]["storageClassName"] = storage_class
+
+    config = SandboxLocalTunnelConnectionConfig(router_namespace=temp_namespace)
+    client = SandboxClient(connection_config=config)
+    try:
+        sandbox = client.create_sandbox(
+            warmpool=sandbox_warmpool,
+            namespace=temp_namespace,
+            volume_claim_templates=custom_vcts,
+        )
+        
+        # Verify that volumeClaimTemplates was propagated to the SandboxClaim spec
+        print("Verifying SandboxClaim spec.volumeClaimTemplates...")
+        claim_res = client.k8s_helper.get_sandbox_claim(sandbox.claim_name, temp_namespace)
+        assert claim_res is not None, f"SandboxClaim {sandbox.claim_name} should exist"
+        claim_spec = claim_res.get("spec", {})
+        claim_vcts = claim_spec.get("volumeClaimTemplates", [])
+        assert len(claim_vcts) == 1, f"Expected 1 volumeClaimTemplate on SandboxClaim, got {len(claim_vcts)}"
+        assert claim_vcts[0].get("metadata", {}).get("name") == "custom-workspace", "Volume claim template name mismatch in SandboxClaim"
+
+        # Verify that volumeClaimTemplates was propagated to the Sandbox spec
+        print("Verifying Sandbox spec.volumeClaimTemplates...")
+        sandbox_res = client.k8s_helper.get_sandbox(sandbox.sandbox_id, temp_namespace)
+        assert sandbox_res is not None, f"Sandbox {sandbox.sandbox_id} should exist"
+        sandbox_spec = sandbox_res.get("spec", {})
+        sandbox_vcts = sandbox_spec.get("volumeClaimTemplates", [])
+
+        # Verify that our custom volume claim template exists in Sandbox spec.volumeClaimTemplates
+        custom_vct = next((v for v in sandbox_vcts if v.get("metadata", {}).get("name") == "custom-workspace"), None)
+        assert custom_vct is not None, "Custom volume claim template 'custom-workspace' not found in Sandbox spec"
+        assert custom_vct.get("spec", {}).get("accessModes") == ["ReadWriteOnce"], "Volume claim template accessModes mismatch in Sandbox"
+        if storage_class:
+            assert custom_vct.get("spec", {}).get("storageClassName") == storage_class, "Volume claim template storageClassName mismatch in Sandbox"
+        assert custom_vct.get("spec", {}).get("resources", {}).get("requests", {}).get("storage") == "1Gi", "Volume claim template storage request mismatch in Sandbox"
+
+
+        # Verify that the PersistentVolumeClaim resource was created with the expected properties
+        print("Verifying PVC creation in cluster...")
+        pvc_name = f"custom-workspace-{sandbox.sandbox_id}"
+        pvc_res = client.k8s_helper.core_v1_api.read_namespaced_persistent_volume_claim(pvc_name, temp_namespace)
+        assert pvc_res is not None, f"PVC {pvc_name} should exist"
+        assert pvc_res.spec.resources.requests is not None
+        assert pvc_res.spec.resources.requests.get("storage") == "1Gi", "PVC storage request mismatch in cluster"
+        if storage_class:
+            assert pvc_res.spec.storage_class_name == storage_class, "PVC storageClassName mismatch in cluster"
+
+        print("Running command to verify sandbox is operational...")
+        res = sandbox.commands.run("df -h")
+        print(f"Disk space output:\n{res.stdout}")
+        assert res.exit_code == 0, f"Command df -h failed with exit code {res.exit_code}: {res.stderr}"
+
+    finally:
+        client.delete_all()
+

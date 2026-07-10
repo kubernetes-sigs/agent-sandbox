@@ -1,4 +1,4 @@
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: ray-native-template
@@ -16,7 +16,7 @@ spec:
         image: us-docker.pkg.dev/vicenteferrara-gke-dev/python-runtime/sandbox:latest
         imagePullPolicy: Always
 ---
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
   name: ray-native-pool

@@ -34,7 +34,7 @@ Before running this test, ensure the following prerequisites are met:
   - Generate the manifests using `cd ~/agent-sandbox && make release-manifests TAG=123`. The
     manifests will be generated in `~/agent-sandbox/release_assets`. Search for the
     `image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:123` line in the generated
-    extensions and manifest files and replace the image with your image:tag.
+    extensions and sandbox files and replace the image with your image:tag.
   - We recommend adding and adjusting the below configurations in the `extensions.yaml` generated
     manifest to whatever values are appropriate for your cluster size:
     ```yaml
@@ -48,8 +48,7 @@ Before running this test, ensure the following prerequisites are met:
           - --enable-tracing
           - --zap-log-level=debug
           - --zap-encoder=json
-          - --kube-api-qps=1000
-          - --kube-api-burst=1000
+          - --kube-api-qps=-1
           - --sandbox-concurrent-workers=1000
           - --sandbox-claim-concurrent-workers=1000
           - --sandbox-warm-pool-concurrent-workers=1000
@@ -59,7 +58,7 @@ Before running this test, ensure the following prerequisites are met:
   - Apply your modified manifests to your cluster to install the agent-sandbox controller.
     ```bash
     cd ~/agent-sandbox
-    kubectl apply -f release_assets/manifest.yaml
+    kubectl apply -f release_assets/sandbox.yaml
     kubectl apply -f release_assets/extensions.yaml
     ```
 

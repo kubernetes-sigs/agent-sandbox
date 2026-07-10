@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -124,11 +123,14 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		return err
 	}
 
-	// Fetch template and compute hash once to avoid repeated expensive operations
-	template, currentPodTemplateHash, tmplErr := r.fetchTemplateAndHash(ctx, warmPool)
+	// Fetch template and compute hash once to avoid repeated expensive operations,
+	// only currentSandboxBlueprintHash is used for staleness checks,
+	// currentPodTemplateHash is kept as a value for DeprecatedSandboxPodTemplateHashLabel
+	// for external consumer compatibility
+	template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr := r.fetchTemplateAndHash(ctx, warmPool)
 
 	// Delete stale pods, filter pods by ownership and adopt orphans
-	activeSandboxes, allErrors := r.filterActiveSandboxes(ctx, warmPool, sandboxList.Items, template, currentPodTemplateHash, tmplErr)
+	activeSandboxes, allErrors := r.filterActiveSandboxes(ctx, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
 
 	const warmPoolReadinessGracePeriod = 5 * time.Minute
 
@@ -149,7 +151,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	activeSandboxes = healthySandboxes
 
-	desiredReplicas := warmPool.Spec.Replicas
+	desiredReplicas := int32(1)
+	if warmPool.Spec.Replicas != nil {
+		desiredReplicas = *warmPool.Spec.Replicas
+	}
 	currentReplicas := int32(len(activeSandboxes))
 
 	logger.Info("Pool status",
@@ -177,7 +182,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		sandboxesToCreate := min(desiredReplicas-currentReplicas, maxBatchSize)
 		logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 
-		sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash)
+		sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash, currentSandboxBlueprintHash)
 		if err != nil {
 			logger.Error(err, "Failed to build sandbox CR blueprint")
 			allErrors = errors.Join(allErrors, err)
@@ -251,7 +256,7 @@ func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
 }
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
-func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, error) {
+func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	var activeSandboxes []sandboxv1beta1.Sandbox
 	var allErrors error
@@ -290,7 +295,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 		}
 
 		if tmplErr == nil && (updateStrategy == extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType || isOrphan) {
-			if r.isSandboxStale(ctx, &sb, template, currentPodTemplateHash, vettedHashes) {
+			if r.isSandboxStale(ctx, &sb, template, currentSandboxBlueprintHash, vettedHashes) {
 				logger.Info("Deleting stale sandbox", "sandbox", sb.Name, "isOrphan", isOrphan)
 				if err := r.Delete(ctx, &sb); err != nil {
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
@@ -331,52 +336,53 @@ func computePodTemplateHash(template *extensionsv1beta1.SandboxTemplate) (string
 	return sandboxcontrollers.NameHash(string(specJSON)), nil
 }
 
+// computeSandboxBlueprintHash computes a hash of the sandbox template's Spec.SandboxBlueprint.
+func computeSandboxBlueprintHash(template *extensionsv1beta1.SandboxTemplate) (string, error) {
+	specJSON, err := json.Marshal(template.Spec.SandboxBlueprint)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal sandbox blueprint for hashing: %w", err)
+	}
+	return sandboxcontrollers.NameHash(string(specJSON)), nil
+}
+
 // fetchTemplateAndHash fetches the sandbox template and computes its hash.
-func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) (*extensionsv1beta1.SandboxTemplate, string, error) {
+func (r *SandboxWarmPoolReconciler) fetchTemplateAndHash(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) (*extensionsv1beta1.SandboxTemplate, string, string, error) {
 	logger := log.FromContext(ctx)
 	template, tmplErr := r.getTemplate(ctx, warmPool)
-	var currentPodTemplateHash string
+	var currentPodTemplateHash, currentSandboxBlueprintHash string
 	if tmplErr == nil {
 		currentPodTemplateHash, tmplErr = computePodTemplateHash(template)
+	}
+	if tmplErr == nil {
+		currentSandboxBlueprintHash, tmplErr = computeSandboxBlueprintHash(template)
 	}
 
 	if tmplErr != nil {
 		logger.Error(tmplErr, "Failed to get sandbox template and hash", "templateRef", warmPool.Spec.TemplateRef.Name)
 	}
-	return template, currentPodTemplateHash, tmplErr
+	return template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr
 }
 
 // buildSandboxCR constructs the base Sandbox CR (with pod template and volume claim templates) for the warm pool.
-func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.SandboxWarmPool, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, currentPodTemplateHash string) (*sandboxv1beta1.Sandbox, error) {
+func (r *SandboxWarmPoolReconciler) buildSandboxCR(
+	warmPool *extensionsv1beta1.SandboxWarmPool,
+	poolNameHash string,
+	template *extensionsv1beta1.SandboxTemplate,
+	currentPodTemplateHash string,
+	currentSandboxBlueprintHash string,
+) (*sandboxv1beta1.Sandbox, error) {
 	sandboxLabels := map[string]string{
-		warmPoolSandboxLabel:                       poolNameHash,
-		sandboxTemplateRefHash:                     SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
-		sandboxv1beta1.SandboxLaunchTypeLabel:      sandboxv1beta1.SandboxLaunchTypeWarm,
-		sandboxv1beta1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
+		warmPoolSandboxLabel:                                 poolNameHash,
+		sandboxTemplateRefHash:                               SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name),
+		sandboxv1beta1.SandboxLaunchTypeLabel:                sandboxv1beta1.SandboxLaunchTypeWarm,
+		sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel: currentPodTemplateHash,
+		sandboxv1beta1.SandboxTemplateHashLabel:              currentSandboxBlueprintHash,
+		sandboxv1beta1.CreatedByLabel:                        "controller",
 	}
 
 	// Build annotations for the Sandbox CR
 	sandboxAnnotations := map[string]string{
 		sandboxv1beta1.SandboxTemplateRefAnnotation: warmPool.Spec.TemplateRef.Name,
-	}
-
-	// Copy template pod labels into sandbox pod template
-	podLabels := make(map[string]string)
-	maps.Copy(podLabels, template.Spec.PodTemplate.ObjectMeta.Labels)
-	// Propagate pool and template labels to pod template for consistency and targeting
-	podLabels[warmPoolSandboxLabel] = poolNameHash
-	podLabels[sandboxTemplateRefHash] = SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name)
-	podLabels[sandboxv1beta1.SandboxPodTemplateHashLabel] = currentPodTemplateHash
-
-	podAnnotations := make(map[string]string)
-	maps.Copy(podAnnotations, template.Spec.PodTemplate.ObjectMeta.Annotations)
-
-	// Respect the template's custom eviction annotation if explicitly specified.
-	// Only apply the default eviction behavior if the annotation is not defined.
-	if _, exists := template.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
-		if r.EnableWarmPoolEviction {
-			podAnnotations[warmPoolEvictionAnnotation] = "true"
-		}
 	}
 
 	sandbox := &sandboxv1beta1.Sandbox{
@@ -386,23 +392,29 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(warmPool *extensionsv1beta1.S
 			Labels:       sandboxLabels,
 			Annotations:  sandboxAnnotations,
 		},
+		// Deep-copy the entire shared blueprint
 		Spec: sandboxv1beta1.SandboxSpec{
-			Service: template.Spec.Service,
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: *template.Spec.PodTemplate.Spec.DeepCopy(),
-				ObjectMeta: sandboxv1beta1.PodMetadata{
-					Labels:      podLabels,
-					Annotations: podAnnotations,
-				},
-			},
+			SandboxBlueprint: *template.Spec.SandboxBlueprint.DeepCopy(),
 		},
 	}
 
-	// Copy volumeClaimTemplates from template to sandbox
-	if len(template.Spec.VolumeClaimTemplates) > 0 {
-		sandbox.Spec.VolumeClaimTemplates = make([]sandboxv1beta1.PersistentVolumeClaimTemplate, len(template.Spec.VolumeClaimTemplates))
-		for i, vct := range template.Spec.VolumeClaimTemplates {
-			vct.DeepCopyInto(&sandbox.Spec.VolumeClaimTemplates[i])
+	// Propagate pool and template labels to pod template for consistency and targeting
+	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
+		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+	}
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[warmPoolSandboxLabel] = poolNameHash
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxTemplateRefHash] = SandboxTemplateRefHash(warmPool.Spec.TemplateRef.Name)
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel] = currentPodTemplateHash
+	sandbox.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.SandboxTemplateHashLabel] = currentSandboxBlueprintHash
+
+	// Respect the template's custom eviction annotation if explicitly specified.
+	// Only apply the default eviction behavior if the annotation is not defined.
+	if _, exists := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
+		if r.EnableWarmPoolEviction {
+			if sandbox.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+				sandbox.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+			}
+			sandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "true"
 		}
 	}
 
@@ -449,24 +461,15 @@ func (r *SandboxWarmPoolReconciler) updateStatus(ctx context.Context, oldStatus 
 		return nil
 	}
 
-	patch := &extensionsv1beta1.SandboxWarmPool{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: extensionsv1beta1.GroupVersion.String(),
-			Kind:       "SandboxWarmPool",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      warmPool.Name,
-			Namespace: warmPool.Namespace,
-		},
-		Status: warmPool.Status,
+	oldWarmPool := warmPool.DeepCopy()
+	oldWarmPool.Status = *oldStatus
+	patch := client.MergeFrom(oldWarmPool)
+
+	if err := r.Status().Patch(ctx, warmPool, patch); err != nil {
+		return fmt.Errorf("failed to update SandboxWarmPool status: %w", err)
 	}
 
-	if err := r.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("warmpool-controller"), client.ForceOwnership); err != nil { //nolint:staticcheck // SA1019: client.Apply requires generated apply configurations
-		logger.Error(err, "Failed to apply SandboxWarmPool status via SSA")
-		return err
-	}
-
-	logger.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas)
+	logger.Info("Updated SandboxWarmPool status", "replicas", warmPool.Status.Replicas, "readyReplicas", warmPool.Status.ReadyReplicas)
 	return nil
 }
 
@@ -494,10 +497,10 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	ctx context.Context,
 	sandbox *sandboxv1beta1.Sandbox,
 	template *extensionsv1beta1.SandboxTemplate,
-	currentPodTemplateHash string,
+	currentSandboxBlueprintHash string,
 	vettedHashes map[string]bool,
 ) bool {
-	sandboxHash := sandbox.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel]
+	sandboxHash := sandbox.Labels[sandboxv1beta1.SandboxTemplateHashLabel]
 
 	// If the templateRefHash doesn't match, it's stale.
 	if sandbox.Labels[sandboxTemplateRefHash] != SandboxTemplateRefHash(template.Name) {
@@ -509,19 +512,19 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	isOrphan := controllerRef == nil
 	if isOrphan {
 		// Always perform full semantic comparison for orphans.
-		return !r.comparePodSpecs(template, &sandbox.Spec.PodTemplate.Spec)
+		return !r.compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
 	}
 
 	// If hashes match, it's fresh.
-	if sandboxHash != "" && sandboxHash == currentPodTemplateHash {
+	if sandboxHash != "" && sandboxHash == currentSandboxBlueprintHash {
 		return false
 	}
 
-	// If currentPodTemplateHash is empty, it means we failed to compute it.
+	// If currentSandboxBlueprintHash is empty, it means we failed to compute it.
 	// In this case, we should log an error and treat it as NOT stale to avoid
 	// mass-deleting existing sandboxes due to a marshal failure.
-	if currentPodTemplateHash == "" {
-		log.FromContext(ctx).Error(nil, "currentPodTemplateHash is empty, skipping staleness check", "sandbox", sandbox.Name)
+	if currentSandboxBlueprintHash == "" {
+		log.FromContext(ctx).Error(nil, "currentSandboxBlueprintHash is empty, skipping staleness check", "sandbox", sandbox.Name)
 		return false
 	}
 
@@ -532,10 +535,10 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 		}
 	}
 
-	// Perform Semantic DeepEqual on the Pod Spec only.
+	// Perform a semantic comparison of the sandbox blueprint.
 	// We normalize the pod spec by applying the same secure defaults
 	// used during creation to avoid false positives from controller-injected fields.
-	isStale := !r.comparePodSpecs(template, &sandbox.Spec.PodTemplate.Spec)
+	isStale := !r.compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
 
 	// Save the result for the next sandbox with this same hash.
 	if sandboxHash != "" {
@@ -556,6 +559,34 @@ func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.
 	// Since both have now undergone the exact same defaulting logic,
 	// any remaining difference is a TRUE template drift.
 	return equality.Semantic.DeepEqual(expectedSpec, actualSandboxSpec)
+}
+
+// compareVolumeClaimTemplates checks if the volume claim templates in the sandbox are equal to the template.
+// Only each entry's name and spec are compared, as changes in metadata (like labels, annotations) are not tracked for staleness.
+// Note: Comparison is index-based (order-sensitive) to stay consistent with computeSandboxBlueprintHash (+listType=atomic).
+// Making this comparison order-independent without also sorting the templates in computeSandboxBlueprintHash
+// would cause reordered warm sandboxes to fail the hash label check on every reconcile.
+func (r *SandboxWarmPoolReconciler) compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, actualVCTs []sandboxv1beta1.PersistentVolumeClaimTemplate) bool {
+	if len(template.Spec.SandboxBlueprint.VolumeClaimTemplates) != len(actualVCTs) {
+		return false
+	}
+
+	for i, tmplVCT := range template.Spec.SandboxBlueprint.VolumeClaimTemplates {
+		actualVCT := actualVCTs[i]
+		if tmplVCT.Name != actualVCT.Name || !equality.Semantic.DeepEqual(tmplVCT.Spec, actualVCT.Spec) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// compareSandboxBlueprint checks if the sandbox blueprint in the sandbox is semantically equal to the template,
+// ignoring metadata differences and only comparing the fields that are relevant for staleness detection.
+func (r *SandboxWarmPoolReconciler) compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
+	return r.comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
+		r.compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
+		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
 }
 
 // SetupWithManager sets up the controller with the Manager.

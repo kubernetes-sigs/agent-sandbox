@@ -61,6 +61,11 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
         f"--output=type={args.docker_build_output_type}",
     ]
     if args.docker_build_output_type == "registry":
+        cache_ref = utils.get_full_image_name(args, service_name, tag="buildcache")
+        build_cmd.extend([
+            f"--cache-from=type=registry,ref={cache_ref}",
+            f"--cache-to=type=registry,ref={cache_ref},mode=max",
+        ])
         build_cmd.append("--platform=" + platforms)
     image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
     build_cmd.extend(["-t", image_name])
@@ -121,6 +126,15 @@ def main(args):
 
             if service_name == ".":
                 service_name = "agent-sandbox-controller"
+
+            # Per-Dockerfile overrides. The Go sandbox-router needs the repo
+            # root as build context (it imports the shared Go module) and
+            # uses a "-go" suffix to avoid colliding with the Python router
+            # image which still lives at clients/python/.../sandbox-router/.
+            go_router_dir = os.path.join(".", "sandbox-router")
+            if root == go_router_dir:
+                context_dir = "."
+                service_name = "sandbox-router-go"
 
             if args.images and service_name not in args.images:
                 continue

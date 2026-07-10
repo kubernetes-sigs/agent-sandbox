@@ -73,18 +73,17 @@ func runWarmPoolParallelClaim(t *framework.TestContext, warmPoolSize int) {
 			Name:      "template",
 			Namespace: ns.Name,
 		},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            "pause",
-							Image:           "registry.k8s.io/pause:3.10",
-							ImagePullPolicy: corev1.PullIfNotPresent,
-						},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:            "pause",
+						Image:           "registry.k8s.io/pause:3.10",
+						ImagePullPolicy: corev1.PullIfNotPresent,
 					},
 				},
 			},
+		}},
 		},
 	}
 	if err := t.CreateWithCleanup(ctx, template); err != nil {
@@ -155,13 +154,14 @@ func runWarmPoolParallelClaim(t *framework.TestContext, warmPoolSize int) {
 		})
 	}()
 
+	replicas := int32(warmPoolSize)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "warmpool",
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas:    int32(warmPoolSize),
+			Replicas:    &replicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
 		},
 	}
@@ -174,6 +174,8 @@ func runWarmPoolParallelClaim(t *framework.TestContext, warmPoolSize int) {
 		t.Fatalf("warmpool failed to become ready: %v", err)
 	}
 
+	// Start the clock!
+	t.Logf("BENCHMARK-START: starting benchmark run [claims=%d]", warmPoolSize)
 	t.StartTimer()
 	startTime := time.Now()
 
@@ -204,9 +206,9 @@ func runWarmPoolParallelClaim(t *framework.TestContext, warmPoolSize int) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	t.Logf("Successfully claimed %d sandboxes", warmPoolSize)
 
 	t.StopTimer()
+	t.Logf("BENCHMARK-END: Successfully claimed %d sandboxes", warmPoolSize)
 
 	// Active iteration cleanup to prevent resource leak over multiple benchmark iterations
 	if err := t.Delete(ctx, ns); err != nil {

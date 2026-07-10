@@ -62,9 +62,12 @@ func TestSandboxClaimDeleteForeground(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "fg-delete-warmpool", Namespace: ns.Name},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
@@ -142,9 +145,12 @@ func TestSandboxClaimTTLDeleteForegroundAfterFinished(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "ttl-fg-delete-warmpool", Namespace: ns.Name},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
@@ -209,9 +215,12 @@ func TestSandboxClaimTTLAfterFinished(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "ttl-after-finished-warmpool", Namespace: ns.Name},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	require.NoError(t, testCtx.CreateWithCleanup(t.Context(), warmPool))
 
@@ -265,9 +274,12 @@ func TestSandboxClaimExpiryUsesEarlierOfShutdownTimeAndTTL(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "earlier-of-warmpool", Namespace: ns.Name},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
@@ -324,9 +336,12 @@ func TestSandboxClaimFinishedWithoutTTLIsRetained(t *testing.T) {
 		}},
 	})
 
+	replicas := int32(0)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "finished-no-ttl-warmpool", Namespace: ns.Name},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
@@ -370,9 +385,12 @@ func TestSandboxClaimTTLZeroRetainPreservesFinishedConditionDuringCleanup(t *tes
 		}},
 	})
 
+	replicas := int32(0)
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: "ttl-zero-retain-warmpool", Namespace: ns.Name},
-		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
 
@@ -432,10 +450,7 @@ func createTemplate(t *testing.T, tc *framework.TestContext, namespace, name str
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
-			PodTemplate:             sandboxv1beta1.PodTemplate{Spec: podSpec},
-		},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: podSpec}}, NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 	return template

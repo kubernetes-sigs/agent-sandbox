@@ -1,0 +1,21 @@
+# Grants ONLY identity `team-a` egress to github.com over HTTPS.
+# This is the "policy that maps to an identity and gives it access to the
+# github.com domain": the endpointSelector matches the team-a security identity,
+# and toFQDNs allowlists the domain (resolved via the DNS proxy from 10-allow-dns).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: team-a-allow-github
+  namespace: sandbox-demo
+spec:
+  endpointSelector:
+    matchLabels:
+      demo.identity: team-a
+  egress:
+    - toFQDNs:
+        - matchName: github.com
+        - matchName: codeload.github.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

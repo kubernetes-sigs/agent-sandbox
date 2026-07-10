@@ -33,7 +33,7 @@ description: >
    VERSION=$(curl https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r '.tag_name')
 
    # To install only the core components:
-   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
    
    # To install the extensions components:
    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
@@ -42,7 +42,7 @@ description: >
    kubectl -n agent-sandbox-system get pods
    ```
 
-3. Before using the client, you must deploy the `sandbox-router`. Follow these there steps:
+3. Before using the client, you must deploy the `sandbox-router`. Follow these three steps:
    ```sh
    curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml | sed 's|${ROUTER_IMAGE}|us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router:latest-main|g' > sandbox_router.yaml
    kubectl apply -f sandbox_router.yaml

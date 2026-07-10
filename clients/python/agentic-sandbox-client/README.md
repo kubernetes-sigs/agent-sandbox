@@ -157,27 +157,15 @@ finally:
 Use this when the client runs **inside the cluster** (for example, another pod in the same cluster).
 The client connects **directly to the sandbox runtime pod**, bypassing the sandbox router.
 
-The **default** is **cluster DNS** (`use_pod_ip=False`). Omit the argument or pass `use_pod_ip=False`
-to use it; set `use_pod_ip=True` only when you want the pod IP path.
-
-**Option A: Direct Pod IP** — `SandboxInClusterConnectionConfig(use_pod_ip=True)`
-
-- Uses the pod IP from the Sandbox status for **low-latency**, direct connections without relying on
-  cluster DNS resolution.
-
-**Option B: Cluster DNS** — `SandboxInClusterConnectionConfig(use_pod_ip=False)`
-
-- Uses a stable DNS-style endpoint (typically `http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`).
-  Prefer this when you want **stable DNS-based routing** across pod lifecycle events.
+The client first uses the pod IP reported in the Sandbox status. If the pod IP is not available
+(for example, before status is populated or when running against an older controller), it falls
+back to the stable cluster DNS endpoint:
+`http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`.
 
 ```python
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.models import SandboxInClusterConnectionConfig
 
-# Choose one connection_config (default = cluster DNS):
-#   SandboxInClusterConnectionConfig()  # same as use_pod_ip=False
-# Option A — direct pod IP (low latency):
-#   SandboxInClusterConnectionConfig(use_pod_ip=True)
 connection_config = SandboxInClusterConnectionConfig()
 
 client = SandboxClient(connection_config=connection_config)
@@ -285,6 +273,69 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### 7. Labels and Pod Metadata
+
+`create_sandbox` lets you attach metadata at two different levels:
+
+- `labels`: Kubernetes labels on the **SandboxClaim object** itself
+  (`SandboxClaim.metadata.labels`). Useful for selecting/listing claims.
+- `pod_labels` / `pod_annotations`: labels and annotations stamped onto the
+  running Sandbox **Pod** via `spec.additionalPodMetadata`. Because they live on
+  the Pod, the workload can read them from inside the sandbox through the
+  [Downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)
+  (for example, to stamp a tenant or client identifier and reject requests that
+  don't belong to it).
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    labels={"team": "platform"},            # on the SandboxClaim object
+    pod_labels={"client-id": "tenant-a"},   # on the running Pod
+    pod_annotations={"owner": "tenant-a"},  # on the running Pod
+)
+```
+
+`pod_labels` are validated with the same Kubernetes label rules as `labels`. The
+same parameters are available on `AsyncSandboxClient.create_sandbox`.
+
+Behavioral notes:
+
+- A `pod_label` / `pod_annotation` whose key already exists on the warmpool
+  template with a different value is rejected by the controller's "No
+  Overrides" rule, and the reconcile errors.
+- Client-side validation only checks RFC-1123 label syntax. The controller's
+  domain allow-list and system-label restrictions are enforced server-side and
+  are not replicated client-side.
+
+### 8. Custom Volume Claim Templates
+
+You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    volume_claim_templates=[
+        {
+            "metadata": {
+                "name": "my-volume",
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": {
+                    "requests": {
+                        "storage": "1Gi",
+                    },
+                },
+            },
+        }
+    ],
+)
+```
+
+The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
 ## Testing
 

@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,15 @@ type SandboxRecord struct {
 	Name      string
 	Namespace string
 	Phase     Phase
+
+	// Pod identity, for joining against node-side data sources.
+	// PodUID is the pod's metadata.uid. NodeName selects the right
+	// profiler-*-<node>.log. ContainerID is the main container's runtime ID
+	// with the scheme (e.g. "containerd://") stripped, matching the
+	// container_id in containerd's event stream (ctr events).
+	PodUID      string
+	NodeName    string
+	ContainerID string
 
 	// Client-observed milestones.
 	CreateCalled    time.Time // just before the Create API call
@@ -326,6 +336,17 @@ func (t *Tracker) handlePodEvent(eventType watch.EventType, u *unstructured.Unst
 	if rec.PodCreated.IsZero() {
 		rec.PodCreated = now
 		rec.ServerPodCreated = u.GetCreationTimestamp().Time
+		rec.PodUID = string(u.GetUID())
+	}
+
+	if rec.NodeName == "" {
+		if nodeName, _, _ := unstructured.NestedString(u.Object, "spec", "nodeName"); nodeName != "" {
+			rec.NodeName = nodeName
+		}
+	}
+
+	if rec.ContainerID == "" {
+		rec.ContainerID = mainContainerID(u)
 	}
 
 	if scheduled, ltt := conditionTrue(u, "PodScheduled"); scheduled && rec.PodScheduled.IsZero() {
@@ -360,6 +381,31 @@ func (t *Tracker) closeGoneLocked(rec *SandboxRecord) {
 		rec.goneClosed = true
 		close(rec.goneCh)
 	}
+}
+
+// mainContainerID returns the pod's main container runtime ID with the
+// scheme prefix (e.g. "containerd://") stripped, or "" if not yet assigned.
+// The runtime only assigns the ID once the container is created on the node.
+func mainContainerID(u *unstructured.Unstructured) string {
+	statuses, found, err := unstructured.NestedSlice(u.Object, "status", "containerStatuses")
+	if err != nil || !found {
+		return ""
+	}
+	for _, sVal := range statuses {
+		s, ok := sVal.(map[string]any)
+		if !ok {
+			continue
+		}
+		containerID, _ := s["containerID"].(string)
+		if containerID == "" {
+			continue
+		}
+		if _, id, ok := strings.Cut(containerID, "://"); ok {
+			return id
+		}
+		return containerID
+	}
+	return ""
 }
 
 // conditionTrue reports whether the given condition type has status True,

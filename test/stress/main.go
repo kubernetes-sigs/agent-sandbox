@@ -545,6 +545,15 @@ func sandboxRecordJSON(rec *SandboxRecord) map[string]any {
 	if rec.Error != "" {
 		out["error"] = rec.Error
 	}
+	if rec.PodUID != "" {
+		out["podUID"] = rec.PodUID
+	}
+	if rec.NodeName != "" {
+		out["nodeName"] = rec.NodeName
+	}
+	if rec.ContainerID != "" {
+		out["containerID"] = rec.ContainerID
+	}
 
 	putTime := func(key string, t time.Time) {
 		if !t.IsZero() {

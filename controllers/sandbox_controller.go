@@ -168,6 +168,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		"sandbox.name":      sandbox.Name,
 		"sandbox.namespace": sandbox.Namespace,
 	}
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
+		initialAttrs[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
+	}
 	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
 	defer end()
 
@@ -879,6 +882,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 	}
 
+	// Propagate the created-by label from the Sandbox CR labels to the Pod if present,
+	// normalizing it to a known allow-list to prevent invalid values or high cardinality.
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok && val != "" {
+		podLabels[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
+	}
+
 	annotations := map[string]string{}
 	var managedAnnotationKeys []string
 	for k, v := range sandbox.Spec.PodTemplate.ObjectMeta.Annotations {
@@ -1024,6 +1033,24 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		// If the Sandbox is no longer owned by a SandboxWarmPool, remove the warm pool label.
 		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
 			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
+			updated = true
+		}
+	}
+
+	// Ensure the created-by label is present on the Pod if it is present on the Sandbox.
+	// We normalize it to a known allow-list to prevent invalid values or high cardinality on the Pod.
+	var expectedCreatedBy string
+	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok && val != "" {
+		expectedCreatedBy = asmetrics.NormalizeCreatedBy(val)
+	}
+	if expectedCreatedBy != "" {
+		if pod.Labels[sandboxv1beta1.CreatedByLabel] != expectedCreatedBy {
+			pod.Labels[sandboxv1beta1.CreatedByLabel] = expectedCreatedBy
+			updated = true
+		}
+	} else {
+		if _, exists := pod.Labels[sandboxv1beta1.CreatedByLabel]; exists {
+			delete(pod.Labels, sandboxv1beta1.CreatedByLabel)
 			updated = true
 		}
 	}

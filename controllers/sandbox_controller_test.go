@@ -2060,6 +2060,185 @@ func TestReconcilePod(t *testing.T) {
 			expectErr:              true,
 			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name"},
 		},
+		{
+			name:        "propagates and normalizes created-by label value go-client",
+			initialObjs: []runtime.Object{},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "go-client",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						sandboxv1beta1.CreatedByLabel:       "go-client",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name:        "normalizes invalid created-by label to unknown",
+			initialObjs: []runtime.Object{},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "invalid-user-value-which-is-too-long-or-custom",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						sandboxv1beta1.CreatedByLabel:       "unknown",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "updates and normalizes created-by label on existing Pod",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							"custom-label":                       "label-val",
+							sandboxv1beta1.SandboxAdoptableLabel: "true",
+							sandboxv1beta1.CreatedByLabel:        "controller",
+						},
+						Annotations: map[string]string{
+							"custom-annotation":                      "anno-val",
+							"agents.x-k8s.io/propagated-labels":      "custom-label",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sandboxObj.DeepCopy()
+				sb.Labels = map[string]string{
+					sandboxv1beta1.CreatedByLabel: "python-client",
+				}
+				return sb
+			}(),
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						"custom-label":                       "label-val",
+						sandboxv1beta1.SandboxAdoptableLabel: "true",
+						sandboxv1beta1.CreatedByLabel:        "python-client",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "removes created-by label from existing Pod when Sandbox lacks it",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							"custom-label":                       "label-val",
+							sandboxv1beta1.SandboxAdoptableLabel: "true",
+							sandboxv1beta1.CreatedByLabel:        "go-client",
+						},
+						Annotations: map[string]string{
+							"custom-annotation":                      "anno-val",
+							"agents.x-k8s.io/propagated-labels":      "custom-label",
+							"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+			sandbox: sandboxObj,
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						"custom-label":                       "label-val",
+						sandboxv1beta1.SandboxAdoptableLabel: "true",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -3239,4 +3418,71 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
 	require.Len(t, got.Status.Conditions, 1,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}
+
+type mockTracer struct {
+	asmetrics.Instrumenter
+	capturedAttrs map[string]string
+}
+
+func (m *mockTracer) StartSpan(ctx context.Context, _ metav1.Object, _ string, attrs map[string]string) (context.Context, func()) {
+	if len(attrs) > 0 {
+		m.capturedAttrs = attrs
+	}
+	return ctx, func() {}
+}
+
+func (m *mockTracer) GetTraceContext(_ context.Context) string {
+	return ""
+}
+
+func (m *mockTracer) IsRecording(_ context.Context) bool {
+	return true
+}
+
+func (m *mockTracer) AddEvent(_ context.Context, _ string, _ map[string]string) {}
+
+func TestReconcile_TracingNormalization(t *testing.T) {
+	sbName := "tracing-test-sandbox"
+	sbNs := "default"
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbName,
+			Namespace: sbNs,
+			UID:       "uid-1",
+			Labels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "invalid-value",
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fc := newFakeClient(sandbox)
+	mt := &mockTracer{}
+	r := &SandboxReconciler{
+		Client:        fc,
+		Scheme:        Scheme,
+		Tracer:        mt,
+		ClusterDomain: "cluster.local",
+	}
+
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sbName, Namespace: sbNs}}
+
+	var sb sandboxv1beta1.Sandbox
+	require.NoError(t, fc.Get(ctx, req.NamespacedName, &sb))
+
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	require.NotNil(t, mt.capturedAttrs)
+	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
 }

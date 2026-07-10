@@ -377,6 +377,7 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 		sandboxv1beta1.SandboxLaunchTypeLabel:                sandboxv1beta1.SandboxLaunchTypeWarm,
 		sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel: currentPodTemplateHash,
 		sandboxv1beta1.SandboxTemplateHashLabel:              currentSandboxBlueprintHash,
+		sandboxv1beta1.CreatedByLabel:                        "controller",
 	}
 
 	// Build annotations for the Sandbox CR

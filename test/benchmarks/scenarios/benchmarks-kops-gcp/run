@@ -131,6 +131,11 @@ trap cleanup EXIT
 NODE_COUNT="${NODE_COUNT:-20}"
 NODE_SIZE="${NODE_SIZE:-n2-standard-8}"
 CONTROL_PLANE_SIZE="${CONTROL_PLANE_SIZE:-n2-standard-8}"
+# Optional node OS image override (kops --image), e.g. a newer Ubuntu for a
+# kernel A/B test: node-side churn contention was attributed to mount-table
+# locking (containerd blocking ~70ms in /proc/self/fd re-opens), and mount
+# path scalability varies by kernel version. Empty = kOps default image.
+NODE_IMAGE="${NODE_IMAGE:-}"
 
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
@@ -154,6 +159,7 @@ kops create cluster \
   --control-plane-size="${CONTROL_PLANE_SIZE}" \
   --node-count="${NODE_COUNT}" \
   --node-size="${NODE_SIZE}" \
+  ${NODE_IMAGE:+--image="${NODE_IMAGE}"} \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/livez \

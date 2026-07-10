@@ -155,7 +155,7 @@ func run(ctx context.Context) error {
 	var cfg Config
 	flag.StringVar(&cfg.Namespace, "namespace", "", "Kubernetes namespace to run the test in. If empty, a timestamped name is generated.")
 	flag.StringVar(&cfg.OutputDir, "output-dir", "./stress-results", "Directory to write results to")
-	flag.StringVar(&cfg.Image, "image", "debian:latest", "Container image to use for Sandboxes (must support 'sleep infinity')")
+	flag.StringVar(&cfg.Image, "image", "debian:latest", "Container image to use for Sandboxes (must provide sh and sleep)")
 	flag.BoolVar(&cfg.Cleanup, "cleanup", true, "Whether to delete the namespace at the end of the test")
 	flag.BoolVar(&cfg.RecordWatch, "record-watch", true, "Whether to record all watch events to watch.jsonl.gz")
 	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Minute, "Timeout for the entire test run")

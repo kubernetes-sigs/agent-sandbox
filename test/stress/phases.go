@@ -40,10 +40,13 @@ type stressTest struct {
 // The container sleeps forever; sandboxes are torn down by deletion, so we can
 // measure readiness (launch) independently of workload duration.
 //
-// terminationGracePeriodSeconds=1 keeps deletion fast: as PID 1, sleep does not
-// get the default SIGTERM disposition and will only die on SIGKILL after the
-// grace period. automountServiceAccountToken is disabled so kubelet does not
-// project a token volume (noticeable under high churn).
+// The command traps SIGTERM and exits immediately: a bare `sleep` as PID 1
+// gets no default SIGTERM disposition, so the kubelet would wait out the full
+// grace period and SIGKILL (observed as exit code 137 and ~1s of extra
+// deletion latency). The `& wait` is required because sh does not run traps
+// while a foreground child is running. terminationGracePeriodSeconds=1 is the
+// backstop if the trap fails. automountServiceAccountToken is disabled so
+// kubelet does not project a token volume (noticeable under high churn).
 func buildSandboxObject(id types.NamespacedName, image string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{
@@ -64,7 +67,7 @@ func buildSandboxObject(id types.NamespacedName, image string) *unstructured.Uns
 								"name":            "main",
 								"image":           image,
 								"imagePullPolicy": "IfNotPresent",
-								"command":         []string{"sleep", "infinity"},
+								"command":         []string{"sh", "-c", "trap 'exit 0' TERM INT; sleep infinity & wait"},
 							},
 						},
 					},

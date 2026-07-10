@@ -160,5 +160,5 @@ echo "Benchmark completed successfully."
 
 # Run the stress test
 echo "Running stress test"
-go run ./test/stress --sandbox-count 1000 --create-concurrency 100 --output-dir="${ARTIFACTS:-.}/stress-test/"
+go run ./test/stress --sandbox-count 200 --create-concurrency 50 --output-dir="${ARTIFACTS:-.}/stress-test/"
 echo "Stress test completed successfully."

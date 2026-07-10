@@ -1989,9 +1989,27 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		return sb
 	}
 
+	// matchingBlueprintHash is the blueprint hash the warm pool controller would stamp on a
+	// fresh sandbox for this template; a candidate carrying it is considered current under Recreate.
+	matchingBlueprintHash, hashErr := computeSandboxBlueprintHash(template)
+	if hashErr != nil {
+		t.Fatalf("failed to compute blueprint hash: %v", hashErr)
+	}
+
+	// withBlueprintHash stamps the blueprint hash label the SandboxClaim controller inspects
+	// when deciding whether a candidate is fresh under the Recreate strategy (issue #764).
+	withBlueprintHash := func(sb *sandboxv1beta1.Sandbox, blueprintHash string) *sandboxv1beta1.Sandbox {
+		sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel] = blueprintHash
+		return sb
+	}
+
+	recreateStrategy := &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType}
+	onReplenishStrategy := &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType}
+
 	testCases := []struct {
 		name                    string
 		existingObjects         []client.Object
+		warmPoolStrategy        *extensionsv1beta1.SandboxWarmPoolUpdateStrategy
 		expectSandboxAdoption   bool
 		expectedAdoptedSandbox  string
 		expectedAnnotations     map[string]string
@@ -2249,14 +2267,90 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectNewSandboxCreated: false,
 		},
+		{
+			name:             "skips stale candidate under Recreate strategy and cold starts",
+			warmPoolStrategy: recreateStrategy,
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withBlueprintHash(createWarmPoolSandbox("stale-recreate", metav1.Now(), true), "stale-hash"),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
+		},
+		{
+			name:             "adopts fresh candidate under Recreate strategy",
+			warmPoolStrategy: recreateStrategy,
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withBlueprintHash(createWarmPoolSandbox("fresh-recreate", metav1.Now(), true), matchingBlueprintHash),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "fresh-recreate",
+			expectNewSandboxCreated: false,
+		},
+		{
+			// Regression for issue #764: a candidate whose blueprint-hash label is missing (e.g. a
+			// sandbox created by an older controller version before the label existed) but whose
+			// blueprint is still semantically current must be adopted, not dropped. The pool
+			// controller's isSandboxStale keeps such a sandbox (falls back to a semantic comparison
+			// on a hash mismatch and finds it fresh), so it is never deleted or replaced. If the
+			// claim dropped it without requeue, a Recreate pool full of pre-label sandboxes would be
+			// permanently unadoptable and every claim would needlessly cold-start against a "full" pool.
+			name:             "adopts semantically-current candidate with missing hash label under Recreate",
+			warmPoolStrategy: recreateStrategy,
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("prelabel-recreate", metav1.Now(), true)
+					// No SandboxTemplateHashLabel is stamped, but the blueprint carries the same
+					// secure defaults the controller applies at creation, so it is semantically current.
+					ApplySandboxSecureDefaults(template, &sb.Spec.PodTemplate.Spec)
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "prelabel-recreate",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name:             "adopts stale candidate under OnReplenish strategy (no regression)",
+			warmPoolStrategy: onReplenishStrategy,
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withBlueprintHash(createWarmPoolSandbox("stale-onreplenish", metav1.Now(), true), "stale-hash"),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "stale-onreplenish",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name:             "adopts stale candidate when warm pool strategy unset (defaults to OnReplenish)",
+			warmPoolStrategy: nil,
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withBlueprintHash(createWarmPoolSandbox("default-stale", metav1.Now(), true), "stale-hash"),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "default-stale",
+			expectNewSandboxCreated: false,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
+			// The update strategy lives on the SandboxWarmPool spec; give each case its own pool so
+			// the claim controller reads the intended strategy (issue #764).
+			caseWarmPool := warmPool.DeepCopy()
+			caseWarmPool.Spec.UpdateStrategy = tc.warmPoolStrategy
 			var fakeClient client.Client = fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(append(tc.existingObjects, warmPool)...).
+				WithObjects(append(tc.existingObjects, caseWarmPool)...).
 				WithStatusSubresource(claim).
 				Build()
 
@@ -2393,6 +2487,94 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		})
 	}
 }
+
+// TestGetCandidateRequeuesRecreateCandidateOnTemplateLookupError verifies that when a Recreate
+// candidate is encountered but the expected pod template hash cannot be computed (here because the
+// SandboxTemplate lookup fails), getCandidate does not adopt the unverified candidate and instead
+// requeues it so a later reconcile can retry. Draining it would empty a pool that may hold fresh
+// pods, while adopting it risks handing out a stale version (issue #764).
+func TestGetCandidateRequeuesRecreateCandidateOnTemplateLookupError(t *testing.T) {
+	scheme := newScheme(t)
+
+	warmPoolUID := types.UID("warmpool-uid-req")
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+
+	// The Recreate warm pool exists but its referenced SandboxTemplate does not, so
+	// getTemplateForWarmPool returns ErrTemplateNotFound and the lazy hash computation fails.
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: warmPoolUID},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			TemplateRef:    extensionsv1beta1.SandboxTemplateRef{Name: "missing-template"},
+			UpdateStrategy: &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType},
+		},
+	}
+
+	candidate := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "recreate-candidate",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:                    sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash:                  SandboxTemplateRefHash("missing-template"),
+				sandboxv1beta1.SandboxLaunchTypeLabel:   sandboxv1beta1.SandboxLaunchTypeWarm,
+				sandboxv1beta1.SandboxTemplateHashLabel: "some-hash",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        warmPoolUID,
+				Controller: new(true),
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, claim, candidate).Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(candidate.Namespace, "test-pool")
+	key := queue.SandboxKey{Namespace: candidate.Namespace, Name: candidate.Name}
+	warmSandboxQueue.Add(namespacedWarmPoolName, key)
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		WarmSandboxQueue: warmSandboxQueue,
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	sb, _, err := reconciler.getCandidate(context.Background(), claim)
+	if err != nil {
+		t.Fatalf("getCandidate returned unexpected error: %v", err)
+	}
+	if sb != nil {
+		t.Fatalf("expected no candidate to be adopted, got %q", sb.Name)
+	}
+
+	// The candidate must have been requeued rather than drained.
+	got, ok := warmSandboxQueue.Get(namespacedWarmPoolName)
+	if !ok {
+		t.Fatalf("expected Recreate candidate to be requeued, but queue is empty")
+	}
+	if got.Name != candidate.Name {
+		t.Fatalf("expected requeued candidate %q, got %q", candidate.Name, got.Name)
+	}
+}
+
 func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 	q := queue.NewSimpleSandboxQueue()
 	handler := &sandboxEventHandler{sandboxQueue: q}

@@ -34,7 +34,7 @@ fi
 echo "Installing agent-sandbox $version ..."
 
 base="https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${version}"
-kubectl apply --server-side -f "${base}/manifest.yaml"
+kubectl apply --server-side -f "${base}/sandbox.yaml"
 kubectl apply --server-side -f "${base}/extensions.yaml"
 
 echo "Waiting for the controller to become Available..."

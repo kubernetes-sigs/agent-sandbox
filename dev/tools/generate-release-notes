@@ -293,12 +293,19 @@ def main():
     installation_notes = f"""
 ### Installation
 
-#### Core & Extensions
+#### Standard Install (Core + Extensions)
+Recommended for most users and GitOps engines (Argo CD, Config Sync, kustomize):
 ```bash
-# To install only the core components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/sandbox-with-extensions.yaml
+```
 
-# To install the extensions components:
+#### Selective Install
+Install components separately:
+```bash
+# Core only:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/sandbox.yaml
+
+# Extensions (opt-in):
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/extensions.yaml
 ```
 

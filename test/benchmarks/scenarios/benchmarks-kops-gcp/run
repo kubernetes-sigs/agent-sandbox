@@ -121,6 +121,15 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Cluster size is overridable so the same script can drive large-scale runs.
+# The default (3 x n2-standard-8, ~110 pods/node) gives roughly 330 pod slots.
+# For a ~10k pod stress run, use something like NODE_COUNT=100 and a larger
+# control plane (e.g. CONTROL_PLANE_SIZE=n2-standard-16), and scale the
+# STRESS_* variables below to match.
+NODE_COUNT="${NODE_COUNT:-3}"
+NODE_SIZE="${NODE_SIZE:-n2-standard-8}"
+CONTROL_PLANE_SIZE="${CONTROL_PLANE_SIZE:-n2-standard-8}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -130,9 +139,9 @@ kops create cluster \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
-  --control-plane-size=n2-standard-8 \
-  --node-count=3 \
-  --node-size=n2-standard-8
+  --control-plane-size="${CONTROL_PLANE_SIZE}" \
+  --node-count="${NODE_COUNT}" \
+  --node-size="${NODE_SIZE}"
 
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes
@@ -158,7 +167,35 @@ dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
 echo "Benchmark completed successfully."
 
 
-# Run the stress test
+# Run the stress test.
+#
+# The stress test runs three phases (see test/stress/main.go):
+#   fill:       long-running background sandboxes, so we measure a cluster at scale
+#   probe:      low-concurrency launches measuring clean per-sandbox launch latency
+#   throughput: closed-loop churn (create -> ready -> delete) capped at max-in-flight,
+#               measuring sustained launches/sec without queueing on cluster capacity
+#
+# Keep fill-count + max-in-flight below the cluster's spare pod capacity
+# (roughly NODE_COUNT * 110 minus system pods); the test warns if they don't fit.
+# Defaults below are sized for the default 3-node cluster. For a ~10k pod run:
+#   NODE_COUNT=100 STRESS_FILL_COUNT=10000 STRESS_MAX_IN_FLIGHT=500 \
+#   STRESS_CREATE_CONCURRENCY=100 STRESS_TIMEOUT=2h
+STRESS_OUTPUT_DIR="${ARTIFACTS:-.}/stress-test/"
+mkdir -p "${STRESS_OUTPUT_DIR}"
 echo "Running stress test"
-go run ./test/stress --sandbox-count 1000 --create-concurrency 100 --output-dir="${ARTIFACTS:-.}/stress-test/"
+go run ./test/stress \
+  --fill-count="${STRESS_FILL_COUNT:-150}" \
+  --probe-count="${STRESS_PROBE_COUNT:-30}" \
+  --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \
+  --max-in-flight="${STRESS_MAX_IN_FLIGHT:-100}" \
+  --create-concurrency="${STRESS_CREATE_CONCURRENCY:-50}" \
+  --timeout="${STRESS_TIMEOUT:-30m}" \
+  --output-dir="${STRESS_OUTPUT_DIR}"
 echo "Stress test completed successfully."
+
+# Capture controller diagnostics alongside the stress test results.
+echo "Capturing controller diagnostics..."
+kubectl logs deployment/agent-sandbox-controller --namespace agent-sandbox-system --tail=-1 > "${STRESS_OUTPUT_DIR}/controller.log" || true
+kubectl get pods -A -o wide > "${STRESS_OUTPUT_DIR}/pods.txt" || true
+kubectl get nodes -o wide > "${STRESS_OUTPUT_DIR}/nodes.txt" || true
+kubectl top nodes > "${STRESS_OUTPUT_DIR}/top-nodes.txt" 2>/dev/null || true

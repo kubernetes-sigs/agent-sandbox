@@ -14,13 +14,20 @@
 
 // stress is a load-testing harness for the Sandbox controller.
 //
-// It creates N sandboxes and waits for them to become Ready, recording a
-// per-stage latency breakdown (controller, scheduler, kubelet, status
-// propagation) plus create/ready throughput.
+// It runs up to three phases, all optional:
+//
+//   - fill: create long-running background sandboxes so later phases measure a
+//     cluster at scale (e.g. 10k pods on a suitably sized cluster).
+//   - probe: create sandboxes at low concurrency and measure launch latency
+//     cleanly, with a per-stage breakdown (controller, scheduler, kubelet,
+//     status propagation).
+//   - throughput: churn sandboxes (create -> ready -> delete) in a closed loop
+//     capped at --max-in-flight, measuring sustained launches/second without
+//     queueing on cluster capacity (maxPodsPerNode * nodes).
 //
 // Outputs (in --output-dir):
 //
-//   - summary.json: aggregate metrics
+//   - summary.json: aggregate metrics per phase
 //   - sandboxes.jsonl: per-sandbox lifecycle milestones (client + server timestamps)
 //   - timeseries.jsonl: per-second event counts and gauges
 //   - watch.jsonl.gz: full watch streams (pods, nodes, events, sandboxes) for offline analysis
@@ -40,6 +47,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -48,7 +56,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -66,8 +73,16 @@ type Config struct {
 	Timeout           time.Duration `json:"-"`
 	PerSandboxTimeout time.Duration `json:"-"`
 
-	SandboxCount      int `json:"sandboxCount"`
 	CreateConcurrency int `json:"createConcurrency"`
+
+	FillCount int `json:"fillCount"`
+
+	ProbeCount       int           `json:"probeCount"`
+	ProbeConcurrency int           `json:"probeConcurrency"`
+	ProbeInterval    time.Duration `json:"-"`
+
+	ThroughputCount int `json:"throughputCount"`
+	MaxInFlight     int `json:"maxInFlight"`
 }
 
 // MarshalJSON renders durations as strings for readability.
@@ -77,10 +92,12 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		alias
 		Timeout           string `json:"timeout"`
 		PerSandboxTimeout string `json:"perSandboxTimeout"`
+		ProbeInterval     string `json:"probeInterval"`
 	}{
 		alias:             alias(c),
 		Timeout:           c.Timeout.String(),
 		PerSandboxTimeout: c.PerSandboxTimeout.String(),
+		ProbeInterval:     c.ProbeInterval.String(),
 	})
 }
 
@@ -136,19 +153,40 @@ func main() {
 
 func run(ctx context.Context) error {
 	var cfg Config
-	flag.IntVar(&cfg.SandboxCount, "sandbox-count", 100, "Number of Sandboxes to create")
-	flag.IntVar(&cfg.CreateConcurrency, "create-concurrency", 10, "Number of concurrent workers creating Sandboxes")
 	flag.StringVar(&cfg.Namespace, "namespace", "", "Kubernetes namespace to run the test in. If empty, a timestamped name is generated.")
 	flag.StringVar(&cfg.OutputDir, "output-dir", "./stress-results", "Directory to write results to")
-	flag.BoolVar(&cfg.Cleanup, "cleanup", true, "Whether to delete the namespace at the end of the test")
 	flag.StringVar(&cfg.Image, "image", "debian:latest", "Container image to use for Sandboxes (must support 'sleep infinity')")
+	flag.BoolVar(&cfg.Cleanup, "cleanup", true, "Whether to delete the namespace at the end of the test")
 	flag.BoolVar(&cfg.RecordWatch, "record-watch", true, "Whether to record all watch events to watch.jsonl.gz")
-	flag.DurationVar(&cfg.Timeout, "timeout", 15*time.Minute, "Timeout for the entire test run")
-	flag.DurationVar(&cfg.PerSandboxTimeout, "per-sandbox-timeout", 5*time.Minute, "Timeout waiting for sandboxes to become Ready after creates finish")
+	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Minute, "Timeout for the entire test run")
+	flag.DurationVar(&cfg.PerSandboxTimeout, "per-sandbox-timeout", 5*time.Minute, "Timeout for a single sandbox to become ready / be deleted")
+	flag.IntVar(&cfg.CreateConcurrency, "create-concurrency", 20, "Number of concurrent workers creating Sandboxes (fill and throughput phases)")
+	flag.IntVar(&cfg.FillCount, "fill-count", 0, "Number of long-running background Sandboxes to create before measuring (0 to skip)")
+	flag.IntVar(&cfg.ProbeCount, "probe-count", 20, "Number of latency probe Sandboxes to launch (0 to skip)")
+	flag.IntVar(&cfg.ProbeConcurrency, "probe-concurrency", 1, "Number of concurrent latency probes; keep low for clean latency numbers")
+	flag.DurationVar(&cfg.ProbeInterval, "probe-interval", 0, "Delay between latency probes")
+	flag.IntVar(&cfg.ThroughputCount, "throughput-count", 200, "Number of Sandboxes to churn through in the throughput phase (0 to skip)")
+	flag.IntVar(&cfg.MaxInFlight, "max-in-flight", 50, "Maximum Sandboxes alive at once during the throughput phase; keep below spare cluster pod capacity")
 	flag.Parse()
 
-	if cfg.SandboxCount <= 0 {
-		return fmt.Errorf("--sandbox-count must be > 0")
+	if cfg.FillCount < 0 || cfg.ProbeCount < 0 || cfg.ThroughputCount < 0 {
+		return fmt.Errorf("counts must be >= 0: fill=%d probe=%d throughput=%d", cfg.FillCount, cfg.ProbeCount, cfg.ThroughputCount)
+	}
+	if cfg.Timeout <= 0 || cfg.PerSandboxTimeout <= 0 {
+		return fmt.Errorf("timeouts must be > 0: timeout=%v per-sandbox-timeout=%v", cfg.Timeout, cfg.PerSandboxTimeout)
+	}
+	if (cfg.FillCount > 0 || cfg.ThroughputCount > 0) && cfg.CreateConcurrency <= 0 {
+		return fmt.Errorf("--create-concurrency must be > 0 when fill and/or throughput phases are enabled")
+	}
+	if cfg.ProbeCount > 0 && cfg.ProbeConcurrency <= 0 {
+		return fmt.Errorf("--probe-concurrency must be > 0 when --probe-count > 0")
+	}
+	if cfg.ThroughputCount > 0 && cfg.MaxInFlight <= 0 {
+		return fmt.Errorf("--max-in-flight must be > 0 when --throughput-count > 0")
+	}
+
+	if cfg.FillCount+cfg.ProbeCount+cfg.ThroughputCount == 0 {
+		return fmt.Errorf("nothing to do: all of --fill-count, --probe-count, --throughput-count are 0")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
@@ -163,8 +201,8 @@ func run(ctx context.Context) error {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return fmt.Errorf("failed to create run directory %s: %w", cfg.OutputDir, err)
 	}
-	log.Printf("Starting stress test run %s: creating %d Sandboxes (create-concurrency=%d), writing results to %s",
-		runID, cfg.SandboxCount, cfg.CreateConcurrency, cfg.OutputDir)
+	log.Printf("Starting stress test run %s: fill=%d probe=%d throughput=%d (max-in-flight=%d), writing results to %s",
+		runID, cfg.FillCount, cfg.ProbeCount, cfg.ThroughputCount, cfg.MaxInFlight, cfg.OutputDir)
 
 	// Initialize kubernetes client config
 	restConfig, err := getRestConfig()
@@ -266,27 +304,54 @@ func run(ctx context.Context) error {
 	// Start progress reporter
 	testStartTime := time.Now()
 	taskRunner.RunPeriodic(ctx, 5*time.Second, func() error {
-		counts := tracker.Snapshot()[PhaseCreate]
-		line := fmt.Sprintf("[progress +%s] created=%d ready=%d failed=%d",
-			time.Since(testStartTime).Round(time.Second), counts.Created, counts.Ready, counts.Failed)
-		if writeToFileChannel != nil {
-			line += fmt.Sprintf(" | watch-queue=%d/%d", len(writeToFileChannel), cap(writeToFileChannel))
+		counts := tracker.Snapshot()
+		var line strings.Builder
+		fmt.Fprintf(&line, "[progress +%s]", time.Since(testStartTime).Round(time.Second))
+		for _, phase := range []Phase{PhaseFill, PhaseProbe, PhaseThroughput} {
+			c, ok := counts[phase]
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(&line, " %s: created=%d ready=%d deleted=%d failed=%d |",
+				phase, c.Created, c.Ready, c.Deleted, c.Failed)
 		}
-		log.Print(line)
+		if writeToFileChannel != nil {
+			fmt.Fprintf(&line, " watch-queue=%d/%d", len(writeToFileChannel), cap(writeToFileChannel))
+		}
+		log.Print(line.String())
 		return nil
 	})
 
-	sandboxClient := dynamicClient.Resource(schema.GroupVersionResource{
-		Group:    "agents.x-k8s.io",
-		Version:  "v1beta1",
-		Resource: "sandboxes",
-	}).Namespace(cfg.Namespace)
+	test := &stressTest{
+		cfg:       cfg,
+		tracker:   tracker,
+		namespace: cfg.Namespace,
+		sandboxClient: dynamicClient.Resource(schema.GroupVersionResource{
+			Group:    "agents.x-k8s.io",
+			Version:  "v1beta1",
+			Resource: "sandboxes",
+		}).Namespace(cfg.Namespace),
+	}
 
-	phaseStart := time.Now()
-	phaseErr := runCreatePhase(ctx, cfg, tracker, sandboxClient)
-	phaseDuration := time.Since(phaseStart)
-	if phaseErr != nil {
-		log.Printf("create phase error: %v", phaseErr)
+	// Run the phases, recording wall-clock windows for throughput calculations.
+	phaseDurations := make(map[Phase]time.Duration)
+	var phaseErr error
+	for _, phase := range []struct {
+		name Phase
+		fn   func(context.Context) error
+	}{
+		{PhaseFill, test.runFillPhase},
+		{PhaseProbe, test.runProbePhase},
+		{PhaseThroughput, test.runThroughputPhase},
+	} {
+		start := time.Now()
+		if err := phase.fn(ctx); err != nil {
+			phaseErr = fmt.Errorf("%s phase: %w", phase.name, err)
+			phaseDurations[phase.name] = time.Since(start)
+			log.Printf("aborting after error: %v", phaseErr)
+			break
+		}
+		phaseDurations[phase.name] = time.Since(start)
 	}
 
 	// Give the watchers a moment to observe trailing events.
@@ -294,8 +359,8 @@ func run(ctx context.Context) error {
 		time.Sleep(2 * time.Second)
 	}
 
-	// Write outputs even if the phase failed: partial data is still useful.
-	summary := buildSummary(runID, testStartTime, cfg, clusterInfo, tracker, phaseDuration)
+	// Write outputs even if a phase failed: partial data is still useful.
+	summary := buildSummary(runID, testStartTime, cfg, clusterInfo, tracker, phaseDurations)
 	if err := writeOutputs(cfg.OutputDir, summary, tracker); err != nil {
 		if phaseErr == nil {
 			phaseErr = err
@@ -307,7 +372,7 @@ func run(ctx context.Context) error {
 	printReport(summary, clusterInfo)
 
 	// Stop the watchers and wait for the watch log to be flushed,
-	// even when the phase failed.
+	// even when a phase failed.
 	cancel()
 	waitErr := taskRunner.Wait()
 
@@ -317,96 +382,28 @@ func run(ctx context.Context) error {
 	return waitErr
 }
 
-// runCreatePhase creates cfg.SandboxCount long-running sandboxes and waits for
-// them to become Ready. Readiness is the measured event; sandboxes sleep forever
-// so Finished latency is not conflated with the workload duration.
-func runCreatePhase(ctx context.Context, cfg Config, tracker *Tracker, sandboxClient dynamic.ResourceInterface) error {
-	log.Printf("[create] creating %d sandboxes (create-concurrency=%d)", cfg.SandboxCount, cfg.CreateConcurrency)
-
-	names := make([]types.NamespacedName, 0, cfg.SandboxCount)
-	for i := range cfg.SandboxCount {
-		names = append(names, types.NamespacedName{Name: fmt.Sprintf("stress-%d", i), Namespace: cfg.Namespace})
-	}
-
-	if _, err := ForkJoin(ctx, names, cfg.CreateConcurrency, func(id types.NamespacedName) (struct{}, error) {
-		sandbox := &unstructured.Unstructured{
-			Object: map[string]any{
-				"apiVersion": "agents.x-k8s.io/v1beta1",
-				"kind":       "Sandbox",
-				"metadata": map[string]any{
-					"name":      id.Name,
-					"namespace": id.Namespace,
-				},
-				"spec": map[string]any{
-					"podTemplate": map[string]any{
-						"spec": map[string]any{
-							"restartPolicy": "Never",
-							"containers": []any{
-								map[string]any{
-									"name":            "main",
-									"image":           cfg.Image,
-									"imagePullPolicy": "IfNotPresent",
-									"command":         []string{"sleep", "infinity"},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-
-		tracker.Register(id, PhaseCreate)
-		_, err := sandboxClient.Create(ctx, sandbox, metav1.CreateOptions{})
-		tracker.MarkCreateReturned(id, err)
-		if err != nil {
-			log.Printf("[create] failed to create sandbox %s: %v", id.Name, err)
-		}
-		// Per-sandbox create failures are recorded; do not abort the phase.
-		return struct{}{}, nil
-	}); err != nil {
-		return err
-	}
-
-	log.Printf("[create] all create workers finished; waiting for Ready...")
-
-	lastReady := -1
-	lastProgress := time.Now()
-	for {
-		counts := tracker.Snapshot()[PhaseCreate]
-		if counts.Created == 0 {
-			return fmt.Errorf("[create] all %d sandbox creations failed", counts.Failed)
-		}
-		if counts.Ready >= counts.Created {
-			log.Printf("[create] all %d created sandboxes are Ready (%d failed to create)", counts.Created, counts.Failed)
-			return nil
-		}
-		if counts.Ready != lastReady {
-			lastReady = counts.Ready
-			lastProgress = time.Now()
-		}
-		if time.Since(lastProgress) > cfg.PerSandboxTimeout {
-			return fmt.Errorf("[create] stalled: %d/%d sandboxes Ready with no progress for %v", counts.Ready, counts.Created, cfg.PerSandboxTimeout)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-}
-
 // checkClusterCapacity warns when the test configuration will exceed spare cluster
 // pod capacity: in that case latency and throughput results measure queueing
 // for capacity rather than the sandbox launch pipeline.
+//
+// Phases run sequentially, so peak concurrent test pods is fill plus the
+// larger of the probe/throughput in-flight caps (fill sandboxes stay up).
 func checkClusterCapacity(cfg Config, info *ClusterInfo) {
-	needed := cfg.SandboxCount
+	extra := 0
+	if cfg.ProbeCount > 0 && cfg.ProbeConcurrency > extra {
+		extra = cfg.ProbeConcurrency
+	}
+	if cfg.ThroughputCount > 0 && cfg.MaxInFlight > extra {
+		extra = cfg.MaxInFlight
+	}
+	needed := cfg.FillCount + extra
 	spare := int(info.PodCapacity) - info.PreexistingPods
 	if spare <= 0 {
 		return
 	}
 	switch {
 	case needed > spare:
-		log.Printf("WARNING: test needs up to %d concurrent pods but the cluster only has %d spare pod slots; results will measure capacity queueing, not launch performance. Reduce --sandbox-count or add nodes.", needed, spare)
+		log.Printf("WARNING: test needs up to %d concurrent pods but the cluster only has %d spare pod slots; results will measure capacity queueing, not launch performance. Reduce --fill-count/--max-in-flight or add nodes.", needed, spare)
 	case needed > spare*9/10:
 		log.Printf("WARNING: test needs up to %d concurrent pods, over 90%% of the %d spare pod slots; scheduling may interfere with measurements.", needed, spare)
 	}
@@ -480,8 +477,14 @@ func isControlPlaneNode(u *unstructured.Unstructured) bool {
 	return false
 }
 
-func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *ClusterInfo, tracker *Tracker, phaseDuration time.Duration) *Summary {
+func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *ClusterInfo, tracker *Tracker, phaseDurations map[Phase]time.Duration) *Summary {
 	records := tracker.Records()
+
+	requested := map[Phase]int{
+		PhaseFill:       cfg.FillCount,
+		PhaseProbe:      cfg.ProbeCount,
+		PhaseThroughput: cfg.ThroughputCount,
+	}
 
 	summary := &Summary{
 		RunID:     runID,
@@ -492,33 +495,40 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 		Phases:    make(map[Phase]*PhaseSummary),
 	}
 
-	ps := &PhaseSummary{
-		Requested:       cfg.SandboxCount,
-		DurationSeconds: phaseDuration.Seconds(),
-		Latency:         computeLatencyBreakdown(records),
+	recordsByPhase := make(map[Phase][]SandboxRecord)
+	for _, record := range records {
+		recordsByPhase[record.Phase] = append(recordsByPhase[record.Phase], record)
 	}
-	var createTimes, readyTimes []time.Time
-	for i := range records {
-		rec := &records[i]
-		if !rec.CreateReturned.IsZero() {
-			ps.Created++
-			createTimes = append(createTimes, rec.CreateReturned)
+
+	for phase, phaseRecords := range recordsByPhase {
+		ps := &PhaseSummary{
+			Requested:       requested[phase],
+			DurationSeconds: phaseDurations[phase].Seconds(),
+			Latency:         computeLatencyBreakdown(phaseRecords),
 		}
-		if !rec.SandboxReady.IsZero() {
-			ps.Ready++
-			readyTimes = append(readyTimes, rec.SandboxReady)
+		var createTimes, readyTimes []time.Time
+		for i := range phaseRecords {
+			rec := &phaseRecords[i]
+			if !rec.CreateReturned.IsZero() {
+				ps.Created++
+				createTimes = append(createTimes, rec.CreateReturned)
+			}
+			if !rec.SandboxReady.IsZero() {
+				ps.Ready++
+				readyTimes = append(readyTimes, rec.SandboxReady)
+			}
+			if rec.Error != "" {
+				ps.Failed++
+			}
 		}
-		if rec.Error != "" {
-			ps.Failed++
+		ps.CreateThroughput = computeThroughputStats(createTimes)
+		ps.ReadyThroughput = computeThroughputStats(readyTimes)
+		if clusterInfo != nil {
+			ps.CreateThroughputPerNode = ps.CreateThroughput.perNode(clusterInfo.Nodes)
+			ps.ReadyThroughputPerNode = ps.ReadyThroughput.perNode(clusterInfo.Nodes)
 		}
+		summary.Phases[phase] = ps
 	}
-	ps.CreateThroughput = computeThroughputStats(createTimes)
-	ps.ReadyThroughput = computeThroughputStats(readyTimes)
-	if clusterInfo != nil {
-		ps.CreateThroughputPerNode = ps.CreateThroughput.perNode(clusterInfo.Nodes)
-		ps.ReadyThroughputPerNode = ps.ReadyThroughput.perNode(clusterInfo.Nodes)
-	}
-	summary.Phases[PhaseCreate] = ps
 
 	return summary
 }
@@ -655,29 +665,39 @@ func printReport(summary *Summary, clusterInfo *ClusterInfo) {
 			clusterInfo.KubernetesVersion, clusterInfo.Nodes, clusterInfo.PodCapacity, clusterInfo.PreexistingPods)
 	}
 
-	ps, ok := summary.Phases[PhaseCreate]
-	if !ok {
-		fmt.Println("(no results)")
-		fmt.Println("=======================================================")
-		return
+	printBreakdown := func(b LatencyBreakdown) {
+		fmt.Printf("    create ack (apiserver):        %s\n", formatLatency(b.CreateAck))
+		fmt.Printf("    create -> pod created:         %s\n", formatLatency(b.CreateToPodCreated))
+		fmt.Printf("    pod created -> scheduled:      %s\n", formatLatency(b.PodCreatedToScheduled))
+		fmt.Printf("    scheduled -> pod running:      %s\n", formatLatency(b.ScheduledToPodRunning))
+		fmt.Printf("    pod running -> pod ready:      %s\n", formatLatency(b.PodRunningToPodReady))
+		fmt.Printf("    pod ready -> sandbox ready:    %s\n", formatLatency(b.PodReadyToSandboxReady))
+		fmt.Printf("    END-TO-END (create -> ready):  %s\n", formatLatency(b.EndToEndReady))
 	}
-	fmt.Printf("\n--- create: %d requested, %d created, %d ready, %d failed (%.1fs) ---\n",
-		ps.Requested, ps.Created, ps.Ready, ps.Failed, ps.DurationSeconds)
-	fmt.Println("  Launch latency breakdown:")
-	b := ps.Latency
-	fmt.Printf("    create ack (apiserver):        %s\n", formatLatency(b.CreateAck))
-	fmt.Printf("    create -> pod created:         %s\n", formatLatency(b.CreateToPodCreated))
-	fmt.Printf("    pod created -> scheduled:      %s\n", formatLatency(b.PodCreatedToScheduled))
-	fmt.Printf("    scheduled -> pod running:      %s\n", formatLatency(b.ScheduledToPodRunning))
-	fmt.Printf("    pod running -> pod ready:      %s\n", formatLatency(b.PodRunningToPodReady))
-	fmt.Printf("    pod ready -> sandbox ready:    %s\n", formatLatency(b.PodReadyToSandboxReady))
-	fmt.Printf("    END-TO-END (create -> ready):  %s\n", formatLatency(b.EndToEndReady))
-	fmt.Printf("  create throughput:               %s\n", formatThroughput(ps.CreateThroughput))
-	fmt.Printf("  ready throughput:                %s\n", formatThroughput(ps.ReadyThroughput))
-	fmt.Printf("  ready throughput per node:       %s\n", formatPerNodeRates(ps.ReadyThroughputPerNode))
+
+	for _, phase := range []Phase{PhaseFill, PhaseProbe, PhaseThroughput} {
+		ps, ok := summary.Phases[phase]
+		if !ok {
+			continue
+		}
+		fmt.Printf("\n--- %s: %d requested, %d created, %d ready, %d failed (%.1fs) ---\n",
+			phase, ps.Requested, ps.Created, ps.Ready, ps.Failed, ps.DurationSeconds)
+
+		switch phase {
+		case PhaseProbe:
+			fmt.Println("  Launch latency breakdown:")
+			printBreakdown(ps.Latency)
+		default:
+			fmt.Printf("  end-to-end ready latency:        %s\n", formatLatency(ps.Latency.EndToEndReady))
+			fmt.Printf("  create throughput:               %s\n", formatThroughput(ps.CreateThroughput))
+			fmt.Printf("  ready throughput:                %s\n", formatThroughput(ps.ReadyThroughput))
+			fmt.Printf("  ready throughput per node:       %s\n", formatPerNodeRates(ps.ReadyThroughputPerNode))
+		}
+	}
 	fmt.Println("\n=======================================================")
 	fmt.Println("Detailed outputs: summary.json, sandboxes.jsonl, timeseries.jsonl, watch.jsonl.gz")
 }
+
 func getRestConfig() (*rest.Config, error) {
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {

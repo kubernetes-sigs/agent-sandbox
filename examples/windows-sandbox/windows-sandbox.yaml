@@ -41,9 +41,6 @@ spec:
               protocol: TCP
           securityContext:
             privileged: true
-            capabilities:
-              add:
-                - NET_ADMIN
           volumeMounts:
             - mountPath: /storage
               name: storage

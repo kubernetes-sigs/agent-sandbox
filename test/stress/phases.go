@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -227,7 +228,8 @@ func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInF
 	if count == 0 {
 		return nil
 	}
-	log.Printf("[%s] churning %d sandboxes (max-in-flight=%d, create-concurrency=%d)", phase, count, maxInFlight, s.cfg.CreateConcurrency)
+	minDuration := time.Duration(s.cfg.ThroughputMinSeconds * float64(time.Second))
+	log.Printf("[%s] churning >=%d sandboxes for >=%s (max-in-flight=%d, create-concurrency=%d)", phase, count, minDuration, maxInFlight, s.cfg.CreateConcurrency)
 
 	if maxInFlight < 1 {
 		return fmt.Errorf("[%s] invalid max-in-flight=%d (must be >= 1)", phase, maxInFlight)
@@ -236,41 +238,54 @@ func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInF
 	slots := make(chan struct{}, maxInFlight)
 	var lifecycleWG sync.WaitGroup
 
-	names := make([]types.NamespacedName, 0, count)
-	for i := range count {
-		names = append(names, types.NamespacedName{Name: fmt.Sprintf("tp%d-%d", maxInFlight, i), Namespace: s.namespace})
-	}
+	// A level ends only once BOTH -throughput-count sandboxes have been
+	// churned AND -throughput-min-seconds has elapsed. A fixed count alone
+	// made levels shorter than the node profiler's 30s snapshot window once
+	// throughput passed ~100/s, so per-phase attribution of node-side
+	// profiler data became unreliable. Because both conditions are monotonic
+	// and indices are handed out in order, the created names are always a
+	// contiguous tp<mif>-[0..n) range.
+	start := time.Now()
+	var nextIndex atomic.Int64
+	var createWG sync.WaitGroup
+	for range s.cfg.CreateConcurrency {
+		createWG.Go(func() {
+			for ctx.Err() == nil {
+				i := int(nextIndex.Add(1)) - 1
+				if i >= count && time.Since(start) >= minDuration {
+					return
+				}
+				id := types.NamespacedName{Name: fmt.Sprintf("tp%d-%d", maxInFlight, i), Namespace: s.namespace}
 
-	if _, err := ForkJoin(ctx, names, s.cfg.CreateConcurrency, func(id types.NamespacedName) (struct{}, error) {
-		select {
-		case slots <- struct{}{}:
-		case <-ctx.Done():
-			return struct{}{}, nil
-		}
+				select {
+				case slots <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
 
-		if err := s.createSandbox(ctx, id, phase); err != nil {
-			<-slots
-			return struct{}{}, nil
-		}
+				if err := s.createSandbox(ctx, id, phase); err != nil {
+					<-slots
+					continue
+				}
 
-		lifecycleWG.Go(func() {
-			defer func() { <-slots }()
+				lifecycleWG.Go(func() {
+					defer func() { <-slots }()
 
-			if err := s.tracker.WaitReady(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
-				s.tracker.MarkError(id, err.Error())
-				log.Printf("[%s] %s: %v", phase, id.Name, err)
-			}
+					if err := s.tracker.WaitReady(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
+						s.tracker.MarkError(id, err.Error())
+						log.Printf("[%s] %s: %v", phase, id.Name, err)
+					}
 
-			s.deleteSandbox(ctx, id)
-			if err := s.tracker.WaitGone(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
-				s.tracker.MarkError(id, err.Error())
-				log.Printf("[%s] %s: %v", phase, id.Name, err)
+					s.deleteSandbox(ctx, id)
+					if err := s.tracker.WaitGone(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
+						s.tracker.MarkError(id, err.Error())
+						log.Printf("[%s] %s: %v", phase, id.Name, err)
+					}
+				})
 			}
 		})
-		return struct{}{}, nil
-	}); err != nil {
-		return err
 	}
+	createWG.Wait()
 
 	lifecycleWG.Wait()
 	if err := ctx.Err(); err != nil {

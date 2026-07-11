@@ -267,6 +267,7 @@ go run ./test/stress \
   --fill-count="${STRESS_FILL_COUNT:-150}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-1000}" \
+  --throughput-min-seconds="${STRESS_THROUGHPUT_MIN_SECONDS:-45}" \
   --max-in-flight="${STRESS_MAX_IN_FLIGHT:-600,400,200,100,50}" \
   --create-concurrency="${STRESS_CREATE_CONCURRENCY:-50}" \
   --timeout="${STRESS_TIMEOUT:-30m}" \

@@ -86,6 +86,10 @@ type Config struct {
 	ProbeInterval    time.Duration `json:"-"`
 
 	ThroughputCount int `json:"throughputCount"`
+	// ThroughputMinSeconds is the minimum duration of each throughput level;
+	// levels keep churning past ThroughputCount until this much time has
+	// elapsed, so node-profiler snapshot windows (30s) land inside the phase.
+	ThroughputMinSeconds float64 `json:"throughputMinSeconds"`
 	// MaxInFlight holds one or more in-flight caps; each runs as its own
 	// back-to-back throughput level (a concurrency sweep within one run).
 	MaxInFlight []int `json:"maxInFlight"`
@@ -181,6 +185,7 @@ func run(ctx context.Context) error {
 	flag.IntVar(&cfg.ProbeConcurrency, "probe-concurrency", 1, "Number of concurrent latency probes; keep low for clean latency numbers")
 	flag.DurationVar(&cfg.ProbeInterval, "probe-interval", 0, "Delay between latency probes")
 	flag.IntVar(&cfg.ThroughputCount, "throughput-count", 200, "Number of Sandboxes to churn through in the throughput phase (0 to skip)")
+	flag.Float64Var(&cfg.ThroughputMinSeconds, "throughput-min-seconds", 45, "Minimum duration of each throughput level; levels churn beyond -throughput-count until this much time has elapsed (0 = count-based only)")
 	maxInFlightFlag := flag.String("max-in-flight", "50", "Maximum Sandboxes alive at once during the throughput phase; keep below spare cluster pod capacity. A comma-separated list (e.g. 200,100,50) runs one throughput level per value, back to back")
 	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
 	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
@@ -575,8 +580,12 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 	}
 
 	for phase, phaseRecords := range recordsByPhase {
+		// Throughput levels overshoot the configured count when
+		// -throughput-min-seconds keeps them churning; every record was a
+		// real request.
+		req := max(requested(phase), len(phaseRecords))
 		ps := &PhaseSummary{
-			Requested:          requested(phase),
+			Requested:          req,
 			DurationSeconds:    phaseDurations[phase].Seconds(),
 			StartOffsetSeconds: phaseOffsets[phase].Seconds(),
 			Latency:            computeLatencyBreakdown(phaseRecords),

@@ -137,6 +137,24 @@ CONTROL_PLANE_SIZE="${CONTROL_PLANE_SIZE:-n2-standard-8}"
 # path scalability varies by kernel version. Empty = kOps default image.
 NODE_IMAGE="${NODE_IMAGE:-}"
 
+# CNI A/B experiment: kindnet vs cilium (the kOps default).
+# Cilium's adaptive endpoint-create API limiter measured a 3.0s mean queue
+# wait at mif400 (scheduledToPodRunning p50 2.3s), and each pod lifecycle
+# costs extra apiserver writes (POST ciliumendpoints + ciliumidentities,
+# DELETE ciliumendpoints). kindnet is a minimal CNI (local bridge + node
+# routes, no per-pod control-plane objects, no agent API), so it isolates
+# CNI machinery from the launch path. Set STRESS_NETWORKING=cilium to
+# restore the previous behavior.
+STRESS_NETWORKING="${STRESS_NETWORKING:-kindnet}"
+
+# Options that only apply to a specific CNI.
+NETWORKING_ARGS=()
+if [[ "${STRESS_NETWORKING}" == "cilium" ]]; then
+  # Serve cilium-agent prometheus metrics on :9090 so the stress test can
+  # scrape the endpoint-create limiter and endpoint regeneration metrics.
+  NETWORKING_ARGS+=("--set" "cluster.spec.networking.cilium.enablePrometheusMetrics=true")
+fi
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 #
@@ -167,6 +185,8 @@ kops create cluster \
   --node-count="${NODE_COUNT}" \
   --node-size="${NODE_SIZE}" \
   ${NODE_IMAGE:+--image="${NODE_IMAGE}"} \
+  --networking="${STRESS_NETWORKING}" \
+  "${NETWORKING_ARGS[@]}" \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/livez \
@@ -175,7 +195,6 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
-  --set cluster.spec.networking.cilium.enablePrometheusMetrics=true \
   --set cluster.spec.kubeScheduler.qps=200 \
   --set cluster.spec.kubeScheduler.burst=300
 

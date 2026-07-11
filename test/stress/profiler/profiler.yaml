@@ -249,15 +249,15 @@ data:
     kprobe:finish_task_switch*
     {
       $prev = (struct task_struct *)arg0;
-      if (strncmp($prev->comm, "containerd", 10) == 0) {
+      if (strncmp($prev->comm, "containerd", 10) == 0 || strncmp($prev->comm, "runc", 4) == 0) {
         @offcpu_since[$prev->pid] = nsecs;
       }
       $last = @offcpu_since[tid];
       if ($last) {
         $delta_us = (nsecs - $last) / 1000;
         delete(@offcpu_since[tid]);
-        if ($delta_us >= 1000 && strncmp(comm, "containerd", 10) == 0) {
-          @offcpu_us[kstack(20)] = sum($delta_us);
+        if ($delta_us >= 1000 && (strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0)) {
+          @offcpu_us[comm, kstack(20)] = sum($delta_us);
         }
       }
     }
@@ -323,6 +323,22 @@ spec:
         - name: sys
           mountPath: /sys
           readOnly: true
+      - name: nodestat
+        image: bpftrace:latest
+        # /proc/stat and /proc/loadavg are not namespaced: a plain container
+        # sees host CPU counters. The off-CPU profile showed no dominant
+        # sleeps, making CPU saturation the leading node-ceiling hypothesis;
+        # these snapshots measure it directly (diff cpu jiffies per window).
+        command:
+        - sh
+        - -c
+        - |
+          while true; do
+            echo "=== nodestat $(date -u +%H:%M:%S) ==="
+            head -1 /proc/stat
+            cat /proc/loadavg
+            sleep 15
+          done
       - name: ctr-events
         image: bpftrace:latest
         # Run the host's ctr binary in the host mount namespace. Events are

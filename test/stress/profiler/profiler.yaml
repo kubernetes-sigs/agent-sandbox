@@ -223,6 +223,36 @@ data:
       clear(@slow_proc_paths);
       clear(@slow_proc_us);
     }
+  cpu.bt: |
+    // EXPERIMENTAL (own container): CPU sampling profiler at 99Hz.
+    // Complements nodestat (which says how busy the CPUs are) with
+    // attribution: per-comm sample share for every process, plus kernel
+    // stacks for the pod-churn actors. Kernel stacks always symbolize;
+    // user stacks are skipped deliberately — short-lived runc processes
+    // exit before symbolization (perf record on one node is the
+    // escalation if user-space Go turns out dominant).
+    BEGIN
+    {
+      printf("cpu profiler started\n");
+    }
+
+    profile:hz:99
+    {
+      @cpu_samples[comm] = count();
+      if (strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 ||
+          comm == "kubelet" || strncmp(comm, "cilium", 6) == 0) {
+        @cpu_stacks[comm, kstack(16)] = count();
+      }
+    }
+
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
+      print(@cpu_samples);
+      print(@cpu_stacks);
+      clear(@cpu_samples);
+      clear(@cpu_stacks);
+    }
   offcpu.bt: |
     // EXPERIMENTAL (own container): off-CPU time by kernel stack for
     // containerd* (includes shims). Discriminates the competing theories
@@ -302,6 +332,18 @@ spec:
       - name: extra-trace
         image: bpftrace:latest
         command: ["bpftrace", "/scripts/extra.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: cpu-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/cpu.bt"]
         securityContext:
           privileged: true
         volumeMounts:

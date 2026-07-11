@@ -62,6 +62,17 @@ metadata:
 data:
   fsync.bt: |
     // Trace fsync-family syscalls: callers, rates, and blocked time.
+    //
+    // Per-thread "in flight" maps are LRU: entries leak when a thread dies
+    // mid-syscall or a kretprobe return is missed under load, and a full
+    // regular map makes bpftrace 0.21+ emit a per-event warning that
+    // flooded container logs with gigabytes and starved out all data.
+    let @start = lruhash(16384);
+    let @open_start = lruhash(16384);
+    let @open_path = lruhash(16384);
+    let @sys_start = lruhash(16384);
+    let @sys_nr = lruhash(16384);
+
     BEGIN
     {
       printf("fsync tracer started\n");
@@ -174,6 +185,9 @@ data:
     // ~2 opens per pod cycle): exact paths for opens blocked >= 20ms.
     // Printed AND CLEARED every snapshot: paths embed pids, so cardinality
     // is only bounded per window, not per run.
+    let @xopen_start = lruhash(16384);
+    let @xopen_path = lruhash(16384);
+
     BEGIN
     {
       printf("extra tracer started\n");
@@ -223,6 +237,10 @@ data:
     // waits < 1ms are ignored. Maps are printed AND CLEARED each snapshot.
     // Long idle parks (futex/epoll worker threads) will dominate the sums
     // with boring stacks; read past them to the filesystem/VFS stacks.
+    // LRU: threads that die while off-CPU never resume, so their entries
+    // leak; a full regular map floods logs with per-event warnings.
+    let @start = lruhash(16384);
+
     BEGIN
     {
       printf("offcpu tracer started\n");

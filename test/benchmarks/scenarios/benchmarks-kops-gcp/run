@@ -262,6 +262,7 @@ if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
   while read -r pod node; do
     kubectl logs --namespace stress-node-profiler "${pod}" -c fsync-trace > "${STRESS_OUTPUT_DIR}/profiler-fsync-${node}.log" || true
     kubectl logs --namespace stress-node-profiler "${pod}" -c extra-trace > "${STRESS_OUTPUT_DIR}/profiler-extra-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c offcpu-trace > "${STRESS_OUTPUT_DIR}/profiler-offcpu-${node}.log" || true
     kubectl logs --namespace stress-node-profiler "${pod}" -c ctr-events > "${STRESS_OUTPUT_DIR}/profiler-ctr-events-${node}.log" || true
   done
   kubectl delete -f test/stress/profiler/profiler.yaml --wait=false || true

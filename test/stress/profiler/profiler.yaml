@@ -209,6 +209,47 @@ data:
       clear(@slow_proc_paths);
       clear(@slow_proc_us);
     }
+  offcpu.bt: |
+    // EXPERIMENTAL (own container): off-CPU time by kernel stack for
+    // containerd* (includes shims). Discriminates the competing theories
+    // for node-side churn contention: mount-table locking (namespace_sem /
+    // mnt_want_write frames) vs ext4 journal & disk flush waits caused by
+    // fsync storms (jbd2 / wait_on_page_writeback / wait_transaction_locked
+    // frames) vs anything else. The trick: when a task resumes inside
+    // finish_task_switch, its kernel stack above schedule() is the path
+    // where it blocked, so the stack IS the sleep site.
+    //
+    // Overhead is bounded by filtering both edges to containerd* tasks;
+    // waits < 1ms are ignored. Maps are printed AND CLEARED each snapshot.
+    // Long idle parks (futex/epoll worker threads) will dominate the sums
+    // with boring stacks; read past them to the filesystem/VFS stacks.
+    BEGIN
+    {
+      printf("offcpu tracer started\n");
+    }
+
+    kprobe:finish_task_switch*
+    {
+      $prev = (struct task_struct *)arg0;
+      if (strncmp($prev->comm, "containerd", 10) == 0) {
+        @start[$prev->pid] = nsecs;
+      }
+      $last = @start[tid];
+      if ($last) {
+        $delta_us = (nsecs - $last) / 1000;
+        delete(@start[tid]);
+        if ($delta_us >= 1000 && strncmp(comm, "containerd", 10) == 0) {
+          @offcpu_us[kstack(20)] = sum($delta_us);
+        }
+      }
+    }
+
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
+      print(@offcpu_us);
+      clear(@offcpu_us);
+    }
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -243,6 +284,18 @@ spec:
       - name: extra-trace
         image: bpftrace:latest
         command: ["bpftrace", "/scripts/extra.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: offcpu-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/offcpu.bt"]
         securityContext:
           privileged: true
         volumeMounts:

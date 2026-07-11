@@ -3509,6 +3509,63 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimClearsAssignedSandboxOwnedByAnotherClaim(t *testing.T) {
+	scheme := newScheme(t)
+	ctx := context.Background()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "lost-sandbox",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+	lostSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "lost-sandbox",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxClaim",
+				Name:       "other-claim",
+				UID:        "other-claim-uid",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim, lostSandbox).
+		Build()
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	sandbox, err := reconciler.getOrCreateSandbox(ctx, claim, nil)
+	require.NoError(t, err)
+	require.Nil(t, sandbox)
+
+	var updatedSandbox sandboxv1beta1.Sandbox
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(lostSandbox), &updatedSandbox))
+	controllerRef := metav1.GetControllerOf(&updatedSandbox)
+	require.NotNil(t, controllerRef)
+	require.Equal(t, types.UID("other-claim-uid"), controllerRef.UID)
+
+	var updatedClaim extensionsv1beta1.SandboxClaim
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(claim), &updatedClaim))
+	require.NotContains(t, updatedClaim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+}
+
 // TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag verifies that during informer cache lag,
 // the assigned sandbox annotation on the claim is used to identify the previously adopted Sandbox,
 // preventing duplicate adoptions from the warm pool.

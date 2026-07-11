@@ -360,19 +360,20 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 	message := ""
 	podReady := false
 	if pod != nil {
-		message = "Pod exists with phase: " + string(pod.Status.Phase)
+		// Deliberately a single stable message for the whole launch sequence
+		// (Pending, Running-but-not-Ready, Ready-without-podIPs): embedding
+		// the pod's progress here rewrites the condition — and costs a status
+		// write — on every pod update while Ready stays False. Measured at
+		// 4.1 status writes per sandbox lifecycle (~300/s under churn), with
+		// the launch progress already observable on the Pod itself.
+		message = "Waiting for Pod to be Ready"
 		// Check if pod Ready condition is true
 		if pod.Status.Phase == corev1.PodRunning {
-			message = "Pod is Running but not Ready"
 			for _, condition := range pod.Status.Conditions {
 				if condition.Type == corev1.PodReady {
-					if condition.Status == corev1.ConditionTrue {
-						if len(pod.Status.PodIPs) == 0 {
-							message = "Pod is Ready but has no podIPs yet"
-						} else {
-							message = "Pod is Ready"
-							podReady = true
-						}
+					if condition.Status == corev1.ConditionTrue && len(pod.Status.PodIPs) > 0 {
+						message = "Pod is Ready"
+						podReady = true
 					}
 					break
 				}

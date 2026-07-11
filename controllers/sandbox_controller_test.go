@@ -112,7 +112,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -129,7 +129,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -148,7 +148,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Ready but has no podIPs yet; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -193,7 +193,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Unknown; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -323,7 +323,7 @@ func TestReconcile(t *testing.T) {
 						Status:             "False",
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
-						Message:            "Pod exists with phase: ",
+						Message:            "Waiting for Pod to be Ready",
 					},
 				},
 			},
@@ -374,7 +374,7 @@ func TestReconcile(t *testing.T) {
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
-						Message:            "Pod exists with phase: ; Service Exists",
+						Message:            "Waiting for Pod to be Ready; Service Exists",
 					},
 				},
 			},
@@ -468,7 +468,7 @@ func TestReconcile(t *testing.T) {
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
-						Message:            "Pod exists with phase: ; Service Exists",
+						Message:            "Waiting for Pod to be Ready; Service Exists",
 					},
 				},
 			},

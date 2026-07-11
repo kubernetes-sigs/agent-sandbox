@@ -196,7 +196,25 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
   --set cluster.spec.kubeScheduler.qps=200 \
-  --set cluster.spec.kubeScheduler.burst=300
+  --set cluster.spec.kubeScheduler.burst=300 \
+  --set cluster.spec.kubelet.kubeAPIQPS=100 \
+  --set cluster.spec.kubelet.kubeAPIBurst=200 \
+  --set cluster.spec.kubelet.eventQPS=5 \
+  --set cluster.spec.kubelet.eventBurst=50
+
+# kubelet.kubeAPIQPS/kubeAPIBurst (default 50/100): headroom for the
+# kubelet's status-reporting pipeline. Measured rest_client rate-limiter
+# wait was 0.0s at 42-53 req/s/node, so 50 was NOT yet binding — this is
+# prophylactic so the limiter cannot become the next ceiling as node-side
+# fixes push per-node churn higher. Note kube-api-qps does not cover
+# events, which have their own limiter:
+#
+# kubelet.eventQPS/eventBurst (default 50/100 per node): kubelet event
+# emission. Under churn the cluster posts 245-417 events/s (~1/3 of ALL
+# apiserver writes) — pure write amplification for a benchmark. 5/s
+# sustained (bursts to 50) caps that at ~100/s cluster-wide; excess
+# events are dropped kubelet-side. Diagnostics trade-off is acceptable
+# here; do not blindly copy to production clusters.
 
 # fsync A/B experiment: /var/lib/containerd on tmpfs (worker nodes only).
 # At ~113 sandboxes/s the profiler measured ~42 fdatasync+fsync calls per

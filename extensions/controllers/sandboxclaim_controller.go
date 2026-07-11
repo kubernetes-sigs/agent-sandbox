@@ -1623,7 +1623,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if controllerRef != nil &&
 				controllerRef.APIVersion == extensionsv1beta1.GroupVersion.String() &&
 				controllerRef.Kind == "SandboxClaim" {
-				logger.Info("Sandbox recorded in claim metadata belongs to another claim, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
+				logger.Info("Sandbox recorded in claim metadata belongs to another claim, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "ownerClaim", controllerRef.Name, "ownerUID", controllerRef.UID)
 				patch := client.MergeFrom(claim.DeepCopy())
 				if fromLabel {
 					delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)

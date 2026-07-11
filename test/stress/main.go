@@ -90,6 +90,9 @@ type Config struct {
 	// levels keep churning past ThroughputCount until this much time has
 	// elapsed, so node-profiler snapshot windows (30s) land inside the phase.
 	ThroughputMinSeconds float64 `json:"throughputMinSeconds"`
+	// ProfileAPIServer captures a kube-apiserver CPU profile during each
+	// throughput level (pprof-apiserver-<phase>.pb.gz).
+	ProfileAPIServer bool `json:"profileAPIServer"`
 	// MaxInFlight holds one or more in-flight caps; each runs as its own
 	// back-to-back throughput level (a concurrency sweep within one run).
 	MaxInFlight []int `json:"maxInFlight"`
@@ -186,6 +189,7 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.ProbeInterval, "probe-interval", 0, "Delay between latency probes")
 	flag.IntVar(&cfg.ThroughputCount, "throughput-count", 200, "Number of Sandboxes to churn through in the throughput phase (0 to skip)")
 	flag.Float64Var(&cfg.ThroughputMinSeconds, "throughput-min-seconds", 45, "Minimum duration of each throughput level; levels churn beyond -throughput-count until this much time has elapsed (0 = count-based only)")
+	flag.BoolVar(&cfg.ProfileAPIServer, "profile-apiserver", true, "Capture a kube-apiserver CPU profile during each throughput level")
 	maxInFlightFlag := flag.String("max-in-flight", "50", "Maximum Sandboxes alive at once during the throughput phase; keep below spare cluster pod capacity. A comma-separated list (e.g. 200,100,50) runs one throughput level per value, back to back")
 	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
 	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
@@ -388,12 +392,26 @@ func run(ctx context.Context) error {
 		{PhaseFill, test.runFillPhase},
 		{PhaseProbe, test.runProbePhase},
 	}
+	// CPU-profile the apiserver during each throughput level (it is the
+	// dominant control-plane CPU consumer under churn). 5s in to skip the
+	// slot-fill burst; levels last >=45s (ThroughputMinSeconds).
+	var profiler *apiserverProfiler
+	if cfg.ProfileAPIServer {
+		profiler, err = newAPIServerProfiler(restConfig, cfg.OutputDir)
+		if err != nil {
+			return fmt.Errorf("failed to build apiserver profiler: %w", err)
+		}
+	}
+
 	for _, maxInFlight := range cfg.MaxInFlight {
 		name := PhaseThroughput
 		if len(cfg.MaxInFlight) > 1 {
 			name = Phase(fmt.Sprintf("%s-mif%d", PhaseThroughput, maxInFlight))
 		}
 		phaseRuns = append(phaseRuns, phaseRun{name, func(ctx context.Context) error {
+			if profiler != nil {
+				go profiler.CaptureCPUProfile(ctx, name, 5*time.Second, 20*time.Second)
+			}
 			return test.runThroughputLevel(ctx, name, maxInFlight)
 		}})
 	}

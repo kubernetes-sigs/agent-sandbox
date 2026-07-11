@@ -206,8 +206,12 @@ kops create cluster \
 # theory. Benchmark-only: image store and snapshots do not survive a node
 # reboot (irrelevant for a throwaway cluster). Nodes are n2-standard-8
 # (32GB); tmpfs only consumes what is written (~1-2GB of images here).
-# Set STRESS_CONTAINERD_TMPFS=false to restore disk-backed containerd.
-STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-true}"
+# Verdict (run18 vs run17): the front of the pod-start path went from
+# 681ms to a load-invariant ~140ms p50 at mif600 (~540ms/pod was disk
+# I/O serialized behind bolt commits) and mif400 throughput rose +18%.
+# Default false so the benchmark measures realistic disk-backed nodes;
+# set true when isolating software bottlenecks from storage effects.
+STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-false}"
 if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
   echo "Adding containerd-on-tmpfs hook to cluster spec..."
   # `kops get -o yaml` emits top-level keys sorted (apiVersion, kind,

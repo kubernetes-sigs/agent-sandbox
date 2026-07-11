@@ -164,7 +164,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         """
         try:
             result = subprocess.run(
-                ["kubectl", "get", "svc", "sandbox-router-svc",
+                ["kubectl", "get", ROUTER_SERVICE_NAME,
                  "-n", self.config.router_namespace],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -175,7 +175,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                 # Exit code 1 with "not found" in stderr is a definitive absence — raise early.
                 if "not found" in stderr_text.lower():
                     raise SandboxPortForwardError(
-                        f"Router service 'sandbox-router-svc' not found in namespace "
+                        f"Router service '{ROUTER_SERVICE_NAME}' not found in namespace "
                         f"'{self.config.router_namespace}'. "
                         f"If the router is deployed in a different namespace, set "
                         f"router_namespace accordingly, e.g. "
@@ -236,7 +236,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     _, stderr = self.port_forward_process.communicate()
                     stderr_text = stderr.decode(errors="replace")
                     raise SandboxPortForwardError(
-                        f"Tunnel to router service 'sandbox-router-svc' in namespace "
+                        f"Tunnel to router service '{ROUTER_SERVICE_NAME}' in namespace "
                         f"'{self.config.router_namespace}' crashed. "
                         f"If the router is deployed in a different namespace, set "
                         f"router_namespace accordingly, e.g. "

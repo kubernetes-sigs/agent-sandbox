@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -117,9 +116,15 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}},
 	}
 
-	builder := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(template, warmPool, poolSb0, poolSb1).
+	builder := newSandboxClaimClientBuilder(scheme).
+		WithObjects(
+			template,
+			warmPool,
+			poolSb0,
+			poolSb1,
+			podForSandbox(poolSb0, poolSb0.Status.NodeName),
+			podForSandbox(poolSb1, poolSb1.Status.NodeName),
+		).
 		WithStatusSubresource(&extensionsv1beta1.SandboxClaim{})
 	for _, cl := range claims {
 		builder = builder.WithObjects(cl)

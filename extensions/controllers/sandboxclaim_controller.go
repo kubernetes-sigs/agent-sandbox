@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +57,7 @@ import (
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 const immediateRequeueDelay = time.Millisecond
+const assignedSandboxNameField = "sandboxclaim.assignedSandboxName"
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -92,6 +94,16 @@ var ErrCrossNamespaceAdoption = errors.New("cross-namespace adoption forbidden")
 
 // ErrEnvVarsInjectionRejected is a sentinel error indicating environment variable injection was rejected.
 var ErrEnvVarsInjectionRejected = errors.New("environment variable injection rejected")
+
+var errSandboxPlacementIneligible = errors.New("sandbox placement is ineligible for adoption")
+
+var errSandboxPlacementRetryable = errors.New("sandbox placement may become eligible for adoption")
+
+var errSandboxPlacementMissing = errors.New("sandbox placement no longer exists")
+
+var errSandboxPlacementLookup = errors.New("sandbox placement lookup failed")
+
+var errAdoptionConflictRetry = errors.New("sandbox adoption conflict requires retry")
 
 // ErrVolumeClaimTemplatesDisallowed is a sentinel error indicating that volumeClaimTemplates are disallowed by the template.
 var ErrVolumeClaimTemplatesDisallowed = errors.New("volume claim templates are disallowed by the template")
@@ -179,12 +191,14 @@ func (m *triggeredAdoptionMap) Delete(key types.NamespacedName) {
 type SandboxClaimReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
+	APIReader               client.Reader
 	WarmSandboxQueue        queue.SandboxQueue
 	Recorder                events.EventRecorder
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
 	triggeredAdoptions      triggeredAdoptionMap
+	pendingAssignments      triggeredAdoptionMap
 	AllowedLabelDomains     []string
 }
 
@@ -194,6 +208,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=core,resources=nodes,verbs=get
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
@@ -210,6 +225,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			// Fallback cleanup to prevent memory leaks if the delete predicate was missed or a stale request is processed.
 			r.observedTimes.Delete(req.NamespacedName)
 			r.triggeredAdoptions.Delete(req.NamespacedName)
+			r.pendingAssignments.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
@@ -236,6 +252,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	defer end()
 
 	if !claim.DeletionTimestamp.IsZero() {
+		r.pendingAssignments.Delete(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -350,18 +367,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: requeueDelay}, nil
 	}
 
-	// Adoption was just triggered for a warm-pool sandbox. The sandbox is now patched
-	// to us, but the informer cache may still show the warm-pool owner. Requeue
-	// with a bounded delay to let the cache converge, WITHOUT returning an
-	// error: returning an error would route through the exponential failure rate
-	// limiter (and, under bursts, the shared 10qps bucket limiter), and because this
-	// same retry recurs on each pass until the cache catches up the backoff compounds
-	// (5ms*(2^k-1)) and adoption tail latency balloons (#1107). The nil error lets the
-	// workqueue Forget the key, resetting the failure counter. Status is intentionally
-	// not finalized with the sandbox on this pass (sandbox is nil here), preserving the
-	// duplicate-adoption protection during cache lag.
-	if errors.Is(reconcileErr, errAdoptionTriggeredRetry) {
-		logger.V(4).Info("Adoption triggered; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
+	// Adoption completion and ownership-conflict recovery both wait for the cache
+	// through the bounded retry path. Returning nil resets the workqueue failure
+	// counter, which avoids compounding backoff while the informer converges (#1107).
+	if errors.Is(reconcileErr, errAdoptionTriggeredRetry) || errors.Is(reconcileErr, errAdoptionConflictRetry) {
+		logger.V(4).Info("Adoption pending; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
 		requeueDelay := adoptionCacheLagRequeueDelay
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
@@ -609,14 +619,12 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				ObservedGeneration: claim.Generation,
 			}
 		}
-		if errors.Is(err, errAdoptionTriggeredRetry) {
-			// Benign retry signal, not a claim failure: adoption was patched and we
-			// are only waiting for the informer cache to converge before finalizing.
+		if errors.Is(err, errAdoptionTriggeredRetry) || errors.Is(err, errAdoptionConflictRetry) {
 			return metav1.Condition{
 				Type:               string(v1beta1.SandboxConditionReady),
 				Status:             metav1.ConditionFalse,
 				Reason:             "AdoptionPending",
-				Message:            "Warm-pool sandbox adoption triggered; waiting for cache to converge",
+				Message:            "Warm-pool sandbox adoption is waiting for cache convergence",
 				ObservedGeneration: claim.Generation,
 			}
 		}
@@ -722,7 +730,7 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.Sa
 	// claim status was already finalized with a sandbox (the adoption pass itself, or
 	// a controller restart racing a stale informer), leave the recorded Name/PodIPs
 	// and existing conditions untouched instead of transiently wiping them.
-	if sandbox == nil && errors.Is(err, errAdoptionTriggeredRetry) && claim.Status.SandboxStatus.Name != "" {
+	if sandbox == nil && (errors.Is(err, errAdoptionTriggeredRetry) || errors.Is(err, errAdoptionConflictRetry)) && claim.Status.SandboxStatus.Name != "" {
 		return
 	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
@@ -783,6 +791,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	var fallbackSandbox *v1beta1.Sandbox
 	var fallbackKey queue.SandboxKey
 	var adoptingFallback bool
+	var placementLookupErr error
 
 	// Instantly returns unused keys the moment we find a valid/ready candidate!
 	defer func() {
@@ -856,6 +865,9 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 				adoptingFallback = true
 				return fallbackSandbox, fallbackKey, nil
 			}
+			if placementLookupErr != nil {
+				return nil, queue.SandboxKey{}, placementLookupErr
+			}
 			return nil, queue.SandboxKey{}, nil
 		}
 
@@ -872,11 +884,19 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			return nil, queue.SandboxKey{}, err
 		}
 
-		if err := verifySandboxCandidate(adopted, claim); err != nil {
+		if err := r.verifySandboxCandidate(ctx, adopted, claim); err != nil {
 			logger.V(1).Info("sandbox candidate can't be adopted", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", err.Error())
-			// If it is a good sandbox in the wrong namespace, put it back.
-			// (Though pickSmart makes this impossible, we keep it for safety).
-			if errors.Is(err, ErrCrossNamespaceAdoption) {
+			if errors.Is(err, errSandboxPlacementMissing) || errors.Is(err, errSandboxPlacementIneligible) {
+				continue
+			}
+			if errors.Is(err, errSandboxPlacementLookup) {
+				skipped = append(skipped, adoptedKey)
+				if placementLookupErr == nil {
+					placementLookupErr = err
+				}
+				continue
+			}
+			if errors.Is(err, ErrCrossNamespaceAdoption) || errors.Is(err, errSandboxPlacementRetryable) {
 				skipped = append(skipped, adoptedKey)
 			}
 			continue
@@ -938,15 +958,43 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
 				return false, err
 			}
+			r.pendingAssignments.Store(
+				types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
+				triggeredAdoptionEntry{uid: claim.UID, sandbox: adopted.Name},
+			)
+
+			if err := r.verifyRequestingClaimAssignment(ctx, claim, adopted.Name); err != nil {
+				if errors.Is(err, errSandboxPlacementLookup) {
+					return false, err
+				}
+				logger.Info("SandboxClaim changed after recording its assignment", "sandbox", adopted.Name, "claim", claim.Name, "reason", err.Error())
+				if releaseErr := r.releaseCandidateAssignment(ctx, claim, adopted, true); releaseErr != nil {
+					return false, fmt.Errorf("failed to release sandbox candidate %q: %w", adopted.Name, releaseErr)
+				}
+				return false, fmt.Errorf("%w: requesting claim changed", errAdoptionConflictRetry)
+			}
+
+			if err := r.verifySandboxCandidate(ctx, adopted, claim); err != nil {
+				if errors.Is(err, errSandboxPlacementLookup) {
+					return false, err
+				}
+				logger.Info("Sandbox candidate became ineligible before adoption", "sandbox", adopted.Name, "claim", claim.Name, "reason", err.Error())
+				if releaseErr := r.releaseCandidateAssignment(ctx, claim, adopted, errors.Is(err, errSandboxPlacementRetryable)); releaseErr != nil {
+					return false, fmt.Errorf("failed to release sandbox candidate %q: %w", adopted.Name, releaseErr)
+				}
+				return false, fmt.Errorf("%w: candidate became ineligible", errAdoptionConflictRetry)
+			}
 
 			// Call helper to complete adoption (patch sandbox)
 			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
 				if k8errors.IsNotFound(err) {
-					return false, nil
+					if releaseErr := r.releaseCandidateAssignment(ctx, claim, adopted, false); releaseErr != nil {
+						return false, fmt.Errorf("failed to release missing sandbox candidate %q: %w", adopted.Name, releaseErr)
+					}
+					return false, fmt.Errorf("%w: candidate disappeared", errAdoptionConflictRetry)
 				}
-				r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
 				if k8errors.IsConflict(err) {
-					return false, nil
+					return false, r.recoverAdoptionConflict(ctx, claim, adopted)
 				}
 				logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
 				return false, err
@@ -1084,7 +1132,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		}
 	}
 
-	if err := r.Patch(ctx, adopted, client.MergeFrom(originalAdopted)); err != nil {
+	if err := r.Patch(ctx, adopted, client.MergeFromWithOptions(originalAdopted, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 
@@ -1499,6 +1547,184 @@ func validateVolumeClaimTemplates(vcts []v1beta1.PersistentVolumeClaimTemplate) 
 	return nil
 }
 
+func sandboxAssignmentPresent(claim *extensionsv1beta1.SandboxClaim, sandboxName string) bool {
+	return claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] == sandboxName ||
+		claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] == sandboxName
+}
+
+func assignedSandboxName(claim *extensionsv1beta1.SandboxClaim) string {
+	if name := claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]; name != "" {
+		return name
+	}
+	return claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel]
+}
+
+func assignedSandboxNames(rawObj client.Object) []string {
+	claim, ok := rawObj.(*extensionsv1beta1.SandboxClaim)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, 2)
+	if name := claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]; name != "" {
+		names = append(names, name)
+	}
+	if name := claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel]; name != "" && !slices.Contains(names, name) {
+		names = append(names, name)
+	}
+	return names
+}
+
+func (r *SandboxClaimReconciler) uncachedReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+func (r *SandboxClaimReconciler) syncPendingAssignment(claim *extensionsv1beta1.SandboxClaim) {
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	name := assignedSandboxName(claim)
+	if !claim.DeletionTimestamp.IsZero() || name == "" {
+		r.pendingAssignments.Delete(key)
+		return
+	}
+	r.pendingAssignments.Store(key, triggeredAdoptionEntry{uid: claim.UID, sandbox: name})
+}
+
+func (r *SandboxClaimReconciler) hydratePendingAssignment(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	pending, ok := r.pendingAssignments.Load(key)
+	if !ok {
+		return nil
+	}
+	if pending.uid != claim.UID {
+		r.pendingAssignments.Delete(key)
+		return nil
+	}
+
+	current := &extensionsv1beta1.SandboxClaim{}
+	if err := r.uncachedReader().Get(ctx, key, current); err != nil {
+		if k8errors.IsNotFound(err) {
+			r.pendingAssignments.Delete(key)
+			return fmt.Errorf("%w: requesting claim %q no longer exists", errAdoptionConflictRetry, claim.Name)
+		}
+		return fmt.Errorf("%w: get pending claim %q: %w", errSandboxPlacementLookup, claim.Name, err)
+	}
+	if current.UID != claim.UID || !current.DeletionTimestamp.IsZero() {
+		r.pendingAssignments.Delete(key)
+		return fmt.Errorf("%w: requesting claim %q changed", errAdoptionConflictRetry, claim.Name)
+	}
+
+	current.DeepCopyInto(claim)
+	r.syncPendingAssignment(claim)
+	return nil
+}
+
+func (r *SandboxClaimReconciler) requeueCandidateIfStillWarm(
+	ctx context.Context,
+	claim *extensionsv1beta1.SandboxClaim,
+	sandbox *v1beta1.Sandbox,
+) error {
+	if r.WarmSandboxQueue == nil {
+		return nil
+	}
+	fresh := &v1beta1.Sandbox{}
+	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(sandbox), fresh); err != nil {
+		if k8errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("confirm sandbox %q before requeue: %w", sandbox.Name, err)
+	}
+	if getWarmPoolName(fresh) != claim.Spec.WarmPoolRef.Name || isAdoptable(fresh) != nil {
+		return nil
+	}
+	r.WarmSandboxQueue.Add(
+		queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name),
+		queue.SandboxKey{Namespace: fresh.Namespace, Name: fresh.Name, NodeName: fresh.Status.NodeName},
+	)
+	return nil
+}
+
+func (r *SandboxClaimReconciler) releaseCandidateAssignment(
+	ctx context.Context,
+	claim *extensionsv1beta1.SandboxClaim,
+	sandbox *v1beta1.Sandbox,
+	requeue bool,
+) (retErr error) {
+	if requeue {
+		defer func() {
+			retErr = errors.Join(retErr, r.requeueCandidateIfStillWarm(ctx, claim, sandbox))
+		}()
+	}
+
+	current := &extensionsv1beta1.SandboxClaim{}
+	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(claim), current); err != nil {
+		if k8errors.IsNotFound(err) {
+			r.pendingAssignments.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
+			return nil
+		}
+		return fmt.Errorf("get claim before releasing sandbox assignment: %w", err)
+	}
+	if current.UID != claim.UID {
+		r.pendingAssignments.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
+		return nil
+	}
+	if !sandboxAssignmentPresent(current, sandbox.Name) {
+		r.syncPendingAssignment(current)
+		return nil
+	}
+
+	original := current.DeepCopy()
+	if current.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] == sandbox.Name {
+		delete(current.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+	}
+	if current.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] == sandbox.Name {
+		delete(current.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
+	}
+	if err := r.Patch(ctx, current, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return err
+	}
+	current.DeepCopyInto(claim)
+	r.syncPendingAssignment(current)
+	return nil
+}
+
+func (r *SandboxClaimReconciler) recoverAdoptionConflict(
+	ctx context.Context,
+	claim *extensionsv1beta1.SandboxClaim,
+	sandbox *v1beta1.Sandbox,
+) error {
+	fresh := &v1beta1.Sandbox{}
+	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(sandbox), fresh); err != nil {
+		if !k8errors.IsNotFound(err) {
+			return fmt.Errorf("%w: get sandbox %q after adoption conflict: %w", errSandboxPlacementLookup, sandbox.Name, err)
+		}
+		if releaseErr := r.releaseCandidateAssignment(ctx, claim, sandbox, false); releaseErr != nil {
+			return fmt.Errorf("release assignment for missing sandbox %q: %w", sandbox.Name, releaseErr)
+		}
+		return fmt.Errorf("%w: sandbox disappeared", errAdoptionConflictRetry)
+	}
+	r.syncPendingAssignment(claim)
+
+	if metav1.IsControlledBy(fresh, claim) {
+		r.triggeredAdoptions.Store(
+			types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
+			triggeredAdoptionEntry{uid: claim.UID, sandbox: sandbox.Name},
+		)
+		return fmt.Errorf("%w: fresh sandbox is already controlled by requesting claim", errAdoptionTriggeredRetry)
+	}
+
+	controllerRef := metav1.GetControllerOf(fresh)
+	if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" && controllerRef.Name == claim.Spec.WarmPoolRef.Name {
+		return fmt.Errorf("%w: sandbox resource version changed", errAdoptionConflictRetry)
+	}
+
+	if err := r.releaseCandidateAssignment(ctx, claim, sandbox, false); err != nil {
+		return fmt.Errorf("release assignment after sandbox ownership conflict: %w", err)
+	}
+	return fmt.Errorf("%w: another owner claimed sandbox", errAdoptionConflictRetry)
+}
+
 // migrateLegacyAssignedSandboxLabel migrates legacy assigned Sandbox name from label to annotation.
 func (r *SandboxClaimReconciler) migrateLegacyAssignedSandboxLabel(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sbName string) error {
 	patch := client.MergeFrom(claim.DeepCopy())
@@ -1522,6 +1748,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 				r.triggeredAdoptions.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
+				r.pendingAssignments.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
 				launchType := v1beta1.SandboxLaunchTypeCold
 				if claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] == statusName ||
 					claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] == statusName ||
@@ -1536,6 +1763,10 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		} else if !k8errors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
 		}
+	}
+
+	if err := r.hydratePendingAssignment(ctx, claim); err != nil {
+		return nil, err
 	}
 
 	// Check if a previously adopted sandbox is recorded in claim annotations or legacy labels
@@ -1554,10 +1785,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	if sbName != "" {
 		logger.V(1).Info("Checking assigned sandbox name", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
+		err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox)
+		if err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox", "sandbox", sbName, "claim", claim.Name)
 				r.triggeredAdoptions.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
+				r.pendingAssignments.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
 				if fromLabel {
 					if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
 						logger.Error(err, "Failed to migrate legacy sandbox label to annotation (non-fatal)", "claim", claim.Name)
@@ -1575,67 +1808,82 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
 				// Still in warm pool. Try to complete adoption!
 				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
-				if err := verifySandboxCandidate(sandbox, claim); err != nil {
-					logger.Info("Sandbox recorded in claim metadata cannot be adopted, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "reason", err.Error())
-					patch := client.MergeFrom(claim.DeepCopy())
-					if fromLabel {
-						delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
-					} else {
-						delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+				if err := r.verifyRequestingClaimAssignment(ctx, claim, sbName); err != nil {
+					if errors.Is(err, errSandboxPlacementLookup) {
+						return nil, err
 					}
-					if err := r.Patch(ctx, claim, patch); err != nil {
+					if releaseErr := r.releaseCandidateAssignment(ctx, claim, sandbox, true); releaseErr != nil {
+						return nil, fmt.Errorf("failed to release invalid sandbox reference: %w", releaseErr)
+					}
+					return nil, fmt.Errorf("%w: requesting claim changed", errAdoptionConflictRetry)
+				}
+				if err := r.verifySandboxCandidate(ctx, sandbox, claim); err != nil {
+					if errors.Is(err, errSandboxPlacementLookup) {
+						return nil, err
+					}
+					logger.Info("Sandbox recorded in claim metadata cannot be adopted, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "reason", err.Error())
+					if err := r.releaseCandidateAssignment(ctx, claim, sandbox, errors.Is(err, errSandboxPlacementRetryable)); err != nil {
 						return nil, fmt.Errorf("failed to remove invalid sandbox reference: %w", err)
 					}
-				} else {
-					// If we already sent the adoption patch for this exact claim+sandbox,
-					// the cache just hasn't converged yet — keep waiting via the bounded
-					// requeue without re-sending the (idempotent but redundant) patch.
-					adoptionKey := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-					if prev, ok := r.triggeredAdoptions.Load(adoptionKey); ok && prev.uid == claim.UID && prev.sandbox == sbName {
-						logger.V(4).Info("Adoption already triggered, waiting for cache to converge", "sandbox", sbName, "claim", claim.Name)
-						return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
+					return nil, fmt.Errorf("%w: assigned sandbox became ineligible", errAdoptionConflictRetry)
+				}
+
+				// A prior patch may be ahead of the informer cache, so wait without sending it again.
+				adoptionKey := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+				if prev, ok := r.triggeredAdoptions.Load(adoptionKey); ok && prev.uid == claim.UID && prev.sandbox == sbName {
+					logger.V(4).Info("Adoption already triggered, waiting for cache to converge", "sandbox", sbName, "claim", claim.Name)
+					return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
+				}
+				if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
+					if k8errors.IsConflict(err) {
+						return nil, r.recoverAdoptionConflict(ctx, claim, sandbox)
 					}
-					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
-						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
-							logger.V(4).Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
-						} else {
-							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
+					if k8errors.IsNotFound(err) {
+						if releaseErr := r.releaseCandidateAssignment(ctx, claim, sandbox, false); releaseErr != nil {
+							return nil, fmt.Errorf("failed to release missing sandbox reference: %w", releaseErr)
 						}
+						return nil, fmt.Errorf("%w: assigned sandbox disappeared", errAdoptionConflictRetry)
+					}
+					return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
+				}
+
+				r.triggeredAdoptions.Store(adoptionKey, triggeredAdoptionEntry{uid: claim.UID, sandbox: sbName})
+				if fromLabel {
+					if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
+						logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 					} else {
-						r.triggeredAdoptions.Store(adoptionKey, triggeredAdoptionEntry{uid: claim.UID, sandbox: sbName})
-						if fromLabel {
-							if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
-								logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
-							} else {
-								logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
-							}
-						}
-						// Adoption was completed in-place (completeAdoption patched our controllerRef
-						// and the Warm label). Signal a retry so a later pass observes the sandbox as
-						// controlled by us once the cache converges. Returned as a sentinel so
-						// Reconcile requeues immediately with a bounded delay rather than routing
-						// through the exponential failure rate limiter (#1107).
-						logger.Info("Triggered adoption completion for sandbox, requeueing", "sandbox", sbName, "claim", claim.Name)
-						return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
+						logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 					}
 				}
+				// The informer may lag the completed patch, so finalize on the bounded retry.
+				logger.Info("Triggered adoption completion for sandbox, requeueing", "sandbox", sbName, "claim", claim.Name)
+				return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
 			}
-			logger.V(4).Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
-		} else if k8errors.IsNotFound(err) {
-			logger.Info("Sandbox recorded in claim metadata not found, removing stale reference", "sandboxName", sbName, "claim", claim.Name)
-			patch := client.MergeFrom(claim.DeepCopy())
-			if fromLabel {
-				delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
-			} else {
-				delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+			logger.V(4).Info("Sandbox recorded in claim metadata belongs to another owner", "sandbox", sbName, "claim", claim.Name)
+			if err := r.releaseCandidateAssignment(ctx, claim, sandbox, false); err != nil {
+				return nil, fmt.Errorf("failed to release sandbox reference owned by another controller: %w", err)
 			}
-			if err := r.Patch(ctx, claim, patch); err != nil {
-				return nil, fmt.Errorf("failed to remove stale sandbox reference from claim metadata: %w", err)
-			}
-			logger.Info("Successfully removed stale sandbox reference from claim metadata", "sandbox", sbName, "claim", claim.Name)
-		} else {
+			return nil, fmt.Errorf("%w: assigned sandbox belongs to another owner", errAdoptionConflictRetry)
+		}
+		if !k8errors.IsNotFound(err) {
 			return nil, fmt.Errorf("failed to get sandbox %q for sandbox name lookup: %w", sbName, err)
 		}
+
+		fresh := &v1beta1.Sandbox{}
+		key := client.ObjectKey{Namespace: claim.Namespace, Name: sbName}
+		liveErr := r.uncachedReader().Get(ctx, key, fresh)
+		if liveErr == nil {
+			return nil, fmt.Errorf("%w: assigned sandbox is not visible in cache", errAdoptionConflictRetry)
+		}
+		if !k8errors.IsNotFound(liveErr) {
+			return nil, fmt.Errorf("%w: confirm missing sandbox %q: %w", errSandboxPlacementLookup, sbName, liveErr)
+		}
+
+		missing := &v1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: claim.Namespace, Name: sbName}}
+		if err := r.releaseCandidateAssignment(ctx, claim, missing, false); err != nil {
+			return nil, fmt.Errorf("failed to remove stale sandbox reference from claim metadata: %w", err)
+		}
+		return nil, fmt.Errorf("%w: assigned sandbox no longer exists", errAdoptionConflictRetry)
 	}
 
 	// Try name-based lookup (sandbox created by createSandbox uses claim.Name)
@@ -1807,6 +2055,9 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, func(rawObj client.Object) []string {
 		claim, ok := rawObj.(*extensionsv1beta1.SandboxClaim)
@@ -1818,6 +2069,14 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		}
 		return []string{claim.Spec.WarmPoolRef.Name}
 	}); err != nil {
+		return err
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&extensionsv1beta1.SandboxClaim{},
+		assignedSandboxNameField,
+		assignedSandboxNames,
+	); err != nil {
 		return err
 	}
 
@@ -2049,6 +2308,182 @@ func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1
 		return fmt.Errorf("incorrect warm pool, expected %v", claim.Spec.WarmPoolRef.Name)
 	}
 	return nil
+}
+
+func (r *SandboxClaimReconciler) verifySandboxCandidate(
+	ctx context.Context,
+	candidate *v1beta1.Sandbox,
+	claim *extensionsv1beta1.SandboxClaim,
+) error {
+	if err := verifySandboxCandidate(candidate, claim); err != nil {
+		return err
+	}
+	if err := r.verifySandboxCandidateReservation(ctx, candidate, claim); err != nil {
+		return err
+	}
+	return r.verifySandboxCandidatePlacement(ctx, candidate)
+}
+
+func (r *SandboxClaimReconciler) verifySandboxCandidateReservation(
+	ctx context.Context,
+	candidate *v1beta1.Sandbox,
+	claim *extensionsv1beta1.SandboxClaim,
+) error {
+	claims := &extensionsv1beta1.SandboxClaimList{}
+	if err := r.List(
+		ctx,
+		claims,
+		client.InNamespace(candidate.Namespace),
+		client.MatchingFields{assignedSandboxNameField: candidate.Name},
+	); err != nil {
+		return fmt.Errorf("%w: list cached claims assigned to sandbox %q: %w", errSandboxPlacementLookup, candidate.Name, err)
+	}
+	for i := range claims.Items {
+		cached := &claims.Items[i]
+		if cached.UID == claim.UID || !cached.DeletionTimestamp.IsZero() {
+			continue
+		}
+
+		confirmed := &extensionsv1beta1.SandboxClaim{}
+		if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(cached), confirmed); err != nil {
+			if k8errors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("%w: confirm claim %q assigned to sandbox %q: %w", errSandboxPlacementLookup, cached.Name, candidate.Name, err)
+		}
+		if confirmed.UID == claim.UID || !confirmed.DeletionTimestamp.IsZero() || !sandboxAssignmentPresent(confirmed, candidate.Name) {
+			continue
+		}
+		return fmt.Errorf(
+			"%w: sandbox %q is assigned to claim %q",
+			errSandboxPlacementRetryable,
+			candidate.Name,
+			confirmed.Name,
+		)
+	}
+	return nil
+}
+
+func (r *SandboxClaimReconciler) verifyRequestingClaimAssignment(
+	ctx context.Context,
+	claim *extensionsv1beta1.SandboxClaim,
+	sandboxName string,
+) error {
+	current := &extensionsv1beta1.SandboxClaim{}
+	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(claim), current); err != nil {
+		if k8errors.IsNotFound(err) {
+			return fmt.Errorf("%w: requesting claim %q no longer exists", errSandboxPlacementRetryable, claim.Name)
+		}
+		return fmt.Errorf("%w: get requesting claim %q: %w", errSandboxPlacementLookup, claim.Name, err)
+	}
+	if current.UID != claim.UID {
+		return fmt.Errorf("%w: requesting claim %q was replaced", errSandboxPlacementRetryable, claim.Name)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("%w: requesting claim %q is deleting", errSandboxPlacementRetryable, claim.Name)
+	}
+	if !sandboxAssignmentPresent(current, sandboxName) {
+		return fmt.Errorf("%w: requesting claim %q no longer assigns sandbox %q", errSandboxPlacementRetryable, claim.Name, sandboxName)
+	}
+	return nil
+}
+
+func (r *SandboxClaimReconciler) verifySandboxCandidatePlacement(ctx context.Context, candidate *v1beta1.Sandbox) error {
+	reader := r.uncachedReader()
+
+	podName := candidate.Annotations[v1beta1.SandboxPodNameAnnotation]
+	if podName == "" {
+		podName = candidate.Name
+	}
+	pod := &corev1.Pod{}
+	err := reader.Get(ctx, client.ObjectKey{Namespace: candidate.Namespace, Name: podName}, pod)
+	if k8errors.IsNotFound(err) && podName != candidate.Name {
+		podName = candidate.Name
+		err = reader.Get(ctx, client.ObjectKey{Namespace: candidate.Namespace, Name: podName}, pod)
+	}
+	if k8errors.IsNotFound(err) {
+		return fmt.Errorf("%w: pod for sandbox %q", errSandboxPlacementMissing, candidate.Name)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: get pod %q: %w", errSandboxPlacementLookup, podName, err)
+	}
+	if pod.GetDeletionTimestamp() != nil {
+		return fmt.Errorf("%w: pod %q is deleting", errSandboxPlacementIneligible, pod.Name)
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return fmt.Errorf("%w: pod %q is in terminal phase %s", errSandboxPlacementIneligible, pod.Name, pod.Status.Phase)
+	}
+
+	nodeName := pod.Spec.NodeName
+	if candidate.Status.NodeName != "" && candidate.Status.NodeName != nodeName {
+		return fmt.Errorf(
+			"%w: sandbox reports node %q but pod %q reports node %q",
+			errSandboxPlacementRetryable,
+			candidate.Status.NodeName,
+			pod.Name,
+			nodeName,
+		)
+	}
+	if nodeName == "" {
+		return nil
+	}
+
+	node := &corev1.Node{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		if k8errors.IsNotFound(err) {
+			return fmt.Errorf("%w: node %q", errSandboxPlacementMissing, nodeName)
+		}
+		return fmt.Errorf("%w: get node %q: %w", errSandboxPlacementLookup, nodeName, err)
+	}
+	if node.GetDeletionTimestamp() != nil {
+		return fmt.Errorf("%w: node %q is deleting", errSandboxPlacementIneligible, nodeName)
+	}
+	if node.Spec.Unschedulable {
+		return fmt.Errorf("%w: node %q is unschedulable", errSandboxPlacementRetryable, nodeName)
+	}
+	if !nodeIsReady(node) {
+		return fmt.Errorf("%w: node %q is not Ready", errSandboxPlacementRetryable, nodeName)
+	}
+
+	for i := range node.Spec.Taints {
+		taint := &node.Spec.Taints[i]
+		if taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		if !tolerationsPermanentlyTolerateTaint(pod.Spec.Tolerations, taint) {
+			return fmt.Errorf(
+				"%w: node %q has unsafe %s taint %q",
+				errSandboxPlacementRetryable,
+				nodeName,
+				taint.Effect,
+				taint.Key,
+			)
+		}
+	}
+	return nil
+}
+
+func nodeIsReady(node *corev1.Node) bool {
+	for i := range node.Status.Conditions {
+		condition := &node.Status.Conditions[i]
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func tolerationsPermanentlyTolerateTaint(tolerations []corev1.Toleration, taint *corev1.Taint) bool {
+	for i := range tolerations {
+		toleration := &tolerations[i]
+		if !toleration.ToleratesTaint(klog.Background(), taint, false) {
+			continue
+		}
+		if taint.Effect != corev1.TaintEffectNoExecute || toleration.TolerationSeconds == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func isAdoptable(candidate *v1beta1.Sandbox) error {

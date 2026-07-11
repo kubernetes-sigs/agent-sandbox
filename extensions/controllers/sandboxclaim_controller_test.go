@@ -1077,7 +1077,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			}
 
 			allObjects := append(tc.existingObjects, claimToUse)
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
+			client := newSandboxClaimClientBuilder(scheme).WithObjects(allObjects...).WithStatusSubresource(claimToUse).Build()
 
 			reconciler := &SandboxClaimReconciler{
 				Client:              client,
@@ -1335,7 +1335,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				tc.claim.Status.SandboxStatus.Name = sandbox.Name
 			}
 
-			client := fake.NewClientBuilder().WithScheme(scheme).
+			client := newSandboxClaimClientBuilder(scheme).
 				WithObjects(template, warmPool, tc.claim, sandbox).
 				WithStatusSubresource(tc.claim).Build()
 
@@ -1455,7 +1455,7 @@ func TestSandboxClaimMirrorsFinishedConditionAndSchedulesTTL(t *testing.T) {
 		}}},
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).
+	client := newSandboxClaimClientBuilder(scheme).
 		WithObjects(claim, template, warmPool, sandbox).
 		WithStatusSubresource(claim).
 		Build()
@@ -1565,7 +1565,7 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			claim := createClaim(tc.name, tc.policy)
 			sandbox := createSandbox(claim)
-			client := fake.NewClientBuilder().WithScheme(scheme).
+			client := newSandboxClaimClientBuilder(scheme).
 				WithObjects(claim, sandbox, warmPool, template).
 				WithStatusSubresource(claim).
 				Build()
@@ -1679,7 +1679,7 @@ func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
 		}}},
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).
+	client := newSandboxClaimClientBuilder(scheme).
 		WithObjects(claim, template, warmPool, sandbox).
 		WithStatusSubresource(claim).
 		Build()
@@ -1739,7 +1739,7 @@ func TestSandboxProvisionEvent(t *testing.T) {
 	}
 
 	fakeRecorder := events.NewFakeRecorder(10)
-	client := fake.NewClientBuilder().WithScheme(scheme).
+	client := newSandboxClaimClientBuilder(scheme).
 		WithObjects(claim, template, warmPool).
 		WithStatusSubresource(claim).Build()
 
@@ -1817,7 +1817,7 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
 		WithObjects(claim, template, warmPool).
 		WithStatusSubresource(claim).Build()
 
@@ -1999,7 +1999,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		expectedLabels          map[string]string
 		expectedPodLabels       map[string]string
 		expectNewSandboxCreated bool
-		simulateConflicts       int
 	}{
 		{
 			name: "adopts oldest ready sandbox from warm pool",
@@ -2124,19 +2123,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
-			name: "retries on conflict when adopting sandbox",
-			existingObjects: []client.Object{
-				template,
-				claim,
-				createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
-				createWarmPoolSandbox("pool-sb-2", metav1.Now(), true),
-			},
-			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "pool-sb-2",
-			expectNewSandboxCreated: false,
-			simulateConflicts:       1, // Fail update on the first sandbox, succeed on the second
-		},
-		{
 			name: "preserves template eviction annotation false when adopting sandbox",
 			existingObjects: []client.Object{
 				func() client.Object {
@@ -2254,18 +2240,17 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)
-			var fakeClient client.Client = fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(append(tc.existingObjects, warmPool)...).
-				WithStatusSubresource(claim).
-				Build()
-
-			if tc.simulateConflicts > 0 {
-				fakeClient = &conflictClient{
-					Client:       fakeClient,
-					maxConflicts: tc.simulateConflicts,
+			existingObjects := append([]client.Object{}, tc.existingObjects...)
+			for _, obj := range tc.existingObjects {
+				if sandbox, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+					existingObjects = append(existingObjects, podForSandbox(sandbox, sandbox.Status.NodeName))
 				}
 			}
+			existingObjects = append(existingObjects, warmPool)
+			var fakeClient client.Client = newSandboxClaimClientBuilder(scheme).
+				WithObjects(existingObjects...).
+				WithStatusSubresource(claim).
+				Build()
 
 			// 1. Initialize the Queue
 			warmSandboxQueue := queue.NewSimpleSandboxQueue()
@@ -2515,8 +2500,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
 		WithObjects(template, warmPool, claim, adoptedSandbox, poolSandbox).
 		WithStatusSubresource(claim).
 		Build()
@@ -2698,7 +2682,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 
 			scheme := newScheme(t)
 			warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool).Build()
+			fakeClient := newSandboxClaimClientBuilder(scheme).WithObjects(warmPool).Build()
 			r := &SandboxClaimReconciler{Client: fakeClient}
 
 			if tc.setupReconciler != nil {
@@ -2745,7 +2729,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 	t.Run("Cold Start", func(t *testing.T) {
 		asmetrics.SandboxClaimCreationTotal.Reset()
 		scheme := newScheme(t)
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, warmPool, claim).WithStatusSubresource(claim).Build()
+		client := newSandboxClaimClientBuilder(scheme).WithObjects(template, warmPool, claim).WithStatusSubresource(claim).Build()
 		reconciler := &SandboxClaimReconciler{
 			Client:           client,
 			Scheme:           scheme,
@@ -2815,7 +2799,10 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		scheme := newScheme(t)
-		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, warmPool, claim, warmSandbox).WithStatusSubresource(claim).Build()
+		client := newSandboxClaimClientBuilder(scheme).
+			WithObjects(template, warmPool, claim, warmSandbox, podForSandbox(warmSandbox, warmSandbox.Status.NodeName)).
+			WithStatusSubresource(claim).
+			Build()
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 		if isAdoptable(warmSandbox) == nil {
 			warmPoolName := getWarmPoolName(warmSandbox)
@@ -2947,8 +2934,7 @@ func TestInitializeSandboxLaunchTypeLabel(t *testing.T) {
 				}
 			}
 
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
+			fakeClient := newSandboxClaimClientBuilder(scheme).
 				WithObjects(sandbox).
 				Build()
 			reconciler := &SandboxClaimReconciler{
@@ -2984,34 +2970,14 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func newSandboxClaimClientBuilder(scheme *runtime.Scheme) *fake.ClientBuilder {
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&extensionsv1beta1.SandboxClaim{}, assignedSandboxNameField, assignedSandboxNames)
+}
+
 func ignoreTimestamp(_, _ metav1.Time) bool {
 	return true
-}
-
-type conflictClient struct {
-	client.Client
-	conflictCount int
-	maxConflicts  int
-}
-
-func (c *conflictClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	if sandbox, ok := obj.(*sandboxv1beta1.Sandbox); ok {
-		if c.conflictCount < c.maxConflicts {
-			c.conflictCount++
-			return k8errors.NewConflict(sandboxv1beta1.Resource("sandboxes"), sandbox.Name, fmt.Errorf("simulated conflict"))
-		}
-	}
-	return c.Client.Update(ctx, obj, opts...)
-}
-
-func (c *conflictClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-	if sandbox, ok := obj.(*sandboxv1beta1.Sandbox); ok {
-		if c.conflictCount < c.maxConflicts {
-			c.conflictCount++
-			return k8errors.NewConflict(sandboxv1beta1.Resource("sandboxes"), sandbox.Name, fmt.Errorf("simulated conflict"))
-		}
-	}
-	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
 func TestSandboxClaimTimingPredicates(t *testing.T) {
@@ -3226,8 +3192,7 @@ func TestSandboxClaimReconcileCleanup(t *testing.T) {
 		t.Helper()
 		scheme := newScheme(t)
 		objs = append(objs, &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}}})
-		fc := fake.NewClientBuilder().
-			WithScheme(scheme).
+		fc := newSandboxClaimClientBuilder(scheme).
 			WithObjects(objs...).
 			WithStatusSubresource(&extensionsv1beta1.SandboxClaim{}).
 			Build()
@@ -3598,9 +3563,16 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(template, warmPool, claim, adoptedSandbox, extraSandbox).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
+		WithObjects(
+			template,
+			warmPool,
+			claim,
+			adoptedSandbox,
+			extraSandbox,
+			podForSandbox(adoptedSandbox, adoptedSandbox.Status.NodeName),
+			podForSandbox(extraSandbox, extraSandbox.Status.NodeName),
+		).
 		WithStatusSubresource(claim).
 		Build()
 
@@ -3778,11 +3750,11 @@ func TestSandboxClaimAdoptionCacheLagDoesNotRepatch(t *testing.T) {
 	// Frozen warm-pool-owned view: served on every Get to simulate an informer
 	// cache that has not converged yet, no matter what was patched.
 	staleSandbox := adoptedSandbox.DeepCopy()
+	staleSandbox.ResourceVersion = "999"
 
 	sandboxPatches := 0
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(template, warmPool, claim, adoptedSandbox).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
+		WithObjects(template, warmPool, claim, adoptedSandbox, podForSandbox(adoptedSandbox, "")).
 		WithStatusSubresource(claim).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -3919,10 +3891,10 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 	// Frozen warm-pool-owned view: served on every Get to simulate an informer
 	// cache that has not converged yet, no matter what was patched.
 	staleSandbox := adoptedSandbox.DeepCopy()
+	staleSandbox.ResourceVersion = "999"
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(template, warmPool, claim, adoptedSandbox).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
+		WithObjects(template, warmPool, claim, adoptedSandbox, podForSandbox(adoptedSandbox, "")).
 		WithStatusSubresource(claim).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -4035,11 +4007,11 @@ func TestSandboxClaimFreshAdoptionDoesNotRepatchDuringCacheLag(t *testing.T) {
 	// Frozen warm-pool-owned view: served on every Get to simulate an informer
 	// cache that never converges within the test, no matter what was patched.
 	staleSandbox := warmSandbox.DeepCopy()
+	staleSandbox.ResourceVersion = "999"
 
 	sandboxPatches := 0
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(template, warmPool, claim, warmSandbox).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
+		WithObjects(template, warmPool, claim, warmSandbox, podForSandbox(warmSandbox, "")).
 		WithStatusSubresource(claim).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -4170,8 +4142,7 @@ func TestSandboxClaimPreventsAdoptionFromWrongWarmPool(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
 		WithObjects(template, warmPool, claim, wrongPoolSandbox).
 		WithStatusSubresource(claim).
 		Build()
@@ -4188,9 +4159,15 @@ func TestSandboxClaimPreventsAdoptionFromWrongWarmPool(t *testing.T) {
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
 
-	_, err := reconciler.Reconcile(context.Background(), req)
+	res, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Fatalf("Expected reconcile to succeed (fall through and create new sandbox), but failed: %v", err)
+		t.Fatalf("Expected reconcile to release the invalid assignment, but failed: %v", err)
+	}
+	if res.RequeueAfter != adoptionCacheLagRequeueDelay {
+		t.Fatalf("expected bounded requeue after releasing the invalid assignment, got %v", res.RequeueAfter)
+	}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Expected the next reconcile to create a new sandbox, but failed: %v", err)
 	}
 
 	var sb sandboxv1beta1.Sandbox
@@ -4247,8 +4224,7 @@ func TestSandboxClaimRecoveryWhenTemplateCreated(t *testing.T) {
 	}
 
 	// Step 1: Reconcile without template
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
 		WithObjects(claim, warmPool).
 		WithStatusSubresource(claim).
 		Build()
@@ -4325,8 +4301,7 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 	// unless configured with WithIndex.
 
 	// Let's use the WithIndex option on the fake client builder to support the matchingFields query!
-	fakeClientWithIndex := fake.NewClientBuilder().
-		WithScheme(scheme).
+	fakeClientWithIndex := newSandboxClaimClientBuilder(scheme).
 		WithObjects(claim1, claim2, claimOther, warmPool).
 		WithIndex(&extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, func(obj client.Object) []string {
 			c := obj.(*extensionsv1beta1.SandboxClaim)
@@ -4417,8 +4392,7 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
 		WithObjects(template, warmPool, claim, adoptedSandbox).
 		WithStatusSubresource(claim).
 		Build()
@@ -4503,6 +4477,905 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	err = isAdoptable(ownedByClaimSandbox)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not managed by warm pool")
+}
+
+func nodeEligibilityClaim() *extensionsv1beta1.SandboxClaim {
+	return &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+}
+
+func nodeEligibilityQueueName() string {
+	return queue.GetNamespacedWarmPoolName("default", "test-pool")
+}
+
+func adoptableSandboxOnNode(name, nodeName string) *sandboxv1beta1.Sandbox {
+	return &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "pool-uid",
+				Controller: new(true),
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "agent", Image: "example.test/agent"}},
+				}},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			NodeName: nodeName,
+			Conditions: []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+}
+
+func podForSandbox(sandbox *sandboxv1beta1.Sandbox, nodeName string, tolerations ...corev1.Toleration) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace},
+		Spec:       corev1.PodSpec{NodeName: nodeName, Tolerations: tolerations},
+	}
+}
+
+func readyNode(name string, taints ...corev1.Taint) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       corev1.NodeSpec{Taints: taints},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+		}}},
+	}
+}
+
+func TestVerifySandboxCandidatePlacement(t *testing.T) {
+	scheme := newScheme(t)
+	deletionTime := metav1.Now()
+	drainingTaint := corev1.Taint{
+		Key: "maintenance.example/draining", Value: "rollout-1", Effect: corev1.TaintEffectNoSchedule,
+	}
+	drainingToleration := corev1.Toleration{
+		Key: drainingTaint.Key, Operator: corev1.TolerationOpEqual, Value: drainingTaint.Value, Effect: drainingTaint.Effect,
+	}
+	noExecuteTaint := corev1.Taint{Key: drainingTaint.Key, Effect: corev1.TaintEffectNoExecute}
+	deletingNode := readyNode("node-1")
+	deletingNode.DeletionTimestamp = &deletionTime
+	deletingNode.Finalizers = []string{"test.example/finalizer"}
+	unschedulableNode := readyNode("node-1")
+	unschedulableNode.Spec.Unschedulable = true
+	notReadyNode := readyNode("node-1")
+	notReadyNode.Status.Conditions[0].Status = corev1.ConditionFalse
+
+	tests := []struct {
+		name                string
+		podNodeName         string
+		podPhase            corev1.PodPhase
+		podDeleting         bool
+		unbound             bool
+		annotatedPodName    string
+		templateTolerations []corev1.Toleration
+		podTolerations      []corev1.Toleration
+		node                *corev1.Node
+		omitPod             bool
+		wantError           error
+		wantMessage         string
+	}{
+		{
+			name: "eligible node",
+			node: readyNode("node-1"),
+		},
+		{
+			name:             "annotation resolves the actual pod and its injected toleration",
+			annotatedPodName: "replacement-pod",
+			podTolerations:   []corev1.Toleration{drainingToleration},
+			node:             readyNode("node-1", drainingTaint),
+		},
+		{
+			name:                "template toleration does not replace the actual pod toleration",
+			templateTolerations: []corev1.Toleration{drainingToleration},
+			node:                readyNode("node-1", drainingTaint),
+			wantError:           errSandboxPlacementRetryable,
+			wantMessage:         "unsafe NoSchedule taint",
+		},
+		{
+			name:        "deleting pod",
+			podDeleting: true,
+			wantError:   errSandboxPlacementIneligible,
+			wantMessage: "pod \"candidate\" is deleting",
+		},
+		{
+			name:        "succeeded pod",
+			podPhase:    corev1.PodSucceeded,
+			wantError:   errSandboxPlacementIneligible,
+			wantMessage: "terminal phase Succeeded",
+		},
+		{
+			name:        "failed pod",
+			podPhase:    corev1.PodFailed,
+			wantError:   errSandboxPlacementIneligible,
+			wantMessage: "terminal phase Failed",
+		},
+		{
+			name:        "deleting node",
+			node:        deletingNode,
+			wantError:   errSandboxPlacementIneligible,
+			wantMessage: "is deleting",
+		},
+		{
+			name:        "unschedulable node",
+			node:        unschedulableNode,
+			wantError:   errSandboxPlacementRetryable,
+			wantMessage: "is unschedulable",
+		},
+		{
+			name:        "node without Ready condition",
+			node:        &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}},
+			wantError:   errSandboxPlacementRetryable,
+			wantMessage: "is not Ready",
+		},
+		{
+			name:        "NodeReady false",
+			node:        notReadyNode,
+			wantError:   errSandboxPlacementRetryable,
+			wantMessage: "is not Ready",
+		},
+		{
+			name:        "untolerated NoExecute taint",
+			node:        readyNode("node-1", noExecuteTaint),
+			wantError:   errSandboxPlacementRetryable,
+			wantMessage: "unsafe NoExecute taint",
+		},
+		{
+			name: "permanently tolerated NoExecute taint",
+			podTolerations: []corev1.Toleration{{
+				Key: drainingTaint.Key, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute,
+			}},
+			node: readyNode("node-1", noExecuteTaint),
+		},
+		{
+			name: "time-limited NoExecute toleration",
+			podTolerations: []corev1.Toleration{{
+				Key: drainingTaint.Key, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute,
+				TolerationSeconds: ptr.To[int64](300),
+			}},
+			node:        readyNode("node-1", noExecuteTaint),
+			wantError:   errSandboxPlacementRetryable,
+			wantMessage: "unsafe NoExecute taint",
+		},
+		{
+			name: "PreferNoSchedule does not block adoption",
+			node: readyNode("node-1", corev1.Taint{
+				Key: "maintenance.example/prefer-other-nodes", Effect: corev1.TaintEffectPreferNoSchedule,
+			}),
+		},
+		{
+			name:     "unbound pending pod",
+			podPhase: corev1.PodPending,
+			unbound:  true,
+		},
+		{
+			name:     "bound pending pod",
+			podPhase: corev1.PodPending,
+			node:     readyNode("node-1"),
+		},
+		{
+			name:        "sandbox and pod node mismatch",
+			podNodeName: "node-2",
+			wantError:   errSandboxPlacementRetryable,
+			wantMessage: "sandbox reports node",
+		},
+		{
+			name:        "missing pod",
+			omitPod:     true,
+			wantError:   errSandboxPlacementMissing,
+			wantMessage: "pod",
+		},
+		{
+			name:        "missing node",
+			wantError:   errSandboxPlacementMissing,
+			wantMessage: "node",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandboxNodeName := "node-1"
+			podNodeName := "node-1"
+			if tt.unbound {
+				sandboxNodeName = ""
+				podNodeName = ""
+			} else if tt.podNodeName != "" {
+				podNodeName = tt.podNodeName
+			}
+			candidate := adoptableSandboxOnNode("candidate", sandboxNodeName)
+			candidate.Spec.PodTemplate.Spec.Tolerations = tt.templateTolerations
+			if tt.annotatedPodName != "" {
+				candidate.Annotations = map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: tt.annotatedPodName}
+			}
+			objects := []client.Object{}
+			if !tt.omitPod {
+				pod := podForSandbox(candidate, podNodeName, tt.podTolerations...)
+				pod.Status.Phase = tt.podPhase
+				if tt.podDeleting {
+					pod.DeletionTimestamp = &deletionTime
+					pod.Finalizers = []string{"test.example/finalizer"}
+				}
+				if tt.annotatedPodName != "" {
+					pod.Name = tt.annotatedPodName
+				}
+				objects = append(objects, pod)
+			}
+			if tt.node != nil {
+				objects = append(objects, tt.node)
+			}
+			r := &SandboxClaimReconciler{Client: newSandboxClaimClientBuilder(scheme).WithObjects(objects...).Build()}
+
+			err := r.verifySandboxCandidatePlacement(context.Background(), candidate)
+			if tt.wantError == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tt.wantError)
+			require.ErrorContains(t, err, tt.wantMessage)
+		})
+	}
+}
+
+func TestVerifySandboxCandidatePlacementFailsClosedOnAPIError(t *testing.T) {
+	scheme := newScheme(t)
+	candidate := adoptableSandboxOnNode("candidate", "node-1")
+	pod := podForSandbox(candidate, "node-1")
+	node := readyNode("node-1")
+
+	for _, resource := range []string{"pod", "node"} {
+		t.Run(resource, func(t *testing.T) {
+			getErr := fmt.Errorf("%s API unavailable", resource)
+			cachedClient := newSandboxClaimClientBuilder(scheme).WithObjects(pod, node).Build()
+			apiReader := interceptor.NewClient(cachedClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if resource == "pod" {
+						if _, ok := obj.(*corev1.Pod); ok {
+							return getErr
+						}
+					} else if _, ok := obj.(*corev1.Node); ok {
+						return getErr
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			r := &SandboxClaimReconciler{Client: cachedClient, APIReader: apiReader}
+
+			err := r.verifySandboxCandidatePlacement(context.Background(), candidate)
+			require.ErrorIs(t, err, errSandboxPlacementLookup)
+			require.ErrorIs(t, err, getErr)
+		})
+	}
+}
+
+func TestVerifySandboxCandidateReservation(t *testing.T) {
+	scheme := newScheme(t)
+	claim := nodeEligibilityClaim()
+	candidate := adoptableSandboxOnNode("candidate", "node-1")
+	claim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: candidate.Name}
+	other := nodeEligibilityClaim()
+	other.Name = "other"
+	other.UID = "other-uid"
+	other.Labels = map[string]string{extensionsv1beta1.DeprecatedAssignedSandboxNameLabel: candidate.Name}
+
+	t.Run("current claim is allowed", func(t *testing.T) {
+		fc := newSandboxClaimClientBuilder(scheme).WithObjects(claim).Build()
+		r := &SandboxClaimReconciler{Client: fc, APIReader: fc}
+		require.NoError(t, r.verifySandboxCandidateReservation(context.Background(), candidate, claim))
+	})
+
+	t.Run("confirmed legacy assignment blocks", func(t *testing.T) {
+		fc := newSandboxClaimClientBuilder(scheme).WithObjects(claim, other).Build()
+		r := &SandboxClaimReconciler{Client: fc, APIReader: fc}
+		require.ErrorIs(t, r.verifySandboxCandidateReservation(context.Background(), candidate, claim), errSandboxPlacementRetryable)
+	})
+
+	t.Run("stale indexed assignment does not block", func(t *testing.T) {
+		cached := newSandboxClaimClientBuilder(scheme).WithObjects(claim, other).Build()
+		liveOther := other.DeepCopy()
+		liveOther.Labels = nil
+		live := newSandboxClaimClientBuilder(scheme).WithObjects(claim, liveOther).Build()
+		r := &SandboxClaimReconciler{Client: cached, APIReader: live}
+		require.NoError(t, r.verifySandboxCandidateReservation(context.Background(), candidate, claim))
+	})
+
+	t.Run("cached index failure fails closed", func(t *testing.T) {
+		listErr := errors.New("claim cache unavailable")
+		base := newSandboxClaimClientBuilder(scheme).WithObjects(claim).Build()
+		cached := interceptor.NewClient(base, interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return listErr
+			},
+		})
+		r := &SandboxClaimReconciler{Client: cached, APIReader: base}
+		err := r.verifySandboxCandidateReservation(context.Background(), candidate, claim)
+		require.ErrorIs(t, err, errSandboxPlacementLookup)
+		require.ErrorIs(t, err, listErr)
+	})
+
+	t.Run("positive confirmation failure fails closed", func(t *testing.T) {
+		getErr := errors.New("claim API unavailable")
+		cached := newSandboxClaimClientBuilder(scheme).WithObjects(claim, other).Build()
+		live := interceptor.NewClient(cached, interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return getErr
+			},
+		})
+		r := &SandboxClaimReconciler{Client: cached, APIReader: live}
+		err := r.verifySandboxCandidateReservation(context.Background(), candidate, claim)
+		require.ErrorIs(t, err, errSandboxPlacementLookup)
+		require.ErrorIs(t, err, getErr)
+	})
+}
+
+func TestQueueRebuildHonorsClaimReservationUntilDeletion(t *testing.T) {
+	scheme := newScheme(t)
+	claim := nodeEligibilityClaim()
+	claim.Name = "other-claim"
+	claim.UID = "other-claim-uid"
+	claim.Finalizers = []string{"test.example/finalizer"}
+	claim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: "candidate"}
+	requestingClaim := nodeEligibilityClaim()
+	candidate := adoptableSandboxOnNode("candidate", "node-1")
+	fakeClient := newSandboxClaimClientBuilder(scheme).
+		WithObjects(claim, requestingClaim, candidate, podForSandbox(candidate, "node-1"), readyNode("node-1")).
+		Build()
+	warmQueue := queue.NewSimpleSandboxQueue()
+	warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{Namespace: candidate.Namespace, Name: candidate.Name, NodeName: candidate.Status.NodeName})
+	r := &SandboxClaimReconciler{Client: fakeClient, APIReader: fakeClient, WarmSandboxQueue: warmQueue}
+
+	got, _, err := r.getCandidate(context.Background(), requestingClaim)
+	require.NoError(t, err)
+	require.Nil(t, got)
+	requeued, queued := warmQueue.Get(nodeEligibilityQueueName())
+	require.True(t, queued)
+	require.Equal(t, candidate.Name, requeued.Name)
+	warmQueue.Add(nodeEligibilityQueueName(), requeued)
+
+	require.NoError(t, fakeClient.Delete(context.Background(), claim))
+	got, _, err = r.getCandidate(context.Background(), requestingClaim)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, candidate.Name, got.Name)
+}
+
+func TestGetCandidateSkipsIneligibleNode(t *testing.T) {
+	scheme := newScheme(t)
+	claim := nodeEligibilityClaim()
+	drainingCandidate := adoptableSandboxOnNode("draining-candidate", "node-draining")
+	eligibleCandidate := adoptableSandboxOnNode("eligible-candidate", "node-eligible")
+	drainingPod := podForSandbox(drainingCandidate, "node-draining")
+	eligiblePod := podForSandbox(eligibleCandidate, "node-eligible")
+	drainingNode := readyNode("node-draining", corev1.Taint{
+		Key: "maintenance.example/draining", Effect: corev1.TaintEffectNoSchedule,
+	})
+	eligibleNode := readyNode("node-eligible")
+	fakeClient := newSandboxClaimClientBuilder(scheme).
+		WithObjects(claim, drainingCandidate, eligibleCandidate, drainingPod, eligiblePod, drainingNode, eligibleNode).
+		Build()
+	warmQueue := queue.NewSimpleSandboxQueue()
+	warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{Namespace: "default", Name: drainingCandidate.Name, NodeName: drainingCandidate.Status.NodeName})
+	warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{Namespace: "default", Name: eligibleCandidate.Name, NodeName: eligibleCandidate.Status.NodeName})
+	r := &SandboxClaimReconciler{Client: fakeClient, WarmSandboxQueue: warmQueue}
+
+	candidate, key, err := r.getCandidate(context.Background(), claim)
+	require.NoError(t, err)
+	require.Equal(t, eligibleCandidate.Name, candidate.Name)
+	require.Equal(t, eligibleCandidate.Name, key.Name)
+
+	requeued, ok := warmQueue.Get(nodeEligibilityQueueName())
+	require.True(t, ok)
+	require.Equal(t, drainingCandidate.Name, requeued.Name)
+}
+
+func TestGetCandidateRequeuesPlacementLookupFailure(t *testing.T) {
+	scheme := newScheme(t)
+	claim := nodeEligibilityClaim()
+	candidate := adoptableSandboxOnNode("candidate", "node-1")
+	pod := podForSandbox(candidate, "node-1")
+	node := readyNode("node-1")
+	fakeClient := newSandboxClaimClientBuilder(scheme).WithObjects(claim, candidate, pod, node).Build()
+	getErr := errors.New("node API unavailable")
+	apiReader := interceptor.NewClient(fakeClient, interceptor.Funcs{
+		Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.Node); ok {
+				return getErr
+			}
+			return fakeClient.Get(ctx, key, obj, opts...)
+		},
+	})
+	warmQueue := queue.NewSimpleSandboxQueue()
+	warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{Namespace: "default", Name: candidate.Name, NodeName: candidate.Status.NodeName})
+	r := &SandboxClaimReconciler{Client: fakeClient, APIReader: apiReader, WarmSandboxQueue: warmQueue}
+
+	_, _, err := r.getCandidate(context.Background(), claim)
+	require.ErrorIs(t, err, errSandboxPlacementLookup)
+	require.ErrorIs(t, err, getErr)
+
+	requeued, ok := warmQueue.Get(nodeEligibilityQueueName())
+	require.True(t, ok)
+	require.Equal(t, candidate.Name, requeued.Name)
+}
+
+func TestGetCandidatePermanentPlacementFallsBackToCold(t *testing.T) {
+	scheme := newScheme(t)
+
+	for _, condition := range []string{"missing pod", "missing node", "terminal pod"} {
+		t.Run(condition, func(t *testing.T) {
+			claim := nodeEligibilityClaim()
+			candidate := adoptableSandboxOnNode("candidate", "node-1")
+			objects := []client.Object{claim, candidate}
+			if condition != "missing pod" {
+				pod := podForSandbox(candidate, "node-1")
+				if condition == "terminal pod" {
+					pod.Status.Phase = corev1.PodFailed
+				}
+				objects = append(objects, pod)
+			}
+			fakeClient := newSandboxClaimClientBuilder(scheme).WithObjects(objects...).Build()
+			warmQueue := queue.NewSimpleSandboxQueue()
+			warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{Namespace: "default", Name: candidate.Name, NodeName: candidate.Status.NodeName})
+			r := &SandboxClaimReconciler{Client: fakeClient, WarmSandboxQueue: warmQueue}
+
+			got, _, err := r.getCandidate(context.Background(), claim)
+			require.NoError(t, err)
+			require.Nil(t, got)
+			_, ok := warmQueue.Get(nodeEligibilityQueueName())
+			require.False(t, ok)
+		})
+	}
+}
+
+func TestAdoptionRechecksPlacementAfterRecordingAssignment(t *testing.T) {
+	scheme := newScheme(t)
+	drainTaint := corev1.Taint{Key: "maintenance.example/draining", Effect: corev1.TaintEffectNoSchedule}
+
+	tests := []struct {
+		name          string
+		lookupError   error
+		nodeMissing   bool
+		wantAssigned  bool
+		wantCandidate bool
+	}{
+		{
+			name:          "new drain taint releases the assignment",
+			wantCandidate: true,
+		},
+		{
+			name:         "transient lookup error preserves the assignment",
+			lookupError:  errors.New("node API unavailable"),
+			wantAssigned: true,
+		},
+		{
+			name:        "missing node releases the assignment",
+			nodeMissing: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := nodeEligibilityClaim()
+			candidate := adoptableSandboxOnNode("candidate", "node-1")
+			pod := podForSandbox(candidate, "node-1")
+			fakeClient := newSandboxClaimClientBuilder(scheme).
+				WithObjects(claim, candidate, pod, readyNode("node-1")).
+				Build()
+			podReads := 0
+			nodeReads := 0
+			apiReader := interceptor.NewClient(fakeClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*corev1.Pod); ok {
+						podReads++
+						return c.Get(ctx, key, obj, opts...)
+					}
+					node, ok := obj.(*corev1.Node)
+					if !ok {
+						return c.Get(ctx, key, obj, opts...)
+					}
+					nodeReads++
+					if nodeReads >= 2 && tt.nodeMissing {
+						return k8errors.NewNotFound(corev1.Resource("nodes"), key.Name)
+					}
+					if nodeReads >= 2 && tt.lookupError != nil {
+						return tt.lookupError
+					}
+					if err := c.Get(ctx, key, node, opts...); err != nil {
+						return err
+					}
+					if nodeReads >= 2 {
+						node.Spec.Taints = []corev1.Taint{drainTaint}
+					}
+					return nil
+				},
+			})
+			warmQueue := queue.NewSimpleSandboxQueue()
+			warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{Namespace: candidate.Namespace, Name: candidate.Name, NodeName: candidate.Status.NodeName})
+			r := &SandboxClaimReconciler{Client: fakeClient, APIReader: apiReader, WarmSandboxQueue: warmQueue}
+
+			got, err := r.adoptSandboxFromCandidates(context.Background(), claim)
+			if tt.lookupError == nil {
+				require.ErrorIs(t, err, errAdoptionConflictRetry)
+			} else {
+				require.ErrorIs(t, err, errSandboxPlacementLookup)
+				require.ErrorIs(t, err, tt.lookupError)
+			}
+			require.Nil(t, got)
+			require.GreaterOrEqual(t, podReads, 2)
+			require.GreaterOrEqual(t, nodeReads, 2)
+
+			updatedClaim := &extensionsv1beta1.SandboxClaim{}
+			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(claim), updatedClaim))
+			_, assigned := updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]
+			require.Equal(t, tt.wantAssigned, assigned)
+			requeued, queued := warmQueue.Get(nodeEligibilityQueueName())
+			require.Equal(t, tt.wantCandidate, queued)
+			if queued {
+				require.Equal(t, candidate.Name, requeued.Name)
+			}
+
+			updatedCandidate := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(candidate), updatedCandidate))
+			controllerRef := metav1.GetControllerOf(updatedCandidate)
+			require.NotNil(t, controllerRef)
+			require.Equal(t, "SandboxWarmPool", controllerRef.Kind)
+		})
+	}
+}
+
+func TestAdoptionRecheckRejectsInactiveRequestingClaim(t *testing.T) {
+	scheme := newScheme(t)
+
+	for _, tt := range []struct {
+		name           string
+		mutate         func(context.Context, client.WithWatch, *extensionsv1beta1.SandboxClaim) error
+		wantUID        types.UID
+		wantAssignment string
+	}{
+		{
+			name:    "requesting claim starts deleting",
+			wantUID: "claim-uid",
+			mutate: func(ctx context.Context, c client.WithWatch, claim *extensionsv1beta1.SandboxClaim) error {
+				return c.Delete(ctx, claim)
+			},
+		},
+		{
+			name:    "requesting claim is replaced under the same name",
+			wantUID: "replacement-uid",
+			mutate: func(ctx context.Context, c client.WithWatch, claim *extensionsv1beta1.SandboxClaim) error {
+				if err := c.Delete(ctx, claim); err != nil {
+					return err
+				}
+				replacement := nodeEligibilityClaim()
+				replacement.UID = "replacement-uid"
+				return c.Create(ctx, replacement)
+			},
+		},
+		{
+			name:           "requesting claim changes its assignment",
+			wantUID:        "claim-uid",
+			wantAssignment: "other-sandbox",
+			mutate: func(ctx context.Context, c client.WithWatch, claim *extensionsv1beta1.SandboxClaim) error {
+				claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = "other-sandbox"
+				return c.Update(ctx, claim)
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := nodeEligibilityClaim()
+			if tt.name == "requesting claim starts deleting" {
+				claim.Finalizers = []string{"test.example/finalizer"}
+			}
+			candidate := adoptableSandboxOnNode("candidate", "node-1")
+			baseClient := newSandboxClaimClientBuilder(scheme).
+				WithObjects(claim, candidate, podForSandbox(candidate, "node-1"), readyNode("node-1")).
+				Build()
+			mutated := false
+			apiReader := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					current, ok := obj.(*extensionsv1beta1.SandboxClaim)
+					if !ok {
+						return c.Get(ctx, key, obj, opts...)
+					}
+					if !mutated {
+						if err := c.Get(ctx, key, current, opts...); err != nil {
+							return err
+						}
+						if err := tt.mutate(ctx, c, current); err != nil {
+							return err
+						}
+						mutated = true
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			warmQueue := queue.NewSimpleSandboxQueue()
+			warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{
+				Namespace: candidate.Namespace,
+				Name:      candidate.Name,
+				NodeName:  candidate.Status.NodeName,
+			})
+			r := &SandboxClaimReconciler{Client: baseClient, APIReader: apiReader, WarmSandboxQueue: warmQueue}
+
+			got, err := r.adoptSandboxFromCandidates(context.Background(), claim)
+			require.ErrorIs(t, err, errAdoptionConflictRetry)
+			require.Nil(t, got)
+			require.True(t, mutated)
+
+			persistedClaim := &extensionsv1beta1.SandboxClaim{}
+			require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(claim), persistedClaim))
+			require.Equal(t, tt.wantUID, persistedClaim.UID)
+			require.False(t, sandboxAssignmentPresent(persistedClaim, candidate.Name))
+			require.Equal(t, tt.wantAssignment, persistedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+
+			requeued, queued := warmQueue.Get(nodeEligibilityQueueName())
+			require.True(t, queued)
+			require.Equal(t, candidate.Name, requeued.Name)
+
+			persistedCandidate := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(candidate), persistedCandidate))
+			controllerRef := metav1.GetControllerOf(persistedCandidate)
+			require.NotNil(t, controllerRef)
+			require.Equal(t, "SandboxWarmPool", controllerRef.Kind)
+		})
+	}
+}
+
+func TestAdoptionConflictRecovery(t *testing.T) {
+	scheme := newScheme(t)
+
+	for _, tt := range []struct {
+		name         string
+		otherOwner   bool
+		wantAssigned bool
+	}{
+		{name: "another claim wins ownership", otherOwner: true},
+		{name: "unrelated resource version change", wantAssigned: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := nodeEligibilityClaim()
+			candidate := adoptableSandboxOnNode("candidate", "node-1")
+			candidate.Spec.PodTemplate.ObjectMeta.Labels = map[string]string{}
+			baseClient := newSandboxClaimClientBuilder(scheme).
+				WithObjects(claim, candidate, podForSandbox(candidate, "node-1"), readyNode("node-1")).
+				Build()
+			conflictPending := true
+			cachedClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*sandboxv1beta1.Sandbox); !ok || !conflictPending {
+						return c.Patch(ctx, obj, patch, opts...)
+					}
+					conflictPending = false
+					fresh := &sandboxv1beta1.Sandbox{}
+					if err := c.Get(ctx, client.ObjectKeyFromObject(candidate), fresh); err != nil {
+						return err
+					}
+					if tt.otherOwner {
+						fresh.OwnerReferences = []metav1.OwnerReference{{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       "SandboxClaim",
+							Name:       "winner",
+							UID:        "winner-uid",
+							Controller: new(true),
+						}}
+					} else {
+						fresh.Annotations = map[string]string{"test.example/revision-bump": "true"}
+					}
+					if err := c.Update(ctx, fresh); err != nil {
+						return err
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			warmQueue := queue.NewSimpleSandboxQueue()
+			warmQueue.Add(nodeEligibilityQueueName(), queue.SandboxKey{
+				Namespace: candidate.Namespace,
+				Name:      candidate.Name,
+				NodeName:  candidate.Status.NodeName,
+			})
+			r := &SandboxClaimReconciler{
+				Client:           cachedClient,
+				APIReader:        baseClient,
+				Scheme:           scheme,
+				WarmSandboxQueue: warmQueue,
+			}
+
+			got, err := r.adoptSandboxFromCandidates(context.Background(), claim)
+			require.Nil(t, got)
+			require.ErrorIs(t, err, errAdoptionConflictRetry)
+			require.False(t, conflictPending)
+			_, queued := warmQueue.Get(nodeEligibilityQueueName())
+			require.False(t, queued)
+
+			persistedClaim := &extensionsv1beta1.SandboxClaim{}
+			require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(claim), persistedClaim))
+			require.Equal(t, tt.wantAssigned, sandboxAssignmentPresent(persistedClaim, candidate.Name))
+
+			persistedSandbox := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(candidate), persistedSandbox))
+			owner := metav1.GetControllerOf(persistedSandbox)
+			require.NotNil(t, owner)
+			if tt.otherOwner {
+				require.Equal(t, types.UID("winner-uid"), owner.UID)
+				persistedClaim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: candidate.Name}
+				require.NoError(t, baseClient.Update(context.Background(), persistedClaim))
+				got, err = r.getOrCreateSandbox(context.Background(), persistedClaim, nil)
+				require.Nil(t, got)
+				require.ErrorIs(t, err, errAdoptionConflictRetry)
+				require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(claim), persistedClaim))
+				require.False(t, sandboxAssignmentPresent(persistedClaim, candidate.Name))
+				return
+			}
+
+			staleClaim := nodeEligibilityClaim()
+			got, err = r.getOrCreateSandbox(context.Background(), staleClaim, nil)
+			require.Nil(t, got)
+			require.ErrorIs(t, err, errAdoptionTriggeredRetry)
+			require.True(t, sandboxAssignmentPresent(staleClaim, candidate.Name))
+			require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(candidate), persistedSandbox))
+			require.True(t, metav1.IsControlledBy(persistedSandbox, staleClaim))
+		})
+	}
+}
+
+func TestReleaseCandidateAssignmentRequeuesAfterAmbiguousPatch(t *testing.T) {
+	scheme := newScheme(t)
+	patchErr := errors.New("patch response lost")
+
+	for _, tt := range []struct {
+		name        string
+		applyPatch  bool
+		bothSources bool
+		ownerWins   bool
+	}{
+		{
+			name:       "applied patch makes the candidate adoptable",
+			applyPatch: true,
+		},
+		{
+			name: "unapplied patch keeps the candidate reserved",
+		},
+		{
+			name:        "both assignment sources are cleared",
+			applyPatch:  true,
+			bothSources: true,
+		},
+		{
+			name:       "owned sandbox is not requeued",
+			applyPatch: true,
+			ownerWins:  true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := nodeEligibilityClaim()
+			claim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: "candidate"}
+			if tt.bothSources {
+				claim.Labels = map[string]string{extensionsv1beta1.DeprecatedAssignedSandboxNameLabel: "candidate"}
+			}
+			otherClaim := nodeEligibilityClaim()
+			otherClaim.Name = "other-claim"
+			otherClaim.UID = "other-claim-uid"
+			candidate := adoptableSandboxOnNode("candidate", "node-1")
+			pod := podForSandbox(candidate, "node-1")
+			baseClient := newSandboxClaimClientBuilder(scheme).
+				WithObjects(claim, otherClaim, candidate, pod, readyNode("node-1")).
+				Build()
+			patchClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if tt.applyPatch {
+						if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+							return err
+						}
+						if tt.ownerWins {
+							fresh := &sandboxv1beta1.Sandbox{}
+							if err := c.Get(ctx, client.ObjectKeyFromObject(candidate), fresh); err != nil {
+								return err
+							}
+							fresh.OwnerReferences = []metav1.OwnerReference{{
+								APIVersion: extensionsv1beta1.GroupVersion.String(),
+								Kind:       "SandboxClaim",
+								Name:       otherClaim.Name,
+								UID:        otherClaim.UID,
+								Controller: new(true),
+							}}
+							if err := c.Update(ctx, fresh); err != nil {
+								return err
+							}
+						}
+					}
+					return patchErr
+				},
+			})
+			warmQueue := queue.NewSimpleSandboxQueue()
+			r := &SandboxClaimReconciler{Client: patchClient, APIReader: baseClient, WarmSandboxQueue: warmQueue}
+
+			err := r.releaseCandidateAssignment(context.Background(), claim, candidate, true)
+			require.ErrorIs(t, err, patchErr)
+
+			persistedClaim := &extensionsv1beta1.SandboxClaim{}
+			require.NoError(t, baseClient.Get(context.Background(), client.ObjectKeyFromObject(claim), persistedClaim))
+			require.Equal(t, !tt.applyPatch, sandboxAssignmentPresent(persistedClaim, candidate.Name))
+			requeued, queued := warmQueue.Get(nodeEligibilityQueueName())
+			require.Equal(t, !tt.ownerWins, queued)
+			if tt.ownerWins {
+				return
+			}
+			require.Equal(t, candidate.Name, requeued.Name)
+			warmQueue.Add(nodeEligibilityQueueName(), requeued)
+
+			got, _, err := r.getCandidate(context.Background(), otherClaim)
+			require.NoError(t, err)
+			if tt.applyPatch {
+				require.NotNil(t, got)
+				require.Equal(t, candidate.Name, got.Name)
+				return
+			}
+			require.Nil(t, got)
+			requeued, queued = warmQueue.Get(nodeEligibilityQueueName())
+			require.True(t, queued)
+			require.Equal(t, candidate.Name, requeued.Name)
+		})
+	}
+}
+
+func TestRecordedAssignmentRecoveryRequeuesIneligibleCandidate(t *testing.T) {
+	scheme := newScheme(t)
+	claim := nodeEligibilityClaim()
+	claim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: "candidate"}
+	candidate := adoptableSandboxOnNode("candidate", "node-1")
+	pod := podForSandbox(candidate, "node-2")
+	fakeClient := newSandboxClaimClientBuilder(scheme).WithObjects(claim, candidate, pod).Build()
+	warmQueue := queue.NewSimpleSandboxQueue()
+	r := &SandboxClaimReconciler{Client: fakeClient, WarmSandboxQueue: warmQueue}
+
+	got, err := r.getOrCreateSandbox(context.Background(), claim, nil)
+	require.ErrorIs(t, err, errAdoptionConflictRetry)
+	require.Nil(t, got)
+
+	requeued, ok := warmQueue.Get(nodeEligibilityQueueName())
+	require.True(t, ok)
+	require.Equal(t, candidate.Name, requeued.Name)
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(claim), updatedClaim))
+	require.NotContains(t, updatedClaim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+}
+
+func TestRecordedAssignmentNotFoundPreservesNewAssignment(t *testing.T) {
+	scheme := newScheme(t)
+	liveClaim := nodeEligibilityClaim()
+	liveClaim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: "candidate-b"}
+	staleClaim := liveClaim.DeepCopy()
+	staleClaim.Annotations = map[string]string{extensionsv1beta1.AssignedSandboxNameAnnotation: "candidate-a"}
+	fc := newSandboxClaimClientBuilder(scheme).WithObjects(liveClaim).Build()
+	r := &SandboxClaimReconciler{Client: fc, APIReader: fc, WarmSandboxQueue: queue.NewSimpleSandboxQueue()}
+
+	got, err := r.getOrCreateSandbox(context.Background(), staleClaim, nil)
+	require.Nil(t, got)
+	require.ErrorIs(t, err, errAdoptionConflictRetry)
+
+	persisted := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fc.Get(context.Background(), client.ObjectKeyFromObject(liveClaim), persisted))
+	require.Equal(t, "candidate-b", assignedSandboxName(persisted))
+	pending, ok := r.pendingAssignments.Load(client.ObjectKeyFromObject(liveClaim))
+	require.True(t, ok)
+	require.Equal(t, "candidate-b", pending.sandbox)
 }
 
 func TestSandboxClaimAdoptionStrategy(t *testing.T) {
@@ -4630,12 +5503,18 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			var allObjects []client.Object
 			allObjects = append(allObjects, template, claim, warmPool)
 			allObjects = append(allObjects, tc.otherObjects...)
+			nodeNames := map[string]struct{}{}
 			for _, sb := range tc.existingSandboxes {
-				allObjects = append(allObjects, sb)
+				allObjects = append(allObjects, sb, podForSandbox(sb, sb.Status.NodeName))
+				if sb.Status.NodeName != "" {
+					nodeNames[sb.Status.NodeName] = struct{}{}
+				}
+			}
+			for nodeName := range nodeNames {
+				allObjects = append(allObjects, readyNode(nodeName))
 			}
 
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
+			fakeClient := newSandboxClaimClientBuilder(scheme).
 				WithObjects(allObjects...).
 				WithStatusSubresource(claim).
 				Build()
@@ -4826,12 +5705,11 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 						}},
 					},
 				}
-				existingObjects = append(existingObjects, readyWarmSandbox)
+				existingObjects = append(existingObjects, readyWarmSandbox, podForSandbox(readyWarmSandbox, readyWarmSandbox.Status.NodeName))
 				warmSandboxQueue.Add(queue.GetNamespacedWarmPoolName("default", "vct-warmpool"), queue.SandboxKey{Namespace: "default", Name: "warm-sandbox"})
 			}
 
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
+			fakeClient := newSandboxClaimClientBuilder(scheme).
 				WithObjects(existingObjects...).
 				WithStatusSubresource(claim).
 				Build()
@@ -5000,8 +5878,7 @@ func TestCreateSandboxClaimVolumeClaimTemplatesErrors(t *testing.T) {
 			templateCopy.Spec.VolumeClaimTemplates = tc.templateVCTs
 			templateCopy.Spec.VolumeClaimTemplatesPolicy = tc.policy
 
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
+			fakeClient := newSandboxClaimClientBuilder(scheme).
 				WithObjects(claim, templateCopy, warmPool).
 				WithStatusSubresource(claim).
 				Build()
@@ -5071,8 +5948,7 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 	}
 
 	scheme := newScheme(t)
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
+	fakeClient := newSandboxClaimClientBuilder(scheme).
 		WithObjects(claim).
 		WithStatusSubresource(claim).
 		Build()

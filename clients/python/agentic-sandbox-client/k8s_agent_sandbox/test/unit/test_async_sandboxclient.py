@@ -461,9 +461,7 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         await sandbox.terminate()
         await sandbox.terminate()
 
-        mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
-            "test-claim", "test-ns"
-        )
+        mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with("test-claim", "test-ns")
         self.assertIsNone(sandbox.claim_name)
 
     @patch("k8s_agent_sandbox.async_sandbox.AsyncFilesystem")

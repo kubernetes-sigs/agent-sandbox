@@ -198,6 +198,37 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.qps=200 \
   --set cluster.spec.kubeScheduler.burst=300
 
+# fsync A/B experiment: /var/lib/containerd on tmpfs (worker nodes only).
+# At ~113 sandboxes/s the profiler measured ~42 fdatasync+fsync calls per
+# pod in containerd (bolt metadata + content store, 1.4ms mean) — visible
+# but estimated second-order (~50-80ms/pod serial). tmpfs makes those
+# syncs ~free, so this run measures the true upper bound of the fsync
+# theory. Benchmark-only: image store and snapshots do not survive a node
+# reboot (irrelevant for a throwaway cluster). Nodes are n2-standard-8
+# (32GB); tmpfs only consumes what is written (~1-2GB of images here).
+# Set STRESS_CONTAINERD_TMPFS=false to restore disk-backed containerd.
+STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-true}"
+if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
+  echo "Adding containerd-on-tmpfs hook to cluster spec..."
+  # `kops get -o yaml` emits top-level keys sorted (apiVersion, kind,
+  # metadata, spec), so appending 2-space-indented keys extends spec.
+  kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster.yaml"
+  cat >> "${WORKDIR}/cluster.yaml" <<'HOOK_EOF'
+  hooks:
+  - name: containerd-tmpfs
+    before:
+    - containerd.service
+    roles:
+    - Node
+    manifest: |
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/mkdir -p /var/lib/containerd
+      ExecStart=/bin/mount -t tmpfs -o size=16g tmpfs /var/lib/containerd
+HOOK_EOF
+  kops replace -f "${WORKDIR}/cluster.yaml"
+fi
+
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes
 

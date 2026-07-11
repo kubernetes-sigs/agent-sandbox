@@ -457,6 +457,15 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return nil
 	}
 
+	// NodeName alone is not worth an API write: it becomes known when the
+	// pod is scheduled, moments before the pod-startup status changes that
+	// consumers actually wait on, and nothing blocks on it. Fold it into
+	// the next semantic write instead of paying a status write (and the
+	// resulting watch event) per lifecycle just to publish it early.
+	if nodeNameOnlyChange(oldStatus, &sandbox.Status) {
+		return nil
+	}
+
 	if err := r.Status().Update(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to update sandbox status")
 		return err
@@ -464,6 +473,17 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// nodeNameOnlyChange reports whether NodeName is the only field that differs
+// between the old and new status.
+func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool {
+	if oldStatus.NodeName == newStatus.NodeName {
+		return false
+	}
+	scratch := newStatus.DeepCopy()
+	scratch.NodeName = oldStatus.NodeName
+	return reflect.DeepEqual(oldStatus, scratch)
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.

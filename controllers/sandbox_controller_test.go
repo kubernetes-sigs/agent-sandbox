@@ -284,6 +284,70 @@ func TestResolvePodName(t *testing.T) {
 	}
 }
 
+func TestNodeNameOnlyChange(t *testing.T) {
+	base := func() *sandboxv1beta1.SandboxStatus {
+		return &sandboxv1beta1.SandboxStatus{
+			PodIPs:   []string{"10.0.0.1"},
+			NodeName: "node-1",
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionFalse},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name   string
+		mutate func(*sandboxv1beta1.SandboxStatus)
+		want   bool
+	}{
+		{
+			name:   "no change",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) {},
+			want:   false,
+		},
+		{
+			name:   "nodeName set",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) { s.NodeName = "node-2" },
+			want:   true,
+		},
+		{
+			name:   "nodeName cleared",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) { s.NodeName = "" },
+			want:   true,
+		},
+		{
+			name: "nodeName and podIPs change",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) {
+				s.NodeName = "node-2"
+				s.PodIPs = []string{"10.0.0.2"}
+			},
+			want: false,
+		},
+		{
+			name: "nodeName and condition change",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) {
+				s.NodeName = "node-2"
+				s.Conditions[0].Status = metav1.ConditionTrue
+			},
+			want: false,
+		},
+		{
+			name:   "condition change only",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) { s.Conditions[0].Status = metav1.ConditionTrue },
+			want:   false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			oldStatus := base()
+			newStatus := base()
+			tc.mutate(newStatus)
+			require.Equal(t, tc.want, nodeNameOnlyChange(oldStatus, newStatus))
+		})
+	}
+}
+
 func TestReconcile(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"

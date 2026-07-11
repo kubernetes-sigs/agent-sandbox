@@ -447,6 +447,25 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await sandbox.get_pod_ip(), "10.244.0.42")
 
+    async def test_terminate_is_idempotent_after_successful_delete(self):
+        mock_k8s_helper = AsyncMock()
+        mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        sandbox = AsyncSandbox(
+            claim_name="test-claim",
+            sandbox_id="test-id",
+            namespace="test-ns",
+            connection_config=SandboxDirectConnectionConfig(api_url="http://test-router:8080"),
+            k8s_helper=mock_k8s_helper,
+        )
+
+        await sandbox.terminate()
+        await sandbox.terminate()
+
+        mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-ns"
+        )
+        self.assertIsNone(sandbox.claim_name)
+
     @patch("k8s_agent_sandbox.async_sandbox.AsyncFilesystem")
     @patch("k8s_agent_sandbox.async_sandbox.AsyncCommandExecutor")
     @patch("k8s_agent_sandbox.async_sandbox.create_tracer_manager")

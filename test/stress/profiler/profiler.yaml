@@ -239,7 +239,7 @@ data:
     // with boring stacks; read past them to the filesystem/VFS stacks.
     // LRU: threads that die while off-CPU never resume, so their entries
     // leak; a full regular map floods logs with per-event warnings.
-    let @start = lruhash(16384);
+    let @offcpu_since = lruhash(16384);
 
     BEGIN
     {
@@ -250,12 +250,12 @@ data:
     {
       $prev = (struct task_struct *)arg0;
       if (strncmp($prev->comm, "containerd", 10) == 0) {
-        @start[$prev->pid] = nsecs;
+        @offcpu_since[$prev->pid] = nsecs;
       }
-      $last = @start[tid];
+      $last = @offcpu_since[tid];
       if ($last) {
         $delta_us = (nsecs - $last) / 1000;
-        delete(@start[tid]);
+        delete(@offcpu_since[tid]);
         if ($delta_us >= 1000 && strncmp(comm, "containerd", 10) == 0) {
           @offcpu_us[kstack(20)] = sum($delta_us);
         }

@@ -266,6 +266,14 @@ if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
     kubectl logs --namespace stress-node-profiler "${pod}" -c ctr-events > "${STRESS_OUTPUT_DIR}/profiler-ctr-events-${node}.log" || true
   done
   kubectl delete -f test/stress/profiler/profiler.yaml --wait=false || true
+
+  # A bpftrace program that fails the kernel verifier dies at startup and
+  # silently yields no data (this cost several runs of profiler data before
+  # anyone noticed). Surface it loudly in the build log.
+  if grep -l "ERROR" "${STRESS_OUTPUT_DIR}"/profiler-fsync-*.log "${STRESS_OUTPUT_DIR}"/profiler-extra-*.log "${STRESS_OUTPUT_DIR}"/profiler-offcpu-*.log >/dev/null 2>&1; then
+    echo "WARNING: bpftrace errors detected in profiler logs (data likely missing):"
+    grep -H -m1 "ERROR" "${STRESS_OUTPUT_DIR}"/profiler-*.log 2>/dev/null | head -5 || true
+  fi
 fi
 
 # Capture controller diagnostics alongside the stress test results.

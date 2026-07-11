@@ -60,15 +60,15 @@
     },
     {
       "id": 5,
-      "name": "eval-security-vulnerability-p1",
-      "prompt": "Triage open issue #601 (security vulnerability / dependency issue).",
-      "expected_output": "Issue #601 assigned priority/important-soon (P1) for security vulnerability.",
+      "name": "eval-security-vulnerability-p0",
+      "prompt": "Triage open issue #601 (critical security vulnerability / CVE).",
+      "expected_output": "Issue #601 assigned priority/critical-urgent (P0) for critical security vulnerability.",
       "files": [
         "evals/files/roadmap.md",
         "evals/files/open_issues.json"
       ],
       "assertions": [
-        "Issue #601 is assigned priority/important-soon (P1)",
+        "Issue #601 is assigned priority/critical-urgent (P0)",
         "Rationale cites security or dependency vulnerability"
       ]
     },

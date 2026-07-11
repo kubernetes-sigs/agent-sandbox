@@ -114,12 +114,12 @@ def run_triage_engine(roadmap_content, open_issues):
             }
             continue
 
-        # Rule 5: Security / dependency vulnerabilities
-        if "security" in title_body or "vulnerability" in title_body or "cve" in title_body or "dependency" in title_body:
+        # Rule 5: Critical Security / CVEs -> P0
+        if "security" in title_body or "vulnerability" in title_body or "cve" in title_body:
             results[num] = {
-                "priority": "priority/important-soon",
-                "kanban": "P1",
-                "rationale": "Security / dependency vulnerability -> P1.",
+                "priority": "priority/critical-urgent",
+                "kanban": "P0",
+                "rationale": "Critical security vulnerability / CVE -> P0.",
                 "preserved": False,
             }
             continue
@@ -234,9 +234,9 @@ def evaluate_assertion(assertion_text, report_text, triage_results):
         evidence = f"Issue #501 assigned priority='{res.get('priority')}' kanban='{res.get('kanban')}'"
         return passed, evidence
 
-    if "issue #601" in text and ("priority/important-soon" in text or "p1" in text):
+    if "issue #601" in text and ("priority/critical-urgent" in text or "p0" in text):
         res = triage_results.get("601", {})
-        passed = res.get("priority") == "priority/important-soon" and res.get("kanban") == "P1"
+        passed = res.get("priority") == "priority/critical-urgent" and res.get("kanban") == "P0"
         evidence = f"Issue #601 assigned priority='{res.get('priority')}' kanban='{res.get('kanban')}'"
         return passed, evidence
 

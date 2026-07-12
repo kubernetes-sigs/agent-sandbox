@@ -318,6 +318,12 @@ func runCreatePhase(ctx context.Context, cfg Config, tracker *Tracker, sandboxCl
 	}
 
 	if _, err := ForkJoin(ctx, names, cfg.CreateConcurrency, func(id types.NamespacedName) (struct{}, error) {
+		// The command traps SIGTERM and exits immediately: a bare `sleep` as PID 1
+		// gets no default SIGTERM disposition, so the kubelet would wait out the full
+		// grace period and SIGKILL (observed as exit code 137 and ~1s of extra
+		// deletion latency). The `& wait` is required because sh does not run traps
+		// while a foreground child is running.
+		// terminationGracePeriodSeconds=1 is the backstop if the trap fails.
 		sandbox := &unstructured.Unstructured{
 			Object: map[string]any{
 				"apiVersion": "agents.x-k8s.io/v1beta1",
@@ -329,13 +335,14 @@ func runCreatePhase(ctx context.Context, cfg Config, tracker *Tracker, sandboxCl
 				"spec": map[string]any{
 					"podTemplate": map[string]any{
 						"spec": map[string]any{
-							"restartPolicy": "Never",
+							"restartPolicy":                 "Never",
+							"terminationGracePeriodSeconds": int64(1),
 							"containers": []any{
 								map[string]any{
 									"name":            "main",
 									"image":           cfg.Image,
 									"imagePullPolicy": "IfNotPresent",
-									"command":         []string{"sleep", "infinity"},
+									"command":         []string{"sh", "-c", "trap 'exit 0' TERM INT; sleep 5 & wait"},
 								},
 							},
 						},

@@ -18,7 +18,7 @@ While standard errors are often surfaced directly in your script, the `k8s_agent
 
 - A running Kubernetes cluster with the [Agent Sandbox Controller]({{< ref "/docs/getting_started/overview" >}}) installed.
 - The [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/sandbox-router/README.md) deployed in your cluster.
-- A `SandboxTemplate` named `python-sandbox-template` applied to your cluster. See the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide for setup instructions.
+- A `SandboxWarmPool` named `python-sandbox-pool` (backed by a `SandboxTemplate` named `python-sandbox-template`) applied to your cluster. See the [Filesystem]({{< ref "/docs/filesystem" >}}) guide for a minimal `kubectl apply` example, or the [Python Runtime Sandbox]({{< ref "/docs/runtime-templates/python" >}}) guide.
 - The [Python SDK]({{< ref "/docs/python-client" >}}) installed with the tracing extra: `pip install "k8s-agent-sandbox[tracing]"`.
 
 ### SDK Logging
@@ -34,7 +34,7 @@ from k8s_agent_sandbox import SandboxClient
 logging.basicConfig(level=logging.INFO)
 
 client = SandboxClient()
-sandbox = client.create_sandbox("simple-sandbox-template")
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool")
 payload = "echo 'Hello World!'"
 response = sandbox.commands.run(payload)
 
@@ -43,7 +43,7 @@ print(response)
 
 Example output:
 ```log
-Creating SandboxClaim 'sandbox-claim-66ae1a5e' in namespace 'default' using template 'python-sandbox-template'...
+Creating SandboxClaim 'sandbox-claim-66ae1a5e' in namespace 'default' using warm pool 'python-sandbox-pool'...
 2026-04-15 16:52:11,634 - INFO - Resolving sandbox name from claim 'sandbox-claim-66ae1a5e'...
 2026-04-15 16:52:11,651 - INFO - Resolved sandbox name 'sandbox-claim-66ae1a5e' from claim status
 2026-04-15 16:52:11,651 - INFO - Watching for Sandbox sandbox-claim-66ae1a5e to become ready...
@@ -59,7 +59,7 @@ stdout='Hello World!\n' stderr='' exit_code=0
 
 ### Custom Sandbox Images and Output Inspection
 
-Often, agent code fails because the environment lacks necessary system packages or dependencies. If your agent requires a specific setup, you should build a custom Docker image, push it to your registry, and reference it in your Kubernetes `SandboxTemplate`.
+Often, agent code fails because the environment lacks necessary system packages or dependencies. If your agent requires a specific setup, you should build a custom Docker image, push it to your registry, and reference it in your Kubernetes `SandboxTemplate`. You must also create a `SandboxWarmPool` that references that template before calling `create_sandbox(warmpool=...)`.
 
 When executing commands inside this custom environment, the `response` object is your primary debugging tool. It strictly separates standard output, standard error, and the exit code.
 
@@ -72,8 +72,8 @@ from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
 
-# 1. Create a sandbox using a template that references your custom Docker image
-sandbox = client.create_sandbox("python-sandbox-template")
+# 1. Create a sandbox from a warm pool backed by a template with your custom Docker image
+sandbox = client.create_sandbox(warmpool="python-sandbox-pool")
 
 # 2. Run a command that might fail (e.g., executing a script with missing dependencies)
 response = sandbox.commands.run("python3 /app/agent_script.py")
@@ -121,10 +121,14 @@ You can run the following commands in your terminal to diagnose the Sandbox Cont
 
 #### Essential Diagnostic Commands
 
-Check the status of your sandbox templates to ensure your custom images are properly registered:
+Check the status of your sandbox templates and warm pools to ensure your custom images are properly registered:
 ```bash
-# Verify the template exists and is ready
+# Verify the template exists
 kubectl get sandboxtemplates
+
+# Verify the warm pool exists and has ready replicas
+kubectl get sandboxwarmpools
+kubectl describe sandboxwarmpool python-sandbox-pool
 ```
 
 When `create_sandbox()` hangs, it usually means the controller cannot fulfill the claim (e.g., due to insufficient node resources or an exhausted warm pool). Inspect the claims:

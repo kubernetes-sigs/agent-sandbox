@@ -54,7 +54,7 @@ steps:
       labelSelector: "agents.x-k8s.io/pool"
 
 # --- 2. DRAIN WARMPOOL (Excluded from Cold Measurement) ---
-# TODO: Add a measurement once we have the metric to measure acquistion from warmpool.
+# TODO: Add a measurement once we have the metric to measure acquisition from warmpool.
 - name: Claim with Warmpool
   phases:
   - name: Drain Pool

@@ -5,6 +5,10 @@ all: fix-go-generate build lint-go lint-api test-unit toc-verify
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: install-gen-tools
+install-gen-tools:
+	dev/tools/fix-go-generate --install-only
+
 GOPATH ?= $(shell go env GOPATH)
 
 .PHONY: generate-api-docs
@@ -25,8 +29,15 @@ LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 	-X $(VERSION_PKG).buildDate=$(BUILD_DATE)
 
 .PHONY: build
-build:
+build: build-controller build-sandbox-router
+
+.PHONY: build-controller
+build-controller:
 	go build -ldflags "$(LD_FLAGS)" -o bin/manager ./cmd/agent-sandbox-controller
+
+.PHONY: build-sandbox-router
+build-sandbox-router:
+	go build -ldflags "$(LD_FLAGS)" -o bin/sandbox-router ./sandbox-router/cmd
 
 KIND_CLUSTER=agent-sandbox
 
@@ -103,19 +114,19 @@ release-promote:
 # Publish a draft release to GitHub
 # Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-2.5-flash
 .PHONY: release-publish
-release-publish:
+release-publish: install-gen-tools
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-publish TAG=vX.Y.Z)"; exit 1; fi
 	go mod tidy
-	go generate ./...
+	PATH="$(CURDIR)/bin:$(PATH)" go generate ./...
 	./dev/tools/release --tag=${TAG} --publish --model=${GEMINI_MODEL}
 
 # Generate release manifests only
 # Usage: make release-manifests TAG=vX.Y.Z
 .PHONY: release-manifests
-release-manifests:
+release-manifests: install-gen-tools
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-manifests TAG=vX.Y.Z)"; exit 1; fi
 	go mod tidy
-	go generate ./...
+	PATH="$(CURDIR)/bin:$(PATH)" go generate ./...
 	./dev/tools/release --tag=${TAG}
 
 # Example usage:

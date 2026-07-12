@@ -33,11 +33,192 @@ def _fleet(registry, **cfg):
   return SandboxFleet(FleetConfig(**cfg), registry=registry)
 
 
+def test_naive_epochs_reuse_pools(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1", "i2"])
+  res = f.run(lambda t, h: t.image, strategy="naive", epochs=3)
+  # epochs>1 -> one task-ordered list per pass
+  assert len(res) == 3
+  assert all(sorted(r) == ["i1", "i2"] for r in res)
+  # pools created once and REUSED across epochs (2 images, not 2*3)
+  assert c.resources.create_warmpool.call_count == 2
+  assert f.handles() == []
+  assert c.active_replicas == 0          # torn down once, at the end
+
+
+def test_keep_warm_persists_then_explicit_teardown(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1", "i2"])
+  f.run(lambda t, h: t.image, strategy="naive", keep_warm=True)
+  # pools left resident (no final teardown) for caller-driven reuse
+  assert c.active_replicas == 2
+  assert set(f._warmed) == {"i1", "i2"}
+  # a second keep_warm run reuses them — no new pools, no double-reserve
+  f.run(lambda t, h: t.image, strategy="naive", keep_warm=True)
+  assert c.resources.create_warmpool.call_count == 2
+  assert c.active_replicas == 2
+  # explicit teardown fully cleans up
+  f.teardown()
+  assert c.active_replicas == 0
+  assert f._warmed == {}
+
+
+def test_epochs_must_be_positive(make_cluster):
+  f = _fleet(ClusterRegistry([make_cluster("solo")]))
+  f.load_tasks(["i1"])
+  with pytest.raises(ValueError):
+    f.run(lambda t, h: t.image, strategy="naive", epochs=0)
+
+
+def test_warm_entry_reserves_only_delta_on_scale_up(make_cluster):
+  # Re-warming an image with MORE replicas must reserve only the delta (the pool
+  # is upserted, not recreated) so active_replicas isn't double-counted.
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=8)
+  f.load_tasks(["i1"])
+  f.warm_image("i1", replicas_override=2)
+  assert c.active_replicas == 2 and f._warmed["i1"] == 2
+  f.warm_image("i1", replicas_override=4)        # scale up 2 -> 4
+  assert c.active_replicas == 4 and f._warmed["i1"] == 4
+  # already satisfied -> no further reservation
+  f.warm_image("i1", replicas_override=4)
+  assert c.active_replicas == 4
+
+
+def test_explicit_empty_registry_is_honored_no_kubeconfig(monkeypatch):
+  # An explicit (even empty) registry must NOT be replaced by a default ambient
+  # Cluster — ClusterRegistry defines __len__, so `registry or default` would
+  # treat ClusterRegistry([]) as falsy and load kube-config (fails in CI).
+  import agent_sandbox_rl.fleet as fleet_mod
+
+  def _boom(*a, **k):
+    raise AssertionError("must not build a default Cluster / load kube-config")
+  monkeypatch.setattr(fleet_mod, "Cluster", _boom)   # the name _default_registry uses
+  f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([]))
+  assert len(f.registry) == 0           # honored as-is, no fallback
+
+
+def test_warm_entry_waits_on_reuse(make_cluster):
+  # Re-warming an already-warm image with wait=True must still wait for readiness
+  # (a prior warm may have used wait=False), not silently skip the check.
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1"])
+  f.warm_image("i1", wait=False)                 # warm without waiting
+  assert c.resources.wait_for_pool_ready.call_count == 0
+  f.warm_image("i1", wait=True)                  # reuse — must wait now
+  assert c.resources.wait_for_pool_ready.call_count == 1
+  # no re-create / no extra reservation on reuse
+  assert c.resources.create_warmpool.call_count == 1
+
+
+def test_warm_images_dedupes_input(make_cluster):
+  # Duplicates in the public helper must not warm the same image twice (unsafe).
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["i1", "i2"])
+  f.warm_images(["i1", "i1", "i2", "i1"], wait=True)
+  assert c.resources.create_warmpool.call_count == 2
+
+
+def test_epoch_failure_tears_down_when_not_keep_warm(make_cluster):
+  # A non-final epoch that raises (teardown=False) must still clean up, so warm
+  # pools / reserved replicas don't leak when keep_warm=False.
+  from agent_sandbox_rl.exceptions import FleetError
+  c = make_cluster("solo")
+  c.resources.wait_for_pool_ready.return_value = False    # warm never ready -> FleetError
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4, ready_timeout=0)
+  f.load_tasks(["i1", "i2"])
+  with pytest.raises(FleetError):
+    f.run(lambda t, h: t.image, strategy="naive", epochs=2)
+  assert c.active_replicas == 0          # epoch-1 failure still tore down
+  assert f._warmed == {}
+
+
 def test_load_tasks_and_counts(two_cluster_registry):
   f = _fleet(two_cluster_registry)
   f.load_tasks(["imgA", "imgA", "imgB"])
   assert len(f.tasks) == 3
   assert dict(f.image_counts()) == {"imgA": 2, "imgB": 1}
+
+
+def test_warm_images_warms_in_parallel(make_cluster):
+  import time
+  c = make_cluster("solo")
+
+  def _slow_ready(*a, **k):
+    time.sleep(0.1)
+    return True
+  c.resources.wait_for_pool_ready.side_effect = _slow_ready
+
+  f = _fleet(ClusterRegistry([c]), max_concurrent=10)
+  imgs = [f"img{i}" for i in range(10)]
+  f.load_tasks(imgs)
+  start = time.monotonic()
+  f.warm_images(imgs, wait=True)            # 10 pools, each 0.1s ready
+  elapsed = time.monotonic() - start
+  assert elapsed < 0.6                       # parallel; serial would be ~1.0s
+  assert c.resources.create_warmpool.call_count == 10
+
+
+def test_warm_images_surfaces_warm_error(make_cluster):
+  from agent_sandbox_rl.exceptions import FleetError
+  c = make_cluster("solo")
+  c.resources.wait_for_pool_ready.return_value = False   # never ready -> FleetError
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4, ready_timeout=0)
+  f.load_tasks(["i1", "i2", "i3"])
+  with pytest.raises(FleetError):
+    f.warm_images(["i1", "i2", "i3"], wait=True)
+
+
+def test_recommended_window_uses_cluster_nodes(make_cluster):
+  # disk-aware window should span the whole pool when cluster_nodes is set
+  imgs = [f"img{i}" for i in range(100)]
+  f1 = _fleet(ClusterRegistry([make_cluster("a")]), max_concurrent=500,
+              avg_image_gb=10, node_ephemeral_gb=339)            # nodes unknown -> 1 node
+  f1.load_tasks(imgs)
+  f2 = _fleet(ClusterRegistry([make_cluster("b")]), max_concurrent=500,
+              avg_image_gb=10, node_ephemeral_gb=339, cluster_nodes=30)
+  f2.load_tasks(imgs)
+  assert f1.recommended_window() < f2.recommended_window()       # 25 (1 node) < 100 (pool)
+  assert f2.recommended_window() == 100                          # all fit across the pool
+
+
+def test_warm_per_task_sizes_replicas_to_task_count(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1, warm_per_task=True)
+  f.load_tasks(["i1", "i1", "i1", "i2"])           # i1: 3 tasks, i2: 1 task
+  reps = {e.image: e.replicas for e in f.plan().entries}
+  assert reps == {"i1": 3, "i2": 1}                # one replica per task
+
+
+def test_warm_per_task_clamps_to_max_pool_and_warns(make_cluster, caplog):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1, warm_per_task=True,
+             max_warmpool_size=2)
+  f.load_tasks(["i1", "i1", "i1"])                  # 3 tasks, cap 2
+  with caplog.at_level("WARNING"):
+    reps = {e.image: e.replicas for e in f.plan().entries}
+  assert reps == {"i1": 2}                          # clamped to max_warmpool_size
+  assert any("warm_per_task" in r.message for r in caplog.records)
+
+
+def test_pipelined_plus_warm_per_task_warns(make_cluster, caplog):
+  # the documented anti-pattern (window shrinkage) is guarded at runtime
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4, warm_per_task=True)
+  f.load_tasks(["i1", "i1", "i2", "i2"])
+  with caplog.at_level("WARNING"):
+    f.recommended_window(pipelined=True)
+  assert any("pipelined" in r.message and "warm_per_task" in r.message
+             for r in caplog.records)
+  # sliding (non-pipelined) does NOT warn
+  caplog.clear()
+  with caplog.at_level("WARNING"):
+    f.recommended_window(pipelined=False)
+  assert not any("pipelined" in r.message for r in caplog.records)
 
 
 def test_preflight_ok(two_cluster_registry):

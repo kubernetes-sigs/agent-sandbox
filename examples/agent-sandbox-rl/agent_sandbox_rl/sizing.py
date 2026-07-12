@@ -32,14 +32,22 @@ def compute_replicas(
     max_pool: int,
     *,
     buffer: int = 0,
+    per_task: bool = False,
 ) -> int:
   """Replicas to pre-warm for one image.
 
-  ``clamp(round(max_concurrent * tasks_image / tasks_total), 1,
-  min(tasks_image, max_pool)) + buffer`` (re-clamped).
+  Default (concurrency-proportional): ``clamp(round(max_concurrent * tasks_image
+  / tasks_total), 1, min(tasks_image, max_pool)) + buffer`` (re-clamped).
+
+  ``per_task=True`` instead warms **one replica per task** for the image —
+  ``min(tasks_image, max_pool)`` — so every task can claim a sandbox immediately
+  (RL "instant-claim" sizing). ``max_pool`` still caps it; raise
+  ``max_warmpool_size`` if an image has more tasks than the cap.
   """
   if tasks_image <= 0:
     return 0
+  if per_task:                       # one replica per task (tasks_image >= 1 here)
+    return min(tasks_image, max_pool)
   if tasks_total <= 0:
     tasks_total = tasks_image
   share = max_concurrent * tasks_image / tasks_total
@@ -51,6 +59,8 @@ def recommend_window(
     image_totals: "OrderedDict[str, int]",
     max_concurrent: int,
     max_pool: int,
+    *,
+    per_task: bool = False,
 ) -> int:
   """For the sliding strategy: how many image pools to keep warm so the total
   warm footprint stays ~ ``max_concurrent``."""
@@ -59,7 +69,7 @@ def recommend_window(
   used = 0
   window = 0
   for cnt in image_totals.values():
-    r = compute_replicas(cnt, total, max_concurrent, max_pool)
+    r = compute_replicas(cnt, total, max_concurrent, max_pool, per_task=per_task)
     if window >= 1 and used + r > budget:
       break
     used += r
@@ -67,11 +77,79 @@ def recommend_window(
   return max(1, window)
 
 
-def plan(image_totals, max_concurrent, max_pool, *, buffer=0):
+def recommend_window_disk(
+    image_totals: "OrderedDict[str, int]",
+    max_concurrent: int,
+    max_pool: int,
+    *,
+    avg_image_gb: float,
+    usable_disk_gb: float,
+    pipeline_factor: float = 1.0,
+    buffer: int = 0,
+    per_task: bool = False,
+    nodes: int = 1,
+) -> int:
+  """Largest window whose resident image bytes fit the usable node disk.
+
+  Disk budget = ``usable_disk_gb · nodes`` (the cluster's usable ephemeral disk):
+  distinct images **spread across the node pool**, so the resident set is bounded by
+  total cluster disk, not a single node's. With the default ``nodes=1`` this reduces
+  to the conservative single-node bound (a window's replicas might all co-locate);
+  pass the real node count to use the pool's full capacity.
+  ``pipeline_factor`` accounts for keeping up to N windows resident at once (2 for
+  the pipelined strategy). Returns ≥ 1 (always allow at least one image)."""
+  if not image_totals:
+    return 1
+  if not avg_image_gb or not usable_disk_gb:
+    return len(image_totals)               # disk-unbounded
+  total = sum(image_totals.values()) or 1
+  budget_gb = (usable_disk_gb * max(1, nodes)) / max(1e-9, pipeline_factor)
+  used_gb = 0.0
+  window = 0
+  for cnt in image_totals.values():
+    cost = compute_replicas(cnt, total, max_concurrent, max_pool,
+                            buffer=buffer, per_task=per_task) * avg_image_gb
+    if window >= 1 and used_gb + cost > budget_gb:
+      break
+    used_gb += cost
+    window += 1
+  return max(1, window)
+
+
+def recommend_window_pipelined(
+    image_totals: "OrderedDict[str, int]",
+    max_concurrent: int,
+    max_pool: int,
+    *,
+    avg_image_gb: float | None = None,
+    usable_disk_gb: float | None = None,
+    buffer: int = 0,
+    per_task: bool = False,
+    nodes: int = 1,
+) -> int:
+  """Window for the pipelined (double-buffered) strategy.
+
+  The pipeline keeps up to **two** windows resident at once, so halve the
+  concurrency window to keep peak ~ ``max_concurrent``; then, if disk hints are
+  given, cap by disk with a 2x factor (each cap applies its factor exactly once).
+  ``nodes`` lets the disk cap use the whole pool's disk (distinct images spread)."""
+  conc_win = max(1, recommend_window(
+      image_totals, max_concurrent, max_pool, per_task=per_task) // 2)
+  if avg_image_gb is None or usable_disk_gb is None:
+    return conc_win
+  disk_win = recommend_window_disk(
+      image_totals, max_concurrent, max_pool, avg_image_gb=avg_image_gb,
+      usable_disk_gb=usable_disk_gb, pipeline_factor=2.0, buffer=buffer,
+      per_task=per_task, nodes=nodes)
+  return max(1, min(conc_win, disk_win))
+
+
+def plan(image_totals, max_concurrent, max_pool, *, buffer=0, per_task=False):
   """Returns ``(per_image_replicas: OrderedDict, total_warm_footprint: int)``."""
   total = sum(image_totals.values()) or 1
   per = OrderedDict(
-      (img, compute_replicas(c, total, max_concurrent, max_pool, buffer=buffer))
+      (img, compute_replicas(c, total, max_concurrent, max_pool,
+                             buffer=buffer, per_task=per_task))
       for img, c in image_totals.items()
   )
   return per, sum(per.values())

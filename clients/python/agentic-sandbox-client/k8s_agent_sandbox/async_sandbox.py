@@ -19,7 +19,7 @@ from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
+from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
 from .utils import select_pod_ip
 

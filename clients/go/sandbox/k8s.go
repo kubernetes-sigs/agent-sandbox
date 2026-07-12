@@ -138,6 +138,9 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 			GenerateName: "sandbox-claim-",
 			Namespace:    namespace,
 			Annotations:  annotations,
+			Labels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "go-client",
+			},
 		},
 		Spec: extv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{

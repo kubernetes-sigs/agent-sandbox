@@ -18,7 +18,11 @@ from unittest.mock import MagicMock, patch
 
 
 from k8s_agent_sandbox.sandbox import Sandbox
-from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig, SandboxTracerConfig
+from k8s_agent_sandbox.models import (
+    SandboxInClusterConnectionConfig,
+    SandboxLocalTunnelConnectionConfig,
+    SandboxTracerConfig,
+)
 from k8s_agent_sandbox.utils import select_pod_ip
 
 
@@ -112,6 +116,33 @@ class TestSandbox(unittest.TestCase):
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
         mock_command_executor.assert_called_once_with(mock_connector.return_value, mock_tracer, "custom-tracer")
         mock_filesystem.assert_called_once_with(mock_connector.return_value, mock_tracer, "custom-tracer")
+
+    @patch('k8s_agent_sandbox.sandbox.Filesystem')
+    @patch('k8s_agent_sandbox.sandbox.CommandExecutor')
+    @patch('k8s_agent_sandbox.sandbox.create_tracer_manager')
+    @patch('k8s_agent_sandbox.sandbox.SandboxConnector')
+    @patch('k8s_agent_sandbox.sandbox.K8sHelper')
+    def test_in_cluster_passes_pod_ip_callback(
+        self,
+        mock_k8s_helper,
+        mock_connector,
+        mock_create_tracer_manager,
+        mock_command_executor,
+        mock_filesystem,
+    ):
+        config = SandboxInClusterConnectionConfig()
+        mock_create_tracer_manager.return_value = (MagicMock(), MagicMock())
+
+        sandbox = Sandbox(
+            claim_name=self.claim_name,
+            sandbox_id=self.sandbox_id,
+            namespace=self.namespace,
+            connection_config=config,
+        )
+
+        callback = mock_connector.call_args.kwargs["get_pod_ip"]
+        self.assertIs(callback.__self__, sandbox)
+        self.assertIs(callback.__func__, Sandbox.get_pod_ip)
 
     def test_get_pod_name_with_annotation(self):
         self.mock_k8s_helper.get_sandbox.return_value = {

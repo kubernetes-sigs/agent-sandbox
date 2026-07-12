@@ -137,6 +137,11 @@ def gather_manifests(manifests_path):
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
                 continue
+            if filename in ("kustomization.yaml", "kustomization.yml"):
+                # kustomization files describe how to assemble the manifests
+                # (see the all-in-one sandbox-with-extensions.yaml); they are not applyable
+                # resources, so skip them here as the release tool does.
+                continue
             path = os.path.join(root, filename)
             with open(path, "r") as f:
                 docs = list(yaml.safe_load_all(f))

@@ -1,13 +1,16 @@
 # Standard kOps config for the default benchmark cluster
 # (1 control-plane + 3 nodes, all n2-standard-8, in us-central1-a).
 #
-# This is a complete kOps manifest, applied as-is with `kops create -f`.
-# Two things are supplied by the environment at create time rather than living
-# here, because they vary per run:
+# This is a complete kOps manifest, applied with `kops create -f`. Two things
+# are supplied by the environment at create time rather than living here,
+# because they vary per run:
 #   * KOPS_STATE_STORE  - exported by create-cluster; kOps derives spec.configBase
 #                         from it, so configBase is intentionally omitted.
-#   * spec.project      - the placeholder below is overwritten via `kops set`
-#                         with the resolved GCP project (gcloud or Boskos lease).
+#   * spec.project      - kOps validates the project against the GCE API at
+#                         create time, so create-cluster substitutes the
+#                         placeholder below (into a working copy under .build/)
+#                         with the resolved project (gcloud or Boskos lease)
+#                         before running `kops create -f`.
 # To add another cluster shape, copy this file and edit metadata.name + the
 # InstanceGroup machineType/minSize/maxSize.
 apiVersion: kops.k8s.io/v1alpha2
@@ -17,7 +20,7 @@ metadata:
 spec:
   channel: stable
   cloudProvider: gce
-  project: PLACEHOLDER_PROJECT # overwritten by create-cluster via `kops set`
+  project: PLACEHOLDER_PROJECT # replaced by create-cluster before `kops create -f`
   # No DNS domain required: expose the API via a public load balancer and set
   # DNS to None so an arbitrary (non-FQDN) cluster name works.
   api:

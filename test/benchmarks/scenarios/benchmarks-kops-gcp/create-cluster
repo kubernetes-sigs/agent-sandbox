@@ -73,8 +73,8 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "----------------------------------------------------------------------"
   log "Would run:"
   echo "  export KOPS_STATE_STORE=gs://kops-state-<project-number>"
-  echo "  kops create -f ${CONFIG_PATH}"
-  echo "  kops set cluster --name ${CLUSTER_NAME} spec.project=<project>"
+  echo "  sed s/PLACEHOLDER_PROJECT/<project>/ ${CONFIG_PATH} > ${STATE_DIR}/cluster.yaml"
+  echo "  kops create -f ${STATE_DIR}/cluster.yaml"
   echo "  kops update cluster --name ${CLUSTER_NAME} --yes"
   echo "  kops export kubeconfig --name ${CLUSTER_NAME} --admin --kubeconfig ${STATE_DIR}/kubeconfig"
   echo "  kops validate cluster --name ${CLUSTER_NAME} --wait 10m"
@@ -95,19 +95,32 @@ resolve_project
 configure_images
 ensure_state_store  # exports KOPS_STATE_STORE; kOps derives configBase from it
 
+# Record state BEFORE any kops mutation so teardown can find the right project
+# and state store even if provisioning fails part way through.
+cat > "${STATE_DIR}/cluster.env" <<EOF
+CLUSTER_NAME=${CLUSTER_NAME}
+CONFIG_NAME=${CONFIG_REF}
+PROJECT_ID=${PROJECT_ID}
+PROJECT_NUMBER=${PROJECT_NUMBER}
+KOPS_STATE_STORE=${KOPS_STATE_STORE}
+IMAGE_PREFIX=${IMAGE_PREFIX}
+IMAGE_TAG=${IMAGE_TAG}
+EOF
+
 # Build and push the images the cluster will run.
 for image in agent-sandbox-controller chrome-sandbox; do
   log "Pushing ${image} to ${IMAGE_PREFIX}..."
   dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
 done
 
-log "Creating cluster ${CLUSTER_NAME} from ${CONFIG_PATH}..."
-kops create -f "${CONFIG_PATH}"
+# Stamp the resolved project into a working copy of the config. kOps validates
+# spec.project against the GCE API at `kops create -f` time, so the placeholder
+# must be replaced before create (a post-create `kops set` is too late).
+MANIFEST="${STATE_DIR}/cluster.yaml"
+sed "s/PLACEHOLDER_PROJECT/${PROJECT_ID}/" "${CONFIG_PATH}" > "${MANIFEST}"
 
-# The config carries a placeholder project (it varies per run / Boskos lease);
-# stamp the resolved one before applying.
-log "Setting project to ${PROJECT_ID}..."
-kops set cluster --name "${CLUSTER_NAME}" "spec.project=${PROJECT_ID}"
+log "Creating cluster ${CLUSTER_NAME} from ${CONFIG_PATH} (project ${PROJECT_ID})..."
+kops create -f "${MANIFEST}"
 
 log "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes
@@ -125,17 +138,6 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
   KUBECONFIG="${STATE_DIR}/kubeconfig" kubectl rollout status deployment agent-sandbox-controller \
     --namespace agent-sandbox-system --timeout=10m
 fi
-
-# Persist everything the later phases need.
-cat > "${STATE_DIR}/cluster.env" <<EOF
-CLUSTER_NAME=${CLUSTER_NAME}
-CONFIG_NAME=${CONFIG_REF}
-PROJECT_ID=${PROJECT_ID}
-PROJECT_NUMBER=${PROJECT_NUMBER}
-KOPS_STATE_STORE=${KOPS_STATE_STORE}
-IMAGE_PREFIX=${IMAGE_PREFIX}
-IMAGE_TAG=${IMAGE_TAG}
-EOF
 
 log "Cluster '${CLUSTER_NAME}' is ready."
 log "Run tests:  ${SCRIPT_DIR}/run-tests --cluster-name ${CLUSTER_NAME} --tests benchmarks,stress"

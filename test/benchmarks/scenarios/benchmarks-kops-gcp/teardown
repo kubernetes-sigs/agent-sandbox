@@ -61,21 +61,21 @@ install_tools
 
 STATE_DIR="$(state_dir "${CLUSTER_NAME}")"
 
-# Prefer the recorded state (KOPS_STATE_STORE etc.); if create-cluster failed
-# before writing it, reconstruct enough to still delete the cluster.
+# create-cluster records state (project, state store) before any kops mutation,
+# so a missing cluster.env means nothing was provisioned. Do NOT try to
+# reconstruct via resolve_project here: under Boskos that would lease a fresh
+# project (not the one create used) and look in the wrong state store.
 if [[ -f "${STATE_DIR}/cluster.env" ]]; then
   # shellcheck disable=SC1091
   source "${STATE_DIR}/cluster.env"
   export KOPS_STATE_STORE
-else
-  log "No cluster.env for '${CLUSTER_NAME}'; reconstructing state store to attempt deletion."
-  resolve_project
-  ensure_state_store
-fi
 
-log "Deleting cluster ${CLUSTER_NAME}..."
-kops delete cluster --name "${CLUSTER_NAME}" --yes || \
-  log "kops delete cluster failed or cluster already gone; continuing cleanup."
+  log "Deleting cluster ${CLUSTER_NAME}..."
+  kops delete cluster --name "${CLUSTER_NAME}" --yes || \
+    log "kops delete cluster failed or cluster already gone; continuing cleanup."
+else
+  log "No cluster.env for '${CLUSTER_NAME}'; nothing was provisioned. Skipping kops delete."
+fi
 
 if [[ "${CLEANUP_BUCKET}" == "true" && -n "${KOPS_STATE_STORE:-}" ]]; then
   log "Deleting state-store bucket ${KOPS_STATE_STORE}..."

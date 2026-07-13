@@ -1,6 +1,6 @@
 # Standard kOps config for a small / cheap cluster used to iterate on the
 # harness itself (1 control-plane + 2 nodes, n2-standard-4). Not for meaningful
-# throughput numbers. See default.yaml for how project/configBase are supplied.
+# throughput numbers. See default.yaml for how project/configBase are supplied at create time.
 apiVersion: kops.k8s.io/v1alpha2
 kind: Cluster
 metadata:
@@ -8,7 +8,7 @@ metadata:
 spec:
   channel: stable
   cloudProvider: gce
-  project: PLACEHOLDER_PROJECT # overwritten by create-cluster via `kops set`
+  project: PLACEHOLDER_PROJECT # replaced by create-cluster before `kops create -f`
   api:
     loadBalancer:
       type: Public

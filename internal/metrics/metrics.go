@@ -113,6 +113,20 @@ var (
 		nil,
 	)
 
+	// FastPathDeletionTotal counts best-effort deletions of children left
+	// behind by deleted Sandboxes, issued by the controller ahead of the
+	// kube-controller-manager garbage collector (which remains the backstop).
+	// Labels:
+	// - resource: "pods" | "services"
+	// - outcome: "deleted" (fast path deleted it) | "error" (left to the GC).
+	FastPathDeletionTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "agent_sandbox_fastpath_deletion_total",
+			Help: "Children of deleted Sandboxes deleted via the controller fast path, ahead of the garbage collector.",
+		},
+		[]string{"resource", "outcome"},
+	)
+
 	buildVersionInfo = version.Get()
 
 	// BuildInfo exposes agent-sandbox-controller build metadata as a constant gauge.
@@ -139,6 +153,7 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
+	metrics.Registry.MustRegister(FastPathDeletionTotal)
 	metrics.Registry.MustRegister(BuildInfo)
 }
 

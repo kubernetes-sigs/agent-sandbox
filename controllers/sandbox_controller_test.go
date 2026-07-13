@@ -35,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -111,7 +112,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -128,7 +129,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -147,7 +148,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Ready but has no podIPs yet; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -192,7 +193,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Unknown; Service Exists"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Waiting for Pod to be Ready; Service Exists"},
 			},
 		},
 		{
@@ -283,6 +284,70 @@ func TestResolvePodName(t *testing.T) {
 	}
 }
 
+func TestNodeNameOnlyChange(t *testing.T) {
+	base := func() *sandboxv1beta1.SandboxStatus {
+		return &sandboxv1beta1.SandboxStatus{
+			PodIPs:   []string{"10.0.0.1"},
+			NodeName: "node-1",
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionFalse},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name   string
+		mutate func(*sandboxv1beta1.SandboxStatus)
+		want   bool
+	}{
+		{
+			name:   "no change",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) {},
+			want:   false,
+		},
+		{
+			name:   "nodeName set",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) { s.NodeName = "node-2" },
+			want:   true,
+		},
+		{
+			name:   "nodeName cleared",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) { s.NodeName = "" },
+			want:   true,
+		},
+		{
+			name: "nodeName and podIPs change",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) {
+				s.NodeName = "node-2"
+				s.PodIPs = []string{"10.0.0.2"}
+			},
+			want: false,
+		},
+		{
+			name: "nodeName and condition change",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) {
+				s.NodeName = "node-2"
+				s.Conditions[0].Status = metav1.ConditionTrue
+			},
+			want: false,
+		},
+		{
+			name:   "condition change only",
+			mutate: func(s *sandboxv1beta1.SandboxStatus) { s.Conditions[0].Status = metav1.ConditionTrue },
+			want:   false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			oldStatus := base()
+			newStatus := base()
+			tc.mutate(newStatus)
+			require.Equal(t, tc.want, nodeNameOnlyChange(oldStatus, newStatus))
+		})
+	}
+}
+
 func TestReconcile(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"
@@ -322,7 +387,7 @@ func TestReconcile(t *testing.T) {
 						Status:             "False",
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
-						Message:            "Pod exists with phase: ",
+						Message:            "Waiting for Pod to be Ready",
 					},
 				},
 			},
@@ -373,7 +438,7 @@ func TestReconcile(t *testing.T) {
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
-						Message:            "Pod exists with phase: ; Service Exists",
+						Message:            "Waiting for Pod to be Ready; Service Exists",
 					},
 				},
 			},
@@ -467,7 +532,7 @@ func TestReconcile(t *testing.T) {
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
-						Message:            "Pod exists with phase: ; Service Exists",
+						Message:            "Waiting for Pod to be Ready; Service Exists",
 					},
 				},
 			},
@@ -1152,9 +1217,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "persists owner reference when adopting unowned pod whose labels are already correct",
@@ -1204,9 +1267,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "adopts unowned pod carrying legacy tracking label when adoptable label is absent",
@@ -1252,9 +1313,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name:    "reconcilePod creates a new Pod",
@@ -1283,9 +1342,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "drops user-supplied system-reserved labels and annotations to prevent hijacking",
@@ -1337,9 +1394,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "scrubs stale system labels/annotations recorded by an older controller",
@@ -1391,9 +1446,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "does not propagate system labels from Sandbox metadata to Pod",
@@ -1428,7 +1481,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "does not propagate system labels from Sandbox PodTemplate to Pod",
@@ -1465,7 +1518,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "does not propagate template-ref-hash from Sandbox metadata to Pod",
@@ -1545,7 +1598,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "removes warm pool label from Pod when Sandbox is no longer owned by SandboxWarmPool",
@@ -1601,9 +1654,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "adds warm pool label to existing Pod when Sandbox is owned by SandboxWarmPool",
@@ -1671,9 +1722,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "propagates template-ref-hash label from Sandbox labels to new Pod",
@@ -2269,9 +2318,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "refuses to adopt unowned pod that lacks pool authorization label",
@@ -2338,9 +2385,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name:        "normalizes invalid created-by label to unknown",
@@ -2373,9 +2418,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "updates and normalizes created-by label on existing Pod",
@@ -2431,9 +2474,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 		{
 			name: "removes created-by label from existing Pod when Sandbox lacks it",
@@ -2482,9 +2523,7 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			wantSandboxAnnotations: nil, // default pod name: no tracking annotation is written
 		},
 	}
 
@@ -3732,4 +3771,163 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
+}
+
+// TestFastPathDeleteChildren verifies that reconciling a Sandbox that no
+// longer exists best-effort deletes the children it left behind (the fake
+// client has no garbage collector, so any deletion observed here was issued
+// by the fast path), and — critically — that it never deletes objects the
+// dead Sandbox did not own (orphaned or foreign objects).
+func TestFastPathDeleteChildren(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := NameHash(sandboxName)
+
+	podMeta := func(name string, ownerRef *metav1.OwnerReference) metav1.ObjectMeta {
+		meta := metav1.ObjectMeta{
+			Name:      name,
+			Namespace: sandboxNs,
+			Labels:    map[string]string{sandboxLabel: nameHash},
+		}
+		if ownerRef != nil {
+			meta.OwnerReferences = []metav1.OwnerReference{*ownerRef}
+		}
+		return meta
+	}
+	sandboxRef := sandboxControllerRef(sandboxName)
+	otherSandboxRef := sandboxControllerRef("other-sandbox")
+	deploymentRef := metav1.OwnerReference{
+		APIVersion: "apps/v1", Kind: "Deployment", Name: sandboxName,
+		UID: "deploy-uid", Controller: new(true),
+	}
+
+	testCases := []struct {
+		name         string
+		initialObjs  []runtime.Object
+		wantDeleted  []client.Object
+		wantSurvives []client.Object
+	}{
+		{
+			name: "owned pod and service are fast-path deleted",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, &sandboxRef)},
+				&corev1.Service{ObjectMeta: podMeta(sandboxName, &sandboxRef)},
+			},
+			wantDeleted: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "replacement pod with a different name is found via the label index",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName+"-replacement", &sandboxRef)},
+			},
+			wantDeleted: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName + "-replacement", Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "orphaned pod (ownerRef stripped by orphan propagation) survives",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, nil)},
+				&corev1.Service{ObjectMeta: podMeta(sandboxName, nil)},
+			},
+			wantSurvives: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "pod owned by a different controller kind survives",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, &deploymentRef)},
+			},
+			wantSurvives: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "pod owned by a different sandbox survives",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{ObjectMeta: podMeta(sandboxName, &otherSandboxRef)},
+			},
+			wantSurvives: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			fc := newFakeClient(tc.initialObjs...)
+			r := SandboxReconciler{
+				Client:        fc,
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
+			}
+
+			// Reconcile the (nonexistent) Sandbox: the NotFound path runs the fast-path deletion.
+			_, err := r.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+			})
+			require.NoError(t, err)
+
+			for _, obj := range tc.wantDeleted {
+				err := fc.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+				require.True(t, k8serrors.IsNotFound(err),
+					"expected %T %s to be fast-path deleted, got err=%v", obj, obj.GetName(), err)
+			}
+			for _, obj := range tc.wantSurvives {
+				require.NoError(t, fc.Get(ctx, client.ObjectKeyFromObject(obj), obj),
+					"expected %T %s to survive the fast path", obj, obj.GetName())
+			}
+		})
+	}
+}
+
+func TestHasSandboxControllerRef(t *testing.T) {
+	ref := sandboxControllerRef("sb")
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "sb", OwnerReferences: []metav1.OwnerReference{ref},
+	}}
+	require.True(t, hasSandboxControllerRef(pod, "sb"))
+	require.False(t, hasSandboxControllerRef(pod, "other"))
+
+	// Same kind name in a different API group must not match.
+	foreign := pod.DeepCopy()
+	foreign.OwnerReferences[0].APIVersion = "example.com/v1"
+	require.False(t, hasSandboxControllerRef(foreign, "sb"))
+
+	// Non-controller ownerRef must not match.
+	nonController := pod.DeepCopy()
+	nonController.OwnerReferences[0].Controller = nil
+	require.False(t, hasSandboxControllerRef(nonController, "sb"))
+}
+
+// TestSandboxUpdatePredicate pins the event-filtering behavior: the
+// controller must not re-reconcile in response to its own status writes
+// (the reconcile-amplification fix), but must reconcile on spec changes —
+// including warm-pool adoption, which mutates spec.podTemplate.
+func TestSandboxUpdatePredicate(t *testing.T) {
+	base := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb", Generation: 1},
+	}
+
+	statusOnly := base.DeepCopy()
+	statusOnly.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+	statusOnly.Status.PodIPs = []string{"10.0.0.1"}
+	require.False(t, sandboxUpdatePredicate.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: statusOnly}),
+		"status-only updates must be filtered")
+
+	specChange := base.DeepCopy()
+	specChange.Generation = 2
+	require.True(t, sandboxUpdatePredicate.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: specChange}),
+		"generation changes must be admitted")
+
+	annotationOnly := base.DeepCopy()
+	annotationOnly.Annotations = map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "some-pod"}
+	require.False(t, sandboxUpdatePredicate.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: annotationOnly}),
+		"annotation-only updates are deliberately filtered (see sandboxUpdatePredicate)")
 }

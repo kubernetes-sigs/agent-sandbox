@@ -93,7 +93,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     nil,
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is provisioning."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service does not exist"},
 			},
 		},
@@ -103,7 +103,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is provisioning."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
 			},
 		},
@@ -113,7 +113,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
 			},
 		},
@@ -131,7 +131,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready; Service Exists"},
 			},
 		},
@@ -151,7 +151,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Ready but has no podIPs yet; Service Exists"},
 			},
 		},
@@ -168,7 +168,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Sandbox suspension requested. Pod is in the process of termination."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is suspending."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
 			},
 		},
@@ -178,7 +178,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been successfully terminated. Sandbox is fully suspended."},
+				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been terminated. Sandbox is suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
 			},
 		},
@@ -192,7 +192,7 @@ func TestComputeConditions(t *testing.T) {
 			svc: &corev1.Service{},
 			pod: nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodResuming", Message: "Sandbox resumption requested. Pod is being provisioned."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
 			},
 		},
@@ -202,7 +202,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Unknown; Service Exists"},
 			},
 		},
@@ -212,7 +212,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 			},
@@ -223,7 +223,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 			},
@@ -235,7 +235,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     nil,
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is provisioning."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: something went wrong"},
 			},
 		},
@@ -335,8 +335,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "PodProvisioned",
-						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+						Reason:             "Running",
+						Message:            "Sandbox is running.",
 					},
 					{
 						Type:               "Ready",
@@ -393,8 +393,8 @@ func TestReconcile(t *testing.T) {
 						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
-						Reason:             "PodProvisioned",
-						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+						Reason:             "Running",
+						Message:            "Sandbox is running.",
 					},
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -494,8 +494,8 @@ func TestReconcile(t *testing.T) {
 						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
-						Reason:             "PodProvisioned",
-						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+						Reason:             "Running",
+						Message:            "Sandbox is running.",
 					},
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -628,8 +628,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "PodProvisioned",
-						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+						Reason:             "Running",
+						Message:            "Sandbox is running.",
 					},
 					{
 						Type:               "Ready",
@@ -701,8 +701,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "PodProvisioned",
-						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+						Reason:             "Running",
+						Message:            "Sandbox is running.",
 					},
 					{
 						Type:               "Ready",
@@ -773,8 +773,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "PodProvisioned",
-						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+						Reason:             "Running",
+						Message:            "Sandbox is running.",
 					},
 					{
 						Type:               "Ready",

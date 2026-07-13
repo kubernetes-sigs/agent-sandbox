@@ -86,8 +86,8 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 1,
-					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodProvisioned,
-					Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					Reason:             sandboxv1beta1.SandboxReasonSuspendedRunning,
+					Message:            "Sandbox is running.",
 				},
 				{
 					Type:               "Ready",

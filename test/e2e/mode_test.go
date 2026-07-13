@@ -51,8 +51,8 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 1,
-					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodProvisioned,
-					Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					Reason:             sandboxv1beta1.SandboxReasonSuspendedRunning,
+					Message:            "Sandbox is running.",
 				},
 				{
 					Type:               "Ready",
@@ -93,7 +93,7 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
-					Message:            "Pod has been successfully terminated. Sandbox is fully suspended.",
+					Message:            "Pod has been terminated. Sandbox is suspended.",
 				},
 				{
 					Type:               "Ready",
@@ -126,8 +126,8 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 3,
-					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodProvisioned,
-					Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					Reason:             sandboxv1beta1.SandboxReasonSuspendedRunning,
+					Message:            "Sandbox is running.",
 				},
 				{
 					Type:               "Ready",

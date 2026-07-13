@@ -292,44 +292,24 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 }
 
 func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
-	desiresSuspension := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
-	existingSuspendedCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
-
-	// Initialize the condition container (keep the condition present once initialized)
+	// Initialize the Suspended condition which tracks only the suspension state, persisting once set.
 	suspended := &metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
+		Status:             metav1.ConditionFalse,
+		Reason:             sandboxv1beta1.SandboxReasonSuspendedRunning,
+		Message:            "Sandbox is running.",
 	}
 
-	if desiresSuspension {
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
 		if pod == nil {
 			// Stable State: Fully Suspended
 			suspended.Status = metav1.ConditionTrue
 			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
-			suspended.Message = "Pod has been successfully terminated. Sandbox is fully suspended."
+			suspended.Message = "Pod has been terminated. Sandbox is suspended."
 		} else {
-			// Transient State: In the process of scaling down
-			suspended.Status = metav1.ConditionFalse
 			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
-			suspended.Message = "Sandbox suspension requested. Pod is in the process of termination."
-		}
-	} else {
-		// The spec wants it RUNNING
-		if pod == nil {
-			// Differentiate between a brand-new Sandbox and one waking up from suspension
-			suspended.Status = metav1.ConditionFalse
-			if existingSuspendedCond != nil && (existingSuspendedCond.Status == metav1.ConditionTrue || existingSuspendedCond.Reason == sandboxv1beta1.SandboxReasonSuspendedPodTerminating) {
-				suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodResuming
-				suspended.Message = "Sandbox resumption requested. Pod is being provisioned."
-			} else {
-				suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodProvisioning
-				suspended.Message = "Pod is provisioning."
-			}
-		} else {
-			// The pod exists. We do not track granular pod health here; Ready condition does that.
-			suspended.Status = metav1.ConditionFalse
-			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodProvisioned
-			suspended.Message = "Sandbox is active and the underlying Pod has been provisioned."
+			suspended.Message = "Pod is terminating. Sandbox is suspending."
 		}
 	}
 

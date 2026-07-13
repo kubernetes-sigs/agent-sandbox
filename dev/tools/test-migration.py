@@ -411,9 +411,6 @@ def create_v1alpha1_objects():
 
     # Explicitly patch the status of upgrade-claim-warm since subresources.status drops status fields on normal apply
     run_cmd(["kubectl", "patch", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "upgrade-claim-warm", "-n", "default", "--subresource=status", "--type=merge", "-p", '{"status":{"sandbox":{"name":"upgrade-pool-warm-a1b2c"}}}'])
-    claim_uid = run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "upgrade-claim-warm", "-n", "default", "-o", "jsonpath={.metadata.uid}"], capture_output=True).stdout.strip()
-    owner_patch = {"metadata":{"ownerReferences":[{"apiVersion":"extensions.agents.x-k8s.io/v1alpha1","kind":"SandboxClaim","name":"upgrade-claim-warm","uid":claim_uid,"controller":True,"blockOwnerDeletion":True}]}}
-    run_cmd(["kubectl", "patch", "sandboxes.v1alpha1.agents.x-k8s.io", "upgrade-pool-warm-a1b2c", "-n", "default", "--type=merge", "-p", json.dumps(owner_patch)])
     
     print("Waiting for upgrade-sandbox-running Pod to be created...")
     pod_exists = False

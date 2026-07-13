@@ -75,9 +75,9 @@ bash dev/tools/migrate.sh --phase=bootstrap
 #    CRDs: SandboxClaim, SandboxTemplate, SandboxWarmPool). Apply both.
 #    Wait until the controller pod is Ready and the webhook Service has
 #    endpoints before proceeding.
-#
-#    Note: For releases older than v0.5.2, the core manifest is named manifest.yaml
-#    instead of sandbox.yaml.
+#    Note: Starting from v0.5.2, the core manifest is named `sandbox.yaml`. 
+#    If upgrading to an older release (like v0.5.0 or v0.5.1), apply `manifest.yaml` instead of `sandbox.yaml`:
+#    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/manifest.yaml
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/sandbox.yaml
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/extensions.yaml
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system

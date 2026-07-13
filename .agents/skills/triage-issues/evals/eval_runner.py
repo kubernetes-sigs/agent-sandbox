@@ -169,8 +169,19 @@ def generate_triage_report(triage_results, open_issues):
         lines.append("")
 
     lines.append("## Second Look / Judgment Calls")
-    lines.append("- Issue #301: Kept existing label `priority/important-soon` as per heuristic 1.")
-    lines.append("- Issue #501: Empty body; assigned `priority/awaiting-more-evidence` (P4) pending user detail.")
+    second_looks = []
+    for issue in open_issues:
+        num = str(issue["number"])
+        res = triage_results[num]
+        if res.get("preserved"):
+            second_looks.append(f"- Issue #{num}: Kept existing label `{res['priority']}` ({res['kanban']}) as per heuristic 1.")
+        elif res.get("kanban") == "P4":
+            second_looks.append(f"- Issue #{num}: Low signal or missing detail; assigned `{res['priority']}` (P4) pending user detail.")
+
+    if not second_looks:
+        lines.append("None")
+    else:
+        lines.extend(second_looks)
     lines.append("")
 
     return "\n".join(lines)

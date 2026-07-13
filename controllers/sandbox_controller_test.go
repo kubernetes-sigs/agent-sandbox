@@ -93,6 +93,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     nil,
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is provisioning."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service does not exist"},
 			},
 		},
@@ -102,6 +103,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is provisioning."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
 			},
 		},
@@ -111,6 +113,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
 			},
 		},
@@ -128,6 +131,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready; Service Exists"},
 			},
 		},
@@ -147,6 +151,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Ready but has no podIPs yet; Service Exists"},
 			},
 		},
@@ -163,7 +168,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodNotTerminated", Message: "Pod has not been terminated. Sandbox is operational."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Sandbox suspension requested. Pod is in the process of termination."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
 			},
 		},
@@ -173,16 +178,21 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been terminated. Sandbox is not operational."},
+				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been successfully terminated. Sandbox is fully suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
 			},
 		},
 		{
-			name:    "8. Resuming - Pod missing",
-			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
-			svc:     &corev1.Service{},
-			pod:     nil,
+			name: "8. Resuming - Pod missing",
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning)
+				sb.Status.Conditions = []metav1.Condition{{Type: "Suspended", Status: "True"}}
+				return sb
+			}(),
+			svc: &corev1.Service{},
+			pod: nil,
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodResuming", Message: "Sandbox resumption requested. Pod is being provisioned."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
 			},
 		},
@@ -192,6 +202,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}},
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Unknown; Service Exists"},
 			},
 		},
@@ -201,6 +212,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 			},
@@ -211,6 +223,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioned", Message: "Sandbox is active and the underlying Pod has been provisioned."},
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 			},
@@ -222,6 +235,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     nil,
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodProvisioning", Message: "Pod is provisioning."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: something went wrong"},
 			},
 		},
@@ -318,6 +332,13 @@ func TestReconcile(t *testing.T) {
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				Conditions: []metav1.Condition{
 					{
+						Type:               "Suspended",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "PodProvisioned",
+						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					},
+					{
 						Type:               "Ready",
 						Status:             "False",
 						ObservedGeneration: 1,
@@ -368,6 +389,13 @@ func TestReconcile(t *testing.T) {
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				Conditions: []metav1.Condition{
+					{
+						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             "PodProvisioned",
+						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					},
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
 						Status:             metav1.ConditionFalse,
@@ -462,6 +490,13 @@ func TestReconcile(t *testing.T) {
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
 				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 				Conditions: []metav1.Condition{
+					{
+						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             "PodProvisioned",
+						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					},
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
 						Status:             metav1.ConditionFalse,
@@ -590,6 +625,13 @@ func TestReconcile(t *testing.T) {
 				NodeName:      "node-1",
 				Conditions: []metav1.Condition{
 					{
+						Type:               "Suspended",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "PodProvisioned",
+						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					},
+					{
 						Type:               "Ready",
 						Status:             "True",
 						ObservedGeneration: 1,
@@ -656,6 +698,13 @@ func TestReconcile(t *testing.T) {
 				PodIPs:        []string{"10.244.0.5", "fd00::5"},
 				Conditions: []metav1.Condition{
 					{
+						Type:               "Suspended",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "PodProvisioned",
+						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					},
+					{
 						Type:               "Ready",
 						Status:             "True",
 						ObservedGeneration: 1,
@@ -720,6 +769,13 @@ func TestReconcile(t *testing.T) {
 				PodIPs:        []string{"10.244.0.5"},
 				NodeName:      "node-2",
 				Conditions: []metav1.Condition{
+					{
+						Type:               "Suspended",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "PodProvisioned",
+						Message:            "Sandbox is active and the underlying Pod has been provisioned.",
+					},
 					{
 						Type:               "Ready",
 						Status:             "True",
@@ -3663,7 +3719,7 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 
 	var got sandboxv1beta1.Sandbox
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
-	require.Len(t, got.Status.Conditions, 1,
+	require.Len(t, got.Status.Conditions, 2,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
 }
 

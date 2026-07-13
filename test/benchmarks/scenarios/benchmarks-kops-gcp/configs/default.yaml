@@ -1,0 +1,99 @@
+# Standard kOps config for the default benchmark cluster
+# (1 control-plane + 3 nodes, all n2-standard-8, in us-central1-a).
+#
+# This is a complete kOps manifest, applied as-is with `kops create -f`.
+# Two things are supplied by the environment at create time rather than living
+# here, because they vary per run:
+#   * KOPS_STATE_STORE  - exported by create-cluster; kOps derives spec.configBase
+#                         from it, so configBase is intentionally omitted.
+#   * spec.project      - the placeholder below is overwritten via `kops set`
+#                         with the resolved GCP project (gcloud or Boskos lease).
+# To add another cluster shape, copy this file and edit metadata.name + the
+# InstanceGroup machineType/minSize/maxSize.
+apiVersion: kops.k8s.io/v1alpha2
+kind: Cluster
+metadata:
+  name: sandbox-benchmark-default
+spec:
+  channel: stable
+  cloudProvider: gce
+  project: PLACEHOLDER_PROJECT # overwritten by create-cluster via `kops set`
+  # No DNS domain required: expose the API via a public load balancer and set
+  # DNS to None so an arbitrary (non-FQDN) cluster name works.
+  api:
+    loadBalancer:
+      type: Public
+  topology:
+    dns:
+      type: None
+  authorization:
+    rbac: {}
+  cloudConfig:
+    # Needed under Boskos, which does not let us configure IAM on the project;
+    # the default compute service account already has registry access.
+    gceServiceAccount: default
+  iam:
+    allowContainerRegistry: true
+    legacy: false
+  kubelet:
+    anonymousAuth: false
+  networking:
+    cilium: {}
+  nonMasqueradeCIDR: 100.64.0.0/10
+  kubernetesApiAccess:
+    - 0.0.0.0/0
+    - ::/0
+  sshAccess:
+    - 0.0.0.0/0
+    - ::/0
+  subnets:
+    - name: us-central1
+      region: us-central1
+      type: Public
+  etcdClusters:
+    - name: main
+      cpuRequest: 200m
+      memoryRequest: 100Mi
+      etcdMembers:
+        - instanceGroup: control-plane-us-central1-a
+          name: a
+    - name: events
+      cpuRequest: 100m
+      memoryRequest: 100Mi
+      etcdMembers:
+        - instanceGroup: control-plane-us-central1-a
+          name: a
+
+---
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  name: control-plane-us-central1-a
+  labels:
+    kops.k8s.io/cluster: sandbox-benchmark-default
+spec:
+  role: ControlPlane
+  machineType: n2-standard-8
+  minSize: 1
+  maxSize: 1
+  subnets:
+    - us-central1
+  zones:
+    - us-central1-a
+
+---
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  name: nodes-us-central1-a
+  labels:
+    kops.k8s.io/cluster: sandbox-benchmark-default
+spec:
+  role: Node
+  machineType: n2-standard-8
+  minSize: 3
+  maxSize: 3
+  subnets:
+    - us-central1
+  zones:
+    - us-central1-a

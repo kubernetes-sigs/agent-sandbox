@@ -1,0 +1,86 @@
+# Standard kOps config for a large cluster used for higher-scale stress runs
+# (1 control-plane + 10 nodes, n2-standard-16). Costs materially more per hour
+# than the default preset. See default.yaml for how project/configBase are supplied.
+apiVersion: kops.k8s.io/v1alpha2
+kind: Cluster
+metadata:
+  name: sandbox-benchmark-large
+spec:
+  channel: stable
+  cloudProvider: gce
+  project: PLACEHOLDER_PROJECT # overwritten by create-cluster via `kops set`
+  api:
+    loadBalancer:
+      type: Public
+  topology:
+    dns:
+      type: None
+  authorization:
+    rbac: {}
+  cloudConfig:
+    gceServiceAccount: default
+  iam:
+    allowContainerRegistry: true
+    legacy: false
+  kubelet:
+    anonymousAuth: false
+  networking:
+    cilium: {}
+  nonMasqueradeCIDR: 100.64.0.0/10
+  kubernetesApiAccess:
+    - 0.0.0.0/0
+    - ::/0
+  sshAccess:
+    - 0.0.0.0/0
+    - ::/0
+  subnets:
+    - name: us-central1
+      region: us-central1
+      type: Public
+  etcdClusters:
+    - name: main
+      cpuRequest: 200m
+      memoryRequest: 100Mi
+      etcdMembers:
+        - instanceGroup: control-plane-us-central1-a
+          name: a
+    - name: events
+      cpuRequest: 100m
+      memoryRequest: 100Mi
+      etcdMembers:
+        - instanceGroup: control-plane-us-central1-a
+          name: a
+
+---
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  name: control-plane-us-central1-a
+  labels:
+    kops.k8s.io/cluster: sandbox-benchmark-large
+spec:
+  role: ControlPlane
+  machineType: n2-standard-16
+  minSize: 1
+  maxSize: 1
+  subnets:
+    - us-central1
+  zones:
+    - us-central1-a
+
+---
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  name: nodes-us-central1-a
+  labels:
+    kops.k8s.io/cluster: sandbox-benchmark-large
+spec:
+  role: Node
+  machineType: n2-standard-16
+  minSize: 10
+  maxSize: 10
+  subnets:
+    - us-central1
+  zones:
+    - us-central1-a

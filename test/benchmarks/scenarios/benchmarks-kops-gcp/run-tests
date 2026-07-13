@@ -1,0 +1,110 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# run-tests: phase 2 of the modular kOps/GCE benchmark flow.
+# Runs one or more tests against a cluster previously created by create-cluster.
+# Re-runnable: you can invoke it repeatedly with different --tests / stress args.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+
+VALID_TESTS="benchmarks stress"
+
+usage() {
+  cat <<EOF
+Usage: run-tests --cluster-name NAME [flags]
+
+Run tests against an existing cluster created by create-cluster.
+
+Flags:
+  --cluster-name NAME     Cluster to target (required)
+  --tests LIST            Comma/space separated tests to run, in order.
+                          Valid: ${VALID_TESTS// /, } (default: benchmarks,stress)
+  --sandbox-count N       Stress: number of sandboxes (default: 200)
+  --create-concurrency N  Stress: concurrent creators (default: 50)
+  --stress-args "..."     Stress: extra args passed verbatim to test/stress
+  -h, --help              Show this help
+
+Artifacts are written under \${ARTIFACTS:-.} (stress -> \$ARTIFACTS/stress-test/).
+EOF
+}
+
+CLUSTER_NAME=""
+TESTS="benchmarks,stress"
+SANDBOX_COUNT="200"
+CREATE_CONCURRENCY="50"
+STRESS_ARGS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cluster-name) CLUSTER_NAME="$2"; shift 2 ;;
+    --tests) TESTS="$2"; shift 2 ;;
+    --sandbox-count) SANDBOX_COUNT="$2"; shift 2 ;;
+    --create-concurrency) CREATE_CONCURRENCY="$2"; shift 2 ;;
+    --stress-args) STRESS_ARGS="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown flag: $1 (try --help)" ;;
+  esac
+done
+
+[[ -n "${CLUSTER_NAME}" ]] || die "--cluster-name is required (try --help)"
+
+# Normalize the test list (commas -> spaces) and validate it before doing any
+# work, so bad args fail fast regardless of cluster state.
+read -r -a requested <<< "${TESTS//,/ }"
+[[ "${#requested[@]}" -gt 0 ]] || die "--tests is empty"
+for t in "${requested[@]}"; do
+  case " ${VALID_TESTS} " in
+    *" ${t} "*) ;;
+    *) die "unknown test: '${t}' (valid: ${VALID_TESTS// /, })" ;;
+  esac
+done
+
+cd "${REPO_ROOT}"
+
+# Loads cluster.env (PROJECT_ID, IMAGE_PREFIX, ...) and exports KUBECONFIG.
+load_cluster_env "${CLUSTER_NAME}"
+
+ARTIFACTS_DIR="${ARTIFACTS:-.}"
+
+run_benchmarks() {
+  log "Running e2e benchmark suite..."
+  dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
+}
+
+run_stress() {
+  local out="${ARTIFACTS_DIR}/stress-test/"
+  log "Running stress test (sandbox-count=${SANDBOX_COUNT}, create-concurrency=${CREATE_CONCURRENCY})..."
+  # shellcheck disable=SC2086 # STRESS_ARGS is intentionally word-split.
+  go run ./test/stress \
+    --sandbox-count "${SANDBOX_COUNT}" \
+    --create-concurrency "${CREATE_CONCURRENCY}" \
+    --output-dir="${out}" \
+    ${STRESS_ARGS}
+}
+
+for t in "${requested[@]}"; do
+  case "${t}" in
+    benchmarks) run_benchmarks ;;
+    stress) run_stress ;;
+  esac
+done
+
+log "Tests completed successfully: ${requested[*]}"

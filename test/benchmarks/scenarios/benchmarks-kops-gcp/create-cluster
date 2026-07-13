@@ -1,0 +1,144 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# create-cluster: phase 1 of the modular kOps/GCE benchmark flow.
+# Applies a standard kOps config (configs/<name>.yaml) as-is with `kops create -f`,
+# stamps the resolved GCP project, provisions the cluster, builds/pushes images,
+# deploys the controller, and records per-cluster state for run-tests/teardown.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+
+usage() {
+  cat <<EOF
+Usage: create-cluster [flags]
+
+Provision a kOps cluster on GCE from a standard kOps config and deploy the
+agent-sandbox controller. The cluster name comes from the config's Cluster
+metadata.name; to add a shape, copy a file in configs/ and edit it.
+
+Flags:
+  --config NAME|PATH   kOps config to apply (default: default -> configs/default.yaml)
+  --skip-deploy        Provision the cluster but do not deploy the controller
+  --dry-run            Print the config and planned steps; change nothing
+  -h, --help           Show this help
+
+On success prints the cluster name; use it with run-tests and teardown.
+EOF
+}
+
+CONFIG_REF="default"
+SKIP_DEPLOY="false"
+DRY_RUN="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config) CONFIG_REF="$2"; shift 2 ;;
+    --skip-deploy) SKIP_DEPLOY="true"; shift ;;
+    --dry-run) DRY_RUN="true"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown flag: $1 (try --help)" ;;
+  esac
+done
+
+cd "${REPO_ROOT}"
+
+CONFIG_PATH="$(resolve_config "${CONFIG_REF}")"
+CLUSTER_NAME="$(cluster_name_from_manifest "${CONFIG_PATH}")"
+STATE_DIR="$(state_dir "${CLUSTER_NAME}")"
+
+if [[ "${DRY_RUN}" == "true" ]]; then
+  # A dry run must not touch GCP. Just show the config that would be applied and
+  # the commands that would run.
+  log "Dry run for config '${CONFIG_REF}' (${CONFIG_PATH}); cluster name: ${CLUSTER_NAME}"
+  echo "----------------------------------------------------------------------"
+  cat "${CONFIG_PATH}"
+  echo "----------------------------------------------------------------------"
+  log "Would run:"
+  echo "  export KOPS_STATE_STORE=gs://kops-state-<project-number>"
+  echo "  kops create -f ${CONFIG_PATH}"
+  echo "  kops set cluster --name ${CLUSTER_NAME} spec.project=<project>"
+  echo "  kops update cluster --name ${CLUSTER_NAME} --yes"
+  echo "  kops export kubeconfig --name ${CLUSTER_NAME} --admin --kubeconfig ${STATE_DIR}/kubeconfig"
+  echo "  kops validate cluster --name ${CLUSTER_NAME} --wait 10m"
+  for image in agent-sandbox-controller chrome-sandbox; do
+    echo "  dev/tools/push-images --image-prefix=gcr.io/<project>/agent-sandbox/ --images ${image}"
+  done
+  if [[ "${SKIP_DEPLOY}" != "true" ]]; then
+    echo "  dev/tools/deploy-to-kube --image-prefix=gcr.io/<project>/agent-sandbox/ --extensions"
+  fi
+  log "Dry run complete; no changes made."
+  exit 0
+fi
+
+mkdir -p "${STATE_DIR}"
+
+install_tools
+resolve_project
+configure_images
+ensure_state_store  # exports KOPS_STATE_STORE; kOps derives configBase from it
+
+# Build and push the images the cluster will run.
+for image in agent-sandbox-controller chrome-sandbox; do
+  log "Pushing ${image} to ${IMAGE_PREFIX}..."
+  dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
+done
+
+log "Creating cluster ${CLUSTER_NAME} from ${CONFIG_PATH}..."
+kops create -f "${CONFIG_PATH}"
+
+# The config carries a placeholder project (it varies per run / Boskos lease);
+# stamp the resolved one before applying.
+log "Setting project to ${PROJECT_ID}..."
+kops set cluster --name "${CLUSTER_NAME}" "spec.project=${PROJECT_ID}"
+
+log "Applying cluster configuration..."
+kops update cluster --name "${CLUSTER_NAME}" --yes
+
+log "Exporting kubeconfig..."
+kops export kubeconfig --name "${CLUSTER_NAME}" --admin --kubeconfig "${STATE_DIR}/kubeconfig"
+
+log "Waiting for cluster to be ready..."
+KUBECONFIG="${STATE_DIR}/kubeconfig" kops validate cluster --name "${CLUSTER_NAME}" --wait 10m
+
+if [[ "${SKIP_DEPLOY}" != "true" ]]; then
+  log "Deploying agent-sandbox controller..."
+  KUBECONFIG="${STATE_DIR}/kubeconfig" dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions
+  log "Waiting for controller to be ready..."
+  KUBECONFIG="${STATE_DIR}/kubeconfig" kubectl rollout status deployment agent-sandbox-controller \
+    --namespace agent-sandbox-system --timeout=10m
+fi
+
+# Persist everything the later phases need.
+cat > "${STATE_DIR}/cluster.env" <<EOF
+CLUSTER_NAME=${CLUSTER_NAME}
+CONFIG_NAME=${CONFIG_REF}
+PROJECT_ID=${PROJECT_ID}
+PROJECT_NUMBER=${PROJECT_NUMBER}
+KOPS_STATE_STORE=${KOPS_STATE_STORE}
+IMAGE_PREFIX=${IMAGE_PREFIX}
+IMAGE_TAG=${IMAGE_TAG}
+EOF
+
+log "Cluster '${CLUSTER_NAME}' is ready."
+log "Run tests:  ${SCRIPT_DIR}/run-tests --cluster-name ${CLUSTER_NAME} --tests benchmarks,stress"
+log "Tear down:  ${SCRIPT_DIR}/teardown --cluster-name ${CLUSTER_NAME}"
+# Emit the bare cluster name on stdout as the last line for scripting.
+echo "${CLUSTER_NAME}"

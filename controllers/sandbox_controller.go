@@ -571,10 +571,10 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 		// blocked by LoadOrStore keeping the old value.
 		if existing, loaded := r.resumeStartTimes.LoadOrStore(key, newEntry); loaded {
 			if existing.uid != sandbox.UID {
-				logger.Info("Overwriting stale resume start time timer with new start time", "old_uid", string(existing.uid), "new_uid", string(newEntry.uid))
+				logger.V(2).Info("Overwriting stale resume start time timer with new start time", "old_uid", string(existing.uid), "new_uid", string(newEntry.uid))
 				r.resumeStartTimes.Store(key, newEntry)
 			} else {
-				logger.Info("Resume start time timer already seeded for this UID", "start_time", existing.timestamp.Format(time.RFC3339Nano))
+				logger.V(2).Info("Resume start time timer already seeded for this UID", "start_time", existing.timestamp.Format(time.RFC3339Nano))
 			}
 		}
 	}

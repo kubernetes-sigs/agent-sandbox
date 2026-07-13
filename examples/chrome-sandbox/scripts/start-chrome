@@ -26,7 +26,6 @@ flags+=(--disable-gpu) # We don't (normally) have a GPU
 flags+=(--disable-dev-shm-usage) # We don't (normally) have a shared memory filesystem
 
 flags+=(--no-default-browser-check) # Avoids hanging with a "set chrome as default browser" dialog
-flags+=(--no-first-run) # Avoids hanging with a "set chrome as default browser" dialog
 
 flags+=(--start-maximized) # We're the only thing running, use the whole screen
 

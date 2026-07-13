@@ -1,8 +1,16 @@
 baseURL: 'https://agent-sandbox.sigs.k8s.io/'
-languageCode: 'en-us'
+locale: 'en-US'
 title: 'Agent Sandbox'
 
 enableRobotsTXT: true
+
+security:
+  allowContent:
+    - '^text/html$'
+    - '^text/markdown$'
+  node:
+    permissions:
+      allowRead: ["*"]
 
 ## Docsy
 enableGitInfo: true
@@ -109,7 +117,7 @@ module:
   proxy: direct
   hugoVersion:
     extended: true
-    min: 0.73.0
+    min: 0.163.3
   mounts:
   - disableWatch: false
     source: content
@@ -138,22 +146,22 @@ module:
   - disableWatch: true
     source: ../
     target: assets/additional
-    includeFiles: ["CONTRIBUTING.md", "README.md"]
+    files: ["CONTRIBUTING.md", "README.md"]
   - disableWatch: true
     source: ../examples
     target: assets/additional/examples
   - disableWatch: true
     source: ../clients/python/agentic-sandbox-client
     target: assets/additional/python-agentic-sandbox-client
-    includeFiles: ["README.md"]
+    files: ["README.md"]
   - disableWatch: true
     source: ../clients/go
     target: assets/additional/go-client
-    includeFiles: ["README.md"]
+    files: ["README.md"]
   - disableWatch: true
     source: ../docs
     target: assets/additional/docs
-    includeFiles: ["testing.md", "api.md", "api-migration-guide.md"]
+    files: ["testing.md", "api.md", "api-migration-guide.md"]
 
   imports:
     - path: github.com/google/docsy

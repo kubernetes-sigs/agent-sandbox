@@ -42,6 +42,7 @@ type AgentSandboxesMetricKey struct {
 	LaunchType     string
 	Template       string
 	OwnedBy        string
+	CreatedBy      string
 }
 
 // NewAgentSandboxesConstMetric creates a new Prometheus ConstMetric for the agent_sandboxes gauge.
@@ -56,6 +57,7 @@ func NewAgentSandboxesConstMetric(count int, key AgentSandboxesMetricKey) promet
 		key.LaunchType,
 		key.Template,
 		key.OwnedBy,
+		key.CreatedBy,
 	)
 }
 
@@ -140,6 +142,11 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			ownedByStr = k
 		}
 
+		createdByStr := "unknown"
+		if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
+			createdByStr = NormalizeCreatedBy(val)
+		}
+
 		key := AgentSandboxesMetricKey{
 			Namespace:      sandbox.Namespace,
 			ReadyCondition: readyConditionStr,
@@ -147,6 +154,7 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 			LaunchType:     launchTypeStr,
 			Template:       sandboxTemplateStr,
 			OwnedBy:        ownedByStr,
+			CreatedBy:      createdByStr,
 		}
 		counts[key]++
 	}

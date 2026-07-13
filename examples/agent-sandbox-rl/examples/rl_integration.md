@@ -12,6 +12,30 @@ The fleet is framework-agnostic. The contract is simple:
 A `SandboxHandle` is the integration point: `hostname` (stable in-cluster DNS),
 `pod_name`, `pod_ip`, `endpoint(port)`, `exec(cmd)` (router-free), `release()`.
 
+## Sizing for rollouts (instant claims)
+
+RL typically samples **G rollouts per problem** (e.g. GRPO group size), so the *same*
+problem image is claimed G times at once — unlike a 1:1 eval sweep. For that, turn on
+the instant-claim levers so no rollout queues behind another:
+
+```python
+from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig, TemplateSpec
+
+fleet = SandboxFleet(FleetConfig(
+    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    max_concurrent=64,
+    max_warmpool_size=16,                 # >= rollouts per problem (G)
+    warm_per_task=True,                   # one warm replica per rollout
+    template=TemplateSpec(colocate_replicas=True)))  # G replicas, one image pull/node
+fleet.run(rollout_fn, strategy="naive", keep_warm=True)   # pools persist across steps
+```
+
+This cuts the per-rollout **claim tail** — in a synchronous step you wait for the
+slowest of G rollouts, so a stray queued claim delays the whole step. Use `naive` or
+`sliding` (not `pipelined`, whose window shrinks under deep replicas), and
+`keep_warm=True` to reuse pools across training steps. Full rationale and measurements:
+[eval vs RL](../README.md#eval-vs-rl--recommended-recipes).
+
 ## Generic env wrapper (primitives)
 
 ```python

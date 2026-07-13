@@ -27,6 +27,7 @@ import collections
 import logging
 import math
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -101,7 +102,12 @@ class SandboxFleet:
   def __init__(self, config: FleetConfig | None = None,
                registry: ClusterRegistry | None = None):
     self.config = config or FleetConfig()
-    self.registry = registry or self._default_registry(self.config)
+    # Honor an explicitly-passed registry even when empty — `ClusterRegistry`
+    # defines `__len__`, so `registry or …` would treat `ClusterRegistry([])` as
+    # falsy and build a default ambient Cluster (which loads kube-config). Only
+    # fall back when no registry was given at all.
+    self.registry = (registry if registry is not None
+                     else self._default_registry(self.config))
     self.placement = get_placement(self.config.placement)
     self.tasks: list[Task] = []
     self.plan_: FleetPlan | None = None
@@ -139,8 +145,25 @@ class SandboxFleet:
     return ClusterRegistry([Cluster(ClusterConfig(), labels=config.labels)])
 
   # --- inputs ------------------------------------------------------------ #
-  def load_tasks(self, source) -> list[Task]:
-    self.tasks = to_tasks(source)
+  def load_tasks(self, source, *, image_rewrite=None) -> list[Task]:
+    """Load tasks from ``source``. ``image_rewrite`` is an optional
+    ``image -> image`` hook (e.g. ``registry_rewrite.make_rewriter(...)``) applied
+    to each task's image; the original is stashed in ``metadata['original_image']``."""
+    tasks = to_tasks(source)
+    if image_rewrite is not None:
+      # Copy rather than mutate: to_tasks may hand back the caller's own Task
+      # objects (e.g. a list[Task] / caching TaskSource), so rewriting in place
+      # would alias and corrupt their images/metadata.
+      rewritten = []
+      for t in tasks:
+        new = image_rewrite(t.image)
+        if new != t.image:
+          t = t.model_copy(update={
+              "image": new,
+              "metadata": {**t.metadata, "original_image": t.image}})
+        rewritten.append(t)
+      tasks = rewritten
+    self.tasks = tasks
     logger.info("Loaded %d tasks (%d unique images)",
                 len(self.tasks), len({t.image for t in self.tasks}))
     return self.tasks
@@ -150,6 +173,46 @@ class SandboxFleet:
     for t in self.tasks:
       counts[t.image] = counts.get(t.image, 0) + 1
     return counts
+
+  def _disk_spec(self) -> "tuple[float | None, float | None]":
+    """``(avg_image_gb, usable_disk_gb)`` for disk-aware window sizing. ``usable`` is
+    ``None`` (disk cap disabled) unless **both** ``avg_image_gb`` and
+    ``node_ephemeral_gb`` are set; ``avg`` is returned as-configured for reference.
+    ``usable`` is per-node ephemeral storage minus headroom (conservative: a window's
+    images may co-locate on one node)."""
+    avg = self.config.avg_image_gb
+    node_gb = self.config.node_ephemeral_gb
+    if avg is None or node_gb is None:
+      return (avg, None)                      # usable=None -> recommend_window_* skips the disk cap
+    return (avg, node_gb * (1.0 - self.config.disk_headroom))
+
+  def recommended_window(self, *, pipelined: bool = False) -> int:
+    """Window size for sliding/pipelined: explicit ``window_size`` wins; otherwise
+    the concurrency-aware window, capped by node disk when disk hints are set."""
+    if self.config.window_size is not None:
+      return max(1, self.config.window_size)
+    counts = self.image_counts()
+    avg, usable = self._disk_spec()
+    per_task = self.config.warm_per_task
+    nodes = self.config.cluster_nodes or 1   # spread distinct images across the pool
+    if pipelined and per_task:
+      logger.warning(
+          "pipelined + warm_per_task: deep per-image replicas shrink the prefetch "
+          "window and can serialize images (underfilling max_concurrent). Prefer "
+          "strategy='naive' or 'sliding' with warm_per_task for RL rollouts.")
+    if pipelined:
+      return sizing.recommend_window_pipelined(
+          counts, self.config.max_concurrent, self.config.max_warmpool_size,
+          avg_image_gb=avg, usable_disk_gb=usable, per_task=per_task, nodes=nodes)
+    win = sizing.recommend_window(
+        counts, self.config.max_concurrent, self.config.max_warmpool_size,
+        per_task=per_task)
+    if avg is not None and usable is not None:
+      win = min(win, sizing.recommend_window_disk(
+          counts, self.config.max_concurrent, self.config.max_warmpool_size,
+          avg_image_gb=avg, usable_disk_gb=usable, pipeline_factor=1.0,
+          per_task=per_task, nodes=nodes))
+    return max(1, win)
 
   # --- preflight / plan -------------------------------------------------- #
   def preflight(self) -> dict:
@@ -210,11 +273,18 @@ class SandboxFleet:
     cluster_budget = _split_budget(self.config.max_concurrent,
                                    {c.name: c.config.weight for c in used})
 
+    per_task = self.config.warm_per_task
     entries: list[PlanEntry] = []
     for image, c in assigned.items():
       replicas = sizing.compute_replicas(
           counts[image], cluster_totals[c.name],
-          cluster_budget[c.name], self.config.max_warmpool_size)
+          cluster_budget[c.name], self.config.max_warmpool_size,
+          per_task=per_task)
+      if per_task and replicas < counts[image]:   # clamped by max_warmpool_size
+        logger.warning(
+            "warm_per_task: image %s has %d tasks but max_warmpool_size=%d; "
+            "warming only %d replicas (raise max_warmpool_size for one per task)",
+            image, counts[image], self.config.max_warmpool_size, replicas)
       template = self.config.template_name(image)
       entries.append(PlanEntry(
           cluster=c.name, image=image, template=template,
@@ -241,24 +311,92 @@ class SandboxFleet:
       c.resources.ensure_template(
           e.image, e.template, c.template_spec(self.config.template))
 
+  def _warm_entry(self, e, wait: bool, replicas_override: int | None = None) -> None:
+    """Warm one plan entry's pool (create template+pool, reserve, optionally wait
+    for readiness). The single warm path shared by ``warm_image`` and
+    ``start_warmpools``. Safe to run concurrently **across distinct images** (how
+    start_warmpools/the windowed strategies call it): shared counters/observer use
+    atomic helpers and ``_warmed`` writes hold the lock. It is NOT safe to warm the
+    *same* image from two threads at once (the reuse check + record aren't atomic
+    across the released lock); the callers never do that — one entry per image."""
+    reps = replicas_override if replicas_override is not None else e.replicas
+    c = self.registry.get(e.cluster)
+    fam = repo_family(e.image)
+
+    def _await_ready():
+      with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):
+        if not c.resources.wait_for_pool_ready(
+            e.pool, reps, timeout=self.config.ready_timeout):
+          raise FleetError(
+              f"warm pool '{e.pool}' on cluster '{e.cluster}' did not become "
+              f"ready within {self.config.ready_timeout}s")
+
+    with self._lock:
+      already = self._warmed.get(e.image, 0)
+    if already >= reps:                       # already warm (cross-epoch / keep_warm reuse)
+      if wait:                                # still honor the readiness contract on reuse
+        _await_ready()
+      return
+    with self._obs.phase("create_warmpool", cluster=e.cluster, family=fam):
+      c.resources.ensure_template(
+          e.image, e.template, c.template_spec(self.config.template))
+      c.resources.create_warmpool(e.pool, e.template, reps, reconcile=True)
+    # Reserve only the delta when scaling an already-warm pool (create_warmpool
+    # upserts replicas on 409 under reconcile), so reuse never double-counts.
+    delta = reps - already
+    c.reserve_replicas(delta)
+    with self._lock:
+      self._warmed[e.image] = reps
+    self._obs.warm_add(e.cluster, delta)
+    if wait:
+      _await_ready()
+
+  def _warm_entries(self, entries, wait: bool,
+                    replicas_override: int | None = None) -> None:
+    """Warm a set of plan entries **concurrently** (bounded by ``max_concurrent``).
+    Each entry's ``wait_for_pool_ready`` blocks on the image pull, so serializing
+    them is O(#images) slow; this fans out across a thread pool and raises the first
+    error (teardown cleans up partial state). Shared by ``start_warmpools`` (all
+    pools) and ``warm_images`` (a window) — both warm one entry per distinct image,
+    which ``_warm_entry`` is safe for."""
+    if not entries:
+      return
+    workers = max(1, min(len(entries), self.config.max_concurrent))
+    if workers == 1 or len(entries) == 1:
+      for e in entries:
+        self._warm_entry(e, wait, replicas_override=replicas_override)
+      return
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+      futures = [ex.submit(self._warm_entry, e, wait, replicas_override)
+                 for e in entries]
+      err = None
+      for f in as_completed(futures):
+        try:
+          f.result()
+        except BaseException as exc:  # noqa: BLE001 — surface first; teardown cleans up
+          err = err or exc
+      if err is not None:
+        raise err
+
   def start_warmpools(self, wait: bool = True) -> None:
+    """Warm every planned pool, concurrently (bounded by ``max_concurrent``)."""
+    self._warm_entries((self.plan_ or self.plan()).entries, wait)
+
+  def warm_images(self, images, *, replicas_override: int | None = None,
+                  wait: bool = True) -> None:
+    """Warm a subset of images' pools **concurrently** (used by sliding/pipelined to
+    warm a whole window in parallel instead of one image at a time)."""
     plan = self.plan_ or self.plan()
-    for e in plan.entries:
-      c = self.registry.get(e.cluster)
-      fam = repo_family(e.image)
-      with self._obs.phase("create_warmpool", cluster=e.cluster, family=fam):
-        c.resources.ensure_template(
-            e.image, e.template, c.template_spec(self.config.template))
-        c.resources.create_warmpool(e.pool, e.template, e.replicas)
-      c.reserve_replicas(e.replicas)
-      self._obs.warm_add(e.cluster, e.replicas)
-      if wait:
-        with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):
-          if not c.resources.wait_for_pool_ready(
-              e.pool, e.replicas, timeout=self.config.ready_timeout):
-            raise FleetError(
-                f"warm pool '{e.pool}' on cluster '{e.cluster}' did not become "
-                f"ready within {self.config.ready_timeout}s")
+    # Dedupe while preserving order: warming the same image from two threads at
+    # once is unsafe (see ``_warm_entry``), and this is a public helper.
+    images = list(dict.fromkeys(images))
+    resolved = [(img, plan.for_image(img)) for img in images]
+    entries = [e for _img, e in resolved if e is not None]
+    missing = [img for img, e in resolved if e is None]
+    if missing:                              # callers pass planned images; None = a bug
+      logger.warning("warm_images: %d image(s) not in the plan, skipped: %s",
+                     len(missing), missing[:5])
+    self._warm_entries(entries, wait, replicas_override=replicas_override)
 
   def warm_image(self, image: str, *, replicas_override: int | None = None,
                  wait: bool = True) -> None:
@@ -266,24 +404,7 @@ class SandboxFleet:
     entry = (self.plan_ or self.plan()).for_image(image)
     if entry is None:
       raise KeyError(f"image not in plan: {image}")
-    c = self.registry.get(entry.cluster)
-    reps = replicas_override if replicas_override is not None else entry.replicas
-    fam = repo_family(image)
-    with self._obs.phase("create_warmpool", cluster=entry.cluster, family=fam):
-      c.resources.ensure_template(
-          image, entry.template, c.template_spec(self.config.template))
-      c.resources.create_warmpool(entry.pool, entry.template, reps)
-    c.reserve_replicas(reps)
-    with self._lock:
-      self._warmed[image] = reps
-    self._obs.warm_add(entry.cluster, reps)
-    if wait:
-      with self._obs.phase("wait_pool_ready", cluster=entry.cluster, family=fam):
-        if not c.resources.wait_for_pool_ready(
-            entry.pool, reps, timeout=self.config.ready_timeout):
-          raise FleetError(
-              f"warm pool '{entry.pool}' on cluster '{entry.cluster}' did not "
-              f"become ready within {self.config.ready_timeout}s")
+    self._warm_entry(entry, wait, replicas_override=replicas_override)
 
   def unwarm_image(self, image: str) -> None:
     """Tear down one image's pool + template."""
@@ -464,22 +585,45 @@ class SandboxFleet:
 
   # --- managed runner ---------------------------------------------------- #
   def run(self, process_fn: Callable[[Task, SandboxHandle], object],
-          strategy: str = "naive", concurrency: int | None = None) -> list:
-    """Run all loaded tasks under ``strategy`` (none|naive|sliding) with up to
-    ``concurrency`` parallel claim+exec (defaults to ``config.max_concurrent``).
-    Returns one result per task (a per-task exception is captured, not raised).
+          strategy: str = "naive", concurrency: int | None = None,
+          *, epochs: int = 1, keep_warm: bool = False) -> list:
+    """Run all loaded tasks under ``strategy`` (none|naive|sliding|pipelined) with
+    up to ``concurrency`` parallel claim+exec (defaults to ``config.max_concurrent``).
+
+    ``epochs>1`` runs that many passes over all tasks, keeping warm pools resident
+    between epochs (so re-pulls hit the node layer cache) and tearing down once at
+    the end; it returns ``list[list]`` (one task-ordered list per pass). ``epochs==1``
+    returns the flat ``list`` (a per-task exception is captured, not raised).
+    ``keep_warm=True`` skips the final teardown so a caller's own loop can reuse the
+    warm pools; call ``fleet.teardown()`` when done.
     """
     from .strategies import STRATEGIES
     if strategy not in STRATEGIES:
       raise ValueError(f"unknown strategy '{strategy}'; choose from {sorted(STRATEGIES)}")
+    if epochs < 1:
+      raise ValueError("epochs must be >= 1")
     conc = concurrency or self.config.max_concurrent
+    fn = STRATEGIES[strategy]
     with self._obs.run(strategy) as report:
       self.report = report
       try:
         report.environment = self.describe_environment()
       except Exception:  # noqa: BLE001 — environment is best-effort
         logger.debug("could not collect environment", exc_info=True)
-      results = STRATEGIES[strategy](self, process_fn, conc)
+      if epochs == 1:
+        results = fn(self, process_fn, conc, teardown=not keep_warm)
+      else:
+        results = []
+        for e in range(epochs):
+          last = e == epochs - 1
+          logger.info("epoch %d/%d", e + 1, epochs)
+          try:
+            results.append(fn(self, process_fn, conc,
+                              teardown=last and not keep_warm))
+          except BaseException:               # a mid-run epoch never tore down
+            if not keep_warm and not last:
+              self.teardown()
+            raise
     logger.info("\n%s", report.summary())
     return results
 

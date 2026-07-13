@@ -160,7 +160,7 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if !hasIPv6LinkLocalExcept {
 					t.Errorf("Expected IPv6 Egress Except list to contain fe80::/10, got %v", ipv6Peer.IPBlock.Except)
 				}
-				expectedLabelKey := "agents.x-k8s.io/sandbox-template-ref-hash"
+				expectedLabelKey := sandboxTemplateRefHash
 				if _, ok := np.Spec.PodSelector.MatchLabels[expectedLabelKey]; !ok {
 					t.Errorf("Expected PodSelector MatchLabels to contain %q", expectedLabelKey)
 				}

@@ -16,6 +16,7 @@
 import argparse
 import os
 import subprocess
+import sys
 
 from shared import utils
 
@@ -113,6 +114,7 @@ def main(args):
         # TODO: Implement an explicit inclusion strategy for controller only Dockerfile.
         excluded_dirs.update({"examples", "clients"})
 
+    built = set()
     for root, dirs, files in os.walk(".", topdown=True):
         dirs[:] = [d for d in dirs if d not in excluded_dirs]
 
@@ -125,10 +127,26 @@ def main(args):
                 continue
 
             if service_name == ".":
+                # The Dockerfile at the repo root is the controller image.
+                # Single source of truth: do not copy it elsewhere.
                 service_name = "agent-sandbox-controller"
+
+            # Per-Dockerfile overrides. The Go sandbox-router needs the repo
+            # root as build context (it imports the shared Go module) and
+            # uses a "-go" suffix to avoid colliding with the Python router
+            # image which still lives at clients/python/.../sandbox-router/.
+            go_router_dir = os.path.join(".", "sandbox-router")
+            if root == go_router_dir:
+                context_dir = "."
+                service_name = "sandbox-router-go"
 
             if args.images and service_name not in args.images:
                 continue
+
+            if service_name in built:
+                sys.exit(f"ERROR: duplicate Dockerfiles for image {service_name!r}: "
+                         f"second one at {dockerfile_path} (whichever builds last "
+                         "would silently win the tag)")
 
             print(f"--- Found Dockerfile at: {dockerfile_path}")
             print(f"--- Service Name: {service_name}")
@@ -138,7 +156,16 @@ def main(args):
             create_buildx_builder_if_not_exists()
             print(f"building image for {service_name}")
             build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
-            # TODO: Handle duplicate service names in different paths
+            built.add(service_name)
+
+    # A requested image with no matching Dockerfile is an error: silently
+    # skipping it leaves stale or missing images in the registry and the
+    # failure only surfaces much later as ImagePullBackOff.
+    if args.images:
+        missing = set(args.images) - built
+        if missing:
+            sys.exit(f"ERROR: no Dockerfile found for requested image(s): {sorted(missing)} "
+                     "(is the directory committed?)")
 
 
 if __name__ == "__main__":

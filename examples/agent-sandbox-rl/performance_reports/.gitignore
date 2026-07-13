@@ -1,5 +1,10 @@
 # Generated run reports embed live cluster metadata (k8s version, node pools,
-# region, …) and churn — don't commit them. The one redacted sample + README
-# are already tracked and stay; any new .txt/.json here is ignored.
+# region, project, …) and churn — don't commit them. The one redacted sample +
+# README are tracked and stay; any new .txt/.json/.md report here is ignored.
 *.txt
 *.json
+*.md
+!README.md
+# Redacted sample report (environment scrubbed) — the one checked-in example.
+!sample_rl_rollout.md
+!sample_rl_rollout.json

@@ -65,17 +65,17 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
         self.strategy.close()
 
     def test_connect_uses_pod_ip_when_callable_provided(self):
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
         strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, get_pod_ip=lambda: "10.244.0.5")
         self.assertEqual(strategy.connect(), "http://10.244.0.5:8888")
 
     def test_connect_falls_back_to_dns_when_callable_returns_none(self):
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
         strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, get_pod_ip=lambda: None)
         self.assertEqual(strategy.connect(), "http://my-sandbox.dev.svc.cluster.local:8888")
 
     def test_connect_uses_dns_when_no_callable(self):
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
         strategy = InClusterConnectionStrategy("my-sandbox", "dev", config, get_pod_ip=None)
         self.assertEqual(strategy.connect(), "http://my-sandbox.dev.svc.cluster.local:8888")
 
@@ -96,7 +96,7 @@ class TestInClusterConnectionStrategy(unittest.TestCase):
 
     def test_connect_brackets_ipv6_pod_ip(self):
         """IPv6 pod IPs must be enclosed in brackets in URLs (RFC 3986)."""
-        config = SandboxInClusterConnectionConfig(server_port=8888, use_pod_ip=True)
+        config = SandboxInClusterConnectionConfig(server_port=8888)
         strategy = InClusterConnectionStrategy(
             "my-sandbox", "dev", config, get_pod_ip=lambda: "2001:db8::1"
         )

@@ -64,7 +64,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -82,7 +82,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -103,7 +103,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -121,7 +121,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:warm namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:warm namespace:default owned_by:None ready_condition:false sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -194,9 +194,9 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 3, // We expect 3 distinct metric series for the 4 sandboxes
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown":     1,
-				"expired:true launch_type:warm namespace:test-ns owned_by:None ready_condition:false sandbox_template:my-template": 1,
-				"expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown":    2,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown":     1,
+				"created_by:unknown expired:true launch_type:warm namespace:test-ns owned_by:None ready_condition:false sandbox_template:my-template": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:false sandbox_template:unknown":    2,
 			},
 		},
 		{
@@ -228,7 +228,7 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default owned_by:SandboxClaim ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxClaim ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 		{
@@ -260,7 +260,85 @@ func TestSandboxCollector(t *testing.T) {
 			},
 			expectedCount: 1,
 			expectedLabels: map[string]int{
-				"expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
+			},
+		},
+		{
+			name: "client-created sandbox",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-client",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.CreatedByLabel: "go-client",
+						},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"created_by:go-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+			},
+		},
+		{
+			name: "python client created sandbox",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-python-client",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.CreatedByLabel: "python-client",
+						},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"created_by:python-client expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
+			},
+		},
+		{
+			name: "untrusted created_by label normalized to unknown",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-untrusted",
+						Namespace: "default",
+						Labels: map[string]string{
+							sandboxv1beta1.CreatedByLabel: "hacker-client",
+						},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:None ready_condition:true sandbox_template:unknown": 1,
 			},
 		},
 	}

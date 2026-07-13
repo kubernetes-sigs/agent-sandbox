@@ -30,6 +30,7 @@ from .constants import (
     SANDBOX_API_GROUP,
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
+    CREATED_BY_LABEL,
 )
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
@@ -82,9 +83,11 @@ class AsyncK8sHelper:
         metadata = {
             "name": name,
             "annotations": annotations or {},
+            "labels": {
+                **(labels or {}),
+                CREATED_BY_LABEL: "python-client",
+            }
         }
-        if labels:
-            metadata["labels"] = labels
 
         spec = {
             "warmPoolRef": {

@@ -34,7 +34,8 @@ The following example demonstrates creating a sandbox, modifying its filesystem,
 
 > [!NOTE]
 > A sandbox can only be restored from its own previous snapshots (via the `suspend()` and `resume()` lifecycle).
-
+>
+> Snapshot/suspend/resume support is Python-only for now. `PodSnapshotSandboxClient` drives this through GKE's `podsnapshot.gke.io` custom resources, which the published Go SDK (`clients/go/sandbox`) doesn't wrap yet — there's no equivalent to add here without reimplementing that orchestration from scratch.
 
 ```python
 import time
@@ -81,3 +82,5 @@ assert resume_result.restored_from_snapshot
 response = sandbox.commands.run("cat /tmp/data/status.txt")
 print(response.stdout) # Should output 'session_active'
 ```
+
+

@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,7 +50,7 @@ func newTestScheme() *runtime.Scheme {
 
 func createPoolSandbox(poolName, namespace, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, suffix string) *sandboxv1beta1.Sandbox {
 	templateRefHash := ""
-	var podTemplateHash string
+	var podTemplateHash, sandboxBlueprintHash string
 	var podSpec corev1.PodSpec
 
 	if template != nil {
@@ -58,9 +60,13 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 		// If template has a version label, we could use it as part of the hash placeholder
 		if v, ok := template.Spec.PodTemplate.ObjectMeta.Labels["version"]; ok {
 			podTemplateHash = "pod-hash-" + v
+			sandboxBlueprintHash = "blueprint-hash-" + v
 		} else {
-			specJSON, _ := json.Marshal(template.Spec.PodTemplate)
-			podTemplateHash = sandboxcontrollers.NameHash(string(specJSON))
+			podTemplateJSON, _ := json.Marshal(template.Spec.PodTemplate)
+			podTemplateHash = sandboxcontrollers.NameHash(string(podTemplateJSON))
+
+			sandboxBlueprintJSON, _ := json.Marshal(template.Spec.SandboxBlueprint)
+			sandboxBlueprintHash = sandboxcontrollers.NameHash(string(sandboxBlueprintJSON))
 		}
 	} else {
 		// Fallback for tests that don't provide a template
@@ -72,8 +78,11 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 				},
 			},
 		}
-		specJSON, _ := json.Marshal(sandboxv1beta1.PodTemplate{Spec: podSpec})
-		podTemplateHash = sandboxcontrollers.NameHash(string(specJSON))
+		podTemplateJSON, _ := json.Marshal(sandboxv1beta1.PodTemplate{Spec: podSpec})
+		podTemplateHash = sandboxcontrollers.NameHash(string(podTemplateJSON))
+
+		sandboxBlueprintJSON, _ := json.Marshal(sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: podSpec}})
+		sandboxBlueprintHash = sandboxcontrollers.NameHash(string(sandboxBlueprintJSON))
 	}
 
 	return &sandboxv1beta1.Sandbox{
@@ -82,17 +91,19 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 			Namespace:         namespace,
 			CreationTimestamp: metav1.Now(),
 			Labels: map[string]string{
-				warmPoolSandboxLabel:                       poolNameHash,
-				sandboxTemplateRefHash:                     templateRefHash,
-				sandboxv1beta1.SandboxPodTemplateHashLabel: podTemplateHash,
+				warmPoolSandboxLabel:                                 poolNameHash,
+				sandboxTemplateRefHash:                               templateRefHash,
+				sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel: podTemplateHash,
+				sandboxv1beta1.SandboxTemplateHashLabel:              sandboxBlueprintHash,
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
 			ObjectMeta: sandboxv1beta1.PodMetadata{
 				Labels: map[string]string{
-					warmPoolSandboxLabel:                       poolNameHash,
-					sandboxTemplateRefHash:                     templateRefHash,
-					sandboxv1beta1.SandboxPodTemplateHashLabel: podTemplateHash,
+					warmPoolSandboxLabel:                                 poolNameHash,
+					sandboxTemplateRefHash:                               templateRefHash,
+					sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel: podTemplateHash,
+					sandboxv1beta1.SandboxTemplateHashLabel:              sandboxBlueprintHash,
 				},
 			},
 			Spec: podSpec,
@@ -117,6 +128,19 @@ func createTemplate(namespace string) *extensionsv1beta1.SandboxTemplate {
 				},
 			},
 		}},
+		},
+	}
+}
+
+func createVolumeClaimTemplate(name string, storageClass string) sandboxv1beta1.PersistentVolumeClaimTemplate {
+	return sandboxv1beta1.PersistentVolumeClaimTemplate{
+		EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: name},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			StorageClassName: &storageClass,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+			},
 		},
 	}
 }
@@ -1006,7 +1030,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			require.NoError(t, err)
 
 			// Get initial hash label
-			template, initialHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+			template, _, initialHash, err := r.fetchTemplateAndHash(ctx, warmPool)
 			require.NoError(t, err)
 
 			// Verify sandboxes exist with initial image and hash
@@ -1016,7 +1040,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			require.Len(t, sandboxes.Items, int(replicas))
 			for _, sb := range sandboxes.Items {
 				require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image)
-				require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel], "Sandbox should have initial template hash label")
+				require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel], "Sandbox should have initial sandbox blueprint hash label")
 			}
 
 			// Update the SandboxTemplate content
@@ -1026,7 +1050,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			require.NoError(t, err)
 
 			// Get new expected hash label
-			_, updatedHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+			_, _, updatedHash, err := r.fetchTemplateAndHash(ctx, warmPool)
 			require.NoError(t, err)
 			require.NotEqual(t, initialHash, updatedHash, "Hashes should differ after template update")
 
@@ -1043,14 +1067,14 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 				// For Recreate strategy, all should be updated
 				for _, sb := range sandboxes.Items {
 					require.Equal(t, "image-v2", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should have updated image")
-					require.Equal(t, updatedHash, sb.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel], "Sandbox should have updated template hash label")
+					require.Equal(t, updatedHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel], "Sandbox should have updated sandbox blueprint hash label")
 				}
 				t.Log("Verified: All sandboxes updated immediately with Recreate strategy")
 			} else {
 				// For OnReplenish (default), all should still be v1
 				for _, sb := range sandboxes.Items {
 					require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image")
-					require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel], "Sandbox should retain original template hash label")
+					require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel], "Sandbox should retain original sandbox blueprint hash label")
 				}
 				t.Log("Verified: Sandboxes retained original image after update with OnReplenish strategy")
 
@@ -1073,10 +1097,10 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					switch sb.Spec.PodTemplate.Spec.Containers[0].Image {
 					case "image-v1":
 						v1Count++
-						require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel])
+						require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel])
 					case "image-v2":
 						v2Count++
-						require.Equal(t, updatedHash, sb.Labels[sandboxv1beta1.SandboxPodTemplateHashLabel])
+						require.Equal(t, updatedHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel])
 					}
 				}
 				require.Equal(t, 1, v1Count, "Should have one remaining v1 sandbox")
@@ -1462,7 +1486,7 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 		},
 	}
 
-	currentPodTemplateHash, err := computePodTemplateHash(template)
+	currentSandboxBlueprintHash, err := computeSandboxBlueprintHash(template)
 	require.NoError(t, err)
 	templateRefHash := SandboxTemplateRefHash(template.Name)
 
@@ -1479,15 +1503,15 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 			Name:      "spoofed-orphan",
 			Namespace: poolNamespace,
 			Labels: map[string]string{
-				sandboxv1beta1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
-				sandboxTemplateRefHash:                     templateRefHash,
-				warmPoolSandboxLabel:                       sandboxcontrollers.NameHash(poolName),
+				sandboxv1beta1.SandboxTemplateHashLabel: currentSandboxBlueprintHash,
+				sandboxTemplateRefHash:                  templateRefHash,
+				warmPoolSandboxLabel:                    sandboxcontrollers.NameHash(poolName),
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: *spoofedSpec}}},
 	}
 
-	isStaleSpoofed := r.isSandboxStale(ctx, spoofedOrphan, template, currentPodTemplateHash, vettedHashes)
+	isStaleSpoofed := r.isSandboxStale(ctx, spoofedOrphan, template, currentSandboxBlueprintHash, vettedHashes)
 	require.True(t, isStaleSpoofed, "Orphaned sandbox with spoofed hash but modified PodSpec should be stale")
 
 	// Case 2: Orphaned sandbox with matching hash label and genuine/fully vetted PodSpec.
@@ -1500,15 +1524,15 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 			Name:      "genuine-orphan",
 			Namespace: poolNamespace,
 			Labels: map[string]string{
-				sandboxv1beta1.SandboxPodTemplateHashLabel: currentPodTemplateHash,
-				sandboxTemplateRefHash:                     templateRefHash,
-				warmPoolSandboxLabel:                       sandboxcontrollers.NameHash(poolName),
+				sandboxv1beta1.SandboxTemplateHashLabel: currentSandboxBlueprintHash,
+				sandboxTemplateRefHash:                  templateRefHash,
+				warmPoolSandboxLabel:                    sandboxcontrollers.NameHash(poolName),
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: *genuineSpec}}},
 	}
 
-	isStaleGenuine := r.isSandboxStale(ctx, genuineOrphan, template, currentPodTemplateHash, vettedHashes)
+	isStaleGenuine := r.isSandboxStale(ctx, genuineOrphan, template, currentSandboxBlueprintHash, vettedHashes)
 	require.False(t, isStaleGenuine, "Orphaned sandbox with genuine fully vetted PodSpec should be fresh")
 }
 
@@ -1698,4 +1722,537 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
+	poolNamespace := "default"
+	templateName := "test-template"
+
+	trueVal := true
+	falseVal := false
+	replicas := int32(1)
+
+	baseSandboxBlueprint := sandboxv1beta1.SandboxBlueprint{
+		PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: &falseVal,
+				Containers:                   []corev1.Container{{Name: "app", Image: "image-v1"}},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name             string
+		updateBaseFn     func(*sandboxv1beta1.SandboxBlueprint)
+		updateFn         func(*extensionsv1beta1.SandboxTemplate)
+		verifyFn         func(*testing.T, sandboxv1beta1.Sandbox)
+		expectRecreation bool
+	}{
+		{
+			name:             "Template spec unchanged should NOT recreate",
+			expectRecreation: false,
+		},
+		{
+			name: "Pod template annotation drift should NOT recreate",
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				if tmpl.Spec.PodTemplate.ObjectMeta.Annotations == nil {
+					tmpl.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
+				}
+				tmpl.Spec.PodTemplate.ObjectMeta.Annotations["new-annotation"] = "value"
+			},
+			expectRecreation: false,
+		},
+		{
+			name: "Pod template label drift should NOT recreate",
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				if tmpl.Spec.PodTemplate.ObjectMeta.Labels == nil {
+					tmpl.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
+				}
+				tmpl.Spec.PodTemplate.ObjectMeta.Labels["new-label"] = "value"
+			},
+			expectRecreation: false,
+		},
+		{
+			name: "VCT annotation drift should NOT recreate",
+			updateBaseFn: func(bp *sandboxv1beta1.SandboxBlueprint) {
+				bp.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					createVolumeClaimTemplate("data", "standard"),
+				}
+			},
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				if tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Annotations == nil {
+					tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Annotations = make(map[string]string)
+				}
+				tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Annotations["new-annotation"] = "value"
+			},
+			expectRecreation: false,
+		},
+		{
+			name: "VCT label drift should NOT recreate",
+			updateBaseFn: func(bp *sandboxv1beta1.SandboxBlueprint) {
+				bp.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					createVolumeClaimTemplate("data", "standard"),
+				}
+			},
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				if tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Labels == nil {
+					tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Labels = make(map[string]string)
+				}
+				tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Labels["new-label"] = "value"
+			},
+			expectRecreation: false,
+		},
+		{
+			name: "Image change should recreate",
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				tmpl.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+			},
+			verifyFn: func(t *testing.T, sb sandboxv1beta1.Sandbox) {
+				require.Equal(t, "image-v2", sb.Spec.PodTemplate.Spec.Containers[0].Image)
+			},
+			expectRecreation: true,
+		},
+		{
+			name: "VCT addition should recreate",
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					createVolumeClaimTemplate("data", "standard"),
+				}
+			},
+			verifyFn: func(t *testing.T, sb sandboxv1beta1.Sandbox) {
+				require.Len(t, sb.Spec.SandboxBlueprint.VolumeClaimTemplates, 1)
+				require.Equal(t, "data", sb.Spec.SandboxBlueprint.VolumeClaimTemplates[0].Name)
+			},
+			expectRecreation: true,
+		},
+		{
+			name: "VCT spec change should recreate",
+			updateBaseFn: func(bp *sandboxv1beta1.SandboxBlueprint) {
+				bp.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")}
+			},
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				newSC := "fast-ssd"
+				tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates[0].Spec.StorageClassName = &newSC
+			},
+			verifyFn: func(t *testing.T, sb sandboxv1beta1.Sandbox) {
+				require.Len(t, sb.Spec.SandboxBlueprint.VolumeClaimTemplates, 1)
+				require.Equal(t, "fast-ssd", *sb.Spec.SandboxBlueprint.VolumeClaimTemplates[0].Spec.StorageClassName)
+			},
+			expectRecreation: true,
+		},
+		{
+			name: "VCT removal should recreate",
+			updateBaseFn: func(bp *sandboxv1beta1.SandboxBlueprint) {
+				bp.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")}
+			},
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				tmpl.Spec.SandboxBlueprint.VolumeClaimTemplates = nil
+			},
+			verifyFn: func(t *testing.T, sb sandboxv1beta1.Sandbox) {
+				require.Empty(t, sb.Spec.SandboxBlueprint.VolumeClaimTemplates)
+			},
+			expectRecreation: true,
+		},
+		{
+			name: "Service addition should recreate",
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				tmpl.Spec.SandboxBlueprint.Service = &trueVal
+			},
+			verifyFn: func(t *testing.T, sb sandboxv1beta1.Sandbox) {
+				require.NotNil(t, sb.Spec.SandboxBlueprint.Service)
+				require.True(t, *sb.Spec.SandboxBlueprint.Service)
+			},
+			expectRecreation: true,
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			initialSandboxBlueprint := (&baseSandboxBlueprint).DeepCopy()
+			if tt.updateBaseFn != nil {
+				tt.updateBaseFn(initialSandboxBlueprint)
+			}
+
+			template := &extensionsv1beta1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: poolNamespace,
+				},
+				Spec: extensionsv1beta1.SandboxTemplateSpec{
+					NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+					SandboxBlueprint:        *initialSandboxBlueprint,
+				},
+			}
+
+			warmPool := &extensionsv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: poolNamespace,
+					UID:       "warmpool-uid-456",
+				},
+				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+					Replicas:    &replicas,
+					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+					UpdateStrategy: &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+						Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+					},
+				},
+			}
+
+			scheme := newTestScheme()
+			r := SandboxWarmPoolReconciler{
+				Client: fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithRuntimeObjects(template, warmPool).
+					Build(),
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			}
+
+			ctx := context.Background()
+
+			// Initial reconcile
+			err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			sandboxes := &sandboxv1beta1.SandboxList{}
+			err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, sandboxes.Items, int(replicas), "expected warm sandbox after initial reconcile")
+
+			// Capture initial sandboxblueprint hash
+			_, _, initialHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+			require.NoError(t, err)
+
+			// Capture initial sandbox names to verify recreation later
+			initialName := sandboxes.Items[0].Name
+
+			// Apply the template drift
+			if tt.updateFn != nil {
+				updatedTemplate := template.DeepCopy()
+				tt.updateFn(updatedTemplate)
+				err = r.Update(ctx, updatedTemplate)
+				require.NoError(t, err)
+			}
+
+			// Capture updated sandbox blueprint hash after template update
+			_, _, updatedHash, err := r.fetchTemplateAndHash(ctx, warmPool)
+			require.NoError(t, err)
+			if tt.expectRecreation {
+				require.NotEqual(t, initialHash, updatedHash, "sandbox blueprint hash should change after template update")
+			}
+
+			// Recreate strategy should delete stale sandbox and create a fresh one
+			err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
+			require.NoError(t, err)
+			require.Len(t, sandboxes.Items, int(replicas), "expected same replica count after recreation")
+
+			for _, sb := range sandboxes.Items {
+				if tt.expectRecreation {
+					require.Equal(t, updatedHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel],
+						"recreated sandbox should carry the updated sandbox blueprint hash")
+					require.NotEqual(t, initialName, sb.Name, "recreated sandbox should have a new name")
+				} else {
+					require.Equal(t, initialHash, sb.Labels[sandboxv1beta1.SandboxTemplateHashLabel],
+						"unchanged sandbox should retain the initial sandbox blueprint hash")
+					require.Equal(t, initialName, sb.Name, "unchanged sandbox should retain the same name")
+				}
+				if tt.verifyFn != nil {
+					tt.verifyFn(t, sb)
+				}
+			}
+		})
+	}
+}
+
+func TestComputeSandboxBlueprintHash(t *testing.T) {
+	namespace := "default"
+
+	template := createTemplate(namespace)
+
+	diffImage := template.DeepCopy()
+	diffImage.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+
+	withVCT := template.DeepCopy()
+	withVCT.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")}
+
+	svcEnabled := template.DeepCopy()
+	svcEnabled.Spec.Service = new(true)
+
+	testCases := []struct {
+		name        string
+		template    *extensionsv1beta1.SandboxTemplate
+		equalToBase bool
+	}{
+		{
+			name:        "same template produces same hash",
+			template:    template.DeepCopy(),
+			equalToBase: true,
+		},
+		{
+			name:        "pod spec change produces different hash",
+			template:    diffImage,
+			equalToBase: false,
+		},
+		{
+			name:        "VCT addition produces different hash",
+			template:    withVCT,
+			equalToBase: false,
+		},
+		{
+			name:        "Service toggle produces different hash",
+			template:    svcEnabled,
+			equalToBase: false,
+		},
+	}
+
+	currentSandboxHash, err := computeSandboxBlueprintHash(template)
+	require.NoError(t, err)
+	require.NotEmpty(t, currentSandboxHash)
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			sandboxHash, err := computeSandboxBlueprintHash(tt.template)
+			require.NoError(t, err)
+			require.NotEmpty(t, sandboxHash)
+			if tt.equalToBase {
+				require.Equal(t, currentSandboxHash, sandboxHash)
+			} else {
+				require.NotEqual(t, currentSandboxHash, sandboxHash)
+			}
+		})
+	}
+}
+
+func TestCompareSandboxBlueprint(t *testing.T) {
+	falseVal := false
+	trueVal := true
+
+	basePodTemplate := sandboxv1beta1.PodTemplate{
+		Spec: corev1.PodSpec{
+			AutomountServiceAccountToken: &falseVal,
+			Containers:                   []corev1.Container{{Name: "app", Image: "image-v1"}},
+		},
+	}
+
+	testCases := []struct {
+		name                     string
+		templateSandboxBlueprint sandboxv1beta1.SandboxBlueprint
+		actualSandboxBlueprint   sandboxv1beta1.SandboxBlueprint
+		expectedResult           bool
+	}{
+		{
+			name:                     "Identical sandbox blueprint with no VCTs and no service should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: basePodTemplate},
+			actualSandboxBlueprint:   sandboxv1beta1.SandboxBlueprint{PodTemplate: basePodTemplate},
+			expectedResult:           true,
+		},
+		{
+			name: "Identical sandbox blueprint with VCTs should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "Identical sandbox blueprint with service enabled should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+				Service:              &trueVal,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+				Service:              &trueVal,
+			},
+			expectedResult: true,
+		},
+		{
+			name: "VCT label drift should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{
+							Name:   "data",
+							Labels: map[string]string{"extra": "label"},
+						},
+						Spec: createVolumeClaimTemplate("data", "standard").Spec,
+					},
+				},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "VCT annotation drift should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{
+							Name:        "data",
+							Annotations: map[string]string{"extra": "annotation"},
+						},
+						Spec: createVolumeClaimTemplate("data", "standard").Spec,
+					},
+				},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "Pod spec image drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						AutomountServiceAccountToken: &falseVal,
+						Containers:                   []corev1.Container{{Name: "app", Image: "image-v1"}},
+					},
+				},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						AutomountServiceAccountToken: &falseVal,
+						Containers:                   []corev1.Container{{Name: "app", Image: "image-v2"}},
+					},
+				},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "VCT count drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					createVolumeClaimTemplate("data", "standard"),
+					createVolumeClaimTemplate("cache", "standard"),
+				},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "VCTs reordered should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					createVolumeClaimTemplate("data", "standard"),
+					createVolumeClaimTemplate("cache", "standard"),
+				},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					createVolumeClaimTemplate("cache", "standard"),
+					createVolumeClaimTemplate("data", "standard"),
+				},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "VCT name drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("renamed-data", "standard")},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "VCT spec storage class drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "standard")},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:          basePodTemplate,
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{createVolumeClaimTemplate("data", "fast-ssd")},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "Service enabled vs disabled should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				Service:     &trueVal,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				Service:     &falseVal,
+			},
+			expectedResult: false,
+		},
+		{
+			name: "Service set vs nil should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				Service:     &trueVal,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				Service:     nil,
+			},
+			expectedResult: false,
+		},
+	}
+
+	r := &SandboxWarmPoolReconciler{}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			template := &extensionsv1beta1.SandboxTemplate{
+				Spec: extensionsv1beta1.SandboxTemplateSpec{
+					NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged,
+					SandboxBlueprint:        tt.templateSandboxBlueprint,
+				},
+			}
+			result := r.compareSandboxBlueprint(template, &tt.actualSandboxBlueprint)
+			require.Equal(t, tt.expectedResult, result)
+		})
+	}
+}
+
+// TestSandboxBlueprintFieldsAreCompared verifies that compareSandboxBlueprint()
+// accounts for all fields in the SandboxBlueprint struct. A field missing from the
+// comparison logic is not tracked for drift, so a warm sandbox will not be detected
+// as stale when that field changes.
+func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
+	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service"}
+
+	var actualFields []string
+	blueprintType := reflect.TypeFor[sandboxv1beta1.SandboxBlueprint]()
+	for field := range blueprintType.Fields() {
+		actualFields = append(actualFields, field.Name)
+	}
+
+	slices.Sort(expectedFields)
+	slices.Sort(actualFields)
+
+	require.Equal(t, expectedFields, actualFields,
+		"SandboxBlueprint fields have changed. Update compareSandboxBlueprint() in "+
+			"sandboxwarmpool_controller.go to compare the new field for staleness detection, then update the "+
+			"expected field list in this test to include it.")
 }

@@ -70,13 +70,16 @@ The official agent-sandbox installation path is `kubectl apply -f` against the r
 bash dev/tools/migrate.sh --phase=bootstrap
 
 # 2. Install the new controller + CRDs (which include the conversion webhook).
-#    The release ships two manifests: manifest.yaml (core controller + base
+#    The release ships two manifests: sandbox.yaml (core controller + base
 #    CRDs + webhook Service) and extensions.yaml (the extensions API group
 #    CRDs: SandboxClaim, SandboxTemplate, SandboxWarmPool). Apply both.
 #    Wait until the controller pod is Ready and the webhook Service has
 #    endpoints before proceeding.
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/manifest.yaml
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/extensions.yaml
+#
+#    Note: For releases older than v0.5.2, the core manifest is named manifest.yaml
+#    instead of sandbox.yaml.
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/sandbox.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/extensions.yaml
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
 kubectl wait --for=condition=Ready pods -l app=agent-sandbox-controller -n agent-sandbox-system
 
@@ -278,9 +281,13 @@ done
 ### Step 6: Revert the CRD manifests and Controller
 Downgrade the installed components back to the old version:
 
-* **For Flow A (kubectl):** Re-apply the old version's manifests (substitute `<old-version>` with your previous version, e.g., `v0.4.6`):
+* **For Flow A (kubectl):** Re-apply the old version's manifests (substitute `<old-version>` with your previous version, e.g., `v0.4.6`). Note that for versions older than `v0.5.2` the core manifest is named `manifest.yaml`, while for `v0.5.2` and newer it is named `sandbox.yaml`:
   ```bash
+  # For <old-version> < v0.5.2:
   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/manifest.yaml
+  # For <old-version> >= v0.5.2:
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/sandbox.yaml
+
   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/extensions.yaml
   ```
 * **For Flow B (Helm):** Roll back the Helm release to the pre-migration revision (find the revision number using `helm history agent-sandbox`):

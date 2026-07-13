@@ -88,12 +88,13 @@ var (
 	// - launch_type: "warm", "cold", "unknown"
 	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
 	// - pod_condition: "ready", "not_ready".
+	// - created_by: the component that created the claim (e.g. "go-client", "python-client", "controller", "unknown").
 	SandboxClaimCreationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "agent_sandbox_claim_creation_total",
-			Help: "Total number of SandboxClaims created, labeled by namespace, sandbox template, launch type, warmpool name, and pod condition.",
+			Help: "Total number of SandboxClaims created, labeled by namespace, sandbox template, launch type, warmpool name, pod condition, and created_by.",
 		},
-		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition"},
+		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition", "created_by"},
 	)
 
 	// AgentSandboxesDesc describes the agent_sandboxes metric point-in-time counts.
@@ -104,10 +105,11 @@ var (
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: sandboxTemplateRef.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
+	// - created_by: the component that created the sandbox (e.g. "go-client", "python-client", "controller", "unknown").
 	AgentSandboxesDesc = prometheus.NewDesc(
 		"agent_sandboxes",
 		"Monitor the point-in-time number of sandboxes in the cluster.",
-		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by"},
+		[]string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by", "created_by"},
 		nil,
 	)
 
@@ -157,7 +159,19 @@ func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType,
 	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
 }
 
+// NormalizeCreatedBy returns the createdBy label normalized to a known allow-list
+// (go-client, python-client, controller) or "unknown" for anything else.
+func NormalizeCreatedBy(createdBy string) string {
+	switch createdBy {
+	case "go-client", "python-client", "controller":
+		return createdBy
+	default:
+		return "unknown"
+	}
+}
+
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.
-func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition string) {
-	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition).Inc()
+// The createdBy value is automatically normalized.
+func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition, createdBy string) {
+	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition, NormalizeCreatedBy(createdBy)).Inc()
 }

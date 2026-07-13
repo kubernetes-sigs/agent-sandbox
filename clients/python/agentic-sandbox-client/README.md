@@ -157,27 +157,15 @@ finally:
 Use this when the client runs **inside the cluster** (for example, another pod in the same cluster).
 The client connects **directly to the sandbox runtime pod**, bypassing the sandbox router.
 
-The **default** is **cluster DNS** (`use_pod_ip=False`). Omit the argument or pass `use_pod_ip=False`
-to use it; set `use_pod_ip=True` only when you want the pod IP path.
-
-**Option A: Direct Pod IP** — `SandboxInClusterConnectionConfig(use_pod_ip=True)`
-
-- Uses the pod IP from the Sandbox status for **low-latency**, direct connections without relying on
-  cluster DNS resolution.
-
-**Option B: Cluster DNS** — `SandboxInClusterConnectionConfig(use_pod_ip=False)`
-
-- Uses a stable DNS-style endpoint (typically `http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`).
-  Prefer this when you want **stable DNS-based routing** across pod lifecycle events.
+The client first uses the pod IP reported in the Sandbox status. If the pod IP is not available
+(for example, before status is populated or when running against an older controller), it falls
+back to the stable cluster DNS endpoint:
+`http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`.
 
 ```python
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.models import SandboxInClusterConnectionConfig
 
-# Choose one connection_config (default = cluster DNS):
-#   SandboxInClusterConnectionConfig()  # same as use_pod_ip=False
-# Option A — direct pod IP (low latency):
-#   SandboxInClusterConnectionConfig(use_pod_ip=True)
 connection_config = SandboxInClusterConnectionConfig()
 
 client = SandboxClient(connection_config=connection_config)

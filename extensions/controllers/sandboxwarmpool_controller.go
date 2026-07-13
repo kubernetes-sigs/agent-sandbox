@@ -45,7 +45,7 @@ import (
 )
 
 const (
-	sandboxTemplateRefHash          = "agents.x-k8s.io/sandbox-template-ref-hash"
+	sandboxTemplateRefHash          = sandboxv1beta1.SandboxTemplateRefHashLabel
 	warmPoolSandboxLabel            = sandboxv1beta1.SandboxWarmPoolLabel
 	sandboxCreateDeleteMaxBatchSize = 300
 	warmPoolEvictionAnnotation      = "cluster-autoscaler.kubernetes.io/safe-to-evict"
@@ -377,6 +377,7 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 		sandboxv1beta1.SandboxLaunchTypeLabel:                sandboxv1beta1.SandboxLaunchTypeWarm,
 		sandboxv1beta1.DeprecatedSandboxPodTemplateHashLabel: currentPodTemplateHash,
 		sandboxv1beta1.SandboxTemplateHashLabel:              currentSandboxBlueprintHash,
+		sandboxv1beta1.CreatedByLabel:                        "controller",
 	}
 
 	// Build annotations for the Sandbox CR

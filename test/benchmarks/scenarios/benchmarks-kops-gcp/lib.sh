@@ -145,8 +145,14 @@ load_cluster_env() {
   dir="$(state_dir "${name}")"
   [[ -f "${dir}/cluster.env" ]] || \
     die "no state for cluster '${name}' at ${dir}; run create-cluster first"
+  # set -a: export everything sourced from cluster.env. Child processes (e.g.
+  # test-e2e) read IMAGE_TAG/IMAGE_PREFIX from the environment; a plain source
+  # would leave them shell-local and test-e2e would generate a different image
+  # tag than the one create-cluster pushed.
+  set -a
   # shellcheck disable=SC1091
   source "${dir}/cluster.env"
+  set +a
   export KUBECONFIG="${dir}/kubeconfig"
   [[ -f "${KUBECONFIG}" ]] || die "kubeconfig missing at ${KUBECONFIG}"
 }

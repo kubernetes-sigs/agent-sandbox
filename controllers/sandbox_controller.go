@@ -490,6 +490,45 @@ func isSystemLabel(key string) bool {
 	return hasSystemReservedPrefix(key)
 }
 
+// extensionPodLabelKeys must stay in sync with computeExtensionPodLabels so reconcile
+// removes stale extension labels when they are no longer expected on the Pod.
+var extensionPodLabelKeys = []string{
+	sandboxv1beta1.SandboxWarmPoolLabel,
+	sandboxv1beta1.SandboxTemplateRefHashLabel,
+}
+
+// computeExtensionPodLabels returns extension-owned labels that should be propagated
+// from a Sandbox CR to its Pod. Labels are only returned when the Sandbox is owned
+// by an extensions controller (SandboxClaim or SandboxWarmPool).
+func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]string {
+	ref := metav1.GetControllerOf(sandbox)
+	if ref == nil {
+		return nil
+	}
+	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+	if gvk.Group != extensionsv1beta1.GroupVersion.Group {
+		return nil
+	}
+
+	var labels map[string]string
+
+	if gvk.Kind == "SandboxWarmPool" {
+		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
+			if labels == nil {
+				labels = make(map[string]string, 2)
+			}
+			labels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+		}
+	}
+	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok && val != "" {
+		if labels == nil {
+			labels = make(map[string]string, 2)
+		}
+		labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
+	}
+	return labels
+}
+
 // isSystemAnnotation reports whether an annotation key is reserved for the sandbox
 // system and therefore must not be settable through a user-supplied PodTemplate.
 func isSystemAnnotation(key string) bool {
@@ -872,20 +911,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Propagate extension-owned labels from the Sandbox CR to the Pod, provided the Sandbox is
 	// owned by an extensions controller (SandboxClaim or SandboxWarmPool).
-	if ref := metav1.GetControllerOf(sandbox); ref != nil {
-		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group {
-			// The warm pool label is required by the capacity buffer to identify warm pool pods.
-			if gvk.Kind == "SandboxWarmPool" {
-				if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
-					podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
-				}
-			}
-			if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok {
-				podLabels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
-			}
-		}
-	}
+	maps.Copy(podLabels, computeExtensionPodLabels(sandbox))
 
 	// Propagate the created-by label from the Sandbox CR labels to the Pod if present,
 	// normalizing it to a known allow-list to prevent invalid values or high cardinality.
@@ -1022,36 +1048,15 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		}
 	}
 	// Reconcile extension-owned labels based on Sandbox ownership.
-	var expectedWarmPoolHash string
-	var expectedTemplateRefHash string
-	if ref := metav1.GetControllerOf(sandbox); ref != nil {
-		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group {
-			if gvk.Kind == "SandboxWarmPool" {
-				expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+	extensionLabels := computeExtensionPodLabels(sandbox)
+	for _, key := range extensionPodLabelKeys {
+		if val, ok := extensionLabels[key]; ok {
+			if pod.Labels[key] != val {
+				pod.Labels[key] = val
+				updated = true
 			}
-			expectedTemplateRefHash = sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]
-		}
-	}
-	if expectedWarmPoolHash != "" {
-		if pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] != expectedWarmPoolHash {
-			pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] = expectedWarmPoolHash
-			updated = true
-		}
-	} else {
-		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
-			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
-			updated = true
-		}
-	}
-	if expectedTemplateRefHash != "" {
-		if pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] != expectedTemplateRefHash {
-			pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = expectedTemplateRefHash
-			updated = true
-		}
-	} else {
-		if _, exists := pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; exists {
-			delete(pod.Labels, sandboxv1beta1.SandboxTemplateRefHashLabel)
+		} else if _, exists := pod.Labels[key]; exists {
+			delete(pod.Labels, key)
 			updated = true
 		}
 	}

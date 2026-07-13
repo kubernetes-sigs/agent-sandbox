@@ -520,9 +520,11 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 // a resumed Sandbox becomes Ready.
 func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) {
 	key := types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}
+	logger := ctrl.Log.WithName("resume-metrics").WithValues("sandbox", key.String(), "uid", string(sandbox.UID))
 
 	// A suspend cancels any in-flight resume timer for this Sandbox.
 	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		logger.Info("Sandbox is suspended; deleting any in-flight resume timer")
 		r.resumeStartTimes.Delete(key)
 		return
 	}
@@ -534,6 +536,7 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 		// longer matches (left by a same-named predecessor) — so it cannot block a
 		// future LoadOrStore anchor for this key.
 		if entry, ok := r.resumeStartTimes.Load(key); ok {
+			logger.Info("Ready condition observed. Found resume timer entry", "entry_uid", string(entry.uid), "start_time", entry.timestamp.Format(time.RFC3339Nano))
 			r.resumeStartTimes.Delete(key)
 			if entry.uid == sandbox.UID {
 				templateName := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]
@@ -545,8 +548,13 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 				if launchType == "" {
 					launchType = asmetrics.LaunchTypeUnknown
 				}
+				logger.Info("Recording resume latency metric!", "template", templateName, "launchType", launchType, "duration_ms", time.Since(entry.timestamp).Milliseconds())
 				asmetrics.RecordResumeLatency(entry.timestamp, sandbox.Namespace, templateName, launchType)
+			} else {
+				logger.Info("Ready condition observed but entry UID mismatched", "entry_uid", string(entry.uid))
 			}
+		} else {
+			logger.Info("Ready condition observed but no resume timer entry found in map")
 		}
 		return
 	}
@@ -557,11 +565,17 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 	cond := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 	if cond != nil && cond.Status == metav1.ConditionTrue {
 		newEntry := resumeTimeEntry{timestamp: time.Now(), uid: sandbox.UID}
+		logger.Info("Seeding resume start time timer", "start_time", newEntry.timestamp.Format(time.RFC3339Nano))
 		// If a stale entry from a same-named predecessor is present (different UID),
 		// overwrite it so this resume is timed from a fresh start rather than being
 		// blocked by LoadOrStore keeping the old value.
-		if existing, loaded := r.resumeStartTimes.LoadOrStore(key, newEntry); loaded && existing.uid != sandbox.UID {
-			r.resumeStartTimes.Store(key, newEntry)
+		if existing, loaded := r.resumeStartTimes.LoadOrStore(key, newEntry); loaded {
+			if existing.uid != sandbox.UID {
+				logger.Info("Overwriting stale resume start time timer with new start time", "old_uid", string(existing.uid), "new_uid", string(newEntry.uid))
+				r.resumeStartTimes.Store(key, newEntry)
+			} else {
+				logger.Info("Resume start time timer already seeded for this UID", "start_time", existing.timestamp.Format(time.RFC3339Nano))
+			}
 		}
 	}
 }

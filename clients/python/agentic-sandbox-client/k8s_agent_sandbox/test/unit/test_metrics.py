@@ -112,9 +112,11 @@ class TestMetrics(unittest.TestCase):
         self.assertIsInstance(metrics_output, str)
         self.assertIn("sandbox_client_discovery_latency_ms", metrics_output)
         
-        # Test print_metrics
-        print_metrics()
-        mock_print.assert_called_once_with(metrics_output)
+        # Test print_metrics with a stable mocked string using localized context patch
+        with patch('k8s_agent_sandbox.metrics_utils.get_metrics') as mock_get_metrics:
+            mock_get_metrics.return_value = "mocked_prometheus_metrics"
+            print_metrics()
+            mock_print.assert_called_once_with("mocked_prometheus_metrics")
 
 if __name__ == '__main__':
     unittest.main()

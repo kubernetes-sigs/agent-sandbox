@@ -423,24 +423,27 @@ def display_prometheus_latency_metrics():
         ):
             print(f"\nMetric: {metric.name}")
             
-            count_val = 0.0
-            buckets = []
+            series = {}  # label-tuple -> {"count": float, "buckets": [(le, count), ...]}
             
             for sample in metric.samples:
+                label_key = tuple(sorted((k, v) for k, v in sample.labels.items() if k != "le"))
+                entry = series.setdefault(label_key, {"count": 0.0, "buckets": []})
                 if sample.name.endswith("_count"):
-                    count_val = sample.value
+                    entry["count"] = sample.value
                 elif sample.name.endswith("_bucket"):
                     le_str = sample.labels.get("le")
                     le_val = float('inf') if le_str == "+Inf" else float(le_str)
-                    buckets.append((le_val, sample.value))
+                    entry["buckets"].append((le_val, sample.value))
             
-            if count_val > 0:
-                p50 = calculate_quantile(0.5, buckets, count_val)
-                p90 = calculate_quantile(0.9, buckets, count_val)
-                p99 = calculate_quantile(0.99, buckets, count_val)
-                print(f"  p50: {p50:.2f} ms")
-                print(f"  p90: {p90:.2f} ms")
-                print(f"  p99: {p99:.2f} ms")
+            total_count = sum(v["count"] for v in series.values())
+            if total_count > 0:
+                for label_key, v in series.items():
+                    if v["count"] == 0:
+                        continue
+                    p50 = calculate_quantile(0.5, v["buckets"], v["count"])
+                    p90 = calculate_quantile(0.9, v["buckets"], v["count"])
+                    p99 = calculate_quantile(0.99, v["buckets"], v["count"])
+                    print(f"  {dict(label_key)}: p50={p50:.2f}ms p90={p90:.2f}ms p99={p99:.2f}ms")
             else:
                 print("  No metrics recorded (Count: 0)")
 

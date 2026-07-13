@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import time
 from kubernetes.client import ApiException
 from k8s_agent_sandbox.exceptions import SnapshotNotFoundError
 from k8s_agent_sandbox.utils import record_latency

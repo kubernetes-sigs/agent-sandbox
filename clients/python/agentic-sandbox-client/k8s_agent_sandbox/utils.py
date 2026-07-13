@@ -40,7 +40,7 @@ def record_latency(metric):
                     status = "failure"
                     duration = (time.perf_counter() - start_time) * 1000.0
                     metric.labels(status=status).observe(duration)
-                raise e
+                raise
             finally:
                 if response is not None and not getattr(self, "_skip_latency_metric", False):
                     duration = (time.perf_counter() - start_time) * 1000.0

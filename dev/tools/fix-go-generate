@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import os
 import subprocess
 import sys
@@ -21,6 +22,9 @@ script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(script_dir)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--install-only", action="store_true")
+    args = parser.parse_args()
     # Find the repo root from the script's location
     repo_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 
@@ -66,6 +70,9 @@ def main():
         with open(stamp_file, "w") as f:
             f.write(expected_stamp + "\n")
         print("Tools installed successfully.")
+
+    if args.install_only:
+        sys.exit(0)
 
     # Add local bin to PATH so go generate (and buf generate) can find them
     env = os.environ.copy()

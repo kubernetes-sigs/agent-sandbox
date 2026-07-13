@@ -96,7 +96,7 @@ func TestSandboxClaimCreationRecording(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			SandboxClaimCreationTotal.Reset()
-			SandboxClaimCreationTotal.WithLabelValues("default", "test-tmpl", tc.launchType, "test-pool", tc.podCondition).Inc()
+			SandboxClaimCreationTotal.WithLabelValues("default", "test-tmpl", tc.launchType, "test-pool", tc.podCondition, "unknown").Inc()
 
 			if testutil.CollectAndCount(SandboxClaimCreationTotal) != 1 {
 				t.Errorf("Expected 1 observation")

@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agent-claw-sandbox}"
+KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agent-sandbox}"
 NODE_PORT="30789"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"

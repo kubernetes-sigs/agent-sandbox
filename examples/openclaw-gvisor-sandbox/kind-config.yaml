@@ -4,9 +4,6 @@ containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
     runtime_type = "io.containerd.runsc.v1"
-- |-
-  [debug]
-    level = "debug"
 nodes:
 - role: control-plane
   extraMounts:
@@ -24,7 +21,3 @@ nodes:
     apiServer:
       extraArgs:
         enable-admission-plugins: "NodeRestriction,OwnerReferencesPermissionEnforcement"
-  - |
-    kind: KubeletConfiguration
-    logging:
-      verbosity: 8

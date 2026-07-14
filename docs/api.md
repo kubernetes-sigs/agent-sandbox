@@ -225,6 +225,45 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | annotations is an unstructured key value map stored with a resource that may be<br />set by external tools to store and retrieve arbitrary metadata. They are not<br />queryable and should be preserved when modifying objects.<br />More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations |  | Optional: \{\} <br /> |
 
 
+#### IdleExpirationPolicy
+
+_Underlying type:_ _string_
+
+IdleExpirationPolicy describes the action taken when an active idle TTL expires.
+
+_Validation:_
+- Enum: [Suspend Delete]
+
+_Appears in:_
+- [IdleLifecyclePolicy](#idlelifecyclepolicy)
+
+| Field | Description |
+| --- | --- |
+| `Suspend` | IdleExpirationPolicySuspend transitions the sandbox to Suspended when idle.<br /> |
+| `Delete` | IdleExpirationPolicyDelete deletes the sandbox when idle.<br /> |
+
+
+#### IdleLifecyclePolicy
+
+
+
+IdleLifecyclePolicy defines an idle-based lifecycle for Sandboxes.
+When configured, the controller automatically suspends idle sandboxes
+and optionally deletes them after a retention period.
+
+
+
+_Appears in:_
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `activeTTLSeconds` _integer_ | activeTTLSeconds defines how long (in seconds) a Running sandbox can<br />remain without activity before the activeExpirationPolicy applies. |  | Minimum: 0 <br /> |
+| `activeExpirationPolicy` _[IdleExpirationPolicy](#idleexpirationpolicy)_ | activeExpirationPolicy defines the action when the active TTL expires. | Suspend | Enum: [Suspend Delete] <br />Optional: \{\} <br /> |
+| `suspendedTTLSeconds` _integer_ | suspendedTTLSeconds defines how long (in seconds) a Suspended sandbox<br />remains before the suspendedExpirationPolicy applies.<br />If unset, the sandbox remains suspended indefinitely until manually resumed. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `suspendedExpirationPolicy` _[SuspendedExpirationPolicy](#suspendedexpirationpolicy)_ | suspendedExpirationPolicy defines the action when the suspended TTL expires. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+
+
 #### Lifecycle
 
 
@@ -377,6 +416,7 @@ _Appears in:_
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
+| `idleLifecycle` _[IdleLifecyclePolicy](#idlelifecyclepolicy)_ | idleLifecycle defines an idle-based lifecycle policy. When set, the<br />controller tracks activity and transitions the sandbox through<br />Running -> Suspended -> Deleted based on the configured TTLs. |  | Optional: \{\} <br /> |
 
 
 #### SandboxStatus
@@ -398,6 +438,7 @@ _Appears in:_
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters. |  | Optional: \{\} <br /> |
 | `nodeName` _string_ | nodeName is the name of the node where the underlying pod is scheduled. |  | Optional: \{\} <br /> |
+| `lastActivityTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | lastActivityTime records when the sandbox last had activity.<br />Updated by the router or SDK on each interaction.<br />Used by the controller to enforce the idle lifecycle policy. |  | Optional: \{\} <br /> |
 
 
 #### ShutdownPolicy
@@ -417,6 +458,24 @@ _Appears in:_
 | --- | --- |
 | `Delete` | ShutdownPolicyDelete deletes the Sandbox when expired.<br /> |
 | `Retain` | ShutdownPolicyRetain keeps the Sandbox when expired (Status will show Expired).<br /> |
+
+
+#### SuspendedExpirationPolicy
+
+_Underlying type:_ _string_
+
+SuspendedExpirationPolicy describes the action taken when a suspended TTL expires.
+
+_Validation:_
+- Enum: [Delete Retain]
+
+_Appears in:_
+- [IdleLifecyclePolicy](#idlelifecyclepolicy)
+
+| Field | Description |
+| --- | --- |
+| `Delete` | SuspendedExpirationPolicyDelete deletes the sandbox after the suspended TTL.<br /> |
+| `Retain` | SuspendedExpirationPolicyRetain keeps the sandbox object but marks it as expired.<br /> |
 
 
 

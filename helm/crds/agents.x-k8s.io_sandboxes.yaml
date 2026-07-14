@@ -37,6 +37,31 @@ spec:
             type: object
           spec:
             properties:
+              idleLifecycle:
+                properties:
+                  activeExpirationPolicy:
+                    default: Suspend
+                    enum:
+                    - Suspend
+                    - Delete
+                    type: string
+                  activeTTLSeconds:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  suspendedExpirationPolicy:
+                    default: Delete
+                    enum:
+                    - Delete
+                    - Retain
+                    type: string
+                  suspendedTTLSeconds:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - activeTTLSeconds
+                type: object
               operatingMode:
                 default: Running
                 enum:
@@ -4004,6 +4029,9 @@ spec:
                   - type
                   type: object
                 type: array
+              lastActivityTime:
+                format: date-time
+                type: string
               nodeName:
                 type: string
               podIPs:

@@ -29,6 +29,9 @@
 //   - sandboxes.jsonl: per-sandbox lifecycle milestones (client + server timestamps)
 //   - timeseries.jsonl: per-second event counts and gauges
 //   - watch.jsonl.gz: full watch streams (pods, nodes, events, sandboxes) for offline analysis
+//   - metrics.jsonl.gz: Prometheus samples scraped from the apiserver,
+//     kube-controller-manager, kube-scheduler, the sandbox controller, and
+//     kubelets (optional; see --collect-metrics)
 package main
 
 import (
@@ -136,6 +139,9 @@ type Config struct {
 	// levels keep churning past ThroughputCount until this much time has
 	// elapsed (0 = count-based only).
 	ThroughputMinSeconds float64 `json:"throughputMinSeconds"`
+
+	CollectMetrics  bool          `json:"collectMetrics"`
+	MetricsInterval time.Duration `json:"metricsIntervalNanos"`
 }
 
 func main() {
@@ -166,6 +172,8 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.ProbeInterval, "probe-interval", 0, "Delay between latency probes")
 	flag.IntVar(&cfg.ThroughputCount, "throughput-count", 200, "Number of Sandboxes to churn per throughput phase (before --throughput-min-seconds)")
 	flag.Float64Var(&cfg.ThroughputMinSeconds, "throughput-min-seconds", 45, "Minimum duration of each throughput phase; levels churn beyond -throughput-count until this much time has elapsed (0 = count-based only)")
+	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
+	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
 	flag.Parse()
 
 	for part := range strings.SplitSeq(*phasesFlag, ",") {
@@ -291,6 +299,23 @@ func run(ctx context.Context) error {
 		})
 	}
 
+	// Periodically scrape Prometheus metrics from the control plane, the
+	// sandbox controller, and kubelets. Cumulative counters snapshotted on
+	// an interval can be diffed per phase offline.
+	var scraper *promScraper
+	if cfg.CollectMetrics {
+		scraper, err = newPromScraper(restConfig, filepath.Join(cfg.OutputDir, "metrics.jsonl.gz"))
+		if err != nil {
+			return fmt.Errorf("failed to start metrics scraper: %w", err)
+		}
+		defer scraper.Close()
+		scraper.ScrapeAll(ctx) // baseline snapshot before any load
+		taskRunner.RunPeriodic(ctx, cfg.MetricsInterval, func() error {
+			scraper.ScrapeAll(ctx)
+			return nil
+		})
+	}
+
 	// Wait briefly for watches to establish
 	time.Sleep(2 * time.Second)
 
@@ -350,6 +375,11 @@ func run(ctx context.Context) error {
 	// Give the watchers a moment to observe trailing events.
 	if ctx.Err() == nil {
 		time.Sleep(2 * time.Second)
+	}
+
+	// Final metrics snapshot so cumulative counters cover the whole run.
+	if scraper != nil && ctx.Err() == nil {
+		scraper.ScrapeAll(ctx)
 	}
 
 	// Write outputs even if a phase failed: partial data is still useful.

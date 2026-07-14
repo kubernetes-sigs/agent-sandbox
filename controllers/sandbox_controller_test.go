@@ -35,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -46,6 +47,16 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
 		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
 		WithRuntimeObjects(initialObjs...).
+		Build()
+}
+
+func newFakeClientWithInterceptor(funcs interceptor.Funcs, initialObjs ...runtime.Object) client.WithWatch {
+	return fake.NewClientBuilder().
+		WithScheme(Scheme).
+		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
+		WithRuntimeObjects(initialObjs...).
+		WithInterceptorFuncs(funcs).
 		Build()
 }
 
@@ -187,7 +198,22 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
-			name:    "9. Unresponsive - Pod Status Unknown",
+			name: "9. Recreate recovery clears Finished when failed pod was deleted",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Generation: gen},
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode:    sandboxv1beta1.SandboxOperatingModeRunning,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			svc: &corev1.Service{},
+			pod: nil,
+			expectedConditions: []metav1.Condition{
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
+			},
+		},
+		{
+			name:    "10. Unresponsive - Pod Status Unknown",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}},
@@ -196,7 +222,7 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
-			name:    "10. Pod Failed",
+			name:    "11. Pod Failed",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
@@ -206,7 +232,7 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
-			name:    "11. Pod Succeeded",
+			name:    "12. Pod Succeeded",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
@@ -216,7 +242,7 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
-			name:    "12. Reconciler error takes precedence",
+			name:    "13. Reconciler error takes precedence",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			err:     errors.New("something went wrong"),
 			svc:     nil,
@@ -2486,6 +2512,283 @@ func TestReconcilePod(t *testing.T) {
 				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
+		{
+			name: "Failed pod with default Ignore policy is retained",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodFailed},
+				},
+			},
+			sandbox: sandboxObj,
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						sandboxLabel:   nameHash,
+						"custom-label": "label-val",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "Failed pod with Recreate policy is deleted and annotation cleared",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodFailed},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+						"other-annotation":                      "keep-me",
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			wantPod: nil,
+			wantSandboxAnnotations: map[string]string{
+				"other-annotation": "keep-me",
+			},
+		},
+		{
+			name: "Failed pod already being deleted for Recreate clears annotation without deleting again",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              sandboxName,
+						Namespace:         sandboxNs,
+						ResourceVersion:   "1",
+						DeletionTimestamp: new(metav1.NewTime(time.Now())),
+						Finalizers:        []string{"test-finalizer"},
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodFailed},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+						"other-annotation":                      "keep-me",
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			wantPod:         nil,
+			wantPodSurvives: sandboxName,
+			wantSandboxAnnotations: map[string]string{
+				"other-annotation": "keep-me",
+			},
+		},
+		{
+			name: "Failed pod with Recreate policy owned by another controller is not deleted",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "apps/v1",
+								Kind:               "Deployment",
+								Name:               "other-deployment",
+								UID:                "other-uid",
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
+							},
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodFailed},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			wantPod:                nil,
+			expectErr:              true,
+			wantPodSurvives:        sandboxName,
+			wantSandboxAnnotations: map[string]string{
+				// owned-by-other path clears the pod-name annotation
+			},
+		},
+		{
+			name: "Succeeded pod with Recreate policy is retained",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							"custom-label": "label-val",
+						},
+						Annotations: map[string]string{
+							"custom-annotation": "anno-val",
+						},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						sandboxLabel:   nameHash,
+						"custom-label": "label-val",
+					},
+					Annotations: map[string]string{
+						"custom-annotation":                      "anno-val",
+						"agents.x-k8s.io/propagated-labels":      "custom-label",
+						"agents.x-k8s.io/propagated-annotations": "custom-annotation",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container"}},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+			},
+			wantSandboxAnnotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		{
+			name: "Failed pod with Recreate policy while Suspended uses suspend delete path",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodFailed},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode:    sandboxv1beta1.SandboxOperatingModeSuspended,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			wantPod:                nil,
+			wantSandboxAnnotations: map[string]string{},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2524,22 +2827,20 @@ func TestReconcilePod(t *testing.T) {
 				err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
 				require.NoError(t, err)
 				require.Equal(t, tc.wantPod, livePod)
+			} else if tc.wantPodSurvives != "" {
+				// Pod should still exist (ownership check blocked deletion)
+				livePod := &corev1.Pod{}
+				err = r.Get(t.Context(), types.NamespacedName{Name: tc.wantPodSurvives, Namespace: sandboxNs}, livePod)
+				require.NoError(t, err, "expected pod %q to survive but it was deleted", tc.wantPodSurvives)
 			} else if !tc.expectErr {
-				if tc.wantPodSurvives != "" {
-					// Pod should still exist (ownership check blocked deletion)
-					livePod := &corev1.Pod{}
-					err = r.Get(t.Context(), types.NamespacedName{Name: tc.wantPodSurvives, Namespace: sandboxNs}, livePod)
-					require.NoError(t, err, "expected pod %q to survive but it was deleted", tc.wantPodSurvives)
-				} else {
-					// When wantPod is nil and no error expected, verify pod doesn't exist
-					livePod := &corev1.Pod{}
-					podName := sandboxName
-					if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
-						podName = annotatedPod
-					}
-					err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)
-					require.True(t, k8serrors.IsNotFound(err))
+				// When wantPod is nil and no error expected, verify pod doesn't exist
+				livePod := &corev1.Pod{}
+				podName := sandboxName
+				if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
+					podName = annotatedPod
 				}
+				err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)
+				require.True(t, k8serrors.IsNotFound(err))
 			}
 
 			if tc.wantSandboxAnnotations != nil {
@@ -2552,6 +2853,197 @@ func TestReconcilePod(t *testing.T) {
 					require.Equal(t, tc.wantSandboxAnnotations, liveSandbox.Annotations)
 				}
 			}
+		})
+	}
+}
+
+func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := "name-hash"
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: sandboxNs,
+			UID:       sandboxUID,
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test-container"}},
+			},
+			ObjectMeta: sandboxv1beta1.PodMetadata{
+				Labels: map[string]string{"custom-label": "label-val"},
+			},
+		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+		},
+	}
+	failedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            sandboxName,
+			Namespace:       sandboxNs,
+			ResourceVersion: "1",
+			Labels:          map[string]string{sandboxLabel: nameHash},
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+		},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed},
+	}
+
+	tracer := &mockTracer{}
+	r := SandboxReconciler{
+		Client:        newFakeClient(failedPod, sandbox),
+		Scheme:        Scheme,
+		Tracer:        tracer,
+		ClusterDomain: "cluster.local",
+	}
+
+	pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+	require.NoError(t, err)
+	require.Nil(t, pod)
+	require.Contains(t, tracer.events, mockTracerEvent{
+		name: "FailedPodDeletedForRecreate",
+		attrs: map[string]string{
+			"pod.Name": sandboxName,
+		},
+	})
+
+	livePod := &corev1.Pod{}
+	err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod)
+	require.True(t, k8serrors.IsNotFound(err))
+
+	liveSandbox := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, liveSandbox))
+	_, hasAnnotation := liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
+	require.False(t, hasAnnotation)
+
+	replacement, err := r.reconcilePod(t.Context(), liveSandbox, nameHash)
+	require.NoError(t, err)
+	require.NotNil(t, replacement)
+	require.Equal(t, sandboxName, replacement.Name)
+	require.Equal(t, corev1.PodPhase(""), replacement.Status.Phase)
+	require.Equal(t, []metav1.OwnerReference{sandboxControllerRef(sandboxName)}, replacement.OwnerReferences)
+}
+
+func TestReconcilePodFailurePolicyRecreatePatchBehavior(t *testing.T) {
+	sandboxName := "sandbox-name"
+	sandboxNs := "sandbox-ns"
+	nameHash := "name-hash"
+
+	testCases := []struct {
+		name            string
+		sandbox         *sandboxv1beta1.Sandbox
+		failedPod       *corev1.Pod
+		wantPodPatches  int
+		wantOwnerRefs   []metav1.OwnerReference
+		assertionReason string
+	}{
+		{
+			name: "owned Failed pod skips metadata patch before delete",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							"custom-label": "label-val",
+						},
+						Annotations: map[string]string{
+							"custom-annotation": "anno-val",
+						},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			failedPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels:          map[string]string{sandboxLabel: nameHash},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			wantPodPatches:  0,
+			assertionReason: "owned Failed pod scheduled for recreate should not be metadata-patched before delete",
+		},
+		{
+			name: "adopted Failed pod is patched once to persist ownership before delete",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Annotations: map[string]string{
+						sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					PodFailurePolicy: sandboxv1beta1.PodFailurePolicyRecreate,
+				},
+			},
+			failedPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels:          map[string]string{sandboxv1beta1.SandboxAdoptableLabel: "true"},
+				},
+				Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
+			},
+			wantPodPatches:  1,
+			wantOwnerRefs:   []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			assertionReason: "adopted Failed pod should be patched once to persist ownership before delete",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			podPatches := 0
+			var patchedOwnerRefs []metav1.OwnerReference
+			fakeClient := newFakeClientWithInterceptor(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if pod, ok := obj.(*corev1.Pod); ok {
+						podPatches++
+						patchedOwnerRefs = append([]metav1.OwnerReference(nil), pod.OwnerReferences...)
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}, tc.failedPod, tc.sandbox)
+
+			r := SandboxReconciler{
+				Client:        fakeClient,
+				Scheme:        Scheme,
+				Tracer:        asmetrics.NewNoOp(),
+				ClusterDomain: "cluster.local",
+			}
+
+			pod, err := r.reconcilePod(t.Context(), tc.sandbox, nameHash)
+			require.NoError(t, err)
+			require.Nil(t, pod)
+			require.Equal(t, tc.wantPodPatches, podPatches, tc.assertionReason)
+			require.Equal(t, tc.wantOwnerRefs, patchedOwnerRefs)
 		})
 	}
 }
@@ -3670,6 +4162,12 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 type mockTracer struct {
 	asmetrics.Instrumenter
 	capturedAttrs map[string]string
+	events        []mockTracerEvent
+}
+
+type mockTracerEvent struct {
+	name  string
+	attrs map[string]string
 }
 
 func (m *mockTracer) StartSpan(ctx context.Context, _ metav1.Object, _ string, attrs map[string]string) (context.Context, func()) {
@@ -3687,7 +4185,9 @@ func (m *mockTracer) IsRecording(_ context.Context) bool {
 	return true
 }
 
-func (m *mockTracer) AddEvent(_ context.Context, _ string, _ map[string]string) {}
+func (m *mockTracer) AddEvent(_ context.Context, name string, attrs map[string]string) {
+	m.events = append(m.events, mockTracerEvent{name: name, attrs: attrs})
+}
 
 func TestReconcile_TracingNormalization(t *testing.T) {
 	sbName := "tracing-test-sandbox"

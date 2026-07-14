@@ -262,6 +262,24 @@ _Appears in:_
 | `spec` _[PersistentVolumeClaimSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#persistentvolumeclaimspec-v1-core)_ | spec is the PVC's spec |  | Required: \{\} <br /> |
 
 
+#### PodFailurePolicy
+
+_Underlying type:_ _string_
+
+PodFailurePolicy controls behavior when the backing Pod reaches phase Failed.
+
+_Validation:_
+- Enum: [Ignore Recreate]
+
+_Appears in:_
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description |
+| --- | --- |
+| `Ignore` | PodFailurePolicyIgnore leaves a Failed Pod in place and surfaces Finished=True<br />(StatefulSet-like). This is the default.<br /> |
+| `Recreate` | PodFailurePolicyRecreate deletes the controller-owned Failed Pod so a new one<br />is created. The Sandbox identity and any Sandbox-owned PVCs are retained.<br /> |
+
+
 #### PodMetadata
 
 
@@ -325,7 +343,7 @@ Sandbox is the Schema for the sandboxes API.
 
 
 SandboxBlueprint defines the configuration shared between Sandbox and SandboxTemplate.
-It deliberately excludes runtime-only fields (operatingMode, lifecycle).
+It deliberately excludes runtime-only fields (operatingMode, lifecycle, podFailurePolicy).
 
 
 
@@ -376,6 +394,7 @@ _Appears in:_
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
+| `podFailurePolicy` _[PodFailurePolicy](#podfailurepolicy)_ | podFailurePolicy controls what happens when the backing Pod enters phase Failed.<br />Ignore (default): leave the Failed pod and surface Finished=True (StatefulSet-like).<br />Recreate: delete the controller-owned Failed pod so a new one is created;<br />the Sandbox identity and any Sandbox-owned PVCs are retained.<br />Combined with restartPolicy Never and a container that always exits non-zero,<br />Recreate can recreate the Pod indefinitely; there is no backoff in this version. | Ignore | Enum: [Ignore Recreate] <br />Optional: \{\} <br /> |
 
 
 #### SandboxStatus

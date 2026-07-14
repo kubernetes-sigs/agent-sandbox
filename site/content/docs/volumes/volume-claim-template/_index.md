@@ -132,10 +132,12 @@ kubectl exec -it my-stateful-sandbox -- cat /data/evidence.txt
 ```
 
 **3. Simulate a failure by deleting the pod**
-Because sandboxes are managed by the Sandbox controller, deleting the pod directly simulates an unexpected failure. 
+Because sandboxes are managed by the Sandbox controller, deleting the pod directly simulates an unexpected failure (the Pod object is gone). Missing pods are recreated automatically when `operatingMode` is `Running`.
 ```bash
 kubectl delete pod my-stateful-sandbox
 ```
+
+> **Note:** If the Pod remains in etcd with `phase=Failed` (for example after node-pressure eviction), the controller does **not** recreate it by default (StatefulSet-like). Set `spec.podFailurePolicy: Recreate` on the Sandbox to delete the Failed Pod and create a replacement while keeping the Sandbox and its PVCs. See [KEP-729](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/keps/729-opt-in-pod-recreation-on-failure/README.md).
 
 **4. Wait for the controller to recreate the sandbox**
 The Sandbox controller will detect that the pod is missing and automatically recreate it. Because `volumeClaimTemplates` use StatefulSet-like semantics, the controller will reattach the *exact same PVC* to the new pod.

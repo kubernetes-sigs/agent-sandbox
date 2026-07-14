@@ -839,6 +839,38 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			}
 		}
 
+		// Opt-in Failed-pod recovery: delete the owned Failed pod so the next
+		// reconcile hits the missing-pod create path. Sandbox identity and PVCs
+		// are preserved. See docs/keps/729-opt-in-pod-recreation-on-failure/.
+		if sandbox.Spec.PodFailurePolicy == sandboxv1beta1.PodFailurePolicyRecreate &&
+			pod.Status.Phase == corev1.PodFailed {
+			ownership, controllerRef := checkOwnership(pod, sandbox)
+			switch ownership {
+			case resourceOwnedBySandbox:
+				if pod.DeletionTimestamp.IsZero() {
+					logger.Info("Deleting Failed Pod because .Spec.PodFailurePolicy is Recreate",
+						"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					if err := r.Delete(ctx, pod); err != nil {
+						return nil, fmt.Errorf("failed to delete Failed pod for recreate: %w", err)
+					}
+				} else {
+					logger.Info("Failed Pod is already being deleted for recreate",
+						"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+				}
+				if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			case resourceUnowned:
+				logger.Info("Refusing to delete Failed pod for recreate: pod has no controllerRef pointing to this sandbox",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
+			case resourceOwnedByOther:
+				logger.Info("Refusing to delete Failed pod for recreate: pod is owned by a different controller",
+					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
+					"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
+			}
+		}
+
 		if err := ensurePodNameAnnotation(pod.Name); err != nil {
 			return nil, err
 		}

@@ -121,6 +121,8 @@ const (
 	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime
 	// and its underlying resources were torn down (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
+	// SandboxReasonIdleSuspended indicates the Sandbox was auto-suspended due to idle timeout.
+	SandboxReasonIdleSuspended = "IdleSuspended"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
@@ -297,6 +299,12 @@ type SandboxSpec struct {
 	// +kubebuilder:default=Running
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
+
+	// idleLifecycle defines an idle-based lifecycle policy. When set, the
+	// controller tracks activity and transitions the sandbox through
+	// Running -> Suspended -> Deleted based on the configured TTLs.
+	// +optional
+	IdleLifecycle *IdleLifecyclePolicy `json:"idleLifecycle,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.
@@ -335,6 +343,55 @@ type Lifecycle struct {
 	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
+// IdleExpirationPolicy describes the action taken when an active idle TTL expires.
+// +kubebuilder:validation:Enum=Suspend;Delete
+type IdleExpirationPolicy string
+
+const (
+	// IdleExpirationPolicySuspend transitions the sandbox to Suspended when idle.
+	IdleExpirationPolicySuspend IdleExpirationPolicy = "Suspend"
+	// IdleExpirationPolicyDelete deletes the sandbox when idle.
+	IdleExpirationPolicyDelete IdleExpirationPolicy = "Delete"
+)
+
+// SuspendedExpirationPolicy describes the action taken when a suspended TTL expires.
+// +kubebuilder:validation:Enum=Delete;Retain
+type SuspendedExpirationPolicy string
+
+const (
+	// SuspendedExpirationPolicyDelete deletes the sandbox after the suspended TTL.
+	SuspendedExpirationPolicyDelete SuspendedExpirationPolicy = "Delete"
+	// SuspendedExpirationPolicyRetain keeps the sandbox object but marks it as expired.
+	SuspendedExpirationPolicyRetain SuspendedExpirationPolicy = "Retain"
+)
+
+// IdleLifecyclePolicy defines an idle-based lifecycle for Sandboxes.
+// When configured, the controller automatically suspends idle sandboxes
+// and optionally deletes them after a retention period.
+type IdleLifecyclePolicy struct {
+	// activeTTLSeconds defines how long (in seconds) a Running sandbox can
+	// remain without activity before the activeExpirationPolicy applies.
+	// +kubebuilder:validation:Minimum=0
+	ActiveTTLSeconds int32 `json:"activeTTLSeconds"`
+
+	// activeExpirationPolicy defines the action when the active TTL expires.
+	// +kubebuilder:default=Suspend
+	// +optional
+	ActiveExpirationPolicy *IdleExpirationPolicy `json:"activeExpirationPolicy,omitempty"`
+
+	// suspendedTTLSeconds defines how long (in seconds) a Suspended sandbox
+	// remains before the suspendedExpirationPolicy applies.
+	// If unset, the sandbox remains suspended indefinitely until manually resumed.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	SuspendedTTLSeconds *int32 `json:"suspendedTTLSeconds,omitempty"`
+
+	// suspendedExpirationPolicy defines the action when the suspended TTL expires.
+	// +kubebuilder:default=Delete
+	// +optional
+	SuspendedExpirationPolicy *SuspendedExpirationPolicy `json:"suspendedExpirationPolicy,omitempty"`
+}
+
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
 	// serviceFQDN that is valid for default cluster settings
@@ -369,6 +426,12 @@ type SandboxStatus struct {
 	// Like podIPs, it is cleared whenever the pod is absent (e.g. while suspended).
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
+
+	// lastActivityTime records when the sandbox last had activity.
+	// Updated by the router or SDK on each interaction.
+	// Used by the controller to enforce the idle lifecycle policy.
+	// +optional
+	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
 }
 
 // +genclient

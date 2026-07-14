@@ -352,11 +352,43 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 		}
 		err = r.reconcileChildResources(ctx, sandbox, wd)
-		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
-		result.RequeueAfter = requeueAfter
-		if expiredAfterReconcile {
+
+		// Check idle lifecycle policy after reconciling child resources,
+		// so that lastActivityTime has been initialized/reset before evaluation.
+		action, idleRequeue := checkIdleLifecycle(sandbox, time.Now())
+		switch action {
+		case idleActionSuspend:
+			logger.Info("Idle TTL expired, suspending sandbox")
+			patch := client.MergeFrom(sandbox.DeepCopy())
+			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+			if patchErr := r.Patch(ctx, sandbox, patch); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{}, nil
+		case idleActionDelete:
+			logger.Info("Idle TTL expired, deleting sandbox")
+			if delErr := r.Delete(ctx, sandbox); delErr != nil && !k8serrors.IsNotFound(delErr) {
+				return ctrl.Result{}, delErr
+			}
+			sandboxDeleted = true
+		case idleActionRetain:
+			logger.Info("Suspended TTL expired, retaining sandbox")
 			setSandboxExpiredCondition(sandbox)
-			result.RequeueAfter = immediateRequeueDelay
+		case idleActionNone:
+			if idleRequeue > 0 {
+				result.RequeueAfter = idleRequeue
+			}
+		}
+
+		if !sandboxDeleted {
+			expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
+			if requeueAfter > 0 {
+				result.RequeueAfter = minPositiveDuration(result.RequeueAfter, requeueAfter)
+			}
+			if expiredAfterReconcile {
+				setSandboxExpiredCondition(sandbox)
+				result.RequeueAfter = immediateRequeueDelay
+			}
 		}
 		if wd != nil && err == nil {
 			if wd.deferred {
@@ -431,6 +463,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		conditionErrors = errors.Join(conditionErrors, err)
 	}
 
+	// Track whether the sandbox was fully suspended before computing conditions,
+	// so a resume can reset idle activity.
+	previousSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	wasSuspended := previousSuspended != nil && previousSuspended.Status == metav1.ConditionTrue
+
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, conditionErrors, svc, pod, podErr)
 	// Conditions that are only present while they apply: Finished has no
@@ -452,6 +489,19 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		if !present {
 			meta.RemoveStatusCondition(&sandbox.Status.Conditions, condType)
 		}
+	}
+
+	// Initialize lastActivityTime for idle lifecycle tracking.
+	if sandbox.Spec.IdleLifecycle != nil && sandbox.Status.LastActivityTime == nil {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
+	}
+
+	// Reset lastActivityTime after a fully suspended sandbox resumes.
+	currentSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if sandbox.Spec.IdleLifecycle != nil && wasSuspended && currentSuspended != nil && currentSuspended.Status == metav1.ConditionFalse {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
 	}
 
 	return allErrors

@@ -213,11 +213,43 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
 	} else {
 		err = r.reconcileChildResources(ctx, sandbox)
-		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
-		result.RequeueAfter = requeueAfter
-		if expiredAfterReconcile {
+
+		// Check idle lifecycle policy after reconciling child resources,
+		// so that lastActivityTime has been initialized/reset before evaluation.
+		action, idleRequeue := checkIdleLifecycle(sandbox, time.Now())
+		switch action {
+		case idleActionSuspend:
+			logger.Info("Idle TTL expired, suspending sandbox")
+			patch := client.MergeFrom(sandbox.DeepCopy())
+			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+			if patchErr := r.Patch(ctx, sandbox, patch); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{}, nil
+		case idleActionDelete:
+			logger.Info("Idle TTL expired, deleting sandbox")
+			if delErr := r.Delete(ctx, sandbox); delErr != nil && !k8serrors.IsNotFound(delErr) {
+				return ctrl.Result{}, delErr
+			}
+			sandboxDeleted = true
+		case idleActionRetain:
+			logger.Info("Suspended TTL expired, retaining sandbox")
 			setSandboxExpiredCondition(sandbox)
-			result.RequeueAfter = immediateRequeueDelay
+		case idleActionNone:
+			if idleRequeue > 0 {
+				result.RequeueAfter = idleRequeue
+			}
+		}
+
+		if !sandboxDeleted {
+			expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
+			if requeueAfter > 0 {
+				result.RequeueAfter = minPositiveDuration(result.RequeueAfter, requeueAfter)
+			}
+			if expiredAfterReconcile {
+				setSandboxExpiredCondition(sandbox)
+				result.RequeueAfter = immediateRequeueDelay
+			}
 		}
 	}
 
@@ -258,18 +290,44 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
+	// Track if the sandbox was suspended before computing conditions, to detect resume transitions.
+	wasSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	wasSuspendedTrue := wasSuspended != nil && wasSuspended.Status == metav1.ConditionTrue
+
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, allErrors, svc, pod)
 	hasFinished := false
+	hasSuspended := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
 		if condition.Type == string(sandboxv1beta1.SandboxConditionFinished) {
 			hasFinished = true
 		}
+		if condition.Type == string(sandboxv1beta1.SandboxConditionSuspended) {
+			hasSuspended = true
+		}
 	}
 
 	if !hasFinished {
 		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	}
+	if !hasSuspended {
+		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	}
+
+	// Initialize lastActivityTime for idle lifecycle tracking
+	if sandbox.Spec.IdleLifecycle != nil && sandbox.Status.LastActivityTime == nil {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
+	}
+
+	// Reset lastActivityTime on resume from suspension.
+	// Detected by: the sandbox WAS suspended (condition was True at start of
+	// reconcile) but is no longer (condition was just removed because
+	// operatingMode returned to Running).
+	if sandbox.Spec.IdleLifecycle != nil && wasSuspendedTrue && !hasSuspended {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
 	}
 
 	return allErrors
@@ -1330,6 +1388,107 @@ func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
+}
+
+// idleAction represents what the controller should do based on idle lifecycle evaluation.
+type idleAction int
+
+const (
+	idleActionNone    idleAction = iota
+	idleActionSuspend            // auto-suspend due to active TTL expiry
+	idleActionDelete             // delete sandbox due to TTL expiry
+	idleActionRetain             // mark as expired but keep the object
+)
+
+// checkIdleLifecycle evaluates the idle lifecycle policy and returns the action
+// to take and when to recheck.
+func checkIdleLifecycle(sandbox *sandboxv1beta1.Sandbox, now time.Time) (idleAction, time.Duration) {
+	policy := sandbox.Spec.IdleLifecycle
+	if policy == nil {
+		return idleActionNone, 0
+	}
+
+	if sandboxMarkedExpired(sandbox) {
+		return idleActionNone, 0
+	}
+
+	switch sandbox.Spec.OperatingMode {
+	case sandboxv1beta1.SandboxOperatingModeRunning:
+		return checkActiveIdleTTL(sandbox, policy, now)
+	case sandboxv1beta1.SandboxOperatingModeSuspended:
+		return checkSuspendedIdleTTL(sandbox, policy, now)
+	}
+	return idleActionNone, 0
+}
+
+func checkActiveIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1beta1.IdleLifecyclePolicy, now time.Time) (idleAction, time.Duration) {
+	lastActivity := sandbox.Status.LastActivityTime
+	if lastActivity == nil {
+		// Fall back to creation time if lastActivityTime hasn't been initialized yet
+		lastActivity = &sandbox.CreationTimestamp
+	}
+
+	deadline := lastActivity.Time.Add(time.Duration(policy.ActiveTTLSeconds) * time.Second)
+	if !now.Before(deadline) {
+		// TTL expired — determine action
+		activePolicy := sandboxv1beta1.IdleExpirationPolicySuspend
+		if policy.ActiveExpirationPolicy != nil {
+			activePolicy = *policy.ActiveExpirationPolicy
+		}
+		switch activePolicy {
+		case sandboxv1beta1.IdleExpirationPolicyDelete:
+			return idleActionDelete, 0
+		default:
+			return idleActionSuspend, 0
+		}
+	}
+
+	remaining := deadline.Sub(now)
+	return idleActionNone, max(remaining, 2*time.Second)
+}
+
+func checkSuspendedIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1beta1.IdleLifecyclePolicy, now time.Time) (idleAction, time.Duration) {
+	if policy.SuspendedTTLSeconds == nil {
+		return idleActionNone, 0
+	}
+
+	// Use the Suspended condition's transition time as the start of the suspended period
+	suspendedCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if suspendedCond == nil || suspendedCond.Status != metav1.ConditionTrue {
+		return idleActionNone, 0
+	}
+
+	suspendStart := suspendedCond.LastTransitionTime.Time
+	deadline := suspendStart.Add(time.Duration(*policy.SuspendedTTLSeconds) * time.Second)
+	if !now.Before(deadline) {
+		suspendedPolicy := sandboxv1beta1.SuspendedExpirationPolicyDelete
+		if policy.SuspendedExpirationPolicy != nil {
+			suspendedPolicy = *policy.SuspendedExpirationPolicy
+		}
+		switch suspendedPolicy {
+		case sandboxv1beta1.SuspendedExpirationPolicyRetain:
+			return idleActionRetain, 0
+		default:
+			return idleActionDelete, 0
+		}
+	}
+
+	remaining := deadline.Sub(now)
+	return idleActionNone, max(remaining, 2*time.Second)
+}
+
+// minPositiveDuration returns the smaller of two durations, ignoring zero values.
+func minPositiveDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // podSandboxNameHashIndexer extracts the sandboxLabel value for the

@@ -27,7 +27,7 @@ gcloud artifacts repositories create analytics \
     --description="Analytics Repo"
 ```
 
-Create a repository in Artifact Registry.
+Build and push the Docker image:
 
 ```bash
 gcloud builds submit .

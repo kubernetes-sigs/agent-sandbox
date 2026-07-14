@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agent-sandbox}"
+KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agent-claw-sandbox}"
 NODE_PORT="30789"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -130,10 +130,10 @@ echo "Gateway responded on NodePort ${NODE_PORT}."
 # --- PVC persistence test ---------------------------------------------------
 
 CANARY="persistence-canary-$(openssl rand -hex 4)"
-echo "Writing canary to /root/.openclaw/canary.txt in ${POD}..."
-kubectl exec "${POD}" -- sh -c "echo '${CANARY}' > /root/.openclaw/canary.txt"
+echo "Writing canary to /workspace/.openclaw/canary.txt in ${POD}..."
+kubectl exec "${POD}" -- sh -c "echo '${CANARY}' > /workspace/.openclaw/canary.txt"
 
-EXPECTED="$(kubectl exec "${POD}" -- cat /root/.openclaw/canary.txt)"
+EXPECTED="$(kubectl exec "${POD}" -- cat /workspace/.openclaw/canary.txt)"
 if [ "${EXPECTED}" != "${CANARY}" ]; then
   echo "ERROR: canary write/read mismatch in original pod." >&2
   exit 1
@@ -156,7 +156,7 @@ fi
 echo "Replacement pod has appeared (new UID: ${CURRENT_UID})."
 kubectl wait --for=condition=ready pod/"${POD}" --timeout=180s
 
-ACTUAL="$(kubectl exec "${POD}" -- cat /root/.openclaw/canary.txt)"
+ACTUAL="$(kubectl exec "${POD}" -- cat /workspace/.openclaw/canary.txt)"
 if [ "${ACTUAL}" != "${CANARY}" ]; then
   echo "FAIL: PVC did not persist across pod respawn." >&2
   echo "  expected: ${CANARY}" >&2

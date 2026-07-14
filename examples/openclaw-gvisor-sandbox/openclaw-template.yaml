@@ -12,12 +12,19 @@ spec:
       dnsPolicy: ClusterFirst
       automountServiceAccountToken: false
       securityContext:
-        runAsUser: 0
-        runAsGroup: 0
-        fsGroup: 0
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
       initContainers:
         - name: init-config
           image: ghcr.io/openclaw/openclaw:2026.3.23
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           command:
             - sh
             - -c
@@ -34,12 +41,17 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
-            runAsNonRoot: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: OPENCLAW_GATEWAY_TOKEN
               value: "dummy-token-for-sandbox"
             - name: OPENCLAW_CONFIG_PATH
               value: "/etc/openclaw/openclaw.json"
+            - name: HOME                            
+              value: "/workspace" 
             # Provider API key (required for chat to work). Create the Secret with:
             #   kubectl create secret generic openclaw-provider-keys \
             #     --from-literal=ANTHROPIC_API_KEY="sk-ant-..."
@@ -53,22 +65,24 @@ spec:
             - sh
             - -c
             - |
-              ssh-keygen -A
-              /usr/sbin/sshd -D &
               node dist/index.js gateway --bind=lan --port 18789 --allow-unconfigured --verbose
           ports:
             - containerPort: 18789
             - containerPort: 18790
           volumeMounts:
-            - mountPath: /root/.openclaw
+            - mountPath: /workspace/.openclaw
               name: workspaces-pvc
             - mountPath: /etc/openclaw
               name: openclaw-etc-writable
+            - mountPath: /workspace
+              name: home-dir
       volumes:
         - name: cm-volume
           configMap:
             name: openclaw-config
         - name: openclaw-etc-writable
+          emptyDir: {}
+        - name: home-dir
           emptyDir: {}
   volumeClaimTemplates:
     - metadata:

@@ -7,8 +7,8 @@ persistent workspace PVC. Ships access flows for both kind (NodePort) and GKE (L
 ## What you get
 
 - `SandboxTemplate` with `runtimeClassName: gvisor`, an init container that seeds
-  config from a ConfigMap, sshd inside the container, and a 2Gi PVC mounted at
-  `/root/.openclaw`.
+  config from a ConfigMap, and a 2Gi PVC mounted at `/workspace/.openclaw`.
+- **Security-hardened context** running as non-root user `1000:1000` with all linux capabilities dropped (`capabilities.drop: ["ALL"]`) and `allowPrivilegeEscalation: false`.
 - `SandboxWarmPool` with one pre-warmed replica so claims resolve quickly.
 - `SandboxClaim` that adopts a sandbox from the pool.
 - Two Service variants — pick one for your environment:
@@ -42,10 +42,9 @@ persistent workspace PVC. Ships access flows for both kind (NodePort) and GKE (L
 3. **`agent-sandbox` controllers installed**, including the extensions CRDs
    (`SandboxTemplate`, `SandboxWarmPool`, `SandboxClaim`).
 
-4. **Permissive namespace.** This template runs as root and starts sshd, so it
-   will not pass the hardened policy in
+4. **Hardened security policy compliant.** This template runs as non-root
+   and drops all capabilities, making it compatible with the hardened policy in
    [`examples/policy/vap/secure-sandbox-policy.yaml`](../policy/vap/secure-sandbox-policy.yaml).
-   Deploy into a namespace where that ValidatingAdmissionPolicy is not enforced.
 
 ## Usage
 
@@ -189,7 +188,7 @@ else
 fi
 ```
 
-The pairing is stored under `/root/.openclaw`, which is on the PVC — so it
+The pairing is stored under `/workspace/.openclaw`, which is on the PVC — so it
 survives pod restarts. You only do this once per browser.
 
 ## Provider API keys
@@ -198,7 +197,11 @@ After pairing, the dashboard loads but chat will fail until OpenClaw has a
 provider API key (Anthropic, OpenAI, Gemini, etc.). Inject it as a Kubernetes
 Secret and mount it into the container as an environment variable.
 
-1. Create the secret (Anthropic shown; use whichever provider you want):
+### Before first deployment (recommended)
+
+Set the API key up before running the initial apply from the Usage section.
+
+1. Create the Secret (Anthropic shown; use whichever provider you want):
 
 ```bash
 kubectl create secret generic openclaw-provider-keys \
@@ -207,17 +210,58 @@ kubectl create secret generic openclaw-provider-keys \
 
 2. Uncomment the `ANTHROPIC_API_KEY` env block in `openclaw-template.yaml`
    (placeholder is already there next to the existing env vars). For other
-   providers, swap the var name (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, etc.) —
+   providers, swap the var name (`OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) —
    the secret key name and env name should match.
 
-3. Re-apply the template and force a pod respawn:
+3. Continue with the standard apply flow from the Usage section.
+
+### Adding a key to an existing deployment (destructive)
+
+**This deletes the PVC, so device pairing state and any workspace files are
+lost.** You'll need to re-pair your browser afterwards.
+
+The `SandboxClaim` controller snapshots the template's pod spec into the
+`Sandbox` at adoption time and never re-syncs. Updating the template and
+deleting the pod won't help — the Sandbox controller respawns from the
+unchanged snapshot. Recreating just the claim isn't enough either: the new
+claim can adopt a stale warm-pool spare built from the pre-update template.
+You need to tear down claim + warmpool + template together, then redeploy.
+
+1. Create or update the Secret with your API key:
+
+```bash
+kubectl create secret generic openclaw-provider-keys \
+  --from-literal=ANTHROPIC_API_KEY="sk-ant-..." \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+2. Uncomment the API key env block in `openclaw-template.yaml`.
+
+3. Tear down claim, warmpool, and template (in that order):
+
+```bash
+kubectl delete -f openclaw-claim.yaml
+kubectl delete -f openclaw-warmpool.yaml
+kubectl delete -f openclaw-template.yaml
+```
+
+4. Redeploy with the updated template:
 
 ```bash
 TOKEN="$(openssl rand -hex 32)"
 sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-template.yaml | kubectl apply -f -
+kubectl apply -f openclaw-warmpool.yaml
+kubectl apply -f openclaw-claim.yaml
+```
+
+5. Wait for the new pod, retrieve the new gateway token, and re-pair your
+   browser using the "Browser pairing / device authorization" section above:
+
+```bash
 SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
 POD=$(kubectl get sandbox "$SANDBOX_NAME" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
-kubectl delete pod "$POD"
+kubectl wait --for=condition=ready pod/"$POD" --timeout=180s
+kubectl exec "$POD" -- printenv OPENCLAW_GATEWAY_TOKEN
 ```
 
 To inject multiple provider keys at once, use `envFrom` instead:
@@ -250,8 +294,4 @@ Do not put `volumeClaimTemplates` on the `SandboxClaim`. A claim containing its 
   kernel's view of the pod's network namespace and finds nothing listening.
   Use a Service path (NodePort on kind, IAP tunnel on GKE) instead.
 - **Exposure is environment-specific.** `kind-service.yaml` only works locally
-  with the kind port mapping; `gke-service.yaml` provisions a public IP on GKE
-  and costs money while it's up.
-- **SSH access is in the container but not exposed.** sshd runs inside the pod
-  but the Services only forward 18789. Add a second port to the Service if you
-  need SSH from outside.
+  with the kind port mapping; `gke-service.yaml` provisions a public IP on GKE.

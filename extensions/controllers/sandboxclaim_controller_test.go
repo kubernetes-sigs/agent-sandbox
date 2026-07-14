@@ -5419,6 +5419,124 @@ func TestReconcilePropagatesAnnotationPatchError(t *testing.T) {
 	require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ClaimStartupLatency), "retry should not double-count")
 }
 
+// TestReconcileAnnotationPatchErrorDoesNotBypassAdoptionRequeue ensures that a
+// failed first-ready annotation backfill co-occurring with errAdoptionTriggeredRetry
+// still returns the bounded nil-error requeue from #1108, rather than routing the
+// metrics Patch error through the exponential failure limiter.
+func TestReconcileAnnotationPatchErrorDoesNotBypassAdoptionRequeue(t *testing.T) {
+	scheme := newScheme(t)
+
+	obs := time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "adopted-sb",
+				asmetrics.ObservabilityAnnotation:               obs,
+				asmetrics.WebhookAnnotation:                     obs,
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "Ready",
+				Message:            "Sandbox is ready",
+				LastTransitionTime: metav1.Now(),
+			}},
+			SandboxStatus: extensionsv1beta1.SandboxStatus{
+				Name:   "adopted-sb",
+				PodIPs: []string{"10.1.2.3"},
+			},
+		},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "img"}},
+			},
+		}},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "warmpool-uid-123"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	adoptedSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sb",
+			Namespace: "default",
+			UID:       "adopted-sb-uid",
+			Labels: map[string]string{
+				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
+				sandboxTemplateRefHash:           sandboxcontrollers.NameHash("test-template"),
+				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			ObjectMeta: sandboxv1beta1.PodMetadata{
+				Labels: map[string]string{
+					extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
+				},
+			},
+		}},
+		},
+	}
+
+	staleSandbox := adoptedSandbox.DeepCopy()
+	inner := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adoptedSandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == "adopted-sb" {
+					staleSandbox.DeepCopyInto(sb)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	fc := &claimPatchFailClient{Client: inner, err: fmt.Errorf("simulated patch failure"), maxFailures: 0}
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fc,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+	// Pretend adoption already patched this claim+sandbox so we hit the cache-lag
+	// sentinel without a claim Patch from completeAdoption / label migration.
+	reconciler.triggeredAdoptions.Store(
+		types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
+		triggeredAdoptionEntry{uid: claim.UID, sandbox: "adopted-sb"},
+	)
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	res, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err, "adoption sentinel must keep nil-error bounded requeue even when annotation backfill fails")
+	require.Equal(t, adoptionCacheLagRequeueDelay, res.RequeueAfter)
+}
+
 type mockTracer struct {
 	asmetrics.Instrumenter
 	capturedAttrs map[string]string

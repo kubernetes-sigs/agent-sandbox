@@ -321,9 +321,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	if metricsErr := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); metricsErr != nil {
-		return ctrl.Result{}, metricsErr
-	}
+	// Record metrics after status is persisted. Do not short-circuit on metricsErr
+	// before the sentinel handling below: a wasReady claim whose first-ready
+	// annotation backfill fails can co-occur with ErrWarmPoolNotFound /
+	// errAdoptionTriggeredRetry, and returning metricsErr alone would drop the
+	// reconcile sentinel and ride the exponential failure limiter (#1107).
+	// Bounded-requeue paths rely on the follow-up pass to retry the annotation
+	// patch; non-sentinel returns Join both errors (mirroring updateStatus).
+	metricsErr := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -349,6 +354,9 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
 		}
+		if metricsErr != nil {
+			logger.V(1).Info("Sandboxclaim first-ready annotation patch failed; will retry on requeue", "error", metricsErr, "request", req.NamespacedName)
+		}
 		return ctrl.Result{RequeueAfter: requeueDelay}, nil
 	}
 
@@ -368,17 +376,26 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
 		}
+		if metricsErr != nil {
+			logger.V(1).Info("Sandboxclaim first-ready annotation patch failed; will retry on requeue", "error", metricsErr, "request", req.NamespacedName)
+		}
 		return ctrl.Result{RequeueAfter: requeueDelay}, nil
 	}
 
 	// Suppress user configuration and validation errors to avoid crash loops
 	if shouldSuppressError(reconcileErr) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
+		// Still surface metricsErr so the annotation guard is retried; the
+		// suppressed reconcileErr must not mask a failed first-ready stamp.
+		if metricsErr != nil {
+			return result, metricsErr
+		}
 		return result, nil
 	}
 
-	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", reconcileErr, "request", req.NamespacedName)
-	return result, reconcileErr
+	errs := errors.Join(reconcileErr, metricsErr)
+	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
+	return result, errs
 }
 
 // initializeAnnotations initializes trace ID and observation time for active resources missing them.

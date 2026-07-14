@@ -18,11 +18,13 @@ kind: Sandbox
 metadata:
   name: chrome-sandbox
 spec:
-  containers:
-    - name: chrome
-      image: registry.k8s.io/chrome-sandbox
-      ports:
-        - containerPort: 9222
+  podTemplate:
+    spec:
+      containers:
+        - name: chrome
+          image: registry.k8s.io/chrome-sandbox
+          ports:
+            - containerPort: 9222
 ```
 
 ## How to Run

@@ -44,6 +44,7 @@ import (
 	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -220,6 +221,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		switch action {
 		case idleActionSuspend:
 			logger.Info("Idle TTL expired, suspending sandbox")
+			// Persist status first so lastActivityTime and conditions from
+			// reconcileChildResources are not lost.
+			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+				err = errors.Join(err, statusUpdateErr)
+			}
+			oldStatus = sandbox.Status.DeepCopy()
 			patch := client.MergeFrom(sandbox.DeepCopy())
 			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
 			if patchErr := r.Patch(ctx, sandbox, patch); patchErr != nil {
@@ -390,7 +397,11 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 
 	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
 	if isSuspended {
-		readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
+		if sandbox.Spec.IdleLifecycle != nil {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonIdleSuspended
+		} else {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
+		}
 		if pod != nil {
 			readyCondition.Message = "Sandbox is suspending"
 		} else {
@@ -1428,8 +1439,8 @@ func checkActiveIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1beta1.
 		lastActivity = &sandbox.CreationTimestamp
 	}
 
-	deadline := lastActivity.Time.Add(time.Duration(policy.ActiveTTLSeconds) * time.Second)
-	if !now.Before(deadline) {
+	deadline := lifecycle.IdleExpireAt(lastActivity, policy.ActiveTTLSeconds)
+	if deadline != nil && !now.Before(*deadline) {
 		// TTL expired — determine action
 		activePolicy := sandboxv1beta1.IdleExpirationPolicySuspend
 		if policy.ActiveExpirationPolicy != nil {
@@ -1443,6 +1454,9 @@ func checkActiveIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1beta1.
 		}
 	}
 
+	if deadline == nil {
+		return idleActionNone, 0
+	}
 	remaining := deadline.Sub(now)
 	return idleActionNone, max(remaining, 2*time.Second)
 }
@@ -1458,9 +1472,8 @@ func checkSuspendedIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1bet
 		return idleActionNone, 0
 	}
 
-	suspendStart := suspendedCond.LastTransitionTime.Time
-	deadline := suspendStart.Add(time.Duration(*policy.SuspendedTTLSeconds) * time.Second)
-	if !now.Before(deadline) {
+	deadline := lifecycle.IdleExpireAt(&suspendedCond.LastTransitionTime, *policy.SuspendedTTLSeconds)
+	if deadline != nil && !now.Before(*deadline) {
 		suspendedPolicy := sandboxv1beta1.SuspendedExpirationPolicyDelete
 		if policy.SuspendedExpirationPolicy != nil {
 			suspendedPolicy = *policy.SuspendedExpirationPolicy
@@ -1473,6 +1486,9 @@ func checkSuspendedIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1bet
 		}
 	}
 
+	if deadline == nil {
+		return idleActionNone, 0
+	}
 	remaining := deadline.Sub(now)
 	return idleActionNone, max(remaining, 2*time.Second)
 }

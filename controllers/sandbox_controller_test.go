@@ -3928,8 +3928,8 @@ func TestCheckIdleLifecycle(t *testing.T) {
 			assert.Equal(t, tc.wantAction, action, "unexpected action")
 			if tc.wantRequeue {
 				assert.Greater(t, requeueAfter, tc.wantRequeueGT, "requeue duration too short")
-			} else if tc.wantAction != idleActionNone {
-				assert.Equal(t, time.Duration(0), requeueAfter)
+			} else {
+				assert.Equal(t, time.Duration(0), requeueAfter, "expected zero requeue")
 			}
 		})
 	}

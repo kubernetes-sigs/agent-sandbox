@@ -296,7 +296,10 @@ def _raw_path_with_query(url, scope) -> str:
     """Return the original request path and query without decoding dot segments."""
     raw_path = scope.get("raw_path") if scope else None
     if isinstance(raw_path, bytes):
-        path = raw_path.decode("ascii")
+        try:
+            path = raw_path.decode("ascii")
+        except UnicodeDecodeError:
+            path = url.path
     elif isinstance(raw_path, str):
         path = raw_path
     else:
@@ -307,7 +310,10 @@ def _raw_path_with_query(url, scope) -> str:
 
     raw_query = scope.get("query_string") if scope else None
     if isinstance(raw_query, bytes):
-        query = raw_query.decode("ascii")
+        try:
+            query = raw_query.decode("ascii")
+        except UnicodeDecodeError:
+            query = url.query
     elif isinstance(raw_query, str):
         query = raw_query
     else:

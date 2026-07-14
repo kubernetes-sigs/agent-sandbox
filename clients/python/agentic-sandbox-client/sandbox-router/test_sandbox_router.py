@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import URL
 from starlette.websockets import WebSocketDisconnect
 
 os.environ["ALLOW_UNAUTHENTICATED_ROUTER"] = "true"
@@ -493,6 +494,38 @@ class TestProxyRouting:
             assert "test-box.prod.svc.cluster.local:9999/some/path" in str(
                 request_obj.url
             )
+
+    def test_target_url_preserves_raw_escaped_path(self):
+        """Escaped dot segments must survive the router hop."""
+        target_url, _ = sandbox_router._resolve_target(
+            {
+                "X-Sandbox-ID": "test-box",
+                "X-Sandbox-Namespace": "prod",
+                "X-Sandbox-Port": "9999",
+            },
+            URL("http://router/list/."),
+            "http",
+            {"raw_path": b"/list/%2E", "query_string": b"marker=%2E"},
+        )
+
+        assert target_url == (
+            "http://test-box.prod.svc.cluster.local:9999/list/%2E?marker=%2E"
+        )
+
+    def test_target_url_preserves_raw_escaped_dotdot_path(self):
+        """Escaped dotdot segments must not be normalized by the router."""
+        target_url, _ = sandbox_router._resolve_target(
+            {
+                "X-Sandbox-ID": "test-box",
+                "X-Sandbox-Namespace": "prod",
+                "X-Sandbox-Port": "9999",
+            },
+            URL("http://router/list/.."),
+            "http",
+            {"raw_path": b"/list/%2E%2E", "query_string": b""},
+        )
+
+        assert target_url == "http://test-box.prod.svc.cluster.local:9999/list/%2E%2E"
 
     def test_target_url_pod_ip_construction(self, client):
         """Verify the router builds the correct URL when X-Sandbox-Pod-IP is provided."""

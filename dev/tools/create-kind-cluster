@@ -20,6 +20,8 @@ import sys
 import tempfile
 import textwrap
 
+from shared import utils
+
 
 def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
     """Create a kind config with kubelet verbosity and containerd settings."""
@@ -50,6 +52,12 @@ def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
     return config
 
 
+def _kind_run(cmd, container_engine, **kwargs):
+    """Run a kind subprocess with provider env vars when needed."""
+    kwargs["env"] = utils.kind_env(container_engine, env=kwargs.get("env"))
+    return subprocess.run(cmd, **kwargs)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Create a kind cluster.")
     parser.add_argument("name", help="The name of the cluster.")
@@ -59,15 +67,29 @@ def main():
                         help="Containerd log level (default: debug). Set to empty string to skip.")
     parser.add_argument("--kubelet-verbosity", type=int, default=8,
                         help="Kubelet verbosity level (requires cluster creation, not applied to existing clusters).")
+    parser.add_argument("--container-engine",
+                        choices=["docker", "podman"],
+                        default=os.environ.get("CONTAINER_ENGINE", "docker"),
+                        help="Container engine to use (docker or podman). "
+                             "Also read from the CONTAINER_ENGINE env var.")
     args = parser.parse_args()
 
-    clusters = subprocess.run(["kind", "get", "clusters"], capture_output=True, text=True).stdout.splitlines()
+    # argparse choices only validates CLI-supplied values, not defaults from
+    # environment variables.  Explicitly validate the resolved value so a
+    # typo in CONTAINER_ENGINE fails fast instead of silently falling through.
+    if args.container_engine not in ("docker", "podman"):
+        sys.exit(f"ERROR: unsupported container engine {args.container_engine!r} "
+                 "(choose docker or podman, or unset CONTAINER_ENGINE)")
+
+    clusters = _kind_run(["kind", "get", "clusters"], args.container_engine,
+                         capture_output=True, text=True).stdout.splitlines()
 
     cluster_exists = args.name in clusters
     if cluster_exists:
         if args.recreate:
             print(f"Cluster '{args.name}' already exists. Deleting it.")
-            subprocess.run(["kind", "delete", "cluster", "--name", args.name], check=True)
+            _kind_run(["kind", "delete", "cluster", "--name", args.name],
+                       args.container_engine, check=True)
             cluster_exists = False
         else:
             print(f"Cluster '{args.name}' already exists. Use --recreate to delete and recreate it.")
@@ -87,7 +109,7 @@ def main():
         create_cmd.extend(["--config", config_path])
 
         try:
-            subprocess.run(create_cmd, check=True)
+            _kind_run(create_cmd, args.container_engine, check=True)
         finally:
             os.unlink(config_path)
     else:
@@ -99,7 +121,8 @@ def main():
         if kubeconfig_dir:
             os.makedirs(kubeconfig_dir, exist_ok=True)
         print(f"Exporting kubeconfig for cluster '{args.name}' to '{args.kubeconfig}'.")
-        subprocess.run(["kind", "export", "kubeconfig", "--name", args.name, "--kubeconfig", args.kubeconfig], check=True)
+        _kind_run(["kind", "export", "kubeconfig", "--name", args.name, "--kubeconfig", args.kubeconfig],
+                   args.container_engine, check=True)
 
 if __name__ == "__main__":
     main()

@@ -90,3 +90,21 @@ def go_tool_args(*args):
     """ Constructs command line arguments to run a go tool """
     repo_root = get_repo_root()
     return ["go", "tool", f"-modfile={repo_root}/dev/tools/go.mod", *args]
+
+
+def kind_env(container_engine, env=None):
+    """Return extra env vars for kind when using a non-default container provider.
+
+    kind reads KIND_EXPERIMENTAL_PROVIDER to select its container runtime.
+    Only set it for podman (docker is the default).
+
+    When *env* is provided (e.g. a caller-supplied dict), it is copied and the
+    provider variable is injected into the copy so the original is never
+    mutated.  When *env* is None (the default), a fresh copy of the current
+    process environment is used.
+    """
+    if container_engine == "podman":
+        base = (env.copy() if env is not None else os.environ.copy())
+        base["KIND_EXPERIMENTAL_PROVIDER"] = "podman"
+        return base
+    return env  # pass through any caller-supplied env as-is when no injection is needed

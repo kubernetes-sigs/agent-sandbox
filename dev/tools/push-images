@@ -17,6 +17,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 
 from shared import utils
 
@@ -34,7 +35,10 @@ def _get_version_build_args():
     ]
 
 
-def create_buildx_builder_if_not_exists():
+def create_buildx_builder_if_not_exists(container_engine):
+    if container_engine == "podman":
+        print("podman detected, skipping buildx builder setup.")
+        return
     builder_name = "agent-sandbox-builder"
     try:
         subprocess.run(
@@ -50,6 +54,27 @@ def create_buildx_builder_if_not_exists():
             ["docker", "buildx", "create", "--name", builder_name], check=True
         )
     subprocess.run(["docker", "buildx", "use", builder_name], check=True)
+
+
+def build_image_with_podman(args, service_name, srcdir, dockerfile_path, image_tag):
+    """Build an image using podman directly (equivalent to docker buildx build --output=type=docker)."""
+    image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
+    build_cmd = [
+        "podman",
+        "build",
+        "--progress=plain",
+        "-t", image_name,
+    ]
+    for tag in args.extra_image_tags:
+        extra_tag = utils.get_full_image_name(args, service_name, tag=tag)
+        build_cmd.extend(["-t", extra_tag])
+
+    dockerfile_rel = os.path.relpath(dockerfile_path, start=srcdir)
+    build_cmd.extend(["-f", dockerfile_rel, "."])
+    # Inject version info into Go binaries
+    build_cmd.extend(_get_version_build_args())
+    subprocess.run(build_cmd, cwd=srcdir, check=True)
+    print(f"built image {image_name}")
 
 
 def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path, image_tag):
@@ -91,26 +116,49 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
 
 def load_kind_image(args, cluster_name, service_name, srcdir, image_tag):
     image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
-    build_cmd = [
-        "kind",
-        "load",
-        "docker-image",
-        f"--name={cluster_name}",
-        image_name,
-    ]
 
-    subprocess.run(build_cmd, cwd=srcdir, check=True)
+    kind_env = utils.kind_env(args.container_engine)
+
+    if args.container_engine == "podman":
+        # podman save to a temp tar, then kind load image-archive from it
+        # (kind load image-archive does not support reading from stdin).
+        with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            subprocess.run(
+                ["podman", "save", "--output", tmp_path, image_name],
+                cwd=srcdir, check=True,
+            )
+            subprocess.run(
+                ["kind", "load", "image-archive", f"--name={cluster_name}", tmp_path],
+                cwd=srcdir, env=kind_env, check=True,
+            )
+        finally:
+            os.unlink(tmp_path)
+    else:
+        subprocess.run(
+            ["kind", "load", "docker-image", f"--name={cluster_name}", image_name],
+            cwd=srcdir,
+            env=kind_env,
+            check=True,
+        )
     print(f"loaded image {image_name} into kind cluster {args.kind_cluster_name}")
 
 
 def build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag):
-    build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path, image_tag)
+    if args.container_engine == "podman":
+        build_image_with_podman(args, service_name, srcdir, dockerfile_path, image_tag)
+    else:
+        build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfile_path, image_tag)
     if args.kind_cluster_name:
         load_kind_image(args, args.kind_cluster_name, service_name, srcdir, image_tag)
 
 
 def main(args):
     """Builds and pushes all discovered Docker images."""
+    if args.container_engine == "podman" and not args.kind_cluster_name:
+        sys.exit("ERROR: --container-engine=podman requires --kind-cluster-name "
+                 "(podman push to registry is not yet supported; use docker for registry pushes)")
     image_tag = args.image_tag or utils.get_image_tag()
     excluded_dirs = {"bin", "dev", "docs", "k8s", "site",
                      "temp", "tests", "tmp", ".venv"}
@@ -158,7 +206,7 @@ def main(args):
             print(f"--- Context Dir: {context_dir}")
 
             print(f"create Docker buildx builder for {service_name}")
-            create_buildx_builder_if_not_exists()
+            create_buildx_builder_if_not_exists(args.container_engine)
             print(f"building image for {service_name}")
             build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
             built.add(service_name)
@@ -173,8 +221,13 @@ def main(args):
                      "(is the directory committed?)")
 
 
-if __name__ == "__main__":
-    # parse arguments and call
+def make_parser():
+    """Create the argument parser for push-images.
+
+    Exported as a module-level function so tests (push_images_test.py) can
+    exercise the real parser rather than re-creating a parallel copy that
+    might drift from the production definition.
+    """
     parser = argparse.ArgumentParser(description="Build and push Docker images")
     parser.add_argument("--image-prefix",
                         dest="image_prefix",
@@ -206,7 +259,26 @@ if __name__ == "__main__":
                         help="List of images to build and push. If not set, all images will be built and pushed",
                         nargs="+",
                         default=[])
+    parser.add_argument("--container-engine",
+                        dest="container_engine",
+                        help="Container engine to use (docker or podman). "
+                             "Also read from the CONTAINER_ENGINE env var.",
+                        type=str,
+                        choices=["docker", "podman"],
+                        default=os.getenv("CONTAINER_ENGINE", "docker"))
+    return parser
+
+
+if __name__ == "__main__":
+    parser = make_parser()
     args = parser.parse_args()
+
+    # argparse choices only validates CLI-supplied values, not defaults from
+    # environment variables.  Explicitly validate the resolved value so a
+    # typo in CONTAINER_ENGINE fails fast instead of silently falling through.
+    if args.container_engine not in ("docker", "podman"):
+        sys.exit(f"ERROR: unsupported container engine {args.container_engine!r} "
+                 "(choose docker or podman, or unset CONTAINER_ENGINE)")
 
     if args.kind_cluster_name:
         args.docker_build_output_type = "docker"

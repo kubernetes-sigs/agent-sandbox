@@ -40,14 +40,16 @@ build-sandbox-router:
 	go build -ldflags "$(LD_FLAGS)" -o bin/sandbox-router ./sandbox-router/cmd
 
 KIND_CLUSTER=agent-sandbox
+CONTAINER_ENGINE ?= docker
 
 .PHONY: deploy-kind
 # `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
 # `CONTROLLER_ARGS="--enable-pprof-debug --zap-log-level=debug" make deploy-kind` to deploy with custom controller flags.
 # `CONTROLLER_ONLY=true make deploy-kind` to build and push only the controller image.
+# `CONTAINER_ENGINE=podman make deploy-kind` to use podman instead of docker.
 deploy-kind:
-	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
+	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG --container-engine=${CONTAINER_ENGINE}
+	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} --container-engine=${CONTAINER_ENGINE} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
 	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
 
 .PHONY: deploy-cloud-provider-kind

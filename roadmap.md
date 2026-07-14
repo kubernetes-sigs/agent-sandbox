@@ -118,7 +118,7 @@ Lowering the barrier to entry, beautiful guides, interactive tools, and UI dashb
     *   Document production-ready reference designs for multi-user cloud environments.
 
 
-## Completed (Since v0.0.1)
+## Completed
 *   **Golang SDK Support** `✅ Completed`
     *   Deliver high-level Go client libraries to programmatically manage sandboxes and route connections. [[#227](https://github.com/kubernetes-sigs/agent-sandbox/issues/227)]
 *   **PyPI Distribution (`k8s-agent-sandbox`)** `✅ Completed`

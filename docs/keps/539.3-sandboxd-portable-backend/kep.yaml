@@ -1,0 +1,13 @@
+title: sandboxd Portable Backend — Hybrid gRPC/REST Protocol
+kep-number: 539.3
+authors:
+  - "@Oneimu"
+status: implementable
+creation-date: 2026-07-13
+reviewers:
+  - "@aditya-shantanu"
+approvers:
+  - "@barney-s"
+  - "@janetkuo"
+see-also:
+  - "/docs/keps/539.2-runtime-standardization"

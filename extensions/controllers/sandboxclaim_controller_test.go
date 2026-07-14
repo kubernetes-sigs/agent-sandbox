@@ -836,27 +836,6 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "claim with invalid safe-to-evict annotation value is rejected",
-			claimToReconcile: &extensionsv1beta1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "claim-invalid-safe-to-evict", Namespace: "default", UID: "uid-invalid-safe-to-evict"},
-				Spec: extensionsv1beta1.SandboxClaimSpec{
-					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
-					AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
-						Annotations: map[string]string{"cluster-autoscaler.kubernetes.io/safe-to-evict": "True"},
-					},
-				},
-			},
-			existingObjects: []client.Object{template, warmPool},
-			expectSandbox:   false,
-			expectError:     false,
-			expectedCondition: metav1.Condition{
-				Type:    string(sandboxv1beta1.SandboxConditionReady),
-				Status:  metav1.ConditionFalse,
-				Reason:  "InvalidMetadata",
-				Message: "invalid additionalPodMetadata: failed to validate annotation \"cluster-autoscaler.kubernetes.io/safe-to-evict\": invalid value \"True\" for annotation \"cluster-autoscaler.kubernetes.io/safe-to-evict\": must be 'true', 'false', or 'on-completion'",
-			},
-		},
-		{
 			name: "claim with spoofed router app label is rejected",
 			claimToReconcile: &extensionsv1beta1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{Name: "claim-spoofed-app-label", Namespace: "default", UID: "uid-spoofed-app-label"},
@@ -2242,6 +2221,32 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectedAdoptedSandbox: "pool-sb-1",
 			expectedPodAnnotations: map[string]string{
 				autoscalerSafeToEvictAnnotation: "false",
+			},
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "preserves claim eviction annotation true when adopting sandbox",
+			existingObjects: []client.Object{
+				template,
+				func() client.Object {
+					cCopy := claim.DeepCopy()
+					if cCopy.Spec.AdditionalPodMetadata.Annotations == nil {
+						cCopy.Spec.AdditionalPodMetadata.Annotations = make(map[string]string)
+					}
+					cCopy.Spec.AdditionalPodMetadata.Annotations[autoscalerSafeToEvictAnnotation] = "true"
+					return cCopy
+				}(),
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					sb.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation] = "true"
+					return sb
+				}(),
+				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedPodAnnotations: map[string]string{
+				autoscalerSafeToEvictAnnotation: "true",
 			},
 			expectNewSandboxCreated: false,
 		},

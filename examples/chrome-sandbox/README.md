@@ -35,7 +35,7 @@ kubectl apply -f chrome-sandbox.yaml
 Port-forward to access Chrome debugging endpoint:
 
 ```bash
-kubectl port-forward sandbox/chrome-sandbox 9222:9222 
+kubectl port-forward pod/chrome-sandbox 9222:9222
 ```
 ---
 

@@ -229,10 +229,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			oldStatus = sandbox.Status.DeepCopy()
 			patch := client.MergeFrom(sandbox.DeepCopy())
 			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = make(map[string]string)
+			}
+			sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation] = "true"
 			if patchErr := r.Patch(ctx, sandbox, patch); patchErr != nil {
 				return ctrl.Result{}, patchErr
 			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, err
 		case idleActionDelete:
 			logger.Info("Idle TTL expired, deleting sandbox")
 			if delErr := r.Delete(ctx, sandbox); delErr != nil && !k8serrors.IsNotFound(delErr) {
@@ -335,6 +339,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	if sandbox.Spec.IdleLifecycle != nil && wasSuspendedTrue && !hasSuspended {
 		now := metav1.Now()
 		sandbox.Status.LastActivityTime = &now
+		delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
 	}
 
 	return allErrors
@@ -397,7 +402,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 
 	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
 	if isSuspended {
-		if sandbox.Spec.IdleLifecycle != nil {
+		if sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation] == "true" {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonIdleSuspended
 		} else {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended

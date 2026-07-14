@@ -93,7 +93,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     nil,
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service does not exist"},
 			},
 		},
@@ -103,7 +103,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
 			},
 		},
@@ -113,7 +113,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
 			},
 		},
@@ -131,7 +131,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready; Service Exists"},
 			},
 		},
@@ -151,7 +151,7 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Ready but has no podIPs yet; Service Exists"},
 			},
 		},
@@ -192,7 +192,7 @@ func TestComputeConditions(t *testing.T) {
 			svc: &corev1.Service{},
 			pod: nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
 			},
 		},
@@ -202,7 +202,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodUnknown}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Unknown; Service Exists"},
 			},
 		},
@@ -212,7 +212,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodFailed}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 			},
@@ -223,7 +223,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 			},
@@ -235,7 +235,7 @@ func TestComputeConditions(t *testing.T) {
 			svc:     nil,
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "Running", Message: "Sandbox is running."},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: something went wrong"},
 			},
 		},
@@ -335,8 +335,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "Running",
-						Message:            "Sandbox is running.",
+						Reason:             "NotSuspended",
+						Message:            "Sandbox is not suspended.",
 					},
 					{
 						Type:               "Ready",
@@ -393,8 +393,8 @@ func TestReconcile(t *testing.T) {
 						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
-						Reason:             "Running",
-						Message:            "Sandbox is running.",
+						Reason:             "NotSuspended",
+						Message:            "Sandbox is not suspended.",
 					},
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -494,8 +494,8 @@ func TestReconcile(t *testing.T) {
 						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 						Status:             metav1.ConditionFalse,
 						ObservedGeneration: 1,
-						Reason:             "Running",
-						Message:            "Sandbox is running.",
+						Reason:             "NotSuspended",
+						Message:            "Sandbox is not suspended.",
 					},
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -628,8 +628,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "Running",
-						Message:            "Sandbox is running.",
+						Reason:             "NotSuspended",
+						Message:            "Sandbox is not suspended.",
 					},
 					{
 						Type:               "Ready",
@@ -701,8 +701,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "Running",
-						Message:            "Sandbox is running.",
+						Reason:             "NotSuspended",
+						Message:            "Sandbox is not suspended.",
 					},
 					{
 						Type:               "Ready",
@@ -773,8 +773,8 @@ func TestReconcile(t *testing.T) {
 						Type:               "Suspended",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             "Running",
-						Message:            "Sandbox is running.",
+						Reason:             "NotSuspended",
+						Message:            "Sandbox is not suspended.",
 					},
 					{
 						Type:               "Ready",
@@ -1049,6 +1049,85 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 		},
+		{
+			// Regression: while the Pod is still terminating (kept alive here by a
+			// finalizer), Suspended must be False/PodTerminating — not True — and
+			// lastTransitionTime must not be stamped prematurely. This exercises the
+			// real reconcilePod path (which the computeSuspendedCondition unit test
+			// bypasses by forcing a non-nil pod).
+			name: "suspend with a still-terminating pod reports Suspended=False/PodTerminating",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						Finalizers:      []string{"agents.x-k8s.io/test-hold"},
+						Labels:          map[string]string{sandboxLabel: nameHash},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				},
+			},
+			sandboxSpec: sandboxv1beta1.SandboxSpec{
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					},
+				},
+			},
+			wantStatus: sandboxv1beta1.SandboxStatus{
+				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Suspended",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             "PodTerminating",
+						Message:            "Pod is terminating. Sandbox is suspending.",
+					},
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonSuspended,
+						Message:            "Sandbox is suspending",
+					},
+				},
+			},
+			wantSurvivingObjs: []client.Object{
+				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs}},
+			},
+		},
+		{
+			name: "suspend with no pod reports Suspended=True/PodTerminated",
+			sandboxSpec: sandboxv1beta1.SandboxSpec{
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					},
+				},
+			},
+			wantStatus: sandboxv1beta1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               "Suspended",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             "PodTerminated",
+						Message:            "Pod has been terminated. Sandbox is suspended.",
+					},
+					{
+						Type:               "Ready",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonSuspended,
+						Message:            "Sandbox is suspended",
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1160,6 +1239,10 @@ func TestReconcilePod(t *testing.T) {
 		expectErr              bool
 		wantSandboxAnnotations map[string]string
 		wantPodSurvives        string // if set, verify this pod still exists after reconcile
+		// wantPodDeleting: reconcilePod is expected to return a still-terminating Pod
+		// (non-nil) and the Pod should exist in the cluster with a DeletionTimestamp set.
+		// Used for the suspend path, where the Pod is deleted but not yet gone.
+		wantPodDeleting bool
 	}{
 		{
 			name: "updates label and owner reference if Pod already exists",
@@ -1944,13 +2027,19 @@ func TestReconcilePod(t *testing.T) {
 			},
 		},
 		{
-			name: "delete pod if mode is Suspended",
+			// Suspend deletes the owned Pod but keeps reporting it (as terminating)
+			// until it is actually gone. The finalizer keeps the fake-client Pod alive
+			// with a DeletionTimestamp after Delete, mimicking a real termination grace
+			// period; reconcilePod returns the (still-present) Pod so the Suspended
+			// condition can report PodTerminating.
+			name: "marks owned pod for deletion when mode is Suspended (still terminating)",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:            sandboxName,
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Finalizers:      []string{"agents.x-k8s.io/test-hold"},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 				},
@@ -1965,7 +2054,7 @@ func TestReconcilePod(t *testing.T) {
 					OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
 				},
 			},
-			wantPod: nil,
+			wantPodDeleting: true,
 		},
 		{
 			name: "no-op if mode is Suspended and pod does not exist",
@@ -2157,6 +2246,7 @@ func TestReconcilePod(t *testing.T) {
 						Name:            "owned-pod",
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
+						Finalizers:      []string{"agents.x-k8s.io/test-hold"},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.PodSpec{
@@ -2178,9 +2268,12 @@ func TestReconcilePod(t *testing.T) {
 					OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
 				},
 			},
-			wantPod:                nil,
-			expectErr:              false,
-			wantSandboxAnnotations: map[string]string{"other-annotation": "keep-me"},
+			wantPodDeleting: true,
+			expectErr:       false,
+			wantSandboxAnnotations: map[string]string{
+				"other-annotation":                      "keep-me",
+				sandboxv1beta1.SandboxPodNameAnnotation: "owned-pod",
+			},
 		},
 		{
 			name: "refuses to adopt annotated pod owned by a different controller",
@@ -2572,29 +2665,39 @@ func TestReconcilePod(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, tc.wantPod, pod)
-
-			// Validate the Pod from the "cluster" (fake client)
-			if tc.wantPod != nil {
+			if tc.wantPodDeleting {
+				// reconcilePod returns the still-terminating Pod (pre-delete snapshot),
+				// and the Pod still exists in the cluster marked for deletion.
+				require.NotNil(t, pod, "expected reconcilePod to return the terminating pod")
 				livePod := &corev1.Pod{}
 				err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
-				require.NoError(t, err)
-				require.Equal(t, tc.wantPod, livePod)
-			} else if !tc.expectErr {
-				if tc.wantPodSurvives != "" {
-					// Pod should still exist (ownership check blocked deletion)
+				require.NoError(t, err, "expected the terminating pod to still exist")
+				require.NotNil(t, livePod.DeletionTimestamp, "expected the pod to be marked for deletion")
+			} else {
+				require.Equal(t, tc.wantPod, pod)
+
+				// Validate the Pod from the "cluster" (fake client)
+				if tc.wantPod != nil {
 					livePod := &corev1.Pod{}
-					err = r.Get(t.Context(), types.NamespacedName{Name: tc.wantPodSurvives, Namespace: sandboxNs}, livePod)
-					require.NoError(t, err, "expected pod %q to survive but it was deleted", tc.wantPodSurvives)
-				} else {
-					// When wantPod is nil and no error expected, verify pod doesn't exist
-					livePod := &corev1.Pod{}
-					podName := sandboxName
-					if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
-						podName = annotatedPod
+					err = r.Get(t.Context(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, livePod)
+					require.NoError(t, err)
+					require.Equal(t, tc.wantPod, livePod)
+				} else if !tc.expectErr {
+					if tc.wantPodSurvives != "" {
+						// Pod should still exist (ownership check blocked deletion)
+						livePod := &corev1.Pod{}
+						err = r.Get(t.Context(), types.NamespacedName{Name: tc.wantPodSurvives, Namespace: sandboxNs}, livePod)
+						require.NoError(t, err, "expected pod %q to survive but it was deleted", tc.wantPodSurvives)
+					} else {
+						// When wantPod is nil and no error expected, verify pod doesn't exist
+						livePod := &corev1.Pod{}
+						podName := sandboxName
+						if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
+							podName = annotatedPod
+						}
+						err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)
+						require.True(t, k8serrors.IsNotFound(err))
 					}
-					err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)
-					require.True(t, k8serrors.IsNotFound(err))
 				}
 			}
 

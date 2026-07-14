@@ -297,8 +297,8 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
 		Status:             metav1.ConditionFalse,
-		Reason:             sandboxv1beta1.SandboxReasonSuspendedRunning,
-		Message:            "Sandbox is running.",
+		Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
+		Message:            "Sandbox is not suspended.",
 	}
 
 	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
@@ -742,6 +742,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				} else {
 					logger.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
+				// Return the deleting pod to track the transient suspending phase until garbage collection completes.
+				return pod, nil
 			case resourceUnowned:
 				logger.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)

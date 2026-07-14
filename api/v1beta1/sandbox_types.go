@@ -30,11 +30,14 @@ const (
 	SandboxConditionSuspended ConditionType = "Suspended"
 	// SandboxReasonSuspendedPodTerminated indicates the sandbox is suspended and its pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
+	// SandboxReasonSuspendedPodNotTerminated indicates the pod has not been terminated yet.
+	// Deprecated: Use SandboxReasonSuspendedPodTerminating instead.
+	SandboxReasonSuspendedPodNotTerminated = "PodNotTerminated"
 	// SandboxReasonSuspendedPodTerminating indicates suspension was requested and the pod is still terminating.
 	SandboxReasonSuspendedPodTerminating = "PodTerminating"
-	// SandboxReasonSuspendedRunning indicates the sandbox is running (not suspended). The pod's
+	// SandboxReasonNotSuspended indicates the sandbox is not suspended. The pod's
 	// readiness/provisioning state is tracked by the Ready condition.
-	SandboxReasonSuspendedRunning = "Running"
+	SandboxReasonNotSuspended = "NotSuspended"
 
 	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"

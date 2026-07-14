@@ -56,6 +56,10 @@ const (
 	// SandboxReasonIdleSuspended indicates the Sandbox was auto-suspended due to idle timeout.
 	SandboxReasonIdleSuspended = "IdleSuspended"
 
+	// SandboxIdleSuspendedAnnotation is set by the controller when a sandbox is auto-suspended due to idle timeout.
+	// Cleared on resume. Used to distinguish idle-triggered suspensions from user-initiated ones.
+	SandboxIdleSuspendedAnnotation = "agents.x-k8s.io/idle-suspended"
+
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.

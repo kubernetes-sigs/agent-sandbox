@@ -301,9 +301,9 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
-	// Track if the sandbox was suspended before computing conditions, to detect resume transitions.
-	wasSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
-	wasSuspendedTrue := wasSuspended != nil && wasSuspended.Status == metav1.ConditionTrue
+	// Track if the sandbox had a Suspended condition before computing new conditions,
+	// to detect resume transitions (including from the intermediate pod-terminating state).
+	wasSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended)) != nil
 
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, allErrors, svc, pod)
@@ -336,7 +336,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// Detected by: the sandbox WAS suspended (condition was True at start of
 	// reconcile) but is no longer (condition was just removed because
 	// operatingMode returned to Running).
-	if sandbox.Spec.IdleLifecycle != nil && wasSuspendedTrue && !hasSuspended {
+	if sandbox.Spec.IdleLifecycle != nil && wasSuspended && !hasSuspended {
 		now := metav1.Now()
 		sandbox.Status.LastActivityTime = &now
 		delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)

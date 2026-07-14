@@ -24,13 +24,11 @@
 - [Alternatives Considered](#alternatives-considered)
 <!-- /toc -->
 
----
 
 ## Summary
 
 This proposal defines the hybrid gRPC/REST protocol for `sandboxd`, the portable backend daemon for agent-sandbox. It formalizes the decision to use gRPC for process management (streaming) and REST/OpenAPI for filesystem operations (stateless), documents all breaking changes that will occur when the SDK is updated to target `sandboxd`, and defines the SDK migration strategy.
 
----
 
 ## Motivation
 
@@ -47,9 +45,8 @@ The current sandbox runtime is a FastAPI Python server. It is not portable, not 
 
 - Maintaining backwards compatibility with the existing `python-runtime` unversioned API.
 - Implementing Jupyter or Admin services (deferred to follow-up specification PRs).
-- Changing the Kubernetes controller, `AgentSandbox` CRD, or networking layer (`sandbox-router`).
+- Changing the Kubernetes controller, `Sandbox` CRD, or networking layer (`sandbox-router`).
 
----
 
 ## Current State
 
@@ -79,11 +76,11 @@ The Go SDK `FileEntry` type currently on the wire:
 type FileEntry struct {
     Name    string   `json:"name"`
     Type    FileType `json:"type"`     // "file" | "directory"
+    Size    int64    `json:"size"`
     ModTime float64  `json:"mod_time"` // Unix epoch, float64
 }
 ```
 
----
 
 ## Proposal
 
@@ -108,7 +105,7 @@ SANDBOXD_REST_ADDR=localhost:8080
 
 Defined in `packages/sandboxd/spec/process/v1/process.proto`.
 
-gRPC is used for process management because `Start` is a long-lived bidirectional stream — `stdout` and `stderr` flow continuously until the process exits. HTTP/1.1 cannot model this cleanly.
+gRPC is used for process management because `Start` is a long-lived server-streaming RPC — `stdout` and `stderr` flow continuously from the server until the process exits. Client input is handled separately via the `WriteStdin` RPC. HTTP/1.1 cannot model this cleanly.
 
 | RPC | Type | Purpose |
 |---|---|---|
@@ -120,7 +117,7 @@ gRPC is used for process management because `Start` is a long-lived bidirectiona
 
 ### Filesystem Service — REST/OpenAPI
 
-Defined in `packages/sandboxd/spec/filesystem/v1/filesystem.yaml`.
+Defined in `packages/sandboxd/spec/filesystem/v1/filesystem.yaml` (introduced in companion PR #1116).
 
 REST is used for filesystem operations because every operation is a simple request/response with a file payload — standard HTTP semantics (`GET`, `PUT`, `DELETE`) map naturally, avoiding base64 protobuf serialization wrapper overhead on large binary transfers. Any standard HTTP client works without generated stubs.
 
@@ -130,14 +127,13 @@ REST is used for filesystem operations because every operation is a simple reque
 | `PUT` | `/v1/files/{path}` | Write file (`octet-stream` or `multipart/form-data`), creates parent dirs automatically |
 | `DELETE` | `/v1/files/{path}` | Remove file or directory (supports `recursive=true` for `rm -rf` behavior) |
 | `GET` | `/v1/health` | Liveness/readiness probe for Kubernetes (`200 OK` / `503 Service Unavailable`) |
-| `GET` | `/v1/metadata` | Runtime environment variables and configuration secrets injected by orchestrator |
+| `GET` | `/v1/metadata` | Workload-scoped environment variables injected by the orchestrator (e.g. sandbox ID, workspace path) |
 
 ### Runtime Endpoints
 
 - **`/v1/health`** is required for Kubernetes liveness and readiness probes. It returns `200 OK` (`{"status": "ok"}`) when ready to accept traffic and **`503 Service Unavailable`** when degraded or during shutdown. The orchestrator cannot use gRPC for standard probes — HTTP is mandatory here.
 - **`/v1/metadata`** exposes workload-scoped environment variables injected by the orchestrator at pod creation time (e.g., sandbox ID, workspace path). It must never carry orchestrator credentials or Kubernetes API tokens — those must be kept outside the sandbox network namespace entirely.
 
----
 
 ## Breaking Changes
 
@@ -164,11 +160,10 @@ The `sandboxd` specification itself (#956, #1116) does not break existing client
 | `mode` | — | `string` (octal, e.g. `"0644"`) | New optional field — octal permission bits. |
 | `name` | `string` | `string` | Unchanged. |
 | `type` | `"file"` \| `"directory"` | `"file"` \| `"directory"` | Unchanged. Note: Symlinks are resolved by `SanitizePath` (`EvalSymlinks`) before listing, so `"symlink"` is never returned on the wire. |
-| `size` | Not present | `int64` | New field — file size in bytes. |
+| `size` | `int64` | `int64` | Unchanged. |
 
 The SDK update must replace `ModTime float64` with `ModifiedAt time.Time` and update JSON unmarshalling accordingly.
 
----
 
 ## Migration Plan
 
@@ -192,7 +187,6 @@ Recommended approach:
 
 The cutoff date must be agreed with the team before Part 3/3 ships. Announce the deprecation in the Part 2/3 release notes so SDK consumers have adequate lead time.
 
----
 
 ## Security Considerations
 
@@ -202,7 +196,6 @@ The cutoff date must be agreed with the team before Part 3/3 ships. Announce the
   - Orchestrator credentials, Kubernetes API tokens, and cloud provider IAM keys must **never** be placed in `/v1/metadata`. Those must be injected via Kubernetes Secret volumes or projected service account tokens and permission-gated outside the agent's reach.
 - **Path Traversal Protection:** All file paths received on `/v1/files/{path}` are processed through `SanitizePath`, which invokes `filepath.EvalSymlinks` and checks that the canonical resolved path strictly resides under the sandbox root (`/workspace`). Any attempt to traverse outside the sandbox root (`../`) is rejected with `403 Forbidden`.
 
----
 
 ## Implementation Phases
 
@@ -213,7 +206,6 @@ The cutoff date must be agreed with the team before Part 3/3 ships. Announce the
 | **Part 3/3: SDK Migration** | SDK client update (Go + Python), `FileEntry` wire migration, `python-runtime` deprecation notice | **Planned** |
 | **Follow-up Specifications** | `JupyterService` (kernel session manager) and `AdminService` definitions | **Deferred** |
 
----
 
 ## Alternatives Considered
 

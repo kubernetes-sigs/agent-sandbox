@@ -26,7 +26,9 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 )
 
-// Phase identifies which part of the stress test a Sandbox belongs to.
+// Phase identifies which part of the stress test a Sandbox belongs to by name
+// (fill, probe, throughput-mifN). Names may repeat across a run when --phases
+// lists the same entry more than once; PhaseNumber distinguishes those entries.
 type Phase string
 
 const (
@@ -37,6 +39,10 @@ const (
 	// PhaseThroughput sandboxes are churned (create -> ready -> delete) to measure sustained throughput.
 	PhaseThroughput Phase = "throughput"
 )
+
+// PhaseNumber is a 1-based index into the run's phase list (Config.Phases /
+// Summary.Phases). The zero value means unset and is never a valid phase.
+type PhaseNumber int
 
 // Future is a future value that can be notified and waited on.
 type Future[T any] struct {
@@ -84,7 +90,11 @@ func (f *Future[T]) Wait(ctx context.Context) (T, error) {
 type SandboxRecord struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
-	Phase     Phase  `json:"phase"`
+	// Phase is the phase name for this sandbox (may repeat if --phases lists
+	// the same name more than once). PhaseNumber is the 1-based index of that
+	// run entry and is the key used when aggregating summary stats.
+	Phase       Phase       `json:"phase"`
+	PhaseNumber PhaseNumber `json:"phaseNumber"`
 
 	// Pod identity, for joining against node-side data sources.
 	// PodUID is the pod's metadata.uid. NodeName selects the right
@@ -137,11 +147,14 @@ func NewTracker() *Tracker {
 
 // Register creates a record for a Sandbox we are about to create,
 // stamping CreateCalled with the current time.
-func (t *Tracker) Register(id types.NamespacedName, phase Phase) *SandboxRecord {
+// number is the 1-based index of the phase entry in this run; name is that
+// entry's phase name (kept for sandboxes.jsonl readability).
+func (t *Tracker) Register(id types.NamespacedName, name Phase, number PhaseNumber) *SandboxRecord {
 	rec := &SandboxRecord{
 		Name:         id.Name,
 		Namespace:    id.Namespace,
-		Phase:        phase,
+		Phase:        name,
+		PhaseNumber:  number,
 		CreateCalled: time.Now(),
 	}
 	rec.ready = newFuture[bool]()
@@ -258,8 +271,9 @@ func (t *Tracker) Records() []SandboxRecord {
 	return out
 }
 
-// PhaseCounts summarizes progress for one phase.
+// PhaseCounts summarizes progress for one phase entry in the run.
 type PhaseCounts struct {
+	Name       Phase
 	Registered int
 	Created    int
 	Ready      int
@@ -268,13 +282,14 @@ type PhaseCounts struct {
 	Failed     int
 }
 
-// Snapshot returns per-phase progress counts.
-func (t *Tracker) Snapshot() map[Phase]PhaseCounts {
+// Snapshot returns per-phase-entry progress counts, keyed by PhaseNumber.
+func (t *Tracker) Snapshot() map[PhaseNumber]PhaseCounts {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make(map[Phase]PhaseCounts)
+	out := make(map[PhaseNumber]PhaseCounts)
 	for _, rec := range t.records {
-		c := out[rec.Phase]
+		c := out[rec.PhaseNumber]
+		c.Name = rec.Phase
 		c.Registered++
 		if !rec.CreateReturned.IsZero() {
 			c.Created++
@@ -291,7 +306,7 @@ func (t *Tracker) Snapshot() map[Phase]PhaseCounts {
 		if rec.Error != "" {
 			c.Failed++
 		}
-		out[rec.Phase] = c
+		out[rec.PhaseNumber] = c
 	}
 	return out
 }

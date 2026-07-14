@@ -81,13 +81,13 @@ func buildSandboxObject(id types.NamespacedName, image string) *unstructured.Uns
 // createSandbox registers a record and issues the Create call.
 // Create errors are recorded on the SandboxRecord rather than returned:
 // individual failures should not abort the run, they are reported in the summary.
-func (s *stressTest) createSandbox(ctx context.Context, id types.NamespacedName, phase Phase) error {
+func (s *stressTest) createSandbox(ctx context.Context, id types.NamespacedName, name Phase, number PhaseNumber) error {
 	sandbox := buildSandboxObject(id, s.cfg.Image)
-	s.tracker.Register(id, phase)
+	s.tracker.Register(id, name, number)
 	_, err := s.sandboxClient.Create(ctx, sandbox, metav1.CreateOptions{})
 	s.tracker.MarkCreateReturned(id, err)
 	if err != nil {
-		log.Printf("[%s] failed to create sandbox %s: %v", phase, id.Name, err)
+		log.Printf("[%s] failed to create sandbox %s: %v", name, id.Name, err)
 	}
 	return err
 }
@@ -112,21 +112,22 @@ func (s *stressTest) deleteSandbox(ctx context.Context, id types.NamespacedName)
 // runFillPhase creates cfg.FillCount long-running sandboxes and waits for all of
 // them to become Ready. These stay running for the rest of the test, so the
 // probe and throughput phases measure performance on a cluster at scale.
-func (s *stressTest) runFillPhase(ctx context.Context) error {
+func (s *stressTest) runFillPhase(ctx context.Context, number PhaseNumber) error {
 	count := s.cfg.FillCount
 	if count == 0 {
 		return nil
 	}
-	log.Printf("[fill] creating %d background sandboxes (create-concurrency=%d)", count, s.cfg.CreateConcurrency)
+	log.Printf("[fill#%d] creating %d background sandboxes (create-concurrency=%d)", number, count, s.cfg.CreateConcurrency)
 
 	names := make([]types.NamespacedName, 0, count)
 	for i := range count {
-		names = append(names, types.NamespacedName{Name: fmt.Sprintf("fill-%d", i), Namespace: s.namespace})
+		// Include phase number so repeated fill entries do not collide on name.
+		names = append(names, types.NamespacedName{Name: fmt.Sprintf("p%d-fill-%d", number, i), Namespace: s.namespace})
 	}
 
 	if _, err := ForkJoin(ctx, names, s.cfg.CreateConcurrency, func(id types.NamespacedName) (struct{}, error) {
 		// Errors are recorded per-sandbox; do not abort the phase.
-		_ = s.createSandbox(ctx, id, PhaseFill)
+		_ = s.createSandbox(ctx, id, PhaseFill, number)
 		return struct{}{}, nil
 	}); err != nil {
 		return err
@@ -137,13 +138,13 @@ func (s *stressTest) runFillPhase(ctx context.Context) error {
 	lastReady := -1
 	lastProgress := time.Now()
 	for {
-		counts := s.tracker.Snapshot()[PhaseFill]
+		counts := s.tracker.Snapshot()[number]
 		if counts.Created == 0 {
-			return fmt.Errorf("[fill] all %d sandbox creations failed", counts.Failed)
+			return fmt.Errorf("[fill#%d] all %d sandbox creations failed", number, counts.Failed)
 		}
 		if counts.Ready >= counts.Created {
-			log.Printf("[fill] all %d created sandboxes are Ready (%d failed to create)",
-				counts.Created, counts.Failed)
+			log.Printf("[fill#%d] all %d created sandboxes are Ready (%d failed to create)",
+				number, counts.Created, counts.Failed)
 			return nil
 		}
 		if counts.Ready != lastReady {
@@ -151,7 +152,7 @@ func (s *stressTest) runFillPhase(ctx context.Context) error {
 			lastProgress = time.Now()
 		}
 		if time.Since(lastProgress) > s.cfg.PerSandboxTimeout {
-			return fmt.Errorf("[fill] stalled: %d/%d sandboxes Ready with no progress for %v", counts.Ready, counts.Created, s.cfg.PerSandboxTimeout)
+			return fmt.Errorf("[fill#%d] stalled: %d/%d sandboxes Ready with no progress for %v", number, counts.Ready, counts.Created, s.cfg.PerSandboxTimeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -165,12 +166,12 @@ func (s *stressTest) runFillPhase(ctx context.Context) error {
 // Probes run at low concurrency (default 1) so they never queue on cluster
 // capacity or on each other; each probe is deleted once measured so the
 // background scale stays constant.
-func (s *stressTest) runProbePhase(ctx context.Context) error {
+func (s *stressTest) runProbePhase(ctx context.Context, number PhaseNumber) error {
 	count := s.cfg.ProbeCount
 	if count == 0 {
 		return nil
 	}
-	log.Printf("[probe] launching %d probe sandboxes (concurrency=%d, interval=%v)", count, s.cfg.ProbeConcurrency, s.cfg.ProbeInterval)
+	log.Printf("[probe#%d] launching %d probe sandboxes (concurrency=%d, interval=%v)", number, count, s.cfg.ProbeConcurrency, s.cfg.ProbeInterval)
 
 	indices := make([]int, count)
 	for i := range indices {
@@ -178,12 +179,12 @@ func (s *stressTest) runProbePhase(ctx context.Context) error {
 	}
 
 	_, err := ForkJoin(ctx, indices, s.cfg.ProbeConcurrency, func(i int) (struct{}, error) {
-		id := types.NamespacedName{Name: fmt.Sprintf("probe-%d", i), Namespace: s.namespace}
+		id := types.NamespacedName{Name: fmt.Sprintf("p%d-probe-%d", number, i), Namespace: s.namespace}
 
-		if err := s.createSandbox(ctx, id, PhaseProbe); err == nil {
+		if err := s.createSandbox(ctx, id, PhaseProbe, number); err == nil {
 			if err := s.tracker.WaitReady(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
 				s.tracker.MarkError(id, err.Error())
-				log.Printf("[probe] %s: %v", id.Name, err)
+				log.Printf("[probe#%d] %s: %v", number, id.Name, err)
 			}
 
 			// Delete the probe and wait for its Pod to go away, so each probe
@@ -191,7 +192,7 @@ func (s *stressTest) runProbePhase(ctx context.Context) error {
 			s.deleteSandbox(ctx, id)
 			if err := s.tracker.WaitGone(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
 				s.tracker.MarkError(id, err.Error())
-				log.Printf("[probe] %s: %v", id.Name, err)
+				log.Printf("[probe#%d] %s: %v", number, id.Name, err)
 			}
 		}
 
@@ -223,16 +224,16 @@ func (s *stressTest) runProbePhase(ctx context.Context) error {
 // Multiple levels run back-to-back as separate phases (a max-in-flight sweep
 // within a single run): each level fully drains (every pod observed deleted)
 // before the next begins, so levels do not contaminate each other.
-func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInFlight int) error {
+func (s *stressTest) runThroughputLevel(ctx context.Context, name Phase, number PhaseNumber, maxInFlight int) error {
 	count := s.cfg.ThroughputCount
 	if count == 0 {
 		return nil
 	}
 	minDuration := time.Duration(s.cfg.ThroughputMinSeconds * float64(time.Second))
-	log.Printf("[%s] churning >=%d sandboxes for >=%s (max-in-flight=%d, create-concurrency=%d)", phase, count, minDuration, maxInFlight, s.cfg.CreateConcurrency)
+	log.Printf("[%s#%d] churning >=%d sandboxes for >=%s (max-in-flight=%d, create-concurrency=%d)", name, number, count, minDuration, maxInFlight, s.cfg.CreateConcurrency)
 
 	if maxInFlight < 1 {
-		return fmt.Errorf("[%s] invalid max-in-flight=%d (must be >= 1)", phase, maxInFlight)
+		return fmt.Errorf("[%s#%d] invalid max-in-flight=%d (must be >= 1)", name, number, maxInFlight)
 	}
 
 	slots := make(chan struct{}, maxInFlight)
@@ -243,7 +244,7 @@ func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInF
 	// made high-rate levels too short for stable throughput samples and for
 	// correlating with any side-car time series. Because both conditions are
 	// monotonic and indices are handed out in order, the created names are
-	// always a contiguous tp<mif>-[0..n) range.
+	// always a contiguous p<num>-tp<mif>-[0..n) range.
 	start := time.Now()
 	var nextIndex atomic.Int64
 	var createWG sync.WaitGroup
@@ -254,7 +255,7 @@ func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInF
 				if i >= count && time.Since(start) >= minDuration {
 					return
 				}
-				id := types.NamespacedName{Name: fmt.Sprintf("tp%d-%d", maxInFlight, i), Namespace: s.namespace}
+				id := types.NamespacedName{Name: fmt.Sprintf("p%d-tp%d-%d", number, maxInFlight, i), Namespace: s.namespace}
 
 				select {
 				case slots <- struct{}{}:
@@ -262,7 +263,7 @@ func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInF
 					return
 				}
 
-				if err := s.createSandbox(ctx, id, phase); err != nil {
+				if err := s.createSandbox(ctx, id, name, number); err != nil {
 					<-slots
 					continue
 				}
@@ -272,13 +273,13 @@ func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInF
 
 					if err := s.tracker.WaitReady(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
 						s.tracker.MarkError(id, err.Error())
-						log.Printf("[%s] %s: %v", phase, id.Name, err)
+						log.Printf("[%s#%d] %s: %v", name, number, id.Name, err)
 					}
 
 					s.deleteSandbox(ctx, id)
 					if err := s.tracker.WaitGone(ctx, id, s.cfg.PerSandboxTimeout); err != nil && ctx.Err() == nil {
 						s.tracker.MarkError(id, err.Error())
-						log.Printf("[%s] %s: %v", phase, id.Name, err)
+						log.Printf("[%s#%d] %s: %v", name, number, id.Name, err)
 					}
 				})
 			}
@@ -290,7 +291,7 @@ func (s *stressTest) runThroughputLevel(ctx context.Context, phase Phase, maxInF
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	counts := s.tracker.Snapshot()[phase]
-	log.Printf("[%s] done: %d created, %d ready, %d failed", phase, counts.Created, counts.Ready, counts.Failed)
+	counts := s.tracker.Snapshot()[number]
+	log.Printf("[%s#%d] done: %d created, %d ready, %d failed", name, number, counts.Created, counts.Ready, counts.Failed)
 	return nil
 }

@@ -82,12 +82,14 @@ type ClusterInfo struct {
 
 // PhaseSummary holds the aggregate results for one phase.
 type PhaseSummary struct {
-	Name            string  `json:"name"`
-	Requested       int     `json:"requested"`
-	Created         int     `json:"created"`
-	Ready           int     `json:"ready"`
-	Failed          int     `json:"failed"`
-	DurationSeconds float64 `json:"durationSeconds"`
+	// Number is the 1-based index of this entry in Summary.Phases / Config.Phases.
+	Number          PhaseNumber `json:"phaseNumber"`
+	Name            string      `json:"name"`
+	Requested       int         `json:"requested"`
+	Created         int         `json:"created"`
+	Ready           int         `json:"ready"`
+	Failed          int         `json:"failed"`
+	DurationSeconds float64     `json:"durationSeconds"`
 	// StartOffsetSeconds is the phase's start relative to Summary.StartTime.
 	StartOffsetSeconds float64 `json:"startOffsetSeconds"`
 
@@ -300,10 +302,10 @@ func run(ctx context.Context) error {
 		counts := tracker.Snapshot()
 		var line strings.Builder
 		fmt.Fprintf(&line, "[progress +%s]", time.Since(testStartTime).Round(time.Second))
-		for _, phase := range slices.Sorted(maps.Keys(counts)) {
-			c := counts[phase]
-			fmt.Fprintf(&line, " %s: created=%d ready=%d deleted=%d failed=%d |",
-				phase, c.Created, c.Ready, c.Deleted, c.Failed)
+		for _, number := range slices.Sorted(maps.Keys(counts)) {
+			c := counts[number]
+			fmt.Fprintf(&line, " %s#%d: created=%d ready=%d deleted=%d failed=%d |",
+				c.Name, number, c.Created, c.Ready, c.Deleted, c.Failed)
 		}
 		if writeToFileChannel != nil {
 			fmt.Fprintf(&line, " watch-queue=%d/%d", len(writeToFileChannel), cap(writeToFileChannel))
@@ -332,6 +334,7 @@ func run(ctx context.Context) error {
 	var phaseErr error
 	for _, phase := range phaseRuns {
 		result := phaseResult{
+			number: phase.number,
 			name:   phase.name,
 			offset: time.Since(testStartTime),
 		}
@@ -339,7 +342,7 @@ func run(ctx context.Context) error {
 		if err := phase.fn(ctx); err != nil {
 			result.duration = time.Since(start)
 			phaseResults = append(phaseResults, result)
-			phaseErr = fmt.Errorf("%s phase: %w", phase.name, err)
+			phaseErr = fmt.Errorf("%s#%d phase: %w", phase.name, phase.number, err)
 			log.Printf("aborting after error: %v", phaseErr)
 			break
 		}
@@ -376,12 +379,14 @@ func run(ctx context.Context) error {
 }
 
 type phaseRun struct {
-	name Phase
-	fn   func(context.Context) error
+	number PhaseNumber // 1-based index into Config.Phases
+	name   Phase
+	fn     func(context.Context) error
 }
 
 // phaseResult records wall-clock timing for one completed (or aborted) phase.
 type phaseResult struct {
+	number   PhaseNumber
 	name     Phase
 	offset   time.Duration // start relative to the test start
 	duration time.Duration
@@ -390,9 +395,11 @@ type phaseResult struct {
 // buildPhaseRuns turns Config.Phases into concrete runners.
 // Recognized names today: fill, probe, throughput-mifN (N > 0).
 // Bare "throughput" is accepted as an alias for throughput-mif50.
+// Duplicate names are allowed; each entry gets a distinct PhaseNumber.
 func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 	var runs []phaseRun
-	for _, raw := range test.cfg.Phases {
+	for i, raw := range test.cfg.Phases {
+		number := PhaseNumber(i + 1)
 		switch {
 		case raw == string(PhaseFill):
 			if test.cfg.FillCount <= 0 {
@@ -401,7 +408,9 @@ func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 			if test.cfg.CreateConcurrency <= 0 {
 				return nil, fmt.Errorf("--create-concurrency must be > 0 for phase %q", raw)
 			}
-			runs = append(runs, phaseRun{PhaseFill, test.runFillPhase})
+			runs = append(runs, phaseRun{number, PhaseFill, func(ctx context.Context) error {
+				return test.runFillPhase(ctx, number)
+			}})
 		case raw == string(PhaseProbe):
 			if test.cfg.ProbeCount <= 0 {
 				return nil, fmt.Errorf("phase %q requires --probe-count > 0", raw)
@@ -409,7 +418,9 @@ func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 			if test.cfg.ProbeConcurrency <= 0 {
 				return nil, fmt.Errorf("--probe-concurrency must be > 0 for phase %q", raw)
 			}
-			runs = append(runs, phaseRun{PhaseProbe, test.runProbePhase})
+			runs = append(runs, phaseRun{number, PhaseProbe, func(ctx context.Context) error {
+				return test.runProbePhase(ctx, number)
+			}})
 		default:
 			maxInFlight, ok := throughputMaxInFlight(raw)
 			if !ok {
@@ -426,8 +437,8 @@ func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 				name = Phase(fmt.Sprintf("%s-mif%d", PhaseThroughput, maxInFlight))
 			}
 			mif := maxInFlight
-			runs = append(runs, phaseRun{name, func(ctx context.Context) error {
-				return test.runThroughputLevel(ctx, name, mif)
+			runs = append(runs, phaseRun{number, name, func(ctx context.Context) error {
+				return test.runThroughputLevel(ctx, name, number, mif)
 			}})
 		}
 	}
@@ -576,18 +587,19 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 		Phases:    make([]*PhaseSummary, 0, len(phaseResults)),
 	}
 
-	recordsByPhase := make(map[Phase][]SandboxRecord)
+	recordsByPhase := make(map[PhaseNumber][]SandboxRecord)
 	for _, record := range records {
-		recordsByPhase[record.Phase] = append(recordsByPhase[record.Phase], record)
+		recordsByPhase[record.PhaseNumber] = append(recordsByPhase[record.PhaseNumber], record)
 	}
 
 	for _, result := range phaseResults {
-		phaseRecords := recordsByPhase[result.name]
+		phaseRecords := recordsByPhase[result.number]
 		// Throughput levels overshoot the configured count when
 		// -throughput-min-seconds keeps them churning; every record was a
 		// real request.
 		req := max(requested(result.name), len(phaseRecords))
 		ps := &PhaseSummary{
+			Number:             result.number,
 			Name:               string(result.name),
 			Requested:          req,
 			DurationSeconds:    result.duration.Seconds(),
@@ -744,8 +756,8 @@ func printReport(summary *Summary, clusterInfo *ClusterInfo) {
 	}
 
 	for _, ps := range summary.Phases {
-		fmt.Printf("\n--- %s: %d requested, %d created, %d ready, %d failed (%.1fs) ---\n",
-			ps.Name, ps.Requested, ps.Created, ps.Ready, ps.Failed, ps.DurationSeconds)
+		fmt.Printf("\n--- #%d %s: %d requested, %d created, %d ready, %d failed (%.1fs) ---\n",
+			ps.Number, ps.Name, ps.Requested, ps.Created, ps.Ready, ps.Failed, ps.DurationSeconds)
 
 		switch Phase(ps.Name) {
 		case PhaseProbe:

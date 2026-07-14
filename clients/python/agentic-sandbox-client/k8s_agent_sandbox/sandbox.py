@@ -20,7 +20,6 @@ from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
     SandboxConnectionConfig,
-    SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
 )

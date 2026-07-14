@@ -82,6 +82,63 @@ def get_release_info(tag):
     sys.exit(1)
 
 
+def _kustomization_resource_paths(path):
+    """Resource file paths listed under `resources:` in a kustomization file.
+
+    Deliberately stdlib-only (the release tool has no third-party deps): this
+    parses the simple `resources:` list this repo uses rather than pulling in
+    PyYAML.
+    """
+    paths = set()
+    in_resources = False
+    with open(path) as f:
+        for raw in f:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not raw[:1].isspace():
+                # A top-level key ends the resources block unless this *is* it.
+                in_resources = stripped == "resources:"
+                continue
+            if in_resources and stripped.startswith("- "):
+                # Drop any YAML inline comment (whitespace + '#'); a bare '#'
+                # inside a token is not a comment.
+                value = re.split(r"\s+#", stripped[2:], maxsplit=1)[0].strip()
+                paths.add(value)
+    return paths
+
+
+def check_install_manifest_drift(
+    all_yaml_files, kustomization_path="k8s/kustomization.yaml", k8s_dir="k8s"
+):
+    """Fail loudly if k8s/kustomization.yaml drifts from the flat release assets.
+
+    sandbox.yaml/extensions.yaml are concatenated from every k8s/**/*.yaml
+    (except kustomization.yaml); sandbox-with-extensions.yaml is rendered from
+    kustomization.yaml, whose `resources:` list is hand-maintained. Both assemble
+    whole files, so they stay in sync iff kustomization.yaml lists exactly those
+    globbed files -- minus extensions.controller.yaml, the intentionally-excluded
+    duplicate controller Deployment (the core controller.yaml is patched
+    instead). Without this guard, a new file dropped into k8s/ would land in the
+    flat assets automatically yet be silently missing from
+    sandbox-with-extensions.yaml.
+    """
+    globbed = {os.path.relpath(f, k8s_dir) for f in all_yaml_files}
+    globbed.discard("extensions.controller.yaml")
+    listed = _kustomization_resource_paths(kustomization_path)
+
+    missing = globbed - listed
+    extra = listed - globbed
+    if missing or extra:
+        print("❌ k8s/kustomization.yaml has drifted from the flat release assets:")
+        for f in sorted(missing):
+            print(f"   - {f}: in sandbox/extensions.yaml but not listed in kustomization.yaml")
+        for f in sorted(extra):
+            print(f"   - {f}: listed in kustomization.yaml but not a k8s asset file")
+        print("   Update k8s/kustomization.yaml so sandbox-with-extensions.yaml stays in sync.")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate release manifests.")
     parser.add_argument("--tag", required=True, help="The git tag for the release.")
@@ -98,32 +155,44 @@ def main():
     if not os.path.exists("release_assets"):
         os.makedirs("release_assets")
 
-    all_yaml_files = glob.glob("k8s/**/*.yaml", recursive=True)
+    # kustomization.yaml files describe how to assemble the manifests (see the
+    # all-in-one sandbox-with-extensions.yaml below); they are not themselves
+    # resources, so they must not be concatenated into the flat sandbox/extensions
+    # assets.
+    all_yaml_files = [
+        f
+        for f in glob.glob("k8s/**/*.yaml", recursive=True)
+        if os.path.basename(f) not in ("kustomization.yaml", "kustomization.yml")
+    ]
     image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}"
 
-    # --- Generate manifest.yaml ---
-    print("INFO: Preparing core manifest.yaml")
-    manifest_files = [f for f in all_yaml_files if "extensions" not in os.path.basename(f)]
-    with open("release_assets/manifest.yaml", "w") as outfile:
-        for fname in sorted(manifest_files):
+    def replace_image(text):
+        """Replace the ko:// image placeholder with the published controller image."""
+        return re.sub(
+            r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
+            image_url,
+            text,
+        )
+
+    # --- Generate sandbox.yaml (core only) ---
+    print("INFO: Preparing core sandbox.yaml")
+    core_files = [f for f in all_yaml_files if "extensions" not in os.path.basename(f)]
+    with open("release_assets/sandbox.yaml", "w") as outfile:
+        for fname in sorted(core_files):
             with open(fname) as infile:
                 outfile.write(infile.read())
                 outfile.write("---\n")
 
-    # Replace image placeholder in manifest.yaml.
-    print(f"INFO: Replacing image placeholder in core manifest.yaml with: {image_url}")
-    with open("release_assets/manifest.yaml", "r") as file:
+    # Replace image placeholder in sandbox.yaml.
+    print(f"INFO: Replacing image placeholder in core sandbox.yaml with: {image_url}")
+    with open("release_assets/sandbox.yaml", "r") as file:
         filedata = file.read()
 
-    filedata = re.sub(
-        r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
-        image_url,
-        filedata,
-    )
+    filedata = replace_image(filedata)
 
-    with open("release_assets/manifest.yaml", "w") as file:
+    with open("release_assets/sandbox.yaml", "w") as file:
         file.write(filedata)
-    print("INFO: Successfully created release_assets/manifest.yaml")
+    print("INFO: Successfully created release_assets/sandbox.yaml")
 
     # --- Generate extensions.yaml ---
     print("INFO: Preparing extensions.yaml")
@@ -139,22 +208,55 @@ def main():
     with open("release_assets/extensions.yaml", "r") as file:
         filedata = file.read()
 
-    filedata = re.sub(
-        r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
-        image_url,
-        filedata,
-    )
+    filedata = replace_image(filedata)
 
     with open("release_assets/extensions.yaml", "w") as file:
         file.write(filedata)
     print("INFO: Successfully created release_assets/extensions.yaml")
 
+    # --- Generate sandbox-with-extensions.yaml (all-in-one, kustomize/GitOps friendly) ---
+    # sandbox.yaml + extensions.yaml both declare the controller Deployment and
+    # are meant for sequential `kubectl apply -f` (last-write-wins). That duplicate
+    # resource id is rejected by kustomize/Config Sync/Argo CD, so we also publish a
+    # single collision-free asset rendered from k8s/kustomization.yaml.
+    #
+    # Guard first: kustomization.yaml's resource list is hand-maintained, so make
+    # sure it hasn't drifted from the glob the flat assets are built from.
+    check_install_manifest_drift(all_yaml_files)
+
+    print("INFO: Preparing all-in-one sandbox-with-extensions.yaml")
+    try:
+        result = subprocess.run(
+            ["kubectl", "kustomize", "k8s"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print("Error: 'kubectl' was not found in PATH; cannot render sandbox-with-extensions.yaml.")
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        print("Error: 'kubectl kustomize k8s' failed while rendering sandbox-with-extensions.yaml.")
+        for stream in (e.stderr, e.stdout):
+            if stream and stream.strip():
+                print(stream.strip())
+        sys.exit(1)
+
+    print(f"INFO: Replacing image placeholder in sandbox-with-extensions.yaml with: {image_url}")
+    with open("release_assets/sandbox-with-extensions.yaml", "w") as file:
+        file.write(replace_image(result.stdout))
+    print("INFO: Successfully created release_assets/sandbox-with-extensions.yaml")
+
+    # --- Publish Draft Release ---
     if args.publish:
         print(f"INFO: Publishing draft release {tag} to GitHub...")
-        manifest_path = "release_assets/manifest.yaml"
+        core_path = "release_assets/sandbox.yaml"
         extensions_path = "release_assets/extensions.yaml"
+        all_in_one_path = "release_assets/sandbox-with-extensions.yaml"
 
-        if not os.path.exists(manifest_path) or not os.path.exists(extensions_path):
+        if not all(
+            os.path.exists(p) for p in (core_path, extensions_path, all_in_one_path)
+        ):
             print("❌ Release assets missing. Cannot publish.")
             sys.exit(1)
 
@@ -171,8 +273,9 @@ def main():
             print(f"INFO: Draft release {tag} already exists; updating assets...")
             run_command([
                 "gh", "release", "upload", tag,
-                manifest_path,
+                core_path,
                 extensions_path,
+                all_in_one_path,
                 "--clobber",
                 "--repo", "kubernetes-sigs/agent-sandbox",
             ])
@@ -198,8 +301,9 @@ def main():
 
             cmd = [
                 "gh", "release", "create", tag,
-                manifest_path,
+                core_path,
                 extensions_path,
+                all_in_one_path,
             ]
 
             if notes_file:

@@ -33,9 +33,10 @@ PYTHON_TEST_SUITES = [
     },
     {
         "name": "dev-tools-shared",
-        "dir": os.path.join("dev", "tools", "shared"),
-        # No requirements file; headers.py relies only on the standard library,
-        # so the runner just installs pytest and runs the suite.
+        # Collect all dev/tools test suites (shared/headers_test.py,
+        # release_test.py, ...). These rely only on the standard library, so the
+        # runner just installs pytest (no requirements.txt) and runs them.
+        "dir": os.path.join("dev", "tools"),
         "requirements": "requirements.txt",
     },
     {

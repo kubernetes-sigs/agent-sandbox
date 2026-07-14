@@ -1996,6 +1996,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		expectedAdoptedSandbox  string
 		expectedAnnotations     map[string]string
 		expectedPodAnnotations  map[string]string
+		expectedLabels          map[string]string
+		expectedPodLabels       map[string]string
 		expectNewSandboxCreated bool
 		simulateConflicts       int
 	}{
@@ -2192,6 +2194,61 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectSandboxAdoption:   false,
 			expectNewSandboxCreated: true,
 		},
+		{
+			name: "propagates and overwrites created-by label during adoption",
+			existingObjects: []client.Object{
+				template,
+				func() client.Object {
+					cCopy := claim.DeepCopy()
+					if cCopy.Labels == nil {
+						cCopy.Labels = make(map[string]string)
+					}
+					cCopy.Labels[sandboxv1beta1.CreatedByLabel] = "go-client"
+					return cCopy
+				}(),
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					if sb.Labels == nil {
+						sb.Labels = make(map[string]string)
+					}
+					sb.Labels[sandboxv1beta1.CreatedByLabel] = "controller"
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedLabels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "go-client",
+			},
+			expectedPodLabels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "go-client",
+			},
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "removes created-by label during adoption when claim lacks it",
+			existingObjects: []client.Object{
+				template,
+				claim.DeepCopy(),
+				func() client.Object {
+					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
+					if sb.Labels == nil {
+						sb.Labels = make(map[string]string)
+					}
+					sb.Labels[sandboxv1beta1.CreatedByLabel] = "controller"
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:  true,
+			expectedAdoptedSandbox: "pool-sb-1",
+			expectedLabels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "",
+			},
+			expectedPodLabels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "",
+			},
+			expectNewSandboxCreated: false,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2305,6 +2362,14 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 
 				for key, expected := range tc.expectedAnnotations {
 					require.Equal(t, expected, adoptedSandbox.Annotations[key])
+				}
+
+				for key, expected := range tc.expectedLabels {
+					require.Equal(t, expected, adoptedSandbox.Labels[key])
+				}
+
+				for key, expected := range tc.expectedPodLabels {
+					require.Equal(t, expected, adoptedSandbox.Spec.PodTemplate.ObjectMeta.Labels[key])
 				}
 
 				// 5. Verify the claim records the assigned sandbox annotation
@@ -2696,9 +2761,21 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		// Verify metric
-		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeCold, "test-warmpool", "not_ready"))
+		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeCold, "test-warmpool", "not_ready", "unknown"))
 		if val != 1 {
 			t.Errorf("expected metric count 1, got %v", val)
+		}
+
+		// Verify created Sandbox labels are absent
+		sb := &sandboxv1beta1.Sandbox{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: "default"}, sb); err != nil {
+			t.Fatalf("failed to get created sandbox: %v", err)
+		}
+		if val, exists := sb.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox created-by label to be absent, got %q", val)
+		}
+		if val, exists := sb.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox pod template created-by label to be absent, got %q", val)
 		}
 	})
 
@@ -2712,8 +2789,9 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				Name:      "warm-sb",
 				Namespace: "default",
 				Labels: map[string]string{
-					warmPoolSandboxLabel:   poolNameHash,
-					sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					warmPoolSandboxLabel:          poolNameHash,
+					sandboxTemplateRefHash:        sandboxcontrollers.NameHash("test-template"),
+					sandboxv1beta1.CreatedByLabel: "controller",
 				},
 				Annotations: map[string]string{
 					sandboxv1beta1.SandboxTemplateRefAnnotation: "test-template",
@@ -2760,9 +2838,21 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 		}
 
 		// Verify metric
-		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeWarm, "test-warmpool", "ready"))
+		val := testutil.ToFloat64(asmetrics.SandboxClaimCreationTotal.WithLabelValues("default", "test-template", asmetrics.LaunchTypeWarm, "test-warmpool", "ready", "unknown"))
 		if val != 1 {
 			t.Errorf("expected metric count 1, got %v", val)
+		}
+
+		// Verify adopted Sandbox labels are removed (since claim lacks it)
+		sb := &sandboxv1beta1.Sandbox{}
+		if err := client.Get(context.Background(), types.NamespacedName{Name: "warm-sb", Namespace: "default"}, sb); err != nil {
+			t.Fatalf("failed to get adopted sandbox: %v", err)
+		}
+		if val, exists := sb.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox created-by label to be absent, got %q", val)
+		}
+		if val, exists := sb.Spec.PodTemplate.ObjectMeta.Labels[sandboxv1beta1.CreatedByLabel]; exists && val != "" {
+			t.Errorf("expected sandbox pod template created-by label to be absent, got %q", val)
 		}
 	})
 }
@@ -4940,4 +5030,187 @@ func TestCreateSandboxClaimVolumeClaimTemplatesErrors(t *testing.T) {
 			require.Contains(t, cond.Message, tc.expectedMessageMatch)
 		})
 	}
+}
+
+func TestSandboxClaimReconcile_PatchErrorPreservesStatus(t *testing.T) {
+	scheme := newScheme(t)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}}},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "warm-sandbox"},
+		},
+	}
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "warm-sandbox", Namespace: "default",
+			Labels: map[string]string{
+				sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm,
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim",
+				Name: "test-claim", UID: "claim-uid", Controller: new(true),
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode:    sandboxv1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, sandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+					return k8errors.NewInternalError(fmt.Errorf("simulated patch failure"))
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.Error(t, err)
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	err = fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim)
+	require.NoError(t, err)
+	require.Equal(t, "warm-sandbox", updatedClaim.Status.SandboxStatus.Name, "status.sandbox.name must not be wiped out when metadata patch fails")
+}
+
+func TestSandboxClaimReconcile_TransientLookupErrorPreservesStatus(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}}},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "warm-sandbox"},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == "warm-sandbox" {
+					return k8errors.NewInternalError(fmt.Errorf("simulated transient lookup timeout"))
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.Error(t, err)
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	err = fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim)
+	require.NoError(t, err)
+	require.Equal(t, "warm-sandbox", updatedClaim.Status.SandboxStatus.Name, "status.sandbox.name must not be wiped out when sandbox lookup fails with transient error")
+}
+
+type mockTracer struct {
+	asmetrics.Instrumenter
+	capturedAttrs map[string]string
+}
+
+func (m *mockTracer) StartSpan(ctx context.Context, _ metav1.Object, _ string, attrs map[string]string) (context.Context, func()) {
+	if len(attrs) > 0 {
+		m.capturedAttrs = attrs
+	}
+	return ctx, func() {}
+}
+
+func (m *mockTracer) GetTraceContext(_ context.Context) string {
+	return ""
+}
+
+func (m *mockTracer) IsRecording(_ context.Context) bool {
+	return true
+}
+
+func (m *mockTracer) AddEvent(_ context.Context, _ string, _ map[string]string) {}
+
+func TestReconcile_TracingNormalization(t *testing.T) {
+	claimName := "tracing-test-claim"
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			UID:       "uid-claim-1",
+			Labels: map[string]string{
+				sandboxv1beta1.CreatedByLabel: "invalid-value",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+		},
+	}
+
+	scheme := newScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	mt := &mockTracer{}
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           mt,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	_ = err
+
+	require.NotNil(t, mt.capturedAttrs)
+	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
 }

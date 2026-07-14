@@ -30,8 +30,12 @@ import (
 type Phase string
 
 const (
-	// PhaseCreate is the single create-and-wait phase used by --sandbox-count.
-	PhaseCreate Phase = "create"
+	// PhaseFill sandboxes provide background scale; they run until the test ends.
+	PhaseFill Phase = "fill"
+	// PhaseProbe sandboxes measure launch latency against the filled cluster.
+	PhaseProbe Phase = "probe"
+	// PhaseThroughput sandboxes are churned (create -> ready -> delete) to measure sustained throughput.
+	PhaseThroughput Phase = "throughput"
 )
 
 // Future is a future value that can be notified and waited on.

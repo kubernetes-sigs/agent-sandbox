@@ -54,6 +54,18 @@ func percentEncode(s string) string {
 	return b.String()
 }
 
+func encodeFilePath(path string) string {
+	encoded := percentEncode(path)
+	switch encoded {
+	case ".":
+		return "%2E"
+	case "..":
+		return "%2E%2E"
+	default:
+		return encoded
+	}
+}
+
 // applyCallOpts applies per-call options, returning a context with any
 // WithTimeout deadline and the configured max retry count (0 = default).
 func applyCallOpts(ctx context.Context, opts []CallOption) (context.Context, context.CancelFunc, int) {
@@ -155,7 +167,7 @@ func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]by
 		return nil, err
 	}
 
-	encoded := percentEncode(path)
+	encoded := encodeFilePath(path)
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, "download/"+encoded, nil, "", maxAttempts)
 	if err != nil {
 		recordError(span, err)
@@ -199,7 +211,7 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 		return nil, err
 	}
 
-	encoded := percentEncode(path)
+	encoded := encodeFilePath(path)
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, "list/"+encoded, nil, "", maxAttempts)
 	if err != nil {
 		recordError(span, err)
@@ -248,7 +260,7 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 		return false, err
 	}
 
-	encoded := percentEncode(path)
+	encoded := encodeFilePath(path)
 	resp, err := f.connector.SendRequest(ctx, http.MethodGet, "exists/"+encoded, nil, "", maxAttempts)
 	if err != nil {
 		recordError(span, err)

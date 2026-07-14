@@ -3,7 +3,7 @@
 # Go toolchain always runs natively instead of under QEMU emulation. Running `go build`
 # under emulation can crash the Go runtime/GC ("found pointer to free object").
 # See https://github.com/golang/go/issues/69255#issuecomment-2523276831
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.5 AS builder
 
 # Declare TARGETARCH/TARGETOS to make them available in this build stage.
 ARG TARGETARCH

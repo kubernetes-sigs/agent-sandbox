@@ -78,6 +78,10 @@ test-e2e-race:
 test-e2e-benchmarks:
 	./dev/ci/presubmits/test-e2e --suite benchmarks
 
+.PHONY: test-skill-eval
+test-skill-eval:
+	./dev/ci/presubmits/test-skill-eval
+
 .PHONY: lint-go
 lint-go:
 	./dev/tools/lint-go

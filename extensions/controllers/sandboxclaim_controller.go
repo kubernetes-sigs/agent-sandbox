@@ -464,7 +464,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		}
 
 		if template != nil {
-
+			patch := client.MergeFrom(sandbox.DeepCopy())
 			// Check if metadata needs update
 			var mergedMeta v1beta1.PodMetadata
 			template.Spec.PodTemplate.ObjectMeta.DeepCopyInto(&mergedMeta)
@@ -512,10 +512,10 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			}
 
 			if needsUpdate {
-				logger.Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
+				logger.V(1).Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
 				sandbox.Spec.PodTemplate.ObjectMeta = mergedMeta
-				if err := r.Update(ctx, sandbox); err != nil {
-					return nil, err
+				if updateErr := r.Patch(ctx, sandbox, patch); updateErr != nil {
+					return sandbox, fmt.Errorf("failed to patch sandbox metadata for claim %q: %w", claim.Name, updateErr)
 				}
 			}
 		}
@@ -751,7 +751,10 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.Sa
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
 		claim.Status.SandboxStatus.PodIPs = sandbox.Status.PodIPs
-	} else {
+	} else if err == nil || errors.Is(err, ErrSandboxNotOwned) {
+		// Only clear bound sandbox identity when there is no error (sandbox legitimately deleted or unbound)
+		// or when ownership verification fails. Never clear on transient lookup or patch errors, as wiping
+		// status.sandbox.name forces a fallback to cold-start on the next reconcile retry.
 		claim.Status.SandboxStatus.Name = ""
 		claim.Status.SandboxStatus.PodIPs = nil
 	}

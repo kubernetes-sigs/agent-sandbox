@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import gzip
 import json
 import os
 import shutil
@@ -36,7 +37,10 @@ def main():
     metrics_file = input_dir / "metrics.jsonl"
 
     if not summary_file.exists():
-        print(f"Error: summary.json not found in {input_dir}", file=sys.stderr)
+        summary_file = input_dir / "summary.json.gz"
+
+    if not summary_file.exists():
+        print(f"Error: summary.json or summary.json.gz not found in {input_dir}", file=sys.stderr)
         sys.exit(1)
 
     if not metrics_file.exists():
@@ -55,7 +59,8 @@ def main():
         watch_file = input_dir / "watch.jsonl.gz"
 
     # 1. Load summary data
-    with open(summary_file) as f:
+    opener = gzip.open if summary_file.suffix == '.gz' else open
+    with opener(summary_file, 'rt') as f:
         summary = json.load(f)
 
     # Keep timestamps as naive UTC: DuckDB converts tz-aware values to local

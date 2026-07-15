@@ -175,14 +175,15 @@ REST is selected for filesystem operations because every operation is a simple r
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `GET` | `/v1/files/{path}` | Read file (`application/octet-stream`) or list directory (`DirectoryListing` JSON) |
+| `GET` | `/v1/files/{path}` | Returns `application/octet-stream` for files or `application/json` (`DirectoryListing`) for directories; response type is determined server-side by the path target |
+| `HEAD` | `/v1/files/{path}` | Check existence and retrieve metadata without transferring the body; `200` if exists, `404` if absent |
 | `PUT` | `/v1/files/{path}` | Write file (`octet-stream` or `multipart/form-data`), creates parent dirs automatically |
 | `DELETE` | `/v1/files/{path}` | Remove file or directory (supports `recursive=true` for `rm -rf` behavior) |
 | `GET` | `/v1/health` | Liveness/readiness probe for Kubernetes (`200 OK` / `503 Service Unavailable`) |
 | `GET` | `/v1/metadata` | Workload-scoped environment variables injected by the orchestrator (e.g. sandbox ID, workspace path) |
 
 #### Runtime Probes & Metadata
-- **`/v1/health`** is required for Kubernetes liveness and readiness probes. It returns `200 OK` (`{"status": "ok"}`) when ready to accept traffic and **`503 Service Unavailable`** when degraded or during shutdown. The orchestrator cannot use gRPC for standard probes — HTTP is mandatory here.
+- **`/v1/health`** is required for Kubernetes liveness and readiness probes. It returns `200 OK` (`{"status": "ok"}`) when ready to accept traffic and **`503 Service Unavailable`** when degraded or during shutdown. HTTP is chosen over gRPC probes for broader compatibility — while Kubernetes has supported native gRPC probes since v1.24, HTTP probes work across all supported Kubernetes versions and require no additional probe configuration.
 - **`/v1/metadata`** exposes workload-scoped environment variables injected by the orchestrator at pod creation time (e.g., sandbox ID, workspace path). It must never carry orchestrator credentials or Kubernetes API tokens — those must be kept outside the sandbox network namespace entirely.
 
 #### Breaking Changes vs. Existing `python-runtime`
@@ -193,8 +194,8 @@ The `sandboxd` specification does not break existing clients today — existing 
 |---|---|---|
 | `POST /upload` | `PUT /v1/files/{path}` | Method changed to `PUT` (idempotent); full relative paths supported; accepts both `octet-stream` and `multipart/form-data`; supports `mode` parameter validated by `^0[0-7]{3}$`. |
 | `GET /download/{path}` | `GET /v1/files/{path}` | Renamed and versioned (`/v1/`). Returns `application/octet-stream`. |
-| `GET /list/{path}` | `GET /v1/files/{path}` | Merged into single endpoint; dispatched by `application/json` content type. |
-| `GET /exists/{path}` | `GET /v1/files/{path}` | No dedicated endpoint; `200 OK` means exists, `404 Not Found` means absent. |
+| `GET /list/{path}` | `GET /v1/files/{path}` | Merged into single endpoint; server returns `application/json` for directories and `application/octet-stream` for files. |
+| `GET /exists/{path}` | `HEAD /v1/files/{path}` | No dedicated endpoint; `200` means exists, `404` means absent. `HEAD` avoids transferring the file body. |
 | — | `DELETE /v1/files/{path}` | New — not available in existing `python-runtime` API. |
 
 ##### Wire Format Changes (`FileEntry`)
@@ -214,7 +215,7 @@ The `sandboxd` specification does not break existing clients today — existing 
 #### Security Considerations
 - **Network Containment:** Both ports (`:8080`, `:9090`) bind strictly to `localhost` inside the pod. They are not reachable outside the pod without explicit proxying (`sandbox-router`).
 - **`/v1/metadata` & Untrusted Code:** The sandbox executes untrusted agent code which can query `/v1/metadata` via local loopback. Therefore, `/v1/metadata` must only expose non-sensitive workload configuration (sandbox ID, workspace path, resource limits). Orchestrator credentials, Kubernetes API tokens, and cloud provider keys must **never** be placed in `/v1/metadata`.
-- **Path Traversal Protection:** All file paths received on `/v1/files/{path}` are processed through `SanitizePath`, invoking `filepath.EvalSymlinks` and verifying that the canonical resolved path strictly resides under the sandbox root (`/workspace`). Traversal attempts (`../`) are rejected with `403 Forbidden`.
+- **Path Traversal Protection:** All file paths received on `/v1/files/{path}` are processed through `SanitizePath`. For existing paths (reads, deletes, lists), `filepath.EvalSymlinks` resolves symlinks and verifies the canonical path resides under the sandbox root (`/workspace`). For new files (writes), `filepath.Clean` is applied lexically to the path and `filepath.EvalSymlinks` is applied to the parent directory to verify it does not escape the sandbox root. Traversal attempts (`../`) are rejected with `403 Forbidden`.
 
 ## Conformance
 

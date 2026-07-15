@@ -183,8 +183,9 @@ echo "Benchmark completed successfully."
 #   probe             low-concurrency launch latency
 #   throughput-mifN   closed-loop churn capped at N in-flight
 #
-# Keep fill-count + max(mifN) below spare pod capacity
-# (roughly 3 * 110 minus system pods on the default cluster); the test warns if they don't fit.
+# Keep fill (fill-per-node * nodes) + max(mifN) below spare pod capacity
+# (roughly 3 * 110 minus system pods on the default cluster); the test
+# refuses to run if they don't fit.
 # Defaults below are sized for the default 3-node cluster.
 STRESS_OUTPUT_DIR="${ARTIFACTS:-.}/stress-test/"
 mkdir -p "${STRESS_OUTPUT_DIR}"
@@ -204,7 +205,7 @@ echo "Running stress test"
 set +o errexit
 go run ./test/stress \
   --phases="${STRESS_PHASES:-fill,probe,throughput-mif200,throughput-mif100,throughput-mif50}" \
-  --fill-count="${STRESS_FILL_COUNT:-150}" \
+  --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \
   --throughput-min-seconds="${STRESS_THROUGHPUT_MIN_SECONDS:-45}" \

@@ -1,0 +1,43 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: sandbox-a1
+  namespace: tenant-a
+spec:
+  operatingMode: Suspended
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        agents.x-k8s.io/workload: sandbox
+        agents.x-k8s.io/sandbox-name: sandbox-a1
+    spec:
+      containers:
+      - name: web
+        image: hashicorp/http-echo:latest
+        args:
+        - "-text=Hello from Tenant-A Sandbox-A1 Container!"
+        ports:
+        - containerPort: 5678
+---
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: sandbox-a2
+  namespace: tenant-a
+spec:
+  operatingMode: Suspended
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        agents.x-k8s.io/workload: sandbox
+        agents.x-k8s.io/sandbox-name: sandbox-a2
+    spec:
+      containers:
+      - name: web
+        image: hashicorp/http-echo:latest
+        args:
+        - "-text=Hello from Tenant-A Sandbox-A2 Container!"
+        ports:
+        - containerPort: 5678

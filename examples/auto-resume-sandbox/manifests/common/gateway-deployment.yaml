@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-gateway
+  namespace: default
+  labels:
+    app: sandbox-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sandbox-gateway
+  template:
+    metadata:
+      labels:
+        app: sandbox-gateway
+    spec:
+      containers:
+      - name: sandbox-gateway
+        image: sandbox-gateway:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50051
+          name: grpc-ext-proc
+        - containerPort: 8080
+          name: http-proxy
+        env:
+        - name: PORT
+          value: "50051"
+        - name: MANAGER_ENDPOINT
+          value: "http://sandbox-suspension-manager-svc:8090/v1/sandboxes/resume"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-gateway-svc
+  namespace: default
+spec:
+  selector:
+    app: sandbox-gateway
+  ports:
+  - name: grpc-ext-proc
+    port: 50051
+    targetPort: 50051
+  - name: http-proxy
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-gateway-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-gateway-cluster-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-gateway-cluster-binding
+subjects:
+- kind: ServiceAccount
+  name: sandbox-gateway-sa
+  namespace: default
+- kind: ServiceAccount
+  name: default
+  namespace: tenant-a
+- kind: ServiceAccount
+  name: default
+  namespace: tenant-b
+roleRef:
+  kind: ClusterRole
+  name: sandbox-gateway-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+

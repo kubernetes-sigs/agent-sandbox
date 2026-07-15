@@ -1,0 +1,36 @@
+FROM golang:1.26-alpine AS builder
+
+RUN apk add --no-cache git
+
+WORKDIR /app
+COPY go.mod go.sum ./
+COPY internal ./internal
+COPY api ./api
+COPY extensions ./extensions
+COPY controllers ./controllers
+COPY clients ./clients
+COPY examples/auto-resume-sandbox/cmd ./cmd
+COPY sandbox-router ./sandbox-router
+
+RUN go mod tidy
+RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-gateway ./cmd/gateway/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-suspension-manager ./cmd/suspension-manager/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-router ./sandbox-router/cmd/main.go
+
+FROM gcr.io/distroless/static-debian13:nonroot AS gateway
+WORKDIR /
+COPY --from=builder /sandbox-gateway /sandbox-gateway
+USER 65532:65532
+ENTRYPOINT ["/sandbox-gateway"]
+
+FROM gcr.io/distroless/static-debian13:nonroot AS manager
+WORKDIR /
+COPY --from=builder /sandbox-suspension-manager /sandbox-suspension-manager
+USER 65532:65532
+ENTRYPOINT ["/sandbox-suspension-manager"]
+
+FROM gcr.io/distroless/static-debian13:nonroot AS router
+WORKDIR /
+COPY --from=builder /sandbox-router /sandbox-router
+USER 65532:65532
+ENTRYPOINT ["/sandbox-router"]

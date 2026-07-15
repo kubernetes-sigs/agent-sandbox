@@ -133,6 +133,11 @@ echo "Creating kOps cluster configuration..."
 # the upstream default, and kOps liveness probes hit /healthz.
 # Ports 10257/10259 are not internet-reachable: kOps GCE creates a
 # deny-by-default VPC and only control-plane instances can reach them.
+#
+# cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the
+# stress test can scrape them (promscrape.go already targets this port; the
+# 2077449092094496768 run showed pod-sandbox creation as the launch
+# bottleneck, and CNI endpoint regeneration latency lives in these metrics).
 kops create cluster \
   --cloud=gce \
   --gce-service-account=default \
@@ -150,7 +155,8 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
-  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
+  --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
 
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes

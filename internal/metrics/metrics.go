@@ -84,12 +84,16 @@ var (
 	// SandboxCreationLatency measures the time from Sandbox creation to Pod Ready state.
 	// Labels:
 	// - namespace: the namespace of the sandbox
-	// - launch_type: "warm", "cold", "unknown"
+	// - launch_type: "warm" | "cold" (defaults to cold when the launch-type label is absent)
 	// - sandbox_template: the SandboxTemplateRef.
+	//
+	// Recorded by the core Sandbox reconciler on first Ready. For warm-pool
+	// sandboxes this fires when the pool member becomes Ready (including
+	// sandboxes that are never claimed), not at claim adoption time.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "agent_sandbox_creation_latency_ms",
-			Help:    "Latency from Sandbox creation to Pod Ready state in milliseconds.",
+			Help:    "Latency from Sandbox creation to Pod Ready state in milliseconds. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
 			Buckets: sandboxLatencyBuckets,
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},
@@ -98,7 +102,7 @@ var (
 	// SandboxReadyLatency measures the time from controller first observed timestamp to Sandbox Ready state.
 	// Labels:
 	// - namespace: the namespace of the sandbox
-	// - launch_type: "warm", "cold", "unknown"
+	// - launch_type: "warm" | "cold" (defaults to cold when the launch-type label is absent)
 	// - sandbox_template: the SandboxTemplateRef.
 	// - owned_by: "SandboxClaim", "SandboxWarmPool", "None".
 	SandboxReadyLatency = prometheus.NewHistogramVec(

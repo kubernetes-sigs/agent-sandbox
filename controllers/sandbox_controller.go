@@ -180,12 +180,18 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID and observability annotation for active resources missing them (inline, no re-reconcile)
+	// Initialize trace ID / observability / first-ready annotations for active
+	// resources missing them (inline, no re-reconcile). Folding the already-Ready
+	// first-ready sentinel into this patch avoids a second write on upgrade when
+	// both the observability and flap-guard annotations are missing.
 	tc := r.Tracer.GetTraceContext(ctx)
 	needTraceContextPatch := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
 	needObservabilityPatch := sandbox.Annotations == nil || sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] == ""
+	alreadyReady := meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	needFirstReadyBackfill := alreadyReady &&
+		(sandbox.Annotations == nil || sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] == "")
 
-	if needTraceContextPatch || needObservabilityPatch {
+	if needTraceContextPatch || needObservabilityPatch || needFirstReadyBackfill {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
@@ -195,6 +201,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		if needObservabilityPatch {
 			sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if needFirstReadyBackfill {
+			// Sentinel: true first-ready time is unknown (pre-upgrade or prior stamp failure).
+			sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = "unknown"
 		}
 
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
@@ -474,13 +484,15 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 // backfillFirstReadyAnnotation stamps the SandboxFirstReadyAnnotation with a
 // sentinel value when the sandbox was previously Ready but the annotation is
-// missing (e.g. a prior Patch failed). This arms the persistent guard so that
-// future readiness flaps are highly unlikely to double-count metrics. Double
-// counting would only happen if both the original happy-path stamp and this
-// backfill Patch fail exactly at the transitions between both NotReady->Ready
-// and Ready->NotReady, as well as all reconcile cycles where it stays Ready. The
-// sentinel "unknown" is used instead of a timestamp to signal that the actual
-// first-ready time is unknown.
+// missing (e.g. a prior Patch failed). Prefer the early Reconcile patch that
+// folds this sentinel in with other missing annotations when the sandbox is
+// already Ready; this helper remains as a safety net if the early path was
+// skipped. This arms the persistent guard so that future readiness flaps are
+// highly unlikely to double-count metrics. Double counting would only happen if
+// both the original happy-path stamp and this backfill Patch fail exactly at
+// the transitions between both NotReady->Ready and Ready->NotReady, as well as
+// all reconcile cycles where it stays Ready. The sentinel "unknown" is used
+// instead of a timestamp to signal that the actual first-ready time is unknown.
 func (r *SandboxReconciler) backfillFirstReadyAnnotation(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
 	if sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] != "" {
 		return nil

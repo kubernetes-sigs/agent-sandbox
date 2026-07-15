@@ -1,5 +1,7 @@
 # KEP-539.2: Standardizing Sandbox Runtime Interfaces
 
+**Authors:** @barney-s, @Oneimu
+
 <!--
 TOC is auto-generated via `make toc-update`.
 -->
@@ -16,7 +18,19 @@ TOC is auto-generated via `make toc-update`.
     - [Core Execution](#core-execution)
     - [Filesystem Operations](#filesystem-operations)
     - [Stateful Code Interpretation (Jupyter)](#stateful-code-interpretation-jupyter)
+  - [Choosing Between REST and gRPC](#choosing-between-rest-and-grpc)
+    - [Option 1: OpenAPI / REST](#option-1-openapi--rest)
+    - [Option 2: gRPC / Protobuf](#option-2-grpc--protobuf)
   - [Should We Support Both?](#should-we-support-both)
+  - [Concrete Implementation: <code>sandboxd</code> Hybrid gRPC/REST Architecture](#concrete-implementation-sandboxd-hybrid-grpcrest-architecture)
+    - [Process Service (<code>:9090</code> gRPC)](#process-service-9090-grpc)
+    - [Filesystem Service (<code>:8080</code> REST/OpenAPI)](#filesystem-service-8080-restopenapi)
+    - [Runtime Probes &amp; Metadata](#runtime-probes--metadata)
+    - [Breaking Changes vs. Existing <code>python-runtime</code>](#breaking-changes-vs-existing-python-runtime)
+      - [Endpoint Surface Changes](#endpoint-surface-changes)
+      - [Wire Format Changes (<code>FileEntry</code>)](#wire-format-changes-fileentry)
+    - [SDK Migration Plan](#sdk-migration-plan)
+    - [Security Considerations](#security-considerations)
 - [Conformance](#conformance)
   - [1. Protocol Adherence](#1-protocol-adherence)
   - [2. Conformance Levels](#2-conformance-levels)
@@ -87,7 +101,6 @@ Unlike raw process execution, AI agents frequently need to execute Python snippe
 
 
 
----
 
 ### Choosing Between REST and gRPC
 
@@ -114,7 +127,6 @@ Inspired by E2B's `envd`, this approach uses a binary protocol over HTTP/2.
     * **Complexity:** Requires Protobuf toolchains and generated code, raising the barrier to entry for simple integrations.
     * **Inspectability:** Binary traffic is harder to inspect and debug without specialized tools.
 
----
 
 ### Should We Support Both?
 
@@ -125,6 +137,84 @@ Inspired by E2B's `envd`, this approach uses a binary protocol over HTTP/2.
    * We can provide an **OpenAPI/REST** interface as the default, high-compatibility entry point for most users and languages.
    * We can support a **gRPC** interface for performance-critical workloads or when advanced streaming (like `Watch` or interactive PTY) is required.
 3. **Sidecar Model:** By using a sidecar model in our Kubernetes Pods, users could choose to inject an `execd` (REST) sidecar or an `envd` (gRPC) sidecar depending on their SDK and performance needs, while keeping the underlying `agent-sandbox` CRD management identical.
+
+### Concrete Implementation: `sandboxd` Hybrid gRPC/REST Architecture
+
+To realize the hybrid model described above without forcing users to choose between two separate sidecar binaries (`execd` vs `envd`), we propose a unified portable daemon called **`sandboxd`** that serves both protocols from explicit, dedicated ports within the sidecar container:
+
+```text
+sandboxd (sidecar)
+├── gRPC  :9090  →  ProcessService    (streaming process I/O)
+└── HTTP  :8080  →  FilesystemService (stateless file operations & runtime probes)
+```
+
+Both ports bind strictly to `localhost` within the pod network namespace and are never exposed outside the container without explicit proxying (`sandbox-router`). The agent SDK discovers them via environment variables:
+
+```bash
+SANDBOXD_GRPC_ADDR=localhost:9090
+SANDBOXD_REST_ADDR=localhost:8080
+```
+
+#### Process Service (`:9090` gRPC)
+Defined in `packages/sandboxd/spec/process/v1/process.proto`.
+
+gRPC is selected for process management because `Start` is a long-lived server-streaming RPC — `stdout` and `stderr` flow continuously from the server until the process exits. Client input is handled separately via unary `WriteStdin`. HTTP/1.1 cannot model this cleanly.
+
+| RPC | Type | Purpose |
+|---|---|---|
+| `Start` | Server stream | Run a command, stream `stdout`/`stderr` in real time until `ExitEvent` |
+| `Execute` | Unary | Run a command synchronously, return `stdout`/`stderr`/`exit_code` atomically on exit |
+| `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process |
+| `SendSignal` | Unary | Deliver a POSIX signal (`SIGINT`, `SIGTERM`, `SIGKILL`); errors returned via gRPC status |
+| `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`) |
+
+#### Filesystem Service (`:8080` REST/OpenAPI)
+Defined in `packages/sandboxd/spec/filesystem/v1/filesystem.yaml`.
+
+REST is selected for filesystem operations because every operation is a simple request/response with a file payload — standard HTTP semantics (`GET`, `PUT`, `DELETE`) map naturally, avoiding base64 protobuf serialization wrapper overhead on large binary transfers. Any standard HTTP client works without generated stubs.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/v1/files/{path}` | Read file (`application/octet-stream`) or list directory (`DirectoryListing` JSON) |
+| `PUT` | `/v1/files/{path}` | Write file (`octet-stream` or `multipart/form-data`), creates parent dirs automatically |
+| `DELETE` | `/v1/files/{path}` | Remove file or directory (supports `recursive=true` for `rm -rf` behavior) |
+| `GET` | `/v1/health` | Liveness/readiness probe for Kubernetes (`200 OK` / `503 Service Unavailable`) |
+| `GET` | `/v1/metadata` | Workload-scoped environment variables injected by the orchestrator (e.g. sandbox ID, workspace path) |
+
+#### Runtime Probes & Metadata
+- **`/v1/health`** is required for Kubernetes liveness and readiness probes. It returns `200 OK` (`{"status": "ok"}`) when ready to accept traffic and **`503 Service Unavailable`** when degraded or during shutdown. The orchestrator cannot use gRPC for standard probes — HTTP is mandatory here.
+- **`/v1/metadata`** exposes workload-scoped environment variables injected by the orchestrator at pod creation time (e.g., sandbox ID, workspace path). It must never carry orchestrator credentials or Kubernetes API tokens — those must be kept outside the sandbox network namespace entirely.
+
+#### Breaking Changes vs. Existing `python-runtime`
+The `sandboxd` specification does not break existing clients today — existing SDKs continue to target the unversioned `python-runtime` API (`POST /upload`, `GET /download/...`, `GET /list/...`) unchanged. The breaking change is deferred to the SDK migration, when clients switch to point at `sandboxd` endpoints.
+
+##### Endpoint Surface Changes
+| Existing (`python-runtime`) | New (`sandboxd`) | Notes |
+|---|---|---|
+| `POST /upload` | `PUT /v1/files/{path}` | Method changed to `PUT` (idempotent); full relative paths supported; accepts both `octet-stream` and `multipart/form-data`; supports `mode` parameter validated by `^0[0-7]{3}$`. |
+| `GET /download/{path}` | `GET /v1/files/{path}` | Renamed and versioned (`/v1/`). Returns `application/octet-stream`. |
+| `GET /list/{path}` | `GET /v1/files/{path}` | Merged into single endpoint; dispatched by `application/json` content type. |
+| `GET /exists/{path}` | `GET /v1/files/{path}` | No dedicated endpoint; `200 OK` means exists, `404 Not Found` means absent. |
+| — | `DELETE /v1/files/{path}` | New — not available in existing `python-runtime` API. |
+
+##### Wire Format Changes (`FileEntry`)
+| Field | Existing (`python-runtime`) | New (`sandboxd`) | Impact |
+|---|---|---|---|
+| `mod_time` | `float64` (Unix epoch) | **Removed** | **Breaking** — existing decoders will silently receive zero values. |
+| `modified_at` | — | `string` (RFC 3339) | New field — ISO 8601 formatted timestamp. |
+| `mode` | — | `string` (octal, e.g. `"0644"`) | New optional field — octal permission bits. |
+| `name` | `string` | `string` | Unchanged. |
+| `type` | `"file"` \| `"directory"` | `"file"` \| `"directory"` | Unchanged. Note: Symlinks are resolved by `SanitizePath` (`EvalSymlinks`) before listing, so `"symlink"` is never returned on the wire. |
+| `size` | `int64` | `int64` | Unchanged. |
+
+#### SDK Migration Plan
+1. **SDK Versioning Strategy:** `sandboxd` is a replacement, not an extension, making the migration a breaking SDK release (`v2.0.0` or minor bump if pre-v1.0).
+2. **Dynamic Endpoint Gating:** The SDK checks for `SANDBOXD_REST_ADDR` and `SANDBOXD_GRPC_ADDR`. If present, it connects to `sandboxd` (`/v1/files/...` and `ProcessService`); otherwise, it falls back to `python-runtime`, enabling a smooth, phased rollout across different sandbox templates.
+
+#### Security Considerations
+- **Network Containment:** Both ports (`:8080`, `:9090`) bind strictly to `localhost` inside the pod. They are not reachable outside the pod without explicit proxying (`sandbox-router`).
+- **`/v1/metadata` & Untrusted Code:** The sandbox executes untrusted agent code which can query `/v1/metadata` via local loopback. Therefore, `/v1/metadata` must only expose non-sensitive workload configuration (sandbox ID, workspace path, resource limits). Orchestrator credentials, Kubernetes API tokens, and cloud provider keys must **never** be placed in `/v1/metadata`.
+- **Path Traversal Protection:** All file paths received on `/v1/files/{path}` are processed through `SanitizePath`, invoking `filepath.EvalSymlinks` and verifying that the canonical resolved path strictly resides under the sandbox root (`/workspace`). Traversal attempts (`../`) are rejected with `403 Forbidden`.
 
 ## Conformance
 

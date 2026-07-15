@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
@@ -1620,18 +1621,20 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 					}
 				}
 			}
-			if controllerRef != nil &&
-				controllerRef.APIVersion == extensionsv1beta1.GroupVersion.String() &&
-				controllerRef.Kind == "SandboxClaim" {
-				logger.Info("Sandbox recorded in claim metadata belongs to another claim, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "ownerClaim", controllerRef.Name, "ownerUID", controllerRef.UID)
-				patch := client.MergeFrom(claim.DeepCopy())
-				if fromLabel {
-					delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
-				} else {
-					delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
-				}
-				if err := r.Patch(ctx, claim, patch); err != nil {
-					return nil, fmt.Errorf("failed to remove sandbox reference owned by another claim: %w", err)
+			if controllerRef != nil {
+				if gv, gvErr := schema.ParseGroupVersion(controllerRef.APIVersion); gvErr == nil &&
+					gv.Group == extensionsv1beta1.GroupVersion.Group &&
+					controllerRef.Kind == "SandboxClaim" {
+					logger.Info("Sandbox recorded in claim metadata belongs to another claim, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "ownerClaim", controllerRef.Name, "ownerUID", controllerRef.UID)
+					patch := client.MergeFrom(claim.DeepCopy())
+					if fromLabel {
+						delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
+					} else {
+						delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+					}
+					if err := r.Patch(ctx, claim, patch); err != nil {
+						return nil, fmt.Errorf("failed to remove sandbox reference owned by another claim: %w", err)
+					}
 				}
 			}
 			logger.V(4).Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)

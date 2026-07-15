@@ -144,6 +144,10 @@ type Config struct {
 
 	CollectMetrics  bool          `json:"collectMetrics"`
 	MetricsInterval time.Duration `json:"metricsIntervalNanos"`
+
+	// ProfileAPIServer captures a kube-apiserver CPU profile during each
+	// throughput level (pprof-apiserver-<phase>.pprof).
+	ProfileAPIServer bool `json:"profileAPIServer"`
 }
 
 func main() {
@@ -176,6 +180,7 @@ func run(ctx context.Context) error {
 	flag.Float64Var(&cfg.ThroughputMinSeconds, "throughput-min-seconds", 45, "Minimum duration of each throughput phase; levels churn beyond -throughput-count until this much time has elapsed (0 = count-based only)")
 	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
 	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
+	flag.BoolVar(&cfg.ProfileAPIServer, "profile-apiserver", true, "Capture a kube-apiserver CPU profile during each throughput level (pprof-apiserver-<phase>.pprof)")
 	flag.Parse()
 
 	for part := range strings.SplitSeq(*phasesFlag, ",") {
@@ -339,10 +344,21 @@ func run(ctx context.Context) error {
 		return nil
 	})
 
+	// CPU-profile the apiserver during each throughput level (it is the
+	// dominant control-plane CPU consumer under churn).
+	var profiler *apiserverProfiler
+	if cfg.ProfileAPIServer {
+		profiler, err = newAPIServerProfiler(restConfig, cfg.OutputDir)
+		if err != nil {
+			return fmt.Errorf("failed to build apiserver profiler: %w", err)
+		}
+	}
+
 	test := &stressTest{
 		cfg:       cfg,
 		tracker:   tracker,
 		namespace: cfg.Namespace,
+		profiler:  profiler,
 		sandboxClient: dynamicClient.Resource(schema.GroupVersionResource{
 			Group:    "agents.x-k8s.io",
 			Version:  "v1beta1",
@@ -468,6 +484,11 @@ func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 			}
 			mif := maxInFlight
 			runs = append(runs, phaseRun{number, name, func(ctx context.Context) error {
+				if test.profiler != nil {
+					// 5s in to skip the slot-fill burst; levels last >=45s
+					// (ThroughputMinSeconds), so the 20s window lands inside.
+					go test.profiler.CaptureCPUProfile(ctx, name, 5*time.Second, 20*time.Second)
+				}
 				return test.runThroughputLevel(ctx, name, number, mif)
 			}})
 		}

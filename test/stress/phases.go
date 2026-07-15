@@ -35,6 +35,9 @@ type stressTest struct {
 	tracker       *Tracker
 	sandboxClient dynamic.ResourceInterface
 	namespace     string
+	// profiler captures apiserver CPU profiles during throughput levels
+	// (nil when --profile-apiserver is false).
+	profiler *apiserverProfiler
 }
 
 // buildSandboxObject returns a minimal long-running Sandbox.

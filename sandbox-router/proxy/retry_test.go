@@ -261,8 +261,8 @@ func TestRetryTransport_TimerDrainToleratesAlreadyConsumedChannel(t *testing.T) 
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok"))}, nil
 	})
-	// 1ms delay guarantees the timer fires before context cancellation,
-	// so each iteration's select takes the <-timer.C branch — meaning the
+	// 1ms delay is short enough that the timer fires during each select
+	// wait, so the <-timer.C branch is taken every iteration — meaning the
 	// channel is empty when the next iteration's drain runs.
 	tr := newRetryTransport(base, 5, 1*time.Millisecond, 5*time.Millisecond, nil)
 

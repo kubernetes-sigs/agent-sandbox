@@ -339,7 +339,7 @@ def update_issues(repo, flaky, infra, dry_run):
         )
     )
     actions = []
-    for f in merge_flaky_by_test(flaky):
+    for f in flaky:
         marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
         issue = find_existing_issue(existing, marker, f["short"])
         if issue and marker not in issue.get("body", ""):
@@ -458,8 +458,10 @@ def main():
                 fh.write(payload)
 
     if args.update_issues:
+        # Merge per-tab findings before thresholding so a test flaking a
+        # little in several tabs is judged on its total occurrence count.
         issue_worthy = [
-            f for f in flaky
+            f for f in merge_flaky_by_test(flaky)
             if f["retest_flips"] or f["flaky_cells"] or f["fails"] >= args.min_flakes
         ]
         actions = update_issues(args.repo, issue_worthy, infra, args.dry_run)

@@ -228,7 +228,9 @@ func run(ctx context.Context) error {
 	}
 	log.Printf("Cluster: kubernetes %s, %d worker nodes, pod capacity %d, %d pre-existing worker pods",
 		clusterInfo.KubernetesVersion, clusterInfo.Nodes, clusterInfo.PodCapacity, clusterInfo.PreexistingPods)
-	checkClusterCapacity(cfg, clusterInfo)
+	if err := checkClusterCapacity(cfg, clusterInfo); err != nil {
+		return err
+	}
 
 	// Create namespace
 	nsClient := dynamicClient.Resource(schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"})
@@ -491,13 +493,14 @@ func throughputMaxInFlight(name string) (int, bool) {
 	return n, true
 }
 
-// checkClusterCapacity warns when the test configuration will exceed spare cluster
-// pod capacity: in that case latency and throughput results measure queueing
-// for capacity rather than the sandbox launch pipeline.
+// checkClusterCapacity returns an error when the test configuration would
+// exceed spare cluster pod capacity: in that case latency and throughput
+// results would measure queueing for capacity rather than the sandbox launch
+// pipeline, so the run would not test what it claims to test.
 //
 // Phases run sequentially, so peak concurrent test pods is fill plus the
 // larger of the probe/throughput in-flight caps (fill sandboxes stay up).
-func checkClusterCapacity(cfg Config, info *ClusterInfo) {
+func checkClusterCapacity(cfg Config, info *ClusterInfo) error {
 	extra := 0
 	if slices.Contains(cfg.Phases, string(PhaseProbe)) && cfg.ProbeConcurrency > extra {
 		extra = cfg.ProbeConcurrency
@@ -514,14 +517,15 @@ func checkClusterCapacity(cfg Config, info *ClusterInfo) {
 	needed += extra
 	spare := info.PodCapacity - info.PreexistingPods
 	if needed == 0 {
-		return
+		return nil
 	}
 	switch {
 	case needed > spare:
-		log.Printf("WARNING: test needs up to %d concurrent pods but the cluster only has %d spare pod slots; results will measure capacity queueing, not launch performance. Reduce --fill-count / throughput-mifN or add nodes.", needed, spare)
+		return fmt.Errorf("test needs up to %d concurrent pods but the cluster only has %d spare pod slots; results would measure capacity queueing, not launch performance. Reduce --fill-count / throughput-mifN or add nodes", needed, spare)
 	case spare > 0 && needed > spare*9/10:
 		log.Printf("WARNING: test needs up to %d concurrent pods, over 90%% of the %d spare pod slots; scheduling may interfere with measurements.", needed, spare)
 	}
+	return nil
 }
 
 // inspectCluster records the apiserver version and counts worker-node pod

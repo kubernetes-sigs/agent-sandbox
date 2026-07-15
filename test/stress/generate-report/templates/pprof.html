@@ -1,0 +1,101 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}CPU Profiles - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}CPU Profiles (Flame Graphs){% endblock %}
+
+{% block content %}
+{% if pprof_profiles %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/d3-flame-graph@4/dist/d3-flamegraph.css">
+<div class="card">
+    <div class="card-title">
+        <span>kube-apiserver CPU profile</span>
+        <span class="badge badge-info" id="profile-info"></span>
+    </div>
+    <div class="profile-controls">
+        <label for="profile-select">Profile:</label>
+        <select id="profile-select">
+            {% for p in pprof_profiles %}
+            <option value="{{ p.file }}">{{ p.label }}</option>
+            {% endfor %}
+        </select>
+        <input id="profile-search" type="search" placeholder="Search functions&hellip;">
+        <button id="profile-reset" type="button">Reset zoom</button>
+    </div>
+    <div id="flamegraph"></div>
+    <div class="card-desc" style="margin-top: 12px;">
+        Width is total CPU time (self + callees); click a frame to zoom in, click root to zoom out.
+        The raw files sit next to this page
+        ({% for p in pprof_profiles %}<a href="{{ p.file }}"><code>{{ p.file }}</code></a>{{ ", " if not loop.last }}{% endfor %})
+        and can be analyzed offline with <code>go tool pprof &lt;file&gt;</code>.
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3-flame-graph@4/dist/d3-flamegraph.min.js"></script>
+<script src="flamegraph.js"></script>
+<script>
+    const container = document.getElementById('flamegraph');
+    const select = document.getElementById('profile-select');
+    const info = document.getElementById('profile-info');
+
+    const chart = flamegraph()
+        .width(Math.max(container.clientWidth, 600))
+        .cellHeight(18)
+        .minFrameSize(2)
+        .transitionDuration(250)
+        .sort(true);
+
+    async function show(file) {
+        info.textContent = 'loading…';
+        container.innerHTML = '';
+        try {
+            const profile = await loadPprof(file);
+            const pick = pickSampleType(profile);
+            const tree = buildFlameTree(profile, pick.index);
+            d3.select(container).datum(tree).call(chart);
+            const seconds = profile.durationNanos / 1e9;
+            const cores = profile.durationNanos > 0 ? tree.value / profile.durationNanos : 0;
+            info.textContent = `${pick.label}: ${(tree.value / 1e9).toFixed(1)} cpu-s over ${seconds.toFixed(0)}s (${cores.toFixed(1)} cores)`;
+        } catch (err) {
+            info.textContent = 'load failed';
+            container.innerHTML = `<div class="card-desc">Failed to load <code>${escapeHtml(file)}</code>: ${escapeHtml(err.message)}.<br>` +
+                'Note: the profile is fetched at view time, so this page must be served over HTTP ' +
+                '(a file:// URL cannot fetch sibling files).</div>';
+        }
+    }
+
+    select.addEventListener('change', () => show(select.value));
+    document.getElementById('profile-search').addEventListener('input', e => {
+        if (e.target.value) { chart.search(e.target.value); } else { chart.clear(); }
+    });
+    document.getElementById('profile-reset').addEventListener('click', () => chart.resetZoom());
+    show(select.value);
+</script>
+{% else %}
+<div class="card">
+    <div class="card-title">No CPU profiles in this run</div>
+    <div class="card-desc">
+        No <code>pprof-*.pprof</code> files were found in the input directory. The stress tool
+        captures a kube-apiserver CPU profile during each throughput level when
+        <code>--profile-apiserver</code> is enabled (the default).
+    </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import json
 import ssl
 import sys
 import urllib.request
@@ -81,10 +82,9 @@ def download_file(url, out_path):
 
     # GZIP detection based on magic bytes (0x1f, 0x8b).
     # jsonl artifacts are stored gzipped but without the .gz suffix; restore
-    # it so downstream readers pick the right decoder. Other files keep their
-    # name so formats that are gzip by definition are not renamed.
+    # it so downstream readers pick the right decoder. Other formats (e.g.
+    # .pprof) are gzip-compressed by definition and keep their name.
     is_gzip = len(data) >= 2 and data[0] == 0x1f and data[1] == 0x8b
-
     final_path = out_path
     if is_gzip and out_path.suffix == '.jsonl':
         final_path = out_path.with_name(out_path.name + '.gz')
@@ -125,6 +125,25 @@ def main():
         out_file_path = output_dir / filename
         if download_file(file_url, out_file_path):
             downloaded += 1
+
+    # CPU profile names depend on the phases that ran, so derive them from
+    # summary.json. Older runs used a .pb suffix; save either as .pprof.
+    summary_path = output_dir / "summary.json"
+    if summary_path.exists():
+        with open(summary_path) as f:
+            raw_phases = json.load(f).get("phases", [])
+        # Current schema: a list of {"name": ...}; older runs used a
+        # name-keyed dict or a plain list of names.
+        if isinstance(raw_phases, dict):
+            phases = list(raw_phases.keys())
+        else:
+            phases = [p.get("name", "") if isinstance(p, dict) else str(p) for p in raw_phases]
+        for phase in [p for p in phases if p]:
+            out_file_path = output_dir / f"pprof-apiserver-{phase}.pprof"
+            for candidate in (f"pprof-apiserver-{phase}.pprof", f"pprof-apiserver-{phase}.pb"):
+                if download_file(f"{base_url}/{candidate}", out_file_path):
+                    downloaded += 1
+                    break
 
     print(f"\nCompleted downloading {downloaded} files successfully.")
 

@@ -360,3 +360,43 @@ th.sortable[data-order="desc"]::after {
     opacity: 0.8;
     color: var(--accent-primary);
 }
+
+/* Flame graph page */
+.profile-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+}
+
+.profile-controls select,
+.profile-controls input,
+.profile-controls button {
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background-color: var(--card-bg);
+    color: var(--text-primary);
+}
+
+.profile-controls input {
+    flex: 1;
+    max-width: 320px;
+}
+
+.profile-controls button {
+    cursor: pointer;
+}
+
+.profile-controls button:hover {
+    background-color: rgba(28, 26, 23, 0.05);
+}
+
+#flamegraph {
+    font-family: var(--font-sans);
+    overflow-x: auto;
+}

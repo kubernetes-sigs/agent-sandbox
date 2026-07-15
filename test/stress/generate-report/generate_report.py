@@ -797,6 +797,26 @@ def main():
             "sandboxReady_p99": row[12]
         })
 
+    # Discover CPU profiles captured by the stress tool (standard pprof
+    # format: gzip-compressed profile.proto). They are copied next to the
+    # report pages and parsed/rendered client-side by pprof.html.
+    pprof_files = sorted(
+        list(input_dir.glob("pprof-*.pprof"))
+        + list(input_dir.glob("pprof-*.pb"))
+        + list(input_dir.glob("pprof-*.pb.gz")))
+    phase_order = {p["name"]: i for i, p in enumerate(summary.get("phases", []))}
+    pprof_profiles = []
+    for f in pprof_files:
+        label = f.name[len("pprof-"):]
+        for suffix in (".pprof", ".pb.gz", ".pb"):
+            if label.endswith(suffix):
+                label = label[:-len(suffix)]
+                break
+        # Order profiles by when their phase ran, not alphabetically.
+        order = next((i for name, i in phase_order.items() if label.endswith(name)), len(phase_order))
+        pprof_profiles.append({"file": f.name, "label": label, "order": order})
+    pprof_profiles.sort(key=lambda p: (p["order"], p["label"]))
+
     # 5. Render Templates using Jinja2
     output_dir.mkdir(parents=True, exist_ok=True)
     template_dir = Path(__file__).parent / "templates"
@@ -808,6 +828,11 @@ def main():
         if static_file.is_file():
             shutil.copy(static_file, output_dir / static_file.name)
             print(f"Copied static asset: {output_dir / static_file.name}")
+
+    # Copy the profiles so pprof.html can fetch them relative to itself
+    for f in pprof_files:
+        shutil.copy(f, output_dir / f.name)
+        print(f"Copied CPU profile: {output_dir / f.name}")
 
     def render_page(template_name, output_filename, context):
         template = env.get_template(template_name)
@@ -879,6 +904,14 @@ def main():
         "phases": js_phases
     }
     render_page("capacity.html", "capacity.html", capacity_ctx)
+
+    # CPU profiles context
+    pprof_ctx = {
+        "active_page": "pprof",
+        "summary": summary,
+        "pprof_profiles": pprof_profiles
+    }
+    render_page("pprof.html", "pprof.html", pprof_ctx)
 
     print("All report pages generated successfully!")
 

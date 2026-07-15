@@ -42,7 +42,10 @@ const (
 
 // Options configures a Sandbox instance.
 type Options struct {
-	// WarmPoolName is the name of the SandboxWarmPool to use. Required.
+	// WarmPoolName is the name of the SandboxWarmPool to use.
+	// Required in Options before calling Open() to provision a new sandbox.
+	// Optional on Client-level Options; pass the pool name per-sandbox to
+	// CreateSandbox instead.
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
 	WarmPoolName string
 
@@ -238,7 +241,18 @@ func isValidDNSLabel(s string) bool {
 	return true
 }
 
-func (o *Options) validate() error {
+// validateWarmPoolName checks that a warm pool name is present and a valid DNS subdomain.
+func validateWarmPoolName(name string) error {
+	if name == "" {
+		return fmt.Errorf("sandbox: WarmPoolName is required")
+	}
+	if !isValidDNSSubdomain(name) {
+		return fmt.Errorf("sandbox: WarmPoolName %q is not a valid Kubernetes DNS subdomain name", name)
+	}
+	return nil
+}
+
+func (o *Options) validateCommon() error {
 	if o.APIURL != "" {
 		u, err := url.Parse(o.APIURL)
 		if err != nil {
@@ -250,12 +264,6 @@ func (o *Options) validate() error {
 		if u.Host == "" {
 			return fmt.Errorf("sandbox: APIURL %q must include a host", o.APIURL)
 		}
-	}
-	if o.WarmPoolName == "" {
-		return fmt.Errorf("sandbox: WarmPoolName is required")
-	}
-	if !isValidDNSSubdomain(o.WarmPoolName) {
-		return fmt.Errorf("sandbox: WarmPoolName %q is not a valid Kubernetes DNS subdomain name", o.WarmPoolName)
 	}
 	if !isValidDNSLabel(o.Namespace) {
 		return fmt.Errorf("sandbox: Namespace %q is not a valid Kubernetes namespace (DNS label)", o.Namespace)

@@ -1,0 +1,80 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}etcd Performance - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}etcd Latency & Operations{% endblock %}
+
+{% block content %}
+<div class="grid">
+    <div class="card chart-card" id="etcd-chart-card">
+        <div class="card-title">etcd Request Rates Over Time</div>
+        <div class="chart-container">
+            <canvas id="etcdRateChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">etcd Requests by Phase</div>
+    <div class="table-container">
+        <table id="etcd-ops-table"></table>
+    </div>
+</div>
+
+<script>
+    const etcdOps = {{ etcd_ops | tojson }};
+    renderTable('#etcd-ops-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'resource', label: 'Resource', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'operation', label: 'Operation', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'count_delta', label: 'Count'},
+        {key: 'avg_latency_ms', label: 'Average Latency', render: v =>
+            badge(v > 20 ? 'danger' : v > 5 ? 'warning' : 'success', v.toFixed(2) + 'ms')}
+    ], etcdOps);
+
+    const chartData = {{ chart_data | tojson }};
+    const phases = {{ phases | tojson }};
+
+    const timestamps = [...new Set(chartData.map(d => d.ts))].sort();
+    const formattedLabels = timeLabels(timestamps);
+    const pointTimes = timestamps.map(ts => new Date(ts).getTime());
+
+    // Keep the 8 busiest resource/operation series (by total request rate),
+    // and index points by series|ts so each series is built by lookup.
+    const seriesTotals = new Map();
+    const pointIndex = new Map();
+    for (const d of chartData) {
+        const key = `${d.resource} ${d.operation}`;
+        seriesTotals.set(key, (seriesTotals.get(key) || 0) + d.request_rate);
+        pointIndex.set(`${key}|${d.ts}`, d.request_rate);
+    }
+    const topSeries = [...seriesTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([key]) => key);
+    const datasets = topSeries.map((key, idx) => lineDataset(
+        key,
+        timestamps.map(ts => pointIndex.get(`${key}|${ts}`) ?? null),
+        idx));
+
+    new Chart(document.getElementById('etcdRateChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: formattedLabels, datasets: datasets },
+        options: lineChartOptions('Requests / sec'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+</script>
+{% endblock %}

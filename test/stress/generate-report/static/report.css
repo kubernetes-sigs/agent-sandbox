@@ -1,0 +1,362 @@
+/*
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+*/
+
+:root {
+    --bg-color: #fbfaf7;         /* Warm cream paper background */
+    --sidebar-bg: #f4f3ef;      /* Muted light warm grey sidebar */
+    --card-bg: #ffffff;
+    --border-color: #d1cfc7;     /* Soft warm grey borders */
+    --text-primary: #1c1a17;    /* Ink/Charcoal high-contrast text */
+    --text-secondary: #4b4945;  /* Soft dark charcoal for details */
+    --accent-primary: #1d4ed8;  /* Royal Blue (LaTeX style link) */
+    --accent-success: #15803d;  /* Muted Green */
+    --accent-warning: #b45309;  /* Muted Orange */
+    --accent-danger: #b91c1c;   /* Muted Red */
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-serif: 'Lora', 'Georgia', 'Times New Roman', serif;
+    --font-mono: 'Fira Mono', 'Courier New', monospace;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--font-serif);
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    display: flex;
+    min-height: 100vh;
+    overflow-x: hidden;
+    line-height: 1.6;
+}
+
+/* Sidebar styling */
+.sidebar {
+    width: 260px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    padding: 28px 24px;
+    z-index: 100;
+    font-family: var(--font-sans);
+}
+
+.sidebar-brand {
+    font-family: var(--font-serif);
+    font-size: 1.35rem;
+    font-weight: 700;
+    margin-bottom: 36px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--text-primary);
+    text-decoration: none;
+    border-bottom: 2px solid var(--text-primary);
+    padding-bottom: 8px;
+}
+
+.sidebar-brand span {
+    color: var(--text-primary);
+}
+
+.sidebar-menu {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.sidebar-item a {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-radius: 4px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-weight: 500;
+    transition: all 0.15s ease;
+}
+
+.sidebar-item a:hover {
+    color: var(--text-primary);
+    background-color: rgba(28, 26, 23, 0.05);
+}
+
+.sidebar-item.active a {
+    color: #ffffff;
+    background-color: var(--text-primary);
+}
+
+/* Main Content Container */
+.main-content {
+    margin-left: 260px;
+    flex: 1;
+    padding: 48px;
+    max-width: 1400px;
+    width: calc(100% - 260px);
+}
+
+.header {
+    margin-bottom: 40px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 16px;
+}
+
+.header h1 {
+    font-size: 2.25rem;
+    font-weight: 700;
+    margin-bottom: 12px;
+    font-family: var(--font-serif);
+}
+
+.header-meta {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    display: flex;
+    gap: 28px;
+    font-family: var(--font-sans);
+}
+
+/* Cards and Layout Grid */
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 28px;
+    margin-bottom: 40px;
+}
+
+.card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 24px;
+    box-shadow: none;
+}
+
+.card-title {
+    font-family: var(--font-serif);
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.card-value {
+    font-family: var(--font-mono);
+    font-size: 2.25rem;
+    font-weight: 500;
+    margin-bottom: 8px;
+}
+
+.card-desc {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+}
+
+/* Tables (LaTeX Booktabs Style) */
+.table-container {
+    width: 100%;
+    overflow-x: auto;
+    border: none;
+    border-radius: 0;
+    margin-top: 20px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+    font-size: 0.9rem;
+    font-family: var(--font-sans);
+}
+
+thead tr {
+    border-top: 2px solid var(--text-primary);
+    border-bottom: 1.2px solid var(--text-primary);
+}
+
+th {
+    background-color: transparent;
+    color: var(--text-primary);
+    font-weight: 700;
+    padding: 10px 12px;
+    border-bottom: none;
+}
+
+td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #e5e5e0;
+    color: var(--text-secondary);
+}
+
+tbody tr:last-child {
+    border-bottom: 2px solid var(--text-primary);
+}
+
+tr:hover td {
+    color: var(--text-primary);
+    background-color: transparent;
+}
+
+code {
+    font-family: var(--font-mono);
+    background-color: #f1f0ea;
+    padding: 2px 4px;
+    border-radius: 2px;
+    font-size: 0.85em;
+    color: var(--text-primary);
+}
+
+/* Badges */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 6px;
+    border-radius: 2px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-family: var(--font-sans);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border: 1px solid transparent;
+}
+
+.badge-success { background-color: #f0fdf4; color: var(--accent-success); border-color: #bbf7d0; }
+.badge-warning { background-color: #fffbeb; color: var(--accent-warning); border-color: #fde68a; }
+.badge-danger { background-color: #fef2f2; color: var(--accent-danger); border-color: #fecaca; }
+.badge-info { background-color: #eff6ff; color: var(--accent-primary); border-color: #bfdbfe; }
+
+/* Threshold-colored numeric cells */
+.num-good { color: var(--accent-success); }
+.num-warn { color: var(--accent-warning); font-weight: 600; }
+.num-bad { color: var(--accent-danger); font-weight: 600; }
+
+/* Findings styling (Academic Theorem Block style) */
+.findings-list {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    margin-top: 20px;
+}
+
+.finding-item {
+    padding: 20px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    border-left: 5px solid var(--accent-primary);
+    background-color: #faf9f6;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.finding-item.critical { border-left-color: var(--accent-danger); }
+.finding-item.warning { border-left-color: var(--accent-warning); }
+.finding-item.info { border-left-color: var(--accent-primary); }
+
+.finding-title {
+    font-family: var(--font-serif);
+    font-weight: 700;
+    font-size: 1.1rem;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--text-primary);
+}
+
+.finding-desc {
+    font-family: var(--font-serif);
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.finding-link {
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--accent-primary);
+    text-decoration: none;
+    align-self: flex-start;
+    margin-top: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.finding-link:hover {
+    text-decoration: underline;
+}
+
+/* Chart card styling */
+.chart-card {
+    grid-column: span 2;
+}
+
+.chart-container {
+    position: relative;
+    height: 350px;
+    width: 100%;
+    margin-top: 16px;
+}
+
+/* Sortable tables styling */
+th.sortable {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    padding-right: 28px;
+}
+
+th.sortable:hover {
+    background-color: rgba(0, 0, 0, 0.04);
+    color: var(--text-primary);
+}
+
+th.sortable::after {
+    content: '↕';
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-secondary);
+    opacity: 0.4;
+    font-size: 0.8rem;
+}
+
+th.sortable[data-order="asc"]::after {
+    content: '▲';
+    opacity: 0.8;
+    color: var(--accent-primary);
+}
+
+th.sortable[data-order="desc"]::after {
+    content: '▼';
+    opacity: 0.8;
+    color: var(--accent-primary);
+}

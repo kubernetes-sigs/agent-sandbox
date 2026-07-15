@@ -1,0 +1,74 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Sandbox Stress Test Report{% endblock %}</title>
+    <!-- Google Fonts: Lora, Inter, Fira Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Mono:wght@400;500&family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="report.js"></script>
+    <link rel="stylesheet" href="report.css">
+</head>
+<body>
+    <div class="sidebar">
+        <a href="index.html" class="sidebar-brand">
+            <span>Agent Sandbox</span>
+        </a>
+        <ul class="sidebar-menu">
+            <li class="sidebar-item {% if active_page == 'index' %}active{% endif %}">
+                <a href="index.html">Overview</a>
+            </li>
+            <li class="sidebar-item {% if active_page == 'cri' %}active{% endif %}">
+                <a href="cri.html">CRI Runtime</a>
+            </li>
+            <li class="sidebar-item {% if active_page == 'controller' %}active{% endif %}">
+                <a href="agent-sandbox-controller.html">Sandbox Controller</a>
+            </li>
+            <li class="sidebar-item {% if active_page == 'apiserver' %}active{% endif %}">
+                <a href="apiserver.html">API Server</a>
+            </li>
+            <li class="sidebar-item {% if active_page == 'etcd' %}active{% endif %}">
+                <a href="etcd.html">etcd Latency</a>
+            </li>
+            <li class="sidebar-item {% if active_page == 'capacity' %}active{% endif %}">
+                <a href="capacity.html">Cluster Capacity</a>
+            </li>
+        </ul>
+    </div>
+
+    <div class="main-content">
+        <div class="header">
+            <h1>{% block header_title %}Stress Test Report{% endblock %}</h1>
+            <div class="header-meta">
+                <span>Run ID: <strong>{{ summary.runID }}</strong></span>
+                <span>Cluster Version: <strong>{{ summary.cluster.kubernetesVersion }}</strong></span>
+                <span>Nodes: <strong>{{ summary.cluster.nodes }}</strong></span>
+                <span>Start Time: <strong>{{ summary.startTime }}</strong></span>
+            </div>
+        </div>
+
+        {% block content %}{% endblock %}
+    </div>
+
+</body>
+</html>

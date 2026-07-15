@@ -214,6 +214,21 @@ go run ./test/stress \
 stress_status=$?
 set -o errexit
 capture_stress_diagnostics
+
+# Generate stress test report
+REPORT_OUTPUT_DIR="${ARTIFACTS:-.}/stress-report"
+echo "Generating stress test report to ${REPORT_OUTPUT_DIR}..."
+if python3 -c "import venv" >/dev/null 2>&1; then
+  python3 -m venv "${BINDIR}/report-venv"
+  "${BINDIR}/report-venv/bin/pip" install --quiet 'duckdb>=1,<2' 'jinja2>=3,<4'
+  "${BINDIR}/report-venv/bin/python3" test/stress/generate-report/generate_report.py \
+    --input-dir "${STRESS_OUTPUT_DIR}" \
+    --output-dir "${REPORT_OUTPUT_DIR}"
+  echo "Report generated successfully."
+else
+  echo "Warning: python3 venv module not available, skipping report generation."
+fi
+
 if [[ "${stress_status}" -ne 0 ]]; then
   exit "${stress_status}"
 fi

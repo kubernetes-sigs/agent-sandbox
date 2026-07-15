@@ -1,0 +1,76 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Sandbox Controller Performance - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Sandbox Reconciler & Workqueue Performance{% endblock %}
+
+{% block content %}
+<div class="grid">
+    <div class="card chart-card" id="controller-chart-card">
+        <div class="card-title">Reconciliation Rate Over Time</div>
+        <div class="chart-container">
+            <canvas id="reconcileRateChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Reconciliations by Phase</div>
+    <div class="table-container">
+        <table id="controller-ops-table"></table>
+    </div>
+</div>
+
+<script>
+    const controllerOps = {{ controller_ops | tojson }};
+    renderTable('#controller-ops-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'controller', label: 'Controller', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'total_reconciles', label: 'Total Reconciles'},
+        {key: 'total_errors', label: 'Errors'},
+        {key: 'error_rate', label: 'Error Rate', render: v =>
+            badge(v > 5 ? 'danger' : v > 0 ? 'warning' : 'success', v.toFixed(2) + '%')},
+        {key: 'avg_reconcile_ms', label: 'Average Duration', render: v =>
+            badge(v > 50 ? 'danger' : v > 10 ? 'warning' : 'success', v.toFixed(2) + 'ms')}
+    ], controllerOps);
+
+    const chartData = {{ chart_data | tojson }};
+    const phases = {{ phases | tojson }};
+
+    const controllers = [...new Set(chartData.map(d => d.controller))];
+    const timestamps = [...new Set(chartData.map(d => d.ts))].sort();
+    const formattedLabels = timeLabels(timestamps);
+    const pointTimes = timestamps.map(ts => new Date(ts).getTime());
+
+    // Index points by controller|ts so building each series is a lookup, not
+    // a scan of the whole chartData array per point.
+    const pointIndex = new Map(chartData.map(d => [`${d.controller}|${d.ts}`, d.reconcile_rate]));
+    const datasets = controllers.map((ctrl, idx) => lineDataset(
+        `${ctrl} (reconciles/sec)`,
+        timestamps.map(ts => pointIndex.get(`${ctrl}|${ts}`) ?? null),
+        idx));
+
+    new Chart(document.getElementById('reconcileRateChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: formattedLabels, datasets: datasets },
+        options: lineChartOptions('Reconciles / sec'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+</script>
+{% endblock %}

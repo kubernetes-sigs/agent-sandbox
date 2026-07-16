@@ -513,4 +513,3 @@ func main() {
 	logger.Info("Shutting down sandbox-gateway callout service gracefully")
 	grpcServer.GracefulStop()
 }
-

@@ -4,6 +4,7 @@ RUN apk add --no-cache git
 
 WORKDIR /app
 COPY go.mod go.sum ./
+RUN go mod download && go mod verify
 COPY internal ./internal
 COPY api ./api
 COPY extensions ./extensions
@@ -12,7 +13,6 @@ COPY clients ./clients
 COPY examples/auto-resume-sandbox/cmd ./cmd
 COPY sandbox-router ./sandbox-router
 
-RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-gateway ./cmd/gateway/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-suspension-manager ./cmd/suspension-manager/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-router ./sandbox-router/cmd/main.go

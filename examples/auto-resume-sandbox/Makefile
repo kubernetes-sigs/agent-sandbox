@@ -6,8 +6,8 @@ IMAGE_NAME ?= sandbox-gateway:latest
 KIND_CLUSTER ?= agent-sandbox
 
 build:
-	go build -o bin/sandbox-gateway ./cmd/gateway/main.go
-	go build -o bin/sandbox-suspension-manager ./cmd/suspension-manager/main.go
+	go build -o ../../bin/sandbox-gateway ./cmd/gateway/main.go
+	go build -o ../../bin/sandbox-suspension-manager ./cmd/suspension-manager/main.go
 
 docker-build:
 	docker build --target gateway -t sandbox-gateway:latest -f Dockerfile ../..

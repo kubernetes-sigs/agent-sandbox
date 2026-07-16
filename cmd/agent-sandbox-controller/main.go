@@ -172,8 +172,13 @@ func main() {
 		setupLog.V(1).Info("leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty; attempting auto-detection")
 	}
 
-	if !enableWebhook && manageWebhookCerts {
-		setupLog.Info("--manage-webhook-certs has no effect when --enable-webhook=false")
+	if !enableWebhook {
+		setupLog.Info("webhook subsystem disabled (--enable-webhook=false); " +
+			"installed CRDs must use conversion.strategy=None — the stock CRDs in k8s/crds " +
+			"and helm/crds use Webhook conversion and API version conversion will fail without the webhook server")
+		if manageWebhookCerts {
+			setupLog.Info("--manage-webhook-certs has no effect when --enable-webhook=false")
+		}
 	}
 
 	ctx := ctrl.SetupSignalHandler()

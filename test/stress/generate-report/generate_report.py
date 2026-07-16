@@ -519,6 +519,197 @@ def main():
         for row in etcd_ts_raw
     ]
 
+    # Cilium agent metrics (present when the cluster runs Cilium with
+    # enablePrometheusMetrics). The CNI plugin calls the agent's REST API
+    # synchronously during CNI ADD/DEL, so agent API latency is pod sandbox
+    # creation latency. Cilium rate-limits endpoint-create requests
+    # (api-rate-limit, default 0.5/s auto-adjusted), and that limiter's wait
+    # time is where launch throughput ceilings show up.
+    print("Querying cilium agent API latency by phase...")
+    cilium_api_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                CAST(instance AS VARCHAR) as instance,
+                CAST(labels->>'method' AS VARCHAR) as method,
+                CAST(labels->>'path' AS VARCHAR) as path,
+                COALESCE(CAST(labels->>'return_code' AS VARCHAR), '') as return_code,
+                metric,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE metric IN ('cilium_agent_api_process_time_seconds_count', 'cilium_agent_api_process_time_seconds_sum')
+        ),
+        diffs AS (
+            SELECT
+                ts,
+                method,
+                path,
+                metric,
+                value - lag(value) OVER (PARTITION BY instance, method, path, return_code, metric ORDER BY ts) as delta
+            FROM raw
+        ),
+        diffs_with_phase AS (
+            SELECT
+                p.name as phase_name,
+                d.method,
+                d.path,
+                d.metric,
+                d.delta
+            FROM diffs d
+            JOIN phases p ON d.ts >= p.start_time AND d.ts < p.end_time
+            WHERE d.delta >= 0
+        )
+        SELECT
+            phase_name,
+            method,
+            path,
+            SUM(CASE WHEN metric LIKE '%_count' THEN delta ELSE 0 END) as count_delta,
+            SUM(CASE WHEN metric LIKE '%_sum' THEN delta ELSE 0 END) as sum_delta
+        FROM diffs_with_phase
+        GROUP BY phase_name, method, path
+        HAVING count_delta > 0
+        ORDER BY phase_name, sum_delta DESC
+    """).fetchall()
+
+    cilium_api_ops = []
+    for row in cilium_api_raw:
+        phase_name, method, path, count_delta, sum_delta = row
+        avg_latency_ms = (sum_delta / count_delta) * 1000 if count_delta > 0 else 0
+        cilium_api_ops.append({
+            "phase_name": phase_name,
+            "method": method,
+            "path": path,
+            "count_delta": int(count_delta),
+            "avg_latency_ms": avg_latency_ms
+        })
+
+    print("Querying cilium endpoint-create limiter by phase...")
+    # These are gauges (running mean / max since agent start), so per-phase
+    # values are scrape averages: good for spotting sustained queueing,
+    # not exact per-phase distributions.
+    cilium_limiter_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                CAST(instance AS VARCHAR) as instance,
+                metric,
+                CAST(labels->>'value' AS VARCHAR) as kind,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE CAST(labels->>'api_call' AS VARCHAR) = 'endpoint-create'
+              AND metric IN ('cilium_api_limiter_wait_duration_seconds',
+                             'cilium_api_limiter_rate_limit',
+                             'cilium_api_limiter_requests_in_flight',
+                             'cilium_api_limiter_processing_duration_seconds')
+        )
+        SELECT
+            p.name as phase_name,
+            AVG(CASE WHEN metric = 'cilium_api_limiter_wait_duration_seconds' AND kind = 'mean' THEN value END) as wait_mean_s,
+            MAX(CASE WHEN metric = 'cilium_api_limiter_wait_duration_seconds' AND kind = 'max' THEN value END) as wait_max_s,
+            AVG(CASE WHEN metric = 'cilium_api_limiter_rate_limit' AND kind = 'limit' THEN value END) as rate_limit,
+            AVG(CASE WHEN metric = 'cilium_api_limiter_requests_in_flight' AND kind = 'in-flight' THEN value END) as in_flight,
+            AVG(CASE WHEN metric = 'cilium_api_limiter_processing_duration_seconds' AND kind = 'mean' THEN value END) as processing_mean_s
+        FROM raw r
+        JOIN phases p ON r.ts >= p.start_time AND r.ts < p.end_time
+        GROUP BY p.name
+        ORDER BY MIN(p.start_time)
+    """).fetchall()
+
+    cilium_limiter_summary = []
+    for row in cilium_limiter_raw:
+        cilium_limiter_summary.append({
+            "phase_name": row[0],
+            "wait_mean_s": row[1] or 0.0,
+            "wait_max_s": row[2] or 0.0,
+            "rate_limit": row[3] or 0.0,
+            "in_flight": row[4] or 0.0,
+            "processing_mean_s": row[5] or 0.0
+        })
+
+    print("Querying cilium limiter timeseries...")
+    cilium_limiter_ts_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                CAST(instance AS VARCHAR) as instance,
+                metric,
+                CAST(labels->>'value' AS VARCHAR) as kind,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE CAST(labels->>'api_call' AS VARCHAR) = 'endpoint-create'
+              AND metric IN ('cilium_api_limiter_wait_duration_seconds', 'cilium_api_limiter_rate_limit')
+        ),
+        binned AS (
+            SELECT
+                time_bucket(INTERVAL '15 seconds', ts) as bucket_time,
+                instance,
+                AVG(CASE WHEN metric = 'cilium_api_limiter_wait_duration_seconds' AND kind = 'mean' THEN value END) as wait_mean_s,
+                AVG(CASE WHEN metric = 'cilium_api_limiter_rate_limit' AND kind = 'limit' THEN value END) as rate_limit
+            FROM raw
+            GROUP BY bucket_time, instance
+        )
+        SELECT
+            strftime(bucket_time, '%Y-%m-%dT%H:%M:%SZ') as ts,
+            instance,
+            wait_mean_s,
+            rate_limit
+        FROM binned
+        WHERE wait_mean_s IS NOT NULL OR rate_limit IS NOT NULL
+        ORDER BY ts, instance
+    """).fetchall()
+
+    cilium_chart_data = [
+        {"ts": row[0], "instance": row[1], "wait_mean_s": row[2], "rate_limit": row[3]}
+        for row in cilium_limiter_ts_raw
+    ]
+
+    print("Querying cilium endpoint regeneration by phase...")
+    cilium_regen_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                CAST(instance AS VARCHAR) as instance,
+                metric,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE metric IN ('cilium_endpoint_regeneration_time_stats_seconds_count', 'cilium_endpoint_regeneration_time_stats_seconds_sum')
+              AND CAST(labels->>'scope' AS VARCHAR) = 'total'
+              AND CAST(labels->>'status' AS VARCHAR) = 'success'
+        ),
+        diffs AS (
+            SELECT
+                ts,
+                metric,
+                value - lag(value) OVER (PARTITION BY instance, metric ORDER BY ts) as delta
+            FROM raw
+        ),
+        diffs_with_phase AS (
+            SELECT p.name as phase_name, d.metric, d.delta
+            FROM diffs d
+            JOIN phases p ON d.ts >= p.start_time AND d.ts < p.end_time
+            WHERE d.delta >= 0
+        )
+        SELECT
+            phase_name,
+            SUM(CASE WHEN metric LIKE '%_count' THEN delta ELSE 0 END) as count_delta,
+            SUM(CASE WHEN metric LIKE '%_sum' THEN delta ELSE 0 END) as sum_delta
+        FROM diffs_with_phase
+        GROUP BY phase_name
+        HAVING count_delta > 0
+        ORDER BY phase_name
+    """).fetchall()
+
+    cilium_regen = []
+    for row in cilium_regen_raw:
+        phase_name, count_delta, sum_delta = row
+        cilium_regen.append({
+            "phase_name": phase_name,
+            "count_delta": int(count_delta),
+            "avg_ms": (sum_delta / count_delta) * 1000 if count_delta > 0 else 0
+        })
+
+    cilium_available = bool(cilium_api_ops or cilium_limiter_summary)
+
     # Query active sandboxes and pods capacity timeseries from the watch logs
     capacity_chart_data = []
     capacity_summary = []
@@ -732,6 +923,23 @@ def main():
             "link": "etcd.html"
         })
 
+    # Cilium endpoint-create rate limiting check: launch latency spent
+    # queueing in the agent's api-rate-limit, not doing CNI work.
+    cilium_wait_worst = None
+    for row in cilium_limiter_summary:
+        if row['phase_name'].startswith('throughput'):
+            if cilium_wait_worst is None or row['wait_mean_s'] > cilium_wait_worst['wait_mean_s']:
+                cilium_wait_worst = row
+
+    if cilium_wait_worst and cilium_wait_worst['wait_mean_s'] > 0.5:
+        w = cilium_wait_worst
+        findings.append({
+            "severity": "critical" if w['wait_mean_s'] > 5.0 else "warning",
+            "title": f"Cilium endpoint-create API Rate Limited ({w['wait_mean_s']:.1f}s mean wait)",
+            "desc": f"During phase {w['phase_name']}, CNI endpoint-create requests waited a mean of {w['wait_mean_s']:.1f}s (max {w['wait_max_s']:.0f}s) in cilium-agent's API rate limiter, while actual processing took only {w['processing_mean_s']:.2f}s. The auto-adjusted limit averaged {w['rate_limit']:.1f} creates/s per node, which caps pod sandbox creation throughput. Consider raising the endpoint-create limits in Cilium's api-rate-limit configuration.",
+            "link": "cilium.html"
+        })
+
     # Capacity saturation finding check
     max_active_pods = 0
     for pt in capacity_chart_data:
@@ -893,6 +1101,19 @@ def main():
         "phases": js_phases
     }
     render_page("etcd.html", "etcd.html", etcd_ctx)
+
+    # Cilium context
+    cilium_ctx = {
+        "active_page": "cilium",
+        "summary": summary,
+        "cilium_available": cilium_available,
+        "cilium_api_ops": cilium_api_ops,
+        "cilium_limiter_summary": cilium_limiter_summary,
+        "cilium_regen": cilium_regen,
+        "chart_data": cilium_chart_data,
+        "phases": js_phases
+    }
+    render_page("cilium.html", "cilium.html", cilium_ctx)
 
     # Capacity context
     capacity_ctx = {

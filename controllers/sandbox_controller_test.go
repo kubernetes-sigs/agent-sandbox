@@ -3753,7 +3753,7 @@ func TestNameHash_Correctness(t *testing.T) {
 		}
 		// Verify all chars are lowercase hex digits.
 		for i, c := range got {
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				t.Errorf("NameHash(%q)[%d] = %c, want hex digit", name, i, c)
 			}
 		}

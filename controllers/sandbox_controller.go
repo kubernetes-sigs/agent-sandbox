@@ -249,7 +249,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
-		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
 		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 		sandbox.Status.NodeName = pod.Spec.NodeName
 	}
@@ -472,7 +472,18 @@ func GetNumericHash(input string) uint32 {
 // NameHash generates an FNV-1a hash from a string and returns
 // it as a fixed-length hexadecimal string.
 func NameHash(objectName string) string {
-	return fmt.Sprintf("%08x", GetNumericHash(objectName))
+	h := GetNumericHash(objectName)
+	const hex = "0123456789abcdef"
+	var buf [8]byte
+	buf[0] = hex[(h>>28)&0xf]
+	buf[1] = hex[(h>>24)&0xf]
+	buf[2] = hex[(h>>20)&0xf]
+	buf[3] = hex[(h>>16)&0xf]
+	buf[4] = hex[(h>>12)&0xf]
+	buf[5] = hex[(h>>8)&0xf]
+	buf[6] = hex[(h>>4)&0xf]
+	buf[7] = hex[h&0xf]
+	return string(buf[:])
 }
 
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix

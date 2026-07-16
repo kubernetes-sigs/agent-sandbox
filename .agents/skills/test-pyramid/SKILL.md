@@ -11,7 +11,7 @@ Goal: **anything that can be tested as a unit test should be a unit test; only w
 
 Enumerate both layers and count actual test functions (not just files), so the report can show the pyramid shape numerically:
 
-- **Unit tests:** `git ls-files '*_test.go' | grep -v '^test/'` plus Python unit tests under `clients/python/**/tests/`. Count `func Test...` per package (`grep -c '^func Test'`).
+- **Unit tests:** `git ls-files '*_test.go' | grep -v '^test/'` plus Python unit tests under `clients/python/**/test/unit/` (discover with `git ls-files 'clients/python/*' | grep '/test/unit/'` — there is more than one such directory). Count `func Test...` per package (`grep -c '^func Test'`) and `def test_` for Python.
 - **E2E / system tests:** `test/e2e/**/*_test.go` (kind-cluster E2E, incl. `test/e2e/extensions/`), `test/e2e/clients/python/` (SDK E2E), `dev/tools/test-migration.py` (upgrade/rollback), `test/stress/` (load). Count `func Test...` and, for table-driven E2E, the sub-scenarios.
 - Note per-layer runtime cost if discoverable (CI job durations from `dev/ci/`, TestGrid tab names) — the payoff argument for each migration is time and flake surface removed from presubmit.
 
@@ -47,6 +47,6 @@ Every suggestion must survive these checks (drop or downgrade to "uncertain" if 
 2. **E2E → unit table:** E2E test (file:line) | assertions to extract | seam (file:line) | proposed unit test location + shape (table-driven case to add vs. new test) | what remains of the E2E test (thinned / deleted).
 3. **Unit → E2E table** (expect this to be short — the pyramid demands it): gap | why unit level cannot cover it | proposed E2E home (existing file to extend before new file).
 4. **Redundant coverage list.**
-5. **Top 5 quick wins** ranked by (CI time + flake history removed) vs. effort — cross-reference `dev/tools/flake-report` output or open `kind/flake` issues if available, since migrating a flaky E2E assertion to a unit test is the highest-value move.
+5. **Top 5 quick wins** ranked by (CI time + flake history removed) vs. effort — cross-reference flake evidence where available: open `kind/flake` issues, TestGrid history for the presubmit tabs, or `dev/tools/flake-report` output if that tool exists in your checkout. Migrating a flaky E2E assertion to a unit test is the highest-value move.
 
 Rank suggestions by confidence; separate "verified" (seam confirmed, patterns exist) from "needs maintainer judgment" (cluster-coupling unclear). Do not inflate the E2E→unit list — a wrong migration that deletes real coverage is worse than a kept E2E test.

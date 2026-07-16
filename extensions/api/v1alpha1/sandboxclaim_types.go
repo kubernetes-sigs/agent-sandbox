@@ -149,7 +149,9 @@ type SandboxClaimSpec struct {
 	// +optional
 	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
-	// env is a list of environment variables to inject into the sandbox
+	// env is a list of environment variables to inject into the sandbox.
+	// Please note adding this field means the Sandbox will always be cold-started from the
+	// template of the warmpool.
 	// +listType=atomic
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
@@ -171,8 +173,11 @@ type SandboxStatus struct {
 	// +optional
 	Name string `json:"name,omitempty"`
 
-	// podIPs are the IP addresses of the underlying pod.
-	// A pod may have multiple IPs in dual-stack clusters.
+	// podIPs are the IP addresses of the underlying pod, mirrored from the backing
+	// Sandbox's status. A pod may have multiple IPs in dual-stack clusters.
+	// This is populated only while the backing Sandbox has a running pod with assigned
+	// IPs; it is cleared whenever the pod is absent (e.g. before the pod has been
+	// created or while the Sandbox is suspended).
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
 }

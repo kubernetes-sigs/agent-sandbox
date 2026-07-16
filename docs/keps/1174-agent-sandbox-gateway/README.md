@@ -136,9 +136,9 @@ flowchart TB
    To ensure a zero-dependency, out-of-the-box experience for local development (`make deploy-kind`), Kind, Minikube, and standard open-source Kubernetes clusters, `agent-sandbox` ships **Envoy Gateway** (an official CNCF open-source project) as its default reference implementation (`gatewayClassName: envoy`). Pre-packaged base extension manifests include `EnvoyExtensionPolicy` to attach the `ext_proc` callout filter automatically.
 
 3. **Pluggable Bring-Your-Own-Gateway (BYOG) Model & Adapter Classification**: 
-   The `sandbox-gateway` callout microservice (`cmd/sandbox-gateway`) provides a dual-interface architecture to support diverse enterprise ingress proxies:
+   The `sandbox-gateway` callout microservice (`cmd/sandbox-gateway`) provides an extensible architecture to support diverse enterprise ingress proxies:
    - **Class 1: Envoy-Based Gateway Implementations (Native `ext_proc`)**: Platforms using Envoy Gateway, Istio Ingress, Cilium Gateway (Envoy mode), Contour, or Gloo Edge connect natively using Envoy's standard `ext_proc` gRPC callout interface (`envoy.service.ext_proc.v3.ExternalProcessor`).
-   - **Class 2: Non-Envoy & Cloud-Native Ingress Controllers (HTTP/gRPC Callout Adapters)**: Platforms operating non-Envoy infrastructure (NGINX Ingress, Traefik, GKE Gateway, AWS ALB) interface with `sandbox-gateway` via standard HTTP/gRPC header callout endpoints (`POST /v1/callout/headers` on Port `8081`) or native extension hooks (e.g. NGINX `auth_request` / WASM / Lua, Traefik ForwardAuth / Middleware, GCP Service Extensions, AWS ALB Target Group callouts). This guarantees universal BYOG portability across any ingress proxy without forcing Envoy proxy replacements.
+   - **Class 2: Non-Envoy & Cloud-Native Ingress Controllers (HTTP/gRPC Callout Adapters - *Future Work*)**: Non-Envoy platforms (NGINX Ingress, Traefik, GKE Gateway, AWS ALB) will interface with `sandbox-gateway` via planned HTTP/gRPC header callout adapters (`POST /v1/callout/headers` on Port `8081` — *deferred to Future Work*) or native extension hooks (e.g. NGINX `auth_request` / WASM / Lua, Traefik ForwardAuth / Middleware, GCP Service Extensions, AWS ALB Target Group callouts).
 
 ### High-Level Design
 
@@ -286,7 +286,7 @@ The **Sandbox Suspension Manager** exposes a dedicated authenticated internal si
   }
   ```
 * **Authentication & Authorization**:
-  The manager validates the bearer JWT using the Kubernetes `TokenReview` API, extracting the caller's ServiceAccount namespace identity (`system:serviceaccount:tenant-a:sandbox-gateway`). If the caller's namespace does not match `"namespace": "tenant-a"` in the request body, the manager rejects the call with `403 Forbidden`.
+  The manager validates the bearer JWT using the Kubernetes `TokenReview` API, extracting the caller's ServiceAccount namespace identity (`system:serviceaccount:tenant-a:sandbox-gateway`). If the caller's namespace does not match `"namespace": "tenant-a"` in the request body, the manager rejects the call with `403 Forbidden`. *(Note: The Phase 1 reference PoC in `examples/auto-resume-sandbox/cmd/suspension-manager/main.go` validates Projected ServiceAccount Bearer token presence with `401 Unauthorized`; full API-server `TokenReview` token verification and cross-tenant namespace authorization are planned for Phase 2 production integration).*
 
 ### Stream Flow Control & Request Holding Mechanics
 
@@ -445,6 +445,7 @@ W3C trace context headers (`traceparent`, `tracestate`) are propagated across ca
 
 ## Future Work
 
+* **HTTP/gRPC BYOG Header Callout Adapter (`POST /v1/callout/headers` on Port `8081`)**: Adding a dedicated HTTP/gRPC header callout adapter listener on Port `8081` to support non-Envoy ingress proxies (NGINX `auth_request`, Traefik `ForwardAuth`, GCP Service Extensions, AWS ALB Target Group callouts) alongside the core Envoy `ext_proc` gRPC engine.
 * **Workload Signaling Extensions**: Providing standardized container sidecars and client SDKs to allow AI agent workloads running inside a Sandbox to actively signal custom execution states, scheduled hibernation timers, or immediate suspend readiness.
 * **Gateway-Level Idleness & Inactivity Detection**: Passive traffic analysis at the Gateway level to track active connection streams, detect prolonged idleness, and automatically initiate auto-suspension transitions when traffic ceases for a configurable duration.
 * **Traffic-Based Last Activity Tracking**: Updating `status.suspensionState.lastActivityTime` via batch status flushing from Gateway activity metrics to provide precise inactivity auditing.
@@ -454,7 +455,7 @@ W3C trace context headers (`traceparent`, `tracestate`) are propagated across ca
 The implementation of `sandbox-gateway` is divided into three chronological phases:
 
 ### Phase 1: Prototype Verification & Proof-of-Concept (Validated)
-* **Status**: Complete (refer to runnable PoC in [examples/auto-resume-sandbox/](../../examples/auto-resume-sandbox/)).
+* **Status**: Complete (refer to runnable PoC in [examples/auto-resume-sandbox/](../../../examples/auto-resume-sandbox/)).
 * **Deliverables**:
   1. Prototype Go callout server (`cmd/gateway/main.go`) implementing Envoy `ext_proc` gRPC specification (`ProcessingRequest` / `ProcessingResponse`).
   2. Verified header interception (`x-sandbox-id`, `x-sandbox-namespace`), singleflight request collapsing (`singleflight.Group`), dynamic header injection (`x-sandbox-pod-ip`, `x-sandbox-port`), and L7 byte streaming through `sandbox-router`.

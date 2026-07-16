@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -61,11 +62,12 @@ func (m *Manager) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		klog.Warning("Resume request missing Authorization header")
-	} else {
-		klog.V(2).Infof("Received authorized thaw request with Bearer token header")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		klog.Warning("Rejecting thaw request: missing or invalid Authorization header")
+		http.Error(w, "Unauthorized: missing or invalid Bearer token", http.StatusUnauthorized)
+		return
 	}
+	klog.V(2).Infof("Received authorized thaw request with Bearer token header")
 
 	var req ThawRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -155,8 +157,12 @@ func main() {
 	http.HandleFunc("/v1/sandboxes/resume", mgr.handleResume)
 
 	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: nil,
+		Addr:              ":" + port,
+		Handler:           nil,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	klog.Infof("Starting Sandbox Suspension Manager service on port %s...", port)

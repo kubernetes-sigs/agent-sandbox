@@ -86,6 +86,12 @@ spec:
     processingMode:
       request: {}
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-gateway-sa
+  namespace: tenant-b
+---
 # 5. Tenant-B sandbox-gateway Callout Deployment (Pure gRPC Engine)
 apiVersion: apps/v1
 kind: Deployment
@@ -104,6 +110,7 @@ spec:
       labels:
         app: sandbox-gateway
     spec:
+      serviceAccountName: sandbox-gateway-sa
       containers:
       - name: sandbox-gateway
         image: sandbox-gateway:latest

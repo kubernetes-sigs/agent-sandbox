@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,7 +37,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -57,6 +57,7 @@ const (
 type CalloutServer struct {
 	extproc.UnimplementedExternalProcessorServer
 	managerEndpoint string
+	namespace       string
 	singleFlight    singleflight.Group
 	httpClient      *http.Client
 	podLister       corev1listers.PodLister
@@ -65,50 +66,89 @@ type CalloutServer struct {
 	warmCache       map[string]string // map[namespace/sandboxID] -> targetHost (IP:Port)
 }
 
-func NewCalloutServer(ctx context.Context, managerEndpoint string) *CalloutServer {
-	var podLister corev1listers.PodLister
-	var informerSynced cache.InformerSynced
+func NewCalloutServer(ctx context.Context, managerEndpoint string) (*CalloutServer, error) {
+	namespace := os.Getenv("POD_NAMESPACE")
+	if namespace == "" {
+		namespace = os.Getenv("NAMESPACE")
+	}
+	if namespace == "" {
+		namespace = os.Getenv("TENANT_NAMESPACE")
+	}
+	if namespace == "" {
+		if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+			namespace = strings.TrimSpace(string(data))
+		}
+	}
 
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := os.Getenv("KUBECONFIG")
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 	}
-	if err == nil {
-		if clientset, err := kubernetes.NewForConfig(config); err == nil {
-			informerFactory := informers.NewSharedInformerFactory(clientset, 30*time.Minute)
-			podInformer := informerFactory.Core().V1().Pods()
-			podLister = podInformer.Lister()
-			informerSynced = podInformer.Informer().HasSynced
-
-			informerFactory.Start(ctx.Done())
-			klog.Infof("Initializing Kubernetes Pod Informer for zero-latency lookups...")
-			if cache.WaitForCacheSync(ctx.Done(), informerSynced) {
-				klog.Infof("Successfully synced Kubernetes Pod Informer cache")
-			} else {
-				klog.Warningf("Timed out waiting for Pod Informer cache sync")
-			}
-		} else {
-			klog.Warningf("Failed to initialize Kubernetes client for Pod lookup: %v", err)
-		}
-	} else {
-		klog.Warningf("Failed to load Kubernetes client config: %v", err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load Kubernetes client config: %w", err)
 	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Kubernetes clientset: %w", err)
+	}
+
+	var informerFactory informers.SharedInformerFactory
+	if namespace != "" {
+		informerFactory = informers.NewSharedInformerFactoryWithOptions(
+			clientset,
+			30*time.Minute,
+			informers.WithNamespace(namespace),
+		)
+	} else {
+		informerFactory = informers.NewSharedInformerFactory(clientset, 30*time.Minute)
+	}
+
+	podInformer := informerFactory.Core().V1().Pods()
+	podLister := podInformer.Lister()
+	informerSynced := podInformer.Informer().HasSynced
+
+	informerFactory.Start(ctx.Done())
+	logger := klog.FromContext(ctx)
+	logger.Info("Initializing Kubernetes Pod Informer for zero-latency lookups", "namespace", namespace)
+
+	syncCtx, syncCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer syncCancel()
+
+	if !cache.WaitForCacheSync(syncCtx.Done(), informerSynced) {
+		return nil, fmt.Errorf("timed out waiting for Pod Informer cache sync in namespace %q after 30s", namespace)
+	}
+	logger.Info("Successfully synced Kubernetes Pod Informer cache", "namespace", namespace)
 
 	return &CalloutServer{
 		managerEndpoint: managerEndpoint,
+		namespace:       namespace,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   5 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   5 * time.Second,
+				ResponseHeaderTimeout: 10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+			},
 		},
 		podLister:      podLister,
 		informerSynced: informerSynced,
 		warmCache:      make(map[string]string),
-	}
+	}, nil
 }
 
 // Process handles bi-directional gRPC streaming with Envoy.
 func (s *CalloutServer) Process(stream extproc.ExternalProcessor_ProcessServer) error {
 	ctx := stream.Context()
+	logger := klog.FromContext(ctx)
 
 	for {
 		select {
@@ -125,7 +165,7 @@ func (s *CalloutServer) Process(stream extproc.ExternalProcessor_ProcessServer) 
 			if status.Code(err) == codes.Canceled {
 				return nil
 			}
-			klog.V(4).Infof("ext_proc gRPC stream closed: %v", err)
+			logger.V(4).Info("ext_proc gRPC stream closed", "error", err)
 			return err
 		}
 
@@ -133,11 +173,11 @@ func (s *CalloutServer) Process(stream extproc.ExternalProcessor_ProcessServer) 
 		case *extproc.ProcessingRequest_RequestHeaders:
 			resp, err := s.handleRequestHeaders(ctx, v.RequestHeaders)
 			if err != nil {
-				klog.Errorf("Failed handling request headers: %v", err)
+				logger.Error(err, "Failed handling request headers")
 				return err
 			}
 			if err := stream.Send(resp); err != nil {
-				klog.Errorf("Failed sending ext_proc response: %v", err)
+				logger.Error(err, "Failed sending ext_proc response")
 				return err
 			}
 		default:
@@ -150,51 +190,66 @@ func (s *CalloutServer) Process(stream extproc.ExternalProcessor_ProcessServer) 
 }
 
 func (s *CalloutServer) handleRequestHeaders(ctx context.Context, req *extproc.HttpHeaders) (*extproc.ProcessingResponse, error) {
+	logger := klog.FromContext(ctx)
 	headers := make(map[string]string)
+	var headerNames []string
+
 	for _, h := range req.Headers.Headers {
 		key := strings.ToLower(h.Key)
+		headerNames = append(headerNames, key)
 		val := h.Value
 		if val == "" && len(h.RawValue) > 0 {
 			val = string(h.RawValue)
 		}
 		headers[key] = val
-		klog.V(4).Infof("Header: %q = %q", key, val)
 	}
 
-	sandboxID := headers[sandboxHeaderID]
-	namespace := headers[sandboxHeaderNamespace]
-	reqPort, _ := strconv.Atoi(headers["x-sandbox-port"])
+	var sandboxID string
+	var namespace string
+	var reqPort int
 
-	// Extract sandbox ID and namespace from Host or :authority header if not explicitly provided
-	if sandboxID == "" {
-		host := headers["host"]
-		if host == "" {
-			host = headers[":authority"]
+	host := headers["host"]
+	if host == "" {
+		host = headers[":authority"]
+	}
+	if host != "" {
+		hostOnly, portStr, err := net.SplitHostPort(host)
+		if err != nil {
+			hostOnly = host
+		} else if p, pErr := strconv.Atoi(portStr); pErr == nil && p > 0 {
+			reqPort = p
 		}
-		if host != "" {
-			hostOnly, _, err := net.SplitHostPort(host)
-			if err != nil {
-				hostOnly = host
-			}
-			parts := strings.Split(hostOnly, ".")
-			if len(parts) > 0 {
-				sandboxID = parts[0]
-				if namespace == "" && len(parts) > 1 {
-					namespace = parts[1]
-				}
+		parts := strings.Split(hostOnly, ".")
+		if len(parts) > 0 {
+			sandboxID = parts[0]
+			if len(parts) > 1 {
+				namespace = parts[1]
 			}
 		}
 	}
 
 	if namespace == "" {
+		namespace = s.namespace
+	}
+	if namespace == "" {
 		namespace = "default"
 	}
 
 	if sandboxID == "" {
-		return nil, fmt.Errorf("could not determine sandbox identity from request headers")
+		return nil, fmt.Errorf("could not determine sandbox identity from request host header")
 	}
 
-	klog.Infof("Processing ext_proc callout for Sandbox: %s/%s", namespace, sandboxID)
+	if logger.V(4).Enabled() {
+		slices.Sort(headerNames)
+		logger.V(4).Info("Derived routing metadata from request host",
+			"sandboxID", sandboxID,
+			"namespace", namespace,
+			"reqPort", reqPort,
+			"headerNames", strings.Join(headerNames, ","),
+		)
+	}
+
+	logger.Info("Processing ext_proc callout for Sandbox", "namespace", namespace, "sandboxID", sandboxID)
 	targetHost, err := s.ensureSandboxWarm(ctx, namespace, sandboxID, reqPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed ensuring sandbox %s/%s warm: %w", namespace, sandboxID, err)
@@ -203,7 +258,7 @@ func (s *CalloutServer) handleRequestHeaders(ctx context.Context, req *extproc.H
 	podIP, containerPortStr, err := net.SplitHostPort(targetHost)
 	if err != nil {
 		podIP = targetHost
-		containerPortStr = strconv.Itoa(reqPort)
+		containerPortStr = "8080"
 	}
 
 	// Respond to Envoy allowing request pipeline to unpause and proceed directly to target Pod IP / Host (KEP-1174 Contract 2)
@@ -263,57 +318,66 @@ func (s *CalloutServer) handleRequestHeaders(ctx context.Context, req *extproc.H
 	}, nil
 }
 
-func (s *CalloutServer) getPodEndpointFromK8s(namespace, sandboxID string) (string, int) {
+func (s *CalloutServer) getPodEndpointFromK8s(ctx context.Context, namespace, sandboxID string, requestedPort int) (string, int) {
 	if s.podLister == nil {
-		return "", 0
+		return "", requestedPort
 	}
-	// Direct in-memory lookup from Pod Informer Lister
+	logger := klog.FromContext(ctx)
+	// Direct in-memory lookup from Pod Informer Lister (Pod name matches Sandbox name)
 	pod, err := s.podLister.Pods(namespace).Get(sandboxID)
-	if err != nil {
-		// Fallback to label search in memory if Pod name differs from Sandbox name
-		selector := labels.SelectorFromSet(labels.Set{"agents.x-k8s.io/sandbox-name": sandboxID})
-		pods, listErr := s.podLister.Pods(namespace).List(selector)
-		if listErr == nil && len(pods) > 0 {
-			pod = pods[0]
-		}
+	if err != nil || pod == nil {
+		return "", requestedPort
 	}
-	if pod != nil && pod.Status.PodIP != "" {
-		port := 8080
-		if len(pod.Spec.Containers) > 0 && len(pod.Spec.Containers[0].Ports) > 0 {
-			port = int(pod.Spec.Containers[0].Ports[0].ContainerPort)
-		}
-		klog.V(4).Infof("Resolved Pod endpoint %s:%d from Informer cache for Sandbox %s/%s", pod.Status.PodIP, port, namespace, sandboxID)
-		return pod.Status.PodIP, port
+
+	port := requestedPort
+	if port <= 0 && len(pod.Spec.Containers) > 0 && len(pod.Spec.Containers[0].Ports) > 0 {
+		port = int(pod.Spec.Containers[0].Ports[0].ContainerPort)
 	}
-	return "", 0
+	if port <= 0 {
+		port = 8080
+	}
+
+	if pod.Status.PodIP == "" {
+		return "", port
+	}
+
+	logger.V(4).Info("Resolved Pod endpoint from Informer cache", "podIP", pod.Status.PodIP, "port", port, "namespace", namespace, "sandboxID", sandboxID)
+	return pod.Status.PodIP, port
 }
 
-func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandboxID string, reqPort int) (string, error) {
-	key := fmt.Sprintf("%s/%s", namespace, sandboxID)
+func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandboxID string, requestedPort int) (string, error) {
+	logger := klog.FromContext(ctx)
+
+	_, targetPort := s.getPodEndpointFromK8s(ctx, namespace, sandboxID, requestedPort)
+	if targetPort <= 0 {
+		targetPort = 8080
+	}
+	cacheKey := fmt.Sprintf("%s/%s:%d", namespace, sandboxID, targetPort)
+	thawKey := fmt.Sprintf("%s/%s", namespace, sandboxID)
 
 	s.mu.RLock()
-	cachedHost := s.warmCache[key]
+	cachedHost := s.warmCache[cacheKey]
 	s.mu.RUnlock()
 
 	if cachedHost != "" {
 		// Quick TCP probe to verify socket readiness; if pod was suspended externally, invalidate cache and trigger thaw
 		if conn, err := net.DialTimeout("tcp", cachedHost, 100*time.Millisecond); err == nil {
 			conn.Close()
-			klog.V(4).Infof("Sandbox %s is verified warm at %s", key, cachedHost)
+			logger.V(4).Info("Sandbox is verified warm", "cacheKey", cacheKey, "targetHost", cachedHost)
 			return cachedHost, nil
 		}
-		klog.Infof("Sandbox %s was warm in cache at %s but TCP probe failed (suspended/terminated). Invalidating cache...", key, cachedHost)
+		logger.Info("Sandbox warm cache TCP probe failed (suspended/terminated), invalidating cache", "cacheKey", cacheKey, "targetHost", cachedHost)
 		s.mu.Lock()
-		delete(s.warmCache, key)
+		delete(s.warmCache, cacheKey)
 		s.mu.Unlock()
 	}
 
 	// Use singleflight to collapse duplicate cold-start requests for the same sandbox into 1 resume signal
-	res, err, _ := s.singleFlight.Do(key, func() (interface{}, error) {
-		sfCtx, sfCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	res, err, _ := s.singleFlight.Do(thawKey, func() (interface{}, error) {
+		sfCtx, sfCancel := context.WithTimeout(ctx, 60*time.Second)
 		defer sfCancel()
 
-		klog.Infof("Triggering cold-start thaw signal for Sandbox %s via Manager at %s", key, s.managerEndpoint)
+		logger.Info("Triggering cold-start thaw signal for Sandbox via Manager", "sandboxKey", thawKey, "managerEndpoint", s.managerEndpoint)
 
 		// Send resume callout to Sandbox Suspension Manager
 		payload := fmt.Sprintf(`{"namespace":"%s","sandboxName":"%s"}`, namespace, sandboxID)
@@ -325,11 +389,10 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 
 		// Attach Kubernetes Projected ServiceAccount Token for authenticated signaling (KEP-1174 security)
 		tokenBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
-		if err == nil {
-			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tokenBytes)))
-		} else {
-			req.Header.Set("Authorization", "Bearer dev-sandbox-gateway-token")
+		if err != nil {
+			return nil, fmt.Errorf("reading ServiceAccount token from /var/run/secrets/kubernetes.io/serviceaccount/token: %w", err)
 		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tokenBytes)))
 
 		resp, err := s.httpClient.Do(req)
 		if err != nil {
@@ -339,14 +402,15 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			body, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("manager endpoint returned error status %s for Sandbox %s: %s", resp.Status, key, string(body))
+			return nil, fmt.Errorf("manager endpoint returned error status %s for Sandbox %s: %s", resp.Status, thawKey, string(body))
 		}
-		klog.Infof("Manager endpoint accepted thaw request: %s for Sandbox %s", resp.Status, key)
+		logger.Info("Manager endpoint accepted thaw request", "status", resp.Status, "sandboxKey", thawKey)
 
-		klog.Infof("Awaiting upstream pod connectivity for %s from Informer cache...", key)
+		logger.Info("Awaiting upstream pod connectivity from Informer cache", "sandboxKey", thawKey)
 
 		var targetHost string
 		var ready bool
+		var resolvedPort int
 
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
@@ -354,14 +418,10 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 		for {
 			select {
 			case <-sfCtx.Done():
-				return nil, fmt.Errorf("timed out waiting for sandbox %s container readiness: %w", key, sfCtx.Err())
+				return nil, fmt.Errorf("timed out waiting for sandbox %s container readiness: %w", thawKey, sfCtx.Err())
 			case <-ticker.C:
-				podIP, containerPort := s.getPodEndpointFromK8s(namespace, sandboxID)
+				podIP, port := s.getPodEndpointFromK8s(sfCtx, namespace, sandboxID, requestedPort)
 				if podIP != "" {
-					port := containerPort
-					if reqPort > 0 {
-						port = reqPort
-					}
 					candidateHost := fmt.Sprintf("%s:%d", podIP, port)
 
 					// Verify direct TCP socket connectivity to pod IP
@@ -369,6 +429,7 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 					if dialErr == nil {
 						conn.Close()
 						targetHost = candidateHost
+						resolvedPort = port
 						ready = true
 						break
 					}
@@ -380,14 +441,19 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 		}
 
 		if !ready || targetHost == "" {
-			return nil, fmt.Errorf("upstream endpoint for Sandbox %s failed to become ready", key)
+			return nil, fmt.Errorf("upstream endpoint for Sandbox %s failed to become ready", thawKey)
 		}
 
+		if resolvedPort <= 0 {
+			resolvedPort = 8080
+		}
+		cacheKey := fmt.Sprintf("%s/%s:%d", namespace, sandboxID, resolvedPort)
+
 		s.mu.Lock()
-		s.warmCache[key] = targetHost
+		s.warmCache[cacheKey] = targetHost
 		s.mu.Unlock()
 
-		klog.Infof("Sandbox %s is now WARM and READY at %s", key, targetHost)
+		logger.Info("Sandbox is now WARM and READY", "cacheKey", cacheKey, "targetHost", targetHost)
 		return targetHost, nil
 	})
 
@@ -397,7 +463,7 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 	if resStr, ok := res.(string); ok && resStr != "" {
 		return resStr, nil
 	}
-	return "", fmt.Errorf("unexpected empty targetHost for sandbox %s", key)
+	return "", fmt.Errorf("unexpected empty targetHost for sandbox %s", cacheKey)
 }
 
 func main() {
@@ -417,6 +483,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	logger := klog.FromContext(ctx)
 
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
@@ -424,11 +491,14 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer()
-	calloutServer := NewCalloutServer(ctx, managerEndpoint)
+	calloutServer, err := NewCalloutServer(ctx, managerEndpoint)
+	if err != nil {
+		klog.Fatalf("Failed to initialize sandbox-gateway callout server: %v", err)
+	}
 	extproc.RegisterExternalProcessorServer(grpcServer, calloutServer)
 	reflection.Register(grpcServer)
 
-	klog.Infof("Starting sandbox-gateway callout service on port %s (Manager: %s)", port, managerEndpoint)
+	logger.Info("Starting sandbox-gateway callout service", "port", port, "managerEndpoint", managerEndpoint)
 
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
@@ -440,7 +510,7 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
 
-	klog.Info("Shutting down sandbox-gateway callout service gracefully...")
+	logger.Info("Shutting down sandbox-gateway callout service gracefully")
 	grpcServer.GracefulStop()
 }
 

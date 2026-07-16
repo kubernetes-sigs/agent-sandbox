@@ -86,6 +86,12 @@ spec:
     processingMode:
       request: {}
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-gateway-sa
+  namespace: tenant-a
+---
 # 5. Tenant-A sandbox-gateway Callout Deployment (Pure gRPC Engine)
 apiVersion: apps/v1
 kind: Deployment
@@ -104,6 +110,7 @@ spec:
       labels:
         app: sandbox-gateway
     spec:
+      serviceAccountName: sandbox-gateway-sa
       containers:
       - name: sandbox-gateway
         image: sandbox-gateway:latest
@@ -130,6 +137,7 @@ spec:
   - name: grpc-ext-proc
     port: 50051
     targetPort: 50051
+---
 # 7. BackendTrafficPolicy setting 180s HTTP request timeout for tenant-a cold-starts
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: BackendTrafficPolicy

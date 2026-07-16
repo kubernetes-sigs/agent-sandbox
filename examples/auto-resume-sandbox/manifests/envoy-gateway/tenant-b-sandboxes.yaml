@@ -7,10 +7,6 @@ spec:
   operatingMode: Suspended
   service: true
   podTemplate:
-    metadata:
-      labels:
-        agents.x-k8s.io/workload: sandbox
-        agents.x-k8s.io/sandbox-name: sandbox-b1
     spec:
       containers:
       - name: web

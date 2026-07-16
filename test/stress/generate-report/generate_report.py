@@ -708,7 +708,7 @@ def main():
             "avg_ms": (sum_delta / count_delta) * 1000 if count_delta > 0 else 0
         })
 
-    cilium_available = bool(cilium_api_ops or cilium_limiter_summary)
+    cilium_available = bool(cilium_api_ops or cilium_limiter_summary or cilium_regen)
 
     # Query active sandboxes and pods capacity timeseries from the watch logs
     capacity_chart_data = []
@@ -936,7 +936,7 @@ def main():
         findings.append({
             "severity": "critical" if w['wait_mean_s'] > 5.0 else "warning",
             "title": f"Cilium endpoint-create API Rate Limited ({w['wait_mean_s']:.1f}s mean wait)",
-            "desc": f"During phase {w['phase_name']}, CNI endpoint-create requests waited a mean of {w['wait_mean_s']:.1f}s (max {w['wait_max_s']:.0f}s) in cilium-agent's API rate limiter, while actual processing took only {w['processing_mean_s']:.2f}s. The auto-adjusted limit averaged {w['rate_limit']:.1f} creates/s per node, which caps pod sandbox creation throughput. Consider raising the endpoint-create limits in Cilium's api-rate-limit configuration.",
+            "desc": f"During phase {w['phase_name']}, CNI endpoint-create requests waited a mean of {w['wait_mean_s']:.1f}s (max {w['wait_max_s']:.0f}s) in cilium-agent's API rate limiter, while actual processing took only {w['processing_mean_s']:.2f}s. The effective limit averaged {w['rate_limit']:.1f} creates/s per node, which caps pod sandbox creation throughput. Consider raising the endpoint-create limits in Cilium's api-rate-limit configuration.",
             "link": "cilium.html"
         })
 

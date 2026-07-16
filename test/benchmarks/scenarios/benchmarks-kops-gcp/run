@@ -174,6 +174,32 @@ kops export kubeconfig --name "${CLUSTER_NAME}" --admin
 echo "Waiting for cluster to be ready..."
 kops validate cluster --wait 10m
 
+# Raise Cilium's endpoint-create API rate limit. The agent rate-limits
+# endpoint creation (the synchronous PUT /v1/endpoint the CNI plugin makes
+# during every pod sandbox creation) to 0.5/s with auto-adjustment anchored
+# to a 2s estimated processing duration. Under churn, queueing pushes mean
+# processing toward that anchor, so the auto-adjusted limit converges to
+# ~2 creates/s per node while actual endpoint work takes ~100ms — capping
+# pod launch throughput at the limiter, not the datapath (see the stress
+# report's Cilium page, e.g. run 2077526390265090048: 20.8s mean limiter
+# wait vs 1.6s processing at throughput-mif200). Raise the limits and
+# disable auto-adjustment so the stress test measures the CNI datapath's
+# real capacity; kOps applies its addons at bootstrap, so this patch is not
+# reverted during the run.
+echo "Raising Cilium endpoint-create API rate limits..."
+# k8s-client-qps/burst: with the endpoint-create limiter raised, the next
+# cork is cilium-agent's client-go QPS limit (default 5/s, burst 10): run
+# 2077921435870826496 showed ~0.4s of client-side throttle wait per POST and
+# ~1.4s per DELETE to the apiserver during churn, ~7s per endpoint create in
+# total, while the apiserver itself answered in ~20ms.
+kubectl --namespace kube-system patch configmap cilium-config --type merge \
+  --patch '{"data":{"api-rate-limit":"endpoint-create=rate-limit:100/s,rate-burst:100,parallel-requests:32,auto-adjust:false","k8s-client-qps":"50","k8s-client-burst":"100"}}'
+# kOps deploys the cilium DaemonSet with updateStrategy=OnDelete, so
+# "rollout restart" never recreates the pods (and "rollout status" errors
+# out). Delete the agent pods so the DaemonSet brings them back with the
+# new config, then re-validate the cluster to wait for them to be Ready.
+kubectl --namespace kube-system delete pods --selector=k8s-app=cilium
+kops validate cluster --wait 5m
 
 # Deploy to cluster
 echo "Deploying to cluster..."

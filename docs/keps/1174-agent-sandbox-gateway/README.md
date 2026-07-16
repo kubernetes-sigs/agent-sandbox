@@ -16,7 +16,8 @@ TOC is auto-generated via `make toc-update`.
   - [Detailed Operational Step-by-Step Flow](#detailed-operational-step-by-step-flow)
   - [Rationale for <code>sandbox-router</code> Inclusion &amp; Canonical Envoy Integration](#rationale-for-sandbox-router-inclusion--canonical-envoy-integration)
     - [1. Why <code>sandbox-router</code> was Included as the Universal L7 Target](#1-why-sandbox-router-was-included-as-the-universal-l7-target)
-    - [2. Why Envoy Gateway is Shipped as the Default Reference Stack](#2-why-envoy-gateway-is-shipped-as-the-default-reference-stack)
+      - [2. Data-Plane Performance](#2-data-plane-performance)
+    - [3. Why Envoy Gateway is Shipped as the Default Reference Stack](#3-why-envoy-gateway-is-shipped-as-the-default-reference-stack)
   - [Rationale for Per-Tenant Deployment over Control Plane Co-Location](#rationale-for-per-tenant-deployment-over-control-plane-co-location)
   - [Determining Sandbox Resume Need &amp; Container Readiness](#determining-sandbox-resume-need--container-readiness)
     - [Operational Strategy Comparison](#operational-strategy-comparison)
@@ -58,7 +59,7 @@ This KEP introduces **`sandbox-gateway`**, an opt-in extension for `agent-sandbo
 
 The architecture standardizes on the Kubernetes Gateway API (`gateway.networking.k8s.io`) as its declarative control plane interface, providing **Envoy Gateway** as its default open-source reference implementation while supporting a pluggable **Bring-Your-Own-Gateway (BYOG)** model across both Envoy-native proxies (Istio, Cilium Gateway, Contour, Gloo) via `ext_proc` and non-Envoy proxies (NGINX, Traefik, GKE Gateway, AWS ALB) via standard HTTP header callout adapters.
 
-A lightweight callout engine (`cmd/sandbox-gateway`) intercepts incoming HTTP headers, manages authenticated cold-start thaw signaling via `sandbox-suspension-manager`, and injects routing headers (`x-sandbox-id`, `x-sandbox-pod-ip`, `x-sandbox-port`, `x-sandbox-namespace`). Upon unblocking, requests route either through **`sandbox-router`** (`sandbox-router-svc`) for universal Gateway API compatibility or directly to the target Sandbox Pod IP via dynamic warm-path endpoint bypassing. This decouples data-plane streaming from control-plane signaling while guaranteeing multi-cloud operational portability and high performance.
+A lightweight callout engine (`cmd/sandbox-gateway`) intercepts incoming HTTP headers, manages authenticated cold-start thaw signaling via `sandbox-suspension-manager`, and injects routing headers (`x-sandbox-id`, `x-sandbox-pod-ip`, `x-sandbox-port`, `x-sandbox-namespace`). Upon unblocking, requests route through **`sandbox-router`** (`sandbox-router-svc`), which proxies request streams directly to the target Sandbox Pod IP. This decouples data-plane streaming from control-plane signaling while guaranteeing multi-cloud operational portability and high performance.
 
 ## Motivation
 

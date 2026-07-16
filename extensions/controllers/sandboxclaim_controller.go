@@ -2075,7 +2075,10 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	// created by a pre-v1beta1 pool controller still carry the v1alpha1
 	// group version after an upgrade. Match on group+kind, not version.
 	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
-	if err != nil || refGV.Group != extensionsv1beta1.GroupVersion.Group || controllerRef.Kind != "SandboxWarmPool" {
+	if err != nil {
+		return fmt.Errorf("parsing owner reference apiVersion %q of sandbox %s/%s: %w", controllerRef.APIVersion, candidate.Namespace, candidate.Name, err)
+	}
+	if refGV.Group != extensionsv1beta1.GroupVersion.Group || controllerRef.Kind != "SandboxWarmPool" {
 		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil

@@ -125,7 +125,7 @@ func NewCalloutServer(ctx context.Context, managerEndpoint string) (*CalloutServ
 		managerEndpoint: managerEndpoint,
 		namespace:       namespace,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 15 * time.Second,
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
 					Timeout:   5 * time.Second,
@@ -353,7 +353,7 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 		targetPort = 8080
 	}
 	cacheKey := fmt.Sprintf("%s/%s:%d", namespace, sandboxID, targetPort)
-	thawKey := fmt.Sprintf("%s/%s", namespace, sandboxID)
+	thawKey := cacheKey
 
 	s.mu.RLock()
 	cachedHost := s.warmCache[cacheKey]
@@ -373,8 +373,8 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 	}
 
 	// Use singleflight to collapse duplicate cold-start requests for the same sandbox into 1 resume signal
-	res, err, _ := s.singleFlight.Do(thawKey, func() (interface{}, error) {
-		sfCtx, sfCancel := context.WithTimeout(ctx, 60*time.Second)
+	res, err, _ := s.singleFlight.Do(thawKey, func() (any, error) {
+		sfCtx, sfCancel := context.WithTimeout(ctx, 90*time.Second)
 		defer sfCancel()
 
 		logger.Info("Triggering cold-start thaw signal for Sandbox via Manager", "sandboxKey", thawKey, "managerEndpoint", s.managerEndpoint)
@@ -422,7 +422,7 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 			case <-ticker.C:
 				podIP, port := s.getPodEndpointFromK8s(sfCtx, namespace, sandboxID, requestedPort)
 				if podIP != "" {
-					candidateHost := fmt.Sprintf("%s:%d", podIP, port)
+					candidateHost := net.JoinHostPort(podIP, fmt.Sprintf("%d", port))
 
 					// Verify direct TCP socket connectivity to pod IP
 					conn, dialErr := net.DialTimeout("tcp", candidateHost, 100*time.Millisecond)

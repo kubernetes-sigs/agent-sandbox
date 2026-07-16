@@ -82,7 +82,7 @@ func (m *Manager) handleResume(w http.ResponseWriter, r *http.Request) {
 
 	klog.Infof("Processing thaw signal for Sandbox CRD: %s/%s", req.Namespace, req.SandboxName)
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	// Get current Sandbox resource from API Server
@@ -90,20 +90,24 @@ func (m *Manager) handleResume(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		klog.Errorf("Failed fetching Sandbox %s/%s from API Server: %v", req.Namespace, req.SandboxName, err)
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(ThawResponse{Status: "error", Message: err.Error()})
+		if encodeErr := json.NewEncoder(w).Encode(ThawResponse{Status: "error", Message: err.Error()}); encodeErr != nil {
+			klog.Errorf("Failed writing HTTP response: %v", encodeErr)
+		}
 		return
 	}
 
-	spec, ok := sb.Object["spec"].(map[string]interface{})
+	spec, ok := sb.Object["spec"].(map[string]any)
 	if !ok {
-		spec = make(map[string]interface{})
+		spec = make(map[string]any)
 	}
 	currentMode, _ := spec["operatingMode"].(string)
 
 	if currentMode == "Running" {
 		klog.Infof("Sandbox %s/%s is already Running (idempotent noop)", req.Namespace, req.SandboxName)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ThawResponse{Status: "already_running"})
+		if encodeErr := json.NewEncoder(w).Encode(ThawResponse{Status: "already_running"}); encodeErr != nil {
+			klog.Errorf("Failed writing HTTP response: %v", encodeErr)
+		}
 		return
 	}
 
@@ -119,13 +123,17 @@ func (m *Manager) handleResume(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		klog.Errorf("Failed patching operatingMode to Running for Sandbox %s/%s: %v", req.Namespace, req.SandboxName, err)
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ThawResponse{Status: "error", Message: err.Error()})
+		if encodeErr := json.NewEncoder(w).Encode(ThawResponse{Status: "error", Message: err.Error()}); encodeErr != nil {
+			klog.Errorf("Failed writing HTTP response: %v", encodeErr)
+		}
 		return
 	}
 
 	klog.Infof("Successfully patched Sandbox %s/%s operatingMode -> Running!", req.Namespace, req.SandboxName)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ThawResponse{Status: "resumed", Message: "operatingMode set to Running"})
+	if encodeErr := json.NewEncoder(w).Encode(ThawResponse{Status: "resumed", Message: "operatingMode set to Running"}); encodeErr != nil {
+		klog.Errorf("Failed writing HTTP response: %v", encodeErr)
+	}
 }
 
 func main() {
@@ -178,5 +186,7 @@ func main() {
 	<-sigCh
 
 	klog.Info("Shutting down Sandbox Suspension Manager gracefully...")
-	server.Shutdown(context.Background())
+	if err := server.Shutdown(context.Background()); err != nil {
+		klog.Errorf("Error shutting down Sandbox Suspension Manager: %v", err)
+	}
 }

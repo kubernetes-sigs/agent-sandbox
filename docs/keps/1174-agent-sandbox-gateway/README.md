@@ -17,7 +17,6 @@ TOC is auto-generated via `make toc-update`.
   - [Rationale for <code>sandbox-router</code> Inclusion &amp; Canonical Envoy Integration](#rationale-for-sandbox-router-inclusion--canonical-envoy-integration)
     - [1. Why <code>sandbox-router</code> was Included as the Universal L7 Target](#1-why-sandbox-router-was-included-as-the-universal-l7-target)
     - [2. Why Envoy Gateway is Shipped as the Default Reference Stack](#2-why-envoy-gateway-is-shipped-as-the-default-reference-stack)
-    - [3. Data-Plane Performance &amp; Warm-Path Direct Routing Options](#3-data-plane-performance--warm-path-direct-routing-options)
   - [Rationale for Per-Tenant Deployment over Control Plane Co-Location](#rationale-for-per-tenant-deployment-over-control-plane-co-location)
   - [Determining Sandbox Resume Need &amp; Container Readiness](#determining-sandbox-resume-need--container-readiness)
     - [Operational Strategy Comparison](#operational-strategy-comparison)
@@ -214,15 +213,13 @@ flowchart TB
 - **Universal Gateway Compatibility**: Relying on proxy-specific dynamic destination capabilities (such as Envoy `ORIGINAL_DST` clusters) locks the system into Envoy-only ingress controllers. By introducing `sandbox-router` as a standard Kubernetes Service (`sandbox-router-svc`), standard `HTTPRoute` rules point to a regular Service `backendRef`, allowing **any** API Gateway or Ingress controller to be introduced (BYOG).
 - **Decoupled Responsibilities**: Data-plane payload streaming is delegated to `sandbox-router` via memory-safe chunked streaming, while `sandbox-gateway` remains a pure, lightweight control-plane signaling engine.
 
-#### 2. Why Envoy Gateway is Shipped as the Default Reference Stack
+##### 2. Data-Plane Performance 
+While `sandbox-router-svc` provides a universal backend target for standard Gateway API `HTTPRoute` rules, routing all warm data-plane traffic through `sandbox-router` introduces an additional proxy hop (`Client -> Ingress Gateway -> sandbox-router -> Target Sandbox Pod`), consuming additional CPU/RAM and network bandwidth. 
+
+#### 3. Why Envoy Gateway is Shipped as the Default Reference Stack
 - **L7 Stream-Level Flow Control & Memory Bounding**: Envoy's `ext_proc` header filter allows pausing individual HTTP streams prior to ingesting request body payloads, capping proxy RAM at $<256\text{MB}$ even under concurrent multi-gigabyte client request surges.
 - **Explicit Timeout Configuration**: Envoy `ext_proc` callouts are configured with extended timeouts (`grpc_service.timeout: 180s`) to accommodate container cold starts ($5\text{s} - 10\text{s}$) without raising premature HTTP 504 gateway timeouts.
 - **Universal Cloud Parity**: Pre-packaging Envoy Gateway ensures zero-dependency local testing (`make deploy-kind`) and consistent multi-cloud deployment across GKE, EKS, AKS, and bare-metal environments.
-
-#### 3. Data-Plane Performance & Warm-Path Direct Routing Options
-While `sandbox-router-svc` provides a universal backend target for standard Gateway API `HTTPRoute` rules, routing all warm data-plane traffic through `sandbox-router` introduces an additional proxy hop (`Client -> Ingress Gateway -> sandbox-router -> Target Sandbox Pod`), consuming additional CPU/RAM and network bandwidth. To optimize performance, the architecture supports two operational data-plane routing modes:
-- **Mode A: Standard Managed Router (`sandbox-router`) [Default OSS Standard]**: All requests route through `sandbox-router-svc:8080`. Ideal for simple deployment across any standard Gateway API controller without requiring dynamic endpoint management.
-- **Mode B: Dynamic Endpoint / Warm-Path Direct Bypassing [High-Performance Enterprise Mode]**: Once a Sandbox enters `Ready == True`, the optional `gateway_controller.go` or `sandbox-gateway` dynamically populates Kubernetes EndpointSlices or xDS endpoints for host routes targeting warm sandboxes. Subsequent requests from warm sandboxes bypass `sandbox-router` entirely, routing directly from `Ingress Gateway -> Target Sandbox Pod IP`, reducing steady-state proxy overhead and latency to zero.
 
 ### Rationale for Per-Tenant Deployment over Control Plane Co-Location
 

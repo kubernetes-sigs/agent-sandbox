@@ -121,6 +121,12 @@ cleanup() {
 
 trap cleanup EXIT
 
+# CNI selects the cluster networking (any kOps --networking value; we
+# exercise cilium and kindnet in CI). Running the same benchmark under two
+# CNIs separates CNI costs from the rest of the sandbox launch pipeline.
+CNI="${CNI:-cilium}"
+echo "Using CNI: ${CNI}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 #
@@ -136,6 +142,7 @@ echo "Creating kOps cluster configuration..."
 kops create cluster \
   --cloud=gce \
   --gce-service-account=default \
+  --networking="${CNI}" \
   --name="${CLUSTER_NAME}" \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \

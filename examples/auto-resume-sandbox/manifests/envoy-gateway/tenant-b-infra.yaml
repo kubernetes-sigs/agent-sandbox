@@ -66,7 +66,7 @@ spec:
     - name: sandbox-router-svc
       port: 8080
 ---
-# 4. EnvoyExtensionPolicy attaching sandbox-gateway ext_proc callout engine in tenant-b
+# 4. EnvoyExtensionPolicy attaching sandbox-state-informer ext_proc callout engine in tenant-b
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyExtensionPolicy
 metadata:
@@ -79,7 +79,7 @@ spec:
     name: tenant-b-sandboxes-route
   extProc:
   - backendRefs:
-    - name: sandbox-gateway-svc
+    - name: sandbox-state-informer-svc
       port: 50051
     messageTimeout: 180s
     failOpen: false
@@ -89,31 +89,31 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: sandbox-gateway-sa
+  name: sandbox-state-informer-sa
   namespace: tenant-b
 ---
-# 5. Tenant-B sandbox-gateway Callout Deployment (Pure gRPC Engine)
+# 5. Tenant-B sandbox-state-informer Callout Deployment (Pure gRPC Engine)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sandbox-gateway
+  name: sandbox-state-informer
   namespace: tenant-b
   labels:
-    app: sandbox-gateway
+    app: sandbox-state-informer
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: sandbox-gateway
+      app: sandbox-state-informer
   template:
     metadata:
       labels:
-        app: sandbox-gateway
+        app: sandbox-state-informer
     spec:
-      serviceAccountName: sandbox-gateway-sa
+      serviceAccountName: sandbox-state-informer-sa
       containers:
-      - name: sandbox-gateway
-        image: sandbox-gateway:latest
+      - name: sandbox-state-informer
+        image: sandbox-state-informer:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
@@ -124,15 +124,15 @@ spec:
         - name: MANAGER_ENDPOINT
           value: "http://sandbox-suspension-manager-svc.default.svc.cluster.local:8090/v1/sandboxes/resume"
 ---
-# 6. Tenant-B sandbox-gateway gRPC Callout Service
+# 6. Tenant-B sandbox-state-informer gRPC Callout Service
 apiVersion: v1
 kind: Service
 metadata:
-  name: sandbox-gateway-svc
+  name: sandbox-state-informer-svc
   namespace: tenant-b
 spec:
   selector:
-    app: sandbox-gateway
+    app: sandbox-state-informer
   ports:
   - name: grpc-ext-proc
     port: 50051

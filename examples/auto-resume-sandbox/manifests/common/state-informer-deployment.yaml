@@ -1,24 +1,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sandbox-gateway
+  name: sandbox-state-informer
   namespace: default
   labels:
-    app: sandbox-gateway
+    app: sandbox-state-informer
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: sandbox-gateway
+      app: sandbox-state-informer
   template:
     metadata:
       labels:
-        app: sandbox-gateway
+        app: sandbox-state-informer
     spec:
-      serviceAccountName: sandbox-gateway-sa
+      serviceAccountName: sandbox-state-informer-sa
       containers:
-      - name: sandbox-gateway
-        image: sandbox-gateway:latest
+      - name: sandbox-state-informer
+        image: sandbox-state-informer:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
@@ -32,11 +32,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: sandbox-gateway-svc
+  name: sandbox-state-informer-svc
   namespace: default
 spec:
   selector:
-    app: sandbox-gateway
+    app: sandbox-state-informer
   ports:
   - name: grpc-ext-proc
     port: 50051
@@ -45,13 +45,13 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: sandbox-gateway-sa
+  name: sandbox-state-informer-sa
   namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: sandbox-gateway-cluster-role
+  name: sandbox-state-informer-cluster-role
 rules:
 - apiGroups: [""]
   resources: ["pods"]
@@ -63,19 +63,19 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: sandbox-gateway-cluster-binding
+  name: sandbox-state-informer-cluster-binding
 subjects:
 - kind: ServiceAccount
-  name: sandbox-gateway-sa
+  name: sandbox-state-informer-sa
   namespace: default
 - kind: ServiceAccount
-  name: sandbox-gateway-sa
+  name: sandbox-state-informer-sa
   namespace: tenant-a
 - kind: ServiceAccount
-  name: sandbox-gateway-sa
+  name: sandbox-state-informer-sa
   namespace: tenant-b
 roleRef:
   kind: ClusterRole
-  name: sandbox-gateway-cluster-role
+  name: sandbox-state-informer-cluster-role
   apiGroup: rbac.authorization.k8s.io
 

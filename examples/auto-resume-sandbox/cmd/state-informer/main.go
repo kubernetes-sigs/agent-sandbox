@@ -272,7 +272,7 @@ func (s *CalloutServer) handleRequestHeaders(ctx context.Context, req *extproc.H
 						SetHeaders: []*corev3.HeaderValueOption{
 							{
 								Header: &corev3.HeaderValue{
-									Key:      "x-sandbox-gateway-processed",
+									Key:      "x-sandbox-state-informer-processed",
 									Value:    "true",
 									RawValue: []byte("true"),
 								},
@@ -493,12 +493,12 @@ func main() {
 	grpcServer := grpc.NewServer()
 	calloutServer, err := NewCalloutServer(ctx, managerEndpoint)
 	if err != nil {
-		klog.Fatalf("Failed to initialize sandbox-gateway callout server: %v", err)
+		klog.Fatalf("Failed to initialize sandbox-state-informer callout server: %v", err)
 	}
 	extproc.RegisterExternalProcessorServer(grpcServer, calloutServer)
 	reflection.Register(grpcServer)
 
-	logger.Info("Starting sandbox-gateway callout service", "port", port, "managerEndpoint", managerEndpoint)
+	logger.Info("Starting sandbox-state-informer callout service", "port", port, "managerEndpoint", managerEndpoint)
 
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
@@ -510,6 +510,6 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
 
-	logger.Info("Shutting down sandbox-gateway callout service gracefully")
+	logger.Info("Shutting down sandbox-state-informer callout service gracefully")
 	grpcServer.GracefulStop()
 }

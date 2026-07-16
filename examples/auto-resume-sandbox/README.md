@@ -8,7 +8,7 @@ This directory provides the reference implementation for request-driven auto-res
 
 Each tenant namespace deploys **1 single backend service** (`sandbox-router-svc`) to handle L7 routing to Sandbox Pod IPs.
 
-At runtime, `sandbox-gateway` (`ext_proc`) intercepts request headers, wakes sleeping sandboxes out-of-band via `sandbox-suspension-manager`, and injects routing headers (`X-Sandbox-Pod-IP`, `X-Sandbox-Port`, `X-Sandbox-ID`, `X-Sandbox-Namespace`). The request is then routed to `sandbox-router`, which proxies the request to the target Sandbox Pod IP.
+At runtime, `sandbox-state-informer` (`ext_proc`) intercepts request headers, wakes sleeping sandboxes out-of-band via `sandbox-suspension-manager`, and injects routing headers (`X-Sandbox-Pod-IP`, `X-Sandbox-Port`, `X-Sandbox-ID`, `X-Sandbox-Namespace`). The request is then routed to `sandbox-router`, which proxies the request to the target Sandbox Pod IP.
 
 ```mermaid
 flowchart TB
@@ -55,12 +55,12 @@ flowchart TB
 ## 📁 Directory Structure
 
 * `cmd/`:
-  - `gateway/`: Go source code for `sandbox-gateway` gRPC `ext_proc` callout engine.
+  - `state-informer/`: Go source code for `sandbox-state-informer` gRPC `ext_proc` callout engine.
   - `suspension-manager/`: Go source code for `sandbox-suspension-manager` authenticated signaling controller.
-* `Dockerfile`: Multi-stage Docker build file for `sandbox-gateway` and `sandbox-suspension-manager`.
+* `Dockerfile`: Multi-stage Docker build file for `sandbox-state-informer` and `sandbox-suspension-manager`.
 * `Makefile`: Automation targets (`make deploy`, `make test`, `make clean`).
 * `manifests/`:
-  - `common/`: Core infrastructure deployments (`gateway-deployment.yaml`, `manager-deployment.yaml`).
+  - `common/`: Core infrastructure deployments (`state-informer-deployment.yaml`, `manager-deployment.yaml`).
   - `envoy-gateway/`: Multi-tenant Gateway API & CRD manifests (`namespaces.yaml`, `gateway.yaml`, `tenant-a-sandboxes.yaml`, `tenant-b-sandboxes.yaml`).
 
 ---
@@ -91,9 +91,9 @@ This target builds the Go binaries, loads the Docker images into Kind, and appli
 
 ### 3. Stream Logs & Port-Forward Ingress (Terminals 1 & 2)
 
-* **Terminal 1 (Stream `sandbox-gateway` Callout Logs)**:
+* **Terminal 1 (Stream `sandbox-state-informer` Callout Logs)**:
   ```bash
-  kubectl logs -f deployment/sandbox-gateway -n tenant-a
+  kubectl logs -f deployment/sandbox-state-informer -n tenant-a
   ```
 
 * **Terminal 2 (Port-Forward Envoy Edge Gateway)**:

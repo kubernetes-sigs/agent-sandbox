@@ -13,15 +13,15 @@ COPY clients ./clients
 COPY examples/auto-resume-sandbox/cmd ./cmd
 COPY sandbox-router ./sandbox-router
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-gateway ./cmd/gateway/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-state-informer ./cmd/state-informer/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-suspension-manager ./cmd/suspension-manager/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -o /sandbox-router ./sandbox-router/cmd/main.go
 
-FROM gcr.io/distroless/static-debian13:nonroot AS gateway
+FROM gcr.io/distroless/static-debian13:nonroot AS state-informer
 WORKDIR /
-COPY --from=builder /sandbox-gateway /sandbox-gateway
+COPY --from=builder /sandbox-state-informer /sandbox-state-informer
 USER 65532:65532
-ENTRYPOINT ["/sandbox-gateway"]
+ENTRYPOINT ["/sandbox-state-informer"]
 
 FROM gcr.io/distroless/static-debian13:nonroot AS manager
 WORKDIR /

@@ -201,7 +201,7 @@ type SandboxClaimReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
 	claim := &extensionsv1beta1.SandboxClaim{}
@@ -237,6 +237,22 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if !claim.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
+	}
+
+	claimTTLExpired, claimTTLTimeLeft := lifecycle.TimeLeftAfterCreated(time.Now(), claim.CreationTimestamp, claim.Spec.TTLSecondsAfterCreated)
+	if claimTTLExpired {
+		logger.Info("Deleting SandboxClaim because ttlSecondsAfterCreated expired", "claim", claim.Name)
+		if err := r.Delete(ctx, claim); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		return ctrl.Result{}, nil
+	}
+	if claimTTLTimeLeft > 0 {
+		defer func() {
+			if reconcileErr == nil && (result.RequeueAfter == 0 || claimTTLTimeLeft < result.RequeueAfter) {
+				result.RequeueAfter = claimTTLTimeLeft
+			}
+		}()
 	}
 
 	// Initialize trace ID and observation time for active resources missing them.
@@ -288,7 +304,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Manage Resources based on State
 	var sandbox *v1beta1.Sandbox
-	var reconcileErr error
 
 	if claimExpired {
 		// Policy=Retain (since Delete handled above)
@@ -324,7 +339,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
 
 	// Determine Result
-	var result ctrl.Result
 	if !claimExpired {
 		if postExpiration {
 			result = ctrl.Result{RequeueAfter: immediateRequeueDelay}

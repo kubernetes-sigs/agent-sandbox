@@ -136,6 +136,8 @@ func stripRandomSuffix(name string) string {
 // Helper functions for SandboxClaim conversion
 
 func convertClaimSpecTo(src *SandboxClaimSpec, dst *v1beta1.SandboxClaimSpec, claimName, sandboxName string) error {
+	dst.TTLSecondsAfterCreated = src.TTLSecondsAfterCreated
+
 	// Lifecycle
 	if src.Lifecycle != nil {
 		dst.Lifecycle = &v1beta1.Lifecycle{
@@ -190,6 +192,8 @@ func convertClaimSpecTo(src *SandboxClaimSpec, dst *v1beta1.SandboxClaimSpec, cl
 }
 
 func convertClaimSpecFrom(src *v1beta1.SandboxClaimSpec, dst *SandboxClaimSpec) error {
+	dst.TTLSecondsAfterCreated = src.TTLSecondsAfterCreated
+
 	// Lifecycle
 	if src.Lifecycle != nil {
 		dst.Lifecycle = &Lifecycle{

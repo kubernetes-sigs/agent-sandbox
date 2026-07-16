@@ -45,6 +45,13 @@ type SandboxWarmPoolSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// ttlSecondsAfterCreated limits how long the SandboxWarmPool exists after creation.
+	// When set, the controller deletes the SandboxWarmPool after the TTL expires.
+	// When unset, the SandboxWarmPool is not automatically reaped based on its age.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
+
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
 	// +required

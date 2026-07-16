@@ -92,3 +92,31 @@ func TestTimeLeft(t *testing.T) {
 		})
 	}
 }
+
+func TestTimeLeftAfterCreated(t *testing.T) {
+	now := time.Date(2026, time.April, 13, 12, 0, 0, 0, time.UTC)
+	createdThirtySecondsAgo := metav1.NewTime(now.Add(-30 * time.Second))
+	zero := int32(0)
+	oneMinute := int32(60)
+
+	testCases := []struct {
+		name        string
+		createdAt   metav1.Time
+		ttl         *int32
+		wantExpired bool
+		wantRequeue time.Duration
+	}{
+		{name: "ttl unset lives forever", createdAt: createdThirtySecondsAgo},
+		{name: "missing creation timestamp does not expire", ttl: &zero},
+		{name: "future expiry requeues", createdAt: createdThirtySecondsAgo, ttl: &oneMinute, wantRequeue: 30 * time.Second},
+		{name: "zero ttl expires immediately", createdAt: createdThirtySecondsAgo, ttl: &zero, wantExpired: true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			expired, requeueAfter := TimeLeftAfterCreated(now, tc.createdAt, tc.ttl)
+			require.Equal(t, tc.wantExpired, expired)
+			require.Equal(t, tc.wantRequeue, requeueAfter)
+		})
+	}
+}

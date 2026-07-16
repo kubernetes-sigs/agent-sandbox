@@ -132,6 +132,13 @@ type SandboxClaimSpec struct {
 	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
 
+	// ttlSecondsAfterCreated limits how long the SandboxClaim exists after creation.
+	// When set, the controller deletes the SandboxClaim after the TTL expires.
+	// When unset, the SandboxClaim is not automatically reaped based on its age.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
+
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`

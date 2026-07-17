@@ -1,0 +1,187 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Node Kernel - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Node Kernel (bpftrace profiler){% endblock %}
+
+{% block content %}
+{% if profiler_available %}
+<div class="grid">
+    <div class="card chart-card">
+        <div class="card-title">I/O Wait Over Time (per node)</div>
+        <div class="chart-container">
+            <canvas id="iowaitChart"></canvas>
+        </div>
+    </div>
+</div>
+<div class="grid">
+    <div class="card chart-card">
+        <div class="card-title">1-minute Load Average Over Time (per node)</div>
+        <div class="chart-container">
+            <canvas id="loadChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Node CPU / I/O by Phase</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        From per-node /proc/stat samples (15s). High iowait with spare CPU means the
+        launch pipeline is queueing on the node disk, not computing; load average counts
+        processes in uninterruptible disk sleep, so load far above the core count with
+        idle CPU is the same signal.
+    </div>
+    <div class="table-container">
+        <table id="node-phase-table"></table>
+    </div>
+</div>
+
+<div class="card" style="margin-top: 32px;">
+    <div class="card-title">fsync-family Blocked Time by Process (whole run)</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        fsync / fdatasync / sync_file_range calls traced on every worker node, summed
+        over the run. Per-phase splits: <code>test/stress/profiler/analyze-fsync.py</code>
+        against the raw <code>profiler-fsync-*.log</code> artifacts.
+    </div>
+    <div class="table-container">
+        <table id="fsync-table"></table>
+    </div>
+</div>
+
+<div class="card" style="margin-top: 32px;">
+    <div class="card-title">Slow Syscalls &ge; 1ms by Process (whole run)</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        Total blocked time in syscalls that took at least 1ms, for
+        containerd / containerd-shim / runc / kubelet. This is off-CPU blocking time,
+        which CPU profilers mostly miss. Idle waits (futex, epoll/poll, sleeps,
+        child-process waits) are excluded: blocking there is a thread waiting for
+        work, not work waiting for the kernel.
+    </div>
+    <div class="table-container">
+        <table id="syscall-table"></table>
+    </div>
+</div>
+
+<div class="grid" style="margin-top: 32px;">
+    <div class="card">
+        <div class="card-title">Slow open() by Path Bucket</div>
+        <div class="table-container">
+            <table id="open-table"></table>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-title">Slow open() under /proc (by path shape)</div>
+        <div class="card-desc" style="margin-bottom: 8px;">
+            <code>/proc/self/fd/&lt;n&gt;</code> opens are containerd waiting on the
+            shim stdio FIFO rendezvous: the time for shim + runc + container init to
+            come up and open their end.
+        </div>
+        <div class="table-container">
+            <table id="proc-table"></table>
+        </div>
+    </div>
+</div>
+
+<script>
+    const secBadgeK = (warn, bad) => v =>
+        badge(v > bad ? 'danger' : v > warn ? 'warning' : 'success', v.toFixed(1) + 's');
+    const pctBadge = (warn, bad) => v =>
+        badge(v > bad ? 'danger' : v > warn ? 'warning' : 'success', v.toFixed(1) + '%');
+
+    renderTable('#node-phase-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'node', label: 'Node', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'busy_pct', label: 'CPU Busy', render: v => v.toFixed(1) + '%'},
+        {key: 'iowait_pct', label: 'I/O Wait', render: pctBadge(10, 25)},
+        {key: 'load_avg', label: 'Load (avg)', render: v => v.toFixed(1)},
+        {key: 'load_max', label: 'Load (max)', render: v => v.toFixed(1)}
+    ], {{ node_stat_phases | tojson }});
+
+    renderTable('#fsync-table', [
+        {key: 'comm', label: 'Process', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'calls', label: 'Calls'},
+        {key: 'blocked_s', label: 'Total Blocked', render: secBadgeK(30, 120)},
+        {key: 'mean_ms', label: 'Mean / call', render: v => v.toFixed(1) + 'ms'}
+    ], {{ kernel_fsync | tojson }});
+
+    renderTable('#syscall-table', [
+        {key: 'comm', label: 'Process', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'key', label: 'Syscall', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'slow_calls', label: 'Slow Calls'},
+        {key: 'blocked_s', label: 'Total Blocked', render: secBadgeK(30, 300)},
+        {key: 'mean_ms', label: 'Mean / call', render: v => v.toFixed(1) + 'ms'}
+    ], {{ kernel_syscalls | tojson }});
+
+    renderTable('#open-table', [
+        {key: 'comm', label: 'Process', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'key', label: 'Path Bucket', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'slow_calls', label: 'Slow Opens'},
+        {key: 'blocked_s', label: 'Total Blocked', render: secBadgeK(10, 100)},
+        {key: 'mean_ms', label: 'Mean / open', render: v => v.toFixed(1) + 'ms'}
+    ], {{ kernel_opens | tojson }});
+
+    renderTable('#proc-table', [
+        {key: 'comm', label: 'Process', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'key', label: 'Path', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'slow_calls', label: 'Slow Opens'},
+        {key: 'blocked_s', label: 'Total Blocked', render: secBadgeK(10, 100)},
+        {key: 'mean_ms', label: 'Mean / open', render: v => v.toFixed(1) + 'ms'}
+    ], {{ kernel_proc | tojson }});
+
+    const chartData = {{ chart_data | tojson }};
+    const phases = {{ phases | tojson }};
+    const nodes = [...new Set(chartData.map(d => d.node))];
+    const timestamps = [...new Set(chartData.map(d => d.ts))].sort();
+    const formattedLabels = timeLabels(timestamps);
+    const pointTimes = timestamps.map(ts => new Date(ts).getTime());
+
+    function nodeDatasets(field) {
+        const pointIndex = new Map(chartData.map(d => [`${d.node}|${d.ts}`, d[field]]));
+        return nodes.map((node, idx) => lineDataset(
+            node,
+            timestamps.map(ts => pointIndex.get(`${node}|${ts}`) ?? null),
+            idx));
+    }
+
+    new Chart(document.getElementById('iowaitChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: formattedLabels, datasets: nodeDatasets('iowait_pct') },
+        options: lineChartOptions('I/O wait (% of CPU time)'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+
+    new Chart(document.getElementById('loadChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: formattedLabels, datasets: nodeDatasets('load1') },
+        options: lineChartOptions('1-minute load average'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+</script>
+{% else %}
+<div class="card">
+    <div class="card-title">No node profiler data in this run</div>
+    <div class="card-desc">
+        No <code>profiler-*.log</code> files were found in the input directory. The node
+        profiler DaemonSet (<code>test/stress/profiler/</code>) is deployed by the
+        benchmark run script when <code>STRESS_NODE_PROFILER=true</code> (the default);
+        it is best-effort, so a missing image or unsupported kernel leaves no logs.
+    </div>
+</div>
+{% endif %}
+{% endblock %}

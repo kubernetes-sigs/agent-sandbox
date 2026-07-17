@@ -78,8 +78,19 @@ fi
 export IMAGE_TAG
 echo "Using image tag: ${IMAGE_TAG}"
 
+# STRESS_NODE_PROFILER deploys the bpftrace node-profiler DaemonSet
+# (test/stress/profiler/) during the stress test, capturing node-side pod
+# startup/teardown costs that API-side data cannot see: fsync / off-CPU
+# blocking time, CPU stacks, and the containerd event stream. Best-effort
+# at runtime; needs the bpftrace image pushed below.
+STRESS_NODE_PROFILER="${STRESS_NODE_PROFILER:-true}"
+
 # Push images
-for image in "agent-sandbox-controller" "chrome-sandbox"; do
+PUSH_IMAGES=("agent-sandbox-controller" "chrome-sandbox")
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  PUSH_IMAGES+=("bpftrace")
+fi
+for image in "${PUSH_IMAGES[@]}"; do
   echo "Pushing ${image} to ${IMAGE_PREFIX}..."
   dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
 done
@@ -172,6 +183,34 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
   ${CNI_KOPS_FLAGS[@]+"${CNI_KOPS_FLAGS[@]}"}
 
+# fsync isolation experiment: /var/lib/containerd on tmpfs (worker nodes
+# only). The 1122 profiling measured ~42 fdatasync+fsync calls per pod in
+# containerd (bolt metadata + content store); tmpfs makes those syncs free,
+# so an A/B against this knob measures the true upper bound of the fsync
+# theory. Benchmark-only (images/snapshots do not survive reboot). Default
+# false so the benchmark measures realistic disk-backed nodes.
+STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-false}"
+if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
+  echo "Adding containerd-on-tmpfs hook to cluster spec..."
+  # `kops get -o yaml` emits top-level keys sorted (apiVersion, kind,
+  # metadata, spec), so appending 2-space-indented keys extends spec.
+  kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster.yaml"
+  cat >> "${WORKDIR}/cluster.yaml" <<'HOOK_EOF'
+  hooks:
+  - name: containerd-tmpfs
+    before:
+    - containerd.service
+    roles:
+    - Node
+    manifest: |
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/mkdir -p /var/lib/containerd
+      ExecStart=/bin/mount -t tmpfs -o size=16g tmpfs /var/lib/containerd
+HOOK_EOF
+  kops replace -f "${WORKDIR}/cluster.yaml"
+fi
+
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes
 
@@ -246,6 +285,18 @@ capture_stress_diagnostics() {
   kubectl top nodes > "${STRESS_OUTPUT_DIR}/top-nodes.txt" 2>/dev/null || true
 }
 
+# Deploy the node profiler so node-side pod startup/teardown costs are
+# captured during the stress test. See test/stress/profiler/profiler.yaml
+# for what is recorded and why.
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Deploying node profiler..."
+  # bpftrace:latest -> ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG} (images/bpftrace).
+  sed "s|image: bpftrace:latest|image: ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG}|g" \
+    test/stress/profiler/profiler.yaml | kubectl apply -f -
+  # Best-effort: a missing image or unsupported kernel should not fail the run.
+  kubectl rollout status daemonset/stress-node-profiler --namespace stress-node-profiler --timeout=2m || true
+fi
+
 echo "Running stress test"
 # Prometheus metrics from the apiserver, kube-controller-manager,
 # kube-scheduler, the sandbox controller, and kubelets are collected by the
@@ -263,6 +314,23 @@ go run ./test/stress \
 stress_status=$?
 set -o errexit
 capture_stress_diagnostics
+
+# Harvest per-node profiler logs into the artifacts directory. Log names
+# match what test/stress/profiler/analyze-fsync.py expects
+# (profiler-fsync-<node>.log etc).
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Harvesting node profiler logs..."
+  kubectl get pods --namespace stress-node-profiler \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}' | \
+  while read -r pod node; do
+    kubectl logs --namespace stress-node-profiler "${pod}" -c fsync-trace > "${STRESS_OUTPUT_DIR}/profiler-fsync-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c extra-trace > "${STRESS_OUTPUT_DIR}/profiler-extra-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c cpu-trace > "${STRESS_OUTPUT_DIR}/profiler-cpu-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c offcpu-trace > "${STRESS_OUTPUT_DIR}/profiler-offcpu-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c nodestat > "${STRESS_OUTPUT_DIR}/profiler-nodestat-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c ctr-events > "${STRESS_OUTPUT_DIR}/profiler-ctr-events-${node}.log" || true
+  done
+fi
 
 # Generate stress test report
 REPORT_OUTPUT_DIR="${ARTIFACTS:-.}/stress-report"

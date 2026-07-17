@@ -772,31 +772,36 @@ def main():
 
     # Cilium endpoint-create rate limiting check: launch latency spent
     # queueing in the agent's api-rate-limit, not doing CNI work.
+    # Two distinct failure modes, tracked independently so the worst phase
+    # for each is evaluated: time queued in the api-rate-limit (raise the
+    # limit) vs time spent actually processing the create (the limiter is
+    # fine; look at what endpoint creation is doing).
     cilium_wait_worst = None
+    cilium_processing_worst = None
     for row in cilium_limiter_summary:
         if row['phase_name'].startswith('throughput'):
             if cilium_wait_worst is None or row['wait_mean_s'] > cilium_wait_worst['wait_mean_s']:
                 cilium_wait_worst = row
+            if cilium_processing_worst is None or row['processing_mean_s'] > cilium_processing_worst['processing_mean_s']:
+                cilium_processing_worst = row
 
-    if cilium_wait_worst:
+    if (cilium_wait_worst and cilium_wait_worst['wait_mean_s'] > 0.5
+            and cilium_wait_worst['wait_mean_s'] >= cilium_wait_worst['processing_mean_s']):
         w = cilium_wait_worst
-        # Two distinct failure modes: time queued in the api-rate-limit
-        # (raise the limit) vs time spent actually processing the create
-        # (the limiter is fine; look at what endpoint creation is doing).
-        if w['wait_mean_s'] > 0.5 and w['wait_mean_s'] >= w['processing_mean_s']:
-            findings.append({
-                "severity": "critical" if w['wait_mean_s'] > 5.0 else "warning",
-                "title": f"Cilium endpoint-create API Rate Limited ({w['wait_mean_s']:.1f}s mean wait)",
-                "desc": f"During phase {w['phase_name']}, CNI endpoint-create requests waited a mean of {w['wait_mean_s']:.1f}s (max {w['wait_max_s']:.0f}s) in cilium-agent's API rate limiter, while actual processing took {w['processing_mean_s']:.2f}s. The effective limit averaged {w['rate_limit']:.1f} creates/s per node, which caps pod sandbox creation throughput. Consider raising the endpoint-create limits in Cilium's api-rate-limit configuration.",
-                "link": "cilium.html"
-            })
-        elif w['processing_mean_s'] > 1.0:
-            findings.append({
-                "severity": "critical" if w['processing_mean_s'] > 5.0 else "warning",
-                "title": f"Cilium endpoint-create Slow ({w['processing_mean_s']:.1f}s mean processing)",
-                "desc": f"During phase {w['phase_name']}, cilium-agent spent a mean of {w['processing_mean_s']:.1f}s processing each endpoint create (limiter wait was only {w['wait_mean_s']:.1f}s, so api-rate-limit is not the cap). The time is going into the endpoint-create pipeline itself — check client-side API throttling on the Rate Limiting page, endpoint regeneration on the Cilium page, and apiserver latency.",
-                "link": "cilium.html"
-            })
+        findings.append({
+            "severity": "critical" if w['wait_mean_s'] > 5.0 else "warning",
+            "title": f"Cilium endpoint-create API Rate Limited ({w['wait_mean_s']:.1f}s mean wait)",
+            "desc": f"During phase {w['phase_name']}, CNI endpoint-create requests waited a mean of {w['wait_mean_s']:.1f}s (max {w['wait_max_s']:.0f}s) in cilium-agent's API rate limiter, while actual processing took {w['processing_mean_s']:.2f}s. The effective limit averaged {w['rate_limit']:.1f} creates/s per node, which caps pod sandbox creation throughput. Consider raising the endpoint-create limits in Cilium's api-rate-limit configuration.",
+            "link": "cilium.html"
+        })
+    elif cilium_processing_worst and cilium_processing_worst['processing_mean_s'] > 1.0:
+        w = cilium_processing_worst
+        findings.append({
+            "severity": "critical" if w['processing_mean_s'] > 5.0 else "warning",
+            "title": f"Cilium endpoint-create Slow ({w['processing_mean_s']:.1f}s mean processing)",
+            "desc": f"During phase {w['phase_name']}, cilium-agent spent a mean of {w['processing_mean_s']:.1f}s processing each endpoint create (limiter wait was only {w['wait_mean_s']:.1f}s, so api-rate-limit is not the cap). The time is going into the endpoint-create pipeline itself — check client-side API throttling on the Rate Limiting page, endpoint regeneration on the Cilium page, and apiserver latency.",
+            "link": "cilium.html"
+        })
 
     # Client-side API throttling check: a component sitting in its own
     # client-go rate limiter while the apiserver is idle.

@@ -6,7 +6,12 @@
 #
 # See https://github.com/FootprintAI/Containarium for the runtime, and
 # images/agent-box/Dockerfile + images/agent-box/entrypoint.sh for how
-# this image is built (dropbear, not OpenSSH; forced command).
+# this image is built (dropbear, not OpenSSH; forced command). Don't want to
+# trust the published tag sight unseen? Build it yourself from the Dockerfile
+# in this directory — see the README's "Building agent-box from source". This
+# manifest applies as-is with the pinned tag below; swap in your own build by
+# overriding `image:` (e.g. `kubectl set image`, or `sed` before apply — see
+# the README).
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:

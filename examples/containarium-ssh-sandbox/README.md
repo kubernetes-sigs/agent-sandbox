@@ -68,6 +68,33 @@ style commands won't do what you expect — see "Reach the box over SSH" below.
 - (Optional) A RuntimeClass such as `gvisor` for stronger isolation; the
   manifest includes a commented-out `runtimeClassName` line.
 
+## Building agent-box from source
+
+By default every manifest here pins the published
+`ghcr.io/footprintai/containarium-agent-box:v0.52.1` tag. If you'd rather not
+trust a pre-built image sight unseen, [`Dockerfile`](Dockerfile) builds the
+same image from source — it clones
+[Containarium](https://github.com/FootprintAI/Containarium) at that same
+release tag and reproduces `images/agent-box/Dockerfile` there stage-for-stage
+(rootless dropbear, forced command into `agent-box`, nothing else):
+
+```bash
+docker build -t containarium-agent-box:local .
+kind load docker-image containarium-agent-box:local --name <your-kind-cluster>
+```
+
+Then point the manifests at your build instead of the published tag — either
+edit `image:` directly in `containarium-sandbox.yaml` / `gateway-demo.yaml`,
+or override it at apply time without touching the files:
+
+```bash
+sed 's#ghcr.io/footprintai/containarium-agent-box:v0.52.1#containarium-agent-box:local#' \
+  containarium-sandbox.yaml | kubectl apply -f -
+```
+
+(and the same `sed` against `gateway-demo.yaml`, which pins the tag twice —
+once per box). To build a different upstream release, pass
+`--build-arg CONTAINARIUM_REF=vX.Y.Z` to `docker build`.
 
 ## Usage
 

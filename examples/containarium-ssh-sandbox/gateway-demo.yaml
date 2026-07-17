@@ -18,6 +18,11 @@
 #     from.authorized_keys_secret; default data key: authorized_keys).
 #   - Secret sshpiper-upstream-key — the gateway→box private key (referenced
 #     by each Pipe's to.private_key_secret).
+#
+# Both boxes pin the published ghcr.io/footprintai/containarium-agent-box tag
+# below. To run your own build instead (see the Dockerfile in this directory
+# and the README's "Building agent-box from source"), override `image:` on
+# both boxes — e.g. `kubectl set image` after apply, or `sed` before it.
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
 metadata:

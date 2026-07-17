@@ -710,6 +710,185 @@ def main():
 
     cilium_available = bool(cilium_api_ops or cilium_limiter_summary or cilium_regen)
 
+    # Client-side API rate limiting, system-wide. Every component that talks
+    # to the apiserver throttles itself client-side (client-go QPS/burst;
+    # cilium-agent's k8s client exposes its own equivalent metric), and an
+    # undersized limit shows up as end-to-end latency while the apiserver
+    # sits idle. One unified table makes each limit raise provable in the
+    # report. Note: the agent-sandbox controller (controller-runtime) does
+    # not currently export rest_client rate-limiter metrics.
+    print("Querying client-side API throttling by phase...")
+    client_ratelimit_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                source,
+                CAST(instance AS VARCHAR) as instance,
+                CAST(labels->>'verb' AS VARCHAR) as verb,
+                COALESCE(CAST(labels->>'host' AS VARCHAR), '') as host,
+                metric,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE metric IN ('rest_client_rate_limiter_duration_seconds_count', 'rest_client_rate_limiter_duration_seconds_sum')
+            UNION ALL
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                source,
+                CAST(instance AS VARCHAR) as instance,
+                CAST(labels->>'method' AS VARCHAR) as verb,
+                '' as host,
+                metric,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE metric IN ('cilium_k8s_client_rate_limiter_duration_seconds_count', 'cilium_k8s_client_rate_limiter_duration_seconds_sum')
+        ),
+        diffs AS (
+            SELECT
+                ts,
+                source,
+                verb,
+                metric,
+                value - lag(value) OVER (PARTITION BY source, instance, verb, host, metric ORDER BY ts) as delta
+            FROM raw
+        ),
+        diffs_with_phase AS (
+            SELECT
+                p.name as phase_name,
+                d.source,
+                d.verb,
+                CASE WHEN d.metric LIKE '%_count' THEN d.delta ELSE 0 END as n,
+                CASE WHEN d.metric LIKE '%_sum' THEN d.delta ELSE 0 END as wait_s
+            FROM diffs d
+            JOIN phases p ON d.ts >= p.start_time AND d.ts < p.end_time
+            WHERE d.delta >= 0
+        )
+        SELECT phase_name, source, verb, SUM(n) as count_delta, SUM(wait_s) as wait_total
+        FROM diffs_with_phase
+        GROUP BY phase_name, source, verb
+        HAVING count_delta > 0
+        ORDER BY phase_name, wait_total DESC
+    """).fetchall()
+
+    client_ratelimit_ops = []
+    for row in client_ratelimit_raw:
+        phase_name, source, verb, count_delta, wait_total = row
+        client_ratelimit_ops.append({
+            "phase_name": phase_name,
+            "source": source,
+            "verb": verb,
+            "count_delta": int(count_delta),
+            "total_wait_s": wait_total,
+            "avg_wait_ms": (wait_total / count_delta) * 1000 if count_delta > 0 else 0
+        })
+
+    print("Querying client throttling timeseries...")
+    client_ratelimit_ts_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                source,
+                CAST(instance AS VARCHAR) as instance,
+                CAST(labels->>'verb' AS VARCHAR) as verb,
+                COALESCE(CAST(labels->>'host' AS VARCHAR), '') as host,
+                metric,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE metric IN ('rest_client_rate_limiter_duration_seconds_count', 'rest_client_rate_limiter_duration_seconds_sum')
+            UNION ALL
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                source,
+                CAST(instance AS VARCHAR) as instance,
+                CAST(labels->>'method' AS VARCHAR) as verb,
+                '' as host,
+                metric,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE metric IN ('cilium_k8s_client_rate_limiter_duration_seconds_count', 'cilium_k8s_client_rate_limiter_duration_seconds_sum')
+        ),
+        diffs AS (
+            SELECT
+                ts,
+                source,
+                metric,
+                value - lag(value) OVER (PARTITION BY source, instance, verb, host, metric ORDER BY ts) as delta
+            FROM raw
+        ),
+        binned AS (
+            SELECT
+                time_bucket(INTERVAL '15 seconds', ts) as bucket_time,
+                source,
+                SUM(CASE WHEN metric LIKE '%_count' THEN delta ELSE 0 END) as count_delta,
+                SUM(CASE WHEN metric LIKE '%_sum' THEN delta ELSE 0 END) as wait_total
+            FROM diffs
+            WHERE delta >= 0
+            GROUP BY bucket_time, source
+        )
+        SELECT
+            strftime(bucket_time, '%Y-%m-%dT%H:%M:%SZ') as ts,
+            source,
+            CASE WHEN count_delta > 0 THEN wait_total / count_delta ELSE 0.0 END as avg_wait_s
+        FROM binned
+        ORDER BY ts, source
+    """).fetchall()
+
+    client_ratelimit_chart_data = [
+        {"ts": row[0], "source": row[1], "avg_wait_s": row[2]}
+        for row in client_ratelimit_ts_raw
+    ]
+
+    # API Priority & Fairness: server-side queueing at the apiserver, the
+    # other place where "the cluster feels slow but nothing is busy".
+    print("Querying API Priority & Fairness wait by phase...")
+    apf_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT
+                CAST(ts AS TIMESTAMP) as ts,
+                CAST(instance AS VARCHAR) as instance,
+                CAST(labels->>'priority_level' AS VARCHAR) as priority_level,
+                COALESCE(CAST(labels->>'flow_schema' AS VARCHAR), '') as flow_schema,
+                COALESCE(CAST(labels->>'execute' AS VARCHAR), '') as execute,
+                metric,
+                value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE metric IN ('apiserver_flowcontrol_request_wait_duration_seconds_count', 'apiserver_flowcontrol_request_wait_duration_seconds_sum')
+        ),
+        diffs AS (
+            SELECT
+                ts,
+                priority_level,
+                metric,
+                value - lag(value) OVER (PARTITION BY instance, priority_level, flow_schema, execute, metric ORDER BY ts) as delta
+            FROM raw
+        ),
+        diffs_with_phase AS (
+            SELECT
+                p.name as phase_name,
+                d.priority_level,
+                CASE WHEN d.metric LIKE '%_count' THEN d.delta ELSE 0 END as n,
+                CASE WHEN d.metric LIKE '%_sum' THEN d.delta ELSE 0 END as wait_s
+            FROM diffs d
+            JOIN phases p ON d.ts >= p.start_time AND d.ts < p.end_time
+            WHERE d.delta >= 0
+        )
+        SELECT phase_name, priority_level, SUM(n) as count_delta, SUM(wait_s) as wait_total
+        FROM diffs_with_phase
+        GROUP BY phase_name, priority_level
+        HAVING count_delta > 0
+        ORDER BY phase_name, wait_total DESC
+    """).fetchall()
+
+    apf_ops = []
+    for row in apf_raw:
+        phase_name, priority_level, count_delta, wait_total = row
+        apf_ops.append({
+            "phase_name": phase_name,
+            "priority_level": priority_level,
+            "count_delta": int(count_delta),
+            "total_wait_s": wait_total,
+            "avg_wait_ms": (wait_total / count_delta) * 1000 if count_delta > 0 else 0
+        })
+
     # Query active sandboxes and pods capacity timeseries from the watch logs
     capacity_chart_data = []
     capacity_summary = []
@@ -931,13 +1110,41 @@ def main():
             if cilium_wait_worst is None or row['wait_mean_s'] > cilium_wait_worst['wait_mean_s']:
                 cilium_wait_worst = row
 
-    if cilium_wait_worst and cilium_wait_worst['wait_mean_s'] > 0.5:
+    if cilium_wait_worst:
         w = cilium_wait_worst
+        # Two distinct failure modes: time queued in the api-rate-limit
+        # (raise the limit) vs time spent actually processing the create
+        # (the limiter is fine; look at what endpoint creation is doing).
+        if w['wait_mean_s'] > 0.5 and w['wait_mean_s'] >= w['processing_mean_s']:
+            findings.append({
+                "severity": "critical" if w['wait_mean_s'] > 5.0 else "warning",
+                "title": f"Cilium endpoint-create API Rate Limited ({w['wait_mean_s']:.1f}s mean wait)",
+                "desc": f"During phase {w['phase_name']}, CNI endpoint-create requests waited a mean of {w['wait_mean_s']:.1f}s (max {w['wait_max_s']:.0f}s) in cilium-agent's API rate limiter, while actual processing took {w['processing_mean_s']:.2f}s. The effective limit averaged {w['rate_limit']:.1f} creates/s per node, which caps pod sandbox creation throughput. Consider raising the endpoint-create limits in Cilium's api-rate-limit configuration.",
+                "link": "cilium.html"
+            })
+        elif w['processing_mean_s'] > 1.0:
+            findings.append({
+                "severity": "critical" if w['processing_mean_s'] > 5.0 else "warning",
+                "title": f"Cilium endpoint-create Slow ({w['processing_mean_s']:.1f}s mean processing)",
+                "desc": f"During phase {w['phase_name']}, cilium-agent spent a mean of {w['processing_mean_s']:.1f}s processing each endpoint create (limiter wait was only {w['wait_mean_s']:.1f}s, so api-rate-limit is not the cap). The time is going into the endpoint-create pipeline itself — check client-side API throttling on the Rate Limiting page, endpoint regeneration on the Cilium page, and apiserver latency.",
+                "link": "cilium.html"
+            })
+
+    # Client-side API throttling check: a component sitting in its own
+    # client-go rate limiter while the apiserver is idle.
+    client_throttle_worst = None
+    for row in client_ratelimit_ops:
+        if row['phase_name'].startswith('throughput') and row['count_delta'] >= 20:
+            if client_throttle_worst is None or row['avg_wait_ms'] > client_throttle_worst['avg_wait_ms']:
+                client_throttle_worst = row
+
+    if client_throttle_worst and client_throttle_worst['avg_wait_ms'] > 100:
+        w = client_throttle_worst
         findings.append({
-            "severity": "critical" if w['wait_mean_s'] > 5.0 else "warning",
-            "title": f"Cilium endpoint-create API Rate Limited ({w['wait_mean_s']:.1f}s mean wait)",
-            "desc": f"During phase {w['phase_name']}, CNI endpoint-create requests waited a mean of {w['wait_mean_s']:.1f}s (max {w['wait_max_s']:.0f}s) in cilium-agent's API rate limiter, while actual processing took only {w['processing_mean_s']:.2f}s. The effective limit averaged {w['rate_limit']:.1f} creates/s per node, which caps pod sandbox creation throughput. Consider raising the endpoint-create limits in Cilium's api-rate-limit configuration.",
-            "link": "cilium.html"
+            "severity": "critical" if w['avg_wait_ms'] > 1000 else "warning",
+            "title": f"Client-side API Throttling in {w['source']} ({w['avg_wait_ms']/1000:.2f}s avg wait)",
+            "desc": f"During phase {w['phase_name']}, {w['count_delta']:,} {w['verb']} requests from {w['source']} waited an average of {w['avg_wait_ms']/1000:.2f}s ({w['total_wait_s']:.0f}s in total) in the component's own client-side rate limiter before being sent to the apiserver. Consider raising that component's client QPS/burst configuration.",
+            "link": "ratelimits.html"
         })
 
     # Capacity saturation finding check
@@ -1114,6 +1321,17 @@ def main():
         "phases": js_phases
     }
     render_page("cilium.html", "cilium.html", cilium_ctx)
+
+    # Rate limiting context
+    ratelimits_ctx = {
+        "active_page": "ratelimits",
+        "summary": summary,
+        "client_ratelimit_ops": client_ratelimit_ops,
+        "apf_ops": apf_ops,
+        "chart_data": client_ratelimit_chart_data,
+        "phases": js_phases
+    }
+    render_page("ratelimits.html", "ratelimits.html", ratelimits_ctx)
 
     # Capacity context
     capacity_ctx = {

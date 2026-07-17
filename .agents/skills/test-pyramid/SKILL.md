@@ -11,8 +11,8 @@ Goal: **anything that can be tested as a unit test should be a unit test; only w
 
 Enumerate both layers and count actual test functions (not just files), so the report can show the pyramid shape numerically:
 
-- **Unit tests:** `git ls-files '*_test.go' | grep -v '^test/'` plus Python unit tests under `clients/python/**/test/unit/` (discover with `git ls-files 'clients/python/*' | grep '/test/unit/'` — there is more than one such directory). Count `func Test...` per package (`grep -c '^func Test'`) and `def test_` for Python.
-- **E2E / system tests:** `test/e2e/**/*_test.go` (kind-cluster E2E, incl. `test/e2e/extensions/`), `test/e2e/clients/python/` (SDK E2E), `dev/tools/test-migration.py` (upgrade/rollback), `test/stress/` (load). Count `func Test...` and, for table-driven E2E, the sub-scenarios.
+- **Unit tests:** `git ls-files '*_test.go' | grep -v '^test/e2e/'` plus `git ls-files 'test/e2e/framework/*_test.go'` and Python unit tests under `clients/python/**/test/unit/` (discover with `git ls-files 'clients/python/*' | grep '/test/unit/'` — there is more than one such directory). Count `func Test...` per package (`grep -c '^func Test'`) and `def test_` for Python.
+- **E2E / system tests:** `test/e2e/**/*_test.go` excluding `test/e2e/framework/` (kind-cluster E2E, incl. `test/e2e/extensions/`), `test/e2e/clients/python/` (SDK E2E), `dev/tools/test-migration.py` (upgrade/rollback), `test/stress/` (load). Count `func Test...` and, for table-driven E2E, the sub-scenarios.
 - Note per-layer runtime cost if discoverable (CI job durations from `dev/ci/`, TestGrid tab names) — the payoff argument for each migration is time and flake surface removed from presubmit.
 
 ## Phase 2 — Characterize every E2E test
@@ -37,7 +37,7 @@ Read each E2E test body (fan out parallel subagents over batches of 3-5 files fo
 Every suggestion must survive these checks (drop or downgrade to "uncertain" if not):
 
 - Name the exact seam (file:line of the function) and confirm it is callable without a cluster — no unexported entanglement with live clients that fake clients can't satisfy.
-- Check a unit test for that seam doesn't already exist (`grep` the seam name across `*_test.go`); if it exists, the finding is "redundant E2E assertion", not "missing unit test".
+- Check a unit test for that seam doesn't already exist (use package-qualified symbol search across `*_test.go` and verify the test invokes the function); if it exists, the finding is "redundant E2E assertion", not "missing unit test".
 - Confirm the E2E test would still have a reason to exist after extraction, or explicitly state it can be deleted and what residual smoke coverage (if any) replaces it.
 - Beware behaviors that LOOK like logic but are cluster-coupled: informer cache timing, conversion-webhook storage effects, owner-reference garbage collection, Prow retest semantics, anything the migration test covers. When unsure, classify as keep-E2E and say why.
 

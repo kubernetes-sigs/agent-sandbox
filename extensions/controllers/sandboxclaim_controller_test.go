@@ -4487,6 +4487,39 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	err = isAdoptable(ownedSandbox)
 	require.NoError(t, err)
 
+	// 5b. Mock a warm Sandbox created by a pre-v1beta1 pool controller: the
+	// owner reference apiVersion stays v1alpha1 across an in-place upgrade
+	// because storage migration never rewrites owner references.
+	legacyOwnedSandbox := unownedSandbox.DeepCopy()
+	legacyOwnedSandbox.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+			Kind:       "SandboxWarmPool",
+			Name:       "test-pool",
+			UID:        "pool-uid-123",
+			Controller: ptr.To(true), // nolint:modernize
+		},
+	}
+
+	// 5c. Verify it is still adoptable (version-agnostic group+kind match)
+	err = isAdoptable(legacyOwnedSandbox)
+	require.NoError(t, err)
+
+	// 5d. A controller from a different group must still be rejected
+	foreignGroupSandbox := unownedSandbox.DeepCopy()
+	foreignGroupSandbox.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "apps/v1",
+			Kind:       "SandboxWarmPool",
+			Name:       "test-pool",
+			UID:        "pool-uid-123",
+			Controller: ptr.To(true), // nolint:modernize
+		},
+	}
+	err = isAdoptable(foreignGroupSandbox)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not managed by warm pool")
+
 	// 6. Mock an owned Sandbox pointing to a different kind (e.g. SandboxClaim, which is NOT WarmPool)
 	ownedByClaimSandbox := unownedSandbox.DeepCopy()
 	ownedByClaimSandbox.OwnerReferences = []metav1.OwnerReference{

@@ -49,6 +49,10 @@ const (
 	warmPoolSandboxLabel            = sandboxv1beta1.SandboxWarmPoolLabel
 	sandboxCreateDeleteMaxBatchSize = 300
 	warmPoolEvictionAnnotation      = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+	// sandboxWarmPoolLabelIndex is the cache field index over the warmPoolSandboxLabel
+	// value on warm sandboxes, so reconcilePool's member lookup is O(pool members) instead
+	// of O(sandboxes-in-namespace).
+	sandboxWarmPoolLabelIndex = ".metadata.labels[" + warmPoolSandboxLabel + "]"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
@@ -115,10 +119,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		warmPoolSandboxLabel: poolNameHash,
 	})
 
-	if err := r.List(ctx, sandboxList, &client.ListOptions{
-		LabelSelector: labelSelector,
-		Namespace:     warmPool.Namespace,
-	}); err != nil {
+	if err := r.List(ctx, sandboxList,
+		client.InNamespace(warmPool.Namespace),
+		client.MatchingFields{sandboxWarmPoolLabelIndex: poolNameHash},
+	); err != nil {
 		logger.Error(err, "Failed to list sandboxes")
 		return err
 	}
@@ -589,19 +593,43 @@ func (r *SandboxWarmPoolReconciler) compareSandboxBlueprint(template *extensions
 		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
 }
 
+// sandboxWarmPoolLabelIndexer extracts the warmPoolSandboxLabel value for the
+// sandboxWarmPoolLabelIndex cache field index. Shared with tests so fake clients
+// register the same index the manager does.
+func sandboxWarmPoolLabelIndexer(obj client.Object) []string {
+	if v, ok := obj.GetLabels()[warmPoolSandboxLabel]; ok {
+		return []string{v}
+	}
+	return nil
+}
+
+// sandboxTemplateRefNameIndexer extracts the template reference name for the
+// TemplateRefField cache field index. Shared with tests so fake clients
+// register the same index the manager does.
+func sandboxTemplateRefNameIndexer(obj client.Object) []string {
+	wp := obj.(*extensionsv1beta1.SandboxWarmPool)
+	if wp.Spec.TemplateRef.Name == "" {
+		return nil
+	}
+	return []string{wp.Spec.TemplateRef.Name}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	if r.MaxBatchSize <= 0 {
 		r.MaxBatchSize = sandboxCreateDeleteMaxBatchSize
 	}
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, func(rawObj client.Object) []string {
-		wp := rawObj.(*extensionsv1beta1.SandboxWarmPool)
-		if wp.Spec.TemplateRef.Name == "" {
-			return nil
-		}
-		return []string{wp.Spec.TemplateRef.Name}
-	}); err != nil {
-		return err
+
+	// Index sandboxes by the warm pool label value
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1beta1.Sandbox{},
+		sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer); err != nil {
+		return fmt.Errorf("failed to index sandboxes by warm pool label: %w", err)
+	}
+
+	// Index warm pools by the template reference name
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &extensionsv1beta1.SandboxWarmPool{},
+		extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer); err != nil {
+		return fmt.Errorf("failed to index warm pools by template reference name: %w", err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

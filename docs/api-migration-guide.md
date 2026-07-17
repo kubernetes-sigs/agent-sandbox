@@ -281,13 +281,9 @@ done
 ### Step 6: Revert the CRD manifests and Controller
 Downgrade the installed components back to the old version:
 
-* **For Flow A (kubectl):** Re-apply the old version's manifests (substitute `<old-version>` with your previous version, e.g., `v0.4.6`). Note that for versions older than `v0.5.2` the core manifest is named `manifest.yaml`, while for `v0.5.2` and newer it is named `sandbox.yaml`:
+* **For Flow A (kubectl):** Re-apply the old version's manifests (substitute `<old-version>` with your previous version, e.g., `v0.4.6`):
   ```bash
-  # For <old-version> < v0.5.2:
   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/manifest.yaml
-  # For <old-version> >= v0.5.2:
-  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/sandbox.yaml
-
   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<old-version>/extensions.yaml
   ```
 * **For Flow B (Helm):** Roll back the Helm release to the pre-migration revision (find the revision number using `helm history agent-sandbox`):

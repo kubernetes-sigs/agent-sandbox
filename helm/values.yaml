@@ -40,10 +40,12 @@ controller:
   # kubeApiQps: -1.0
   # kubeApiBurst: 10
   # sandboxConcurrentWorkers: 1
-  ##### The following workers are only active when controller.extensions=true.
+  ##### The following are only active when controller.extensions=true.
   # sandboxClaimConcurrentWorkers: 50
   # sandboxWarmPoolConcurrentWorkers: 1
   # sandboxTemplateConcurrentWorkers: 1
+  # sandboxWarmPoolMaxBatchSize: 300  # max parallel sandbox create/delete batch in the SandboxWarmPool controller
+  # enableWarmPoolEviction: true      # mark warm-pool-created pods as safe to evict
   ##### extraArgs passes additional flags not listed above (e.g. zap logging flags).
   extraArgs: []
 

@@ -75,7 +75,12 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
         build_cmd.extend(["-t", extra_tag])
     build_cmd.extend([
         "-f",
-        os.path.basename(dockerfile_path),
+        # Resolve the Dockerfile relative to the build context (the command
+        # runs with cwd=srcdir): when a per-Dockerfile override sets the
+        # context to another directory (sandbox-router-go uses the repo
+        # root), the basename would silently pick that directory's
+        # Dockerfile instead.
+        os.path.relpath(dockerfile_path, srcdir),
         ".",
     ])
     # Inject version info into Go binaries

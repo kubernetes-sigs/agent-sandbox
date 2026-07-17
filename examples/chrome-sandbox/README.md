@@ -18,11 +18,13 @@ kind: Sandbox
 metadata:
   name: chrome-sandbox
 spec:
-  containers:
-    - name: chrome
-      image: registry.k8s.io/chrome-sandbox
-      ports:
-        - containerPort: 9222
+  podTemplate:
+    spec:
+      containers:
+        - name: chrome
+          image: registry.k8s.io/chrome-sandbox
+          ports:
+            - containerPort: 9222
 ```
 
 ## How to Run
@@ -35,7 +37,7 @@ kubectl apply -f chrome-sandbox.yaml
 Port-forward to access Chrome debugging endpoint:
 
 ```bash
-kubectl port-forward sandbox/chrome-sandbox 9222:9222 
+kubectl port-forward pod/chrome-sandbox 9222:9222
 ```
 ---
 

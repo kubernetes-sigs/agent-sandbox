@@ -121,18 +121,49 @@ cleanup() {
 
 trap cleanup EXIT
 
+# CNI selects the cluster networking (any kOps --networking value; we
+# exercise cilium and kindnet in CI). Running the same benchmark under two
+# CNIs separates CNI costs from the rest of the sandbox launch pipeline.
+CNI="${CNI:-cilium}"
+echo "Using CNI: ${CNI}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
+#
+# authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
+# kube-controller-manager and kube-scheduler so the stress test can scrape
+# them through the apiserver pod proxy (the apiserver strips the
+# Authorization header after authenticating, so the proxied request is
+# anonymous and the default delegated authorization rejects it with 403).
+# The health probe paths must be repeated because setting the field replaces
+# the upstream default, and kOps liveness probes hit /healthz.
+# Ports 10257/10259 are not internet-reachable: kOps GCE creates a
+# deny-by-default VPC and only control-plane instances can reach them.
+#
+# cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the
+# stress test can scrape them (promscrape.go already targets this port; the
+# 2077449092094496768 run showed pod-sandbox creation as the launch
+# bottleneck, and CNI endpoint regeneration latency lives in these metrics).
 kops create cluster \
   --cloud=gce \
   --gce-service-account=default \
+  --networking="${CNI}" \
   --name="${CLUSTER_NAME}" \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
   --control-plane-size=n2-standard-8 \
   --node-count=3 \
-  --node-size=n2-standard-8
+  --node-size=n2-standard-8 \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/healthz \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/readyz \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/livez \
+  --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/metrics \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/healthz \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/readyz \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
+  --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
 
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes
@@ -158,7 +189,61 @@ dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
 echo "Benchmark completed successfully."
 
 
-# Run the stress test
+# Run the stress test.
+#
+# Phases are a comma-separated list of names (see test/stress/main.go):
+#   fill              long-running background sandboxes (scale)
+#   probe             low-concurrency launch latency
+#   throughput-mifN   closed-loop churn capped at N in-flight
+#
+# Keep fill (fill-per-node * nodes) + max(mifN) below spare pod capacity
+# (roughly 3 * 110 minus system pods on the default cluster); the test
+# refuses to run if they don't fit.
+# Defaults below are sized for the default 3-node cluster.
+STRESS_OUTPUT_DIR="${ARTIFACTS:-.}/stress-test/"
+mkdir -p "${STRESS_OUTPUT_DIR}"
+
+capture_stress_diagnostics() {
+  echo "Capturing controller diagnostics..."
+  kubectl logs deployment/agent-sandbox-controller --namespace agent-sandbox-system --tail=-1 > "${STRESS_OUTPUT_DIR}/controller.log" || true
+  kubectl get pods -A -o wide > "${STRESS_OUTPUT_DIR}/pods.txt" || true
+  kubectl get nodes -o wide > "${STRESS_OUTPUT_DIR}/nodes.txt" || true
+  kubectl top nodes > "${STRESS_OUTPUT_DIR}/top-nodes.txt" 2>/dev/null || true
+}
+
 echo "Running stress test"
-go run ./test/stress --sandbox-count 200 --create-concurrency 50 --output-dir="${ARTIFACTS:-.}/stress-test/"
+# Prometheus metrics from the apiserver, kube-controller-manager,
+# kube-scheduler, the sandbox controller, and kubelets are collected by the
+# stress tool itself (metrics.jsonl.gz; see --collect-metrics).
+set +o errexit
+go run ./test/stress \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
+  --probe-count="${STRESS_PROBE_COUNT:-30}" \
+  --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \
+  --throughput-min-seconds="${STRESS_THROUGHPUT_MIN_SECONDS:-45}" \
+  --create-concurrency="${STRESS_CREATE_CONCURRENCY:-50}" \
+  --timeout="${STRESS_TIMEOUT:-30m}" \
+  --output-dir="${STRESS_OUTPUT_DIR}"
+stress_status=$?
+set -o errexit
+capture_stress_diagnostics
+
+# Generate stress test report
+REPORT_OUTPUT_DIR="${ARTIFACTS:-.}/stress-report"
+echo "Generating stress test report to ${REPORT_OUTPUT_DIR}..."
+if python3 -c "import venv" >/dev/null 2>&1; then
+  python3 -m venv "${BINDIR}/report-venv"
+  "${BINDIR}/report-venv/bin/pip" install --quiet 'duckdb>=1,<2' 'jinja2>=3,<4'
+  "${BINDIR}/report-venv/bin/python3" test/stress/generate-report/generate_report.py \
+    --input-dir "${STRESS_OUTPUT_DIR}" \
+    --output-dir "${REPORT_OUTPUT_DIR}"
+  echo "Report generated successfully."
+else
+  echo "Warning: python3 venv module not available, skipping report generation."
+fi
+
+if [[ "${stress_status}" -ne 0 ]]; then
+  exit "${stress_status}"
+fi
 echo "Stress test completed successfully."

@@ -252,6 +252,46 @@ def main():
         for row in cri_ts_raw
     ]
 
+    # Kubelet pod-start pipeline: pod_start_sli is the kubelet's own measure
+    # of starting a pod (excluding image pulls and scheduling). Comparing it
+    # to run_podsandbox splits node-local latency into "inside the CRI
+    # sandbox call" vs "queued around it in kubelet pod workers".
+    print("Querying kubelet pod start pipeline...")
+    pod_start_by_phase = {
+        row[0]: (row[1], row[2]) for row in metrics_by_phase(
+            conn, metrics_path_str,
+            metrics=["kubelet_pod_start_sli_duration_seconds_count",
+                     "kubelet_pod_start_sli_duration_seconds_sum"])
+        if row[1] > 0
+    }
+    run_podsandbox_by_phase = {
+        row[0]: (row[1], row[2]) for row in metrics_by_phase(
+            conn, metrics_path_str,
+            metrics=["kubelet_runtime_operations_duration_seconds_count",
+                     "kubelet_runtime_operations_duration_seconds_sum"],
+            labels={"operation_type": "operation_type"},
+            group_by=[],
+            where="operation_type = 'run_podsandbox'")
+        if row[1] > 0
+    }
+
+    pod_start = []
+    for phase in summary.get('phases', []):
+        name = phase['name']
+        if name not in pod_start_by_phase:
+            continue
+        n, total = pod_start_by_phase[name]
+        start_avg_s = total / n
+        rp_n, rp_total = run_podsandbox_by_phase.get(name, (0, 0.0))
+        sandbox_avg_s = rp_total / rp_n if rp_n > 0 else 0.0
+        pod_start.append({
+            "phase_name": name,
+            "count": int(n),
+            "start_avg_s": start_avg_s,
+            "sandbox_avg_s": sandbox_avg_s,
+            "other_avg_s": max(start_avg_s - sandbox_avg_s, 0.0)
+        })
+
     print("Querying controller performance by phase...")
     controller_ops_raw = metrics_by_phase(
         conn, metrics_path_str,
@@ -734,6 +774,31 @@ def main():
             "link": "cri.html"
         })
 
+    # Kubelet pod-start pipeline check: the node-local launch pipeline is
+    # congested even if no single stage below it trips its own threshold.
+    # Baseline against the probe phase (uncontended single-flight launches)
+    # rather than a magic constant.
+    pod_start_baseline_s = None
+    for row in pod_start:
+        if row['phase_name'] == 'probe':
+            pod_start_baseline_s = row['start_avg_s']
+
+    pod_start_worst = None
+    for row in pod_start:
+        if row['phase_name'].startswith('throughput'):
+            if pod_start_worst is None or row['start_avg_s'] > pod_start_worst['start_avg_s']:
+                pod_start_worst = row
+
+    if (pod_start_worst and pod_start_baseline_s is not None
+            and pod_start_worst['start_avg_s'] > max(3.0, 3 * pod_start_baseline_s)):
+        w = pod_start_worst
+        findings.append({
+            "severity": "critical" if w['start_avg_s'] > 10.0 else "warning",
+            "title": f"Kubelet Pod-Start Pipeline Congested ({w['start_avg_s']:.1f}s avg)",
+            "desc": f"During phase {w['phase_name']}, the kubelet took an average of {w['start_avg_s']:.1f}s to start each pod (pod_start_sli, which excludes image pulls and scheduling) against an uncontended baseline of {pod_start_baseline_s:.1f}s in the probe phase. {w['sandbox_avg_s']:.1f}s of that is inside the CRI run_podsandbox call and {w['other_avg_s']:.1f}s is queueing around it in kubelet pod workers — the launch pipeline is saturated on the nodes themselves. See the per-phase breakdown on the CRI page; digging further needs node-level profiling (containerd/CNI plugin execution).",
+            "link": "cri.html"
+        })
+
     # Controller check: ratio of reconciles per sandbox created
     phase_created_map = {p['name']: p.get('created', 0) for p in summary.get('phases', [])}
     
@@ -954,6 +1019,7 @@ def main():
         "active_page": "cri",
         "summary": summary,
         "cri_ops": cri_ops,
+        "pod_start": pod_start,
         "chart_data": cri_chart_data,
         "phases": js_phases
     }

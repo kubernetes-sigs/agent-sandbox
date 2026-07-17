@@ -112,6 +112,7 @@ spec:
             items:
               - key: server_key
                 path: ssh_host_ed25519_key
+            defaultMode: 0400
 ---
 # NodePort for kind/bare clusters; switch to LoadBalancer on cloud.
 apiVersion: v1

@@ -104,7 +104,7 @@ echo "not whatever command the client sends, so we speak MCP directly)..."
 INIT_REQUEST='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"kind-smoke-test","version":"0.0.1"}}}'
 RESPONSE=$(printf '%s\n' "${INIT_REQUEST}" | timeout 10 ssh -i "${KEYDIR}/agent_ed25519" -p 2222 \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  agent@localhost)
+  agent@localhost || true)
 
 if ! printf '%s' "${RESPONSE}" | grep -q '"containarium-agent-box"'; then
   echo "FAIL: no MCP initialize response from agent-box over SSH" >&2
@@ -137,6 +137,9 @@ echo "Switching boxes by SSH username through the gateway (plain TCP to the"
 echo "NodePort — the agent's path holds only its SSH key; kubectl is not"
 echo "involved). Each session runs MCP shell_exec(hostname) to prove which"
 echo "box answered..."
+# Assumes a Linux host: on kind with Docker Desktop (macOS/Windows), the node
+# InternalIP is only reachable from inside the Docker VM, so this NodePort
+# check won't reach it from the host. Use kind's extraPortMappings there.
 NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 sleep 5
 INITIALIZED_NOTIF='{"jsonrpc":"2.0","method":"notifications/initialized"}'
@@ -145,7 +148,7 @@ for name in box-a box-b; do
   RESPONSE=$(printf '%s\n%s\n%s\n' "${INIT_REQUEST}" "${INITIALIZED_NOTIF}" "${HOSTNAME_CALL}" \
     | timeout 25 ssh -i "${KEYDIR}/agent_ed25519" -p 32022 \
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes \
-        "${name}@${NODE_IP}")
+        "${name}@${NODE_IP}" || true)
   if ! printf '%s' "${RESPONSE}" | grep -q '"containarium-agent-box"'; then
     echo "FAIL: no MCP initialize response from ${name} through the gateway" >&2
     echo "Got: ${RESPONSE}" >&2

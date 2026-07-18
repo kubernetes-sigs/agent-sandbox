@@ -78,8 +78,19 @@ fi
 export IMAGE_TAG
 echo "Using image tag: ${IMAGE_TAG}"
 
+# STRESS_NODE_PROFILER deploys the bpftrace node-profiler DaemonSet
+# (test/stress/profiler/) during the stress test, capturing node-side pod
+# startup/teardown costs that API-side data cannot see: fsync / off-CPU
+# blocking time, CPU stacks, and the containerd event stream. Best-effort
+# at runtime; needs the bpftrace image pushed below.
+STRESS_NODE_PROFILER="${STRESS_NODE_PROFILER:-true}"
+
 # Push images
-for image in "agent-sandbox-controller" "chrome-sandbox"; do
+PUSH_IMAGES=("agent-sandbox-controller" "chrome-sandbox")
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  PUSH_IMAGES+=("bpftrace")
+fi
+for image in "${PUSH_IMAGES[@]}"; do
   echo "Pushing ${image} to ${IMAGE_PREFIX}..."
   dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
 done
@@ -127,6 +138,11 @@ trap cleanup EXIT
 CNI="${CNI:-cilium}"
 echo "Using CNI: ${CNI}"
 
+# Node machine type. The default here is the local-SSD experiment: C3 with a
+# bundled 375GB local NVMe SSD, mounted at /var/lib/containerd below.
+STRESS_NODE_SIZE="${STRESS_NODE_SIZE:-c3-standard-8-lssd}"
+echo "Using node size: ${STRESS_NODE_SIZE}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 #
@@ -144,6 +160,13 @@ echo "Creating kOps cluster configuration..."
 # stress test can scrape them (promscrape.go already targets this port; the
 # 2077449092094496768 run showed pod-sandbox creation as the launch
 # bottleneck, and CNI endpoint regeneration latency lives in these metrics).
+# Only set when cilium is the CNI: the --set alone materializes a
+# spec.networking.cilium section, and kOps rejects a cluster with two
+# networking options.
+CNI_KOPS_FLAGS=()
+if [[ "${CNI}" == "cilium" ]]; then
+    CNI_KOPS_FLAGS+=("--set" "cluster.spec.networking.cilium.enablePrometheusMetrics=true")
+fi
 kops create cluster \
   --cloud=gce \
   --gce-service-account=default \
@@ -154,7 +177,7 @@ kops create cluster \
   --control-plane-count=1 \
   --control-plane-size=n2-standard-8 \
   --node-count=3 \
-  --node-size=n2-standard-8 \
+  --node-size="${STRESS_NODE_SIZE}" \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/livez \
@@ -163,7 +186,82 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
-  --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
+  ${CNI_KOPS_FLAGS[@]+"${CNI_KOPS_FLAGS[@]}"}
+
+# fsync isolation experiment: /var/lib/containerd on tmpfs (worker nodes
+# only). The 1122 profiling measured ~42 fdatasync+fsync calls per pod in
+# containerd (bolt metadata + content store); tmpfs makes those syncs free,
+# so an A/B against this knob measures the true upper bound of the fsync
+# theory. Benchmark-only (images/snapshots do not survive reboot). Default
+# false so the benchmark measures realistic disk-backed nodes.
+STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-false}"
+if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
+  echo "Adding containerd-on-tmpfs hook to cluster spec..."
+  # `kops get -o yaml` emits top-level keys sorted (apiVersion, kind,
+  # metadata, spec), so appending 2-space-indented keys extends spec.
+  kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster.yaml"
+  cat >> "${WORKDIR}/cluster.yaml" <<'HOOK_EOF'
+  hooks:
+  - name: containerd-tmpfs
+    before:
+    - containerd.service
+    roles:
+    - Node
+    manifest: |
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/mkdir -p /var/lib/containerd
+      ExecStart=/bin/mount -t tmpfs -o size=16g tmpfs /var/lib/containerd
+HOOK_EOF
+  kops replace -f "${WORKDIR}/cluster.yaml"
+fi
+
+# Local-SSD experiment: run /var/lib/containerd on the node's bundled local
+# NVMe SSD. The fsync profile (containerd bolt/content-store fdatasync,
+# overlayfs teardown sync, kubelet checkpoints) is per-IOPS-latency bound on
+# a pd boot disk (26-36% iowait, load 14-21 on 8 cores at throughput-mif200,
+# run 2078168408230203392); local SSD makes those syncs ~free and is a
+# realistic node profile for ephemeral sandbox fleets, unlike tmpfs.
+# Mutually exclusive with STRESS_CONTAINERD_TMPFS (both mount over
+# /var/lib/containerd, and each appends its own hooks section).
+if [[ "${STRESS_NODE_SIZE}" == *-lssd ]]; then
+  if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
+    echo "ERROR: STRESS_CONTAINERD_TMPFS and an -lssd node size are mutually exclusive"
+    exit 1
+  fi
+  echo "Configuring local SSD for /var/lib/containerd..."
+  # C3 machines do not support pd-standard boot disks (kOps' GCE default);
+  # move the node IG root volume to pd-balanced.
+  kops get instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" -o yaml > "${WORKDIR}/nodes-ig.yaml"
+  python3 - "${WORKDIR}/nodes-ig.yaml" <<'IG_EOF'
+import sys
+path = sys.argv[1]
+s = open(path).read()
+assert "rootVolume" not in s, "rootVolume already set; refusing to overwrite"
+s = s.replace("spec:\n", "spec:\n  rootVolume:\n    type: pd-balanced\n", 1)
+open(path, "w").write(s)
+IG_EOF
+  kops replace -f "${WORKDIR}/nodes-ig.yaml"
+
+  # Format and mount the local NVMe SSD before containerd starts. The
+  # by-id symlink is provided by the GCE guest environment.
+  kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster.yaml"
+  cat >> "${WORKDIR}/cluster.yaml" <<'HOOK_EOF'
+  hooks:
+  - name: containerd-local-ssd
+    before:
+    - containerd.service
+    roles:
+    - Node
+    manifest: |
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/sbin/mkfs.ext4 -F /dev/disk/by-id/google-local-nvme-ssd-0
+      ExecStart=/bin/mkdir -p /var/lib/containerd
+      ExecStart=/bin/mount -o discard,noatime /dev/disk/by-id/google-local-nvme-ssd-0 /var/lib/containerd
+HOOK_EOF
+  kops replace -f "${WORKDIR}/cluster.yaml"
+fi
 
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes
@@ -174,32 +272,34 @@ kops export kubeconfig --name "${CLUSTER_NAME}" --admin
 echo "Waiting for cluster to be ready..."
 kops validate cluster --wait 10m
 
-# Raise Cilium's endpoint-create API rate limit. The agent rate-limits
-# endpoint creation (the synchronous PUT /v1/endpoint the CNI plugin makes
-# during every pod sandbox creation) to 0.5/s with auto-adjustment anchored
-# to a 2s estimated processing duration. Under churn, queueing pushes mean
-# processing toward that anchor, so the auto-adjusted limit converges to
-# ~2 creates/s per node while actual endpoint work takes ~100ms — capping
-# pod launch throughput at the limiter, not the datapath (see the stress
-# report's Cilium page, e.g. run 2077526390265090048: 20.8s mean limiter
-# wait vs 1.6s processing at throughput-mif200). Raise the limits and
-# disable auto-adjustment so the stress test measures the CNI datapath's
-# real capacity; kOps applies its addons at bootstrap, so this patch is not
-# reverted during the run.
-echo "Raising Cilium endpoint-create API rate limits..."
-# k8s-client-qps/burst: with the endpoint-create limiter raised, the next
-# cork is cilium-agent's client-go QPS limit (default 5/s, burst 10): run
-# 2077921435870826496 showed ~0.4s of client-side throttle wait per POST and
-# ~1.4s per DELETE to the apiserver during churn, ~7s per endpoint create in
-# total, while the apiserver itself answered in ~20ms.
-kubectl --namespace kube-system patch configmap cilium-config --type merge \
-  --patch '{"data":{"api-rate-limit":"endpoint-create=rate-limit:100/s,rate-burst:100,parallel-requests:32,auto-adjust:false","k8s-client-qps":"50","k8s-client-burst":"100"}}'
-# kOps deploys the cilium DaemonSet with updateStrategy=OnDelete, so
-# "rollout restart" never recreates the pods (and "rollout status" errors
-# out). Delete the agent pods so the DaemonSet brings them back with the
-# new config, then re-validate the cluster to wait for them to be Ready.
-kubectl --namespace kube-system delete pods --selector=k8s-app=cilium
-kops validate cluster --wait 5m
+if [[ "${CNI}" == "cilium" ]]; then
+  # Raise Cilium's endpoint-create API rate limit. The agent rate-limits
+  # endpoint creation (the synchronous PUT /v1/endpoint the CNI plugin makes
+  # during every pod sandbox creation) to 0.5/s with auto-adjustment anchored
+  # to a 2s estimated processing duration. Under churn, queueing pushes mean
+  # processing toward that anchor, so the auto-adjusted limit converges to
+  # ~2 creates/s per node while actual endpoint work takes ~100ms — capping
+  # pod launch throughput at the limiter, not the datapath (see the stress
+  # report's Cilium page, e.g. run 2077526390265090048: 20.8s mean limiter
+  # wait vs 1.6s processing at throughput-mif200). Raise the limits and
+  # disable auto-adjustment so the stress test measures the CNI datapath's
+  # real capacity; kOps applies its addons at bootstrap, so this patch is not
+  # reverted during the run.
+  echo "Raising Cilium endpoint-create API rate limits..."
+  # k8s-client-qps/burst: with the endpoint-create limiter raised, the next
+  # cork is cilium-agent's client-go QPS limit (default 5/s, burst 10): run
+  # 2077921435870826496 showed ~0.4s of client-side throttle wait per POST and
+  # ~1.4s per DELETE to the apiserver during churn, ~7s per endpoint create in
+  # total, while the apiserver itself answered in ~20ms.
+  kubectl --namespace kube-system patch configmap cilium-config --type merge \
+    --patch '{"data":{"api-rate-limit":"endpoint-create=rate-limit:100/s,rate-burst:100,parallel-requests:32,auto-adjust:false","k8s-client-qps":"50","k8s-client-burst":"100"}}'
+  # kOps deploys the cilium DaemonSet with updateStrategy=OnDelete, so
+  # "rollout restart" never recreates the pods (and "rollout status" errors
+  # out). Delete the agent pods so the DaemonSet brings them back with the
+  # new config, then re-validate the cluster to wait for them to be Ready.
+  kubectl --namespace kube-system delete pods --selector=k8s-app=cilium
+  kops validate cluster --wait 5m
+fi
 
 # Deploy to cluster
 echo "Deploying to cluster..."
@@ -237,6 +337,18 @@ capture_stress_diagnostics() {
   kubectl top nodes > "${STRESS_OUTPUT_DIR}/top-nodes.txt" 2>/dev/null || true
 }
 
+# Deploy the node profiler so node-side pod startup/teardown costs are
+# captured during the stress test. See test/stress/profiler/profiler.yaml
+# for what is recorded and why.
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Deploying node profiler..."
+  # bpftrace:latest -> ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG} (images/bpftrace).
+  sed "s|image: bpftrace:latest|image: ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG}|g" \
+    test/stress/profiler/profiler.yaml | kubectl apply -f -
+  # Best-effort: a missing image or unsupported kernel should not fail the run.
+  kubectl rollout status daemonset/stress-node-profiler --namespace stress-node-profiler --timeout=2m || true
+fi
+
 echo "Running stress test"
 # Prometheus metrics from the apiserver, kube-controller-manager,
 # kube-scheduler, the sandbox controller, and kubelets are collected by the
@@ -254,6 +366,23 @@ go run ./test/stress \
 stress_status=$?
 set -o errexit
 capture_stress_diagnostics
+
+# Harvest per-node profiler logs into the artifacts directory. Log names
+# match what test/stress/profiler/analyze-fsync.py expects
+# (profiler-fsync-<node>.log etc).
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Harvesting node profiler logs..."
+  kubectl get pods --namespace stress-node-profiler \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}' | \
+  while read -r pod node; do
+    kubectl logs --namespace stress-node-profiler "${pod}" -c fsync-trace > "${STRESS_OUTPUT_DIR}/profiler-fsync-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c extra-trace > "${STRESS_OUTPUT_DIR}/profiler-extra-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c cpu-trace > "${STRESS_OUTPUT_DIR}/profiler-cpu-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c offcpu-trace > "${STRESS_OUTPUT_DIR}/profiler-offcpu-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c nodestat > "${STRESS_OUTPUT_DIR}/profiler-nodestat-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c ctr-events > "${STRESS_OUTPUT_DIR}/profiler-ctr-events-${node}.log" || true
+  done
+fi
 
 # Generate stress test report
 REPORT_OUTPUT_DIR="${ARTIFACTS:-.}/stress-report"

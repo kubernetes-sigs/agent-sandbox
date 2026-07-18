@@ -253,9 +253,11 @@ def main():
     ]
 
     # Kubelet pod-start pipeline: pod_start_sli is the kubelet's own measure
-    # of starting a pod (excluding image pulls and scheduling). Comparing it
-    # to run_podsandbox splits node-local latency into "inside the CRI
-    # sandbox call" vs "queued around it in kubelet pod workers".
+    # of starting a pod (excluding image pulls and scheduling). run_podsandbox
+    # is a separately-counted CRI histogram, so the two averages are over
+    # different populations (retries, in-flight-at-scrape) and their
+    # difference is an approximation of the non-CRI portion, not an exact
+    # decomposition -- treat it as "roughly how much is outside the CRI call".
     print("Querying kubelet pod start pipeline...")
     pod_start_by_phase = {
         row[0]: (row[1], row[2]) for row in metrics_by_phase(
@@ -289,6 +291,8 @@ def main():
             "count": int(n),
             "start_avg_s": start_avg_s,
             "sandbox_avg_s": sandbox_avg_s,
+            # Approximate: pod_start_sli and run_podsandbox are different
+            # populations, so this difference is indicative, not exact.
             "other_avg_s": max(start_avg_s - sandbox_avg_s, 0.0)
         })
 
@@ -795,7 +799,7 @@ def main():
         findings.append({
             "severity": "critical" if w['start_avg_s'] > 10.0 else "warning",
             "title": f"Kubelet Pod-Start Pipeline Congested ({w['start_avg_s']:.1f}s avg)",
-            "desc": f"During phase {w['phase_name']}, the kubelet took an average of {w['start_avg_s']:.1f}s to start each pod (pod_start_sli, which excludes image pulls and scheduling) against an uncontended baseline of {pod_start_baseline_s:.1f}s in the probe phase. {w['sandbox_avg_s']:.1f}s of that is inside the CRI run_podsandbox call and {w['other_avg_s']:.1f}s is queueing around it in kubelet pod workers — the launch pipeline is saturated on the nodes themselves. See the per-phase breakdown on the CRI page; digging further needs node-level profiling (containerd/CNI plugin execution).",
+            "desc": f"During phase {w['phase_name']}, the kubelet took an average of {w['start_avg_s']:.1f}s to start each pod (pod_start_sli, which excludes image pulls and scheduling) against an uncontended baseline of {pod_start_baseline_s:.1f}s in the probe phase. The CRI run_podsandbox call averaged {w['sandbox_avg_s']:.1f}s over the same phase (a separately-counted metric, so roughly {w['other_avg_s']:.1f}s of pod start is outside that call — in kubelet pod-worker queueing). The launch pipeline is saturated on the nodes themselves. See the per-phase breakdown on the CRI page; digging further needs node-level profiling (containerd/CNI plugin execution).",
             "link": "cri.html"
         })
 

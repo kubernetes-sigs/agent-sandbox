@@ -34,8 +34,9 @@
     <div class="card-title">Kubelet Pod Start Pipeline by Phase</div>
     <div class="card-desc" style="margin-bottom: 8px;">
         pod_start_sli is the kubelet's own pod-startup time (excludes image pulls and
-        scheduling). The split shows how much of it is inside the CRI run_podsandbox call
-        vs queued around it in kubelet pod workers.
+        scheduling); run_podsandbox is the separately-counted CRI call. They are measured
+        over different populations, so "outside run_podsandbox" is their approximate
+        difference (kubelet pod-worker queueing), not an exact split.
     </div>
     <div class="table-container">
         <table id="pod-start-table"></table>
@@ -58,7 +59,7 @@
         {key: 'count', label: 'Pods Started'},
         {key: 'start_avg_s', label: 'Avg Pod Start (SLI)', render: secBadge(3, 10)},
         {key: 'sandbox_avg_s', label: 'of which run_podsandbox', render: secBadge(2, 5)},
-        {key: 'other_avg_s', label: 'of which kubelet workers', render: secBadge(2, 5)}
+        {key: 'other_avg_s', label: 'outside run_podsandbox (approx)', render: secBadge(2, 5)}
     ], podStart);
 
     const criOps = {{ cri_ops | tojson }};

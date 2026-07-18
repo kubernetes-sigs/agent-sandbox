@@ -1,19 +1,11 @@
 # Containarium SSH Sandbox Example
 
-This example demonstrates how to run [Containarium](https://github.com/FootprintAI/Containarium)'s
-`agent-box` runtime inside an Agent Sandbox, giving an AI agent an
-**SSH-reachable, MCP-native environment** — the agent holds only an SSH key,
-never a kube-apiserver token or cluster credentials.
-
-> **How this relates to Containarium's own backend.** As of v0.52,
-> Containarium's Kubernetes box backend runs *on this CRD*: it replaced a
-> bespoke `StatefulSet`/`Service`/`NetworkPolicy` reconciler with one that
-> reconciles `Sandbox` objects (`pkg/core/box/k8s/`). This example is the same
-> building blocks — the same `agent-box` image, the same SSH+MCP contract —
-> composed by hand so every object is visible, rather than programmed for you
-> by the Containarium daemon. Read it as "here are the pieces Containarium
-> wires together," useful whether you run Containarium or just want its
-> credential-scoped SSH/MCP access pattern as one more agent-sandbox workload.
+This example demonstrates an **SSH-reachable, MCP-native access pattern** for
+the `Sandbox` CRD: the agent holds only an SSH key, never a kube-apiserver
+token or cluster credentials. Every SSH session is pinned by a forced command
+straight into an MCP server, so the key can start that server and nothing
+else — see [See also](#see-also) for the specific runtime image this example
+runs.
 
 ## Why SSH-based access?
 
@@ -239,25 +231,6 @@ credential is spent once, by the operator, at deploy time — the agent's
 ongoing credential is a single SSH key that can do nothing cluster-scoped even
 if it leaks.
 
-This is the pattern [Containarium](https://github.com/FootprintAI/Containarium)'s
-Kubernetes backend automates: its daemon programs one `Pipe` per box and
-manages the key Secrets, so `ssh <box>@<gateway>` just works, and a fleet
-sentinel fronts many clusters behind one public address. See the
-[K8s agent-box runtime design](https://github.com/FootprintAI/Containarium/blob/main/docs/K8S-AGENT-BOX-RUNTIME-DESIGN.md)
-for the full topology.
-
-A way to see the division of labor: sshpiper and agent-sandbox are the `nginx`
-and the `kubelet` of this stack — focused, excellent primitives. sshpiper
-terminates and routes the SSH hop; agent-sandbox owns the pod's identity,
-lifecycle, and storage. Containarium is the control plane and the workload on
-top: it decides *what* runs (the `agent-box` MCP image), *how it's reached*
-(one `Pipe` per box, key Secrets kept in sync as boxes come and go), *which
-credential is spent where* (the agent's key never leaves the gateway; the box
-trusts only the upstream key), and *how one address covers a whole fleet* (a
-sentinel chaining many clusters behind a single public endpoint). Adopting the
-`Sandbox` CRD is what let Containarium delete its own low-level reconciler and
-keep only those differentiated parts.
-
 ## Hardening notes
 
 - Constrain the agent's file operations by setting `AGENTBOX_ROOT` in the
@@ -288,11 +261,22 @@ keep only those differentiated parts.
 ```bash
 # gateway path
 kubectl delete --ignore-not-found -f sshpiper.yaml
-kubectl delete --ignore-not-found sandbox box-a box-b
-kubectl delete --ignore-not-found pipe box-a box-b
+kubectl delete --ignore-not-found -f gateway-demo.yaml
 kubectl delete --ignore-not-found secret containarium-ssh-key agent-authorized-keys sshpiper-server-key sshpiper-upstream-key
 
 # or the local smoke test
 kubectl delete --ignore-not-found -f containarium-sandbox.yaml
 kubectl delete --ignore-not-found secret direct-box-authorized-keys
 ```
+
+## See also
+
+This example runs [Containarium](https://github.com/FootprintAI/Containarium)'s
+`agent-box` image as the MCP runtime (dropbear + forced command, as described
+above) — see [Building agent-box from source](#building-agent-box-from-source)
+for how it's built. Containarium's own Kubernetes backend automates this same
+access pattern at fleet scale — one `Pipe` per box, key Secrets kept in sync
+as boxes come and go, a sentinel fronting many clusters behind one public
+address. See its
+[K8s agent-box runtime design doc](https://github.com/FootprintAI/Containarium/blob/main/docs/K8S-AGENT-BOX-RUNTIME-DESIGN.md)
+if you want that context.

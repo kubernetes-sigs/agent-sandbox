@@ -25,7 +25,7 @@
 # silently discarded); instead this script speaks one round of MCP
 # JSON-RPC over the SSH stdio channel and checks for a real response.
 
-set -e
+set -euo pipefail
 
 # `kubectl wait --for=create` needs kubectl >= 1.31; poll for the pod to exist
 # instead so this runs on older clients too. Args: <label-selector> [timeout-s].
@@ -103,7 +103,7 @@ echo "Checking SSH -> MCP stdio (dropbear's forced command runs agent-box,"
 echo "not whatever command the client sends, so we speak MCP directly)..."
 INIT_REQUEST='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"kind-smoke-test","version":"0.0.1"}}}'
 RESPONSE=$(printf '%s\n' "${INIT_REQUEST}" | timeout 10 ssh -i "${KEYDIR}/agent_ed25519" -p 2222 \
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes \
   agent@localhost || true)
 
 if ! printf '%s' "${RESPONSE}" | grep -q '"containarium-agent-box"'; then

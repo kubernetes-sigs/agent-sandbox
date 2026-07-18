@@ -197,6 +197,37 @@ if [[ "${CNI}" == "cilium" ]]; then
     --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
 fi
 
+# Overlay 'volatile' experiment: mount container overlayfs with the volatile
+# option (kernel 5.10+), which skips ALL syncs of the overlay including the
+# ovl_sync_fs storm at pod teardown that the node profiler measured (run
+# 2078168408230203392). Sandbox pods are ephemeral: after a node crash the
+# upperdir is discarded anyway, which is exactly the volatile contract.
+# The containerd overlayfs snapshotter reads mount_options from its config;
+# kOps configAdditions cannot express TOML arrays, so a node hook appends
+# the snippet to /etc/containerd/config.toml (the file kOps generates and
+# points containerd at) before containerd starts. The base64 payload decodes
+# to:
+#   [plugins."io.containerd.snapshotter.v1.overlayfs"]
+#     mount_options = ["volatile"]
+STRESS_OVERLAY_VOLATILE="${STRESS_OVERLAY_VOLATILE:-true}"
+if [[ "${STRESS_OVERLAY_VOLATILE}" == "true" ]]; then
+  echo "Adding overlayfs volatile hook to cluster spec..."
+  kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster.yaml"
+  cat >> "${WORKDIR}/cluster.yaml" <<'HOOK_EOF'
+  hooks:
+  - name: containerd-overlay-volatile
+    before:
+    - containerd.service
+    roles:
+    - Node
+    manifest: |
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/sh -c "echo CltwbHVnaW5zLiJpby5jb250YWluZXJkLnNuYXBzaG90dGVyLnYxLm92ZXJsYXlmcyJdCiAgbW91bnRfb3B0aW9ucyA9IFsidm9sYXRpbGUiXQo= | base64 -d >> /etc/containerd/config.toml"
+HOOK_EOF
+  kops replace -f "${WORKDIR}/cluster.yaml"
+fi
+
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes
 

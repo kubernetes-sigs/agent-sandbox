@@ -127,6 +127,16 @@ trap cleanup EXIT
 CNI="${CNI:-cilium}"
 echo "Using CNI: ${CNI}"
 
+# Cluster-scale experiment: 20 worker nodes instead of 3. Per-node launch
+# throughput is wall-limited at ~5 pods/s (node I/O; see the Node Kernel
+# report page), so cluster throughput scales with node count -- this run
+# pushes ~100 pods/s through the control plane to find the cluster-scale
+# bottlenecks (apiserver CPU hit 4.5-5.5 cores at ~87/s in the 1122-era
+# runs; the sandbox controller workqueue and KCM client QPS are the other
+# candidates).
+STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
+echo "Using node count: ${STRESS_NODE_COUNT}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -138,7 +148,7 @@ kops create cluster \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
   --control-plane-size=n2-standard-8 \
-  --node-count=3 \
+  --node-count="${STRESS_NODE_COUNT}" \
   --node-size=n2-standard-8
 
 # Spec tuning is applied as separate `kops edit cluster --set` blocks rather
@@ -267,7 +277,7 @@ echo "Running stress test"
 # stress tool itself (metrics.jsonl.gz; see --collect-metrics).
 set +o errexit
 go run ./test/stress \
-  --phases="${STRESS_PHASES:-fill,probe,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \

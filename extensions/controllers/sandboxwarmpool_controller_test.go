@@ -2177,6 +2177,38 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			},
 			expectedResult: false,
 		},
+		{
+			name: "PVC retention policy drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+				},
+			},
+			expectedResult: false,
+		},
+		{
+			name: "Identical PVC retention policy should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				},
+			},
+			expectedResult: true,
+		},
 	}
 
 	r := &SandboxWarmPoolReconciler{}
@@ -2200,7 +2232,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 // comparison logic is not tracked for drift, so a warm sandbox will not be detected
 // as stale when that field changes.
 func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
-	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service"}
+	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service", "PersistentVolumeClaimRetentionPolicy"}
 
 	var actualFields []string
 	blueprintType := reflect.TypeFor[sandboxv1beta1.SandboxBlueprint]()

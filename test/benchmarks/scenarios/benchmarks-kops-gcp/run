@@ -255,8 +255,9 @@ stress_status=$?
 set -o errexit
 capture_stress_diagnostics
 
-# Generate stress test report
-REPORT_OUTPUT_DIR="${ARTIFACTS:-.}/stress-report"
+# Generate stress test report, under the stress-test artifacts dir (the
+# report is part of the stress test, alongside the raw data it renders).
+REPORT_OUTPUT_DIR="${STRESS_OUTPUT_DIR}/report"
 echo "Generating stress test report to ${REPORT_OUTPUT_DIR}..."
 if python3 -c "import venv" >/dev/null 2>&1; then
   python3 -m venv "${BINDIR}/report-venv"
@@ -265,6 +266,29 @@ if python3 -c "import venv" >/dev/null 2>&1; then
     --input-dir "${STRESS_OUTPUT_DIR}" \
     --output-dir "${REPORT_OUTPUT_DIR}"
   echo "Report generated successfully."
+  # Surface a direct link on the prow job page: spyglass's links lens
+  # renders artifacts/*.link.txt files (content: a URL) as clickable links,
+  # so the report is reachable from the PR's Details link without digging
+  # through the artifacts browser.
+  #
+  # Write a gs:// URL rather than an https:// one on purpose: the links lens
+  # sends https:// links through a https://google.com/url?q= redirect (to
+  # strip referer), which shows an interstitial. gs:// links instead go
+  # straight to the configured GCS browser (gcsweb.k8s.io), which 307s a
+  # file URL to storage.googleapis.com and renders it -- no interstitial.
+  if [[ -n "${ARTIFACTS:-}" && -n "${JOB_NAME:-}" && -n "${BUILD_ID:-}" ]]; then
+    if [[ -n "${PULL_NUMBER:-}" ]]; then
+      JOB_GCS_PATH="pr-logs/pull/${REPO_OWNER:-kubernetes-sigs}_${REPO_NAME:-agent-sandbox}/${PULL_NUMBER}/${JOB_NAME}/${BUILD_ID}"
+    else
+      JOB_GCS_PATH="logs/${JOB_NAME}/${BUILD_ID}"
+    fi
+    REPORT_PATH="kubernetes-ci-logs/${JOB_GCS_PATH}/artifacts/stress-test/report/index.html"
+    # Filename sets the link's display text (the links lens title-cases it):
+    # stress-test.link.txt -> "Stress test".
+    echo "gs://${REPORT_PATH}" > "${ARTIFACTS}/stress-test.link.txt"
+    # Echo the direct https URL for copy-paste from the build log.
+    echo "Stress test report: https://storage.googleapis.com/${REPORT_PATH}"
+  fi
 else
   echo "Warning: python3 venv module not available, skipping report generation."
 fi

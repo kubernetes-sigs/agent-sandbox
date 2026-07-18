@@ -138,6 +138,11 @@ trap cleanup EXIT
 CNI="${CNI:-cilium}"
 echo "Using CNI: ${CNI}"
 
+# Node machine type. The default here is the local-SSD experiment: C3 with a
+# bundled 375GB local NVMe SSD, mounted at /var/lib/containerd below.
+STRESS_NODE_SIZE="${STRESS_NODE_SIZE:-c3-standard-8-lssd}"
+echo "Using node size: ${STRESS_NODE_SIZE}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 #
@@ -172,7 +177,7 @@ kops create cluster \
   --control-plane-count=1 \
   --control-plane-size=n2-standard-8 \
   --node-count=3 \
-  --node-size=n2-standard-8 \
+  --node-size="${STRESS_NODE_SIZE}" \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/livez \
@@ -207,6 +212,53 @@ if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
       RemainAfterExit=yes
       ExecStart=/bin/mkdir -p /var/lib/containerd
       ExecStart=/bin/mount -t tmpfs -o size=16g tmpfs /var/lib/containerd
+HOOK_EOF
+  kops replace -f "${WORKDIR}/cluster.yaml"
+fi
+
+# Local-SSD experiment: run /var/lib/containerd on the node's bundled local
+# NVMe SSD. The fsync profile (containerd bolt/content-store fdatasync,
+# overlayfs teardown sync, kubelet checkpoints) is per-IOPS-latency bound on
+# a pd boot disk (26-36% iowait, load 14-21 on 8 cores at throughput-mif200,
+# run 2078168408230203392); local SSD makes those syncs ~free and is a
+# realistic node profile for ephemeral sandbox fleets, unlike tmpfs.
+# Mutually exclusive with STRESS_CONTAINERD_TMPFS (both mount over
+# /var/lib/containerd, and each appends its own hooks section).
+if [[ "${STRESS_NODE_SIZE}" == *-lssd ]]; then
+  if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
+    echo "ERROR: STRESS_CONTAINERD_TMPFS and an -lssd node size are mutually exclusive"
+    exit 1
+  fi
+  echo "Configuring local SSD for /var/lib/containerd..."
+  # C3 machines do not support pd-standard boot disks (kOps' GCE default);
+  # move the node IG root volume to pd-balanced.
+  kops get instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" -o yaml > "${WORKDIR}/nodes-ig.yaml"
+  python3 - "${WORKDIR}/nodes-ig.yaml" <<'IG_EOF'
+import sys
+path = sys.argv[1]
+s = open(path).read()
+assert "rootVolume" not in s, "rootVolume already set; refusing to overwrite"
+s = s.replace("spec:\n", "spec:\n  rootVolume:\n    type: pd-balanced\n", 1)
+open(path, "w").write(s)
+IG_EOF
+  kops replace -f "${WORKDIR}/nodes-ig.yaml"
+
+  # Format and mount the local NVMe SSD before containerd starts. The
+  # by-id symlink is provided by the GCE guest environment.
+  kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster.yaml"
+  cat >> "${WORKDIR}/cluster.yaml" <<'HOOK_EOF'
+  hooks:
+  - name: containerd-local-ssd
+    before:
+    - containerd.service
+    roles:
+    - Node
+    manifest: |
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/sbin/mkfs.ext4 -F /dev/disk/by-id/google-local-nvme-ssd-0
+      ExecStart=/bin/mkdir -p /var/lib/containerd
+      ExecStart=/bin/mount -o discard,noatime /dev/disk/by-id/google-local-nvme-ssd-0 /var/lib/containerd
 HOOK_EOF
   kops replace -f "${WORKDIR}/cluster.yaml"
 fi

@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 const (
@@ -46,7 +47,7 @@ func makePod(name, ns string, sandboxUID types.UID, ip string, ready bool) *core
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
-			Labels:    map[string]string{PodSandboxNameHashLabel: "abc123"},
+			Labels:    map[string]string{sandboxv1beta1.SandboxNameHashLabel: "abc123"},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: SandboxAPIGroup + "/v1beta1",
 				Kind:       SandboxKind,

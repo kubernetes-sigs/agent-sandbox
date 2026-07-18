@@ -315,7 +315,7 @@ func TestReconcile(t *testing.T) {
 			},
 			// Verify Sandbox status
 			wantStatus: sandboxv1beta1.SandboxStatus{
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+				LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 				Conditions: []metav1.Condition{
 					{
 						Type:               "Ready",
@@ -334,7 +334,7 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -366,7 +366,7 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+				LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 				Conditions: []metav1.Condition{
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -385,7 +385,7 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
@@ -404,13 +404,13 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.ServiceSpec{
 						Selector: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						ClusterIP: "None",
 					},
@@ -460,7 +460,7 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+				LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 				Conditions: []metav1.Condition{
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -479,7 +479,7 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 							"custom-label":                      "label-val",
 						},
 						Annotations: map[string]string{
@@ -515,13 +515,13 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.ServiceSpec{
 						Selector: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						ClusterIP: "None",
 					},
@@ -532,7 +532,7 @@ func TestReconcile(t *testing.T) {
 						Name:      "my-pvc-sandbox-name",
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 							"custom-label":                      "label-val",
 						},
 						Annotations:     map[string]string{"custom-annotation": "anno-val"},
@@ -558,7 +558,7 @@ func TestReconcile(t *testing.T) {
 						Name:      sandboxName,
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 							sandboxv1beta1.SandboxAdoptableLabel: "true",
 						},
 					},
@@ -585,7 +585,7 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+				LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 				PodIPs:        []string{"10.244.0.5", "fd00::5"},
 				NodeName:      "node-1",
 				Conditions: []metav1.Condition{
@@ -606,13 +606,13 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.ServiceSpec{
 						Selector: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						ClusterIP: "None",
 					},
@@ -627,7 +627,7 @@ func TestReconcile(t *testing.T) {
 						Name:      sandboxName,
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 					},
 					Spec: corev1.PodSpec{
@@ -652,7 +652,7 @@ func TestReconcile(t *testing.T) {
 			wantStatus: sandboxv1beta1.SandboxStatus{
 				Service:       sandboxName,
 				ServiceFQDN:   "sandbox-name.sandbox-ns.svc.cluster.local",
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+				LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 				PodIPs:        []string{"10.244.0.5", "fd00::5"},
 				Conditions: []metav1.Condition{
 					{
@@ -671,13 +671,13 @@ func TestReconcile(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 					},
 					Spec: corev1.ServiceSpec{
 						Selector: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 						ClusterIP: "None",
 					},
@@ -692,7 +692,7 @@ func TestReconcile(t *testing.T) {
 						Name:      sandboxName,
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 							sandboxv1beta1.SandboxAdoptableLabel: "true",
 						},
 					},
@@ -716,7 +716,7 @@ func TestReconcile(t *testing.T) {
 			}},
 			},
 			wantStatus: sandboxv1beta1.SandboxStatus{
-				LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+				LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 				PodIPs:        []string{"10.244.0.5"},
 				NodeName:      "node-2",
 				Conditions: []metav1.Condition{
@@ -1133,7 +1133,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						"custom-label":                       "label-val",
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
 					},
@@ -1165,7 +1165,7 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 							"custom-label":                       "label-val",
 							sandboxv1beta1.SandboxAdoptableLabel: "true",
 						},
@@ -1189,7 +1189,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						"custom-label":                       "label-val",
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
 					},
@@ -1217,7 +1217,7 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 							"custom-label":                      "label-val",
 						},
 						Annotations: map[string]string{
@@ -1238,7 +1238,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1265,7 +1265,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1303,7 +1303,7 @@ func TestReconcilePod(t *testing.T) {
 						Labels: map[string]string{
 							// Attacker attempts to hijack another Sandbox's routing label
 							// and to spoof an extensions-prefixed system label.
-							"agents.x-k8s.io/sandbox-name-hash":          "malicious-hijacked-hash",
+							sandboxv1beta1.SandboxNameHashLabel:          "malicious-hijacked-hash",
 							"extensions.agents.x-k8s.io/warm-pool-spoof": "evil",
 							"custom-label": "label-val",
 						},
@@ -1323,7 +1323,7 @@ func TestReconcilePod(t *testing.T) {
 					ResourceVersion: "1",
 					Labels: map[string]string{
 						// System label is set by the controller, not the attacker's value.
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1350,7 +1350,7 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 							"custom-label":                      "label-val",
 							// A system label an older controller propagated and recorded.
 							"agents.x-k8s.io/evil": "x",
@@ -1377,7 +1377,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1418,7 +1418,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1455,7 +1455,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						"custom-label":                      "label-val",
 					},
 					Annotations: map[string]string{
@@ -1534,7 +1534,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						sandboxv1beta1.SandboxWarmPoolLabel: NameHash("my-warm-pool"),
 						"custom-label":                      "label-val",
 					},
@@ -1556,7 +1556,7 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 							sandboxv1beta1.SandboxWarmPoolLabel:  "pool-hash",
 							"custom-label":                       "label-val",
 							sandboxv1beta1.SandboxAdoptableLabel: "true",
@@ -1588,7 +1588,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						"custom-label":                       "label-val",
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
 					},
@@ -1614,7 +1614,7 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+							sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 							"custom-label":                       "label-val",
 							sandboxv1beta1.SandboxAdoptableLabel: "true",
 						},
@@ -1657,7 +1657,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						sandboxv1beta1.SandboxWarmPoolLabel:  NameHash("my-warm-pool"),
 						"custom-label":                       "label-val",
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
@@ -2036,7 +2036,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel:                         nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
@@ -2272,10 +2272,10 @@ func TestReconcilePod(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							sandboxLabel:                   nameHash,
-							"remove-label":                 "value",
-							"keep-label":                   "value",
-							"agents.x-k8s.io/system-label": "value",
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
+							"remove-label":                      "value",
+							"keep-label":                        "value",
+							"agents.x-k8s.io/system-label":      "value",
 						},
 						Annotations: map[string]string{
 							"remove-annotation":                      "value",
@@ -2318,9 +2318,9 @@ func TestReconcilePod(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						sandboxLabel:                   nameHash,
-						"keep-label":                   "value",
-						"agents.x-k8s.io/system-label": "value",
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
+						"keep-label":                        "value",
+						"agents.x-k8s.io/system-label":      "value",
 					},
 					Annotations: map[string]string{
 						"keep-annotation":                        "value",
@@ -2655,14 +2655,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "1",
 					Labels: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -2713,14 +2713,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"keep":       "me",
-						sandboxLabel: nameHash,
+						"keep":                              "me",
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					Selector: map[string]string{
-						sandboxLabel: nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -2774,14 +2774,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					Selector: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -2837,7 +2837,7 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						sandboxv1beta1.SandboxNameHashLabel:  nameHash,
 						sandboxv1beta1.SandboxAdoptableLabel: "true",
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
@@ -2845,7 +2845,7 @@ func TestReconcileService(t *testing.T) {
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -2861,13 +2861,13 @@ func TestReconcileService(t *testing.T) {
 						Namespace:       sandboxNs,
 						ResourceVersion: "1",
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 					},
 					Spec: corev1.ServiceSpec{
 						ClusterIP: "None",
 						Selector: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 					},
 				},
@@ -2879,14 +2879,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -2936,14 +2936,14 @@ func TestReconcileService(t *testing.T) {
 					Namespace:       sandboxNs,
 					ResourceVersion: "2",
 					Labels: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
 					ClusterIP: "None",
 					Selector: map[string]string{
-						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						sandboxv1beta1.SandboxNameHashLabel: nameHash,
 					},
 				},
 			},
@@ -3323,7 +3323,7 @@ func TestReconcilePVCs(t *testing.T) {
 						Name:      pvcName,
 						Namespace: sandboxNs,
 						Labels: map[string]string{
-							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							sandboxv1beta1.SandboxNameHashLabel: nameHash,
 						},
 					},
 				},
@@ -3682,7 +3682,7 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: sbName, Namespace: sbNs,
-			Labels:          map[string]string{sandboxLabel: nameHash},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sbName)},
 		},
 		Spec: corev1.PodSpec{
@@ -3701,12 +3701,12 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: sbName, Namespace: sbNs,
-			Labels:          map[string]string{sandboxLabel: nameHash},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sbName)},
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: "None",
-			Selector:  map[string]string{sandboxLabel: nameHash},
+			Selector:  map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
 		},
 	}
 

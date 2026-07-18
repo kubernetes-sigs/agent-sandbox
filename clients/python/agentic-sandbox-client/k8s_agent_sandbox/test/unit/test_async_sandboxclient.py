@@ -467,6 +467,62 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         self.assertIs(callback.__func__, AsyncSandbox.get_pod_ip)
 
 
+class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
+    """`AsyncSandbox.terminate()` must be idempotent — a second call must not
+    issue a redundant DELETE."""
+
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncFilesystem")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncCommandExecutor")
+    @patch("k8s_agent_sandbox.async_sandbox.create_tracer_manager")
+    @patch("k8s_agent_sandbox.async_sandbox.AsyncSandboxConnector")
+    def _build_sandbox(self, mock_connector, mock_tracer, mock_cmd, mock_files):
+        mock_tracer.return_value = (MagicMock(), MagicMock())
+        mock_connector.return_value.close = AsyncMock()
+        k8s_helper = MagicMock()
+        k8s_helper.delete_sandbox_claim = AsyncMock()
+        return AsyncSandbox(
+            claim_name="my-claim",
+            sandbox_id="my-claim",
+            namespace="demo",
+            connection_config=SandboxDirectConnectionConfig(
+                api_url="http://test-router:8080", server_port=8888
+            ),
+            k8s_helper=k8s_helper,
+        ), k8s_helper
+
+    async def test_second_terminate_does_not_redelete(self):
+        sandbox, helper = self._build_sandbox()
+
+        await sandbox.terminate()
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
+        self.assertIsNone(sandbox.claim_name)
+
+        # Second call must be a no-op.
+        await sandbox.terminate()
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
+
+    async def test_failed_terminate_preserves_claim_name_for_retry(self):
+        """When delete_sandbox_claim raises, claim_name must NOT be cleared —
+        otherwise a transient 5xx / network blip would hide the error and
+        the caller would have no handle to retry or clean up manually."""
+        sandbox, helper = self._build_sandbox()
+
+        helper.delete_sandbox_claim.side_effect = RuntimeError("transient 500")
+
+        with self.assertRaisesRegex(RuntimeError, "transient 500"):
+            await sandbox.terminate()
+
+        # claim_name must be preserved so the caller can retry.
+        self.assertEqual(sandbox.claim_name, "my-claim")
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
+
+        # Retry succeeds and clears the handle.
+        helper.delete_sandbox_claim.side_effect = None
+        await sandbox.terminate()
+        self.assertEqual(helper.delete_sandbox_claim.call_count, 2)
+        self.assertIsNone(sandbox.claim_name)
+
+
 class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):

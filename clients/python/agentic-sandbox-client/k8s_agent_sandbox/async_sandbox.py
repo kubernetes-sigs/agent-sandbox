@@ -139,6 +139,21 @@ class AsyncSandbox:
         logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
 
     async def terminate(self):
-        """Permanent deletion of all server side infrastructure and client side connection."""
+        """
+        Permanent deletion of all server side infrastructure and client side connection.
+
+        This method is idempotent. After a successful delete, ``claim_name`` is
+        cleared so later calls are a local no-op and do not issue another DELETE.
+        If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
+        404 as success rather than raising.
+        """
         await self._close_connection()
+
+        if not self.claim_name:
+            # Already deleted (or never successfully created a claim).
+            return
+
         await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # Clear only after success so a failed delete can be retried.
+        self.claim_name = None

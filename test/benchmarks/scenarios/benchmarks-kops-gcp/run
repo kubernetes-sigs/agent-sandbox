@@ -189,7 +189,7 @@ kops create cluster \
 # so an A/B against this knob measures the true upper bound of the fsync
 # theory. Benchmark-only (images/snapshots do not survive reboot). Default
 # false so the benchmark measures realistic disk-backed nodes.
-STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-false}"
+STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-true}"
 if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
   echo "Adding containerd-on-tmpfs hook to cluster spec..."
   # `kops get -o yaml` emits top-level keys sorted (apiVersion, kind,

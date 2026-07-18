@@ -54,8 +54,15 @@ def _counter_deltas_cte(metrics_path, metrics, labels, where):
         diffs AS (
             SELECT
                 *,
-                value - lag(value) OVER (PARTITION BY {partition} ORDER BY ts) as delta
+                value - lag(value) OVER w as delta,
+                -- Midpoint of the delta window (previous sample -> this
+                -- sample): used to attribute the window to the phase it
+                -- mostly overlaps, so increments accumulated late in phase
+                -- A are not booked to phase B just because the scrape
+                -- landed after the boundary.
+                lag(ts) OVER w + (ts - lag(ts) OVER w) / 2 as window_mid
             FROM raw{where_clause}
+            WINDOW w AS (PARTITION BY {partition} ORDER BY ts)
         )"""
 
 
@@ -83,7 +90,7 @@ def metrics_by_phase(conn, metrics_path, metrics, labels=None, group_by=None, wh
         with_phase AS (
             SELECT p.name as phase_name, d.*
             FROM diffs d
-            JOIN phases p ON d.ts >= p.start_time AND d.ts < p.end_time
+            JOIN phases p ON d.window_mid >= p.start_time AND d.window_mid < p.end_time
             WHERE d.delta >= 0
         )
         SELECT

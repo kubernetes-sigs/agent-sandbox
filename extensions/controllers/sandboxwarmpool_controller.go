@@ -1243,10 +1243,12 @@ func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, ac
 
 // compareSandboxBlueprint checks if the sandbox blueprint in the sandbox is semantically equal to the template,
 // ignoring metadata differences and only comparing the fields that are relevant for staleness detection.
-func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
-	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
-		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
-		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
+func (r *SandboxWarmPoolReconciler) compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
+	return r.comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
+		r.compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
+		equality.Semantic.DeepEqual(template.Spec.SandboxBlueprint.Service, actualSandboxSpec.Service) &&
+		equality.Semantic.DeepEqual(template.Spec.SandboxBlueprint.PersistentVolumeClaimRetentionPolicy, actualSandboxSpec.PersistentVolumeClaimRetentionPolicy)
+}
 }
 
 // sandboxWarmPoolLabelIndexer extracts the warmPoolSandboxLabel value for the

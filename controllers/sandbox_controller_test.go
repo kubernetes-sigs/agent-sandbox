@@ -3798,3 +3798,211 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
 }
+
+func TestCheckIdleLifecycle(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	pastActivity := metav1.NewTime(now.Add(-15 * time.Minute))
+	recentActivity := metav1.NewTime(now.Add(-5 * time.Minute))
+	suspendedTime := metav1.NewTime(now.Add(-25 * time.Hour))
+	recentSuspendedTime := metav1.NewTime(now.Add(-1 * time.Hour))
+
+	suspendPolicy := sandboxv1beta1.IdleExpirationPolicySuspend
+	deleteActivePolicy := sandboxv1beta1.IdleExpirationPolicyDelete
+	_ = sandboxv1beta1.SuspendedExpirationPolicyDelete // default, used implicitly
+	retainPolicy := sandboxv1beta1.SuspendedExpirationPolicyRetain
+	suspendedTTL := int32(86400) // 24h
+
+	testCases := []struct {
+		name          string
+		sandbox       *sandboxv1beta1.Sandbox
+		wantAction    idleAction
+		wantRequeue   bool
+		wantRequeueGT time.Duration
+	}{
+		{
+			name: "no idle policy",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning},
+			},
+			wantAction: idleActionNone,
+		},
+		{
+			name: "running, active TTL not expired",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds:       600, // 10m
+						ActiveExpirationPolicy: &suspendPolicy,
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					LastActivityTime: &recentActivity,
+				},
+			},
+			wantAction:    idleActionNone,
+			wantRequeue:   true,
+			wantRequeueGT: 4 * time.Minute,
+		},
+		{
+			name: "running, active TTL expired, default policy suspends",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds: 600, // 10m, last activity 15m ago
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					LastActivityTime: &pastActivity,
+				},
+			},
+			wantAction: idleActionSuspend,
+		},
+		{
+			name: "running, active TTL expired, policy=Delete",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds:       600,
+						ActiveExpirationPolicy: &deleteActivePolicy,
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					LastActivityTime: &pastActivity,
+				},
+			},
+			wantAction: idleActionDelete,
+		},
+		{
+			name: "running, no lastActivityTime falls back to creationTimestamp",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					CreationTimestamp: metav1.NewTime(now.Add(-15 * time.Minute)),
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds: 600,
+					},
+				},
+			},
+			wantAction: idleActionSuspend,
+		},
+		{
+			name: "suspended, no suspendedTTLSeconds means indefinite",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds: 600,
+					},
+				},
+			},
+			wantAction: idleActionNone,
+		},
+		{
+			name: "suspended, TTL not expired",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds:    600,
+						SuspendedTTLSeconds: &suspendedTTL,
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{{
+						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: recentSuspendedTime,
+					}},
+				},
+			},
+			wantAction:    idleActionNone,
+			wantRequeue:   true,
+			wantRequeueGT: 22 * time.Hour,
+		},
+		{
+			name: "suspended, TTL expired, default policy deletes",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds:    600,
+						SuspendedTTLSeconds: &suspendedTTL,
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{{
+						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: suspendedTime,
+					}},
+				},
+			},
+			wantAction: idleActionDelete,
+		},
+		{
+			name: "suspended, TTL expired, policy=Retain",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds:          600,
+						SuspendedTTLSeconds:       &suspendedTTL,
+						SuspendedExpirationPolicy: &retainPolicy,
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{{
+						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: suspendedTime,
+					}},
+				},
+			},
+			wantAction: idleActionRetain,
+		},
+		{
+			name: "already marked expired skips idle check",
+			sandbox: &sandboxv1beta1.Sandbox{
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds: 600,
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					LastActivityTime: &pastActivity,
+					Conditions: []metav1.Condition{{
+						Type:   string(sandboxv1beta1.SandboxConditionReady),
+						Status: metav1.ConditionFalse,
+						Reason: sandboxv1beta1.SandboxReasonExpired,
+					}},
+				},
+			},
+			wantAction: idleActionNone,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			action, requeueAfter := checkIdleLifecycle(tc.sandbox, now)
+			assert.Equal(t, tc.wantAction, action, "unexpected action")
+			if tc.wantRequeue {
+				assert.Greater(t, requeueAfter, tc.wantRequeueGT, "requeue duration too short")
+			} else {
+				assert.Equal(t, time.Duration(0), requeueAfter, "expected zero requeue")
+			}
+		})
+	}
+}
+
+func TestMinPositiveDuration(t *testing.T) {
+	assert.Equal(t, 5*time.Second, minPositiveDuration(5*time.Second, 10*time.Second))
+	assert.Equal(t, 5*time.Second, minPositiveDuration(10*time.Second, 5*time.Second))
+	assert.Equal(t, 10*time.Second, minPositiveDuration(0, 10*time.Second))
+	assert.Equal(t, 5*time.Second, minPositiveDuration(5*time.Second, 0))
+}

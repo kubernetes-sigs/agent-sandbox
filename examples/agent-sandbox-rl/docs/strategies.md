@@ -137,6 +137,35 @@ What they do and don't buy:
   the pipelined window to keep its footprint bounded, which serializes problems and
   underfills `max_concurrent` once rollouts do real work.
 
+### Recycling (reset-and-reuse) — experimental, orthogonal to strategy & sizing
+
+Instant-claim gives each rollout a *fresh* sandbox; **recycling** reuses *one* sandbox
+across a problem's G rollouts, resetting between them — so claims scale with **problems**
+(÷G), not tasks. Where instant-claim cuts claim *latency*, recycling cuts claim *count*
+(and the controller reconciles / API-server writes that scale with it). Use it via
+`reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *, max_reuses,
+reset_timeout)` instead of `fleet.run(...)`; it groups tasks by image and reuses one
+claim per group.
+
+The shipped reset tier is **git-restore** (`GitRestoreReset`): `git reset --hard
+pristine` + `clean -xdff` + detach + process/`/tmp` sweep, then a **cleanliness verify**
+— repo at the pristine SHA and, as tripwires (detect, don't repair), the Python env
+(`pip freeze` hash), git config/hooks hash, and process count unchanged. Drift, a reset
+over `reset_timeout`, or hitting `max_reuses` → **quarantine** (release + fresh claim).
+Rationale: in RL a polluted sandbox silently biases rewards, so *detect-and-escalate*
+beats a cheap-but-unverified wipe. The env-restore and overlay/checkpoint tiers are
+deferred (drift there escalates to a fresh claim).
+
+- **Verify first:** `determinism_canary(fleet, task, process_fn)` runs a task twice in
+  one recycled sandbox; `identical` must be True before trusting recycled runs for
+  training.
+- **Cost model:** recycling pays off only when reset time ≪ claim time (~2–5 s) and an
+  image carries many tasks (RL, not 1:1 eval). New `reset`/`quarantine`/`rotate` phases
+  in the `RunReport` make the trade measurable.
+- Full design + deep-research hardening (git shared-store gc hazards, `/testbed`
+  realpath stability, the site-packages hole) and open questions: notes repo
+  `plans/sandbox-recycling.md`.
+
 ---
 
 ## 4. Caching & amortization levers (avoid the pull)

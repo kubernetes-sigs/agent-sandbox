@@ -165,6 +165,7 @@ python run_swebench_fleet.py
 | **SandboxHandle** | A claimed sandbox: `hostname`, `pod_name`, `pod_ip`, `endpoint(port)`, `exec(cmd)`, `release()`. |
 | **Placement** | Which cluster serves an image: `round-robin`, `least-loaded`, `capacity-weighted`, `image-affinity`. |
 | **Strategy** | *When* pools exist: `none`, `naive`, `sliding`, `pipelined`. |
+| **Recycling** | *Reuse* one sandbox across same-image tasks (reset between): `reuse_git_restore_sandbox` + `GitRestoreReset` (claims scale ÷ tasks-per-image). |
 | **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`). |
 
 ## Warm-pool strategies
@@ -263,6 +264,41 @@ fleet.run(process_fn, strategy="naive")          # warm everything, full depth, 
 > per-image replicas the pipelined window shrinks to keep its footprint bounded, which
 > serializes problems and underfills `max_concurrent` once rollouts do real work
 > (measured: pipelined wall 55 s → 97 s). `pipelined` is for the 1:1 eval case.
+
+### Sandbox recycling (reset-and-reuse) — experimental
+
+`warm_per_task` gives each rollout its own *fresh* sandbox; **recycling** instead keeps
+one claimed sandbox and *resets* it between rollouts on the same image, so **claims
+scale with problems, not tasks** (÷ *G*). At the RL shape (G rollouts/problem) that is
+G× fewer claims, controller reconciles, and API-server writes.
+
+```python
+from agent_sandbox_rl import reuse_git_restore_sandbox, determinism_canary
+
+fleet.setup()
+# reuse one sandbox per image; reset between same-image tasks, quarantine if dirty
+results = reuse_git_restore_sandbox(
+    fleet, fleet.tasks, process_fn, concurrency=40,
+    max_reuses=32, reset_timeout=5.0)
+fleet.teardown()
+```
+
+The reset (`GitRestoreReset`) restores `/testbed` to a pristine git tag, sweeps
+processes + `/tmp`, then **verifies** cleanliness — repo at the pristine SHA, and (as
+tripwires) the Python env, git config/hooks, and process count unchanged. Any drift
+**quarantines** the sandbox (release + fresh claim) rather than risk contaminating the
+next rollout — because in RL a polluted sandbox silently biases rewards, which is worse
+than a crash. The env-restore and overlay/checkpoint reset tiers are deferred; drift in
+those surfaces escalates to a fresh claim.
+
+> ⚠️ **Verify before trusting it for training.** Run the determinism canary first — the
+> same seeded task twice in one recycled sandbox must produce byte-identical output:
+> ```python
+> out = determinism_canary(fleet, task, process_fn)
+> assert out["identical"] and out["reset_clean"]
+> ```
+> Recycling is experimental; the design, hardening findings, and known limits are in
+> `plans/sandbox-recycling.md` (notes repo).
 
 ### Eval vs RL — recommended recipes
 

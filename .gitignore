@@ -40,3 +40,4 @@ hermes-sandbox-knowledge.md
 .claude
 .vscode
 .agents/skills/**/workspace/
+.DS_Store

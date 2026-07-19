@@ -188,6 +188,8 @@ type SandboxBlueprint struct {
 }
 
 // SandboxSpec defines the desired state of Sandbox.
+// volumeClaimTemplates is immutable after creation.
+// +kubebuilder:validation:XValidation:rule="has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates) && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates == oldSelf.volumeClaimTemplates)",message="volumeClaimTemplates is immutable"
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html

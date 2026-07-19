@@ -48,6 +48,16 @@ func newTestScheme() *runtime.Scheme {
 	return scheme
 }
 
+func newFakeClient(scheme *runtime.Scheme, initialObjs ...runtime.Object) client.WithWatch {
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+		WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+		WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+		WithRuntimeObjects(initialObjs...).
+		Build()
+}
+
 func createPoolSandbox(poolName, namespace, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, suffix string) *sandboxv1beta1.Sandbox {
 	templateRefHash := ""
 	var podTemplateHash, sandboxBlueprintHash string
@@ -238,10 +248,7 @@ func TestReconcilePool(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			warmPool.Spec.Replicas = tc.replicas
 			r := SandboxWarmPoolReconciler{
-				Client: fake.NewClientBuilder().
-					WithScheme(scheme).
-					WithRuntimeObjects(tc.initialObjs...).
-					Build(),
+				Client:       newFakeClient(scheme, tc.initialObjs...),
 				Scheme:       scheme,
 				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
@@ -377,10 +384,7 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := SandboxWarmPoolReconciler{
-				Client: fake.NewClientBuilder().
-					WithScheme(scheme).
-					WithRuntimeObjects(tc.initialObjs...).
-					Build(),
+				Client:       newFakeClient(scheme, tc.initialObjs...),
 				Scheme:       scheme,
 				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
@@ -467,10 +471,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 		}
 
 		r := SandboxWarmPoolReconciler{
-			Client: fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithRuntimeObjects(template).
-				Build(),
+			Client:                 newFakeClient(scheme, template),
 			Scheme:                 scheme,
 			MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
 			EnableWarmPoolEviction: true,
@@ -500,7 +501,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 			// Verify pod template annotations
 			require.Equal(t, "from-podtemplate", sb.Spec.PodTemplate.ObjectMeta.Annotations["pod-annotation"])
-			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation])
+			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation])
 		}
 	})
 }
@@ -568,10 +569,7 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	}
 
 	r := SandboxWarmPoolReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(scheme).
-			WithRuntimeObjects(template).
-			Build(),
+		Client:       newFakeClient(scheme, template),
 		Scheme:       scheme,
 		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
@@ -666,10 +664,7 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 			}
 
 			r := SandboxWarmPoolReconciler{
-				Client: fake.NewClientBuilder().
-					WithScheme(scheme).
-					WithRuntimeObjects(template).
-					Build(),
+				Client:       newFakeClient(scheme, template),
 				Scheme:       scheme,
 				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
@@ -781,10 +776,7 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := SandboxWarmPoolReconciler{
-				Client: fake.NewClientBuilder().
-					WithScheme(scheme).
-					WithRuntimeObjects(tc.initialObjs...).
-					Build(),
+				Client: newFakeClient(scheme, tc.initialObjs...),
 				Scheme: scheme,
 			}
 
@@ -816,11 +808,7 @@ func TestUpdateStatusClearsZeroValues(t *testing.T) {
 	}
 
 	r := SandboxWarmPoolReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(scheme).
-			WithObjects(warmPool.DeepCopy()).
-			WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
-			Build(),
+		Client: newFakeClient(scheme, warmPool),
 		Scheme: scheme,
 	}
 
@@ -878,14 +866,11 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 
 	t.Run("deletes non-ready sandbox older than grace period", func(t *testing.T) {
 		r := SandboxWarmPoolReconciler{
-			Client: fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithRuntimeObjects(
-					template,
-					createSandboxWithAge("-stuck", metav1.ConditionFalse, 10*time.Minute),
-					createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
-				).
-				Build(),
+			Client: newFakeClient(scheme,
+				template,
+				createSandboxWithAge("-stuck", metav1.ConditionFalse, 10*time.Minute),
+				createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
+			),
 			Scheme:       scheme,
 			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 		}
@@ -911,14 +896,11 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 
 	t.Run("keeps non-ready sandbox within grace period", func(t *testing.T) {
 		r := SandboxWarmPoolReconciler{
-			Client: fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithRuntimeObjects(
-					template,
-					createSandboxWithAge("-starting", metav1.ConditionFalse, 2*time.Minute),
-					createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
-				).
-				Build(),
+			Client: newFakeClient(scheme,
+				template,
+				createSandboxWithAge("-starting", metav1.ConditionFalse, 2*time.Minute),
+				createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
+			),
 			Scheme:       scheme,
 			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 		}
@@ -1015,10 +997,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 
 			scheme := newTestScheme()
 			r := SandboxWarmPoolReconciler{
-				Client: fake.NewClientBuilder().
-					WithScheme(scheme).
-					WithRuntimeObjects(template, warmPool).
-					Build(),
+				Client:       newFakeClient(scheme, template, warmPool),
 				Scheme:       scheme,
 				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
@@ -1160,10 +1139,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 
 	scheme := newTestScheme()
 	r := SandboxWarmPoolReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(scheme).
-			WithRuntimeObjects(template1, warmPool).
-			Build(),
+		Client:       newFakeClient(scheme, template1, warmPool),
 		Scheme:       scheme,
 		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
@@ -1259,14 +1235,7 @@ func TestFindWarmPoolsForTemplate(t *testing.T) {
 
 	scheme := newTestScheme()
 	r := SandboxWarmPoolReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(scheme).
-			WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, func(rawObj client.Object) []string {
-				wp := rawObj.(*extensionsv1beta1.SandboxWarmPool)
-				return []string{wp.Spec.TemplateRef.Name}
-			}).
-			WithRuntimeObjects(wp1, wp2).
-			Build(),
+		Client: newFakeClient(scheme, wp1, wp2),
 		Scheme: scheme,
 	}
 
@@ -1424,10 +1393,7 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 	}
 
 	r := SandboxWarmPoolReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(scheme).
-			WithRuntimeObjects(template, warmPool).
-			Build(),
+		Client:       newFakeClient(scheme, template, warmPool),
 		Scheme:       scheme,
 		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
@@ -1643,7 +1609,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller true respects explicit template value false",
 			controllerEnable: true,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "false",
+				autoscalerSafeToEvictAnnotation: "false",
 			},
 			expectedEvictionVal: "false",
 		},
@@ -1651,7 +1617,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller false respects explicit template value false",
 			controllerEnable: false,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "false",
+				autoscalerSafeToEvictAnnotation: "false",
 			},
 			expectedEvictionVal: "false",
 		},
@@ -1659,7 +1625,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller true respects explicit template value true",
 			controllerEnable: true,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "true",
+				autoscalerSafeToEvictAnnotation: "true",
 			},
 			expectedEvictionVal: "true",
 		},
@@ -1667,7 +1633,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller false respects explicit template value true",
 			controllerEnable: false,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "true",
+				autoscalerSafeToEvictAnnotation: "true",
 			},
 			expectedEvictionVal: "true",
 		},
@@ -1695,10 +1661,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			}
 
 			r := SandboxWarmPoolReconciler{
-				Client: fake.NewClientBuilder().
-					WithScheme(scheme).
-					WithRuntimeObjects(testTemplate).
-					Build(),
+				Client:                 newFakeClient(scheme, testTemplate),
 				Scheme:                 scheme,
 				MaxBatchSize:           sandboxCreateDeleteMaxBatchSize,
 				EnableWarmPoolEviction: tc.controllerEnable,
@@ -1713,7 +1676,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			require.Len(t, list.Items, 1)
 
 			sb := list.Items[0]
-			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]
+			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation]
 			if tc.expectedEvictionVal != "" {
 				require.True(t, exists, "expected eviction annotation to exist")
 				require.Equal(t, tc.expectedEvictionVal, val)
@@ -1901,10 +1864,7 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 
 			scheme := newTestScheme()
 			r := SandboxWarmPoolReconciler{
-				Client: fake.NewClientBuilder().
-					WithScheme(scheme).
-					WithRuntimeObjects(template, warmPool).
-					Build(),
+				Client:       newFakeClient(scheme, template, warmPool),
 				Scheme:       scheme,
 				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}

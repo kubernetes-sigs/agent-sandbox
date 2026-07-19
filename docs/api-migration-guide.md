@@ -18,20 +18,23 @@ The other two CRDs (`SandboxTemplate`, `SandboxWarmPool`) are structurally ident
 
 ## Two phases
 
-The migration script executes in two distinct phases. **Neither phase can happen in an arbitrary order**, and if you have existing cold-start claims, skipping the bootstrap phase will immediately break them upon upgrading to `v0.5.0`.
+The migration script executes in two distinct phases. **Neither phase can happen in an arbitrary order**, and if you have existing cold-start claims, skipping the bootstrap phase will immediately break them upon upgrading to `v0.5.2`.
+
+> [!IMPORTANT]
+> When migrating from `v0.4.x`, always upgrade directly to **`v0.5.2`** (or later) rather than earlier `0.5.x` releases. Release `v0.5.2` includes a critical fix for a controller race condition that caused warm-started claims to undergo pod cold restarts during initial upgrade reconciliation.
 
 ### Phase 1: `--phase=bootstrap` (Conditionally Mandatory, Pre-Upgrade)
 
-- **Mandatory for `v0.5.0`:** Yes, if you have existing cold-start `v1alpha1` claims (claims where `spec.warmpool` is empty/`"none"`/`"default"` AND `status.sandbox.name` matches the claim name or is empty). Note: The script automatically detects whether cold-start claims exist. If none exist, it safely exits without creating anything, so it is recommended to always run it (or use `--dry-run` to inspect) rather than skipping it manually.
-- **Timing:** Strictly **before** upgrading to `v0.5.0` (while `v1alpha1` is still active).
-- **What it does:** Scans existing `v1alpha1` claims and pre-creates `shadow-pool-<template>` warm pools. The `v0.5.0` controller reconciler is written purely against `v1beta1.SandboxClaim`, which requires a valid `spec.warmPoolRef.name`. If you do not pre-create the shadow pools, the conversion webhook will point converted claims to non-existent infrastructure, leaving converted claims stuck with a `WarmPoolNotFound` condition while the controller repeatedly requeues them.
-- **Why it cannot run after upgrade:** Bootstrap relies on `v1alpha1` field inspection. Once `v0.5.0` is installed, `kubectl get sandboxclaims` defaults to returning `v1beta1` objects (which lack `spec.sandboxTemplateRef`). The script will see empty template names, log errors for every claim, and fail to create any shadow pools.
+- **Mandatory for `v0.5.2`:** Yes, if you have existing cold-start `v1alpha1` claims (claims where `spec.warmpool` is empty/`"none"`/`"default"` AND `status.sandbox.name` matches the claim name or is empty). Note: The script automatically detects whether cold-start claims exist. If none exist, it safely exits without creating anything, so it is recommended to always run it (or use `--dry-run` to inspect) rather than skipping it manually.
+- **Timing:** Strictly **before** upgrading to `v0.5.2` (while `v1alpha1` is still active).
+- **What it does:** Scans existing `v1alpha1` claims and pre-creates `shadow-pool-<template>` warm pools. The `v0.5.2` controller reconciler is written purely against `v1beta1.SandboxClaim`, which requires a valid `spec.warmPoolRef.name`. If you do not pre-create the shadow pools, the conversion webhook will point converted claims to non-existent infrastructure, leaving converted claims stuck with a `WarmPoolNotFound` condition while the controller repeatedly requeues them.
+- **Why it cannot run after upgrade:** Bootstrap relies on `v1alpha1` field inspection. Once `v0.5.2` is installed, `kubectl get sandboxclaims` defaults to returning `v1beta1` objects (which lack `spec.sandboxTemplateRef`). The script will see empty template names, log errors for every claim, and fail to create any shadow pools.
 
-### Phase 2: `--phase=migrate` (Optional for `v0.5.0`, Post-Upgrade)
+### Phase 2: `--phase=migrate` (Optional for `v0.5.2`, Post-Upgrade)
 
-- **Optional for `v0.5.0`** (but mandatory before upgrading to a future release that drops `v1alpha1`).
-- **Timing:** Strictly **after** upgrading to `v0.5.0` (when `v1beta1` is established as the storage version and the conversion webhook is live).
-- **What it does:** Patches every existing resource with a benign annotation (`agents.x-k8s.io/storage-migrated-at`). This forces the API server to read the `v1alpha1` etcd record, pass it through the conversion webhook, and rewrite it to etcd in `v1beta1` storage format. While the kube-apiserver can translate older records on the fly for `v0.5.0`, running this phase ensures all objects are re-serialized in `v1beta1` format in etcd, which is required before `v1alpha1` can be safely removed from the CRD definition in a future release.
+- **Optional for `v0.5.2`** (but mandatory before upgrading to a future release that drops `v1alpha1`).
+- **Timing:** Strictly **after** upgrading to `v0.5.2` (when `v1beta1` is established as the storage version and the conversion webhook is live).
+- **What it does:** Patches every existing resource with a benign annotation (`agents.x-k8s.io/storage-migrated-at`). This forces the API server to read the `v1alpha1` etcd record, pass it through the conversion webhook, and rewrite it to etcd in `v1beta1` storage format. While the kube-apiserver can translate older records on the fly for `v0.5.2`, running this phase ensures all objects are re-serialized in `v1beta1` format in etcd, which is required before `v1alpha1` can be safely removed from the CRD definition in a future release.
 - **Why it cannot run before upgrade:** Before upgrading, `v1alpha1` is still the storage version in etcd. Patching the resources will merely write an annotation onto `v1alpha1` etcd records, accomplishing zero storage migration.
 
 Both phases are idempotent — safe to re-run.
@@ -67,13 +70,16 @@ The official agent-sandbox installation path is `kubectl apply -f` against the r
 bash dev/tools/migrate.sh --phase=bootstrap
 
 # 2. Install the new controller + CRDs (which include the conversion webhook).
-#    The release ships two manifests: manifest.yaml (core controller + base
+#    The release ships two manifests: sandbox.yaml (core controller + base
 #    CRDs + webhook Service) and extensions.yaml (the extensions API group
 #    CRDs: SandboxClaim, SandboxTemplate, SandboxWarmPool). Apply both.
 #    Wait until the controller pod is Ready and the webhook Service has
 #    endpoints before proceeding.
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.0/manifest.yaml
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.0/extensions.yaml
+#    Note: Starting from v0.5.2, the core manifest is named `sandbox.yaml`. 
+#    If upgrading to an older release (like v0.5.0 or v0.5.1), apply `manifest.yaml` instead of `sandbox.yaml`:
+#    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/sandbox.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/<new-version>/extensions.yaml
 kubectl rollout status deploy/agent-sandbox-controller -n agent-sandbox-system
 kubectl wait --for=condition=Ready pods -l app=agent-sandbox-controller -n agent-sandbox-system
 

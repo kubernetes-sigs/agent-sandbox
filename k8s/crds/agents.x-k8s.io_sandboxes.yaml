@@ -3961,6 +3961,11 @@ spec:
             required:
             - podTemplate
             type: object
+            x-kubernetes-validations:
+            - message: volumeClaimTemplates is immutable
+              rule: has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates)
+                && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates ==
+                oldSelf.volumeClaimTemplates)
           status:
             properties:
               conditions:

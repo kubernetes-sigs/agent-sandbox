@@ -210,3 +210,81 @@ func TestRetryTransport_BackoffGrowsAndCaps(t *testing.T) {
 		t.Errorf("expected at least 70ms elapsed, got %s", elapsed)
 	}
 }
+
+// TestRetryTransport_TimerReuseAcrossManyRetries validates that the shared
+// time.Timer is correctly Stop/drain/Reset across many retry iterations.
+//
+// This guards against a subtle deadlock: if the drain after Stop() is
+// blocking (instead of non-blocking), the second retry iteration would hang
+// forever because the prior select already consumed the timer value from the
+// channel. Running with a done channel + timeout ensures the test fails
+// (rather than hangs) if the drain logic regresses.
+func TestRetryTransport_TimerReuseAcrossManyRetries(t *testing.T) {
+	const attempts = 20
+	var calls atomic.Int32
+	base := rtFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, dialErr()
+	})
+	// Short delays so the test runs fast; the timer fires every iteration,
+	// exercising the full Stop → drain → Reset cycle each time.
+	tr := newRetryTransport(base, attempts, 1*time.Millisecond, 5*time.Millisecond, nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = tr.RoundTrip(newRequest(t.Context(), t))
+	}()
+
+	select {
+	case <-done:
+		// Completed without deadlocking.
+	case <-time.After(10 * time.Second):
+		t.Fatal("RoundTrip deadlocked — likely a timer drain bug")
+	}
+
+	if got := calls.Load(); got != attempts {
+		t.Errorf("expected %d attempts, got %d", attempts, got)
+	}
+}
+
+// TestRetryTransport_TimerDrainToleratesAlreadyConsumedChannel specifically
+// targets the scenario where the timer fires, the select consumes timer.C,
+// and then the next iteration's Stop() returns false. The non-blocking drain
+// must not hang in this case.
+func TestRetryTransport_TimerDrainToleratesAlreadyConsumedChannel(t *testing.T) {
+	var calls atomic.Int32
+	base := rtFunc(func(*http.Request) (*http.Response, error) {
+		n := calls.Add(1)
+		if n <= 3 {
+			return nil, dialErr()
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})
+	// 1ms delay is short enough that the timer fires during each select
+	// wait, so the <-timer.C branch is taken every iteration — meaning the
+	// channel is empty when the next iteration's drain runs.
+	tr := newRetryTransport(base, 5, 1*time.Millisecond, 5*time.Millisecond, nil)
+
+	done := make(chan struct{})
+	var resp *http.Response
+	var err error
+	go func() {
+		defer close(done)
+		resp, err = tr.RoundTrip(newRequest(t.Context(), t))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RoundTrip deadlocked on timer drain after consumed channel")
+	}
+
+	if err != nil {
+		t.Fatalf("expected success on attempt 4, got %v", err)
+	}
+	resp.Body.Close()
+	if got := calls.Load(); got != 4 {
+		t.Errorf("expected 4 attempts, got %d", got)
+	}
+}

@@ -117,6 +117,7 @@ type SandboxClaimSpec struct {
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
+	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
 	// +optional
 	AdditionalPodMetadata sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 

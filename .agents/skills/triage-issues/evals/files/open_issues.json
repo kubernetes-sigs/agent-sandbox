@@ -1,0 +1,72 @@
+[
+  {
+    "number": 101,
+    "title": "Data integrity: controller leaks pod resources on sudden node drain",
+    "labels": [{"name": "kind/bug"}],
+    "assignees": [],
+    "createdAt": "2026-07-01T10:00:00Z",
+    "updatedAt": "2026-07-01T10:00:00Z",
+    "body": "When a node drain occurs unexpectedly, core controller fails to cleanup pod resources, leading to resource leakage in cluster.",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues/101"
+  },
+  {
+    "number": 201,
+    "title": "WarmPool controller scaling performance degrade under heavy load",
+    "labels": [{"name": "kind/feature"}],
+    "assignees": [],
+    "createdAt": "2026-07-02T11:00:00Z",
+    "updatedAt": "2026-07-02T11:00:00Z",
+    "body": "WarmPool controller scaling issue #201. Reconciler latency increases significantly when managing >100 sandboxes.",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues/201"
+  },
+  {
+    "number": 202,
+    "title": "Add support for Ephemeral Volume Snapshots",
+    "labels": [{"name": "kind/feature"}],
+    "assignees": [],
+    "createdAt": "2026-07-03T12:00:00Z",
+    "updatedAt": "2026-07-03T12:00:00Z",
+    "body": "Feature request to support taking volume snapshots before sandbox termination as described in roadmap #202.",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues/202"
+  },
+  {
+    "number": 301,
+    "title": "Flaky test in e2e suite",
+    "labels": [{"name": "priority/important-soon"}, {"name": "kind/test"}],
+    "assignees": [],
+    "createdAt": "2026-07-04T13:00:00Z",
+    "updatedAt": "2026-07-04T13:00:00Z",
+    "body": "TestE2E_WarmPoolFlakiness fails intermittently in CI.",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues/301"
+  },
+  {
+    "number": 401,
+    "title": "Refactor controller logging to use V(4) for steady-state checks",
+    "labels": [{"name": "kind/cleanup"}],
+    "assignees": [],
+    "createdAt": "2026-07-05T14:00:00Z",
+    "updatedAt": "2026-07-05T14:00:00Z",
+    "body": "Nice-to-have cleanup: reduce log noise in reconcile loops during steady state.",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues/401"
+  },
+  {
+    "number": 501,
+    "title": "Question about sandbox setup",
+    "labels": [{"name": "triage/needs-information"}],
+    "assignees": [],
+    "createdAt": "2026-07-06T15:00:00Z",
+    "updatedAt": "2026-07-06T15:00:00Z",
+    "body": "",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues/501"
+  },
+  {
+    "number": 601,
+    "title": "Security: High severity vulnerability in third-party dependency",
+    "labels": [{"name": "kind/security"}],
+    "assignees": [],
+    "createdAt": "2026-07-07T16:00:00Z",
+    "updatedAt": "2026-07-07T16:00:00Z",
+    "body": "Security vulnerability detected in third-party dependency.",
+    "url": "https://github.com/kubernetes-sigs/agent-sandbox/issues/601"
+  }
+]

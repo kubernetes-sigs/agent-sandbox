@@ -1,0 +1,121 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Overview - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Overview & Bottleneck Analysis{% endblock %}
+
+{% block content %}
+<div class="grid">
+    <div class="card">
+        <div class="card-title">Total Run Duration</div>
+        <div class="card-value">{{ run_duration }}s</div>
+        <div class="card-desc">From start to end of all phases</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Total Sandboxes Launched</div>
+        <div class="card-value">{{ total_created }}</div>
+        <div class="card-desc">Created across all phases</div>
+    </div>
+    <div class="card">
+        <div class="card-title">Avg Launch Latency (Probe)</div>
+        <div class="card-value">{{ "%.2f"|format(probe_latency_ms) }}ms</div>
+        <div class="card-desc">End-to-end sandbox launch time in probe phase</div>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 32px;">
+    <div class="card-title">
+        <span>Detected Bottlenecks & Findings</span>
+        <span class="badge badge-info">{{ findings|length }} Findings</span>
+    </div>
+    <div class="findings-list">
+        {% for finding in findings %}
+        <div class="finding-item {{ finding.severity }}">
+            <div class="finding-title">
+                {% if finding.severity == 'critical' %}
+                <span class="badge badge-danger">Critical</span>
+                {% elif finding.severity == 'warning' %}
+                <span class="badge badge-warning">Warning</span>
+                {% else %}
+                <span class="badge badge-info">Info</span>
+                {% endif %}
+                {{ finding.title }}
+            </div>
+            <div class="finding-desc">{{ finding.desc }}</div>
+            <a class="finding-link" href="{{ finding.link }}">View Details / Graph &rarr;</a>
+        </div>
+        {% else %}
+        <div class="finding-desc">No major bottlenecks detected. All components performed within normal thresholds.</div>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Test Run Phases</div>
+    <div class="table-container">
+        <table id="phases-table"></table>
+    </div>
+</div>
+
+<div class="card" style="margin-top: 32px;">
+    <div class="card-title">Sandbox Launch Latency Percentiles by Phase</div>
+    <div class="table-container">
+        <table id="percentiles-table"></table>
+    </div>
+</div>
+
+<script>
+    const phaseRows = {{ summary.phases | tojson }}.map(p => ({
+        ...p,
+        create_rate: p.createThroughput ? p.createThroughput.overallPerSecond : null,
+        ready_rate: p.readyThroughput ? p.readyThroughput.overallPerSecond : null
+    }));
+    renderTable('#phases-table', [
+        {key: 'name', label: 'Phase Name', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'requested', label: 'Requested'},
+        {key: 'created', label: 'Created'},
+        {key: 'ready', label: 'Ready'},
+        {key: 'failed', label: 'Failed'},
+        {key: 'durationSeconds', label: 'Duration (s)', render: v => v.toFixed(2)},
+        {key: 'create_rate', label: 'Create Rate (ops/s)', render: v => v == null ? '-' : v.toFixed(2)},
+        {key: 'ready_rate', label: 'Ready Rate (ops/s)', render: v => v == null ? '-' : v.toFixed(2)}
+    ], phaseRows);
+
+    // Latency percentile cells: raw values are milliseconds; short stages are
+    // displayed in ms, longer stages in seconds.
+    const msCell = v => v == null ? '-' : `<span class="${numClass(v, 30, 100)}">${v.toFixed(1)}ms</span>`;
+    const secCell = v => v == null ? '-' : `<span class="${numClass(v, 3000, 10000)}">${(v / 1000).toFixed(1)}s</span>`;
+    const sandboxPercentiles = {{ sandbox_percentiles | tojson }};
+    renderTable('#percentiles-table', [
+        {key: 'phase', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'count', label: 'Count'},
+        {key: 'createAck_p50', label: 'Ack P50', render: msCell},
+        {key: 'createAck_p90', label: 'Ack P90', render: msCell},
+        {key: 'podCreated_p50', label: 'Pod Created P50', render: secCell},
+        {key: 'podCreated_p90', label: 'Pod Created P90', render: secCell},
+        {key: 'podScheduled_p50', label: 'Scheduled P50', render: secCell},
+        {key: 'podScheduled_p90', label: 'Scheduled P90', render: secCell},
+        {key: 'podRunning_p50', label: 'Running P50', render: secCell},
+        {key: 'podRunning_p90', label: 'Running P90', render: secCell},
+        {key: 'sandboxReady_p50', label: 'Ready P50', render: secCell},
+        {key: 'sandboxReady_p90', label: 'Ready P90', render: secCell},
+        {key: 'sandboxReady_p99', label: 'Ready P99', render: secCell}
+    ], sandboxPercentiles);
+</script>
+{% endblock %}

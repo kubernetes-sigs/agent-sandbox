@@ -167,6 +167,55 @@ def test_max_reuses_rotates_sandbox(make_cluster, monkeypatch):
   f.teardown()
 
 
+def test_recyclable_helper():
+  r = GitRestoreReset()
+  from agent_sandbox_rl import ResetBaseline
+  assert r.recyclable(ResetBaseline(pristine_sha="abc")) is True
+  assert r.recyclable(ResetBaseline(pristine_sha="")) is False
+
+
+def test_prime_exec_error_is_non_recyclable():
+  class Boom:
+    cluster_name = "c"
+    pod_name = "p"
+    def exec(self, cmd):
+      raise RuntimeError("no bash")
+  base = GitRestoreReset().prime(Boom())
+  assert base.pristine_sha == ""            # empty -> recyclable() False
+
+
+def test_reset_exec_error_quarantines_not_raises():
+  class Boom:
+    cluster_name = "c"
+    pod_name = "p"
+    calls = 0
+    def exec(self, cmd):
+      Boom.calls += 1
+      if Boom.calls == 1:
+        return _CLEAN                        # prime ok
+      raise RuntimeError("pod died")         # reset exec fails
+  h = Boom()
+  r = GitRestoreReset()
+  base = r.prime(h)
+  out = r.reset(h, base)                     # must NOT raise
+  assert not out.clean and out.reason == "exec_error"
+
+
+def test_non_git_image_falls_back_to_fresh_per_task(make_cluster, monkeypatch):
+  # empty pristine -> not recyclable -> fresh claim per task, no reset attempts
+  empty = "PRISTINE=\nHEAD=\nDIRTY=0\nENV=e1\nCFG=g1\nPROCS=5"
+  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd: empty)
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1)
+  f.load_tasks(["img", "img", "img"])          # 3 tasks, 1 non-git image
+  f.setup()
+  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1)
+  assert res == [1, 1, 1]
+  # non-recyclable -> a fresh claim per task = 3 claims (degrades to the regular path)
+  assert c.sandbox_client.create_sandbox.call_count == 3
+  f.teardown()
+
+
 def test_determinism_canary_identical(make_cluster, monkeypatch):
   _patch_clean_exec(monkeypatch)
   c = make_cluster("solo")

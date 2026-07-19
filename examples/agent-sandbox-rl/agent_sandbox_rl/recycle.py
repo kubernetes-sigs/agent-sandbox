@@ -114,6 +114,13 @@ class GitRestoreReset:
         d[k.strip()] = v.strip()
     return d
 
+  @staticmethod
+  def recyclable(baseline: ResetBaseline) -> bool:
+    """Can this sandbox be git-restored? False when `/testbed` has no git repo
+    (or `git` is absent / `git tag` failed) — the caller should then process the
+    image's tasks with fresh claims instead of quarantining every reset."""
+    return bool(baseline.pristine_sha)
+
   # -- prime: once per sandbox at first claim ----------------------------- #
   def prime(self, handle: SandboxHandle) -> ResetBaseline:
     tb = self.testbed
@@ -128,7 +135,12 @@ class GitRestoreReset:
         f'git -C {tb} config gc.pruneExpire never; '
         f'git -C {tb} checkout -q --detach pristine >/dev/null 2>&1; '
         + self._fingerprint_sh())
-    d = self._parse(handle.exec(["bash", "-lc", script]))
+    try:
+      d = self._parse(handle.exec(["bash", "-lc", script]))
+    except Exception as e:  # noqa: BLE001 — dead pod / no bash → not recyclable
+      logger.warning("prime failed on %s (%s); image treated as non-recyclable",
+                     getattr(handle, "pod_name", "?"), e)
+      return ResetBaseline()          # empty → recyclable() False → fresh path
     return ResetBaseline(
         pristine_sha=d.get("PRISTINE", "") or d.get("HEAD", ""),
         env_hash=d.get("ENV", ""),
@@ -161,7 +173,12 @@ class GitRestoreReset:
         + f'rm -rf {wipe} >/dev/null 2>&1; '
         + self._fingerprint_sh())
     t0 = time.monotonic()
-    d = self._parse(handle.exec(["bash", "-lc", script]))
+    try:
+      d = self._parse(handle.exec(["bash", "-lc", script]))
+    except Exception as e:  # noqa: BLE001 — exec failed (dead pod / no bash):
+      # never raise into the batch; report dirty so the caller quarantines.
+      return ResetOutcome(clean=False, seconds=round(time.monotonic() - t0, 3),
+                          reason="exec_error", detail={"error": str(e)})
     elapsed = time.monotonic() - t0
 
     reason = self._first_failure(d, baseline, elapsed, timeout)
@@ -211,6 +228,13 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
 
   Records ``reset`` / ``quarantine`` / ``rotate`` phases in the RunReport so the
   claim-economics win is measurable next to the baseline strategies.
+
+  **Non-git images are handled transparently:** if an image has no git repo at
+  ``/testbed`` (no pristine anchor at prime), it can't be git-restored, so that
+  image's tasks fall back to a **fresh claim per task** (no reset attempts, no
+  quarantine churn) — safe to point this at a mixed image set. A reset whose
+  ``exec`` fails (dead pod / no bash) is reported dirty and quarantined, never
+  raised into the batch.
   """
   reset = reset or GitRestoreReset()
   results = [None] * len(tasks)
@@ -237,15 +261,27 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
     handle = None
     baseline = None
     uses = 0
+    recyclable = None                         # None = undetermined; decided at 1st prime
     try:
       for pos, (i, t) in enumerate(group):
-        if handle is None:                    # first task, or after a quarantine
+        if handle is None:                    # first task, or after release
           handle = fleet.acquire(t)
-          baseline = reset.prime(handle)
+          if recyclable is None:              # first claim for this image: prime + decide
+            baseline = reset.prime(handle)
+            recyclable = reset.recyclable(baseline)
+            if not recyclable:
+              logger.info("image %s not git-recyclable (%s) — fresh claim per task",
+                          t.image, baseline and "no pristine anchor")
+          elif recyclable:                    # recyclable image, fresh sandbox after
+            baseline = reset.prime(handle)    # rotate/quarantine → re-anchor pristine
           uses = 0
         _process(handle, i, t)
         if pos == len(group) - 1:
-          break                               # nothing to reset for
+          break                               # last task in group: nothing to reset for
+        if not recyclable:                    # can't reset → fresh claim, no reset/quarantine
+          fleet.release(handle)
+          handle = None
+          continue
         uses += 1
         if uses >= max_reuses:                # planned rotation (drift bound)
           with fleet._obs.phase("rotate", cluster=handle.cluster_name):

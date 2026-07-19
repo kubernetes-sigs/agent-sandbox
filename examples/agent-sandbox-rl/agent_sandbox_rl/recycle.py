@@ -97,7 +97,11 @@ class GitRestoreReset:
         f'echo "HEAD=$(git -C {tb} rev-parse HEAD 2>/dev/null)"; '
         f'echo "DIRTY=$(git -C {tb} status --porcelain 2>/dev/null | wc -l | tr -d " ")"; '
         f'echo "ENV=$(pip freeze 2>/dev/null | sha256sum | cut -d" " -f1)"; '
-        f'echo "CFG=$( (git -C {tb} config --list; ls -la {tb}/.git/hooks 2>/dev/null) '
+        # config + hook *content* (names + bodies), mtime-free and order-stable —
+        # `ls -la` would hash mtimes and false-positive on every reset.
+        f'echo "CFG=$( (git -C {tb} config --list --local 2>/dev/null | sort; '
+        f'for f in {tb}/.git/hooks/*; do [ -f "$f" ] && '
+        f'echo "H:$(basename "$f")" && cat "$f"; done 2>/dev/null) '
         f'| sha256sum | cut -d" " -f1)"; '
         f'echo "PROCS=$(ps -eo pid= 2>/dev/null | wc -l | tr -d " ")"')
 

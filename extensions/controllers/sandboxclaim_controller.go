@@ -140,6 +140,10 @@ func (m *observedTimeMap) Delete(key types.NamespacedName) {
 	m.inner.Delete(key)
 }
 
+func (m *observedTimeMap) CompareAndDelete(key types.NamespacedName, old observedTimeEntry) bool {
+	return m.inner.CompareAndDelete(key, old)
+}
+
 func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTimeEntry) (observedTimeEntry, bool) {
 	actual, loaded := m.inner.LoadOrStore(key, entry)
 	return actual.(observedTimeEntry), loaded
@@ -1799,7 +1803,7 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
 			entry, ok := r.observedTimes.Load(key)
 			if ok && entry.uid == e.Object.GetUID() {
-				r.observedTimes.Delete(key)
+				r.observedTimes.CompareAndDelete(key, entry)
 			}
 			return true
 		},
@@ -1929,8 +1933,7 @@ func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, 
 func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string, warmPoolName string) {
 	logger := log.FromContext(ctx)
 	if observedTimeString := claim.Annotations[asmetrics.ObservabilityAnnotation]; observedTimeString != "" {
-		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-		defer r.observedTimes.Delete(key)
+		defer r.drainObservedTime(claim)
 
 		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
 		if err != nil {
@@ -1961,19 +1964,18 @@ func (r *SandboxClaimReconciler) recordSandboxCreationLatency(sandbox *v1beta1.S
 func (r *SandboxClaimReconciler) drainObservedTime(claim *extensionsv1beta1.SandboxClaim) {
 	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
 	if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
-		r.observedTimes.Delete(key)
+		r.observedTimes.CompareAndDelete(key, entry)
 	}
 }
 
 // backfillFirstReadyAnnotation stamps the ClaimFirstReadyAnnotation with a
 // sentinel value when the claim was previously Ready but the annotation is
 // missing (e.g. a prior Patch failed). This arms the persistent guard so that
-// future readiness flaps are highly unlikely to double-count metrics. Double
-// counting would only happen if both the original happy-path stamp and this
-// backfill Patch fail exactly at the transitions between both NotReady->Ready
-// and Ready->NotReady, as well as all reconcile cycles where it stays Ready. The
-// sentinel "unknown" is used instead of a timestamp to signal that the actual
-// first-ready time is unknown.
+// future readiness flaps stop recording duplicate metrics. The guard fails open:
+// if both the original timestamp Patch and this backfill Patch keep failing,
+// each subsequent NotReady->Ready transition can re-record metrics until one of
+// those Patches succeeds. The sentinel value is used instead of a timestamp to
+// signal that the actual first-ready time is unknown.
 func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
 	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
 		return nil
@@ -1982,7 +1984,7 @@ func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Contex
 	if claim.Annotations == nil {
 		claim.Annotations = make(map[string]string)
 	}
-	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = "unknown"
+	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = asmetrics.ClaimFirstReadyUnknownSentinel
 	if err := r.Patch(ctx, claim, patch); err != nil {
 		return fmt.Errorf("backfill claim first-ready annotation: %w", err)
 	}
@@ -2011,6 +2013,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 		// is missing (prior Patch failed), backfill it now so the persistent
 		// guard is armed before the claim can flap back to Ready.
 		if wasReady {
+			r.drainObservedTime(claim)
 			return r.backfillFirstReadyAnnotation(ctx, claim)
 		}
 		return nil

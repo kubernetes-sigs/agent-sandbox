@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -2918,7 +2919,7 @@ func TestRecordCreationLatencyMetric_ClaimFirstReadyAnnotation(t *testing.T) {
 		// Verify the backfill annotation was stamped.
 		updated := &extensionsv1beta1.SandboxClaim{}
 		require.NoError(t, inner.Get(ctx, key, updated))
-		require.Equal(t, "unknown", updated.Annotations[asmetrics.ClaimFirstReadyAnnotation], "retry should backfill annotation")
+		require.Equal(t, asmetrics.ClaimFirstReadyUnknownSentinel, updated.Annotations[asmetrics.ClaimFirstReadyAnnotation], "retry should backfill annotation")
 	})
 
 	t.Run("patch failure followed by mid-flap backfills annotation and prevents double-count", func(t *testing.T) {
@@ -2978,7 +2979,7 @@ func TestRecordCreationLatencyMetric_ClaimFirstReadyAnnotation(t *testing.T) {
 		// Verify backfill was stamped.
 		updated := &extensionsv1beta1.SandboxClaim{}
 		require.NoError(t, inner.Get(ctx, key, updated))
-		require.Equal(t, "unknown", updated.Annotations[asmetrics.ClaimFirstReadyAnnotation])
+		require.Equal(t, asmetrics.ClaimFirstReadyUnknownSentinel, updated.Annotations[asmetrics.ClaimFirstReadyAnnotation])
 
 		// Step 3: Flap back to Ready — newReady=True, oldReady=False.
 		// The annotation guard should prevent re-recording.
@@ -2996,7 +2997,8 @@ func TestRecordCreationLatencyMetric_ClaimFirstReadyAnnotation(t *testing.T) {
 }
 
 // claimPatchFailClient wraps a client.Client and fails the first maxFailures
-// Patch calls for SandboxClaim objects, then delegates to the inner client.
+// Patch calls that write the claim-first-ready annotation, then delegates to
+// the inner client.
 type claimPatchFailClient struct {
 	client.Client
 	err         error
@@ -3006,9 +3008,12 @@ type claimPatchFailClient struct {
 
 func (c *claimPatchFailClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 	if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
-		if c.maxFailures == 0 || c.failures < c.maxFailures {
-			c.failures++
-			return c.err
+		data, err := patch.Data(obj)
+		if err == nil && bytes.Contains(data, []byte(asmetrics.ClaimFirstReadyAnnotation)) {
+			if c.maxFailures == 0 || c.failures < c.maxFailures {
+				c.failures++
+				return c.err
+			}
 		}
 	}
 	return c.Client.Patch(ctx, obj, patch, opts...)
@@ -3425,6 +3430,29 @@ func TestSandboxClaimTimingPredicates(t *testing.T) {
 			tc.verify(t, r)
 		})
 	}
+}
+
+func TestObservedTimeMapCompareAndDeletePreservesNewerUID(t *testing.T) {
+	key := types.NamespacedName{Name: "test-claim", Namespace: "default"}
+	oldEntry := observedTimeEntry{timestamp: time.Now().Add(-10 * time.Second), uid: "uid-1"}
+	newEntry := observedTimeEntry{timestamp: time.Now(), uid: "uid-2"}
+
+	var observed observedTimeMap
+	observed.Store(key, oldEntry)
+
+	staleLoaded, ok := observed.Load(key)
+	require.True(t, ok)
+	require.Equal(t, oldEntry, staleLoaded)
+
+	// Simulate a concurrent UpdateFunc overwriting the entry for a recreated claim.
+	observed.Store(key, newEntry)
+
+	deleted := observed.CompareAndDelete(key, staleLoaded)
+	require.False(t, deleted, "stale cleanup must not delete a newer UID entry")
+
+	current, ok := observed.Load(key)
+	require.True(t, ok)
+	require.Equal(t, newEntry, current)
 }
 
 func TestGetOrRecordObservedTime(t *testing.T) {

@@ -51,6 +51,13 @@ from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
 from .handles import SandboxHandle
 from .observability import Observer, RunReport, repo_family, serve_metrics
+from .recycle import (
+    GitRestoreReset,
+    ResetBaseline,
+    ResetOutcome,
+    determinism_canary,
+    reuse_git_restore_sandbox,
+)
 from .placement import (
     CapacityWeighted,
     ImageAffinity,
@@ -122,6 +129,12 @@ __all__ = [
     # strategies
     "STRATEGIES",
     "process_parallel",
+    # recycling (reset-and-reuse)
+    "GitRestoreReset",
+    "ResetBaseline",
+    "ResetOutcome",
+    "reuse_git_restore_sandbox",
+    "determinism_canary",
     # observability
     "Observer",
     "RunReport",

@@ -9,6 +9,20 @@ Initial implementation (design phases 1–7), live-verified on GKE against Agent
 Sandbox `v0.5.0rc1` (v1beta1).
 
 ### Added (performance & scale)
+- **Sandbox recycling — `reuse_git_restore_sandbox`** (`recycle.py`): reset-and-reuse
+  one claimed sandbox across same-image tasks so **claims scale with problems, not
+  tasks** (÷ tasks-per-image) — the RL-rollout claim-churn lever. `GitRestoreReset`
+  restores `/testbed` to a pristine tag (`git reset --hard` + `clean -xdff` + detach),
+  sweeps processes + `/tmp`, disables git gc/maintenance (avoids shared-store
+  corruption), then **verifies** cleanliness: repo at pristine SHA, and — as tripwires,
+  not repairs — the Python env (`pip freeze` hash), git config/hooks hash, and process
+  count unchanged. Any drift → the sandbox is **quarantined** (released, fresh claim),
+  so contamination never silently biases rewards. The costlier reset tiers (env-dir
+  restore, overlay/checkpoint restart) are deliberately deferred — detected and
+  escalated to a fresh claim instead. `determinism_canary` runs a task twice in one
+  recycled sandbox and asserts byte-identical output (the correctness gate). New
+  `reset`/`quarantine`/`rotate` phases in the `RunReport`. Design + deep-research
+  hardening notes: `plans/sandbox-recycling.md`.
 - **`pipelined` strategy** (`strategies.py`, `async_fleet.py`): double-buffered
   sliding window — prefetch window N+1's pools (background thread / `asyncio.Task`)
   while window N's tasks run, so image pull overlaps execution. Footprint bounded

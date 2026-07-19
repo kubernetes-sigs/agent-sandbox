@@ -146,7 +146,18 @@ so the simple case stays simple.
 | return hostname list | `handles()`, `hostnames()`, `endpoints()` (cluster-qualified) |
 | teardown / delete | `release(handle)`, `release_all()`, `teardown(delete_namespace=False)` (routes to owning cluster) |
 | managed batch | `run(process_fn, strategy=None) -> [Result]` |
+| recycle (reset-and-reuse) | `reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *, reset, max_reuses, reset_timeout)`; `GitRestoreReset.prime/reset`; `determinism_canary(...)` |
 | ergonomics | context manager `__enter__/__exit__` → `setup()`/`teardown()` |
+
+**Sandbox recycling** (`recycle.py`, experimental) is a third execution mode beside
+primitives and the managed runner: reuse one claimed sandbox across same-image tasks,
+resetting between them, so claims scale with *problems* (÷ tasks-per-image) instead of
+tasks. The shipped tier is **git-restore** (`GitRestoreReset`: `git reset --hard
+pristine` + `clean -xdff` + process/`/tmp` sweep, then a cleanliness verify with
+env / config-hooks / process-count tripwires); dirty resets **quarantine** to a fresh
+claim. Costlier tiers (env-dir restore, overlay/checkpoint restart) are deferred. Full
+design, hardening (deep-research verified), and open questions live in the companion
+notes repo `plans/sandbox-recycling.md`; `determinism_canary` is the correctness gate.
 
 **Two modes (both shipped):** (1) **primitives** an RL loop drives itself
 (`acquire` → use `handle.hostname/endpoint` → `release`); (2) **managed runner**

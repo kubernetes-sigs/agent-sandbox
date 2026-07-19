@@ -71,14 +71,18 @@ class GitRestoreReset:
   """Restore a sandbox to its pristine baseline via git + a cleanliness verify.
 
   ``check_env`` / ``check_config`` toggle the site-packages and git-config/hooks
-  **tripwires** (drift → quarantine, since this tier does not restore them).
-  ``testbed`` is the editable-installed repo dir whose realpath must stay stable.
-  All work is one ``exec`` round-trip per phase (prime / reset) to keep the reset
-  off the critical path budget.
+  **tripwires** (drift → quarantine, since this tier does not restore them). Both
+  default **off**: they cost a per-reset `pip freeze` / config scan that dominates
+  reset time and is Python/git-specific, while env/config drift is rare and already
+  bounded by ``max_reuses`` + the determinism canary. Turn ``check_env`` on for
+  workloads whose agents mutate site-packages (and accept the cost). ``testbed`` is
+  the editable-installed repo dir whose realpath must stay stable. Each phase
+  (prime / reset) is one ``exec`` — routed through a persistent `SandboxSession`
+  when the handle has one, so resets don't re-connect per command.
   """
 
-  def __init__(self, testbed: str = "/testbed", *, check_env: bool = True,
-               check_config: bool = True, wipe=_DEFAULT_WIPE,
+  def __init__(self, testbed: str = "/testbed", *, check_env: bool = False,
+               check_config: bool = False, wipe=_DEFAULT_WIPE,
                kill_new_procs: bool = True):
     self.testbed = testbed
     self.check_env = check_env
@@ -89,21 +93,27 @@ class GitRestoreReset:
   # -- shared shell fragments --------------------------------------------- #
   def _fingerprint_sh(self) -> str:
     tb = self.testbed
-    # KEY=VALUE lines, parsed by _parse. pip freeze is the site-packages tripwire;
-    # config+hooks listing is the booby-trap tripwire (v2: agent `git config`
-    # writes land in shared .git/config even with worktreeConfig).
-    return (
-        f'echo "PRISTINE=$(git -C {tb} rev-parse pristine 2>/dev/null)"; '
-        f'echo "HEAD=$(git -C {tb} rev-parse HEAD 2>/dev/null)"; '
-        f'echo "DIRTY=$(git -C {tb} status --porcelain 2>/dev/null | wc -l | tr -d " ")"; '
-        f'echo "ENV=$(pip freeze 2>/dev/null | sha256sum | cut -d" " -f1)"; '
-        # config + hook *content* (names + bodies), mtime-free and order-stable —
-        # `ls -la` would hash mtimes and false-positive on every reset.
-        f'echo "CFG=$( (git -C {tb} config --list --local 2>/dev/null | sort; '
-        f'for f in {tb}/.git/hooks/*; do [ -f "$f" ] && '
-        f'echo "H:$(basename "$f")" && cat "$f"; done 2>/dev/null) '
-        f'| sha256sum | cut -d" " -f1)"; '
-        f'echo "PROCS=$(ps -eo pid= 2>/dev/null | wc -l | tr -d " ")"')
+    # KEY=VALUE lines, parsed by _parse. Only compute what we actually verify —
+    # `pip freeze` (the env tripwire) is the expensive part, so it's skipped
+    # unless check_env is on (git-only reset is the fast default path).
+    parts = [
+        f'echo "PRISTINE=$(git -C {tb} rev-parse pristine 2>/dev/null)"',
+        f'echo "HEAD=$(git -C {tb} rev-parse HEAD 2>/dev/null)"',
+        f'echo "DIRTY=$(git -C {tb} status --porcelain 2>/dev/null | wc -l | tr -d " ")"',
+    ]
+    if self.check_env:
+      parts.append('echo "ENV=$(pip freeze 2>/dev/null | sha256sum | cut -d" " -f1)"')
+    if self.check_config:
+      # config + hook *content* (names + bodies), mtime-free and order-stable —
+      # `ls -la` would hash mtimes and false-positive on every reset.
+      parts.append(
+          f'echo "CFG=$( (git -C {tb} config --list --local 2>/dev/null | sort; '
+          f'for f in {tb}/.git/hooks/*; do [ -f "$f" ] && '
+          f'echo "H:$(basename "$f")" && cat "$f"; done 2>/dev/null) '
+          f'| sha256sum | cut -d" " -f1)"')
+    if self.kill_new_procs:
+      parts.append('echo "PROCS=$(ps -eo pid= 2>/dev/null | wc -l | tr -d " ")"')
+    return "; ".join(parts)
 
   @staticmethod
   def _parse(out: str) -> dict:
@@ -213,7 +223,8 @@ class GitRestoreReset:
 def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
                               reset: GitRestoreReset | None = None,
                               max_reuses: int = 32,
-                              reset_timeout: float = 5.0):
+                              reset_timeout: float = 5.0,
+                              use_session: bool = True):
   """Execute ``tasks`` reusing one sandbox per image (claims scale ÷ tasks-per-image).
 
   Tasks are grouped by image; each group runs sequentially inside a single claimed
@@ -266,6 +277,12 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
       for pos, (i, t) in enumerate(group):
         if handle is None:                    # first task, or after release
           handle = fleet.acquire(t)
+          if use_session:                     # one held-open exec stream per sandbox
+            try:
+              handle.open_session()
+            except Exception as e:            # noqa: BLE001 — fall back to one-shot exec
+              logger.warning("session open failed on %s (%s); one-shot exec",
+                             handle.pod_name, e)
           if recyclable is None:              # first claim for this image: prime + decide
             baseline = reset.prime(handle)
             recyclable = reset.recyclable(baseline)

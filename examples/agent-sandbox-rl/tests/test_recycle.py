@@ -84,11 +84,30 @@ def test_reset_clean_when_fingerprint_matches():
 ])
 def test_reset_detects_each_pollution_vector(fp, reason):
   h = FakeHandle([_CLEAN, fp])
-  r = GitRestoreReset()
+  # enable every tripwire (defaults are off = git-only fast path)
+  r = GitRestoreReset(check_env=True, check_config=True)
   base = r.prime(h)
   out = r.reset(h, base)
   assert not out.clean
   assert out.reason == reason
+
+
+def test_git_only_default_ignores_env_and_config_drift():
+  # defaults check_env/check_config off: only git state is verified
+  drift = "PRISTINE=abc\nHEAD=abc\nDIRTY=0\nENV=e2\nCFG=g2\nPROCS=5"
+  h = FakeHandle([_CLEAN, drift])
+  r = GitRestoreReset()
+  base = r.prime(h)
+  assert r.reset(h, base).clean            # env+config drift ignored by default
+
+
+def test_git_only_fingerprint_omits_pip_freeze():
+  # the expensive pip freeze must not be in the default (git-only) reset script
+  h = FakeHandle([_CLEAN, _CLEAN])
+  r = GitRestoreReset()
+  base = r.prime(h)
+  r.reset(h, base)
+  assert all("pip freeze" not in c[2] for c in h.calls)
 
 
 def test_no_pristine_anchor_is_never_clean():
@@ -127,7 +146,7 @@ def test_reuse_one_claim_per_image(make_cluster, monkeypatch):
   f = _fleet(ClusterRegistry([c]), max_concurrent=4)
   f.load_tasks(["img", "img", "img", "img"])   # 4 tasks, 1 image
   f.setup()
-  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: h.pod_name, concurrency=4)
+  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: h.pod_name, concurrency=4, use_session=False)
   assert len(res) == 4 and all(isinstance(x, str) for x in res)
   # one image -> one claim reused across all 4 tasks (÷G economics)
   assert c.sandbox_client.create_sandbox.call_count == 1
@@ -135,20 +154,19 @@ def test_reuse_one_claim_per_image(make_cluster, monkeypatch):
 
 
 def test_reset_failure_triggers_quarantine(make_cluster, monkeypatch):
-  # prime returns clean; every reset returns env drift -> quarantine each time
-  drift = "PRISTINE=abc\nHEAD=abc\nDIRTY=0\nENV=DRIFT\nCFG=g1\nPROCS=5"
-  seq = {"n": 0}
+  # prime returns clean; every reset returns a DIRTY worktree (git-only catches
+  # it regardless of env/config checks) -> quarantine each time
+  drift = "PRISTINE=abc\nHEAD=abc\nDIRTY=7\nENV=e1\nCFG=g1\nPROCS=5"
 
   def fake_exec(self, cmd):
-    seq["n"] += 1
-    # odd calls are prime (after each fresh claim), even are resets
+    # prime issues `git tag -f pristine`; resets don't
     return _CLEAN if "tag -f pristine" in cmd[2] else drift
   monkeypatch.setattr(SandboxHandle, "exec", fake_exec)
   c = make_cluster("solo")
   f = _fleet(ClusterRegistry([c]), max_concurrent=1)
   f.load_tasks(["img", "img", "img"])          # 3 tasks, 1 image
   f.setup()
-  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: h.pod_name, concurrency=1)
+  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: h.pod_name, concurrency=1, use_session=False)
   assert len(res) == 3
   # every reset dirty -> a fresh claim per task = 3 claims (no successful reuse)
   assert c.sandbox_client.create_sandbox.call_count == 3
@@ -161,7 +179,7 @@ def test_max_reuses_rotates_sandbox(make_cluster, monkeypatch):
   f = _fleet(ClusterRegistry([c]), max_concurrent=1)
   f.load_tasks(["img"] * 5)                     # 5 tasks, 1 image
   f.setup()
-  reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1, max_reuses=2)
+  reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1, max_reuses=2, use_session=False)
   # rotate after every 2 reuses: claims at task 1, 3, 5 -> 3 claims
   assert c.sandbox_client.create_sandbox.call_count == 3
   f.teardown()
@@ -209,7 +227,7 @@ def test_non_git_image_falls_back_to_fresh_per_task(make_cluster, monkeypatch):
   f = _fleet(ClusterRegistry([c]), max_concurrent=1)
   f.load_tasks(["img", "img", "img"])          # 3 tasks, 1 non-git image
   f.setup()
-  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1)
+  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1, use_session=False)
   assert res == [1, 1, 1]
   # non-recyclable -> a fresh claim per task = 3 claims (degrades to the regular path)
   assert c.sandbox_client.create_sandbox.call_count == 3

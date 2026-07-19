@@ -49,7 +49,7 @@ from .exceptions import (
 )
 from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
-from .handles import SandboxHandle
+from .handles import SandboxHandle, SandboxSession
 from .observability import Observer, RunReport, repo_family, serve_metrics
 from .recycle import (
     GitRestoreReset,
@@ -126,6 +126,7 @@ __all__ = [
     "FleetPlan",
     "PlanEntry",
     "SandboxHandle",
+    "SandboxSession",
     # strategies
     "STRATEGIES",
     "process_parallel",

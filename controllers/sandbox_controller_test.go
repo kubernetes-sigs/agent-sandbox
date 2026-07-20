@@ -1172,9 +1172,9 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "persists owner reference when adopting unowned pod whose labels are already correct",
@@ -1224,9 +1224,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "adopts unowned pod carrying legacy tracking label when adoptable label is absent",
@@ -1272,9 +1272,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name:    "reconcilePod creates a new Pod",
@@ -1303,9 +1303,9 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "drops user-supplied system-reserved labels and annotations to prevent hijacking",
@@ -1357,9 +1357,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "scrubs stale system labels/annotations recorded by an older controller",
@@ -1411,9 +1411,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "does not propagate system labels from Sandbox metadata to Pod",
@@ -1448,7 +1448,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "does not propagate system labels from Sandbox PodTemplate to Pod",
@@ -1485,7 +1485,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "does not propagate template-ref-hash from Sandbox metadata to Pod",
@@ -1520,7 +1520,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "propagates warm pool label from Sandbox owner reference to Pod",
@@ -1565,7 +1565,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "removes warm pool label from Pod when Sandbox is no longer owned by SandboxWarmPool",
@@ -1621,9 +1621,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "adds warm pool label to existing Pod when Sandbox is owned by SandboxWarmPool",
@@ -1691,9 +1691,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "propagates template-ref-hash label from Sandbox labels to new Pod",
@@ -1738,7 +1738,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "adds template-ref-hash label to existing Pod during reconciliation",
@@ -1802,7 +1802,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "both warm-pool-sandbox and template-ref-hash coexist on Pod",
@@ -1849,7 +1849,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "removes template-ref-hash label from Pod when Sandbox is not owned by extensions controller",
@@ -1903,9 +1903,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "removes template-ref-hash label from Pod when absent from Sandbox labels but still extensions-owned",
@@ -1968,9 +1968,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "delete pod if mode is Suspended",
@@ -2354,9 +2354,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "refuses to adopt unowned pod that lacks pool authorization label",
@@ -2423,9 +2423,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name:        "normalizes invalid created-by label to unknown",
@@ -2458,9 +2458,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "updates and normalizes created-by label on existing Pod",
@@ -2516,9 +2516,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "removes created-by label from existing Pod when Sandbox lacks it",
@@ -2567,9 +2567,9 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// The pod name matches the sandbox name (the resolvePodName
+			// fallback), so no tracking annotation is written.
+			wantSandboxAnnotations: map[string]string{},
 		},
 	}
 

@@ -82,22 +82,14 @@ func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))
 
 	podKey := types.NamespacedName{Name: sandbox.Name, Namespace: ns.Name}
-	var failedPodUID types.UID
-	require.Eventually(t, func() bool {
-		pod := &corev1.Pod{}
-		if err := tc.Get(t.Context(), podKey, pod); err != nil {
-			return false
-		}
-		if pod.Status.Phase != corev1.PodFailed {
-			return false
-		}
-		failedPodUID = pod.UID
-		return failedPodUID != ""
-	}, 60*time.Second, time.Second, "expected initial pod to fail before recreate")
-
-	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: ns.Name},
-	}))
+	// Capture the first Pod's UID as soon as it is created. Waiting for a
+	// transient Failed or NotFound window is racy because the controller deletes
+	// Failed Pods for recreate immediately and then reuses the same Pod name.
+	initialPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: ns.Name}}
+	require.NoError(t, tc.WaitForObject(t.Context(), initialPod))
+	require.NoError(t, tc.Get(t.Context(), podKey, initialPod))
+	require.NotEmpty(t, initialPod.UID, "expected initial pod UID to be assigned")
+	initialPodUID := initialPod.UID
 
 	nameHash := NameHash(sandbox.Name)
 	require.NoError(t, tc.WaitForObject(t.Context(), sandbox, predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
@@ -120,9 +112,12 @@ func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
 	require.Equal(t, sandbox.UID, pvc.OwnerReferences[0].UID)
 
 	pod := &corev1.Pod{}
-	require.NoError(t, tc.Get(t.Context(), podKey, pod))
-	require.Equal(t, corev1.PodRunning, pod.Status.Phase)
-	require.NotEqual(t, failedPodUID, pod.UID, "expected recreate policy to replace the failed pod")
+	require.Eventually(t, func() bool {
+		if err := tc.Get(t.Context(), podKey, pod); err != nil {
+			return false
+		}
+		return pod.Status.Phase == corev1.PodRunning && pod.UID != initialPodUID
+	}, 60*time.Second, time.Second, "expected recreate policy to replace the initial pod with a running pod")
 
 	var foundVolume bool
 	for _, vol := range pod.Spec.Volumes {

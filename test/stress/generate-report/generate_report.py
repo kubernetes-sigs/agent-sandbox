@@ -1011,6 +1011,19 @@ def main():
         shutil.copy(f, output_dir / f.name)
         print(f"Copied CPU profile: {output_dir / f.name}")
 
+    # Copy the watch stream so watch.html can fetch and parse it client-side.
+    # Always name the copy watch.jsonl, even when the input is watch.jsonl.gz:
+    # prow's GCS artifact uploader strips a .gz suffix on upload (the run
+    # artifacts show watch.jsonl.gz stored as watch.jsonl), so a page
+    # referencing the .gz name 404s in CI. The client detects gzip by magic
+    # bytes rather than by extension, so the bare name works for both
+    # compressed and uncompressed inputs.
+    watch_log_name = None
+    if watch_file.exists():
+        watch_log_name = "watch.jsonl"
+        shutil.copy(watch_file, output_dir / watch_log_name)
+        print(f"Copied watch log: {output_dir / watch_log_name}")
+
     def render_page(template_name, output_filename, context):
         template = env.get_template(template_name)
         rendered = template.render(context)
@@ -1115,6 +1128,15 @@ def main():
         "pprof_profiles": pprof_profiles
     }
     render_page("pprof.html", "pprof.html", pprof_ctx)
+
+    # Watch events context
+    watch_ctx = {
+        "active_page": "watch",
+        "summary": summary,
+        "watch_log": watch_log_name,
+        "phases": js_phases
+    }
+    render_page("watch.html", "watch.html", watch_ctx)
 
     print("All report pages generated successfully!")
 

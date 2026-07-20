@@ -270,6 +270,14 @@ if [[ "${CNI}" == "cilium" ]]; then
   kops validate cluster --wait 5m
 fi
 
+# node-exporter: node-level CPU (incl. iowait), memory and disk stats for
+# every node including the control plane; the stress tool scrapes it via the
+# apiserver pod proxy (see promscrape.go). Without it the report cannot tell
+# control-plane CPU saturation from disk stalls at the node level.
+echo "Deploying node-exporter..."
+kubectl apply -f test/benchmarks/scenarios/benchmarks-kops-gcp/node-exporter.yaml
+kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout=3m
+
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).

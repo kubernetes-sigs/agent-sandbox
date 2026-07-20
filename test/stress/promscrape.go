@@ -47,7 +47,7 @@ import (
 // same pattern).
 type metricSample struct {
 	TS       time.Time       `json:"ts"`
-	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet | cilium-agent | etcd-main | etcd-events
+	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet | cilium-agent | etcd-main | etcd-events | node
 	Instance string          `json:"instance"` // pod or node name
 	Metric   string          `json:"metric"`   // family name (+ _bucket/_sum/_count for histograms and summaries)
 	Labels   json.RawMessage `json:"labels,omitempty"`
@@ -174,6 +174,28 @@ func (s *promScraper) resolveSources(ctx context.Context) []promSource {
 	// Best-effort: clusters without the listener just skip it.
 	forPods("kube-system", "etcd-main", "http", 2391, "k8s-app=etcd-manager-main")
 	forPods("kube-system", "etcd-events", "http", 2392, "k8s-app=etcd-manager-events")
+
+	// node-exporter (deployed by the stress scenarios, e.g.
+	// benchmarks-kops-gcp/node-exporter.yaml): node-level CPU incl. iowait,
+	// memory and disk stats — the kubelet source above only describes the
+	// kubelet process itself. Unlike forPods, the instance is the NODE name,
+	// so report pages can group by node role. Best-effort: clusters without
+	// the DaemonSet skip it.
+	if pods, err := s.kube.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{LabelSelector: "app.kubernetes.io/name=node-exporter"}); err != nil {
+		log.Printf("[metrics] listing node-exporter pods: %v", err)
+	} else {
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if pod.Spec.NodeName == "" {
+				continue
+			}
+			sources = append(sources, promSource{
+				source:   "node",
+				instance: pod.Spec.NodeName,
+				path:     fmt.Sprintf("/api/v1/namespaces/kube-system/pods/http:%s:9100/proxy/metrics", pod.Name),
+			})
+		}
+	}
 
 	nodes, err := s.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {

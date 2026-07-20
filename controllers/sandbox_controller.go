@@ -453,7 +453,9 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, sandbox); err != nil {
+	base := sandbox.DeepCopy()
+	base.Status = *oldStatus
+	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
 		logger.Error(err, "Failed to update sandbox status")
 		return err
 	}

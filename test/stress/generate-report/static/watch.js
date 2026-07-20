@@ -170,19 +170,23 @@ function parseQuery(text) {
     return terms;
 }
 
-function singular(word) {
-    return word.endsWith('s') ? word.slice(0, -1) : word;
+// kindMatches reports whether a query token names the given kind (already
+// lower-cased and singular, e.g. "pod", "sandbox"). Plural queries match by
+// appending "s"/"es" to the kind rather than stripping suffixes from the
+// query: singularizing "sandboxes" naively yields "sandboxe", which would
+// never equal "sandbox". An empty kind (no involvedObject) matches nothing.
+function kindMatches(kindLower, query) {
+    return kindLower !== '' &&
+        (kindLower === query || kindLower + 's' === query || kindLower + 'es' === query);
 }
 
 function matchesEvent(ev, terms) {
     for (const term of terms) {
         const v = term.value;
         switch (term.key) {
-            case 'kind': {
-                const want = singular(v);
-                if (singular(ev.kindLower) !== want && singular(ev.targetKindLower) !== want) return false;
+            case 'kind':
+                if (!kindMatches(ev.kindLower, v) && !kindMatches(ev.targetKindLower, v)) return false;
                 break;
-            }
             case 'name':
                 if (!ev.nameLower.includes(v)) return false;
                 break;
@@ -193,7 +197,9 @@ function matchesEvent(ev, terms) {
                 if (!ev.type.toLowerCase().startsWith(v)) return false;
                 break;
             case 'resource':
-                if (!singular(ev.resource.toLowerCase()).startsWith(singular(v))) return false;
+                // Resource names are plural ("pods"); a singular query is a
+                // prefix of the plural, so prefix matching covers both.
+                if (!ev.resource.toLowerCase().startsWith(v)) return false;
                 break;
             case 'uid':
                 if (!ev.uid.startsWith(v) && !ev.targetUid.startsWith(v)) return false;

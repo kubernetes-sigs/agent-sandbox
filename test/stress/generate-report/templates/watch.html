@@ -138,7 +138,7 @@
         const kindLabel = ev.resource === 'events' && ev.targetKind
             ? `Event·${escapeHtml(ev.targetKind)}` : escapeHtml(ev.kind);
         return `<div class="watch-row" data-i="${i}">
-            <div class="watch-row-head">
+            <div class="watch-row-head" tabindex="0" role="button" aria-expanded="false">
                 <span class="watch-time">${formatTime(ev.t)}</span>
                 ${phase ? `<span class="watch-phase">${escapeHtml(phase)}</span>` : ''}
                 ${badge(TYPE_BADGE[ev.type] || 'info', ev.type)}
@@ -178,6 +178,15 @@
 
     moreEl.addEventListener('click', renderMore);
 
+    function toggleRow(row) {
+        const detail = row.querySelector('.watch-row-detail');
+        if (detail.hidden && !detail.innerHTML) {
+            detail.innerHTML = renderDetail(Number(row.dataset.i));
+        }
+        detail.hidden = !detail.hidden;
+        row.querySelector('.watch-row-head').setAttribute('aria-expanded', String(!detail.hidden));
+    }
+
     resultsEl.addEventListener('click', e => {
         const nameLink = e.target.closest('.watch-name');
         if (nameLink) {
@@ -189,11 +198,19 @@
         }
         const row = e.target.closest('.watch-row');
         if (!row || window.getSelection().toString()) return;
-        const detail = row.querySelector('.watch-row-detail');
-        if (detail.hidden && !detail.innerHTML) {
-            detail.innerHTML = renderDetail(Number(row.dataset.i));
-        }
-        detail.hidden = !detail.hidden;
+        toggleRow(row);
+    });
+
+    // Keyboard equivalent of the click handler: the row heads are focusable
+    // buttons, so Enter/Space must expand them. Keys on the name link are
+    // left to its own native Enter -> click behavior.
+    resultsEl.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        if (e.target.closest('.watch-name')) return;
+        const head = e.target.closest('.watch-row-head');
+        if (!head) return;
+        e.preventDefault();
+        toggleRow(head.closest('.watch-row'));
     });
 
     (async () => {

@@ -426,6 +426,11 @@ th.sortable[data-order="desc"]::after {
     white-space: nowrap;
 }
 
+.watch-row-head:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: -2px;
+}
+
 .watch-time {
     color: var(--text-secondary);
     flex-shrink: 0;

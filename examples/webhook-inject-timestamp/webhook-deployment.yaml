@@ -13,6 +13,10 @@ spec:
       labels:
         app: webhook
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: webhook
         image: kind.local/webhook-image:latest
@@ -26,6 +30,12 @@ spec:
           limits:
             cpu: 100m
             memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         volumeMounts:
         - name: certs
           mountPath: /etc/webhook/certs

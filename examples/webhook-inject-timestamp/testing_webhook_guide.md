@@ -80,11 +80,12 @@ cd examples/webhook-inject-timestamp
 Set the image tag and build the image:
 
 ```bash
-# For GKE set "us-docker.pkg.dev/<project-id>/<repo-name>/" to your Artifact Registry path
+# Choose ONE of the following:
+# For GKE, set "us-docker.pkg.dev/<project-id>/<repo-name>/" to your Artifact Registry path
 export IMAGE_TAG="us-docker.pkg.dev/<project-id>/<repo-name>/webhook-image:latest"
 
-# For Kind
-export IMAGE_TAG="kind.local/webhook-image:latest"
+# OR for Kind:
+# export IMAGE_TAG="kind.local/webhook-image:latest"
 
 docker build -t ${IMAGE_TAG} .
 ```

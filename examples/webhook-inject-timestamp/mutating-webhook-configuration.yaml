@@ -15,7 +15,7 @@ webhooks:
     rules:
       - operations: ["CREATE"]
         apiGroups: ["extensions.agents.x-k8s.io"]
-        apiVersions: ["v1alpha1"]
+        apiVersions: ["v1beta1"]
         resources: ["sandboxclaims"]
     admissionReviewVersions: ["v1"]
     sideEffects: None

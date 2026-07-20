@@ -453,6 +453,20 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return nil
 	}
 
+	// Pod scheduling produces a status change containing nothing but the
+	// node name (the pod is bound seconds before it runs, so nodeName lands
+	// in its own reconcile, then podIPs and Ready land together shortly
+	// after). While the sandbox is still transitioning, don't spend an API
+	// request on the node name alone: it rides along with the next status
+	// write instead, normally the Ready transition. Once the sandbox is
+	// Ready the deferral no longer applies -- a node change on a Ready
+	// sandbox should be impossible, but if it happens, write it through
+	// rather than leave a Ready sandbox with a wrong or missing node name.
+	if nodeNameOnlyChange(oldStatus, &sandbox.Status) &&
+		!meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
+		return nil
+	}
+
 	if err := r.Status().Update(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to update sandbox status")
 		return err
@@ -460,6 +474,17 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// nodeNameOnlyChange reports whether the node assignment is the only
+// difference between the two statuses.
+func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool {
+	if oldStatus.NodeName == newStatus.NodeName {
+		return false
+	}
+	scratch := newStatus.DeepCopy()
+	scratch.NodeName = oldStatus.NodeName
+	return reflect.DeepEqual(oldStatus, scratch)
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.

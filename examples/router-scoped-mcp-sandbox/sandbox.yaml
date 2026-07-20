@@ -1,0 +1,48 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: box-a
+spec:
+  # No K8s credential in the pod at all — the agent's only credential is
+  # the scoped token minted for this sandbox by mint-token, verified by
+  # sandbox-router's --authz-mode=scoped-token. Nothing in this pod ever
+  # needs to call the K8s API.
+  automountServiceAccountToken: false
+  podTemplate:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: mcp
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: mcp
+          containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        readinessProbe:
+          httpGet:
+            path: /mcp
+            port: mcp
+          initialDelaySeconds: 2
+          periodSeconds: 2
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

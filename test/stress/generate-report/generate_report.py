@@ -438,6 +438,73 @@ def main():
             "avg_latency_ms": avg_latency_ms
         })
 
+    # etcd server-side disk latency (present when the cluster serves etcd's
+    # plain-HTTP metrics listener; see promscrape.go). WAL fsync is the write
+    # path's disk wait and backend commit is the boltdb flush: elevated
+    # client-observed etcd latency with FLAT fsync/commit numbers means the
+    # time is going to CPU starvation or queueing on the control-plane node,
+    # not storage (run 2079306544964440064 needed exactly this distinction).
+    print("Querying etcd disk latency by phase...")
+    etcd_disk_avg_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["etcd_disk_wal_fsync_duration_seconds_count",
+                 "etcd_disk_wal_fsync_duration_seconds_sum",
+                 "etcd_disk_backend_commit_duration_seconds_count",
+                 "etcd_disk_backend_commit_duration_seconds_sum"],
+        group_by=["source"],
+        where="source IN ('etcd-main', 'etcd-events')")
+
+    # p99 needs the histogram buckets: sum per-scrape bucket deltas per phase,
+    # then interpolate within the bucket that crosses the 99th percentile.
+    etcd_disk_bucket_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["etcd_disk_wal_fsync_duration_seconds_bucket",
+                 "etcd_disk_backend_commit_duration_seconds_bucket"],
+        labels={"le": "le"},
+        group_by=["source", "le"],
+        where="source IN ('etcd-main', 'etcd-events')")
+
+    def bucket_p99(buckets):
+        """buckets: {le(float): cumulative count delta} including +Inf."""
+        total = buckets.get(float("inf"), 0.0)
+        if total <= 0:
+            return 0.0
+        target = 0.99 * total
+        cum_prev, le_prev = 0.0, 0.0
+        for le in sorted(buckets):
+            cum = buckets[le]
+            if cum >= target:
+                if le == float("inf"):
+                    return le_prev * 1000
+                frac = (target - cum_prev) / max(cum - cum_prev, 1e-9)
+                return (le_prev + frac * (le - le_prev)) * 1000
+            cum_prev, le_prev = cum, le
+        return le_prev * 1000
+
+    etcd_disk_buckets = {}
+    for phase_name, source, le, fsync_delta, commit_delta in etcd_disk_bucket_raw:
+        le_f = float("inf") if le == "+Inf" else float(le)
+        entry = etcd_disk_buckets.setdefault((phase_name, source), ({}, {}))
+        entry[0][le_f] = entry[0].get(le_f, 0.0) + fsync_delta
+        entry[1][le_f] = entry[1].get(le_f, 0.0) + commit_delta
+
+    etcd_disk = []
+    for row in etcd_disk_avg_raw:
+        phase_name, source, fsync_n, fsync_sum, commit_n, commit_sum = row
+        if fsync_n <= 0 and commit_n <= 0:
+            continue
+        fsync_buckets, commit_buckets = etcd_disk_buckets.get((phase_name, source), ({}, {}))
+        etcd_disk.append({
+            "phase_name": phase_name,
+            "source": source,
+            "fsync_n": int(fsync_n),
+            "fsync_avg_ms": (fsync_sum / fsync_n * 1000) if fsync_n > 0 else 0.0,
+            "fsync_p99_ms": bucket_p99(fsync_buckets),
+            "commit_avg_ms": (commit_sum / commit_n * 1000) if commit_n > 0 else 0.0,
+            "commit_p99_ms": bucket_p99(commit_buckets),
+        })
+    etcd_disk.sort(key=lambda r: (phase_order_map_early.get(r["phase_name"], 99), r["source"]))
+
     print("Querying etcd timeseries...")
     etcd_ts_raw = metrics_timeseries(
         conn, metrics_path_str,
@@ -882,7 +949,25 @@ def main():
         findings.append({
             "severity": "warning",
             "title": f"Elevated etcd Update Latency ({etcd_update_latency_max:.2f}ms)",
-            "desc": f"etcd update operation average latency reached {etcd_update_latency_max:.2f}ms under load. While standard, high write latencies from etcd indicate write disk throughput contention.",
+            "desc": f"etcd update operation average latency reached {etcd_update_latency_max:.2f}ms under load. This is the apiserver's client-side view: check the etcd page's server-side WAL fsync latency to tell disk stalls from control-plane CPU starvation.",
+            "link": "etcd.html"
+        })
+
+    # etcd disk stall check: the client-side latency above cannot separate
+    # disk from CPU, but the server-side WAL fsync p99 can. etcd's own
+    # guidance is p99 fsync < 10ms on suitable disks.
+    fsync_worst = None
+    for row in etcd_disk:
+        if row['source'] == 'etcd-main' and row['phase_name'].startswith('throughput') and row['fsync_n'] >= 50:
+            if fsync_worst is None or row['fsync_p99_ms'] > fsync_worst['fsync_p99_ms']:
+                fsync_worst = row
+
+    if fsync_worst and fsync_worst['fsync_p99_ms'] > 10.0:
+        w = fsync_worst
+        findings.append({
+            "severity": "critical" if w['fsync_p99_ms'] > 100.0 else "warning",
+            "title": f"etcd WAL fsync Latency ({w['fsync_p99_ms']:.1f}ms p99)",
+            "desc": f"During phase {w['phase_name']}, etcd's WAL fsync p99 reached {w['fsync_p99_ms']:.1f}ms (avg {w['fsync_avg_ms']:.2f}ms over {w['fsync_n']:,} fsyncs). etcd waits on every write for this, so the storage volume is the bottleneck: consider a faster or larger etcd disk. If client-observed etcd latency is elevated while this number stays flat, the time is going to control-plane CPU instead.",
             "link": "etcd.html"
         })
 
@@ -1108,6 +1193,7 @@ def main():
         "active_page": "etcd",
         "summary": summary,
         "etcd_ops": etcd_ops,
+        "etcd_disk": etcd_disk,
         "chart_data": etcd_chart_data,
         "phases": js_phases
     }

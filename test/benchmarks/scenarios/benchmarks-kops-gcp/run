@@ -189,6 +189,26 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubeControllerManager.kubeAPIQPS=500 \
   --set cluster.spec.kubeControllerManager.kubeAPIBurst=500
 
+# etcdClusters[].manager.listenMetricsURLs: have etcd serve its dedicated
+# plain-HTTP metrics listener. etcd's client port requires mTLS, so the
+# stress tool deliberately does not scrape it; the metrics listener carries
+# /metrics without auth, and the tool reaches it through the apiserver pod
+# proxy like every other component. WAL fsync and backend-commit latency
+# live here -- the direct way to tell etcd disk stalls from control-plane
+# CPU starvation (run 2079306544964440064 needed exactly this distinction).
+# The ports differ because both etcd-manager pods (main and events) run
+# hostNetwork on the control-plane node, and neither can be etcd's
+# conventional 2381: kOps assigns 2380/2381/2382 as the main/events/cilium
+# PEER ports (pkg/model/components/etcdmanager PortsForCluster), so binding
+# the metrics listener there collides with etcd-events' peer listener and
+# etcd never comes up (run 2079330812058144768). 2391/2392 are outside
+# kOps' wellknownports range. Index addressing matches the order
+# `kops create cluster` emits: [0]=main, [1]=events. Not internet-reachable:
+# same deny-by-default VPC as the 10257/10259 note above.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set 'cluster.spec.etcdClusters[0].manager.listenMetricsURLs=http://0.0.0.0:2391' \
+  --set 'cluster.spec.etcdClusters[1].manager.listenMetricsURLs=http://0.0.0.0:2392'
+
 # kubeScheduler.qps/burst: the scheduler's client defaults (50/100) throttle
 # it under churn -- every sandbox is a pod to schedule, and each pod costs
 # the scheduler a binding plus status writes, which shows up as

@@ -1,11 +1,29 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 openapi: "3.0.3"
 info:
   title: sandboxd Filesystem & Runtime REST API
   description: >
     Stateless REST interface for sandbox file system operations and runtime metadata.
-    Part of the Agent Runtime Protocol hybrid gRPC/REST architecture.
+    Part of the Agent Runtime Protocol hybrid gRPC/REST architecture defined in KEP-539.2.
     High-performance raw file transfers (read/write) are served over HTTP REST, while interactive
     process execution is served over gRPC on a dedicated port.
+    Compatibility & Migration Note: This specification replaces the unversioned python-runtime
+    endpoints (/upload, /download, /list, /exists) and FileEntry wire representation. Existing
+    SDK clients migrate to this versioned /v1/ surface using the dynamic endpoint discovery and
+    breaking change rollout strategy documented in KEP-539.2.
     Security note: sandboxd listens strictly on localhost or Unix Domain Socket within the isolated
     container network namespace and must never be exposed on public interfaces.
   version: "v1"
@@ -104,6 +122,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
   /health:
     get:
@@ -128,10 +148,12 @@ paths:
     get:
       summary: Runtime environment metadata
       description: >
-        Returns dynamic environment variables and secrets injected by the orchestrator.
-        This endpoint is intentionally reachable only via localhost or Unix Domain Socket
-        and must not be exposed on a public network interface. No additional authentication
-        is applied beyond network-level containment.
+        Returns workload-scoped environment configuration injected by the orchestrator
+        (e.g. sandbox ID, workspace path, resource limits).
+        Security restriction: this endpoint must only serve non-sensitive configuration.
+        Orchestrator credentials, Kubernetes API tokens, and cloud provider IAM keys must NEVER
+        be served or placed in /v1/metadata since untrusted agent code running in the sandbox
+        can query localhost.
       responses:
         "200":
           description: Runtime metadata
@@ -233,6 +255,12 @@ components:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: Path does not exist within the sandbox
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Directory not empty when recursive=false
       content:
         application/json:
           schema:

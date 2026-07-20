@@ -172,10 +172,25 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # throughput-mif100..600 (saturation), and KCM's garbage collector is on
 # the sandbox delete path (sandbox -> ownerRef cascade -> pod delete), so
 # the closed-loop delete drain paces the whole benchmark: mif200 slots
-# cycled in ~8.8s of which only 1.6s was launch.
+# cycled in ~8.8s of which only 1.6s was launch. Raising to 100/200 still
+# left KCM throttling client-side, so go to 500/500 to take the client
+# limiter out of the measurement entirely.
 kops edit cluster --name "${CLUSTER_NAME}" \
-  --set cluster.spec.kubeControllerManager.kubeAPIQPS=100 \
-  --set cluster.spec.kubeControllerManager.kubeAPIBurst=200
+  --set cluster.spec.kubeControllerManager.kubeAPIQPS=500 \
+  --set cluster.spec.kubeControllerManager.kubeAPIBurst=500
+
+# kubeScheduler.qps/burst: the scheduler's client defaults (50/100) throttle
+# it under churn -- every sandbox is a pod to schedule, and each pod costs
+# the scheduler a binding plus status writes, which shows up as
+# kube-scheduler client-side throttle wait on the stress report's Rate
+# Limiting page. Match KCM at 500/500. Note these fields render into the
+# KubeSchedulerConfiguration file's clientConnection.qps/burst (the
+# scheduler's kubeAPIQPS/kubeAPIBurst spec fields map to the legacy
+# --kube-api-qps/--kube-api-burst flags, which current kube-schedulers no
+# longer accept).
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubeScheduler.qps=500 \
+  --set cluster.spec.kubeScheduler.burst=500
 
 
 if [[ "${CNI}" == "cilium" ]]; then

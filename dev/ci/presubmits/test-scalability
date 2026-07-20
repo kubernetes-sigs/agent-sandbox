@@ -15,5 +15,13 @@
 
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "${repo_root}"
+
 echo "Executing agent-sandbox scalability test helper..."
-go run dev/tools/codegen.go
+./dev/tools/fix-go-generate
+
+if ! git diff --exit-code; then
+  echo "ERROR: Generated files out-of-date. Run ./dev/tools/fix-go-generate and commit the results."
+  exit 1
+fi

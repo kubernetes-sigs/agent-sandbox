@@ -3692,8 +3692,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected reconcile to finalize adoption without error, got error: %v", err)
 	}
-	if res.RequeueAfter != 0 {
-		t.Fatalf("Expected no polling requeue (convergence is watch-driven), got RequeueAfter=%v", res.RequeueAfter)
+	if !res.IsZero() {
+		t.Fatalf("Expected no requeue (convergence is watch-driven), got %+v", res)
 	}
 
 	// Verify that the claim status WAS finalized with the adopted sandbox in the same pass.
@@ -3728,9 +3728,12 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	// Run reconcile AGAIN while the cache is STILL stale. The pass re-sends the
 	// idempotent adoption patch and must neither error, nor wipe the finalized
 	// status, nor adopt the extra warm sandbox.
-	_, err = reconciler.Reconcile(context.Background(), req)
+	res, err = reconciler.Reconcile(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Expected stale-cache Reconcile to succeed, but failed: %v", err)
+	}
+	if !res.IsZero() {
+		t.Fatalf("Expected no requeue on the stale-cache pass, got %+v", res)
 	}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 		t.Fatalf("failed to get claim: %v", err)
@@ -3748,9 +3751,12 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 	// Cache converges: the next pass takes the fast path (status lookup,
 	// IsControlledBy) and is stable.
 	cacheStale = false
-	_, err = reconciler.Reconcile(context.Background(), req)
+	res, err = reconciler.Reconcile(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Expected post-convergence Reconcile to succeed, but failed: %v", err)
+	}
+	if !res.IsZero() {
+		t.Fatalf("Expected no requeue after convergence, got %+v", res)
 	}
 
 	// Verify that the claim status is unchanged.
@@ -3884,8 +3890,8 @@ func TestSandboxClaimAdoptionCacheLagRepatchesIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pass 1: expected nil error, got: %v", err)
 	}
-	if res.RequeueAfter != 0 {
-		t.Fatalf("pass 1: expected no polling requeue, got RequeueAfter=%v", res.RequeueAfter)
+	if !res.IsZero() {
+		t.Fatalf("pass 1: expected no requeue, got %+v", res)
 	}
 	patchesAfterLastPass := sandboxPatches
 	if patchesAfterLastPass == 0 {
@@ -3907,8 +3913,8 @@ func TestSandboxClaimAdoptionCacheLagRepatchesIdempotently(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pass %d: expected nil error, got: %v", pass, err)
 		}
-		if res.RequeueAfter != 0 {
-			t.Fatalf("pass %d: expected no polling requeue, got RequeueAfter=%v", pass, res.RequeueAfter)
+		if !res.IsZero() {
+			t.Fatalf("pass %d: expected no requeue, got %+v", pass, res)
 		}
 		if sandboxPatches <= patchesAfterLastPass {
 			t.Fatalf("pass %d: expected the idempotent adoption re-patch while cache lags, got %d (was %d)", pass, sandboxPatches, patchesAfterLastPass)
@@ -4047,8 +4053,8 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error during cache lag, got: %v", err)
 	}
-	if res.RequeueAfter != 0 {
-		t.Fatalf("expected no polling requeue, got RequeueAfter=%v", res.RequeueAfter)
+	if !res.IsZero() {
+		t.Fatalf("expected no requeue, got %+v", res)
 	}
 
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
@@ -4196,8 +4202,8 @@ func TestSandboxClaimFreshAdoptionStaleCacheKeepsFinalizedStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pass %d: expected nil error, got: %v", pass, err)
 		}
-		if res.RequeueAfter != 0 {
-			t.Fatalf("pass %d: expected no polling requeue, got RequeueAfter=%v", pass, res.RequeueAfter)
+		if !res.IsZero() {
+			t.Fatalf("pass %d: expected no requeue, got %+v", pass, res)
 		}
 		if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 			t.Fatalf("pass %d: failed to get claim: %v", pass, err)

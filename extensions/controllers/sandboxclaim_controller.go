@@ -1512,18 +1512,12 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 								logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 							}
 						}
-						// The Patch inside completeAdoption wrote the API server's response back
-						// into `sandbox`, so the object we hold now authoritatively shows this
-						// claim as controller (with the Warm launch-type label applied). Return
-						// it so the claim status is finalized in this same pass, just like the
-						// adoptSandboxFromCandidates path does after a fresh adoption.
-						//
-						// Informer cache lag needs no requeue here. A later pass that still
-						// reads the stale warm-pool-owned view simply repeats completeAdoption,
-						// which re-sends the same idempotent patch. And once the cache absorbs
-						// the ownership change, the Owns(&Sandbox{}) watch enqueues this claim
-						// again anyway, so convergence is event-driven (#1107).
-						logger.V(1).Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
+						// completeAdoption wrote the API server's response back into
+						// `sandbox`, so returning it finalizes the claim status in this same
+						// pass. No requeue for cache lag: a stale pass just re-sends the
+						// idempotent patch, and the Owns(&Sandbox{}) watch drives convergence
+						// once the cache catches up (#1107).
+						logger.V(4).Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
 						return sandbox, nil
 					}
 				}

@@ -149,19 +149,30 @@ claim per group.
 
 The shipped reset tier is **git-restore** (`GitRestoreReset`): `git reset --hard
 pristine` + `clean -xdff` + detach + process/`/tmp` sweep, then a **cleanliness verify**
-— repo at the pristine SHA and, as tripwires (detect, don't repair), the Python env
-(`pip freeze` hash), git config/hooks hash, and process count unchanged. Drift, a reset
-over `reset_timeout`, or hitting `max_reuses` → **quarantine** (release + fresh claim).
-Rationale: in RL a polluted sandbox silently biases rewards, so *detect-and-escalate*
-beats a cheap-but-unverified wipe. The env-restore and overlay/checkpoint tiers are
-deferred (drift there escalates to a fresh claim).
+that the repo is back at the pristine SHA and clean. **Git-only by default** (fast); the
+site-packages (`pip freeze`) and git-config/hooks tripwires are opt-in
+(`check_env`/`check_config`) — env drift is rare and bounded by `max_reuses` + the
+canary, and `pip freeze` per reset was the dominant cost. Drift, a reset over
+`reset_timeout`, or hitting `max_reuses` → **quarantine** (release + fresh claim).
+Rationale: a polluted sandbox silently biases RL rewards, so *detect-and-escalate* beats
+a cheap-but-unverified wipe. Env-restore and overlay/checkpoint tiers are deferred.
 
+- **Scales via a persistent exec session** (`use_session=True`, default): one held-open
+  `bash` stream per sandbox, so task + reset pipe over a single websocket rather than a
+  fresh apiserver `exec` connect per command — exec cost O(sandboxes), not O(tasks).
+  This is what makes reuse viable at high concurrency (per-command exec saturated the
+  apiserver in an earlier run).
+- **Safe on mixed image sets:** a non-git `/testbed` (no pristine anchor) transparently
+  falls back to fresh-claim-per-task; an exec failure mid-reset quarantines rather than
+  aborting the batch.
 - **Verify first:** `determinism_canary(fleet, task, process_fn)` runs a task twice in
-  one recycled sandbox; `identical` must be True before trusting recycled runs for
-  training.
-- **Cost model:** recycling pays off only when reset time ≪ claim time (~2–5 s) and an
-  image carries many tasks (RL, not 1:1 eval). New `reset`/`quarantine`/`rotate` phases
-  in the `RunReport` make the trade measurable.
+  one recycled sandbox; `identical` must be True before trusting recycled runs.
+- **When it wins:** at the **RL shape** (few problems, many rollouts each) reuse beats
+  fresh-claim on wall, claims, *and* reliability — regular's shallow per-image warm pool
+  saturates under same-image contention (measured 50×40 no-op: reuse 416s/81 claims/100%
+  vs regular 944s/1,987/99.35%). At **1:1 eval** (many distinct images) keep fresh-claim
+  + `pipelined`; reuse only cuts claims there and costs wall. `reset`/`quarantine`/
+  `rotate` phases in the `RunReport` make the trade measurable.
 - Full design + deep-research hardening (git shared-store gc hazards, `/testbed`
   realpath stability, the site-packages hole) and open questions: notes repo
   `plans/sandbox-recycling.md`.

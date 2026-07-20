@@ -14,15 +14,19 @@ Sandbox `v0.5.0rc1` (v1beta1).
   tasks** (÷ tasks-per-image) — the RL-rollout claim-churn lever. `GitRestoreReset`
   restores `/testbed` to a pristine tag (`git reset --hard` + `clean -xdff` + detach),
   sweeps processes + `/tmp`, disables git gc/maintenance (avoids shared-store
-  corruption), then **verifies** cleanliness: repo at pristine SHA, and — as tripwires,
-  not repairs — the Python env (`pip freeze` hash), git config/hooks hash, and process
-  count unchanged. Any drift → the sandbox is **quarantined** (released, fresh claim),
-  so contamination never silently biases rewards. The costlier reset tiers (env-dir
-  restore, overlay/checkpoint restart) are deliberately deferred — detected and
-  escalated to a fresh claim instead. `determinism_canary` runs a task twice in one
-  recycled sandbox and asserts byte-identical output (the correctness gate). New
-  `reset`/`quarantine`/`rotate` phases in the `RunReport`. Design + deep-research
-  hardening notes: `plans/sandbox-recycling.md`.
+  corruption), then **verifies** the repo is back at the pristine SHA and clean; drift
+  → the sandbox is **quarantined** (released, fresh claim) so contamination never
+  silently biases rewards. Reset is **git-only by default** (fast); the site-packages
+  (`pip freeze`) and git-config/hooks tripwires are opt-in (`check_env`/`check_config`,
+  bounded otherwise by `max_reuses` + the canary). Scales via a **persistent exec
+  session** (`SandboxSession`, `use_session=True`): one held-open `bash` stream per
+  sandbox → exec cost O(sandboxes) not O(tasks). Safe on mixed image sets: a non-git
+  `/testbed` falls back to fresh-claim-per-task; an exec failure mid-reset quarantines
+  rather than aborting. `determinism_canary` asserts byte-identical output across a
+  reset (correctness gate). New `reset`/`quarantine`/`rotate` phases in `RunReport`.
+  Measured (no-op, mc=100): RL shape 50×40 reuse 416s/81 claims/100% vs regular
+  944s/1,987/99.35%. Costlier reset tiers (env-dir restore, overlay/checkpoint) are
+  deferred. Design + deep-research hardening: `plans/sandbox-recycling.md`.
 - **`pipelined` strategy** (`strategies.py`, `async_fleet.py`): double-buffered
   sliding window — prefetch window N+1's pools (background thread / `asyncio.Task`)
   while window N's tasks run, so image pull overlaps execution. Footprint bounded

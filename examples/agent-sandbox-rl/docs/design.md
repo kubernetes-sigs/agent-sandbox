@@ -146,18 +146,24 @@ so the simple case stays simple.
 | return hostname list | `handles()`, `hostnames()`, `endpoints()` (cluster-qualified) |
 | teardown / delete | `release(handle)`, `release_all()`, `teardown(delete_namespace=False)` (routes to owning cluster) |
 | managed batch | `run(process_fn, strategy=None) -> [Result]` |
-| recycle (reset-and-reuse) | `reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *, reset, max_reuses, reset_timeout)`; `GitRestoreReset.prime/reset`; `determinism_canary(...)` |
+| recycle (reset-and-reuse) | `reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *, reset, max_reuses, reset_timeout, use_session)`; `GitRestoreReset.prime/reset/recyclable`; `SandboxHandle.open_session()` (`SandboxSession`); `determinism_canary(...)` |
 | ergonomics | context manager `__enter__/__exit__` → `setup()`/`teardown()` |
 
 **Sandbox recycling** (`recycle.py`, experimental) is a third execution mode beside
 primitives and the managed runner: reuse one claimed sandbox across same-image tasks,
 resetting between them, so claims scale with *problems* (÷ tasks-per-image) instead of
 tasks. The shipped tier is **git-restore** (`GitRestoreReset`: `git reset --hard
-pristine` + `clean -xdff` + process/`/tmp` sweep, then a cleanliness verify with
-env / config-hooks / process-count tripwires); dirty resets **quarantine** to a fresh
-claim. Costlier tiers (env-dir restore, overlay/checkpoint restart) are deferred. Full
-design, hardening (deep-research verified), and open questions live in the companion
-notes repo `plans/sandbox-recycling.md`; `determinism_canary` is the correctness gate.
+pristine` + `clean -xdff` + process/`/tmp` sweep, then verify the repo is at the
+pristine SHA and clean); dirty resets **quarantine** to a fresh claim. Reset is
+**git-only by default** — the `pip freeze` env and git-config/hooks tripwires are opt-in
+(`check_env`/`check_config`), bounded otherwise by `max_reuses` + the canary. It scales
+via a **persistent exec session** (`SandboxSession`, `use_session=True`): one held-open
+`bash` stream per sandbox so task+reset cost O(sandboxes) apiserver exec connections, not
+O(tasks) — `SandboxHandle.exec()` routes through it transparently. Non-git images fall
+back to fresh-claim-per-task; exec failures quarantine rather than abort. Costlier tiers
+(env-dir restore, overlay/checkpoint restart) are deferred. `determinism_canary` is the
+correctness gate. Full design + deep-research hardening + A/B findings: notes repo
+`plans/sandbox-recycling.md`.
 
 **Two modes (both shipped):** (1) **primitives** an RL loop drives itself
 (`acquire` → use `handle.hostname/endpoint` → `release`); (2) **managed runner**

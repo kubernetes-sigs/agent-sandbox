@@ -19,6 +19,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -206,6 +207,19 @@ func run(cfg *config.Config, log logr.Logger) error {
 			return fmt.Errorf("build tokenreview authorizer: %w", err)
 		}
 		authorizer = tr
+	}
+	if cfg.AuthzMode == config.AuthzScopedToken {
+		secret, err := os.ReadFile(cfg.AuthzScopedTokenSecretFile)
+		if err != nil {
+			return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
+		}
+		st, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+			Secret: bytes.TrimSpace(secret),
+		})
+		if err != nil {
+			return fmt.Errorf("build scoped-token authorizer: %w", err)
+		}
+		authorizer = st
 	}
 
 	// --- Proxy handler -----------------------------------------------------

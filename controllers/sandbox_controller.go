@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -124,12 +125,51 @@ func init() {
 	utilruntime.Must(sandboxv1beta1.AddToScheme(Scheme))
 }
 
+// resumeTimeEntry stores when the controller first observed a Sandbox leaving a
+// suspended state and the UID of that Sandbox.
+type resumeTimeEntry struct {
+	timestamp time.Time
+	uid       types.UID
+}
+
+// resumeTimeMap is a type-safe wrapper around sync.Map that only stores resumeTimeEntry values.
+type resumeTimeMap struct {
+	inner sync.Map
+}
+
+func (m *resumeTimeMap) Load(key types.NamespacedName) (resumeTimeEntry, bool) {
+	val, ok := m.inner.Load(key)
+	if !ok {
+		return resumeTimeEntry{}, false
+	}
+	return val.(resumeTimeEntry), true
+}
+
+func (m *resumeTimeMap) Store(key types.NamespacedName, entry resumeTimeEntry) {
+	m.inner.Store(key, entry)
+}
+
+func (m *resumeTimeMap) Delete(key types.NamespacedName) {
+	m.inner.Delete(key)
+}
+
+func (m *resumeTimeMap) LoadOrStore(key types.NamespacedName, entry resumeTimeEntry) (resumeTimeEntry, bool) {
+	actual, loaded := m.inner.LoadOrStore(key, entry)
+	return actual.(resumeTimeEntry), loaded
+}
+
 // SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	Tracer        asmetrics.Instrumenter
 	ClusterDomain string
+
+	// resumeStartTimes self-times resume latency: it maps a Sandbox key (NamespacedName)
+	// to the resumeTimeEntry, so agent_sandbox_resume_latency_ms can be recorded when
+	// it becomes Ready.
+	// In-memory only; resumes in flight during a controller restart are not timed.
+	resumeStartTimes resumeTimeMap
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -158,6 +198,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.Get(ctx, req.NamespacedName, sandbox); err != nil {
 		if k8serrors.IsNotFound(err) {
 			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
+			r.resumeStartTimes.Delete(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -177,6 +218,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox is being deleted")
+		r.resumeStartTimes.Delete(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -261,15 +303,25 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, allErrors, svc, pod)
 	hasFinished := false
+	hasSuspended := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
 		if condition.Type == string(sandboxv1beta1.SandboxConditionFinished) {
 			hasFinished = true
 		}
+		if condition.Type == string(sandboxv1beta1.SandboxConditionSuspended) {
+			hasSuspended = true
+		}
 	}
 
 	if !hasFinished {
 		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	}
+
+	// Drop a stale Suspended condition once the Sandbox is no longer suspended, so
+	// it does not linger across a resume.
+	if !hasSuspended {
+		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 	}
 
 	return allErrors
@@ -458,8 +510,74 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return err
 	}
 
+	r.recordResumeLatency(oldStatus, sandbox)
+
 	// Surface error
 	return nil
+}
+
+// recordResumeLatency self-times resume latency and observes the histogram when
+// a resumed Sandbox becomes Ready.
+func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) {
+	key := types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}
+	logger := ctrl.Log.WithName("resume-metrics").WithValues("sandbox", key.String(), "uid", string(sandbox.UID))
+
+	// A suspend cancels any in-flight resume timer for this Sandbox.
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		logger.V(2).Info("Sandbox is suspended; deleting any in-flight resume timer")
+		r.resumeStartTimes.Delete(key)
+		return
+	}
+
+	readyType := string(sandboxv1beta1.SandboxConditionReady)
+	if meta.IsStatusConditionTrue(sandbox.Status.Conditions, readyType) {
+		// Ready: record a resume only if we anchored one (i.e. it followed a suspend).
+		// Always clear the entry once loaded — including a stale one whose UID no
+		// longer matches (left by a same-named predecessor) — so it cannot block a
+		// future LoadOrStore anchor for this key.
+		if entry, ok := r.resumeStartTimes.Load(key); ok {
+			logger.V(2).Info("Ready condition observed. Found resume timer entry", "entry_uid", string(entry.uid), "start_time", entry.timestamp.Format(time.RFC3339Nano))
+			r.resumeStartTimes.Delete(key)
+			if entry.uid == sandbox.UID {
+				templateName := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]
+				if templateName == "" {
+					templateName = "unknown"
+				}
+				// launch_type persists on the Sandbox
+				launchType := sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel]
+				if launchType == "" {
+					launchType = asmetrics.LaunchTypeUnknown
+				}
+				logger.V(2).Info("Recording resume latency metric!", "template", templateName, "launchType", launchType, "duration_ms", time.Since(entry.timestamp).Milliseconds())
+				asmetrics.RecordResumeLatency(entry.timestamp, sandbox.Namespace, templateName, launchType)
+			} else {
+				logger.V(2).Info("Ready condition observed but entry UID mismatched", "entry_uid", string(entry.uid))
+			}
+		} else {
+			logger.V(2).Info("Ready condition observed but no resume timer entry found in map")
+		}
+		return
+	}
+
+	// Not yet Ready. Anchor a resume start once, only when leaving a suspended
+	// state (the prior status still carries a Suspended condition, removed later
+	// this reconcile).
+	cond := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if cond != nil && cond.Status == metav1.ConditionTrue {
+		newEntry := resumeTimeEntry{timestamp: time.Now(), uid: sandbox.UID}
+		logger.V(1).Info("Seeding resume start time timer", "start_time", newEntry.timestamp.Format(time.RFC3339Nano))
+		// If a stale entry from a same-named predecessor is present (different UID),
+		// overwrite it so this resume is timed from a fresh start rather than being
+		// blocked by LoadOrStore keeping the old value.
+		if existing, loaded := r.resumeStartTimes.LoadOrStore(key, newEntry); loaded {
+			if existing.uid != sandbox.UID {
+				logger.V(2).Info("Overwriting stale resume start time timer with new start time", "old_uid", string(existing.uid), "new_uid", string(newEntry.uid))
+				r.resumeStartTimes.Store(key, newEntry)
+			} else {
+				logger.V(2).Info("Resume start time timer already seeded for this UID", "start_time", existing.timestamp.Format(time.RFC3339Nano))
+			}
+		}
+	}
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.

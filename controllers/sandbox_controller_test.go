@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -3732,6 +3733,169 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
 	require.Len(t, got.Status.Conditions, 1,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
+}
+
+func TestRecordResumeLatency(t *testing.T) {
+	const name, ns = "sb-resume", "sb-ns"
+	key := types.NamespacedName{Name: name, Namespace: ns}
+
+	sb := func(mode sandboxv1beta1.SandboxOperatingMode, ready bool) *sandboxv1beta1.Sandbox {
+		s := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: sandboxUID},
+			Spec:       sandboxv1beta1.SandboxSpec{OperatingMode: mode},
+		}
+		if ready {
+			meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: sandboxv1beta1.SandboxReasonDependenciesReady,
+			})
+		}
+		return s
+	}
+	withSuspended := func() *sandboxv1beta1.SandboxStatus {
+		st := &sandboxv1beta1.SandboxStatus{}
+		meta.SetStatusCondition(&st.Conditions, metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+			Status: metav1.ConditionTrue,
+			Reason: sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
+		})
+		return st
+	}
+	empty := func() *sandboxv1beta1.SandboxStatus { return &sandboxv1beta1.SandboxStatus{} }
+
+	tests := []struct {
+		name             string
+		seed             *resumeTimeEntry
+		sandbox          *sandboxv1beta1.Sandbox
+		oldStatus        *sandboxv1beta1.SandboxStatus
+		wantObservations int
+		wantEntry        bool      // whether a timer entry should remain afterwards
+		wantEntryUID     types.UID // if set, the remaining entry must carry this UID
+	}{
+		{
+			name:             "anchors start when leaving suspended, not yet Ready",
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus:        withSuspended(),
+			wantObservations: 0,
+			wantEntry:        true,
+			wantEntryUID:     sandboxUID,
+		},
+		{
+			name:             "overwrites a stale predecessor anchor when leaving suspended",
+			seed:             &resumeTimeEntry{timestamp: time.Now().Add(-time.Hour), uid: types.UID("other-uid")},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus:        withSuspended(),
+			wantObservations: 0,
+			wantEntry:        true,
+			wantEntryUID:     sandboxUID,
+		},
+		{
+			name:             "records latency once Ready after an anchor",
+			seed:             &resumeTimeEntry{timestamp: time.Now().Add(-2 * time.Second), uid: sandboxUID},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, true),
+			oldStatus:        empty(),
+			wantObservations: 1,
+			wantEntry:        false,
+		},
+		{
+			name:             "does not record a fresh cold create (never suspended)",
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, true),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
+			name:             "does not anchor a pod-restart flap (no prior Suspended)",
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
+			name:    "does not anchor if prior Suspended condition was False (canceled suspend)",
+			sandbox: sb(sandboxv1beta1.SandboxOperatingModeRunning, false),
+			oldStatus: &sandboxv1beta1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+						Status: metav1.ConditionFalse,
+					},
+				},
+			},
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
+			name:             "suspend clears an in-flight resume timer",
+			seed:             &resumeTimeEntry{timestamp: time.Now(), uid: sandboxUID},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeSuspended, false),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+		{
+			name:             "does not record a stale entry from a same-named predecessor",
+			seed:             &resumeTimeEntry{timestamp: time.Now().Add(-2 * time.Second), uid: types.UID("other-uid")},
+			sandbox:          sb(sandboxv1beta1.SandboxOperatingModeRunning, true),
+			oldStatus:        empty(),
+			wantObservations: 0,
+			wantEntry:        false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			asmetrics.ResumeLatency.Reset()
+			r := &SandboxReconciler{}
+			if tc.seed != nil {
+				r.resumeStartTimes.Store(key, *tc.seed)
+			}
+
+			r.recordResumeLatency(tc.oldStatus, tc.sandbox)
+
+			if got := testutil.CollectAndCount(asmetrics.ResumeLatency); got != tc.wantObservations {
+				t.Errorf("ResumeLatency observations = %d, want %d", got, tc.wantObservations)
+			}
+			entry, ok := r.resumeStartTimes.Load(key)
+			if ok != tc.wantEntry {
+				t.Errorf("resumeStartTimes entry present = %v, want %v", ok, tc.wantEntry)
+			}
+			if tc.wantEntryUID != "" && entry.uid != tc.wantEntryUID {
+				t.Errorf("resumeStartTimes entry uid = %v, want %v", entry.uid, tc.wantEntryUID)
+			}
+		})
+	}
+}
+
+func TestReconcile_CleanUpResumeStartTimesOnNotFound(t *testing.T) {
+	sbName := "stale-sb"
+	sbNs := "default"
+	key := types.NamespacedName{Name: sbName, Namespace: sbNs}
+
+	// Create a reconciler with an empty fake client (so Get returns NotFound)
+	fc := fake.NewClientBuilder().WithScheme(Scheme).Build()
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+
+	// Seed the map with a stale entry
+	r.resumeStartTimes.Store(key, resumeTimeEntry{
+		timestamp: time.Now(),
+		uid:       "stale-uid",
+	})
+
+	// Run Reconcile (will return early with NotFound)
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: key}
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	// Assert the map entry has been cleaned up
+	_, ok := r.resumeStartTimes.Load(key)
+	assert.False(t, ok, "expected resumeStartTimes entry to be deleted when sandbox is not found")
 }
 
 type mockTracer struct {

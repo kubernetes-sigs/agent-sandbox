@@ -284,12 +284,28 @@ fleet.teardown()
 ```
 
 The reset (`GitRestoreReset`) restores `/testbed` to a pristine git tag, sweeps
-processes + `/tmp`, then **verifies** cleanliness — repo at the pristine SHA, and (as
-tripwires) the Python env, git config/hooks, and process count unchanged. Any drift
-**quarantines** the sandbox (release + fresh claim) rather than risk contaminating the
-next rollout — because in RL a polluted sandbox silently biases rewards, which is worse
-than a crash. The env-restore and overlay/checkpoint reset tiers are deferred; drift in
-those surfaces escalates to a fresh claim.
+processes + `/tmp`, then **verifies** the repo is back at the pristine SHA and clean;
+any drift **quarantines** the sandbox (release + fresh claim) rather than risk
+contaminating the next rollout — in RL a polluted sandbox silently biases rewards,
+worse than a crash. By default the reset is **git-only** (fast); the expensive
+site-packages (`pip freeze`) and git-config/hooks tripwires are opt-in
+(`GitRestoreReset(check_env=True, check_config=True)`) since env drift is rare and
+already bounded by `max_reuses` + the canary. The env-restore and overlay/checkpoint
+tiers are deferred; drift there escalates to a fresh claim.
+
+Two things make this scale (both on by default):
+- **Persistent exec session** (`use_session=True`) — one held-open `bash` stream per
+  sandbox, so task + reset pipe over a single websocket instead of one apiserver
+  `exec` connect per command (exec cost O(sandboxes), not O(tasks)).
+- **Safe on mixed image sets** — a non-git `/testbed` (no pristine anchor) can't be
+  git-restored, so those images transparently fall back to a fresh claim per task; an
+  `exec` failure mid-reset quarantines rather than aborting the batch.
+
+Measured (barkland-brust, no-op, mc=100): at the RL shape (50 problems × 40 rollouts)
+reuse **beat** fresh-claim on wall (416s vs 944s), claims (81 vs 1,987, 24.5×), and
+success (100% vs 99.35%) — regular's shallow per-image warm pool saturates under
+same-image contention. At eval shape (many distinct images, 1:1) keep fresh-claim +
+`pipelined`; reuse only cuts claims there. See `plans/sandbox-recycling.md`.
 
 > ⚠️ **Verify before trusting it for training.** Run the determinism canary first — the
 > same seeded task twice in one recycled sandbox must produce byte-identical output:

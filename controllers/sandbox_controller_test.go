@@ -3044,6 +3044,10 @@ func TestReconcilePodFailurePolicyRecreatePatchBehavior(t *testing.T) {
 			require.Nil(t, pod)
 			require.Equal(t, tc.wantPodPatches, podPatches, tc.assertionReason)
 			require.Equal(t, tc.wantOwnerRefs, patchedOwnerRefs)
+
+			livePod := &corev1.Pod{}
+			err = r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, livePod)
+			require.True(t, k8serrors.IsNotFound(err), "failed pod should be deleted after reconcile")
 		})
 	}
 }

@@ -31,6 +31,33 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 # These helpers own that shape; queries supply only metric names, labels,
 # and grouping.
 
+# DuckDB's read_json_auto infers a rigid nested schema from a sample of the
+# file, so a nested key that first appears past the sample window fails the
+# whole query with an "unknown key" transform error -- run 2079317975134900224
+# died on a container termination message ~28k lines into watch.jsonl.gz.
+# Every file read here has a schema fixed by its writer, so declare it:
+# stable top-level columns get concrete types, and free-form payloads (watch
+# objects, metric labels) are read as JSON, which the -> / ->> operators used
+# throughout handle natively. Fields missing from a line read as NULL and
+# extra fields are ignored, so the scans are insensitive to payload shape.
+
+def json_scan(path, columns):
+    """SQL fragment scanning a jsonl file with an explicit schema."""
+    cols = ", ".join(f"{name}: '{sql_type}'" for name, sql_type in columns.items())
+    return f"read_json('{path}', format='newline_delimited', columns={{{cols}}})"
+
+# metrics.jsonl: written by promscrape.go (metricSample).
+METRICS_COLUMNS = {"ts": "VARCHAR", "source": "VARCHAR", "instance": "VARCHAR",
+                   "metric": "VARCHAR", "labels": "JSON", "value": "DOUBLE"}
+# watch.jsonl: written by the watch recorder (WatchEventRecord); object is an
+# arbitrary Kubernetes object.
+WATCH_COLUMNS = {"timestamp": "VARCHAR", "resource": "VARCHAR",
+                 "type": "VARCHAR", "object": "JSON"}
+# sandboxes.jsonl: only the fields the percentile query reads.
+SANDBOXES_COLUMNS = {"phase": "VARCHAR", "createAckMs": "DOUBLE",
+                     "podCreatedMs": "DOUBLE", "podScheduledMs": "DOUBLE",
+                     "podRunningMs": "DOUBLE", "sandboxReadyMs": "DOUBLE"}
+
 def _counter_deltas_cte(metrics_path, metrics, labels, where):
     """Shared CTE prefix computing per-stream deltas of cumulative counters."""
     label_selects = "".join(
@@ -48,7 +75,7 @@ def _counter_deltas_cte(metrics_path, metrics, labels, where):
                 CAST(instance AS VARCHAR) as instance,
                 metric,
                 value{label_selects}
-            FROM read_json_auto('{metrics_path}')
+            FROM {json_scan(metrics_path, METRICS_COLUMNS)}
             WHERE metric IN ({metric_list})
         ),
         diffs AS (
@@ -310,7 +337,7 @@ def main():
     controller_depth_raw = conn.execute(f"""
         WITH raw AS (
             SELECT CAST(ts AS TIMESTAMP) as ts, value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE source = 'agent-sandbox-controller' AND metric = 'workqueue_depth'
               AND CAST(labels->>'name' AS VARCHAR) = 'sandbox'
         )
@@ -341,7 +368,7 @@ def main():
     controller_depth_ts = conn.execute(f"""
         WITH raw AS (
             SELECT CAST(ts AS TIMESTAMP) as ts, value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE source = 'agent-sandbox-controller' AND metric = 'workqueue_depth'
               AND CAST(labels->>'name' AS VARCHAR) = 'sandbox'
         )
@@ -463,7 +490,7 @@ def main():
                 metric,
                 CAST(labels->>'value' AS VARCHAR) as kind,
                 value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE CAST(labels->>'api_call' AS VARCHAR) = 'endpoint-create'
               AND metric IN ('cilium_api_limiter_wait_duration_seconds',
                              'cilium_api_limiter_rate_limit',
@@ -503,7 +530,7 @@ def main():
                 metric,
                 CAST(labels->>'value' AS VARCHAR) as kind,
                 value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE CAST(labels->>'api_call' AS VARCHAR) = 'endpoint-create'
               AND metric IN ('cilium_api_limiter_wait_duration_seconds', 'cilium_api_limiter_rate_limit')
         ),
@@ -647,7 +674,7 @@ def main():
                     -- name is two objects, not one long-lived one.
                     CAST(object->'metadata'->>'uid' AS VARCHAR) as uid,
                     type
-                FROM read_json_auto('{watch_path_str}')
+                FROM {json_scan(watch_path_str, WATCH_COLUMNS)}
                 WHERE resource IN ('pods', 'sandboxes')
             ),
             lifecycle_ends AS (
@@ -715,7 +742,7 @@ def main():
                     -- name is two objects, not one long-lived one.
                     CAST(object->'metadata'->>'uid' AS VARCHAR) as uid,
                     type
-                FROM read_json_auto('{watch_path_str}')
+                FROM {json_scan(watch_path_str, WATCH_COLUMNS)}
                 WHERE resource IN ('pods', 'sandboxes')
             ),
             lifecycle_ends AS (
@@ -951,7 +978,7 @@ def main():
                 quantile_cont(sandboxReadyMs, 0.5) as sandboxReady_p50,
                 quantile_cont(sandboxReadyMs, 0.9) as sandboxReady_p90,
                 quantile_cont(sandboxReadyMs, 0.99) as sandboxReady_p99
-            FROM read_json_auto('{sandboxes_path_str}')
+            FROM {json_scan(sandboxes_path_str, SANDBOXES_COLUMNS)}
             GROUP BY phase
             ORDER BY phase
         """).fetchall()

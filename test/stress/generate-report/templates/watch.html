@@ -78,10 +78,17 @@
         return phase ? phase.name : '';
     }
 
+    // tMs is NaN when the record's timestamp was missing or unparseable;
+    // toISOString() throws on invalid dates, which would abort rendering of
+    // the whole result batch over one bad line.
     function formatTime(tMs) {
+        if (!Number.isFinite(tMs)) {
+            return '<span class="watch-offset">no timestamp</span>';
+        }
         const iso = new Date(tMs).toISOString();
         const offset = (tMs - START_MS) / 1000;
-        return `${iso.slice(11, 23)} <span class="watch-offset">+${offset.toFixed(1)}s</span>`;
+        const offsetHtml = Number.isFinite(offset) ? ` <span class="watch-offset">+${offset.toFixed(1)}s</span>` : '';
+        return `${iso.slice(11, 23)}${offsetHtml}`;
     }
 
     function changeHtml(change, maxLen) {

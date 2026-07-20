@@ -350,6 +350,22 @@ the fleet builds a per-context client for each, distributes pools/claims, and ea
 `SandboxHandle` carries its owning cluster. Cross-cluster reachability is the
 caller's concern (see the integration guide).
 
+### Multiple clusters and multiple node pools
+
+Each `ClusterConfig` targets one placement domain via its `node_selector`, so plan
+a deployment as **one `ClusterConfig` per (cluster × node pool)** and let a
+`placement` strategy spread work across them. For pools *within the same cluster*,
+give each config the same `context` but a distinct `node_selector` — **and a
+distinct `namespace`**: SandboxTemplate/WarmPool names are keyed by image only
+(`r2e-img-<hash>`), so two same-namespace configs warming the same image would
+collide; separate namespaces keep them isolated. Prefer `capacity-weighted` or
+`least-loaded` placement when pools are heterogeneous (e.g. a 110-pod e2 pool
+alongside a 256-pod n2 pool) so the larger pool gets a proportional share, and set
+each config's capacity/weight accordingly. (To instead let the scheduler place
+across pools freely, use a single config with no `node_selector` and a node
+affinity in `TemplateSpec.extra_pod_spec` — simpler, but you lose control of the
+split across pools with different pod caps.)
+
 ## Configuration reference
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`

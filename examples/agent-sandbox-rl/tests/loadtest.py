@@ -39,9 +39,15 @@ import os
 import time
 
 from agent_sandbox_rl import (AsyncSandboxFleet, ClusterConfig, FleetConfig,
-                              ListSource, STRATEGIES, Task, TemplateSpec)
+                              GitRestoreReset, ListSource, SandboxFleet,
+                              STRATEGIES, Task, TemplateSpec,
+                              reuse_git_restore_sandbox)
 
 ALL_STRATEGIES = ["none", "naive", "sliding", "pipelined"]
+# "reuse" is an execution MODE, not a warm-pool strategy — recognized in an
+# explicit --strategies list (not in "all"); it warms all pools then recycles
+# one sandbox per image instead of claiming per task.
+_REUSE = "reuse"
 
 
 # --------------------------------------------------------------------------- #
@@ -81,9 +87,11 @@ def resolve_strategies(spec: str) -> list[str]:
     if spec == "all":
         return list(ALL_STRATEGIES)
     out = [s.strip() for s in spec.split(",") if s.strip()]
-    bad = [s for s in out if s not in STRATEGIES]
+    allowed = set(STRATEGIES) | {_REUSE}
+    bad = [s for s in out if s not in allowed]
     if bad:
-        raise ValueError(f"unknown strategies {bad}; choose from {sorted(STRATEGIES)}")
+        raise ValueError(f"unknown strategies {bad}; choose from "
+                         f"{sorted(allowed)}")
     return out
 
 
@@ -326,7 +334,62 @@ def _make_fleet(args) -> AsyncSandboxFleet:
     return AsyncSandboxFleet(cfg)
 
 
+def _run_reuse(args, tasks):
+    """Reuse mode (sync fleet + recycling): warm all pools, then reuse one sandbox
+    per image (git-restore reset between same-image tasks) instead of a fresh claim
+    per task. Runs in a worker thread from the async loop (see _run_strategy)."""
+    dur = args.task_duration
+
+    def probe(task, handle):
+        if dur > 0:
+            time.sleep(dur)
+        return handle.pod_name
+
+    cluster = ClusterConfig(name="loadtest", context=args.context,
+                            namespace=args.namespace,
+                            node_selector=parse_node_selector(args.node_selector),
+                            runtime_class=args.runtime_class)
+    cfg = FleetConfig(clusters=[cluster], max_concurrent=args.max_concurrent,
+                      max_warmpool_size=args.max_warmpool_size,
+                      warm_per_task=args.warm_per_task,
+                      ready_timeout=args.ready_timeout,
+                      template=TemplateSpec(runtime_class=args.runtime_class,
+                                            colocate_replicas=args.colocate))
+    fleet = SandboxFleet(cfg)
+    reset = GitRestoreReset(check_env=args.check_env, check_config=args.check_env)
+    entries = []
+    t0 = time.monotonic()
+    try:
+        fleet.load_tasks(ListSource(tasks))
+        plan = fleet.plan()
+        entries = [{"image": e.image, "pool": e.pool, "replicas": e.replicas,
+                    "cluster": e.cluster} for e in plan.entries]
+        fleet.setup()
+        with fleet.observer.run(_REUSE) as report:
+            fleet.report = report
+            t0 = time.monotonic()
+            res = reuse_git_restore_sandbox(
+                fleet, tasks, probe, args.max_concurrent, reset=reset,
+                max_reuses=args.max_reuses, reset_timeout=args.reset_timeout,
+                use_session=args.use_session)
+            report.total_s = time.monotonic() - t0
+        wall = report.total_s
+        ok = sum(1 for r in res if not isinstance(r, Exception))
+        rep = report.to_dict()
+    except Exception as e:                  # noqa: BLE001
+        wall = time.monotonic() - t0
+        ok, rep = 0, (fleet.report.to_dict() if fleet.report else {"phases": {}})
+        rep["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        fleet.teardown()
+    return ({"strategy": _REUSE, "wall_s": round(wall, 2), "ok": ok,
+             "total": len(tasks), "report": rep}, entries)
+
+
 async def _run_strategy(args, tasks, strategy):
+    if strategy == _REUSE:
+        return await asyncio.to_thread(_run_reuse, args, tasks)
+
     dur = args.task_duration
 
     async def probe(task, handle):
@@ -412,6 +475,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--colocate", action="store_true",
                    help="prefer co-locating a pool's replicas on one node (cache reuse)")
     p.add_argument("--window-size", type=int, default=None)
+    # recycling (only used by the `reuse` pseudo-strategy)
+    p.add_argument("--max-reuses", type=int, default=100000,
+                   help="[reuse] max tasks per sandbox before rotating to a fresh one")
+    p.add_argument("--reset-timeout", type=float, default=10.0,
+                   help="[reuse] advisory per-reset budget (s); slower → quarantine")
+    p.add_argument("--check-env", action="store_true",
+                   help="[reuse] enable the pip-freeze/config drift tripwires (default: git-only)")
+    p.add_argument("--no-session", dest="use_session", action="store_false",
+                   help="[reuse] one-shot exec per command instead of a persistent session")
+    p.set_defaults(use_session=True)
     p.add_argument("--ready-timeout", type=int, default=1800)
     p.add_argument("--task-duration", type=float, default=0.0,
                    help="seconds to sleep in process_fn (simulate task work)")

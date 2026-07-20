@@ -339,7 +339,9 @@ fleet.run(rollout_fn, strategy="naive", keep_warm=True)       # reuse across ste
 ```
 
 The [load test](tests/loadtest.py) reproduces both: `--tasks-per-image 1` (eval) vs
-`--tasks-per-image G --warm-per-task --colocate` (RL).
+`--tasks-per-image G --warm-per-task --colocate` (RL). Add `reuse` to `--strategies`
+(e.g. `--strategies naive,pipelined,reuse`) to compare recycling against the warm-pool
+strategies in the same run (`--max-reuses`/`--reset-timeout`/`--check-env` tune it).
 
 ## Multi-cluster
 

@@ -16,6 +16,16 @@ rules:
   - watch
 - apiGroups:
   - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
   - events.k8s.io
   resources:
   - events

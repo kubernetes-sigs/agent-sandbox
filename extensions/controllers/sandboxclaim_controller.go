@@ -200,6 +200,7 @@ type SandboxClaimReconciler struct {
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -444,9 +445,20 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			if len(claim.Spec.AdditionalPodMetadata.Labels) > 0 || len(claim.Spec.AdditionalPodMetadata.Annotations) > 0 {
 				return nil, fmt.Errorf("failed to get template for metadata propagation: %w", templateErr)
 			}
+			if sandbox.Annotations[extensionsv1beta1.GeneratedSecretsAnnotation] != "" {
+				return nil, fmt.Errorf("failed to get template for generated Secret reconciliation: %w", templateErr)
+			}
 		}
 
 		if template != nil {
+			resolvedSecrets, resolveErr := resolvedGeneratedSecretNames(sandbox, template.Spec.GeneratedSecrets)
+			if resolveErr != nil {
+				return sandbox, fmt.Errorf("resolve generated Secrets for Sandbox %q: %w", sandbox.Name, resolveErr)
+			}
+			if _, ensureErr := ensureGeneratedSecrets(ctx, r.Client, r.Scheme, sandbox, template.Spec.GeneratedSecrets, resolvedSecrets); ensureErr != nil {
+				return sandbox, fmt.Errorf("ensure generated Secrets for Sandbox %q: %w", sandbox.Name, ensureErr)
+			}
+
 			patch := client.MergeFrom(sandbox.DeepCopy())
 			// Check if metadata needs update
 			var mergedMeta v1beta1.PodMetadata
@@ -1400,6 +1412,11 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
+	resolvedSecrets, err := prepareGeneratedSecretReferences(sandbox, template.Spec.GeneratedSecrets)
+	if err != nil {
+		return nil, fmt.Errorf("prepare generated Secrets for cold Sandbox: %w", err)
+	}
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
@@ -1410,6 +1427,10 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		err = fmt.Errorf("sandbox create error: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
 		return nil, err
+	}
+	if err := provisionGeneratedSecrets(ctx, r.Client, r.Scheme, sandbox, template.Spec.GeneratedSecrets, resolvedSecrets); err != nil {
+		rollbackErr := client.IgnoreNotFound(r.Delete(ctx, sandbox))
+		return nil, errors.Join(err, rollbackErr)
 	}
 
 	logger.Info("Created sandbox for claim", "claim", claim.Name, "sandbox", sandbox.Name, "isReady", false, "duration", time.Since(claim.CreationTimestamp.Time))

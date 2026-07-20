@@ -25,7 +25,10 @@ import (
 	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
-const v1alpha1SandboxTemplateStateAnnotation = "api.agents.x-k8s.io/v1alpha1-sandboxtemplate-state"
+const (
+	v1alpha1SandboxTemplateStateAnnotation = "api.agents.x-k8s.io/v1alpha1-sandboxtemplate-state"
+	v1beta1GeneratedSecretsAnnotation      = "api.agents.x-k8s.io/v1beta1-generated-secrets"
+)
 
 // ConvertTo converts this SandboxTemplate to the Hub version (v1beta1).
 func (s *SandboxTemplate) ConvertTo(dstRaw conversion.Hub) error {
@@ -49,6 +52,14 @@ func (s *SandboxTemplate) ConvertTo(dstRaw conversion.Hub) error {
 		}
 		if dst.Annotations != nil {
 			delete(dst.Annotations, "api.agents.x-k8s.io/v1beta1-volume-claim-templates-policy")
+		}
+	}
+	if generatedSecrets, ok := s.Annotations[v1beta1GeneratedSecretsAnnotation]; ok {
+		if err := json.Unmarshal([]byte(generatedSecrets), &dst.Spec.GeneratedSecrets); err != nil {
+			return fmt.Errorf("invalid generated Secrets annotation: %w", err)
+		}
+		if dst.Annotations != nil {
+			delete(dst.Annotations, v1beta1GeneratedSecretsAnnotation)
 		}
 	}
 
@@ -92,6 +103,18 @@ func (s *SandboxTemplate) ConvertFrom(srcRaw conversion.Hub) error {
 		s.Annotations["api.agents.x-k8s.io/v1beta1-volume-claim-templates-policy"] = string(src.Spec.VolumeClaimTemplatesPolicy)
 	} else if s.Annotations != nil {
 		delete(s.Annotations, "api.agents.x-k8s.io/v1beta1-volume-claim-templates-policy")
+	}
+	if len(src.Spec.GeneratedSecrets) > 0 {
+		generatedSecrets, err := json.Marshal(src.Spec.GeneratedSecrets)
+		if err != nil {
+			return fmt.Errorf("marshal generated Secrets: %w", err)
+		}
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		s.Annotations[v1beta1GeneratedSecretsAnnotation] = string(generatedSecrets)
+	} else if s.Annotations != nil {
+		delete(s.Annotations, v1beta1GeneratedSecretsAnnotation)
 	}
 
 	return nil

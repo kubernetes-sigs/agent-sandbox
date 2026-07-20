@@ -32,6 +32,10 @@ type NetworkPolicyManagement string
 type EnvVarsInjectionPolicy string
 
 const (
+	// GeneratedSecretsAnnotation records the logical-to-concrete names of Secrets
+	// generated for a Sandbox. Values are intentionally excluded.
+	GeneratedSecretsAnnotation = "extensions.agents.x-k8s.io/generated-secrets"
+
 	// SandboxIDLabel is the label key applied to the Pod to identify the owning Claim UID.
 	// The SandboxClaim controller injects this label into the Pod
 	// System-injected labels/annotations shouldn't be touched.
@@ -55,6 +59,37 @@ const (
 	// EnvVarsInjectionPolicyDisallowed prevents a SandboxClaim from injecting any environment variables.
 	EnvVarsInjectionPolicyDisallowed EnvVarsInjectionPolicy = "Disallowed"
 )
+
+// GeneratedSecretDataSpec describes one randomly generated Secret data entry.
+type GeneratedSecretDataSpec struct {
+	// key is the key stored in the generated Secret.
+	// +required
+	Key string `json:"key"`
+
+	// lengthBytes is the number of random bytes used to generate the URL-safe token.
+	// +kubebuilder:default=32
+	// +kubebuilder:validation:Minimum=32
+	// +kubebuilder:validation:Maximum=128
+	// +optional
+	LengthBytes int32 `json:"lengthBytes,omitempty"`
+}
+
+// GeneratedSecretSpec declares a per-Sandbox Secret referenced symbolically by
+// secretKeyRef entries in the Pod template.
+type GeneratedSecretSpec struct {
+	// name is the logical Secret name used by secretKeyRef entries in the Pod template.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
+	Name string `json:"name"`
+
+	// data lists the keys to populate with independently generated random tokens.
+	// +listType=map
+	// +listMapKey=key
+	// +kubebuilder:validation:MinItems=1
+	// +required
+	Data []GeneratedSecretDataSpec `json:"data"`
+}
 
 // VolumeClaimTemplatesPolicy defines whether a SandboxClaim is allowed to inject or override volume claim templates.
 type VolumeClaimTemplatesPolicy string
@@ -138,6 +173,14 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:default=Disallowed
 	// +optional
 	VolumeClaimTemplatesPolicy VolumeClaimTemplatesPolicy `json:"volumeClaimTemplatesPolicy,omitempty"`
+
+	// generatedSecrets declares Secrets that are generated independently for each
+	// concrete Sandbox. A secretKeyRef whose name matches a declaration is rewritten
+	// to the Sandbox-specific Secret name before the Sandbox is created.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	GeneratedSecrets []GeneratedSecretSpec `json:"generatedSecrets,omitempty"`
 }
 
 // +genclient

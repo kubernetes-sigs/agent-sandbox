@@ -67,6 +67,7 @@ type SandboxWarmPoolReconciler struct {
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;delete
 
 // Reconcile implements the reconciliation loop for SandboxWarmPool.
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -135,6 +136,17 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// Delete stale pods, filter pods by ownership and adopt orphans
 	activeSandboxes, allErrors := r.filterActiveSandboxes(ctx, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
+	if tmplErr == nil {
+		for i := range activeSandboxes {
+			resolvedSecrets, err := resolvedGeneratedSecretNames(&activeSandboxes[i], template.Spec.GeneratedSecrets)
+			if err != nil {
+				return fmt.Errorf("resolve generated Secrets for warm pool Sandbox %q: %w", activeSandboxes[i].Name, err)
+			}
+			if _, err := ensureGeneratedSecrets(ctx, r.Client, r.Scheme, &activeSandboxes[i], template.Spec.GeneratedSecrets, resolvedSecrets); err != nil {
+				return fmt.Errorf("ensure generated Secrets for warm pool Sandbox %q: %w", activeSandboxes[i].Name, err)
+			}
+		}
+	}
 
 	const warmPoolReadinessGracePeriod = 5 * time.Minute
 
@@ -193,7 +205,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		} else {
 			// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
 			_, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
-				return r.createPoolSandbox(ctx, warmPool, sandboxCR)
+				return r.createPoolSandbox(ctx, warmPool, sandboxCR, template.Spec.GeneratedSecrets)
 			})
 			if createErr != nil {
 				logger.Error(createErr, "Failed to create pool sandboxes")
@@ -342,7 +354,17 @@ func computePodTemplateHash(template *extensionsv1beta1.SandboxTemplate) (string
 
 // computeSandboxBlueprintHash computes a hash of the sandbox template's Spec.SandboxBlueprint.
 func computeSandboxBlueprintHash(template *extensionsv1beta1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.SandboxBlueprint)
+	value := any(template.Spec.SandboxBlueprint)
+	if len(template.Spec.GeneratedSecrets) > 0 {
+		value = struct {
+			SandboxBlueprint sandboxv1beta1.SandboxBlueprint         `json:"sandboxBlueprint"`
+			GeneratedSecrets []extensionsv1beta1.GeneratedSecretSpec `json:"generatedSecrets"`
+		}{
+			SandboxBlueprint: template.Spec.SandboxBlueprint,
+			GeneratedSecrets: template.Spec.GeneratedSecrets,
+		}
+	}
+	specJSON, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal sandbox blueprint for hashing: %w", err)
 	}
@@ -434,12 +456,30 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 }
 
 // createPoolSandbox creates a full Sandbox CR for the warm pool using a pre-built sandboxCR.
-func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxCR *sandboxv1beta1.Sandbox) error {
+func (r *SandboxWarmPoolReconciler) createPoolSandbox(
+	ctx context.Context,
+	warmPool *extensionsv1beta1.SandboxWarmPool,
+	sandboxCR *sandboxv1beta1.Sandbox,
+	generatedSecretSpecs []extensionsv1beta1.GeneratedSecretSpec,
+) error {
 	logger := log.FromContext(ctx)
 	sandbox := sandboxCR.DeepCopy()
+	if len(generatedSecretSpecs) > 0 {
+		if err := assignGeneratedSandboxName(sandbox); err != nil {
+			return err
+		}
+	}
+	resolvedSecrets, err := prepareGeneratedSecretReferences(sandbox, generatedSecretSpecs)
+	if err != nil {
+		return fmt.Errorf("prepare generated Secrets for warm pool Sandbox: %w", err)
+	}
 	if err := r.Create(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to create pool sandbox")
 		return err
+	}
+	if err := provisionGeneratedSecrets(ctx, r.Client, r.Scheme, sandbox, generatedSecretSpecs, resolvedSecrets); err != nil {
+		rollbackErr := client.IgnoreNotFound(r.Delete(ctx, sandbox))
+		return errors.Join(err, rollbackErr)
 	}
 
 	logger.Info("Created new pool sandbox", "sandbox", sandbox.Name, "poolName", warmPool.Name)
@@ -515,6 +555,9 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	controllerRef := metav1.GetControllerOf(sandbox)
 	isOrphan := controllerRef == nil
 	if isOrphan {
+		if len(template.Spec.GeneratedSecrets) > 0 {
+			return true
+		}
 		// Always perform full semantic comparison for orphans.
 		return !r.compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
 	}
@@ -537,6 +580,12 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 		if isStale, found := vettedHashes[sandboxHash]; found {
 			return isStale
 		}
+	}
+
+	// Generated Secret declarations are not persisted in the Sandbox spec, so a
+	// hash mismatch is sufficient to identify drift for these templates.
+	if len(template.Spec.GeneratedSecrets) > 0 {
+		return true
 	}
 
 	// Perform a semantic comparison of the sandbox blueprint.

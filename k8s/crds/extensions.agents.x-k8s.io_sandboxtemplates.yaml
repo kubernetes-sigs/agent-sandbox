@@ -34,6 +34,40 @@ spec:
                 - Overrides
                 - Disallowed
                 type: string
+              generatedSecrets:
+                items:
+                  properties:
+                    data:
+                      items:
+                        properties:
+                          key:
+                            type: string
+                          lengthBytes:
+                            default: 32
+                            format: int32
+                            maximum: 128
+                            minimum: 32
+                            type: integer
+                        required:
+                        - key
+                        type: object
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - key
+                      x-kubernetes-list-type: map
+                    name:
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                  - data
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               networkPolicy:
                 properties:
                   egress:

@@ -129,28 +129,6 @@ echo "Using CNI: ${CNI}"
 
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
-#
-# authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
-# kube-controller-manager and kube-scheduler so the stress test can scrape
-# them through the apiserver pod proxy (the apiserver strips the
-# Authorization header after authenticating, so the proxied request is
-# anonymous and the default delegated authorization rejects it with 403).
-# The health probe paths must be repeated because setting the field replaces
-# the upstream default, and kOps liveness probes hit /healthz.
-# Ports 10257/10259 are not internet-reachable: kOps GCE creates a
-# deny-by-default VPC and only control-plane instances can reach them.
-#
-# cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the
-# stress test can scrape them (promscrape.go already targets this port; the
-# 2077449092094496768 run showed pod-sandbox creation as the launch
-# bottleneck, and CNI endpoint regeneration latency lives in these metrics).
-# Only set when cilium is the CNI: the --set alone materializes a
-# spec.networking.cilium section, and kOps rejects a cluster with two
-# networking options.
-CNI_KOPS_FLAGS=()
-if [[ "${CNI}" == "cilium" ]]; then
-    CNI_KOPS_FLAGS+=("--set" "cluster.spec.networking.cilium.enablePrometheusMetrics=true")
-fi
 kops create cluster \
   --cloud=gce \
   --gce-service-account=default \
@@ -161,7 +139,24 @@ kops create cluster \
   --control-plane-count=1 \
   --control-plane-size=n2-standard-8 \
   --node-count=3 \
-  --node-size=n2-standard-8 \
+  --node-size=n2-standard-8
+
+# Spec tuning is applied as separate `kops edit cluster --set` blocks rather
+# than as flags on `kops create` above. Each knob keeps its rationale next to
+# it, and a new knob is a new block instead of another line in a shared flag
+# list -- so tuning changes stop conflicting with each other. The edits
+# mutate the spec in the state store; `kops update cluster` below applies them.
+
+# authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
+# kube-controller-manager and kube-scheduler so the stress test can scrape
+# them through the apiserver pod proxy (the apiserver strips the
+# Authorization header after authenticating, so the proxied request is
+# anonymous and the default delegated authorization rejects it with 403).
+# The health probe paths must be repeated because setting the field replaces
+# the upstream default, and kOps liveness probes hit /healthz.
+# Ports 10257/10259 are not internet-reachable: kOps GCE creates a
+# deny-by-default VPC and only control-plane instances can reach them.
+kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeControllerManager.authorizationAlwaysAllowPaths=/livez \
@@ -169,8 +164,28 @@ kops create cluster \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/healthz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/readyz \
   --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/livez \
-  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics \
-  ${CNI_KOPS_FLAGS[@]+"${CNI_KOPS_FLAGS[@]}"}
+  --set cluster.spec.kubeScheduler.authorizationAlwaysAllowPaths=/metrics
+
+# kubeControllerManager.kubeAPIQPS/Burst: KCM's client defaults (20/30) are
+# the cluster-scale throughput cap. The 20-node run 2078424551523356672
+# measured a flat 473ms average client-side throttle wait across
+# throughput-mif100..600 (saturation), and KCM's garbage collector is on
+# the sandbox delete path (sandbox -> ownerRef cascade -> pod delete), so
+# the closed-loop delete drain paces the whole benchmark: mif200 slots
+# cycled in ~8.8s of which only 1.6s was launch.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubeControllerManager.kubeAPIQPS=100 \
+  --set cluster.spec.kubeControllerManager.kubeAPIBurst=200
+
+
+if [[ "${CNI}" == "cilium" ]]; then
+  # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the
+  # stress test can scrape them (promscrape.go already targets this port; the
+  # 2077449092094496768 run showed pod-sandbox creation as the launch
+  # bottleneck, and CNI endpoint regeneration latency lives in these metrics).
+  kops edit cluster --name "${CLUSTER_NAME}" \
+    --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
+fi
 
 echo "Applying cluster configuration..."
 kops update cluster --name "${CLUSTER_NAME}" --yes

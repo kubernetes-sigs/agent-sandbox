@@ -204,6 +204,8 @@ def main():
             "end_ts": p_end.strftime('%Y-%m-%dT%H:%M:%SZ')
         })
 
+    phase_order_map_early = {name: i for i, (name, _, _) in enumerate(phases)}
+
     start_time_iso = start_time.strftime('%Y-%m-%d %H:%M:%S.%f')
     end_time_iso = end_time.strftime('%Y-%m-%d %H:%M:%S.%f')
 
@@ -286,6 +288,69 @@ def main():
     controller_chart_data = [
         {"ts": row[0], "controller": row[1], "reconcile_rate": row[2] / 15.0}
         for row in controller_ts_raw
+    ]
+
+    # Sandbox controller workqueue: queue time is latency the controller adds
+    # before it even starts reconciling, and depth is the backlog. Work time
+    # vs queue time separates "reconciles are slow" from "reconciles are
+    # queued" (the fix differs: reconcile cost vs worker concurrency).
+    print("Querying controller workqueue by phase...")
+    controller_queue_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["workqueue_queue_duration_seconds_count",
+                 "workqueue_queue_duration_seconds_sum",
+                 "workqueue_work_duration_seconds_count",
+                 "workqueue_work_duration_seconds_sum",
+                 "workqueue_retries_total"],
+        labels={"qname": "name"},
+        group_by=[],
+        where="qname = 'sandbox' AND source = 'agent-sandbox-controller'")
+
+    print("Querying controller workqueue depth...")
+    controller_depth_raw = conn.execute(f"""
+        WITH raw AS (
+            SELECT CAST(ts AS TIMESTAMP) as ts, value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE source = 'agent-sandbox-controller' AND metric = 'workqueue_depth'
+              AND CAST(labels->>'name' AS VARCHAR) = 'sandbox'
+        )
+        SELECT p.name as phase_name, AVG(r.value), MAX(r.value)
+        FROM raw r JOIN phases p ON r.ts >= p.start_time AND r.ts < p.end_time
+        GROUP BY p.name
+    """).fetchall()
+    depth_by_phase = {row[0]: (row[1], row[2]) for row in controller_depth_raw}
+
+    controller_queue = []
+    for row in controller_queue_raw:
+        phase_name, qn, qsum, wn, wsum, retries = row
+        if qn <= 0:
+            continue
+        depth_avg, depth_max = depth_by_phase.get(phase_name, (0.0, 0.0))
+        controller_queue.append({
+            "phase_name": phase_name,
+            "items": int(qn),
+            "avg_queue_ms": qsum / qn * 1000,
+            "avg_work_ms": (wsum / wn * 1000) if wn > 0 else 0.0,
+            "retries": int(retries),
+            "depth_avg": depth_avg,
+            "depth_max": int(depth_max),
+        })
+    controller_queue.sort(key=lambda r: (phase_order_map_early.get(r["phase_name"], 99)))
+
+    print("Querying controller workqueue depth timeseries...")
+    controller_depth_ts = conn.execute(f"""
+        WITH raw AS (
+            SELECT CAST(ts AS TIMESTAMP) as ts, value
+            FROM read_json_auto('{metrics_path_str}')
+            WHERE source = 'agent-sandbox-controller' AND metric = 'workqueue_depth'
+              AND CAST(labels->>'name' AS VARCHAR) = 'sandbox'
+        )
+        SELECT strftime(time_bucket(INTERVAL '15 seconds', ts), '%Y-%m-%dT%H:%M:%SZ') as tsb,
+               MAX(value)
+        FROM raw GROUP BY tsb ORDER BY tsb
+    """).fetchall()
+    controller_depth_chart = [
+        {"ts": row[0], "depth": row[1]} for row in controller_depth_ts
     ]
 
     print("Querying apiserver operations by phase...")
@@ -762,6 +827,23 @@ def main():
             "link": "agent-sandbox-controller.html"
         })
 
+    # Sandbox controller workqueue backlog check: items waiting in the queue
+    # add launch latency before the controller even starts reconciling.
+    queue_worst = None
+    for row in controller_queue:
+        if row['phase_name'].startswith('throughput'):
+            if queue_worst is None or row['avg_queue_ms'] > queue_worst['avg_queue_ms']:
+                queue_worst = row
+
+    if queue_worst and queue_worst['avg_queue_ms'] > 250:
+        w = queue_worst
+        findings.append({
+            "severity": "critical" if w['avg_queue_ms'] > 1000 else "warning",
+            "title": f"Sandbox Controller Workqueue Backlog ({w['avg_queue_ms']/1000:.2f}s avg queue time)",
+            "desc": f"During phase {w['phase_name']}, items waited an average of {w['avg_queue_ms']/1000:.2f}s in the sandbox controller's workqueue (depth averaged {w['depth_avg']:.0f}, peaking at {w['depth_max']}), while actual reconcile work took only {w['avg_work_ms']:.1f}ms per item — the controller is queueing, not slow. Consider raising the controller's reconcile concurrency (MaxConcurrentReconciles) and checking its client-side QPS limits.",
+            "link": "agent-sandbox-controller.html"
+        })
+
     # etcd check
     etcd_update_latency_max = 0.0
     for row in etcd_ops:
@@ -964,6 +1046,8 @@ def main():
         "active_page": "controller",
         "summary": summary,
         "controller_ops": controller_ops,
+        "controller_queue": controller_queue,
+        "depth_chart_data": controller_depth_chart,
         "chart_data": controller_chart_data,
         "phases": js_phases
     }

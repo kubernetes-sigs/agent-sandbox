@@ -1,0 +1,46 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: box-b
+spec:
+  # Identical to box-a (sandbox.yaml) — a second sandbox to prove a token
+  # minted for box-a is rejected here with 403. See "Run it" step 5.
+  automountServiceAccountToken: false
+  podTemplate:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: mcp
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: mcp
+          containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        readinessProbe:
+          httpGet:
+            path: /mcp
+            port: mcp
+          initialDelaySeconds: 2
+          periodSeconds: 2
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

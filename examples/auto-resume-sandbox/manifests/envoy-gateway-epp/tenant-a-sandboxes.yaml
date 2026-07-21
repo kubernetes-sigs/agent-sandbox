@@ -7,6 +7,9 @@ spec:
   operatingMode: Suspended
   service: true
   podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: agent-sandbox
     spec:
       containers:
       - name: web
@@ -25,6 +28,9 @@ spec:
   operatingMode: Suspended
   service: true
   podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: agent-sandbox
     spec:
       containers:
       - name: web

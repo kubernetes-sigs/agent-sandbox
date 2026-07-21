@@ -9,7 +9,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: sandbox-edge-gateway
-  namespace: envoy-gateway-system
+  namespace: default
 spec:
   gatewayClassName: envoy
   listeners:

@@ -16,9 +16,17 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -31,12 +39,16 @@ import (
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extprocfilterv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoytypev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -53,7 +65,8 @@ const (
 	sandboxHeaderNamespace = "x-sandbox-namespace"
 )
 
-// CalloutServer implements the Envoy ext_proc gRPC ExternalProcessor service.
+// CalloutServer implements the Envoy ext_proc gRPC ExternalProcessor service,
+// acting as the protocol-compliant ExternalProcessor for Gateway API Inference Extension (GAIE).
 type CalloutServer struct {
 	extproc.UnimplementedExternalProcessorServer
 	managerEndpoint string
@@ -169,8 +182,10 @@ func (s *CalloutServer) Process(stream extproc.ExternalProcessor_ProcessServer) 
 			return err
 		}
 
+		klog.Infof("Received ext_proc request type: %T", req.Request)
 		switch v := req.Request.(type) {
 		case *extproc.ProcessingRequest_RequestHeaders:
+			klog.Infof("Handling RequestHeaders in ext_proc")
 			resp, err := s.handleRequestHeaders(ctx, v.RequestHeaders)
 			if err != nil {
 				logger.Error(err, "Failed handling request headers")
@@ -180,11 +195,58 @@ func (s *CalloutServer) Process(stream extproc.ExternalProcessor_ProcessServer) 
 				logger.Error(err, "Failed sending ext_proc response")
 				return err
 			}
-		default:
-			// Passthrough for non-header stages (responses/bodies skipped by policy)
-			if err := stream.Send(&extproc.ProcessingResponse{}); err != nil {
+		case *extproc.ProcessingRequest_RequestBody:
+			resp := &extproc.ProcessingResponse{
+				Response: &extproc.ProcessingResponse_RequestBody{
+					RequestBody: &extproc.BodyResponse{},
+				},
+			}
+			if err := stream.Send(resp); err != nil {
+				logger.Error(err, "Failed sending ext_proc body response")
 				return err
 			}
+		case *extproc.ProcessingRequest_ResponseHeaders:
+			resp := &extproc.ProcessingResponse{
+				Response: &extproc.ProcessingResponse_ResponseHeaders{
+					ResponseHeaders: &extproc.HeadersResponse{},
+				},
+			}
+			if err := stream.Send(resp); err != nil {
+				logger.Error(err, "Failed sending ext_proc response headers response")
+				return err
+			}
+		case *extproc.ProcessingRequest_ResponseBody:
+			resp := &extproc.ProcessingResponse{
+				Response: &extproc.ProcessingResponse_ResponseBody{
+					ResponseBody: &extproc.BodyResponse{},
+				},
+			}
+			if err := stream.Send(resp); err != nil {
+				logger.Error(err, "Failed sending ext_proc response body response")
+				return err
+			}
+		case *extproc.ProcessingRequest_RequestTrailers:
+			resp := &extproc.ProcessingResponse{
+				Response: &extproc.ProcessingResponse_RequestTrailers{
+					RequestTrailers: &extproc.TrailersResponse{},
+				},
+			}
+			if err := stream.Send(resp); err != nil {
+				logger.Error(err, "Failed sending ext_proc request trailers response")
+				return err
+			}
+		case *extproc.ProcessingRequest_ResponseTrailers:
+			resp := &extproc.ProcessingResponse{
+				Response: &extproc.ProcessingResponse_ResponseTrailers{
+					ResponseTrailers: &extproc.TrailersResponse{},
+				},
+			}
+			if err := stream.Send(resp); err != nil {
+				logger.Error(err, "Failed sending ext_proc response trailers response")
+				return err
+			}
+		default:
+			logger.Info("Received unhandled ext_proc request type", "type", fmt.Sprintf("%T", req.Request))
 		}
 	}
 }
@@ -252,65 +314,57 @@ func (s *CalloutServer) handleRequestHeaders(ctx context.Context, req *extproc.H
 	logger.Info("Processing ext_proc callout for Sandbox", "namespace", namespace, "sandboxID", sandboxID)
 	targetHost, err := s.ensureSandboxWarm(ctx, namespace, sandboxID, reqPort)
 	if err != nil {
-		return nil, fmt.Errorf("failed ensuring sandbox %s/%s warm: %w", namespace, sandboxID, err)
+		logger.Error(err, "Failed ensuring sandbox warm", "namespace", namespace, "sandboxID", sandboxID)
+		return &extproc.ProcessingResponse{
+			Response: &extproc.ProcessingResponse_ImmediateResponse{
+				ImmediateResponse: &extproc.ImmediateResponse{
+					Status: &envoytypev3.HttpStatus{
+						Code: envoytypev3.StatusCode_ServiceUnavailable, // 503
+					},
+					Body: []byte("No ready sandbox endpoints available"),
+				},
+			},
+		}, nil
 	}
 
-	podIP, containerPortStr, err := net.SplitHostPort(targetHost)
-	if err != nil {
-		podIP = targetHost
-		containerPortStr = "8080"
-	}
-
-	// Respond to Envoy allowing request pipeline to unpause and proceed directly to target Pod IP / Host (KEP-1174 Contract 2)
+	// Respond to Envoy allowing request pipeline to unpause and proceed directly to target Pod IP / Host (EPP Protocol specification)
 	return &extproc.ProcessingResponse{
 		Response: &extproc.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &extproc.HeadersResponse{
 				Response: &extproc.CommonResponse{
 					Status:          extproc.CommonResponse_CONTINUE,
-					ClearRouteCache: true,
+					ClearRouteCache: false,
 					HeaderMutation: &extproc.HeaderMutation{
 						SetHeaders: []*corev3.HeaderValueOption{
 							{
 								Header: &corev3.HeaderValue{
-									Key:      "x-sandbox-state-informer-processed",
-									Value:    "true",
-									RawValue: []byte("true"),
-								},
-								AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-							},
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "x-sandbox-pod-ip",
-									Value:    podIP,
-									RawValue: []byte(podIP),
-								},
-								AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-							},
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "x-sandbox-port",
-									Value:    containerPortStr,
-									RawValue: []byte(containerPortStr),
-								},
-								AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-							},
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "x-sandbox-id",
-									Value:    sandboxID,
-									RawValue: []byte(sandboxID),
-								},
-								AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
-							},
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "x-sandbox-namespace",
-									Value:    namespace,
-									RawValue: []byte(namespace),
+									Key:      "x-gateway-destination-endpoint",
+									Value:    targetHost,
+									RawValue: []byte(targetHost),
 								},
 								AppendAction: corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 							},
 						},
+					},
+				},
+			},
+		},
+		ModeOverride: &extprocfilterv3.ProcessingMode{
+			RequestHeaderMode:  extprocfilterv3.ProcessingMode_SEND,
+			RequestBodyMode:    extprocfilterv3.ProcessingMode_NONE,
+			ResponseHeaderMode: extprocfilterv3.ProcessingMode_SKIP,
+			ResponseBodyMode:   extprocfilterv3.ProcessingMode_NONE,
+		},
+		DynamicMetadata: &structpb.Struct{
+			Fields: map[string]*structpb.Value{
+				"envoy.lb": {
+					Kind: &structpb.Value_StructValue{
+						StructValue: func() *structpb.Struct {
+							s, _ := structpb.NewStruct(map[string]any{
+								"x-gateway-destination-endpoint": targetHost,
+							})
+							return s
+						}(),
 					},
 				},
 			},
@@ -466,6 +520,39 @@ func (s *CalloutServer) ensureSandboxWarm(ctx context.Context, namespace, sandbo
 	return "", fmt.Errorf("unexpected empty targetHost for sandbox %s", cacheKey)
 }
 
+func generateSelfSignedCert() (tls.Certificate, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Agent Sandbox State Informer"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyBytes, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
 func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -490,15 +577,23 @@ func main() {
 		klog.Fatalf("Failed to listen on port %s: %v", port, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	tlsCert, err := generateSelfSignedCert()
+	if err != nil {
+		klog.Fatalf("Failed to generate self-signed TLS cert: %v", err)
+	}
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		NextProtos:   []string{"h2"},
+	})
+	grpcServer := grpc.NewServer(grpc.Creds(creds))
 	calloutServer, err := NewCalloutServer(ctx, managerEndpoint)
 	if err != nil {
-		klog.Fatalf("Failed to initialize sandbox-state-informer callout server: %v", err)
+		klog.Fatalf("Failed to initialize sandbox-router callout server: %v", err)
 	}
 	extproc.RegisterExternalProcessorServer(grpcServer, calloutServer)
 	reflection.Register(grpcServer)
 
-	logger.Info("Starting sandbox-state-informer callout service", "port", port, "managerEndpoint", managerEndpoint)
+	logger.Info("Starting sandbox-router callout service", "port", port, "managerEndpoint", managerEndpoint)
 
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
@@ -510,6 +605,6 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
 
-	logger.Info("Shutting down sandbox-state-informer callout service gracefully")
+	logger.Info("Shutting down sandbox-router callout service gracefully")
 	grpcServer.GracefulStop()
 }

@@ -1,24 +1,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sandbox-state-informer
+  name: sandbox-router
   namespace: default
   labels:
-    app: sandbox-state-informer
+    app: sandbox-router
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: sandbox-state-informer
+      app: sandbox-router
   template:
     metadata:
       labels:
-        app: sandbox-state-informer
+        app: sandbox-router
     spec:
-      serviceAccountName: sandbox-state-informer-sa
+      serviceAccountName: sandbox-router-sa
       containers:
-      - name: sandbox-state-informer
-        image: sandbox-state-informer:latest
+      - name: sandbox-router
+        image: sandbox-router:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 50051
@@ -32,26 +32,27 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: sandbox-state-informer-svc
+  name: sandbox-router-svc
   namespace: default
 spec:
   selector:
-    app: sandbox-state-informer
+    app: sandbox-router
   ports:
   - name: grpc-ext-proc
+    appProtocol: kubernetes.io/h2c
     port: 50051
     targetPort: 50051
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: sandbox-state-informer-sa
+  name: sandbox-router-sa
   namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: sandbox-state-informer-cluster-role
+  name: sandbox-router-cluster-role
 rules:
 - apiGroups: [""]
   resources: ["pods"]
@@ -63,19 +64,19 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: sandbox-state-informer-cluster-binding
+  name: sandbox-router-cluster-binding
 subjects:
 - kind: ServiceAccount
-  name: sandbox-state-informer-sa
+  name: sandbox-router-sa
   namespace: default
 - kind: ServiceAccount
-  name: sandbox-state-informer-sa
+  name: sandbox-router-sa
   namespace: tenant-a
 - kind: ServiceAccount
-  name: sandbox-state-informer-sa
+  name: sandbox-router-sa
   namespace: tenant-b
 roleRef:
   kind: ClusterRole
-  name: sandbox-state-informer-cluster-role
+  name: sandbox-router-cluster-role
   apiGroup: rbac.authorization.k8s.io
 

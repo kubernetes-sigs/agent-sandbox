@@ -77,6 +77,14 @@ Sandbox `v0.5.0rc1` (v1beta1).
   sandbox survives its pool being scaled to 0 / deleted (a `SandboxClaim` detaches it
   from warm-pool ownership). Non-recyclable (fresh-claim-per-task) images keep their
   pools. `scale_on_hold=False` restores resident pools.
+- **Async recycle (`reuse_git_restore_sandbox_async`)** (`recycle.py`): coroutine-per-group
+  twin of `reuse_git_restore_sandbox` for `AsyncSandboxFleet`. Blocking git/exec/claim calls
+  are offloaded to the fleet's bounded pool, so it **holds far more concurrent recycled
+  sandboxes than the sync thread-per-group executor** (one OS thread per held sandbox) —
+  lifting the driver-side concurrency ceiling. Effective *exec* concurrency is still bounded
+  by the pool + apiserver exec path (a native async I/O backend would lift that too). Same
+  semantics (reset / quarantine / rotate / `scale_on_hold`); `process_fn` may be sync or
+  async. (`AsyncSandboxFleet.start_warmpools` also gained the `create_budget` staging arg.)
 - **Node-aware disk window sizing** (`sizing.py`, `config.py`, `fleet.py`):
   `recommend_window_disk` / `recommend_window_pipelined` gained a `nodes` arg so the
   disk budget is the **whole pool's** usable disk (distinct images spread across nodes),

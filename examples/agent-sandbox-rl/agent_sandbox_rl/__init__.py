@@ -57,6 +57,7 @@ from .recycle import (
     ResetOutcome,
     determinism_canary,
     reuse_git_restore_sandbox,
+    reuse_git_restore_sandbox_async,
 )
 from .placement import (
     CapacityWeighted,
@@ -135,6 +136,7 @@ __all__ = [
     "ResetBaseline",
     "ResetOutcome",
     "reuse_git_restore_sandbox",
+    "reuse_git_restore_sandbox_async",
     "determinism_canary",
     # observability
     "Observer",

@@ -588,16 +588,19 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 		}
 	}
 
-	// 2. Ready latency (observability annotation → now).
+	// 2. Ready latency (observability annotation → Ready.LastTransitionTime).
+	// Use the same Ready instant as creation latency so reconcile processing
+	// after the condition transition is not included. metav1.Time is
+	// second-precision, so when the observability annotation is stamped in the
+	// same reconcile the truncated Ready instant can land slightly before the
+	// nano-precision stamp; treat that as zero rather than skipping.
 	if observedTimeStr := sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation]; observedTimeStr != "" {
 		observedTime, parseErr := time.Parse(time.RFC3339Nano, observedTimeStr)
 		if parseErr != nil {
 			logger.Error(parseErr, "Failed to parse sandbox observability annotation, skipping ready latency metric", "value", observedTimeStr)
-		} else {
-			latency := time.Since(observedTime)
-			if latency >= 0 {
-				asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
-			}
+		} else if !newReady.LastTransitionTime.IsZero() {
+			latency := max(newReady.LastTransitionTime.Sub(observedTime), time.Duration(0))
+			asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
 		}
 	}
 
@@ -614,19 +617,27 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 }
 
 // resolveOwnedBy determines the owner of a Sandbox from its controller owner reference.
+// Owner references keep the apiVersion that was current when they were written and
+// are not rewritten by storage migration, so sandboxes created by a pre-v1beta1
+// extensions controller still carry the v1alpha1 group version after an upgrade.
+// Match on group+kind, not version, so owned_by stays stable across API bumps.
 func resolveOwnedBy(sandbox *sandboxv1beta1.Sandbox) string {
 	controllerRef := metav1.GetControllerOf(sandbox)
-	if controllerRef != nil && controllerRef.APIVersion == extensionsv1beta1.GroupVersion.String() {
-		switch controllerRef.Kind {
-		case "SandboxClaim":
-			return asmetrics.OwnedBySandboxClaim
-		case "SandboxWarmPool":
-			return asmetrics.OwnedBySandboxWarmPool
-		default:
-			return asmetrics.OwnedByNone
-		}
+	if controllerRef == nil {
+		return asmetrics.OwnedByNone
 	}
-	return asmetrics.OwnedByNone
+	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
+	if err != nil || refGV.Group != extensionsv1beta1.GroupVersion.Group {
+		return asmetrics.OwnedByNone
+	}
+	switch controllerRef.Kind {
+	case "SandboxClaim":
+		return asmetrics.OwnedBySandboxClaim
+	case "SandboxWarmPool":
+		return asmetrics.OwnedBySandboxWarmPool
+	default:
+		return asmetrics.OwnedByNone
+	}
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only

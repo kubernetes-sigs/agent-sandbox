@@ -4158,6 +4158,26 @@ func TestResolveOwnedBy(t *testing.T) {
 			expected: asmetrics.OwnedBySandboxWarmPool,
 		},
 		{
+			name: "owned by SandboxClaim with v1alpha1 APIVersion",
+			ownerRef: &metav1.OwnerReference{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxClaim",
+				Name:       "my-claim",
+				Controller: new(true),
+			},
+			expected: asmetrics.OwnedBySandboxClaim,
+		},
+		{
+			name: "owned by SandboxWarmPool with v1alpha1 APIVersion",
+			ownerRef: &metav1.OwnerReference{
+				APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+				Kind:       "SandboxWarmPool",
+				Name:       "my-pool",
+				Controller: new(true),
+			},
+			expected: asmetrics.OwnedBySandboxWarmPool,
+		},
+		{
 			name: "owned by non-extensions API group",
 			ownerRef: &metav1.OwnerReference{
 				APIVersion: "apps/v1",
@@ -4173,6 +4193,16 @@ func TestResolveOwnedBy(t *testing.T) {
 				APIVersion: extensionsv1beta1.GroupVersion.String(),
 				Kind:       "SomeFutureType",
 				Name:       "my-thing",
+				Controller: new(true),
+			},
+			expected: asmetrics.OwnedByNone,
+		},
+		{
+			name: "invalid owner APIVersion",
+			ownerRef: &metav1.OwnerReference{
+				APIVersion: "foo/bar/baz",
+				Kind:       "SandboxClaim",
+				Name:       "my-claim",
 				Controller: new(true),
 			},
 			expected: asmetrics.OwnedByNone,

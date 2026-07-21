@@ -300,14 +300,7 @@ func main() {
 		}
 	}
 
-	mgrOpts := ctrl.Options{
-		Scheme:                  scheme,
-		Metrics:                 metricsOpts,
-		HealthProbeBindAddress:  probeAddr,
-		LeaderElection:          enableLeaderElection,
-		LeaderElectionNamespace: leaderElectionNamespace,
-		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
-	}
+	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
 	// managedFields stripping, the Pod spec diet, and (optionally) the
 	// tracking-label scoping; see buildCacheOptions for the rationale.
 	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)

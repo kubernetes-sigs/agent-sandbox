@@ -1791,7 +1791,18 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	}
 }
 
-// mapWarmPoolToClaims maps a SandboxWarmPool to a list of SandboxClaims that reference it.
+// mapWarmPoolToClaims maps a SandboxWarmPool to the SandboxClaims that reference it
+// and still depend on warm-pool state.
+//
+// Claims that are already bound to a sandbox (status.sandboxStatus.name set) are
+// skipped: once bound, a claim's reconciliation is driven by its own events and by
+// the Owns(&Sandbox{}) watch, and nothing in the bound path consults the pool in a
+// way that a pool event must trigger. If the bound sandbox is later deleted, the
+// sandbox delete event (Owns watch) re-reconciles the claim and clears
+// status.sandboxStatus.name, after which the claim receives pool events again.
+// Claims being deleted are likewise skipped since Reconcile returns immediately
+// for them. Unbound claims are always enqueued: they may be waiting for the pool
+// to appear (ErrWarmPoolNotFound requeue path) or for a usable pool spec.
 func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj client.Object) []ctrl.Request {
 	warmPool, ok := obj.(*extensionsv1beta1.SandboxWarmPool)
 	if !ok {
@@ -1806,6 +1817,9 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 	requests := make([]ctrl.Request, 0, len(claims.Items))
 	for i := range claims.Items {
 		claim := &claims.Items[i]
+		if claim.Status.SandboxStatus.Name != "" || !claim.DeletionTimestamp.IsZero() {
+			continue
+		}
 		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
 	}
 	return requests
@@ -1836,7 +1850,18 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		Watches(
 			&extensionsv1beta1.SandboxWarmPool{},
 			handler.EnqueueRequestsFromMapFunc(r.mapWarmPoolToClaims),
-			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			// GenerationChangedPredicate (instead of ResourceVersionChangedPredicate)
+			// drops pool STATUS-only updates, which churn on every adoption /
+			// replenishment and previously fanned out to every claim referencing
+			// the pool (O(pool status writes x claims) no-op reconciles during
+			// bursts). Claims never wait on pool status: newly adoptable warm
+			// sandboxes reach claims through the Sandbox watch feeding the
+			// in-memory WarmSandboxQueue, and a claim that finds the queue empty
+			// falls through to cold-start in the same reconcile rather than
+			// blocking on pool capacity. Pool create/delete events and spec
+			// (generation) changes still pass, covering claims requeueing on
+			// ErrWarmPoolNotFound / ErrTemplateNotFound.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
 		// TODO: Keep a lightweight SandboxTemplate -> claims map watch to promptly reconcile
 		// claims when a missing template is created, instead of relying on the 1-minute fallback.

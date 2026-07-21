@@ -46,6 +46,9 @@ MARKER = "<!-- agent-sandbox/pr-failure-summary -->"
 STATE_RE = re.compile(r"<!-- state=([0-9a-zA-Z:-]+) -->")
 MAX_ERROR_CHARS = 1500
 LOG_TAIL_BYTES = 16384
+# Cap rendered failures per job so a mass failure can't blow past GitHub's
+# ~64KB comment-size limit; the full list is always in the linked logs.
+MAX_FAILURES_PER_JOB = 15
 
 
 def run(cmd, input_text=None, check=True):
@@ -84,7 +87,11 @@ def gcs_list(bucket, prefix):
             + urllib.parse.urlencode(params)
         )
         if not data:
-            return names
+            # A failed listing must not masquerade as an empty one: returning
+            # partial results here would make a job with real junit failures
+            # look junit-less and tell the author to just `/retest`. Raise so
+            # the per-PR try/except skips this PR for the run instead.
+            raise RuntimeError(f"GCS listing failed for gs://{bucket}/{prefix}")
         payload = json.loads(data)
         names += [item["name"] for item in payload.get("items", [])]
         page_token = payload.get("nextPageToken")
@@ -231,10 +238,15 @@ def test_source_dirs(test_name):
 
 
 def pr_changed_dirs(repo, number):
-    files = json.loads(
-        gh("pr", "view", str(number), "--repo", repo, "--json", "files")
-    ).get("files", [])
-    return {d for d in (top_dirs(f["path"]) for f in files) if d}
+    # Paginate the REST files endpoint: `gh pr view --json files` caps at the
+    # first 100 changed files, which would silently degrade overlap detection
+    # on large PRs. --slurp wraps each page in an outer array.
+    pages = json.loads(
+        gh("api", f"repos/{repo}/pulls/{number}/files",
+           "--paginate", "--slurp")
+    )
+    return {d for d in (top_dirs(f["filename"]) for page in pages for f in page)
+            if d}
 
 
 def classify(classname, test_name, flakes, changed_dirs):
@@ -297,10 +309,15 @@ def build_comment(sha, jobs_summaries, all_known_flakes):
     for job, failures, log_tail, pr_fault in jobs_summaries:
         lines.append(f"### ❌ `{job['context']}` — [full logs]({job['url']})")
         if failures:
-            for name, msg, verdict, _ in failures:
+            for name, msg, verdict, _ in failures[:MAX_FAILURES_PER_JOB]:
                 lines.append(f"- `{name}` — {verdict}")
                 if msg:
                     lines += details_block("error", msg)
+            if len(failures) > MAX_FAILURES_PER_JOB:
+                lines.append(
+                    f"- …and {len(failures) - MAX_FAILURES_PER_JOB} more "
+                    "failure(s) in this job — see the full logs above."
+                )
         elif pr_fault:
             lines.append(
                 "- The job failed **without producing test results** — the "
@@ -358,6 +375,31 @@ def upsert_comment(repo, number, body, state, post):
     return "created"
 
 
+def resolve_sticky_comment(repo, number, sha, post):
+    """Collapses a stale failure summary once the PR has no failing jobs.
+
+    A summary left as the last sticky comment on a now-green PR reads as
+    noise, so rewrite it to a one-liner. Idempotent via the state marker.
+    """
+    existing = find_sticky_comment(repo, number)
+    if not existing:
+        return None
+    state = f"{sha[:12]}:resolved"
+    m = STATE_RE.search(existing["body"])
+    if m and m.group(1) == state:
+        return "unchanged"
+    body = "\n".join([
+        MARKER,
+        f"<!-- state={state} -->",
+        f"✅ The CI failures summarized earlier are resolved as of `{sha[:9]}`.",
+    ])
+    if post:
+        gh("api", "-X", "PATCH",
+           f"repos/{repo}/issues/comments/{existing['id']}",
+           "-f", f"body={body}")
+    return "resolved"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", default="kubernetes-sigs/agent-sandbox")
@@ -386,6 +428,11 @@ def main():
         try:
             jobs = failing_prow_statuses(args.repo, sha)
             if not jobs:
+                action = resolve_sticky_comment(args.repo, number, sha, args.post)
+                if action == "resolved":
+                    prefix = "" if args.post else "[preview] "
+                    print(f"{prefix}PR #{number}: collapsed stale summary "
+                          "(no failing jobs)", file=sys.stderr)
                 continue
 
             changed_dirs = pr_changed_dirs(args.repo, number)

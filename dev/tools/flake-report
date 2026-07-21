@@ -42,9 +42,12 @@ from datetime import datetime, timezone
 TESTGRID = "https://testgrid.k8s.io"
 
 # TestGrid cell status values (see testgrid test_status proto).
-PASS_STATUSES = {1, 2, 3, 4}
-FAIL_STATUSES = {12}
+PASS_STATUSES = {1, 2, 3}  # PASS, PASS_WITH_ERRORS, PASS_WITH_SKIPS
+# All completed-failure shapes, not just FAIL=12: TIMED_OUT=9 (a common flake
+# shape under DinD), CATEGORIZED_FAIL=10, BUILD_FAIL=11, TOOL_FAIL=14.
+FAIL_STATUSES = {9, 10, 11, 12, 14}
 FLAKY_STATUS = 13  # failed, then passed on a rerun of the same column
+RUNNING_STATUS = 4  # still in flight: neither a pass nor a fail yet
 
 # Rows like "<job>.Overall" and "<job>.Pod" describe the prow job itself, not
 # an individual test.
@@ -177,8 +180,9 @@ def analyze_tab(dashboard, tab, window):
             "job_history": job_history,
         }
 
-        # Recent non-empty results all failing => hard breakage, not a flake.
-        recent = [s for s in statuses if s != 0][:3]
+        # Recent completed results all failing => hard breakage, not a flake.
+        # RUNNING cells haven't finished, so they say nothing either way.
+        recent = [s for s in statuses if s not in (0, RUNNING_STATUS)][:3]
         if recent and all(s in FAIL_STATUSES for s in recent):
             consistent.append(finding)
         elif (
@@ -358,7 +362,12 @@ def update_issues(repo, flaky, infra, dry_run):
             body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
             actions.append(f"update #{issue['number']}: {f['short']}")
             if not dry_run:
+                # Refresh the title too: it embeds the tab list, which goes
+                # stale when a flake spreads to another tab. Manually-filed
+                # issues were skipped above, so this only ever rewrites
+                # titles this tool created.
                 gh("issue", "edit", str(issue["number"]), "--repo", repo,
+                   "--title", f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})",
                    "--body", body)
         else:
             body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"

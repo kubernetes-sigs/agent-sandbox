@@ -36,6 +36,67 @@ slowest of G rollouts, so a stray queued claim delays the whole step. Use `naive
 `keep_warm=True` to reuse pools across training steps. Full rationale and measurements:
 [eval vs RL](../README.md#eval-vs-rl--recommended-recipes).
 
+## Recycling — reuse one sandbox across a problem's G rollouts
+
+Instant-claim (above) gives each rollout its *own* fresh sandbox. **Recycling** instead
+holds **one** sandbox per problem and git-restore-resets it between rollouts, so **claims
+scale with problems, not tasks** (÷G) — cutting claim latency and control-plane load at
+RL scale. It's the recommended path for high G, and it's a wall-clock + reliability win
+when a shallow warm pool would otherwise saturate under same-image claims.
+
+```python
+from agent_sandbox_rl import (SandboxFleet, FleetConfig, ClusterConfig, TemplateSpec,
+                              ResourceSpec, SweBenchSource, Task, swebench_probe,
+                              reuse_git_restore_sandbox, determinism_canary)
+from agent_sandbox_rl.sources import to_tasks
+
+# SHALLOW warm: recycle holds ~1 sandbox per problem, so 1 replica/pool is enough.
+# Do NOT deep-warm (warm_per_task) for recycling — that stresses the warm-pool controller.
+fleet = SandboxFleet(FleetConfig(
+    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    max_concurrent=500,                                    # concurrent problems held
+    template=TemplateSpec(resources=ResourceSpec(cpu="250m", memory="512Mi"))))
+
+G = 16
+problems = to_tasks(SweBenchSource(limit=500))
+tasks = [Task(id=f"p{i:04d}-r{g}", image=t.image)         # P problems × G rollouts
+         for i, t in enumerate(problems) for g in range(G)]
+fleet.load_tasks(tasks)
+fleet.setup()                                             # shallow warm (staged by default)
+
+# Correctness gate FIRST — same task twice in one recycled sandbox must be byte-identical:
+c = determinism_canary(fleet, problems[0], swebench_probe)
+assert c["identical"] and c["reset_clean"], "reset leaks state — recycling is unsafe here"
+
+# One claim per problem; git-restore reset between its G rollouts:
+results = reuse_git_restore_sandbox(fleet, fleet.tasks, rollout_fn, concurrency=500)
+fleet.teardown()
+```
+
+- **Claims ≈ P, not P·G** — the headline. Reset is git-only by default (`git reset --hard`
+  + `clean -xdff` + verify the pristine SHA); a dirty reset **quarantines** the sandbox
+  (fresh claim) so contamination can never silently bias rewards. A non-git `/testbed`
+  transparently falls back to fresh-claim-per-task.
+- **`determinism_canary`** is the ground-truth check — run it before trusting recycling
+  for training.
+- **Async** (Ray / SkyRL / tunix loops): `reuse_git_restore_sandbox_async(afleet, …)` —
+  a coroutine per group. `shards_per_image=K` runs K sandboxes/image in parallel (saturate
+  a small image set); `claim_concurrency=N` staged-claims to stay under the apiserver.
+
+### Safeguards at scale (on by default)
+Large/deep warm pools can stress the warm-pool controller
+([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)); the SDK is
+fail-safe by default:
+- **Circuit breaker** — `FleetConfig.overcommit_factor` (1.5) / `max_live_sandboxes`: if
+  live sandboxes exceed the ceiling, the fleet tears down and raises `FleetOvercommitError`
+  (catches accidental over-creation — runaway / orphan).
+- **Guaranteed teardown + reaper** — every resource is labelled with `fleet.run_id`;
+  `atexit`/SIGINT/SIGTERM tear down on graceful exit, and **`reap(run_id=…)`** /
+  `python -m agent_sandbox_rl.reaper` sweeps an **orphaned** run (SIGKILL / OOM / node loss).
+- **Staged fill/claims** — `warm_create_budget` (staged warm) + `claim_concurrency` bound
+  concurrent apiserver ops; for large deep warms also keep the controller's
+  `--sandbox-warm-pool-concurrent-workers` low (≤10).
+
 ## Generic env wrapper (primitives)
 
 ```python

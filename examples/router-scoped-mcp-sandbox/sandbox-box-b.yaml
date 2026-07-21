@@ -5,9 +5,9 @@ metadata:
 spec:
   # Identical to box-a (sandbox.yaml) — a second sandbox to prove a token
   # minted for box-a is rejected here with 403. See "Run it" step 5.
-  automountServiceAccountToken: false
   podTemplate:
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -31,8 +31,10 @@ spec:
         - name: workspace
           mountPath: /workspace
         readinessProbe:
-          httpGet:
-            path: /mcp
+          # TCP, not httpGet: the streamable-http MCP endpoint answers a
+          # plain GET (no SSE Accept header) with 406, which an HTTP
+          # probe would count as failure forever.
+          tcpSocket:
             port: mcp
           initialDelaySeconds: 2
           periodSeconds: 2

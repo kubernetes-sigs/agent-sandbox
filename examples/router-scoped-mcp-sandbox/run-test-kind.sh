@@ -35,15 +35,20 @@ ROUTER_IMAGE="${ROUTER_IMAGE:-kind.local/sandbox-router-go:scoped-token-example}
 MCP_IMAGE="${MCP_IMAGE:-kind.local/router-scoped-mcp-sandbox:example}"
 KIND_CLUSTER="${KIND_CLUSTER:-agent-sandbox}"
 
-wait_for_pod_created() {
-  local selector="$1" timeout="${2:-60}" waited=0
-  until [ -n "$(kubectl get pod --selector="${selector}" -o name 2>/dev/null)" ]; do
+# Wait on the Sandbox's own Ready condition (set by the controller when
+# the pod is ready) rather than on a pod label selector — the label
+# scheme the controller stamps on pods is an implementation detail that
+# has changed between releases (v0.5.2 uses
+# agents.x-k8s.io/sandbox-name-hash, not sandbox=<name>).
+wait_for_sandbox_ready() {
+  local name="$1" timeout="${2:-180}" waited=0
+  until kubectl wait --for=condition=ready "sandbox/${name}" --timeout=10s 2>/dev/null; do
     if [ "${waited}" -ge "${timeout}" ]; then
-      echo "timed out after ${timeout}s waiting for a pod matching ${selector}" >&2
+      echo "timed out after ${timeout}s waiting for sandbox/${name} to be Ready" >&2
+      kubectl get "sandbox/${name}" -o yaml | sed -n '/status:/,$p' >&2 || true
       return 1
     fi
-    sleep 2
-    waited=$((waited + 2))
+    waited=$((waited + 10))
   done
 }
 
@@ -120,11 +125,9 @@ export IMAGE="${MCP_IMAGE}"
 envsubst < "${EXAMPLE_DIR}/sandbox.yaml" | kubectl apply -f -
 envsubst < "${EXAMPLE_DIR}/sandbox-box-b.yaml" | kubectl apply -f -
 
-echo "Waiting for both sandbox pods to be ready..."
-wait_for_pod_created sandbox=box-a 60
-wait_for_pod_created sandbox=box-b 60
-kubectl wait --for=condition=ready pod --selector=sandbox=box-a --timeout=180s
-kubectl wait --for=condition=ready pod --selector=sandbox=box-b --timeout=180s
+echo "Waiting for both Sandboxes to be Ready..."
+wait_for_sandbox_ready box-a 180
+wait_for_sandbox_ready box-b 180
 
 echo "Setting up the Python client environment..."
 VENV_DIR="$(mktemp -d)"

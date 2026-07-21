@@ -139,6 +139,44 @@ body {
     font-family: var(--font-sans);
 }
 
+/* In-page section navigation: sticky under the top of the viewport so the
+   reader always sees what sections a page has and where they are. Built by
+   report.js from the card titles. */
+.section-nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 20px;
+    padding: 10px 0;
+    margin-bottom: 24px;
+    background-color: var(--bg-color);
+    border-bottom: 1px solid var(--border-color);
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+}
+
+.section-nav a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.section-nav a:hover {
+    color: var(--text-primary);
+}
+
+.section-nav a.active {
+    color: var(--accent-primary);
+    font-weight: 700;
+}
+
+/* Anchor jumps must clear the sticky section nav. */
+.card {
+    scroll-margin-top: 64px;
+}
+
 /* Cards and Layout Grid */
 .grid {
     display: grid;

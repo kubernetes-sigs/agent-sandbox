@@ -130,3 +130,11 @@ def test_handle_exec_routes_through_session(monkeypatch):
   h._session = sess
   assert h.exec(["bash", "-lc", "echo hi"]) == "via-session"
   sess.run.assert_called_once()
+
+
+def test_as_script_shell_quotes_argv():
+  # bash -lc payload passes through; other argv is shell-quoted so it round-trips
+  # through the session (the sh -c script stays a single argument).
+  assert handles._as_script("echo hi") == "echo hi"
+  assert handles._as_script(["bash", "-lc", "echo hi"]) == "echo hi"
+  assert handles._as_script(["sh", "-c", "echo $(hostname)"]) == "sh -c 'echo $(hostname)'"

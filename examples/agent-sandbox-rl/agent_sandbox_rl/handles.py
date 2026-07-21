@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import shlex
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
@@ -50,7 +51,9 @@ def _as_script(command) -> str:
     return command
   if len(command) >= 3 and command[0] in ("bash", "sh") and command[1] == "-lc":
     return command[2]
-  return " ".join(command)
+  # shell-quote each arg so argv round-trips through the bash session intact
+  # (e.g. ['sh','-c','echo $(hostname)'] -> "sh -c 'echo $(hostname)'").
+  return shlex.join(command)
 
 
 class SandboxSession:
@@ -102,8 +105,11 @@ class SandboxSession:
     marker = tok
     buf = []
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-      self._resp.update(timeout=1)
+    while True:
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        break
+      self._resp.update(timeout=min(1.0, remaining))   # honor small timeouts
       if self._resp.peek_stdout():
         buf.append(self._resp.read_stdout())
         text = "".join(buf)

@@ -122,6 +122,17 @@ def test_no_pristine_anchor_is_never_clean():
   assert out.reason == "no_pristine_anchor"
 
 
+def test_pristine_tag_failed_is_non_recyclable_no_head_fallback():
+  # HEAD exists but `git tag -f pristine` failed → empty PRISTINE. prime must NOT
+  # fall back to HEAD (that would reuse without a verifiable pristine anchor).
+  fp = "PRISTINE=\nHEAD=abc123\nDIRTY=0\nENV=e1\nCFG=g1\nPROCS=5"
+  h = FakeHandle([fp])
+  r = GitRestoreReset()
+  base = r.prime(h)
+  assert base.pristine_sha == ""            # no HEAD fallback
+  assert r.recyclable(base) is False        # → fresh-claim path
+
+
 def test_env_check_can_be_disabled():
   drift = "PRISTINE=abc\nHEAD=abc\nDIRTY=0\nENV=e2\nCFG=g1\nPROCS=5"
   h = FakeHandle([_CLEAN, drift])

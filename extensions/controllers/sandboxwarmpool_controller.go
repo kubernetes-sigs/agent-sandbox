@@ -411,7 +411,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// capacity caps carryover at one second of creates), so when the
 			// hold expires the paced stream starts fresh: delay defers the
 			// START of refill, MaxRefillRate shapes its FLOW.
-			logger.Info("Deferring pool replenishment after recent member drop",
+			// V(4): fires on every reconcile while the hold re-arms (one per
+			// adoption during a claim burst) — routine pacing, not a
+			// lifecycle event.
+			logger.V(4).Info("Deferring pool replenishment after recent member drop",
 				"deficit", desiredReplicas-currentReplicas,
 				"requeueAfter", replenishHold)
 			requeueAfter = replenishHold
@@ -419,7 +422,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			deficit := min(desiredReplicas-currentReplicas, maxBatchSize)
 			sandboxesToCreate, tokenWait := r.takeRefillTokens(poolKey, deficit, now)
 			if sandboxesToCreate < deficit {
-				logger.Info("Pacing pool replenishment",
+				// V(4): fires on every paced pass (a 300-deficit refill is
+				// ~rate*seconds of them) — routine pacing, not a lifecycle
+				// event.
+				logger.V(4).Info("Pacing pool replenishment",
 					"deficit", deficit,
 					"granted", sandboxesToCreate,
 					"tokenWait", tokenWait)

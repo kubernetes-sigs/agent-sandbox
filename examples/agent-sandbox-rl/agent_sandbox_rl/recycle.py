@@ -374,7 +374,8 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
                                           reset_timeout: float = 5.0,
                                           use_session: bool = True,
                                           scale_on_hold: bool = True,
-                                          shards_per_image: int = 1):
+                                          shards_per_image: int = 1,
+                                          claim_concurrency: int = 0):
   """Async twin of `reuse_git_restore_sandbox` for `AsyncSandboxFleet`.
 
   Same semantics — reset-and-reuse a held sandbox, quarantine/rotate, scale_on_hold
@@ -410,6 +411,13 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
   sync = afleet._fleet                          # the wrapped SandboxFleet
   obs = sync._obs
   sem = asyncio.Semaphore(max(1, concurrency))
+  # Staged claims (E11.4): bound how many groups CLAIM (+ scale-down patch) at once,
+  # so reaching a large held count doesn't fire a simultaneous claim burst that
+  # 429-saturates the apiserver. 0 = unlimited (all groups claim at once). Groups
+  # still *hold* up to `concurrency`; only the acquire+prime+scale phase is throttled.
+  claim_sem = asyncio.Semaphore(
+      claim_concurrency if (claim_concurrency and claim_concurrency > 0)
+      else max(1, len(groups)))
   # per-image ref-count for scale_on_hold: desired replicas = active − held
   active: dict[str, int] = {}
   for img, _g in groups:
@@ -443,24 +451,25 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
       try:
         for pos, (i, t) in enumerate(group):
           if handle is None:
-            handle = await afleet.acquire(t)
-            if use_session:
-              try:
-                await afleet._to_thread(handle.open_session)
-              except Exception as e:             # noqa: BLE001 — fall back to one-shot exec
-                logger.warning("session open failed on %s (%s); one-shot exec",
-                               handle.pod_name, e)
-            if recyclable is None:               # first claim: prime + decide
-              baseline = await afleet._to_thread(reset.prime, handle)
-              recyclable = reset.recyclable(baseline)
-              if not recyclable:
-                logger.info("image %s not git-recyclable — fresh claim per task", t.image)
-            elif recyclable:
-              baseline = await afleet._to_thread(reset.prime, handle)
-            if scale_on_hold and recyclable:     # holding → cancel this claim's replenish
-              async with locks[img]:
-                held[img] += 1
-                await _rescale(img)
+            async with claim_sem:                # staged claims: bound in-flight acquires
+              handle = await afleet.acquire(t)
+              if use_session:
+                try:
+                  await afleet._to_thread(handle.open_session)
+                except Exception as e:           # noqa: BLE001 — fall back to one-shot exec
+                  logger.warning("session open failed on %s (%s); one-shot exec",
+                                 handle.pod_name, e)
+              if recyclable is None:             # first claim: prime + decide
+                baseline = await afleet._to_thread(reset.prime, handle)
+                recyclable = reset.recyclable(baseline)
+                if not recyclable:
+                  logger.info("image %s not git-recyclable — fresh claim per task", t.image)
+              elif recyclable:
+                baseline = await afleet._to_thread(reset.prime, handle)
+              if scale_on_hold and recyclable:   # holding → cancel this claim's replenish
+                async with locks[img]:
+                  held[img] += 1
+                  await _rescale(img)
             uses = 0
           await _process(handle, i, t)
           if pos == len(group) - 1:

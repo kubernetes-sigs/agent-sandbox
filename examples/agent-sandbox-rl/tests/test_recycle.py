@@ -434,3 +434,32 @@ def test_reuse_infra_error_isolated_to_group(make_cluster, monkeypatch):
   assert res[0] == "ok" and res[1] == "ok"       # good group unaffected
   assert isinstance(res[2], Exception)           # bad group captured, batch survived
   f.teardown()
+
+
+async def test_reuse_async_claim_concurrency_throttles(make_cluster, monkeypatch):
+  # staged claims: with shards=3 (3 concurrent groups) but claim_concurrency=1,
+  # acquires must be serialized (peak in-flight acquire == 1).
+  import asyncio
+  from agent_sandbox_rl import AsyncSandboxFleet
+  from agent_sandbox_rl.recycle import reuse_git_restore_sandbox_async
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  af = AsyncSandboxFleet(FleetConfig(max_concurrent=8, max_warmpool_size=3),
+                         registry=ClusterRegistry([c]))
+  af.load_tasks(["img"] * 6)
+  await af.setup()
+  state = {"cur": 0, "peak": 0}
+  real = af.acquire
+  async def tracked_acquire(task):
+    state["cur"] += 1; state["peak"] = max(state["peak"], state["cur"])
+    try:
+      await asyncio.sleep(0.02)
+      return await real(task)
+    finally:
+      state["cur"] -= 1
+  monkeypatch.setattr(af, "acquire", tracked_acquire)
+  await reuse_git_restore_sandbox_async(
+      af, af.tasks, lambda t, h: 1, concurrency=8, use_session=False,
+      shards_per_image=3, claim_concurrency=1)
+  assert state["peak"] == 1                       # claims serialized by the admission sem
+  await af.teardown(); af.close()

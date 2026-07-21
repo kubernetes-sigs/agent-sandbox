@@ -251,6 +251,10 @@ code {
 .badge-warning { background-color: #fffbeb; color: var(--accent-warning); border-color: #fde68a; }
 .badge-danger { background-color: #fef2f2; color: var(--accent-danger); border-color: #fecaca; }
 .badge-info { background-color: #eff6ff; color: var(--accent-primary); border-color: #bfdbfe; }
+/* Search/filter summaries (e.g. the pprof page's filtered-CPU stat) */
+.badge-search { background-color: #f5f3ff; color: #7c3aed; border-color: #ddd6fe; }
+/* Zoom-state summaries (e.g. the pprof page's showing-X-cpu-s stat) */
+.badge-zoom { background-color: #f0fdfa; color: #0d9488; border-color: #99f6e4; }
 
 /* Threshold-colored numeric cells */
 .num-good { color: var(--accent-success); }

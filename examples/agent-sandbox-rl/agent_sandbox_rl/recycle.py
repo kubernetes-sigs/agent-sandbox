@@ -339,14 +339,18 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
       if handle is not None:
         fleet.release(handle)
 
-  if concurrency <= 1:
-    for g in groups:
-      _run_group(g)
-    return results
-  with ThreadPoolExecutor(max_workers=concurrency) as ex:
-    futs = [ex.submit(_run_group, g) for g in groups]
-    for fut in as_completed(futs):
-      fut.result()                            # surface executor-level errors
+  # Circuit breaker (#1): abort + teardown if live sandboxes run away (the recycle
+  # path is exactly where over-creation bit us, so it must be guarded too).
+  expected = fleet.plan_.total_replicas if getattr(fleet, "plan_", None) else len(groups)
+  with fleet.overcommit_guard(expected):
+    if concurrency <= 1:
+      for g in groups:
+        _run_group(g)
+    else:
+      with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = [ex.submit(_run_group, g) for g in groups]
+        for fut in as_completed(futs):
+          fut.result()                          # surface executor-level errors
   return results
 
 
@@ -355,28 +359,52 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
                                           max_reuses: int = 32,
                                           reset_timeout: float = 5.0,
                                           use_session: bool = True,
-                                          scale_on_hold: bool = True):
+                                          scale_on_hold: bool = True,
+                                          shards_per_image: int = 1):
   """Async twin of `reuse_git_restore_sandbox` for `AsyncSandboxFleet`.
 
-  Same semantics — group by image, reset-and-reuse one held sandbox per group,
-  quarantine/rotate, `scale_on_hold` — but each group is an **asyncio coroutine**
-  instead of a thread. Blocking git/exec/claim calls are offloaded to the fleet's
-  bounded pool (`afleet._to_thread`), so coroutines let you **hold far more
-  concurrent groups than OS threads allow** (the sync executor is one thread per
-  held sandbox). Effective *exec* concurrency is still bounded by that pool and the
-  apiserver exec path — coroutines lift the driver-side ceiling, not the exec-plane
-  one (a native async I/O backend would lift that too). ``process_fn`` may be sync
-  or async. Returns one result per task in ``tasks`` order (per-task exceptions are
-  captured, not raised)."""
+  Same semantics — reset-and-reuse a held sandbox, quarantine/rotate, scale_on_hold
+  — but each group is an **asyncio coroutine** rather than a thread, so it holds far
+  more concurrent sandboxes than OS threads allow (blocking git/exec/claim calls are
+  offloaded to the fleet's bounded pool). Effective *exec* concurrency is still
+  bounded by that pool + the apiserver exec path — coroutines lift the driver-side
+  ceiling, not the exec-plane one.
+
+  **``shards_per_image`` (default 1):** run K sandboxes **per image** in parallel
+  (each shard recycles a slice of that image's tasks) — how you saturate a pool from
+  a small image set. Requires the image's warm pool to have K replicas (warm with
+  ``warm_per_task`` + ``max_warmpool_size=K``). With ``scale_on_hold``, the pool is
+  ref-counted to ``desired = active_shards − held`` so ``held + warm == active`` per
+  image throughout: K claims never trigger the replenishment storm, and no dangling
+  warm is left when shards finish. ``process_fn`` may be sync or async; results are
+  returned in ``tasks`` order (per-task exceptions captured, not raised)."""
   reset = reset or GitRestoreReset()
   results: list = [None] * len(tasks)
   by_image: dict[str, list[tuple[int, Task]]] = {}
   for i, t in enumerate(tasks):
     by_image.setdefault(t.image, []).append((i, t))
-  groups = list(by_image.values())
+  K = max(1, shards_per_image)
+  groups: list[tuple[str, list]] = []           # (image, [(idx, task), …])
+  for img, items in by_image.items():
+    if K <= 1:
+      groups.append((img, items))
+    else:                                       # round-robin split → K balanced shards
+      for s in range(K):
+        shard = items[s::K]
+        if shard:
+          groups.append((img, shard))
   sync = afleet._fleet                          # the wrapped SandboxFleet
   obs = sync._obs
   sem = asyncio.Semaphore(max(1, concurrency))
+  # per-image ref-count for scale_on_hold: desired replicas = active − held
+  active: dict[str, int] = {}
+  for img, _g in groups:
+    active[img] = active.get(img, 0) + 1
+  held: dict[str, int] = {img: 0 for img in active}
+  locks: dict[str, asyncio.Lock] = {img: asyncio.Lock() for img in active}
+
+  async def _rescale(img):                       # hold locks[img] around this
+    await afleet._to_thread(sync.set_pool_replicas, img, active[img] - held[img])
 
   async def _process(handle, i, t):
     fam = repo_family(t)
@@ -392,7 +420,7 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
     finally:
       obs.task_done(handle.cluster_name, fam, status, time.monotonic() - t0)
 
-  async def _run_group(group):
+  async def _run_group(img, group):
     async with sem:
       handle = None
       baseline = None
@@ -401,9 +429,6 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
       try:
         for pos, (i, t) in enumerate(group):
           if handle is None:
-            if scale_on_hold and recyclable:     # re-claim: pool was dropped, JIT re-warm
-              await afleet._to_thread(sync.warm_image, t.image,
-                                      replicas_override=1, wait=True)
             handle = await afleet.acquire(t)
             if use_session:
               try:
@@ -418,8 +443,10 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
                 logger.info("image %s not git-recyclable — fresh claim per task", t.image)
             elif recyclable:
               baseline = await afleet._to_thread(reset.prime, handle)
-            if scale_on_hold and recyclable:     # holding → stop the pool replenishing
-              await afleet._to_thread(sync.unwarm_image, t.image)
+            if scale_on_hold and recyclable:     # holding → cancel this claim's replenish
+              async with locks[img]:
+                held[img] += 1
+                await _rescale(img)
             uses = 0
           await _process(handle, i, t)
           if pos == len(group) - 1:
@@ -430,6 +457,10 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
           if uses >= max_reuses:                  # planned rotation (drift bound)
             with obs.phase("rotate", cluster=handle.cluster_name):
               await afleet.release(handle)
+            if scale_on_hold and recyclable:      # released → make a warm for re-claim
+              async with locks[img]:
+                held[img] -= 1
+                await _rescale(img)
             handle = None; continue
           with obs.phase("reset", cluster=handle.cluster_name):
             outcome = await afleet._to_thread(reset.reset, handle, baseline,
@@ -439,12 +470,29 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
                            handle.pod_name, outcome.reason)
             with obs.phase("quarantine", cluster=handle.cluster_name):
               await afleet.release(handle)
+            if scale_on_hold and recyclable:
+              async with locks[img]:
+                held[img] -= 1
+                await _rescale(img)
             handle = None
       finally:
-        if handle is not None:
+        holding = handle is not None
+        if holding:
           await afleet.release(handle)
+        if scale_on_hold and recyclable:          # shard done: active−1 (+ held−1 if it
+          async with locks[img]:                  # was holding) leaves desired unchanged
+            if holding:                           # → no dangling warm at end of run
+              held[img] -= 1
+            active[img] -= 1
+            await _rescale(img)
 
-  await asyncio.gather(*(_run_group(g) for g in groups))
+  # Circuit breaker (#1) around the whole fan-out — the sync guard's monitor thread
+  # runs independently of the loop; on trip it tears down (failing in-flight claims,
+  # captured per task) and raises FleetOvercommitError here.
+  expected = (afleet._fleet.plan_.total_replicas
+              if afleet._fleet.plan_ else len(groups))
+  with afleet._fleet.overcommit_guard(expected):
+    await asyncio.gather(*(_run_group(img, g) for img, g in groups))
   return results
 
 

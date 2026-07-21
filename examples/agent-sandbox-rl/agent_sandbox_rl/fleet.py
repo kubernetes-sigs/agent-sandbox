@@ -23,20 +23,24 @@ release → teardown. Use the primitives directly from an RL loop, or the manage
 
 from __future__ import annotations
 
+import atexit
 import collections
+import contextlib
 import logging
 import math
+import signal
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from kubernetes import client
 
-from . import sizing
+from . import constants, sizing
 from .cluster import Cluster, ClusterRegistry
 from .config import ClusterConfig, FleetConfig
-from .exceptions import FleetError, PreflightError
+from .exceptions import FleetError, FleetOvercommitError, PreflightError
 from .handles import SandboxHandle
 from .observability import Observer, repo_family
 from .placement import get_placement
@@ -81,6 +85,7 @@ class FleetPlan:
   def __init__(self, entries: list[PlanEntry]):
     self.entries = entries
     self._by_image = {e.image: e for e in entries}
+    self.warnings: list[str] = []            # (#5) advisory notes, never fatal
 
   def for_image(self, image: str) -> Optional[PlanEntry]:
     return self._by_image.get(image)
@@ -101,7 +106,20 @@ class SandboxFleet:
 
   def __init__(self, config: FleetConfig | None = None,
                registry: ClusterRegistry | None = None):
-    self.config = config or FleetConfig()
+    # Copy the caller's config so we don't mutate their object when stamping the
+    # run-id label below.
+    src = config or FleetConfig()
+    self.config = (src.model_copy(deep=True) if hasattr(src, "model_copy")
+                   else src.copy(deep=True))
+    # Stamp a per-run label on everything this fleet creates so an orphaned run
+    # can always be swept by the reaper (#4). Set before the registry is built so
+    # it flows into every create call's labels.
+    self.run_id = uuid.uuid4().hex[:12]
+    self.config.labels = {**self.config.labels, constants.RUN_ID_LABEL: self.run_id}
+    self._prev_handlers: dict = {}           # signum -> previous handler (to restore)
+    self._atexit_registered = False
+    self._torndown = False
+    self._teardown_lock = threading.Lock()   # makes _teardown idempotent/reentrant
     # Honor an explicitly-passed registry even when empty — `ClusterRegistry`
     # defines `__len__`, so `registry or …` would treat `ClusterRegistry([])` as
     # falsy and build a default ambient Cluster (which loads kube-config). Only
@@ -136,6 +154,119 @@ class SandboxFleet:
   @property
   def observer(self):
     return self._obs
+
+  # --- runaway safeguards (plans/sdk-runaway-safeguards.md) --------------- #
+  def run_selector(self) -> str:
+    """Label selector for resources this run owns (the reaper key)."""
+    return f"{constants.RUN_ID_LABEL}={self.run_id}"
+
+  def live_owned_count(self) -> int:
+    """Live Sandbox CRs this run owns (by run-id label), across clusters."""
+    sel = self.run_selector()
+    n = 0
+    for c in self.registry:
+      try:
+        n += len(c.resources.list_sandboxes(label_selector=sel))
+      except Exception:  # noqa: BLE001 — a transient list error must not crash the breaker
+        pass
+    return n
+
+  @contextlib.contextmanager
+  def overcommit_guard(self, expected: int | None = None):
+    """Circuit breaker (#1): a background thread samples ``live_owned_count`` and, if
+    it exceeds ``min(expected × overcommit_factor, max_live_sandboxes)``, tears the
+    fleet down and raises `FleetOvercommitError` on exit. Keys off *intent* so it
+    trips on accidental over-creation (runaway / orphan / #1215), not a large-but-
+    intended run. Disabled when both knobs are off."""
+    factor = self.config.overcommit_factor
+    hard = self.config.max_live_sandboxes
+    if expected is None:
+      expected = self.plan_.total_replicas if self.plan_ else 0
+    ceilings = []
+    if factor and factor > 0 and expected > 0:
+      ceilings.append(int(expected * factor))
+    if hard:
+      ceilings.append(int(hard))
+    ceiling = min(ceilings) if ceilings else None
+    if ceiling is None:
+      yield
+      return
+    stop = threading.Event()
+    tripped = {"n": 0}
+
+    def _loop():
+      while not stop.wait(self.config.breaker_poll_s):
+        n = self.live_owned_count()
+        if n > ceiling:
+          logger.error("circuit breaker TRIPPED: %d live sandboxes > ceiling %d "
+                       "(expected %d) — aborting run + tearing down", n, ceiling, expected)
+          tripped["n"] = n
+          try:
+            self.teardown()
+          except Exception:  # noqa: BLE001
+            logger.warning("teardown during breaker trip failed", exc_info=True)
+          return
+
+    th = threading.Thread(target=_loop, name="asrl-breaker", daemon=True)
+    th.start()
+    try:
+      yield
+    finally:
+      stop.set()
+      th.join(timeout=2)
+    if tripped["n"]:
+      raise FleetOvercommitError(
+          f"live sandboxes {tripped['n']} exceeded ceiling {ceiling} (expected "
+          f"{expected}, factor {factor}) — run aborted, fleet torn down")
+
+  def _install_teardown_hooks(self) -> None:
+    """(#4) atexit + SIGINT/SIGTERM → teardown so a killed/crashing driver still
+    cleans up. Signal install is a no-op off the main thread; atexit always set."""
+    if not self._atexit_registered:
+      atexit.register(self._safe_teardown)
+      self._atexit_registered = True
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      if sig in self._prev_handlers:
+        continue
+      try:
+        self._prev_handlers[sig] = signal.getsignal(sig)
+        signal.signal(sig, self._on_signal)
+      except (ValueError, OSError):        # not main thread / unsupported
+        self._prev_handlers.pop(sig, None)
+
+  def _on_signal(self, signum, frame):
+    logger.warning("signal %d → tearing down fleet run %s", signum, self.run_id)
+    self._safe_teardown()
+    prev = self._prev_handlers.get(signum)
+    if callable(prev) and prev not in (signal.SIG_DFL, signal.SIG_IGN):
+      prev(signum, frame)
+    elif signum == signal.SIGINT:
+      raise KeyboardInterrupt
+    else:
+      raise SystemExit(128 + signum)
+
+  def _safe_teardown(self) -> None:
+    if self._torndown:
+      return
+    try:
+      self.teardown()
+    except Exception:  # noqa: BLE001
+      logger.warning("teardown hook failed", exc_info=True)
+
+  def _remove_teardown_hooks(self) -> None:
+    if self._atexit_registered:
+      with contextlib.suppress(Exception):
+        atexit.unregister(self._safe_teardown)
+      self._atexit_registered = False
+    # signal.signal only works on the main thread — when teardown runs from the
+    # breaker thread we can't restore here; leave the (idempotent) handlers in
+    # place rather than silently failing. They're cleared on the next main-thread
+    # teardown / process exit.
+    if threading.current_thread() is threading.main_thread():
+      for sig, prev in list(self._prev_handlers.items()):
+        with contextlib.suppress(ValueError, OSError):
+          signal.signal(sig, prev)
+      self._prev_handlers.clear()
 
   @staticmethod
   def _default_registry(config: FleetConfig) -> ClusterRegistry:
@@ -290,10 +421,36 @@ class SandboxFleet:
           cluster=c.name, image=image, template=template,
           pool=f"pool-{template}", replicas=replicas, tasks=counts[image]))
     self.plan_ = FleetPlan(entries)
+    self._advise(self.plan_)                   # (#5) warn-only capacity/QPS advisory
     logger.info("Plan: %d images across %d cluster(s), %d total warm replicas",
                 len(entries), len(self.plan_.by_cluster()),
                 self.plan_.total_replicas)
     return self.plan_
+
+  def _advise(self, plan: "FleetPlan") -> None:
+    """(#5) Warn — never refuse — when the plan's footprint or claim concurrency
+    looks beyond what the control plane comfortably absorbs. The customer owns
+    their cluster; this is a sign, not a gate."""
+    total = plan.total_replicas
+    nodes = self.config.cluster_nodes
+    if nodes:
+      slots = nodes * 200                      # rough usable pod slots/node
+      if total > slots:
+        plan.warnings.append(
+            f"warm footprint {total} exceeds ~{slots} schedulable slots "
+            f"({nodes} nodes × ~200) — expect Pending pods / capacity churn.")
+    if self.config.max_concurrent > 2000:
+      plan.warnings.append(
+          f"max_concurrent {self.config.max_concurrent} exceeds ~2000 the apiserver "
+          f"typically sustains for concurrent claims — expect 429s and possible "
+          f"over-creation; consider staging claims or a lower cap.")
+    if total > 20000:
+      plan.warnings.append(
+          f"warm footprint {total} is very large; deep warm can trip the warm-pool "
+          f"over-creation race (#1215) — keep the controller's "
+          f"--sandbox-warm-pool-concurrent-workers low and stage the fill.")
+    for msg in plan.warnings:
+      logger.warning("plan advisory: %s", msg)
 
   # --- provisioning ------------------------------------------------------ #
   def _ensure_pool(self, cluster: Cluster, image: str, replicas: int) -> str:
@@ -459,6 +616,28 @@ class SandboxFleet:
     c.release_replicas(reps)
     self._obs.warm_remove(entry.cluster, reps)
 
+  def set_pool_replicas(self, image: str, replicas: int) -> None:
+    """Patch an image's warm pool to ``replicas`` (scale up or down) without
+    deleting it. Used by **sharded** recycle to cancel the controller's
+    replenishment as held shards claim: keeping ``desired = K − held`` means
+    ``held + warm == K`` per image throughout, so 18K claims never over-provision
+    (unlike ``unwarm_image``, which drops the whole pool). Best-effort on the warm
+    capacity counter — the delta is reconciled at ``teardown`` (reset_counts)."""
+    entry = (self.plan_ or self.plan()).for_image(image)
+    if entry is None:
+      return
+    replicas = max(0, replicas)
+    c = self.registry.get(entry.cluster)
+    c.resources.create_warmpool(entry.pool, entry.template, replicas, reconcile=True)
+    with self._lock:
+      prev = self._warmed.get(image, entry.replicas)
+      self._warmed[image] = replicas
+    delta = replicas - prev
+    if delta > 0:
+      c.reserve_replicas(delta)
+    elif delta < 0:
+      c.release_replicas(-delta)
+
   def prepull(self, wait: bool = True) -> None:
     """Pre-pull each cluster's planned images via a DaemonSet (optional)."""
     from . import prepull as _pp
@@ -483,6 +662,9 @@ class SandboxFleet:
 
     ``create_budget`` (if set) stages the warm fill in waves to bound the
     controller's concurrent create burst — see ``start_warmpools``."""
+    if self.config.install_teardown_hooks:
+      self._install_teardown_hooks()          # (#4) clean up even on kill/crash
+    self._torndown = False
     self.preflight()
     self.plan()
     if prepull:
@@ -598,6 +780,14 @@ class SandboxFleet:
       self._teardown(delete_namespace)
 
   def _teardown(self, delete_namespace: bool) -> None:
+    # Idempotent/reentrant: the breaker thread, a strategy's teardown, __exit__,
+    # and signal handlers can all call this — only the first pass this cycle runs
+    # (setup() resets the flag). Deletes are 404-tolerant, but this avoids the
+    # redundant sweeps + the registry/handle race of concurrent teardowns.
+    with self._teardown_lock:
+      if self._torndown:
+        return
+      self._torndown = True
     self.release_all()
     for c in self.registry:
       sel = c.resources.managed_selector()
@@ -620,6 +810,7 @@ class SandboxFleet:
       self._warmed.clear()
       self._ondemand.clear()
     self.plan_ = None
+    self._remove_teardown_hooks()
 
   def __enter__(self) -> "SandboxFleet":
     return self.setup()
@@ -648,7 +839,10 @@ class SandboxFleet:
       raise ValueError("epochs must be >= 1")
     conc = concurrency or self.config.max_concurrent
     fn = STRATEGIES[strategy]
-    with self._obs.run(strategy) as report:
+    if self.plan_ is None:
+      self.plan()                             # give the circuit breaker a footprint
+    expected = self.plan_.total_replicas if self.plan_ else None
+    with self.overcommit_guard(expected), self._obs.run(strategy) as report:
       self.report = report
       try:
         report.environment = self.describe_environment()

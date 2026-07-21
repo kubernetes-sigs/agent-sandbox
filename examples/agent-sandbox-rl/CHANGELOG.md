@@ -8,6 +8,27 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 Initial implementation (design phases 1–7), live-verified on GKE against Agent
 Sandbox `v0.5.0rc1` (v1beta1).
 
+### Added (safety / runaway safeguards)
+- **Circuit breaker** (`config.py`, `fleet.py`): a background monitor
+  (`fleet.overcommit_guard`) samples the live Sandbox count this run owns (by run-id
+  label) and, if it exceeds `min(expected × overcommit_factor, max_live_sandboxes)`,
+  **tears the fleet down and raises `FleetOvercommitError`**. Keys off *intent*, so it
+  catches accidental over-creation (runaway / orphaned driver / warm-pool #1215)
+  regardless of source — in-SDK, unlike an external watchdog that goes blind when the
+  apiserver 429s. Wired into `run()`. Config: `overcommit_factor` (1.5),
+  `max_live_sandboxes` (None), `breaker_poll_s` (5.0).
+- **Guaranteed teardown + label reaper** (`fleet.py`, `reaper.py`, `constants.py`):
+  every created resource is stamped with a per-run label (`RUN_ID_LABEL` = `fleet.run_id`);
+  `setup()` installs `atexit` + SIGINT/SIGTERM handlers that tear down on any exit path
+  (`install_teardown_hooks`, default on); and **`reap(run_id=…)`** / `python -m
+  agent_sandbox_rl.reaper` deletes a run's resources by label — the guaranteed sweep for
+  an **orphaned** driver that died without cleanup (the failure mode behind the worst
+  incident).
+- **Capacity/QPS advisory** (`fleet.py`): `plan()` attaches `plan.warnings` (+ logs) when
+  the warm footprint or `max_concurrent` looks beyond what the control plane absorbs
+  (Pending-pod risk, apiserver 429 risk, #1215 deep-warm risk). **Warn only — never
+  refuses**: the customer owns their cluster. See `plans/sdk-runaway-safeguards.md` (notes).
+
 ### Added (performance & scale)
 - **Sandbox recycling — `reuse_git_restore_sandbox`** (`recycle.py`): reset-and-reuse
   one claimed sandbox across same-image tasks so **claims scale with problems, not

@@ -457,3 +457,62 @@ def test_plan_budget_no_overshoot_three_clusters(make_cluster):
   plan = f.plan()
   assert plan.total_replicas == 8
   assert plan.total_replicas <= 8       # would have been 9 with round()
+
+
+# --- runaway safeguards --------------------------------------------------- #
+def test_run_id_label_stamped(make_cluster):
+  from agent_sandbox_rl.constants import RUN_ID_LABEL
+  f = _fleet(ClusterRegistry([make_cluster("solo")]))
+  assert len(f.run_id) == 12
+  assert f.config.labels[RUN_ID_LABEL] == f.run_id      # flows onto every create
+  assert f.run_selector() == f"{RUN_ID_LABEL}={f.run_id}"
+
+
+def test_circuit_breaker_trips_and_tears_down(make_cluster, monkeypatch):
+  import time
+  import unittest.mock as m
+  from agent_sandbox_rl import FleetOvercommitError
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4,
+             overcommit_factor=1.5, breaker_poll_s=0.02)
+  f.load_tasks(["i1", "i2"]); f.plan()
+  monkeypatch.setattr(f, "live_owned_count", lambda: 999)   # simulate runaway
+  td = m.MagicMock(wraps=f.teardown); monkeypatch.setattr(f, "teardown", td)
+  with pytest.raises(FleetOvercommitError):
+    with f.overcommit_guard(expected=2):                    # ceiling = 3
+      time.sleep(0.2)                                       # let the breaker poll
+  assert td.called                                          # tore down on trip
+
+
+def test_circuit_breaker_disabled_when_factor_zero(make_cluster, monkeypatch):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), overcommit_factor=0, max_live_sandboxes=None)
+  monkeypatch.setattr(f, "live_owned_count", lambda: 10**9)
+  with f.overcommit_guard(expected=2):                      # no ceiling → never trips
+    pass
+
+
+def test_plan_advisory_warns_but_never_raises(make_cluster):
+  f = _fleet(ClusterRegistry([make_cluster("solo")]), max_concurrent=5000)
+  f.load_tasks(["i1", "i2"])
+  plan = f.plan()                                           # must NOT raise
+  assert any("max_concurrent" in w for w in plan.warnings)  # warned, proceeded
+
+
+def test_reap_deletes_by_run_id_selector(monkeypatch):
+  import unittest.mock as m
+  import agent_sandbox_rl.reaper as reap_mod
+  from agent_sandbox_rl.constants import RUN_ID_LABEL
+  res = m.MagicMock()
+  res.list_claims.return_value = ["cl1"]
+  res.list_warmpools.return_value = ["wp1"]
+  res.list_sandboxes.return_value = ["sb1", "sb2"]
+  res.list_templates.return_value = []
+  fake = m.MagicMock(); fake.resources = res
+  monkeypatch.setattr(reap_mod, "Cluster", lambda *a, **k: fake)
+  counts = reap_mod.reap(run_id="abc123", context="x", namespace="ns")
+  sel = f"{RUN_ID_LABEL}=abc123"
+  res.list_sandboxes.assert_called_with(label_selector=sel)
+  res.delete_sandbox.assert_any_call("sb1")
+  res.delete_warmpool.assert_any_call("wp1")
+  assert counts["sandboxes"] == 2 and counts["claims"] == 1

@@ -44,11 +44,13 @@ from .config import (
 from .exceptions import (
     CapacityError,
     FleetError,
+    FleetOvercommitError,
     NoClusterAvailableError,
     PreflightError,
 )
 from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
+from .reaper import reap
 from .handles import SandboxHandle, SandboxSession
 from .observability import Observer, RunReport, repo_family, serve_metrics
 from .recycle import (
@@ -156,6 +158,8 @@ __all__ = [
     "PreflightError",
     "CapacityError",
     "NoClusterAvailableError",
+    "FleetOvercommitError",
+    "reap",
 ]
 
 __version__ = "0.1.0.dev0"

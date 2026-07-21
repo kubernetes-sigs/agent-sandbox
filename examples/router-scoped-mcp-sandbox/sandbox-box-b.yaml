@@ -6,6 +6,9 @@ spec:
   # Identical to box-a (sandbox.yaml) — a second sandbox to prove a token
   # minted for box-a is rejected here with 403. See "Run it" step 5.
   podTemplate:
+    metadata:
+      labels:
+        router-scoped-mcp/sandbox: box-b
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -46,3 +49,16 @@ spec:
       resources:
         requests:
           storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: box-b
+spec:
+  clusterIP: None
+  selector:
+    router-scoped-mcp/sandbox: box-b
+  ports:
+  - name: mcp
+    port: 8000
+    targetPort: mcp

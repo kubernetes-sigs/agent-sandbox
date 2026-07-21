@@ -47,7 +47,7 @@ import (
 // same pattern).
 type metricSample struct {
 	TS       time.Time       `json:"ts"`
-	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet
+	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet | cilium-agent | etcd-main | etcd-events
 	Instance string          `json:"instance"` // pod or node name
 	Metric   string          `json:"metric"`   // family name (+ _bucket/_sum/_count for histograms and summaries)
 	Labels   json.RawMessage `json:"labels,omitempty"`
@@ -61,7 +61,8 @@ type metricSample struct {
 // resolve or scrape is logged and skipped, never fatal.
 //
 // Not scraped (deliberately): cadvisor (very large, container-level resource
-// data) and etcd (requires client certificates).
+// data). etcd is scraped via its dedicated plain-HTTP metrics listener when
+// the cluster enables one (the client port requires mTLS and is skipped).
 type promScraper struct {
 	kube *kubernetes.Clientset
 
@@ -162,6 +163,17 @@ func (s *promScraper) resolveSources(ctx context.Context) []promSource {
 	// cilium is absent or metrics are disabled, the scrape is logged and
 	// skipped.
 	forPods("kube-system", "cilium-agent", "http", 9090, "k8s-app=cilium")
+	// etcd main and events: etcd's client port needs mTLS, but its dedicated
+	// metrics listener (--listen-metrics-urls; enabled on the stress cluster
+	// via etcdClusters[].manager.listenMetricsURLs) serves /metrics over
+	// plain HTTP. Ports are 2391/2392 — both pods share the control-plane
+	// host network, and etcd's conventional 2381 is already etcd-events'
+	// PEER port on kOps (2380/2381/2382 = main/events/cilium peers).
+	// WAL fsync and backend-commit latency live here — the signal that
+	// separates etcd disk stalls from control-plane CPU starvation.
+	// Best-effort: clusters without the listener just skip it.
+	forPods("kube-system", "etcd-main", "http", 2391, "k8s-app=etcd-manager-main")
+	forPods("kube-system", "etcd-events", "http", 2392, "k8s-app=etcd-manager-events")
 
 	nodes, err := s.kube.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {

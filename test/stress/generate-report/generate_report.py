@@ -31,6 +31,33 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 # These helpers own that shape; queries supply only metric names, labels,
 # and grouping.
 
+# DuckDB's read_json_auto infers a rigid nested schema from a sample of the
+# file, so a nested key that first appears past the sample window fails the
+# whole query with an "unknown key" transform error -- run 2079317975134900224
+# died on a container termination message ~28k lines into watch.jsonl.gz.
+# Every file read here has a schema fixed by its writer, so declare it:
+# stable top-level columns get concrete types, and free-form payloads (watch
+# objects, metric labels) are read as JSON, which the -> / ->> operators used
+# throughout handle natively. Fields missing from a line read as NULL and
+# extra fields are ignored, so the scans are insensitive to payload shape.
+
+def json_scan(path, columns):
+    """SQL fragment scanning a jsonl file with an explicit schema."""
+    cols = ", ".join(f"{name}: '{sql_type}'" for name, sql_type in columns.items())
+    return f"read_json('{path}', format='newline_delimited', columns={{{cols}}})"
+
+# metrics.jsonl: written by promscrape.go (metricSample).
+METRICS_COLUMNS = {"ts": "VARCHAR", "source": "VARCHAR", "instance": "VARCHAR",
+                   "metric": "VARCHAR", "labels": "JSON", "value": "DOUBLE"}
+# watch.jsonl: written by the watch recorder (WatchEventRecord); object is an
+# arbitrary Kubernetes object.
+WATCH_COLUMNS = {"timestamp": "VARCHAR", "resource": "VARCHAR",
+                 "type": "VARCHAR", "object": "JSON"}
+# sandboxes.jsonl: only the fields the percentile query reads.
+SANDBOXES_COLUMNS = {"phase": "VARCHAR", "createAckMs": "DOUBLE",
+                     "podCreatedMs": "DOUBLE", "podScheduledMs": "DOUBLE",
+                     "podRunningMs": "DOUBLE", "sandboxReadyMs": "DOUBLE"}
+
 def _counter_deltas_cte(metrics_path, metrics, labels, where):
     """Shared CTE prefix computing per-stream deltas of cumulative counters."""
     label_selects = "".join(
@@ -48,7 +75,7 @@ def _counter_deltas_cte(metrics_path, metrics, labels, where):
                 CAST(instance AS VARCHAR) as instance,
                 metric,
                 value{label_selects}
-            FROM read_json_auto('{metrics_path}')
+            FROM {json_scan(metrics_path, METRICS_COLUMNS)}
             WHERE metric IN ({metric_list})
         ),
         diffs AS (
@@ -310,7 +337,7 @@ def main():
     controller_depth_raw = conn.execute(f"""
         WITH raw AS (
             SELECT CAST(ts AS TIMESTAMP) as ts, value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE source = 'agent-sandbox-controller' AND metric = 'workqueue_depth'
               AND CAST(labels->>'name' AS VARCHAR) = 'sandbox'
         )
@@ -341,7 +368,7 @@ def main():
     controller_depth_ts = conn.execute(f"""
         WITH raw AS (
             SELECT CAST(ts AS TIMESTAMP) as ts, value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE source = 'agent-sandbox-controller' AND metric = 'workqueue_depth'
               AND CAST(labels->>'name' AS VARCHAR) = 'sandbox'
         )
@@ -411,6 +438,73 @@ def main():
             "avg_latency_ms": avg_latency_ms
         })
 
+    # etcd server-side disk latency (present when the cluster serves etcd's
+    # plain-HTTP metrics listener; see promscrape.go). WAL fsync is the write
+    # path's disk wait and backend commit is the boltdb flush: elevated
+    # client-observed etcd latency with FLAT fsync/commit numbers means the
+    # time is going to CPU starvation or queueing on the control-plane node,
+    # not storage (run 2079306544964440064 needed exactly this distinction).
+    print("Querying etcd disk latency by phase...")
+    etcd_disk_avg_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["etcd_disk_wal_fsync_duration_seconds_count",
+                 "etcd_disk_wal_fsync_duration_seconds_sum",
+                 "etcd_disk_backend_commit_duration_seconds_count",
+                 "etcd_disk_backend_commit_duration_seconds_sum"],
+        group_by=["source"],
+        where="source IN ('etcd-main', 'etcd-events')")
+
+    # p99 needs the histogram buckets: sum per-scrape bucket deltas per phase,
+    # then interpolate within the bucket that crosses the 99th percentile.
+    etcd_disk_bucket_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["etcd_disk_wal_fsync_duration_seconds_bucket",
+                 "etcd_disk_backend_commit_duration_seconds_bucket"],
+        labels={"le": "le"},
+        group_by=["source", "le"],
+        where="source IN ('etcd-main', 'etcd-events')")
+
+    def bucket_p99(buckets):
+        """buckets: {le(float): cumulative count delta} including +Inf."""
+        total = buckets.get(float("inf"), 0.0)
+        if total <= 0:
+            return 0.0
+        target = 0.99 * total
+        cum_prev, le_prev = 0.0, 0.0
+        for le in sorted(buckets):
+            cum = buckets[le]
+            if cum >= target:
+                if le == float("inf"):
+                    return le_prev * 1000
+                frac = (target - cum_prev) / max(cum - cum_prev, 1e-9)
+                return (le_prev + frac * (le - le_prev)) * 1000
+            cum_prev, le_prev = cum, le
+        return le_prev * 1000
+
+    etcd_disk_buckets = {}
+    for phase_name, source, le, fsync_delta, commit_delta in etcd_disk_bucket_raw:
+        le_f = float("inf") if le == "+Inf" else float(le)
+        entry = etcd_disk_buckets.setdefault((phase_name, source), ({}, {}))
+        entry[0][le_f] = entry[0].get(le_f, 0.0) + fsync_delta
+        entry[1][le_f] = entry[1].get(le_f, 0.0) + commit_delta
+
+    etcd_disk = []
+    for row in etcd_disk_avg_raw:
+        phase_name, source, fsync_n, fsync_sum, commit_n, commit_sum = row
+        if fsync_n <= 0 and commit_n <= 0:
+            continue
+        fsync_buckets, commit_buckets = etcd_disk_buckets.get((phase_name, source), ({}, {}))
+        etcd_disk.append({
+            "phase_name": phase_name,
+            "source": source,
+            "fsync_n": int(fsync_n),
+            "fsync_avg_ms": (fsync_sum / fsync_n * 1000) if fsync_n > 0 else 0.0,
+            "fsync_p99_ms": bucket_p99(fsync_buckets),
+            "commit_avg_ms": (commit_sum / commit_n * 1000) if commit_n > 0 else 0.0,
+            "commit_p99_ms": bucket_p99(commit_buckets),
+        })
+    etcd_disk.sort(key=lambda r: (phase_order_map_early.get(r["phase_name"], 99), r["source"]))
+
     print("Querying etcd timeseries...")
     etcd_ts_raw = metrics_timeseries(
         conn, metrics_path_str,
@@ -463,7 +557,7 @@ def main():
                 metric,
                 CAST(labels->>'value' AS VARCHAR) as kind,
                 value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE CAST(labels->>'api_call' AS VARCHAR) = 'endpoint-create'
               AND metric IN ('cilium_api_limiter_wait_duration_seconds',
                              'cilium_api_limiter_rate_limit',
@@ -503,7 +597,7 @@ def main():
                 metric,
                 CAST(labels->>'value' AS VARCHAR) as kind,
                 value
-            FROM read_json_auto('{metrics_path_str}')
+            FROM {json_scan(metrics_path_str, METRICS_COLUMNS)}
             WHERE CAST(labels->>'api_call' AS VARCHAR) = 'endpoint-create'
               AND metric IN ('cilium_api_limiter_wait_duration_seconds', 'cilium_api_limiter_rate_limit')
         ),
@@ -647,7 +741,7 @@ def main():
                     -- name is two objects, not one long-lived one.
                     CAST(object->'metadata'->>'uid' AS VARCHAR) as uid,
                     type
-                FROM read_json_auto('{watch_path_str}')
+                FROM {json_scan(watch_path_str, WATCH_COLUMNS)}
                 WHERE resource IN ('pods', 'sandboxes')
             ),
             lifecycle_ends AS (
@@ -715,7 +809,7 @@ def main():
                     -- name is two objects, not one long-lived one.
                     CAST(object->'metadata'->>'uid' AS VARCHAR) as uid,
                     type
-                FROM read_json_auto('{watch_path_str}')
+                FROM {json_scan(watch_path_str, WATCH_COLUMNS)}
                 WHERE resource IN ('pods', 'sandboxes')
             ),
             lifecycle_ends AS (
@@ -855,7 +949,25 @@ def main():
         findings.append({
             "severity": "warning",
             "title": f"Elevated etcd Update Latency ({etcd_update_latency_max:.2f}ms)",
-            "desc": f"etcd update operation average latency reached {etcd_update_latency_max:.2f}ms under load. While standard, high write latencies from etcd indicate write disk throughput contention.",
+            "desc": f"etcd update operation average latency reached {etcd_update_latency_max:.2f}ms under load. This is the apiserver's client-side view: check the etcd page's server-side WAL fsync latency to tell disk stalls from control-plane CPU starvation.",
+            "link": "etcd.html"
+        })
+
+    # etcd disk stall check: the client-side latency above cannot separate
+    # disk from CPU, but the server-side WAL fsync p99 can. etcd's own
+    # guidance is p99 fsync < 10ms on suitable disks.
+    fsync_worst = None
+    for row in etcd_disk:
+        if row['source'] == 'etcd-main' and row['phase_name'].startswith('throughput') and row['fsync_n'] >= 50:
+            if fsync_worst is None or row['fsync_p99_ms'] > fsync_worst['fsync_p99_ms']:
+                fsync_worst = row
+
+    if fsync_worst and fsync_worst['fsync_p99_ms'] > 10.0:
+        w = fsync_worst
+        findings.append({
+            "severity": "critical" if w['fsync_p99_ms'] > 100.0 else "warning",
+            "title": f"etcd WAL fsync Latency ({w['fsync_p99_ms']:.1f}ms p99)",
+            "desc": f"During phase {w['phase_name']}, etcd's WAL fsync p99 reached {w['fsync_p99_ms']:.1f}ms (avg {w['fsync_avg_ms']:.2f}ms over {w['fsync_n']:,} fsyncs). etcd waits on every write for this, so the storage volume is the bottleneck: consider a faster or larger etcd disk. If client-observed etcd latency is elevated while this number stays flat, the time is going to control-plane CPU instead.",
             "link": "etcd.html"
         })
 
@@ -951,7 +1063,7 @@ def main():
                 quantile_cont(sandboxReadyMs, 0.5) as sandboxReady_p50,
                 quantile_cont(sandboxReadyMs, 0.9) as sandboxReady_p90,
                 quantile_cont(sandboxReadyMs, 0.99) as sandboxReady_p99
-            FROM read_json_auto('{sandboxes_path_str}')
+            FROM {json_scan(sandboxes_path_str, SANDBOXES_COLUMNS)}
             GROUP BY phase
             ORDER BY phase
         """).fetchall()
@@ -1011,6 +1123,19 @@ def main():
         shutil.copy(f, output_dir / f.name)
         print(f"Copied CPU profile: {output_dir / f.name}")
 
+    # Copy the watch stream so watch.html can fetch and parse it client-side.
+    # Always name the copy watch.jsonl, even when the input is watch.jsonl.gz:
+    # prow's GCS artifact uploader strips a .gz suffix on upload (the run
+    # artifacts show watch.jsonl.gz stored as watch.jsonl), so a page
+    # referencing the .gz name 404s in CI. The client detects gzip by magic
+    # bytes rather than by extension, so the bare name works for both
+    # compressed and uncompressed inputs.
+    watch_log_name = None
+    if watch_file.exists():
+        watch_log_name = "watch.jsonl"
+        shutil.copy(watch_file, output_dir / watch_log_name)
+        print(f"Copied watch log: {output_dir / watch_log_name}")
+
     def render_page(template_name, output_filename, context):
         template = env.get_template(template_name)
         rendered = template.render(context)
@@ -1068,6 +1193,7 @@ def main():
         "active_page": "etcd",
         "summary": summary,
         "etcd_ops": etcd_ops,
+        "etcd_disk": etcd_disk,
         "chart_data": etcd_chart_data,
         "phases": js_phases
     }
@@ -1115,6 +1241,15 @@ def main():
         "pprof_profiles": pprof_profiles
     }
     render_page("pprof.html", "pprof.html", pprof_ctx)
+
+    # Watch events context
+    watch_ctx = {
+        "active_page": "watch",
+        "summary": summary,
+        "watch_log": watch_log_name,
+        "phases": js_phases
+    }
+    render_page("watch.html", "watch.html", watch_ctx)
 
     print("All report pages generated successfully!")
 

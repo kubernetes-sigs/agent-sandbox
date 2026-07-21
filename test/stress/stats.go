@@ -123,6 +123,35 @@ func computeLatencyBreakdown(records []SandboxRecord) LatencyBreakdown {
 	}
 }
 
+// computeTimeToAllReady returns the seconds from the first Create call to the
+// last observed Ready across the given records: how long until every request
+// in the batch was Ready. It returns nil when there are no records or when
+// any record failed to reach Ready (the batch never became "all ready").
+//
+// This is the headline metric for burst phases like claims-warm, where all
+// creates are issued at once and the question is when the last claim became
+// Ready, not just the per-claim percentiles.
+func computeTimeToAllReady(records []SandboxRecord) *float64 {
+	if len(records) == 0 {
+		return nil
+	}
+	var firstCreate, lastReady time.Time
+	for i := range records {
+		rec := &records[i]
+		if rec.CreateCalled.IsZero() || rec.SandboxReady.IsZero() {
+			return nil
+		}
+		if firstCreate.IsZero() || rec.CreateCalled.Before(firstCreate) {
+			firstCreate = rec.CreateCalled
+		}
+		if rec.SandboxReady.After(lastReady) {
+			lastReady = rec.SandboxReady
+		}
+	}
+	seconds := lastReady.Sub(firstCreate).Seconds()
+	return &seconds
+}
+
 // ThroughputStats summarizes the rate at which a set of events occurred.
 type ThroughputStats struct {
 	Count           int     `json:"count"`

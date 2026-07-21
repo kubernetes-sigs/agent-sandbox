@@ -7,6 +7,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
+- [**containarium-ssh-sandbox**](./containarium-ssh-sandbox): An example of running Containarium's agent-box runtime in a Sandbox, reached over SSH with an in-container MCP server (no kube-apiserver token held by the agent).
 - [**gemini-cu-sandbox**](./gemini-cu-sandbox): An example of a Python runtime sandbox for Gemini Computer Use Agent.
 - [**gke-swap**](./gke-swap): Demonstrates how to configure GKE node memory swap with dedicated Local SSDs to drastically increase Chrome pod density from 120 to 200 pods per node.
 - [**hello-world-sandbox**](./hello-world-sandbox): A simple "Hello World" sandbox example.

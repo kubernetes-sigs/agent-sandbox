@@ -1795,11 +1795,16 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 // and still depend on warm-pool state.
 //
 // Claims that are already bound to a sandbox (status.sandboxStatus.name set) are
-// skipped: once bound, a claim's reconciliation is driven by its own events and by
-// the Owns(&Sandbox{}) watch, and nothing in the bound path consults the pool in a
-// way that a pool event must trigger. If the bound sandbox is later deleted, the
-// sandbox delete event (Owns watch) re-reconciles the claim and clears
-// status.sandboxStatus.name, after which the claim receives pool events again.
+// skipped: pool events exist to wake claims that are still WAITING on the pool
+// (binding/adoption), and a bound claim's reconciliation is driven by its own
+// events and by the Owns(&Sandbox{}) watch. Note the bound path does still read
+// the pool/template on reconcile (reconcileActive fetches them for metadata and
+// NetworkPolicy reconciliation) — the deliberate trade-off here is that pool or
+// template spec changes no longer proactively re-enqueue every bound claim;
+// bound claims pick such changes up on their next reconcile from any other
+// trigger. If the bound sandbox is later deleted, the sandbox delete event
+// (Owns watch) re-reconciles the claim and clears status.sandboxStatus.name,
+// after which the claim receives pool events again.
 // Claims being deleted are likewise skipped since Reconcile returns immediately
 // for them. Unbound claims are always enqueued: they may be waiting for the pool
 // to appear (ErrWarmPoolNotFound requeue path) or for a usable pool spec.

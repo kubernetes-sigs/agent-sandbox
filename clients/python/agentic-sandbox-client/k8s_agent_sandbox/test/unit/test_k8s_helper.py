@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 from kubernetes import client
 from k8s_agent_sandbox.k8s_helper import K8sHelper
-from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
+from k8s_agent_sandbox.exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxTemplateNotFoundError
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
@@ -266,6 +266,65 @@ class TestK8sHelperResolveSandboxName(unittest.TestCase):
         helper = K8sHelper()
         with self.assertRaises(SandboxTemplateNotFoundError):
             helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_claim_ready_terminal_reason_fails_fast(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        """A terminal Ready=False reason raises immediately instead of waiting out the timeout."""
+        mock_watch = MagicMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "False",
+                            "reason": "VolumeClaimTemplatesError",
+                            "message": "volumeClaimTemplates overrides are not allowed",
+                        }
+                    ]
+                },
+            },
+        }
+        mock_watch.stream.return_value = [mock_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        with self.assertRaises(SandboxClaimFailedError) as context:
+            helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertIn("VolumeClaimTemplatesError", str(context.exception))
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_wait_for_claim_ready_transient_reason_keeps_waiting(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
+        """Transient Ready=False reasons (controller retries) do not abort the wait."""
+        mock_watch = MagicMock()
+        transient_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "False", "reason": "ReconcilerError",
+                                    "message": "Error seen: transient conflict"}],
+                },
+            },
+        }
+        ready_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "sandbox": {"name": "recovered-sandbox-1"},
+                },
+            },
+        }
+        mock_watch.stream.return_value = [transient_event, ready_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        name = helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertEqual(name, "recovered-sandbox-1")
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_resolve_sandbox_name_returns_before_ready(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):

@@ -31,8 +31,9 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
     CREATED_BY_LABEL,
+    TERMINAL_CLAIM_READY_REASONS,
 )
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
 
 
@@ -171,6 +172,11 @@ class AsyncK8sHelper:
         await self._ensure_initialized()
 
         goal = "claim readiness" if require_ready else "sandbox name"
+        # Keep the legacy resolve-path message byte-identical to the original
+        # two-watch implementation (callers/tests may match on it).
+        deleted_msg = (f"SandboxClaim '{claim_name}' was deleted while waiting for claim readiness"
+                       if require_ready else
+                       f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
         deadline = time.monotonic() + timeout
         rv = resource_version or "0"
         logger.info(f"Watching claim '{claim_name}' for {goal} (from resourceVersion={rv})...")
@@ -197,7 +203,7 @@ class AsyncK8sHelper:
                         continue
                     if event["type"] == "DELETED":
                         raise SandboxMetadataError(
-                            f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name"
+                            deleted_msg
                         )
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event["object"]
@@ -221,6 +227,17 @@ class AsyncK8sHelper:
                             elif cond.get("reason") == "WarmPoolNotFound":
                                 raise SandboxWarmPoolNotFoundError(
                                     f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                                )
+                            elif (
+                                cond.get("type") == "Ready"
+                                and cond.get("status") == "False"
+                                and cond.get("reason") in TERMINAL_CLAIM_READY_REASONS
+                            ):
+                                # The controller reported a failure it will not
+                                # retry; waiting out the timeout cannot succeed.
+                                raise SandboxClaimFailedError(
+                                    f"SandboxClaim '{claim_name}' failed with terminal reason "
+                                    f"{cond.get('reason')}: {cond.get('message', '')}"
                                 )
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
                                 ready = True

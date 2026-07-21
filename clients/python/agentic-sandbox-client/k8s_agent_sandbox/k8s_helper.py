@@ -16,12 +16,13 @@ import logging
 import time
 from typing import List
 from kubernetes import client, config, watch
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import is_valid_ip, is_valid_gateway_hostname
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    TERMINAL_CLAIM_READY_REASONS,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
     GATEWAY_PLURAL,
@@ -150,6 +151,11 @@ class K8sHelper:
         ``"0"`` (current state from the watch cache).
         """
         goal = "claim readiness" if require_ready else "sandbox name"
+        # Keep the legacy resolve-path message byte-identical to the original
+        # two-watch implementation (callers/tests may match on it).
+        deleted_msg = (f"SandboxClaim '{claim_name}' was deleted while waiting for claim readiness"
+                       if require_ready else
+                       f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
         deadline = time.monotonic() + timeout
         rv = resource_version or "0"
         logging.info(f"Watching claim '{claim_name}' for {goal} (from resourceVersion={rv})...")
@@ -176,8 +182,7 @@ class K8sHelper:
                         continue
                     if event["type"] == "DELETED":
                         w.stop()
-                        raise SandboxMetadataError(
-                            f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
+                        raise SandboxMetadataError(deleted_msg)
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event['object']
                         # Track the last-seen resourceVersion so a stream
@@ -202,6 +207,18 @@ class K8sHelper:
                                 w.stop()
                                 raise SandboxWarmPoolNotFoundError(
                                     f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                                )
+                            elif (
+                                cond.get('type') == 'Ready'
+                                and cond.get('status') == 'False'
+                                and cond.get('reason') in TERMINAL_CLAIM_READY_REASONS
+                            ):
+                                # The controller reported a failure it will not
+                                # retry; waiting out the timeout cannot succeed.
+                                w.stop()
+                                raise SandboxClaimFailedError(
+                                    f"SandboxClaim '{claim_name}' failed with terminal reason "
+                                    f"{cond.get('reason')}: {cond.get('message', '')}"
                                 )
                             if cond.get('type') == 'Ready' and cond.get('status') == 'True':
                                 ready = True

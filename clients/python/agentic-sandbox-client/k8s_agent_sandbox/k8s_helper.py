@@ -91,72 +91,140 @@ class K8sHelper:
             "spec": spec,
         }
         logging.info(f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'...")
-        self.custom_objects_api.create_namespaced_custom_object(
+        return self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
             plural=CLAIM_PLURAL_NAME,
             body=manifest
         )
-    
-    def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
+
+    def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
         appears in the claim's status, then returns it.
+
+        Args:
+            resource_version: Optional resourceVersion to start the watch
+                from (e.g. ``metadata.resourceVersion`` of the create
+                response). Defaults to ``"0"`` — see ``_watch_claim``.
         """
+        return self._watch_claim(claim_name, namespace, timeout, require_ready=False,
+                                 resource_version=resource_version)
+
+    def wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+        """Watches the SandboxClaim until it is bound to a sandbox AND its
+        Ready condition is True, then returns the sandbox name.
+
+        This is the lowest-latency ready-wait: the claim controller writes
+        ``status.sandbox.name``, ``status.sandbox.podIPs`` and the forwarded
+        Ready condition in a single status update on warm-pool adoption, so a
+        single watch on the claim observes readiness without a second watch
+        on the Sandbox resource (the claim's Ready condition is a direct
+        forward of the Sandbox's Ready condition).
+
+        Args:
+            resource_version: Optional resourceVersion to start the watch
+                from (e.g. ``metadata.resourceVersion`` of the create
+                response). Defaults to ``"0"`` — see ``_watch_claim``.
+        """
+        return self._watch_claim(claim_name, namespace, timeout, require_ready=True,
+                                 resource_version=resource_version)
+
+    def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
+                     resource_version: str | None = None) -> str:
+        """Shared SandboxClaim watch loop.
+
+        Returns the sandbox name once ``status.sandbox.name`` is populated;
+        when ``require_ready`` is set, additionally waits until the claim's
+        Ready condition is True.
+
+        The watch always starts from an explicit resourceVersion — the
+        claim's own (from the create response) when the caller has it, else
+        ``"0"`` — so the apiserver serves it from the watch cache. A watch
+        with UNSET resourceVersion forces a quorum etcd read to establish
+        initial state on every wait, which at high claim rates is pure
+        apiserver/etcd load on the latency path. If the supplied version has
+        been compacted away (410 Gone), the watch transparently restarts from
+        ``"0"`` (current state from the watch cache).
+        """
+        goal = "claim readiness" if require_ready else "sandbox name"
         deadline = time.monotonic() + timeout
-        logging.info(f"Resolving sandbox name from claim '{claim_name}'...")
+        rv = resource_version or "0"
+        logging.info(f"Watching claim '{claim_name}' for {goal} (from resourceVersion={rv})...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
-                    f"Could not resolve sandbox name from claim "
+                    f"Could not resolve {goal} from claim "
                     f"'{claim_name}' within {timeout} seconds.")
             w = watch.Watch()
-            for event in w.stream(
-                func=self.custom_objects_api.list_namespaced_custom_object,
-                namespace=namespace,
-                group=CLAIM_API_GROUP,
-                version=CLAIM_API_VERSION,
-                plural=CLAIM_PLURAL_NAME,
-                field_selector=f"metadata.name={claim_name}",
-                timeout_seconds=remaining
-            ):
-                if event is None:
-                    continue
-                if event["type"] == "DELETED":
-                    w.stop()
-                    raise SandboxMetadataError(
-                        f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
-                if event["type"] in ["ADDED", "MODIFIED"]:
-                    claim_object = event['object']
-                    status = claim_object.get('status') or {}
-                    
-                    for cond in status.get('conditions', []):
-                        if (
-                            cond.get('type') == 'Ready'
-                            and cond.get('status') == 'False'
-                            and cond.get('reason') == 'TemplateNotFound'
-                        ):
-                            w.stop()
-                            raise SandboxTemplateNotFoundError(
-                                f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
-                            )
-                        elif cond.get('reason') == 'WarmPoolNotFound':
-                            w.stop()
-                            raise SandboxWarmPoolNotFoundError(
-                                f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
-                            )
-
-                    sandbox_status = status.get('sandbox', {})
-                    # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
-                    name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
-                    if name:
-                        logging.info(
-                            f"Resolved sandbox name '{name}' from claim status")
+            try:
+                event_iter = w.stream(
+                    func=self.custom_objects_api.list_namespaced_custom_object,
+                    namespace=namespace,
+                    group=CLAIM_API_GROUP,
+                    version=CLAIM_API_VERSION,
+                    plural=CLAIM_PLURAL_NAME,
+                    field_selector=f"metadata.name={claim_name}",
+                    resource_version=rv,
+                    timeout_seconds=remaining
+                )
+                for event in event_iter:
+                    if event is None:
+                        continue
+                    if event["type"] == "DELETED":
                         w.stop()
-                        return name
+                        raise SandboxMetadataError(
+                            f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
+                    if event["type"] in ["ADDED", "MODIFIED"]:
+                        claim_object = event['object']
+                        # Track the last-seen resourceVersion so a stream
+                        # restart resumes instead of replaying history.
+                        seen_rv = (claim_object.get('metadata') or {}).get('resourceVersion')
+                        if seen_rv:
+                            rv = seen_rv
+                        status = claim_object.get('status') or {}
+
+                        ready = False
+                        for cond in status.get('conditions', []):
+                            if (
+                                cond.get('type') == 'Ready'
+                                and cond.get('status') == 'False'
+                                and cond.get('reason') == 'TemplateNotFound'
+                            ):
+                                w.stop()
+                                raise SandboxTemplateNotFoundError(
+                                    f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                                )
+                            elif cond.get('reason') == 'WarmPoolNotFound':
+                                w.stop()
+                                raise SandboxWarmPoolNotFoundError(
+                                    f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                                )
+                            if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                                ready = True
+
+                        sandbox_status = status.get('sandbox', {})
+                        # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
+                        name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
+                        if name and (ready or not require_ready):
+                            logging.info(
+                                f"Resolved sandbox name '{name}' from claim status"
+                                + (" (claim Ready)" if ready else ""))
+                            w.stop()
+                            return name
+            except client.ApiException as e:
+                if e.status == 410:
+                    # The requested resourceVersion was compacted away:
+                    # restart from the watch cache's current state.
+                    logging.info(
+                        f"Watch on claim '{claim_name}' expired (410 Gone at resourceVersion={rv}); "
+                        "restarting from current state")
+                    rv = "0"
+                    continue
+                raise
 
     def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.

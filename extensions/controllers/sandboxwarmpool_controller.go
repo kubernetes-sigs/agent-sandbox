@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -119,6 +120,224 @@ type SandboxWarmPoolReconciler struct {
 
 	// now is a test hook for the reconciler's clock; nil means time.Now.
 	now func() time.Time
+
+	// ReplenishDelay defers creation of replacement sandboxes after pool
+	// members drop out of the pool (e.g. a burst of SandboxClaims adopting
+	// warm sandboxes). Deferring lets the claim burst consume the API server
+	// budget first instead of racing it with replacement creates. Zero (the
+	// default) disables deferral and preserves the immediate-refill behavior.
+	//
+	// Caveat for SUSTAINED arrivals (measured in a 300-claim warm-adoption
+	// benchmark): the hold re-arms on every observed member drop, so while
+	// claims keep arriving the hold re-arms indefinitely, refill never
+	// starts, and the pool drains to zero. For sustained load prefer
+	// MaxRefillRate — a paced refill stream that coexists with adoption —
+	// combined with a small or zero delay.
+	ReplenishDelay time.Duration
+
+	// MaxRefillRate, when > 0, caps the rate (sandbox creates per second,
+	// PER POOL) at which replacement sandboxes are created, via a per-pool
+	// token bucket. It turns deficit-burst refill (one reconcile firing the
+	// whole deficit through slowStartBatch) into a smooth stream, so at
+	// sustained claim rates refill does not periodically flood the write
+	// path and compete with claim adoption. Zero (the default) leaves refill
+	// unshaped — the full-deficit slowStartBatch behavior.
+	//
+	// Semantics vs ReplenishDelay: the delay defers the START of refill;
+	// the rate shapes its FLOW once started. The bucket holds at most one
+	// second of creates (capacity = max(1, rate)), so refill resumes from a
+	// hold or an idle period with at most a 1×rate initial burst.
+	//
+	// Semantics vs the expectations gate: shaping decides how many creates
+	// this pass may ISSUE; the gate then decides whether issuing anything is
+	// safe against the cache. Tokens taken for a pass the gate refuses are
+	// refunded (no write was issued, so no API budget was spent).
+	//
+	// Sizing guidance (measured in a 300-claim warm-adoption benchmark:
+	// 300-deficit fill through a single reconcile's slowStartBatch):
+	//   - sandbox CREATE stage: ~85/s with API Priority and Fairness
+	//     queueing creates (~50ms mean queue wait), ~240/s burst without
+	//     APF shaping;
+	//   - pod scheduling: ~70/s (kube-scheduler default --kube-api-qps=50);
+	//   - pod start (cached image): ~2.5-3.5s, fully pipelined;
+	//   - net: a 300-member pool went 0 -> 300 Ready in ~6.4s.
+	// One pool's deficit is processed serially under its single reconcile
+	// key, so per-pool refill throughput tops out at
+	//   min(create ~85/s, scheduler share, MaxRefillRate).
+	// For a sustained claim arrival rate R/s aggregate refill must be >= R:
+	//   pools needed  >= ceil(R / per_pool_rate)
+	//   pool replicas >= R × (refill_p99 + replenish hold)   (shock absorber)
+	// e.g. 500 claims/s at ~70/s per pool => >= 8 pools of ~1-2k replicas.
+	// Run --sandbox-warm-pool-concurrent-workers >= pool count so distinct
+	// pools refill in parallel (parallelism across pools is free; a per-pool
+	// create-parallelism knob is NOT needed — slowStartBatch already reaches
+	// 128+-way parallelism inside a batch and the measured limiter is write
+	// RTT and the scheduler, not batch width).
+	MaxRefillRate float64
+
+	// replenishMu guards replenishState and refillState. Distinct pools may
+	// reconcile concurrently when MaxConcurrentReconciles > 1.
+	replenishMu sync.Mutex
+	// replenishState tracks, per pool, the last observed member count and any
+	// active replenish hold. Only used when ReplenishDelay > 0.
+	replenishState map[types.NamespacedName]*replenishDeferState
+	// refillState tracks, per pool, the token bucket that paces replacement
+	// creates. Only used when MaxRefillRate > 0.
+	refillState map[types.NamespacedName]*refillBucket
+}
+
+// refillBucket is the per-pool token bucket behind MaxRefillRate. Tokens
+// accrue at MaxRefillRate per second up to a capacity of max(1, rate) — one
+// second of creates — so a long-idle pool cannot bank a large burst.
+type refillBucket struct {
+	// tokens currently available; one token = one replacement create.
+	tokens float64
+	// last is when tokens were last accrued.
+	last time.Time
+}
+
+// replenishDeferState is the per-pool bookkeeping behind ReplenishDelay.
+type replenishDeferState struct {
+	// lastMembers is the active member count at the previous observation,
+	// plus any replacements created in that reconcile that may not be visible
+	// in the informer cache yet. A subsequent observation below this value
+	// means members were consumed (adopted/claimed/GC'd/deleted), not that
+	// our own creates are still propagating.
+	lastMembers int32
+	// deferUntil suppresses replacement creation while in the future. It is
+	// re-armed on every observed drop, so replenishment starts only after the
+	// burst that is draining the pool has settled for a full ReplenishDelay.
+	deferUntil time.Time
+}
+
+// observeMembersForReplenish records the pool's current active member count
+// and returns how long replacement creation should be deferred (zero means
+// create immediately). It must be called exactly once per reconcile so the
+// baseline stays fresh.
+func (r *SandboxWarmPoolReconciler) observeMembersForReplenish(key types.NamespacedName, currentReplicas, desiredReplicas int32, now time.Time) time.Duration {
+	if r.ReplenishDelay <= 0 {
+		return 0
+	}
+
+	r.replenishMu.Lock()
+	defer r.replenishMu.Unlock()
+
+	st, ok := r.replenishState[key]
+	if !ok {
+		// First observation of this pool (new pool or controller restart):
+		// there is no baseline to detect a drop against, so replenish
+		// immediately. Initial pool fill and scale-ups are never deferred.
+		if r.replenishState == nil {
+			r.replenishState = make(map[types.NamespacedName]*replenishDeferState)
+		}
+		r.replenishState[key] = &replenishDeferState{lastMembers: currentReplicas}
+		return 0
+	}
+
+	dropped := currentReplicas < st.lastMembers
+	st.lastMembers = currentReplicas
+
+	if currentReplicas >= desiredReplicas {
+		// Pool is full (or over-provisioned): nothing to defer.
+		st.deferUntil = time.Time{}
+		return 0
+	}
+	if dropped {
+		// Re-arm on every drop: while an adoption burst is still draining the
+		// pool, keep replacement creates out of its window.
+		st.deferUntil = now.Add(r.ReplenishDelay)
+	}
+	if remaining := st.deferUntil.Sub(now); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+// noteReplenishCreates raises the pool's member baseline by the number of
+// replacements just created. Until the informer cache catches up, subsequent
+// reconciles may not see these creates; counting them in the baseline keeps
+// drop detection accurate — a stale low count registers as a drop (deferring
+// briefly) instead of re-arming nothing. (Duplicate creates off the stale
+// count are separately prevented by the expectations gate.)
+func (r *SandboxWarmPoolReconciler) noteReplenishCreates(key types.NamespacedName, created int32) {
+	if r.ReplenishDelay <= 0 || created <= 0 {
+		return
+	}
+	r.replenishMu.Lock()
+	defer r.replenishMu.Unlock()
+	if st, ok := r.replenishState[key]; ok {
+		st.lastMembers += created
+	}
+}
+
+// forgetReplenishState drops the per-pool replenish and refill bookkeeping
+// for a deleted pool.
+func (r *SandboxWarmPoolReconciler) forgetReplenishState(key types.NamespacedName) {
+	r.replenishMu.Lock()
+	defer r.replenishMu.Unlock()
+	delete(r.replenishState, key)
+	delete(r.refillState, key)
+}
+
+// takeRefillTokens grants up to want replacement creates from the pool's
+// token bucket and returns how many were granted plus, when the grant fell
+// short, how long until the next whole token accrues (the requeue interval
+// that keeps the paced stream flowing without relying on watch events).
+//
+// Tokens are consumed for every granted create up front; failed creates are
+// deliberately NOT refunded — a failed POST spends the same API-server budget
+// the rate exists to protect, and the controller's error backoff already
+// paces retries. (Creates the expectations gate refuses to issue are the one
+// exception: no POST happens, so the caller refunds via refundRefillTokens.)
+// When MaxRefillRate is zero the bucket is bypassed entirely and behavior is
+// byte-identical to the unshaped path.
+func (r *SandboxWarmPoolReconciler) takeRefillTokens(key types.NamespacedName, want int32, now time.Time) (int32, time.Duration) {
+	if r.MaxRefillRate <= 0 || want <= 0 {
+		return want, 0
+	}
+	capacity := math.Max(1, r.MaxRefillRate)
+
+	r.replenishMu.Lock()
+	defer r.replenishMu.Unlock()
+
+	b, ok := r.refillState[key]
+	if !ok {
+		if r.refillState == nil {
+			r.refillState = make(map[types.NamespacedName]*refillBucket)
+		}
+		// First observation of this pool (new pool or controller restart):
+		// start with a full bucket so small deficits are served immediately;
+		// anything beyond one second's worth is paced from the start.
+		b = &refillBucket{tokens: capacity, last: now}
+		r.refillState[key] = b
+	} else if elapsed := now.Sub(b.last); elapsed > 0 {
+		b.tokens = math.Min(capacity, b.tokens+r.MaxRefillRate*elapsed.Seconds())
+		b.last = now
+	}
+
+	granted := min(want, int32(b.tokens))
+	b.tokens -= float64(granted)
+	if granted >= want {
+		return granted, 0
+	}
+	// Ceil so the requeue never lands a hair before the token exists.
+	wait := time.Duration(math.Ceil((1 - b.tokens) / r.MaxRefillRate * float64(time.Second)))
+	return granted, wait
+}
+
+// refundRefillTokens returns tokens that were taken for creates which were
+// never issued (the expectations gate refused the pass). No POST happened, so
+// none of the API-server budget the rate protects was spent — unlike failed
+// creates, which are deliberately not refunded.
+func (r *SandboxWarmPoolReconciler) refundRefillTokens(key types.NamespacedName, n int32) {
+	if r.MaxRefillRate <= 0 || n <= 0 {
+		return
+	}
+	r.replenishMu.Lock()
+	defer r.replenishMu.Unlock()
+	if b, ok := r.refillState[key]; ok {
+		b.tokens = math.Min(math.Max(1, r.MaxRefillRate), b.tokens+float64(n))
+	}
 }
 
 // clockNow returns the reconciler's current time (time.Now unless a test
@@ -199,13 +418,14 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// forgetPool drops per-pool bookkeeping (expectations, not-progressing state)
-// once a pool is gone or terminating.
+// forgetPool drops per-pool bookkeeping (expectations, not-progressing state,
+// replenish/refill shaping state) once a pool is gone or terminating.
 func (r *SandboxWarmPoolReconciler) forgetPool(key types.NamespacedName) {
 	r.exp().Forget(key)
 	r.notProgressingMu.Lock()
 	delete(r.notProgressing, key)
 	r.notProgressingMu.Unlock()
+	r.forgetReplenishState(key)
 }
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
@@ -338,46 +558,87 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	maxBatchSize := int32(r.MaxBatchSize)
 
+	// Record the observed member count and check whether replacement creation
+	// should yield to a recent member drop (claim adoption burst). No-op when
+	// ReplenishDelay is zero.
+	replenishHold := r.observeMembersForReplenish(poolKey, currentReplicas, desiredReplicas, now)
+
 	// Create new sandboxes if we need more.
 	// Hard invariant: never create while the existing population (active,
 	// including non-Ready, plus terminating-still-present) already covers
 	// spec.replicas.
-	if totalReplicas < desiredReplicas && tmplErr == nil {
-		sandboxesToCreate := min(desiredReplicas-totalReplicas, maxBatchSize)
-
-		sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash, currentSandboxBlueprintHash)
-		switch {
-		case err != nil:
-			logger.Error(err, "Failed to build sandbox CR blueprint")
-			allErrors = errors.Join(allErrors, err)
-		// TryExpectCreations atomically checks that every create and delete
-		// this controller previously issued for the pool has been observed by
-		// the informer cache, and records the new in-flight creates. If prior
-		// writes are still unobserved the cached list above is stale and
-		// creating against it would overshoot the target (the #1215 runaway),
-		// so we skip and let the watch (or a fallback requeue) retrigger us.
-		case !r.exp().TryExpectCreations(poolKey, int(sandboxesToCreate)):
-			logger.Info("Skipping sandbox creation: waiting for in-flight creates/deletes to be observed",
-				"poolName", warmPool.Name)
-			requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
-		default:
-			logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
-			// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
-			successes, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
-				return r.createPoolSandbox(ctx, warmPool, sandboxCR)
-			})
-			// Creates that never happened will never produce a watch event;
-			// lower their expectations immediately so the pool is not blocked
-			// until the expectations timeout. lower cannot be negative
-			// (slowStartBatch reports at most the requested count of
-			// successes); the > 0 guard only skips a no-op tracker call on
-			// the everything-succeeded path.
-			if lower := int(sandboxesToCreate) - successes; lower > 0 {
-				r.exp().LowerCreations(poolKey, lower)
-			}
-			if createErr != nil {
-				logger.Error(createErr, "Failed to create pool sandboxes")
-				allErrors = errors.Join(allErrors, createErr)
+	//
+	// The hold branch is keyed on the ACTIVE deficit (currentReplicas), not
+	// the population deficit (totalReplicas): a drop that is still draining
+	// as terminating members must keep the hold's wake-up armed, so that once
+	// the deletions are observed the remaining hold window (not a watch-event
+	// race) decides when refill starts.
+	if replenishHold > 0 && currentReplicas < desiredReplicas && tmplErr == nil {
+		// Members recently dropped out of the pool (e.g. adopted by a burst
+		// of claims). Defer replacement creation so the burst gets the API
+		// server budget first; status above still reflects actual counts.
+		// The refill token bucket is untouched during the hold (its
+		// capacity caps carryover at one second of creates), so when the
+		// hold expires the paced stream starts fresh: delay defers the
+		// START of refill, MaxRefillRate shapes its FLOW.
+		logger.Info("Deferring pool replenishment after recent member drop",
+			"deficit", desiredReplicas-currentReplicas,
+			"requeueAfter", replenishHold)
+		requeueAfter = minNonZeroDuration(requeueAfter, replenishHold)
+	} else if totalReplicas < desiredReplicas && tmplErr == nil {
+		deficit := min(desiredReplicas-totalReplicas, maxBatchSize)
+		// Shape first, then gate: the token bucket decides how many creates
+		// this pass may issue, and the expectations gate below decides
+		// whether issuing them against the current cache is safe.
+		sandboxesToCreate, tokenWait := r.takeRefillTokens(poolKey, deficit, now)
+		if sandboxesToCreate < deficit {
+			// Token bucket exhausted for this pass: create what was granted
+			// now and requeue for the remainder when the next token accrues,
+			// keeping refill a smooth stream instead of a deficit burst.
+			logger.Info("Pacing pool replenishment",
+				"deficit", deficit,
+				"granted", sandboxesToCreate,
+				"requeueAfter", tokenWait)
+			requeueAfter = minNonZeroDuration(requeueAfter, tokenWait)
+		}
+		if sandboxesToCreate > 0 {
+			sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash, currentSandboxBlueprintHash)
+			switch {
+			case err != nil:
+				logger.Error(err, "Failed to build sandbox CR blueprint")
+				allErrors = errors.Join(allErrors, err)
+			// TryExpectCreations atomically checks that every create and delete
+			// this controller previously issued for the pool has been observed by
+			// the informer cache, and records the new in-flight creates. If prior
+			// writes are still unobserved the cached list above is stale and
+			// creating against it would overshoot the target (the #1215 runaway),
+			// so we skip and let the watch (or a fallback requeue) retrigger us.
+			// The granted tokens are refunded: no POST was issued for them.
+			case !r.exp().TryExpectCreations(poolKey, int(sandboxesToCreate)):
+				logger.Info("Skipping sandbox creation: waiting for in-flight creates/deletes to be observed",
+					"poolName", warmPool.Name)
+				r.refundRefillTokens(poolKey, sandboxesToCreate)
+				requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
+			default:
+				logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
+				// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
+				successes, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
+					return r.createPoolSandbox(ctx, warmPool, sandboxCR)
+				})
+				// Creates that never happened will never produce a watch event;
+				// lower their expectations immediately so the pool is not blocked
+				// until the expectations timeout. lower cannot be negative
+				// (slowStartBatch reports at most the requested count of
+				// successes); the > 0 guard only skips a no-op tracker call on
+				// the everything-succeeded path.
+				if lower := int(sandboxesToCreate) - successes; lower > 0 {
+					r.exp().LowerCreations(poolKey, lower)
+				}
+				r.noteReplenishCreates(poolKey, int32(successes))
+				if createErr != nil {
+					logger.Error(createErr, "Failed to create pool sandboxes")
+					allErrors = errors.Join(allErrors, createErr)
+				}
 			}
 		}
 	}

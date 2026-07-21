@@ -74,7 +74,7 @@ With Kata runtimes, direct pod port-forwarding is not compatible. Use the [Sandb
 
 ```bash
 # Deploy the router
-kubectl apply -f clients/python/agentic-sandbox-client/sandbox_router/sandbox_router.yaml
+kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml
 
 # Port-forward to the router service
 kubectl port-forward svc/sandbox-router-svc 8080:8080 -n default
@@ -86,7 +86,7 @@ curl -H "X-Sandbox-ID: sandbox-example" -H "X-Sandbox-Port: 13337" http://localh
 For production external access (e.g., on GKE), deploy the Gateway configuration:
 
 ```bash
-kubectl apply -f clients/python/agentic-sandbox-client/sandbox_router/gateway.yaml
+kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
 ```
 
 ## When to Use Kata Containers

@@ -63,6 +63,10 @@ func newRetryTransport(base http.RoundTripper, attempts int, initialDelay, maxDe
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	delay := t.initialDelay
 	var lastErr error
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
 	for attempt := 1; attempt <= t.maxAttempts; attempt++ {
 		resp, err := t.base.RoundTrip(req)
 		if err == nil {
@@ -76,8 +80,15 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			t.onRetry(req, err, attempt)
 		}
 
+		timer.Stop()
 		select {
-		case <-time.After(delay):
+		case <-timer.C:
+		default:
+		}
+		timer.Reset(delay)
+
+		select {
+		case <-timer.C:
 		case <-req.Context().Done():
 			// Surface the original dial error rather than the context error so
 			// the proxy ErrorHandler reports the actual upstream failure.

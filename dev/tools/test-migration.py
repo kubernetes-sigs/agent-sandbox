@@ -162,6 +162,16 @@ spec:
 status:
   sandbox:
     name: upgrade-pool-warm-a1b2c
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: upgrade-pool-adopt
+  namespace: default
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: upgrade-template
 """
 
 def _safe_extract(tar, dest, members=None):
@@ -532,8 +542,31 @@ spec:
     assert all_bound, f"Not all warm claims were bound in time! Only {bound_count}/11 bound."
 
     run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "-n", "default"])
-    
-    return {"uid": pod_uid, "creationTimestamp": pod_creation}
+
+    # Wait for the v1alpha1 pool controller to create the warm sandbox for
+    # upgrade-pool-adopt. This sandbox carries an owner reference stamped with
+    # apiVersion extensions.agents.x-k8s.io/v1alpha1, which storage migration
+    # does not rewrite — post-upgrade warm adoption from it is validated later.
+    print("Waiting for the v1alpha1 pool controller to create a warm sandbox for upgrade-pool-adopt...")
+    adopt_sandbox_name = ""
+    for i in range(60):
+        res = run_cmd(["kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            for s in json.loads(res.stdout).get("items", []):
+                for ref in s["metadata"].get("ownerReferences", []):
+                    if ref.get("kind") == "SandboxWarmPool" and ref.get("name") == "upgrade-pool-adopt" and ref.get("controller"):
+                        adopt_sandbox_name = s["metadata"]["name"]
+                        assert ref["apiVersion"] == "extensions.agents.x-k8s.io/v1alpha1", \
+                            f"Expected the pre-upgrade warm sandbox owner reference to be v1alpha1, got {ref['apiVersion']}"
+        if adopt_sandbox_name:
+            break
+        if (i + 1) % 5 == 0:
+            print(f"Warm sandbox for upgrade-pool-adopt not created yet (attempt {i+1}/60)...")
+        time.sleep(2)
+    assert adopt_sandbox_name, "The v1alpha1 pool controller never created a warm sandbox for upgrade-pool-adopt!"
+    print(f"Captured pre-upgrade warm sandbox for adoption test: {adopt_sandbox_name}")
+
+    return {"uid": pod_uid, "creationTimestamp": pod_creation, "adopt_sandbox": adopt_sandbox_name}
 
 def upgrade_and_migrate(method, image_prefix, image_tag):
     print(f"\n=== Phase 3 & 4: Upgrading to target version & Migrating using {method} ===")
@@ -814,6 +847,58 @@ def validate_migration(active_pod_info):
     assert "operatingMode" not in sb_running_v1alpha1["spec"], f"upgrade-sandbox-running should NOT have operatingMode in v1alpha1 spec! spec: {sb_running_v1alpha1['spec']}"
     print("upgrade-sandbox-running dynamic reverse-conversion validation PASSED.")
     
+    # 2.6 Verify a new v1beta1 SandboxClaim warm-adopts a sandbox created by
+    # the pre-upgrade (v1alpha1) pool controller. Owner references keep the
+    # apiVersion they were written with, so this exercises the group+kind
+    # matching in the adoption path (a strict v1beta1 match cold-starts
+    # instead — the regression from issue #1190).
+    print("\n=== Validation Phase: Warm adoption from a pre-upgrade pool ===")
+    adopt_sandbox = active_pod_info["adopt_sandbox"]
+
+    # Precondition: the warm sandbox still exists and its owner reference
+    # still says v1alpha1 (if migration ever rewrites owner references, this
+    # test no longer exercises the legacy path and must be reworked).
+    res = run_cmd(["kubectl", "get", "sandboxes.v1beta1.agents.x-k8s.io", adopt_sandbox, "-n", "default", "-o", "json"], capture_output=True)
+    adopt_sb = json.loads(res.stdout)
+    adopt_refs = [r for r in adopt_sb["metadata"].get("ownerReferences", []) if r.get("kind") == "SandboxWarmPool" and r.get("controller")]
+    assert adopt_refs, f"{adopt_sandbox} lost its SandboxWarmPool controller owner reference during upgrade!"
+    assert adopt_refs[0]["apiVersion"] == "extensions.agents.x-k8s.io/v1alpha1", \
+        f"Expected {adopt_sandbox} to keep its v1alpha1 owner reference after upgrade, got {adopt_refs[0]['apiVersion']} — the test precondition no longer holds."
+
+    print(f"Creating a post-upgrade v1beta1 SandboxClaim against upgrade-pool-adopt (expecting to adopt {adopt_sandbox})...")
+    post_upgrade_claim = """apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: post-upgrade-adopt-claim
+  namespace: default
+spec:
+  warmPoolRef:
+    name: upgrade-pool-adopt
+"""
+    run_cmd(["kubectl", "apply", "-f", "-"], input_data=post_upgrade_claim)
+
+    bound_sandbox = ""
+    for i in range(60):
+        res = run_cmd(["kubectl", "get", "sandboxclaims.v1beta1.extensions.agents.x-k8s.io", "post-upgrade-adopt-claim", "-n", "default", "-o", "json"], capture_output=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            bound_sandbox = json.loads(res.stdout).get("status", {}).get("sandbox", {}).get("name", "")
+            if bound_sandbox:
+                break
+        if (i + 1) % 5 == 0:
+            print(f"post-upgrade-adopt-claim not bound yet (attempt {i+1}/60)...")
+        time.sleep(2)
+
+    if bound_sandbox != adopt_sandbox:
+        print("Warm adoption from the pre-upgrade pool failed. Dumping diagnostics:", file=sys.stderr)
+        run_cmd(["kubectl", "get", "sandboxes,sandboxclaims", "-n", "default"], check=False)
+        run_cmd(["kubectl", "logs", "-n", "agent-sandbox-system", "deploy/agent-sandbox-controller", "--tail=100"], check=False)
+    assert bound_sandbox, "post-upgrade-adopt-claim was never bound to a sandbox!"
+    assert bound_sandbox != "post-upgrade-adopt-claim", \
+        "post-upgrade-adopt-claim COLD-STARTED a fresh sandbox instead of adopting the pre-upgrade warm sandbox — v1alpha1 owner references are not being matched by the adoption path (issue #1190 regression)."
+    assert bound_sandbox == adopt_sandbox, \
+        f"post-upgrade-adopt-claim bound to {bound_sandbox} instead of the pre-upgrade warm sandbox {adopt_sandbox} — the pre-upgrade sandbox was skipped or replaced."
+    print(f"post-upgrade-adopt-claim adopted {adopt_sandbox} — warm adoption from a pre-upgrade pool PASSED.")
+
     # 3. Clean up storedVersions in CRDs
     print("Pruning v1alpha1 from CRD storedVersions...")
     crds = [

@@ -53,7 +53,7 @@ PYTHON_TEST_SUITES = [
 ]
 
 
-def run_go_tests(repo_root):
+def run_go_tests(repo_root, artifact_dir):
     """ runs Go unit tests and returns the exit code """
     go_list_cmd = ["go", "list", "./..."]
     go_list_output = subprocess.check_output(go_list_cmd, cwd=repo_root, text=True)
@@ -63,7 +63,7 @@ def run_go_tests(repo_root):
 
     result = subprocess.run(utils.go_tool_args(
         "gotestsum",
-        f"--junitfile={repo_root}/bin/unit-junit.xml",
+        f"--junitfile={os.path.join(artifact_dir, 'junit_unit-go.xml')}",
         "--",
         "-race",
         *filtered_packages
@@ -72,7 +72,7 @@ def run_go_tests(repo_root):
     return result.returncode
 
 
-def run_python_tests(repo_root):
+def run_python_tests(repo_root, artifact_dir):
     """ runs Python unit tests in a temporary venv and returns the exit code """
     returncode = 0
 
@@ -127,7 +127,7 @@ def run_python_tests(repo_root):
 
         print(f"\n=== Running Python unit tests: {suite['name']} ===")
         junit_file = os.path.join(
-            repo_root, "bin", f"python-{suite['name']}-junit.xml")
+            artifact_dir, f"junit_unit-python-{suite['name']}.xml")
         result = subprocess.run([
             venv_python, "-m", "pytest",
             test_dir,
@@ -145,8 +145,13 @@ def main():
     """ invokes unit tests and outputs junit results files """
     repo_root = utils.get_repo_root()
 
-    go_rc = run_go_tests(repo_root)
-    python_rc = run_python_tests(repo_root)
+    # junit_ prefix + $ARTIFACTS: prow spyglass only renders junit files
+    # matching artifacts/junit*.xml. Local runs fall back to bin/.
+    artifact_dir = os.getenv("ARTIFACTS") or os.path.join(repo_root, "bin")
+    os.makedirs(artifact_dir, exist_ok=True)
+
+    go_rc = run_go_tests(repo_root, artifact_dir)
+    python_rc = run_python_tests(repo_root, artifact_dir)
 
     if go_rc != 0:
         return go_rc

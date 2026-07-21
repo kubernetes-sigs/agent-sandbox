@@ -28,12 +28,22 @@ import (
 	"time"
 )
 
-// headerSandboxPodIP mirrors proxy.HeaderSandboxPodIP. It cannot be
-// imported: proxy depends on this package. ScopedTokenAuthorizer
-// refuses requests carrying it — the header overrides the dial target
-// after authorization, which would let a token scoped to one sandbox
-// reach any IP the router can dial.
-const headerSandboxPodIP = "X-Sandbox-Pod-Ip"
+// untrustedRoutingHeaders mirror proxy header names (proxy depends on
+// this package, so they can't be imported). ScopedTokenAuthorizer
+// refuses any request that carries one: each overrides how the proxy
+// picks the dial target *after* authorization, decoupling the address
+// the token was checked against (namespace, name) from the pod the
+// request actually reaches.
+//
+//   - X-Sandbox-Pod-Ip routes straight to a caller-supplied IP.
+//   - X-Sandbox-Uid routes via the router's UID→IP cache, so a token
+//     for box-a plus box-b's UID (with X-Sandbox-Id still box-a, to
+//     pass the claim check) would land on box-b.
+//
+// Rejecting both leaves DNS resolution by (namespace, name) — which is
+// exactly the identity the token authorizes — as the only path, so the
+// dial target always matches what was authorized.
+var untrustedRoutingHeaders = []string{"X-Sandbox-Pod-Ip", "X-Sandbox-Uid"}
 
 // MinScopedTokenSecretLen is the minimum accepted secret length, after
 // surrounding whitespace is trimmed. Any observed token is an offline
@@ -165,14 +175,14 @@ func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, sa
 	if err != nil {
 		return ErrUnauthenticated
 	}
-	// X-Sandbox-Pod-IP replaces the dial target *after* authorization:
-	// the proxy would authorize against the claimed (namespace, name)
-	// and then dial the caller-supplied IP, so a token scoped to one
-	// sandbox could reach anything the router can dial. Scoped tokens
-	// therefore never accept the override — route by (namespace, name)
-	// only.
-	if r.Header.Get(headerSandboxPodIP) != "" {
-		return ErrForbidden
+	// Reject any caller-supplied override of the dial target (see
+	// untrustedRoutingHeaders): they would let a valid token reach a
+	// pod other than the (namespace, name) it authorizes. Scoped-token
+	// routing is by (namespace, name) only.
+	for _, h := range untrustedRoutingHeaders {
+		if r.Header.Get(h) != "" {
+			return ErrForbidden
+		}
 	}
 	if claims.Namespace != sandboxNamespace || claims.Name != sandboxName {
 		return ErrForbidden

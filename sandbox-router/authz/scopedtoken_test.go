@@ -106,22 +106,29 @@ func TestScopedToken_MissingBearerRejected(t *testing.T) {
 	}
 }
 
-// A valid token must not smuggle in a dial-target override:
-// X-Sandbox-Pod-IP redirects the proxy's dial after authorization, so
-// accepting it would let a token scoped to box-a reach any IP the
-// router can dial.
-func TestScopedToken_RejectsPodIPOverride(t *testing.T) {
+// A valid token must not smuggle in a dial-target override: these
+// headers redirect the proxy's dial after authorization, so accepting
+// one would let a token scoped to box-a reach a different pod even
+// though X-Sandbox-Id still says box-a and the claim check passes.
+func TestScopedToken_RejectsRoutingOverrides(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	tok, err := MintScopedToken(secret, "ns", "box-a", time.Minute)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
-	req := reqWithBearer(tok)
-	req.Header.Set("X-Sandbox-Pod-Ip", "10.0.0.99")
-	err = auth.Authorize(context.Background(), req, "ns", "box-a")
-	if !errors.Is(err, ErrForbidden) {
-		t.Fatalf("expected ErrForbidden with pod-IP override, got %v", err)
+	for _, tc := range []struct{ header, value string }{
+		{"X-Sandbox-Pod-Ip", "10.0.0.99"},
+		{"X-Sandbox-Uid", "some-other-sandbox-uid"},
+	} {
+		t.Run(tc.header, func(t *testing.T) {
+			req := reqWithBearer(tok)
+			req.Header.Set(tc.header, tc.value)
+			err := auth.Authorize(context.Background(), req, "ns", "box-a")
+			if !errors.Is(err, ErrForbidden) {
+				t.Fatalf("expected ErrForbidden with %s override, got %v", tc.header, err)
+			}
+		})
 	}
 }
 

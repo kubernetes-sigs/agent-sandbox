@@ -61,7 +61,7 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: gen,
 					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-					Message:            "Sandbox is not suspended.",
+					Message:            "Sandbox is not suspended",
 				},
 				{
 					Type:               "Ready",
@@ -82,7 +82,7 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: gen,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
-					Message:            "Pod has been terminated. Sandbox is suspended.",
+					Message:            "Pod has been terminated. Sandbox is suspended",
 				},
 				{
 					Type:               "Ready",
@@ -177,7 +177,7 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 1,
 					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-					Message:            "Sandbox is not suspended.",
+					Message:            "Sandbox is not suspended",
 				},
 				{
 					Type:               "Ready",
@@ -250,7 +250,7 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
-					Message:            "Pod is terminating. Sandbox is suspending.",
+					Message:            "Pod is terminating. Sandbox is suspending",
 				},
 				{
 					Type:               "Ready",
@@ -297,7 +297,7 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
-					Message:            "Pod has been terminated. Sandbox is suspended.",
+					Message:            "Pod has been terminated. Sandbox is suspended",
 				},
 				{
 					Type:               "Ready",
@@ -343,7 +343,7 @@ func TestSandboxPodDeletionKeepsSuspendedFalse(t *testing.T) {
 				Status:             metav1.ConditionFalse,
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-				Message:            "Sandbox is not suspended.",
+				Message:            "Sandbox is not suspended",
 			},
 			{
 				Type:               "Ready",
@@ -393,4 +393,83 @@ func getSuspendedConditionTime(t *testing.T, tc *framework.TestContext, sandboxO
 	require.NotNil(t, cond, "Suspended condition must be present in Sandbox status")
 	require.False(t, cond.LastTransitionTime.IsZero(), "LastTransitionTime must be nonzero")
 	return cond.LastTransitionTime.Time
+}
+
+func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
+	tc := framework.NewTestContext(t)
+
+	// Set up a namespace
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("sb-unowned-e2e-%d", time.Now().UnixNano())
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+	sandboxName := "my-sandbox-conflict"
+
+	// 1. Pre-create a Pod named "my-sandbox-conflict" in the namespace, but without any controller references.
+	// This represents the "unowned" naming conflict.
+	unownedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: ns.Name,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "pause",
+					Image: "registry.k8s.io/pause:3.10",
+				},
+			},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), unownedPod))
+
+	// 2. Create the Sandbox object with operatingMode = Suspended.
+	sandboxObj := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxName,
+			Namespace: ns.Name,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "pause",
+								Image: "registry.k8s.io/pause:3.10",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
+
+	// 3. The controller should reconcile the Sandbox, see the unowned Pod with a matching name,
+	// and refuse to delete or modify it. The Sandbox should report Suspended=False with Reason=PodNotOwned.
+	expectedStatus := sandboxv1beta1.SandboxStatus{
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonSuspendedPodNotOwned,
+				Message:            "Refused to delete pod because it is not owned by this sandbox",
+			},
+			{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonSuspended,
+				Message:            "Sandbox is suspending",
+			},
+		},
+	}
+	tc.MustWaitForObject(sandboxObj, predicates.SandboxHasStatus(expectedStatus))
+
+	// 4. Verify that the unowned Pod still exists in the namespace (i.e. was not deleted/hijacked).
+	livePod := &corev1.Pod{}
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: ns.Name}, livePod))
 }

@@ -26,7 +26,7 @@ The Sandbox state is determined by multiple distinct layers.
 #### 1. `Suspended`
 This condition explicitly tracks whether the sandbox environment is currently paused or hibernated. 
 * **Status: True** – The Sandbox is no longer actively executing workloads due to a suspension request. The `Reason` field specifies how it is suspended (`PodTerminated`).
-* **Status: False** – The Sandbox is active, running, or in a transient lifecycle phase (`NotSuspended`, `PodTerminating`). `lastTransitionTime` is updated only when the status flips between `True` and `False`, and is retained while the status remains `False` even if the reason/message changes.
+* **Status: False** – The Sandbox is active, running, or in a transient lifecycle phase (`NotSuspended`, `PodTerminating`, `PodNotOwned`). `lastTransitionTime` is updated only when the status flips between `True` and `False`, and is retained while the status remains `False` even if the reason/message changes.
 * **Ready Impact:** The moment a suspension is requested (e.g., `spec.operatingMode: Suspended`), the `Ready` condition immediately transitions to `False` with the reason `SandboxSuspended`. It holds this reason through the entire suspending phase and remains that way once fully suspended.
 
 #### 2. `Ready` (Root Condition)
@@ -42,6 +42,7 @@ The controller evaluates the hierarchy top-down. The `Suspended` condition remai
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Provisioning** | `False` | `NotSuspended` | nil (Initial build) | **`False`** | `DependenciesNotReady` | Transient State: Sandbox is provisioning for the first time. |
 | **Suspending** | `False` | `PodTerminating` | non-nil (Deleting) | **`False`** | `SandboxSuspended` | Transient State: Sandbox suspension requested. Active workloads are being de-provisioned. |
+| **Suspension Blocked** | `False` | `PodNotOwned` | non-nil (Unowned/Other) | **`False`** | `SandboxSuspended` | Transient State: Sandbox suspension requested, but blocked because a conflicting Pod exists that is not owned by this Sandbox. |
 | **Suspended** | `True` | `PodTerminated` | nil (Fully deleted) | **`False`** | `SandboxSuspended` | Stable State: Pod has been successfully terminated. Sandbox is fully suspended. |
 | **Resuming** | `False` | `NotSuspended` | nil (Recreating) | **`False`** | `DependenciesNotReady` | Transient State: Sandbox resumption requested. Recreation of underlying workload is in progress. |
 | **Operational** | `False` | `NotSuspended` | non-nil (Active) | **`True` / `False`** | `DependenciesReady` / `DependenciesNotReady` | Stable State: Sandbox is active and the underlying Pod has been provisioned. Note: The Pod might be Pending or Failed; we rely on `Ready` and `Finished` to track specific Pod health. |

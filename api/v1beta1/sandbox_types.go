@@ -35,6 +35,8 @@ const (
 	SandboxReasonSuspendedPodNotTerminated = "PodNotTerminated"
 	// SandboxReasonSuspendedPodTerminating indicates the Suspended condition is False because the backing Pod is still terminating.
 	SandboxReasonSuspendedPodTerminating = "PodTerminating"
+	// SandboxReasonSuspendedPodNotOwned indicates the Suspended condition is False because a Pod exists with the Sandbox's name but is not owned by this Sandbox.
+	SandboxReasonSuspendedPodNotOwned = "PodNotOwned"
 	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is running.
 	SandboxReasonNotSuspended = "NotSuspended"
 

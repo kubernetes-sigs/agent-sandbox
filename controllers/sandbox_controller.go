@@ -278,9 +278,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) []metav1.Condition {
 	var conditions []metav1.Condition
 
-	if suspended := r.computeSuspendedCondition(sandbox, pod); suspended != nil {
-		conditions = append(conditions, *suspended)
-	}
+	conditions = append(conditions, r.computeSuspendedCondition(sandbox, pod))
 
 	if finished := r.computeFinishedCondition(sandbox, pod); finished != nil {
 		conditions = append(conditions, *finished)
@@ -291,14 +289,14 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 	return conditions
 }
 
-func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
+func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) metav1.Condition {
 	// Initialize the Suspended condition which tracks only the suspension state, persisting once set.
-	suspended := &metav1.Condition{
+	suspended := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
 		Status:             metav1.ConditionFalse,
 		Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-		Message:            "Sandbox is not suspended.",
+		Message:            "Sandbox is not suspended",
 	}
 
 	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
@@ -306,10 +304,16 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 			// Stable State: Fully Suspended
 			suspended.Status = metav1.ConditionTrue
 			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
-			suspended.Message = "Pod has been terminated. Sandbox is suspended."
+			suspended.Message = "Pod has been terminated. Sandbox is suspended"
 		} else {
-			suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
-			suspended.Message = "Pod is terminating. Sandbox is suspending."
+			ownership, _ := checkOwnership(pod, sandbox)
+			if ownership == resourceOwnedBySandbox {
+				suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
+				suspended.Message = "Pod is terminating. Sandbox is suspending"
+			} else {
+				suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodNotOwned
+				suspended.Message = "Refused to delete pod because it is not owned by this sandbox"
+			}
 		}
 	}
 
@@ -798,7 +802,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, err
 		}
 
-		return nil, nil
+		return pod, nil
 	}
 
 	ensurePodNameAnnotation := func(podName string) error {

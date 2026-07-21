@@ -87,7 +87,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 1,
 					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-					Message:            "Sandbox is not suspended.",
+					Message:            "Sandbox is not suspended",
 				},
 				{
 					Type:               "Ready",

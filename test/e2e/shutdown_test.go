@@ -52,7 +52,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 1,
 					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-					Message:            "Sandbox is not suspended.",
+					Message:            "Sandbox is not suspended",
 				},
 				{
 					Type:               "Ready",
@@ -94,7 +94,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
-					Message:            "Sandbox is not suspended.",
+					Message:            "Sandbox is not suspended",
 				},
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionReady),

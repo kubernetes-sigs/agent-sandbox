@@ -79,6 +79,8 @@ func main() {
 	var printVersion bool
 	var webhookPort int
 	var webhookCertDir string
+	var webhookCertName string
+	var webhookKeyName string
 	var webhookServiceName string
 	var webhookNamespace string
 	var manageWebhookCerts bool
@@ -87,6 +89,8 @@ func main() {
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
 	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "The directory that contains the certificates.")
+	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The filename of the webhook certificate.")
+	flag.StringVar(&webhookKeyName, "webhook-key-name", "tls.key", "The filename of the webhook private key.")
 	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
 	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
 	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Manage webhook serving certs and patch CRD conversion caBundles on startup. Set to false when certs and CRD/webhook configuration are managed externally (e.g., GKE Dynamic Certificate Delivery).")
@@ -275,18 +279,37 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-			setupLog.Info("Webhook cert management and CRD conversion caBundle patching disabled; expecting existing tls.crt/tls.key in certDir and CRDs patched externally",
+			setupLog.Info("Webhook cert management and CRD conversion caBundle patching disabled; expecting existing cert files in certDir and CRDs patched externally",
 				"certDir", webhookCertDir,
+				"certName", webhookCertName,
+				"keyName", webhookKeyName,
 				"serviceName", webhookServiceName,
 				"namespace", webhookNamespace,
 			)
-			for _, f := range []string{"tls.crt", "tls.key"} {
-				p := filepath.Join(webhookCertDir, f)
-				if _, err := os.Stat(p); err != nil {
-					setupLog.Error(err, "required webhook cert file missing", "path", p,
-						"hint", "with --manage-webhook-certs=false you must pre-provision tls.crt/tls.key via cert-manager, GKE, or similar")
+
+			// Pre-flight check: If specified tls.crt/tls.key don't exist, check for single-file cert.pem (e.g. GKE DCD)
+			tlsCrtPath := filepath.Join(webhookCertDir, webhookCertName)
+			tlsKeyPath := filepath.Join(webhookCertDir, webhookKeyName)
+			certPemPath := filepath.Join(webhookCertDir, "cert.pem")
+
+			if _, err1 := os.Stat(tlsCrtPath); err1 != nil {
+				if webhookCertName == "tls.crt" && webhookKeyName == "tls.key" {
+					if _, err2 := os.Stat(certPemPath); err2 == nil {
+						setupLog.Info("Found single-file webhook certificate and key (e.g. GKE Dynamic Certificate Delivery)", "path", certPemPath)
+						webhookCertName = "cert.pem"
+						webhookKeyName = "cert.pem"
+					} else {
+						setupLog.Error(err1, "required webhook cert file missing", "path", tlsCrtPath,
+							"hint", "with --manage-webhook-certs=false you must pre-provision tls.crt/tls.key or cert.pem via cert-manager, GKE, or similar")
+						os.Exit(1)
+					}
+				} else {
+					setupLog.Error(err1, "required webhook cert file missing", "path", tlsCrtPath)
 					os.Exit(1)
 				}
+			} else if _, errKey := os.Stat(tlsKeyPath); errKey != nil {
+				setupLog.Error(errKey, "required webhook key file missing", "path", tlsKeyPath)
+				os.Exit(1)
 			}
 		}
 	}
@@ -301,8 +324,10 @@ func main() {
 	}
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
-			Port:    webhookPort,
-			CertDir: webhookCertDir,
+			Port:     webhookPort,
+			CertDir:  webhookCertDir,
+			CertName: webhookCertName,
+			KeyName:  webhookKeyName,
 			TLSOpts: []func(*tls.Config){
 				func(cfg *tls.Config) {
 					cfg.ClientAuth = tls.NoClientCert

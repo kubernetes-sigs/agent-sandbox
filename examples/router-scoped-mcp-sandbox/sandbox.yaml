@@ -7,9 +7,9 @@ spec:
   # the scoped token minted for this sandbox by mint-token, verified by
   # sandbox-router's --authz-mode=scoped-token. Nothing in this pod ever
   # needs to call the K8s API.
-  automountServiceAccountToken: false
   podTemplate:
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -33,8 +33,10 @@ spec:
         - name: workspace
           mountPath: /workspace
         readinessProbe:
-          httpGet:
-            path: /mcp
+          # TCP, not httpGet: the streamable-http MCP endpoint answers a
+          # plain GET (no SSE Accept header) with 406, which an HTTP
+          # probe would count as failure forever.
+          tcpSocket:
             port: mcp
           initialDelaySeconds: 2
           periodSeconds: 2

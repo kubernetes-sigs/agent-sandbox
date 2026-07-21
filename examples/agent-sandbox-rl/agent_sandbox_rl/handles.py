@@ -110,14 +110,14 @@ class SandboxSession:
       if remaining <= 0:
         break
       self._resp.update(timeout=min(1.0, remaining))   # honor small timeouts
+      if self._resp.peek_stderr():
+        buf.append(self._resp.read_stderr())   # combine stderr (exec() returns both)
       if self._resp.peek_stdout():
         buf.append(self._resp.read_stdout())
         text = "".join(buf)
         if marker in text:
           out = text.split(marker, 1)[0]
           return out.replace("\r\n", "\n")
-      if self._resp.peek_stderr():
-        self._resp.read_stderr()               # drain to avoid backpressure
       if not self.is_open:
         break
     raise TimeoutError(f"session.run timed out/closed on {self.pod}")

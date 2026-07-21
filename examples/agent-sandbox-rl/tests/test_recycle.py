@@ -413,3 +413,24 @@ def test_reuse_guarded_by_circuit_breaker(make_cluster, monkeypatch):
     return 1
   with pytest.raises(FleetOvercommitError):
     reuse_git_restore_sandbox(f, f.tasks, slow, concurrency=1, use_session=False)
+
+
+def test_reuse_infra_error_isolated_to_group(make_cluster, monkeypatch):
+  # an acquire/reset/release error in one image's group must NOT abort the batch —
+  # that group's tasks get the error; other groups still succeed.
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["good", "good", "bad"])          # 2 images (good×2, bad×1)
+  f.setup()
+  real_acquire = f.acquire
+  def flaky_acquire(task):
+    if task.image == "bad":
+      raise RuntimeError("claim boom")
+    return real_acquire(task)
+  monkeypatch.setattr(f, "acquire", flaky_acquire)
+  res = reuse_git_restore_sandbox(f, f.tasks, lambda t, h: "ok",
+                                  concurrency=2, use_session=False)
+  assert res[0] == "ok" and res[1] == "ok"       # good group unaffected
+  assert isinstance(res[2], Exception)           # bad group captured, batch survived
+  f.teardown()

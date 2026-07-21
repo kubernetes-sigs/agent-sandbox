@@ -279,7 +279,7 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
     try:
       with fleet._obs.phase("process", cluster=handle.cluster_name, family=fam):
         results[i] = process_fn(t, handle)
-    except BaseException as e:                # noqa: BLE001 — capture, keep batch alive
+    except Exception as e:                    # noqa: BLE001 — capture (let KeyboardInterrupt/SystemExit propagate)
       status = "error"
       results[i] = e
       logger.error("task %s failed: %s", t.id, e)
@@ -335,9 +335,20 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
           with fleet._obs.phase("quarantine", cluster=handle.cluster_name):
             fleet.release(handle)
           handle = None
+    except Exception as e:                    # noqa: BLE001 — infra error (claim/reset/
+      # release/warm): capture for this group's unprocessed tasks so one group's
+      # failure can't abort the whole batch (KeyboardInterrupt/SystemExit still propagate).
+      logger.error("recycle group failed on %s: %s",
+                   group[0][1].image if group else "?", e)
+      for gi, _gt in group:
+        if results[gi] is None:
+          results[gi] = e
     finally:
       if handle is not None:
-        fleet.release(handle)
+        try:
+          fleet.release(handle)
+        except Exception:  # noqa: BLE001
+          logger.warning("release failed during group cleanup", exc_info=True)
 
   # Circuit breaker (#1): abort + teardown if live sandboxes run away (the recycle
   # path is exactly where over-creation bit us, so it must be guarded too).
@@ -350,7 +361,10 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
       with ThreadPoolExecutor(max_workers=concurrency) as ex:
         futs = [ex.submit(_run_group, g) for g in groups]
         for fut in as_completed(futs):
-          fut.result()                          # surface executor-level errors
+          try:
+            fut.result()                        # _run_group captures per-group; this is a backstop
+          except Exception:  # noqa: BLE001 — never let one group abort the batch
+            logger.error("recycle group raised past its own handler", exc_info=True)
   return results
 
 
@@ -413,7 +427,7 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
     try:
       with obs.phase("process", cluster=handle.cluster_name, family=fam):
         results[i] = await afleet._call(process_fn, t, handle)
-    except BaseException as e:                   # noqa: BLE001 — capture, keep batch alive
+    except Exception as e:                       # noqa: BLE001 — capture (let KeyboardInterrupt/SystemExit propagate)
       status = "error"
       results[i] = e
       logger.error("task %s failed: %s", t.id, e)
@@ -475,10 +489,20 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
                 held[img] -= 1
                 await _rescale(img)
             handle = None
+      except Exception as e:                      # noqa: BLE001 — infra error: capture for
+        # this group's unprocessed tasks so it can't abort the whole gather
+        # (KeyboardInterrupt/SystemExit still propagate).
+        logger.error("recycle group failed on %s: %s", img, e)
+        for gi, _gt in group:
+          if results[gi] is None:
+            results[gi] = e
       finally:
         holding = handle is not None
         if holding:
-          await afleet.release(handle)
+          try:
+            await afleet.release(handle)
+          except Exception:  # noqa: BLE001
+            logger.warning("release failed during group cleanup", exc_info=True)
         if scale_on_hold and recyclable:          # shard done: active−1 (+ held−1 if it
           async with locks[img]:                  # was holding) leaves desired unchanged
             if holding:                           # → no dangling warm at end of run
@@ -492,7 +516,10 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
   expected = (afleet._fleet.plan_.total_replicas
               if afleet._fleet.plan_ else len(groups))
   with afleet._fleet.overcommit_guard(expected):
-    await asyncio.gather(*(_run_group(img, g) for img, g in groups))
+    # return_exceptions=True is a backstop — _run_group already captures per-group,
+    # so one group's infra error can't discard the whole batch's results.
+    await asyncio.gather(*(_run_group(img, g) for img, g in groups),
+                         return_exceptions=True)
   return results
 
 

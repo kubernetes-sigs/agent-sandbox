@@ -456,6 +456,10 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	base := sandbox.DeepCopy()
 	base.Status = *oldStatus
 	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
+		if k8serrors.IsNotFound(err) {
+			// Sandbox was deleted mid-reconcile
+			return nil
+		}
 		logger.Error(err, "Failed to update sandbox status")
 		return err
 	}

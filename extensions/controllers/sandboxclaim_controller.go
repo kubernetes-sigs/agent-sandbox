@@ -576,6 +576,10 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 	patch := client.MergeFrom(oldClaim)
 
 	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		if k8errors.IsNotFound(err) {
+			// Claim was deleted mid-reconcile
+			return nil
+		}
 		logger.Error(err, "Failed to patch sandboxclaim status")
 		return err
 	}
@@ -1806,9 +1810,54 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 	requests := make([]ctrl.Request, 0, len(claims.Items))
 	for i := range claims.Items {
 		claim := &claims.Items[i]
+		// Only claims still waiting to adopt benefit from a warm-pool wake-up.
+		// A warm pool's status (readyReplicas) churns ~15-20/s under load, and
+		// this map fans every change out to ALL claims of the pool; at a large
+		// live population that re-reconciles the entire set (including the pile
+		// of Retain'd expired claims) on every blip — the dominant claim
+		// reconcile-storm source under churn. Adopted claims already react to
+		// their own Sandbox via Owns(); expired claims are done. So skip settled
+		// claims and wake only the genuinely pending ones (which is what the pool
+		// refill is relevant to). New pending claims are still handled by their
+		// own create event; a claim that failed to adopt (pool empty) stays
+		// unassigned and is woken here when capacity returns.
+		assigned := claim.Status.SandboxStatus.Name != "" ||
+			(claim.Annotations != nil && claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] != "")
+		if assigned || hasClaimExpiredCondition(claim.Status.Conditions) {
+			continue
+		}
 		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
 	}
 	return requests
+}
+
+// sandboxStatusRelevantChange reports whether a Sandbox update changed a field
+// the SandboxClaim reconciler actually consumes: the status Conditions
+// (Ready/Expired/Finished are forwarded into the claim), PodIPs (mirrored into
+// claim.Status.SandboxStatus), or the DeletionTimestamp (the claim must react
+// when its adopted Sandbox starts terminating). The Owns(&Sandbox{}) watch
+// otherwise reconciles the owning claim on EVERY Sandbox write — including the
+// controller's own metadata patches (pod-name / trace-context annotations, the
+// adoption relabel) and any label churn — none of which the claim depends on.
+// Create and Delete events are intentionally left unfiltered (predicate.Funcs
+// with a nil Create/Delete func allows them): the claim must observe its Sandbox
+// appearing (cold-start create / adoption) and disappearing.
+//
+// Trade-off (same as the Pod predicate in the sandbox controller): the claim's
+// self-heal of sandbox labels (launch-type) no longer runs on a bare label
+// change; it converges on the next status/deletion transition or periodic
+// resync. Acceptable for a rare, self-correcting case.
+func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
+	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldSb.Status.Conditions, newSb.Status.Conditions) {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {
+		return true
+	}
+	return false
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -1828,9 +1877,20 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		return err
 	}
 
+	sandboxOwnsPredicate := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldSb, ok1 := e.ObjectOld.(*v1beta1.Sandbox)
+			newSb, ok2 := e.ObjectNew.(*v1beta1.Sandbox)
+			if !ok1 || !ok2 {
+				return true
+			}
+			return sandboxStatusRelevantChange(oldSb, newSb)
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1beta1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
-		Owns(&v1beta1.Sandbox{}).
+		Owns(&v1beta1.Sandbox{}, builder.WithPredicates(sandboxOwnsPredicate)).
 		Watches(&v1beta1.Sandbox{}, &sandboxEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(&extensionsv1beta1.SandboxWarmPool{}, &warmPoolEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(

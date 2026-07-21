@@ -22,11 +22,20 @@ machine at all in the intended deployment — the credential in hand is the
 token, nothing else.
 
 Usage:
-    python3 client.py --token TOKEN --target-id box-a [--expect-forbidden]
+    python3 client.py --token TOKEN --target-id box-a [--expect-status 403]
 
-The router URL and routing headers default to values matching sandbox.yaml
-run through run-test-kind.sh; override with --router-url / --namespace /
---port for other setups.
+The default --router-url is the localhost port-forward that
+run-test-kind.sh establishes (kubectl port-forward svc/sandbox-router-svc
+18080:8080) — the in-cluster Service DNS name is not reachable from the
+host on kind. Running in-cluster instead, pass
+--router-url http://sandbox-router-svc.default.svc.cluster.local:8080.
+The routing headers default to values matching sandbox.yaml; override
+with --namespace / --port for other setups.
+
+With --expect-status, the script sends one plain HTTP request and passes
+only if the router answers with exactly that status code — asserting the
+documented 403 (valid token, wrong sandbox) vs 401 (forged/expired
+token) distinction rather than accepting any failure.
 """
 
 import argparse
@@ -34,6 +43,8 @@ import asyncio
 import hashlib
 import json
 import sys
+import urllib.error
+import urllib.request
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -59,6 +70,37 @@ def _result_payload(call_result):
     return None
 
 
+def check_rejection(url: str, headers: dict, args: argparse.Namespace) -> int:
+    """Assert the router rejects this request with exactly --expect-status.
+
+    The authz decision happens in the router before any proxying, so a
+    single plain HTTP request is enough to observe the status code the
+    MCP client library would otherwise swallow into a generic error.
+    """
+    req = urllib.request.Request(
+        url,
+        data=b"{}",
+        method="POST",
+        headers={
+            **headers,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"[host] FAIL: expected HTTP {args.expect_status} against "
+                  f"{args.target_id!r}, but got {resp.status}")
+            return 1
+    except urllib.error.HTTPError as exc:
+        if exc.code == args.expect_status:
+            print(f"[host] OK — router returned {exc.code} for {args.target_id!r} as expected")
+            return 0
+        print(f"[host] FAIL: expected HTTP {args.expect_status} against "
+              f"{args.target_id!r}, got {exc.code}")
+        return 1
+
+
 async def run(args: argparse.Namespace) -> int:
     headers = {
         "X-Sandbox-ID": args.target_id,
@@ -68,15 +110,13 @@ async def run(args: argparse.Namespace) -> int:
     }
     url = f"{args.router_url.rstrip('/')}/mcp"
 
+    if args.expect_status is not None:
+        return check_rejection(url, headers, args)
+
     try:
         async with streamablehttp_client(url, headers=headers) as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-
-                if args.expect_forbidden:
-                    print(f"[host] FAIL: expected the router to reject this token against "
-                          f"{args.target_id!r}, but the MCP session initialized")
-                    return 1
 
                 written = _result_payload(await session.call_tool(
                     "write_random_blob", {"name": BLOB_NAME, "size_bytes": BLOB_SIZE},
@@ -94,22 +134,23 @@ async def run(args: argparse.Namespace) -> int:
                 print(f"[host] OK — round-trip sha256 matches: {written['sha256']}")
                 return 0
     except Exception as exc:  # noqa: BLE001 - report and let run-test-kind.sh classify it
-        if args.expect_forbidden:
-            print(f"[host] OK — request against {args.target_id!r} was rejected as expected: {exc}")
-            return 0
         print(f"[host] FAIL: unexpected error talking to {args.target_id!r}: {exc}")
         return 1
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--router-url", default="http://sandbox-router-svc.default.svc.cluster.local:8080")
+    p.add_argument("--router-url", default="http://localhost:18080",
+                   help="matches run-test-kind.sh's port-forward; use the "
+                        "sandbox-router-svc Service DNS name when running in-cluster")
     p.add_argument("--namespace", default="default")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--token", required=True, help="scoped token from ../mint-token")
     p.add_argument("--target-id", required=True, help="X-Sandbox-ID to send — the sandbox being addressed")
-    p.add_argument("--expect-forbidden", action="store_true",
-                    help="invert the pass/fail check: success means the router rejected the request")
+    p.add_argument("--expect-status", type=int, default=None, metavar="CODE",
+                   help="invert the check: pass only if the router rejects the "
+                        "request with exactly this HTTP status (403 wrong sandbox, "
+                        "401 forged/expired)")
     return p.parse_args()
 
 

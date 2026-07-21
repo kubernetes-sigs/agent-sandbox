@@ -419,9 +419,10 @@ bound; the capacity planner sets it from the probed node count).
 run owns exceed `min(expected × factor, max_live_sandboxes)`, the fleet tears down and
 raises `FleetOvercommitError` (catches accidental over-creation; `factor=0` disables);
 `breaker_poll_s` (5.0). `install_teardown_hooks` (True) installs atexit/SIGINT/SIGTERM
-teardown so a killed driver still cleans up; every resource is labelled with
-`fleet.run_id`, and **`reap(run_id=…)`** / `python -m agent_sandbox_rl.reaper` sweeps an
-orphaned run by label. `plan()` also emits **advisory** `plan.warnings` (never fatal)
+teardown on graceful exits (normal return, exceptions, `SIGINT`/`SIGTERM`) — these are
+**best-effort** and can't catch `SIGKILL` / OOM / node loss. For those abrupt cases,
+every resource is labelled with `fleet.run_id`, and **`reap(run_id=…)`** / `python -m
+agent_sandbox_rl.reaper` is the recovery path — sweeping an orphaned run by label. `plan()` also emits **advisory** `plan.warnings` (never fatal)
 for footprint/concurrency beyond what the control plane comfortably absorbs.
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,

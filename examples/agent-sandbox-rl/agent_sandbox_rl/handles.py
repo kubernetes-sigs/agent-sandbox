@@ -84,6 +84,9 @@ class SandboxSession:
     deadline = time.monotonic() + open_timeout
     while time.monotonic() < deadline and not self._resp.is_open():
       self._resp.update(timeout=1)
+    if not self.is_open:                        # honor open_timeout explicitly
+      raise TimeoutError(
+          f"session websocket did not open within {open_timeout}s on {pod}")
     self.run("stty -echo 2>/dev/null; true")   # quiet the pty echo where supported
 
   @property

@@ -17,13 +17,13 @@ Sandbox `v0.5.0rc1` (v1beta1).
   regardless of source — in-SDK, unlike an external watchdog that goes blind when the
   apiserver 429s. Wired into `run()`. Config: `overcommit_factor` (1.5),
   `max_live_sandboxes` (None), `breaker_poll_s` (5.0).
-- **Guaranteed teardown + label reaper** (`fleet.py`, `reaper.py`, `constants.py`):
+- **Best-effort teardown + label reaper** (`fleet.py`, `reaper.py`, `constants.py`):
   every created resource is stamped with a per-run label (`RUN_ID_LABEL` = `fleet.run_id`);
-  `setup()` installs `atexit` + SIGINT/SIGTERM handlers that tear down on any exit path
-  (`install_teardown_hooks`, default on); and **`reap(run_id=…)`** / `python -m
-  agent_sandbox_rl.reaper` deletes a run's resources by label — the guaranteed sweep for
-  an **orphaned** driver that died without cleanup (the failure mode behind the worst
-  incident).
+  `setup()` installs `atexit` + SIGINT/SIGTERM handlers that tear down on **graceful**
+  exits (`install_teardown_hooks`, default on) — best-effort, they can't catch SIGKILL /
+  OOM / node loss. For those abrupt cases, **`reap(run_id=…)`** / `python -m
+  agent_sandbox_rl.reaper` deletes a run's resources by label — the recovery path for an
+  **orphaned** driver that died without cleanup (the failure mode behind the worst incident).
 - **Capacity/QPS advisory** (`fleet.py`): `plan()` attaches `plan.warnings` (+ logs) when
   the warm footprint or `max_concurrent` looks beyond what the control plane absorbs
   (Pending-pod risk, apiserver 429 risk, #1215 deep-warm risk). **Warn only — never

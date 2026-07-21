@@ -38,7 +38,9 @@ func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Optio
 		// deploy. Crash failover still pays lease expiry by design
 		// (split-brain safety); only clean exits release early. Safe here:
 		// controller-runtime requires the binary to exit promptly once the
-		// manager stops, and main() returns right after mgr.Start.
+		// manager stops; mgr.Start is the last explicit statement in main(),
+		// and any deferred shutdown work (e.g. tracing cleanup) must stay
+		// bounded so the process still exits promptly.
 		LeaderElectionReleaseOnCancel: true,
 	}
 }

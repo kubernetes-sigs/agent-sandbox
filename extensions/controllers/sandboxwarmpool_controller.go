@@ -592,14 +592,25 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		// whether issuing them against the current cache is safe.
 		sandboxesToCreate, tokenWait := r.takeRefillTokens(poolKey, deficit, now)
 		if sandboxesToCreate < deficit {
-			// Token bucket exhausted for this pass: create what was granted
-			// now and requeue for the remainder when the next token accrues,
-			// keeping refill a smooth stream instead of a deficit burst.
 			logger.Info("Pacing pool replenishment",
 				"deficit", deficit,
 				"granted", sandboxesToCreate,
-				"requeueAfter", tokenWait)
-			requeueAfter = minNonZeroDuration(requeueAfter, tokenWait)
+				"tokenWait", tokenWait)
+			if sandboxesToCreate == 0 {
+				// Token bucket empty: nothing will be created this pass,
+				// so no Sandbox watch event will trigger the next
+				// reconcile — requeue for when the next token accrues.
+				requeueAfter = minNonZeroDuration(requeueAfter, tokenWait)
+			}
+			// When a partial batch IS granted, rely on the Owns(&Sandbox)
+			// watch instead: each create's informer event first lowers the
+			// creation expectation and then schedules a reconcile, so the
+			// next pass runs against a cache that already contains the new
+			// Sandbox. Requeueing on tokenWait as well would race that
+			// delivery and burn the pass on an unsatisfied expectations
+			// gate (a stale currentReplicas can no longer duplicate
+			// creates — the gate blocks that — but the futile wakeup and
+			// its 30s fallback would stall the paced stream).
 		}
 		if sandboxesToCreate > 0 {
 			sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash, currentSandboxBlueprintHash)

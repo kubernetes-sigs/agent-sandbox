@@ -317,6 +317,82 @@ func TestCache_HandlesMultipleSandboxesIndependently(t *testing.T) {
 	}
 }
 
+func TestCache_GetByName(t *testing.T) {
+	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	c, client, cancel := newCache(t, pod)
+	defer cancel()
+
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
+		t.Fatalf("name-index add failed")
+	}
+	e, ok := c.GetByName(testPodNS, testPodName)
+	if !ok || e.PodIP != testPodIP {
+		t.Fatalf("GetByName entry wrong: %+v ok=%v", e, ok)
+	}
+	// Namespace-scoped: same name in another namespace must miss.
+	if _, ok := c.GetByName("other-ns", testPodName); ok {
+		t.Fatalf("GetByName should be namespace-scoped")
+	}
+
+	// Delete removes the name mapping too.
+	if err := client.CoreV1().Pods(testPodNS).Delete(t.Context(), testPodName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return !ok }) {
+		t.Fatalf("delete event was not reflected in name index")
+	}
+}
+
+func TestCache_StaleDeleteDoesNotEvictSuccessorNameMapping(t *testing.T) {
+	// Simulate a same-named Sandbox recreate where the informer delivers
+	// the new Pod's add BEFORE the old Pod's delete (event reordering
+	// across resyncs). The old delete must not evict the successor's
+	// name mapping.
+	c, err := New(Options{Client: fake.NewSimpleClientset(), Log: logr.Discard()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	oldPod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	newPod := makePod(testPodName, testPodNS, testUID2, testPodIP2, true)
+
+	c.onAddOrUpdate(oldPod)
+	c.onAddOrUpdate(newPod) // successor repoints the name index
+	c.onDelete(oldPod)      // late delete for the predecessor
+
+	if _, ok := c.Get(testUID); ok {
+		t.Fatalf("old UID entry should be gone")
+	}
+	e, ok := c.GetByName(testPodNS, testPodName)
+	if !ok || e.PodIP != testPodIP2 {
+		t.Fatalf("successor name mapping lost or wrong: %+v ok=%v", e, ok)
+	}
+	if e2, ok := c.Get(testUID2); !ok || e2.PodIP != testPodIP2 {
+		t.Fatalf("successor UID entry wrong: %+v ok=%v", e2, ok)
+	}
+}
+
+func TestCache_InvalidateByName(t *testing.T) {
+	c, err := New(Options{Client: fake.NewSimpleClientset(), Log: logr.Discard()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.onAddOrUpdate(makePod(testPodName, testPodNS, testUID, testPodIP, true))
+
+	if !c.InvalidateByName(testPodNS, testPodName) {
+		t.Fatalf("InvalidateByName should report an eviction")
+	}
+	if _, ok := c.Get(testUID); ok {
+		t.Fatalf("UID entry should be gone after InvalidateByName")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatalf("name mapping should be gone after InvalidateByName")
+	}
+	// Unknown name is a no-op.
+	if c.InvalidateByName(testPodNS, "nope") {
+		t.Fatalf("InvalidateByName of unknown name should return false")
+	}
+}
+
 func TestApiVersionInGroup(t *testing.T) {
 	cases := map[string]bool{
 		"agents.x-k8s.io/v1beta1":  true,

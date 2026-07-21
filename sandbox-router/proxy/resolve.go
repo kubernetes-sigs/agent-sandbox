@@ -30,9 +30,15 @@ import (
 // graph just to make a map read.
 type Lookup interface {
 	Get(uid types.UID) (cache.Entry, bool)
+	// GetByName resolves by namespace + sandbox name for requests that
+	// carry no UID header. Required for Sandboxes with spec.service:
+	// false, which have no headless-Service DNS name to fall back to.
+	GetByName(namespace, name string) (cache.Entry, bool)
 	// Invalidate evicts an entry; called by the proxy's ErrorHandler on
 	// dial-class failures so the next request doesn't retry the stale IP.
 	Invalidate(uid types.UID) bool
+	// InvalidateByName is Invalidate for entries resolved via GetByName.
+	InvalidateByName(namespace, name string) bool
 }
 
 // Source tags how the upstream host was picked. Returned alongside the
@@ -46,8 +52,14 @@ const (
 	// SourceCache — UID was present and matched a cache entry; we dialed
 	// the live Pod IP. The KEP-NNNN fast/secure path.
 	SourceCache Source = "cache"
-	// SourceDNS — UID was absent or cache-missed; fell back to the
-	// in-cluster DNS form <id>.<ns>.svc.<cluster-domain>:<port>.
+	// SourceCacheName — no UID (or UID missed), but namespace+ID matched
+	// the cache's name index; we dialed the live Pod IP. This is the
+	// resolution path for service-free Sandboxes (spec.service: false)
+	// reached by SDKs that don't send X-Sandbox-Uid.
+	SourceCacheName Source = "cache-name"
+	// SourceDNS — every cache path missed; fell back to the in-cluster
+	// DNS form <id>.<ns>.svc.<cluster-domain>:<port>. Only works when the
+	// Sandbox has its per-sandbox headless Service.
 	SourceDNS Source = "dns"
 )
 
@@ -59,8 +71,10 @@ const (
 //     used by SDKs that already know the Pod IP from creating the Sandbox.
 //  2. cache lookup by t.UID — KEP-NNNN's secure fast path. Only attempted
 //     when both cache is non-nil AND t.UID is present.
-//  3. DNS form — always works without informer cache or UID, matches
-//     the Python router's behavior.
+//  3. cache lookup by t.Namespace/t.ID — name-index fallback for callers
+//     that send no UID. Makes spec.service:false Sandboxes routable.
+//  4. DNS form — works without informer cache or UID, matches the Python
+//     router's behavior; requires the per-sandbox headless Service.
 //
 // scheme defaults to "http" when empty. The returned Source records
 // which branch fired so the caller can attribute logs and metrics.
@@ -71,14 +85,22 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 
 	var host string
 	src := SourceDNS
-	switch {
-	case t.PodIP != "":
+	if t.PodIP != "" {
 		host = t.PodIP
 		src = SourcePodIP
-	case lookup != nil && t.UID != "":
+	}
+	if host == "" && lookup != nil && t.UID != "" {
 		if e, ok := lookup.Get(types.UID(t.UID)); ok {
 			host = e.PodIP
 			src = SourceCache
+		}
+	}
+	if host == "" && lookup != nil && t.ID != "" && t.Namespace != "" {
+		// Name-index fallback: serves UID-less callers and is the only
+		// non-DNS path for Sandboxes created with spec.service: false.
+		if e, ok := lookup.GetByName(t.Namespace, t.ID); ok {
+			host = e.PodIP
+			src = SourceCacheName
 		}
 	}
 	if host == "" {

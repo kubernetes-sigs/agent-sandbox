@@ -225,9 +225,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// stale entries. We only invalidate when the IP we tried
 			// actually came from the cache — a DNS or PodIP-header
 			// failure means the cache had nothing useful to evict.
-			if src == SourceCache && h.cache != nil && isRetriableDialError(err) && target0.UID != "" {
-				if h.cache.Invalidate(types.UID(target0.UID)) && h.metrics != nil {
-					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
+			if h.cache != nil && isRetriableDialError(err) {
+				switch {
+				case src == SourceCache && target0.UID != "":
+					if h.cache.Invalidate(types.UID(target0.UID)) && h.metrics != nil {
+						h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
+					}
+				case src == SourceCacheName:
+					// The IP came from the name index (UID-less request);
+					// evict by name so the next request re-resolves.
+					if h.cache.InvalidateByName(target0.Namespace, target0.ID) && h.metrics != nil {
+						h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
+					}
 				}
 			}
 			// Use the per-request logger from context so the trace ID is

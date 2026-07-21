@@ -54,7 +54,7 @@ Bearer token can address *any* Sandbox in the cluster.
 | [`sandbox-box-b.yaml`](sandbox-box-b.yaml) | Identical second `Sandbox`, `box-b` — the target for the negative (scoping) test. |
 | [`Dockerfile`](Dockerfile) | `python:3.11-slim` + `pip install mcp` + `mcp_server.py`. Runs continuously (unlike `mcp-server-sandbox`'s per-`kubectl-exec` process). |
 | [`mcp_server.py`](mcp_server.py) | MCP server over the `streamable-http` transport. Same `list_blobs` / `write_random_blob` / `read_blob` tools as `mcp-server-sandbox`, forked as a starting point. |
-| [`client.py`](client.py) | Host-side MCP client. Talks to the router over plain HTTP with the four `X-Sandbox-*` headers plus `Authorization: Bearer <token>` — no `kubectl`, no `ssh`, anywhere in this file. |
+| [`client.py`](client.py) | Host-side MCP client. Talks to the router over plain HTTP with the `X-Sandbox-*` routing headers plus `Authorization: Bearer <token>` — no `kubectl`, no `ssh`, anywhere in this file. The negative tests assert the exact status code (403 wrong sandbox, 401 forged/expired), not just "some failure". |
 | [`mint-token/main.go`](mint-token/main.go) | CLI wrapping `authz.MintScopedToken`. Stands in for the Sandbox controller, which is where minting belongs in production — see "What this example does *not* solve" below. |
 | [`run-test-kind.sh`](run-test-kind.sh) | Builds the router + MCP images, deploys `sandbox-router` with `--authz-mode=scoped-token`, and runs the three checks described below. |
 
@@ -71,8 +71,10 @@ Bearer token can address *any* Sandbox in the cluster.
 ```
 
 This builds and loads both images, deploys `sandbox-router` configured
-with `--authz-mode=scoped-token`, applies both Sandboxes, mints a token
-scoped to `box-a`, and runs three checks:
+with `--authz-mode=scoped-token`, port-forwards its Service to
+`localhost:18080` (the in-cluster DNS name isn't reachable from the host
+on kind), applies both Sandboxes, mints a token scoped to `box-a`, and
+runs three checks:
 
 ```text
 === Test 1: box-a's token against box-a — expect success ===
@@ -80,11 +82,11 @@ scoped to `box-a`, and runs three checks:
 [host] read_blob('random.bin') -> {'path': '/workspace/random.bin', 'size_bytes': 256, 'sha256': '...'}
 [host] OK — round-trip sha256 matches: ...
 
-=== Test 2: box-a's token against box-b — expect rejection (scoping) ===
-[host] OK — request against 'box-b' was rejected as expected: ...
+=== Test 2: box-a's token against box-b — expect exactly 403 (scoping) ===
+[host] OK — router returned 403 for 'box-b' as expected
 
-=== Test 3: a forged token against box-a — expect rejection ===
-[host] OK — request against 'box-a' was rejected as expected: ...
+=== Test 3: a forged token against box-a — expect exactly 401 ===
+[host] OK — router returned 401 for 'box-a' as expected
 
 All checks passed.
 ```

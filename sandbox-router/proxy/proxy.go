@@ -224,9 +224,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// String-matching "dial" would miss them and trap traffic on
 			// stale entries. We only invalidate when the IP we tried
 			// actually came from the cache — a DNS or PodIP-header
-			// failure means the cache had nothing useful to evict.
-			if src == SourceCache && h.cache != nil && isRetriableDialError(err) && target0.UID != "" {
-				if h.cache.Invalidate(types.UID(target0.UID)) && h.metrics != nil {
+			// failure means the cache had nothing useful to evict — and
+			// evict by the same key the entry was resolved with: UID for
+			// the fast path, namespace/name (plus the failed IP, so a
+			// recreated Pod's fresh entry survives) for the name index.
+			if h.cache != nil && isRetriableDialError(err) {
+				invalidated := false
+				switch {
+				case src == SourceCache && target0.UID != "":
+					invalidated = h.cache.Invalidate(types.UID(target0.UID))
+				case src == SourceCacheName:
+					// SplitHostPort strips the port and the brackets
+					// JoinHostPort added around IPv6 literals.
+					if ip, _, sperr := net.SplitHostPort(upstreamURL.Host); sperr == nil {
+						invalidated = h.cache.InvalidateByName(target0.Namespace, target0.ID, ip)
+					}
+				}
+				if invalidated && h.metrics != nil {
 					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
 				}
 			}

@@ -260,21 +260,55 @@ func TestIntegration_UpstreamConnectErrorReturns502(t *testing.T) {
 }
 
 // stubLookup is a minimal Lookup for integration tests of cache wiring.
+// GetByName scans entries so tests only have to populate one map. A
+// mutex guards the maps/slices because the handler mutates them from
+// the httptest server goroutine while assertions read from the test
+// goroutine.
 type stubLookup struct {
-	entries     map[types.UID]cache.Entry
-	invalidated []types.UID
+	mu                sync.Mutex
+	entries           map[types.UID]cache.Entry
+	invalidated       []types.UID
+	invalidatedByName []string
 }
 
 func (s *stubLookup) Get(uid types.UID) (cache.Entry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	e, ok := s.entries[uid]
 	return e, ok
 }
 
+func (s *stubLookup) GetByName(namespace, name string) (cache.Entry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.entries {
+		if e.Namespace == namespace && e.SandboxName == name {
+			return e, true
+		}
+	}
+	return cache.Entry{}, false
+}
+
 func (s *stubLookup) Invalidate(uid types.UID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, ok := s.entries[uid]
 	delete(s.entries, uid)
 	s.invalidated = append(s.invalidated, uid)
 	return ok
+}
+
+func (s *stubLookup) InvalidateByName(namespace, name, podIP string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invalidatedByName = append(s.invalidatedByName, namespace+"/"+name+"="+podIP)
+	for uid, e := range s.entries {
+		if e.Namespace == namespace && e.SandboxName == name && e.PodIP == podIP {
+			delete(s.entries, uid)
+			return true
+		}
+	}
+	return false
 }
 
 // TestIntegration_CacheInvalidationOnDialError exercises the KEP-NNNN
@@ -323,6 +357,8 @@ func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 		t.Fatalf("status: got %d want 502", resp.StatusCode)
 	}
 
+	lookup.mu.Lock()
+	defer lookup.mu.Unlock()
 	if len(lookup.invalidated) != 1 || lookup.invalidated[0] != "sandbox-uid-xyz" {
 		t.Fatalf("expected one invalidation for sandbox-uid-xyz, got %v", lookup.invalidated)
 	}
@@ -368,8 +404,126 @@ func TestIntegration_NoInvalidationOnDNSDialError(t *testing.T) {
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status: got %d want 502", resp.StatusCode)
 	}
-	if len(lookup.invalidated) != 0 {
-		t.Fatalf("expected no invalidations, got %v", lookup.invalidated)
+	lookup.mu.Lock()
+	defer lookup.mu.Unlock()
+	if len(lookup.invalidated) != 0 || len(lookup.invalidatedByName) != 0 {
+		t.Fatalf("expected no invalidations, got %v / %v", lookup.invalidated, lookup.invalidatedByName)
+	}
+}
+
+// TestIntegration_NameIndexRoutesWithoutUID is the end-to-end regression
+// for issue #883: a request carrying only X-Sandbox-Id + X-Sandbox-
+// Namespace (what the SDKs send when they don't know the Pod IP) must
+// route via the cache's name index instead of falling back to the DNS
+// form — which for warm-pool sandboxes (no per-sandbox Service) can
+// never resolve.
+func TestIntegration_NameIndexRoutesWithoutUID(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		gotPath  string
+		gotCalls int
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotPath = r.URL.Path
+		gotCalls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "warm-pool-ok")
+	}))
+	defer backend.Close()
+
+	u, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
+	cfg.ProxyTimeout = 5 * time.Second
+	cfg.ResponseHeaderTimeout = 2 * time.Second
+
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"warm-uid-1": {PodIP: u.Hostname(), SandboxName: "warm-sandbox", Namespace: "tenants"},
+	}}
+
+	router := httptest.NewServer(NewHandler(Options{
+		Config: &cfg,
+		Cache:  lookup,
+		Logger: logr.Discard(),
+	}))
+	defer router.Close()
+
+	// Only ID + namespace + port — no UID, no Pod-IP. Without the name
+	// index this would try warm-sandbox.tenants.svc.cluster.local and 502.
+	req, _ := http.NewRequest("GET", router.URL+"/execute", nil)
+	req.Header.Set(HeaderSandboxID, "warm-sandbox")
+	req.Header.Set(HeaderSandboxNamespace, "tenants")
+	req.Header.Set(HeaderSandboxPort, u.Port())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body %q)", resp.StatusCode, body)
+	}
+	if string(body) != "warm-pool-ok" {
+		t.Errorf("body: got %q want warm-pool-ok", body)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotCalls != 1 || gotPath != "/execute" {
+		t.Errorf("backend saw calls=%d path=%q, want 1 call to /execute", gotCalls, gotPath)
+	}
+}
+
+// TestIntegration_CacheInvalidationOnNameDialError mirrors the UID-path
+// active-invalidation test for name-resolved targets: a dial failure on
+// an IP that came from the name index must evict that entry so the next
+// request doesn't retry the stale IP.
+func TestIntegration_CacheInvalidationOnNameDialError(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.ResponseHeaderTimeout = 1 * time.Second
+	cfg.UpstreamMaxRetries = 0
+
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"warm-uid-1": {PodIP: "127.0.0.1", SandboxName: "warm-sandbox", Namespace: "tenants"},
+	}}
+
+	router := httptest.NewServer(NewHandler(Options{
+		Config: &cfg,
+		Cache:  lookup,
+		Logger: logr.Discard(),
+	}))
+	defer router.Close()
+
+	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
+	req.Header.Set(HeaderSandboxID, "warm-sandbox")
+	req.Header.Set(HeaderSandboxNamespace, "tenants")
+	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502", resp.StatusCode)
+	}
+	lookup.mu.Lock()
+	defer lookup.mu.Unlock()
+	// The handler must pass the IP it actually dialed so the cache can
+	// refuse the eviction if the entry was refreshed mid-dial.
+	if len(lookup.invalidatedByName) != 1 || lookup.invalidatedByName[0] != "tenants/warm-sandbox=127.0.0.1" {
+		t.Fatalf("expected one name invalidation for tenants/warm-sandbox=127.0.0.1, got %v", lookup.invalidatedByName)
+	}
+	if len(lookup.entries) != 0 {
+		t.Fatalf("entry should have been removed from cache, still have %v", lookup.entries)
 	}
 }
 

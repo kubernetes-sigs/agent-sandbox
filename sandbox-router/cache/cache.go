@@ -75,8 +75,9 @@ type Entry struct {
 	// upstream target.
 	PodIP string
 
-	// SandboxName is the human-readable Sandbox CR name (== Pod.Name). Used
-	// for logging and to construct DNS-form upstream targets on cache miss.
+	// SandboxName is the human-readable Sandbox CR name (== Pod.Name).
+	// Together with Namespace it is the key material for the byName
+	// index; also used for logging.
 	SandboxName string
 
 	// Namespace is the K8s namespace of the Sandbox / Pod.
@@ -95,6 +96,12 @@ type Cache struct {
 
 	mu      sync.RWMutex
 	entries map[types.UID]Entry
+	// byName is a secondary index over entries keyed "namespace/name",
+	// maintained under mu in lock-step with entries. SDK traffic carries
+	// only X-Sandbox-Id (no UID), and warm-pool sandboxes have no
+	// per-sandbox Service, so without a name-keyed lookup those requests
+	// fall through to a DNS form that can never resolve (issue #883).
+	byName map[string]types.UID
 }
 
 // Options configure the cache. Namespace is empty for cluster-wide
@@ -143,6 +150,7 @@ func New(o Options) (*Cache, error) {
 		factory:  factory,
 		stopCh:   make(chan struct{}),
 		entries:  make(map[types.UID]Entry),
+		byName:   make(map[string]types.UID),
 	}
 
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -184,6 +192,20 @@ func (c *Cache) Get(uid types.UID) (Entry, bool) {
 	c.mu.RLock()
 	e, ok := c.entries[uid]
 	c.mu.RUnlock()
+	return e, ok
+}
+
+// GetByName looks up the cached entry by sandbox namespace and name
+// (== Pod name). Resolution path for callers that send only
+// X-Sandbox-Id / X-Sandbox-Namespace; see byName.
+func (c *Cache) GetByName(namespace, name string) (Entry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	uid, ok := c.byName[nameKey(namespace, name)]
+	if !ok {
+		return Entry{}, false
+	}
+	e, ok := c.entries[uid]
 	return e, ok
 }
 
@@ -245,6 +267,16 @@ func (c *Cache) upsert(uid types.UID, e Entry) {
 	c.mu.Lock()
 	prev, existed := c.entries[uid]
 	c.entries[uid] = e
+	// Drop a stale name key only when it still points at this UID, so a
+	// newer Pod that already claimed the name is never clobbered.
+	if existed {
+		if pk := nameKey(prev.Namespace, prev.SandboxName); pk != nameKey(e.Namespace, e.SandboxName) && c.byName[pk] == uid {
+			delete(c.byName, pk)
+		}
+	}
+	// Last writer wins on name collisions (relist/compaction edge cases
+	// where delete-then-add ordering isn't contractual).
+	c.byName[nameKey(e.Namespace, e.SandboxName)] = uid
 	c.mu.Unlock()
 	if !existed {
 		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace)
@@ -255,12 +287,26 @@ func (c *Cache) upsert(uid types.UID, e Entry) {
 
 func (c *Cache) remove(uid types.UID) {
 	c.mu.Lock()
-	_, existed := c.entries[uid]
-	delete(c.entries, uid)
+	existed := c.removeLocked(uid)
 	c.mu.Unlock()
 	if existed {
 		c.log.V(1).Info("cache remove", "uid", uid)
 	}
+}
+
+// removeLocked deletes the entry for uid and its name-index key. The
+// name key is dropped only when it still points at this UID, so a
+// recreated Pod (same sandbox name, new UID) that already claimed the
+// key keeps its fresh entry. Caller must hold c.mu.
+func (c *Cache) removeLocked(uid types.UID) bool {
+	prev, existed := c.entries[uid]
+	delete(c.entries, uid)
+	if existed {
+		if k := nameKey(prev.Namespace, prev.SandboxName); c.byName[k] == uid {
+			delete(c.byName, k)
+		}
+	}
+	return existed
 }
 
 // Invalidate evicts the entry for uid if present, returning true when an
@@ -273,13 +319,47 @@ func (c *Cache) remove(uid types.UID) {
 // Safe to call for an unknown UID — the operation is a no-op.
 func (c *Cache) Invalidate(uid types.UID) bool {
 	c.mu.Lock()
-	_, existed := c.entries[uid]
-	delete(c.entries, uid)
+	existed := c.removeLocked(uid)
 	c.mu.Unlock()
 	if existed {
 		c.log.V(1).Info("cache invalidated by caller", "uid", uid)
 	}
 	return existed
+}
+
+// InvalidateByName is Invalidate for name-resolved targets, which carry
+// no UID to evict by. Eviction is conditional on the entry still holding
+// podIP (the IP the failed dial targeted): the name resolves at eviction
+// time, and a Pod recreated while the stale dial was timing out may have
+// already refreshed the entry — evicting it would leave the name
+// unroutable until the next resync. Safe no-op for unknown names or a
+// non-matching IP.
+func (c *Cache) InvalidateByName(namespace, name, podIP string) bool {
+	k := nameKey(namespace, name)
+	c.mu.Lock()
+	var existed bool
+	if uid, ok := c.byName[k]; ok {
+		if e, ok := c.entries[uid]; ok {
+			if e.PodIP == podIP {
+				existed = c.removeLocked(uid)
+			}
+		} else {
+			// Dangling key (should not happen): drop it so lookups
+			// fail fast to DNS instead of resolving nothing forever.
+			delete(c.byName, k)
+		}
+	}
+	c.mu.Unlock()
+	if existed {
+		c.log.V(1).Info("cache invalidated by caller", "ns", namespace, "pod", name, "ip", podIP)
+	}
+	return existed
+}
+
+// nameKey builds the byName index key. Namespace and Pod names are
+// DNS labels (no "/"), so the separator is unambiguous.
+func nameKey(namespace, name string) string {
+	return namespace + "/" + name
 }
 
 // sandboxUIDOf extracts the Sandbox CR UID from a Pod's controller

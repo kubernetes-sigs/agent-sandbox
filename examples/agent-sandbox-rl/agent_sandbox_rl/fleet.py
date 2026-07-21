@@ -378,9 +378,49 @@ class SandboxFleet:
       if err is not None:
         raise err
 
-  def start_warmpools(self, wait: bool = True) -> None:
-    """Warm every planned pool, concurrently (bounded by ``max_concurrent``)."""
-    self._warm_entries((self.plan_ or self.plan()).entries, wait)
+  def start_warmpools(self, wait: bool = True,
+                      create_budget: int | None = None) -> None:
+    """Warm every planned pool, concurrently (bounded by ``max_concurrent``).
+
+    The budget (``create_budget`` if given, else ``config.warm_create_budget``)
+    caps how many sandbox creates are in flight per wave; pools are warmed in
+    **waves** whose summed replicas stay under it, waiting for each wave to reach
+    Ready before the next starts. This bounds the controller's concurrent
+    sandbox-create burst (Σ pools×replicas in flight), which avoids the
+    SandboxWarmPool over-creation race (#1215) at large/deep warm targets — the
+    burst that trips it is ``workers × replicas_per_pool``, and waiting between
+    waves lets the informer cache converge. Budget ``0`` warms all at once;
+    ``create_budget=None`` falls back to the config default.
+
+    Note: when staging is active (budget > 0), intermediate waves always block on
+    readiness regardless of ``wait`` — waiting between waves is what makes staging
+    work; only the final wave honors ``wait``. So ``wait=False`` is not fully
+    non-blocking under staging; pass ``create_budget=0`` for the old all-at-once,
+    ``wait``-honoring behavior."""
+    # None = fall back to the configured default; 0 = explicitly warm all at once.
+    budget = self.config.warm_create_budget if create_budget is None else create_budget
+    entries = (self.plan_ or self.plan()).entries
+    if not budget or budget <= 0:
+      self._warm_entries(entries, wait)
+      return
+    wave: list = []
+    wave_creates = 0
+    n_waves = 0
+    for e in entries:
+      # A pool is atomic: if one entry alone exceeds the budget, it warms solo.
+      if wave and wave_creates + e.replicas > budget:
+        n_waves += 1
+        logger.info("staged warm: wave %d — %d pools / %d creates (budget %d)",
+                    n_waves, len(wave), wave_creates, budget)
+        self._warm_entries(wave, wait=True)   # wait so the cache converges first
+        wave, wave_creates = [], 0
+      wave.append(e)
+      wave_creates += e.replicas
+    if wave:
+      n_waves += 1
+      logger.info("staged warm: wave %d — %d pools / %d creates (budget %d)",
+                  n_waves, len(wave), wave_creates, budget)
+      self._warm_entries(wave, wait=wait)
 
   def warm_images(self, images, *, replicas_override: int | None = None,
                   wait: bool = True) -> None:
@@ -437,13 +477,17 @@ class SandboxFleet:
     for c in self.registry:
       _pp.prepull_delete(c)
 
-  def setup(self, prepull: bool = False) -> "SandboxFleet":
-    """preflight → plan → (optional pre-pull) → start (and wait for) warm pools."""
+  def setup(self, prepull: bool = False,
+            create_budget: int | None = None) -> "SandboxFleet":
+    """preflight → plan → (optional pre-pull) → start (and wait for) warm pools.
+
+    ``create_budget`` (if set) stages the warm fill in waves to bound the
+    controller's concurrent create burst — see ``start_warmpools``."""
     self.preflight()
     self.plan()
     if prepull:
       self.prepull(wait=True)
-    self.start_warmpools(wait=True)
+    self.start_warmpools(wait=True, create_budget=create_budget)
     return self
 
   # --- claims ------------------------------------------------------------ #

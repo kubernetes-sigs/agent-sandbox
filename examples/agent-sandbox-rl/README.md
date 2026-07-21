@@ -177,10 +177,29 @@ python run_swebench_fleet.py
 | `pipelined` | Like `sliding`, but **prefetch** window N+1's pools while window N's tasks run, so image pull overlaps execution. | Bounded (≤ 2 windows; the window is halved so peak ≈ `max_concurrent`). | **Pull-bound eval sweeps** (many distinct images, 1 task each). |
 | `none` | One size-1 pool per image on demand, torn down after. | Lowest (cold-start per image). | Tiny runs / debugging. |
 
-`pipelined` is the throughput pick **when image pull dominates** — e.g. a 1:1
-**eval** sweep over hundreds of distinct images — because it hides each window's
-pull behind the previous window's execution. It is *not* the pick for RL rollouts
-that warm many replicas per image (see [Eval vs RL](#eval-vs-rl--recommended-recipes)).
+**How to choose — two questions: does the warm set fit on disk, and is pull the bottleneck?**
+
+1. **Does the whole warm set fit on the node/pool's disk?** `naive` warms *every* pool
+   at once, so all resident images must fit simultaneously. **If they fit**, `naive` is
+   the simplest and reaches steady state fastest. **If they don't fit** (large image
+   sets — the common case at hundreds+ of multi-GB images), you *must* bound what's
+   resident at any moment → use **`sliding`** or **`pipelined`**, whose window
+   auto-sizes to the disk budget (`avg_image_gb` / `node_ephemeral_gb` / `cluster_nodes`;
+   see [Disk-aware window](#configuration-reference)). This is the primary reason to
+   reach for a windowed strategy: **the images don't fit storage.**
+2. **Is image pull the bottleneck?** For a **1:1 eval sweep** (hundreds of distinct
+   images, one task each) pull dominates wall time → **`pipelined`** hides each window's
+   pull behind the previous window's execution. So use `pipelined` when *either* the set
+   doesn't fit disk *or* pull dominates (usually both, for eval).
+3. **RL rollouts (1:G)** — each image is claimed by G rollouts, so pools are deep. Use
+   **`naive`** or **`sliding`** with `warm_per_task` (+ `colocate_replicas`), **not
+   `pipelined`**: deep per-image replicas shrink the pipelined window and serialize
+   problems (measured wall 55 s → 97 s). See [Eval vs RL](#eval-vs-rl--recommended-recipes).
+
+**In short:** `naive` when everything fits and you want simplicity; **`pipelined`/`sliding`
+when the image set is too big for disk** (windowed = fits by construction), with
+`pipelined` adding pull/exec overlap for pull-bound eval; `naive`/`sliding` + `warm_per_task`
+for RL.
 For repeated passes over the same dataset (RL epochs), use **`epochs=N`** to keep
 pools resident between passes (re-pulls then hit the node layer cache — see
 [Strategies & tuning](docs/strategies.md)), or **`keep_warm=True`** to drive your
@@ -247,6 +266,17 @@ fleet.run(process_fn, strategy="naive")          # warm everything, full depth, 
   node's containerd layer cache (pairs with the default `image_pull_policy:
   IfNotPresent`). Soft, so it spills to other nodes instead of dead-locking when a
   node fills. Size the node for `replicas × cpu_request` (e.g. 50 × 250m ≈ 13 vCPU).
+- **Deep/large warms stage automatically** — `warm_per_task` across many images can
+  ask the controller to create tens of thousands of replicas at once. `start_warmpools`
+  fills in **waves** of ≤ `warm_create_budget` (default 1000) creates, waiting for each
+  wave to be Ready before the next. Set `warm_create_budget=0` to warm all at once.
+  > ⚠️ **Staging alone is not sufficient at scale.** Current Agent Sandbox releases
+  > (≤ v0.5.2) have a warm-pool over-creation *churn* bug
+  > ([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)) that
+  > staging only *slows*. For large/deep *cold* warms, also set the controller flag
+  > **`--sandbox-warm-pool-concurrent-workers` low (≤10)** (leave sandbox/claim workers
+  > high). The RL-safe path avoids the regime entirely — **recycle** one sandbox per
+  > problem (see **Sandbox recycling** below) instead of deep-warming.
 
 > **When does this help?** Only when an image carries **more than one task**. A 1:1
 > eval sweep (one image per task — see below) gets `min(1, …) = 1` replica, so
@@ -320,6 +350,9 @@ same-image contention. At eval shape (many distinct images, 1:1) keep fresh-clai
 
 The two workloads pull in opposite directions: **eval** is *pull-bound* (many distinct
 images, one task each), **RL** is *claim-bound* per problem (one image, many rollouts).
+(Eval uses `pipelined` because a large distinct-image set rarely fits disk *and* pull
+dominates; if your eval set is small enough to fit resident, plain `naive` also works
+and is simpler — see [How to choose](#warm-pool-strategies).)
 
 | Job | Image : task | Strategy | Sizing levers | Why |
 | :-- | :-- | :-- | :-- | :-- |
@@ -370,8 +403,11 @@ split across pools with different pod caps.)
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
 (8), `warm_per_task` (False — one warm replica per task for instant claims),
-`window_size` (None=auto), `ready_timeout` (900), `template` (`TemplateSpec`),
-`template_name_prefix` (`r2e-img-`), `labels`. Disk-aware sizing (optional):
+`window_size` (None=auto), `ready_timeout` (900), `warm_create_budget` (1000 — stage
+the warm fill in waves of ≤ N sandbox creates in flight to curb the controller's
+over-creation race; pair with a low `--sandbox-warm-pool-concurrent-workers` for
+large/deep cold warms; `0` = warm all at once), `template`
+(`TemplateSpec`), `template_name_prefix` (`r2e-img-`), `labels`. Disk-aware sizing (optional):
 `avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
 (None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
 images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct images
@@ -553,7 +589,7 @@ the controller Deployment's container args, namespace `agent-sandbox-system`):
 | `--kube-api-burst` | `10` | n/a | **Moot while `qps=-1`** (burst is only consulted when QPS > 0). Only raise if you set a positive QPS. |
 | `--sandbox-concurrent-workers` | `1` | **`1000`** | Sandbox reconciles (claim binding → Ready) are the main serializer; match your peak concurrent sandboxes. |
 | `--sandbox-claim-concurrent-workers` | `50` | **`1000`** | Concurrent `SandboxClaim` reconciles; match peak in-flight claims. |
-| `--sandbox-warm-pool-concurrent-workers` | `1` | **`1000`** | Parallel warm-pool reconciles (one per image pool); raise so many pools warm at once. |
+| `--sandbox-warm-pool-concurrent-workers` | `1` | **`≤10`** ⚠️ | **Do _not_ raise to 1000.** High values trigger the warm-pool over-creation *churn* bug ([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)): parallel reconciles race a stale informer cache and over-create → delete → re-create sandboxes; with lagging pod GC the pod count balloons (observed ~17K pods for an 8K target). Keep it **low (≤10; `1` fully serializes)** until #1215 is fixed upstream. Warm-pool provisioning is a one-time setup cost, so low concurrency here barely affects steady-state throughput. |
 | `--sandbox-template-concurrent-workers` | `1` | **`1000`** | Parallel template reconciles. |
 | `--sandbox-warm-pool-max-batch-size` | `300` | **`1000`** | Parallel pod create/delete *within* one warm-pool reconcile. |
 
@@ -562,7 +598,10 @@ controller's API client is already uncapped at `qps=-1`. The **worker concurrenc
 flags are what unblock high-scale claims. Size them to your `max_concurrent`. Also
 size this package's client pool (`build_api_client` defaults the urllib3
 `connection_pool_maxsize` to 1000) to match — otherwise the driver throttles before
-the controller does.
+the controller does. **One exception:** `--sandbox-warm-pool-concurrent-workers` — keep
+it **low (≤10)**, not 1000 (see the ⚠️ row above): warm-pool provisioning is a one-time
+setup cost, and high concurrency there triggers the #1215 over-creation churn. Pair with
+this package's staged warm fill (`FleetConfig.warm_create_budget`, default 1000).
 
 Example patch:
 
@@ -570,7 +609,7 @@ Example patch:
 kubectl -n agent-sandbox-system patch deploy agent-sandbox-controller --type=json -p '[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-concurrent-workers=1000"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-claim-concurrent-workers=1000"},
-  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-concurrent-workers=1000"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-concurrent-workers=10"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-template-concurrent-workers=1000"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-max-batch-size=1000"}
 ]'

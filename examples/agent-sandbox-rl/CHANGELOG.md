@@ -51,6 +51,32 @@ Sandbox `v0.5.0rc1` (v1beta1).
   parallel); `_run_windowed`/`_run_pipelined` use it instead of warming one image at a
   time. Measured at 500 images: `sliding` dropped **2556s → 279s (9.2×)**, making the
   windowed strategies competitive with `naive` (the async path was already concurrent).
+- **Staged warm fill (`warm_create_budget`)** (`config.py`, `fleet.py`):
+  `start_warmpools`/`setup` warm pools in **waves** of ≤ `warm_create_budget` sandbox
+  creates in flight (default **1000**), waiting for each wave to reach Ready before the
+  next. Bounds the controller's concurrent create burst (Σ pools×replicas) so a large
+  or deep warm can't trip the SandboxWarmPool over-creation race (upstream
+  [#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)) — the burst
+  that triggers it is `warm-pool-workers × replicas_per_pool`, and the wait between
+  waves lets the informer cache converge. `warm_create_budget=0` (or `create_budget=0`)
+  restores the old warm-all-at-once behavior; a warm ≤ the budget is a single wave
+  (no change). **Reduces but does not by itself eliminate** the controller-side race —
+  for large/deep *cold* warms it must be paired with a low
+  `--sandbox-warm-pool-concurrent-workers` (the churn is per-pool + lagging pod GC).
+  The robust fix is upstream (expectations pattern on warm-pool creates + counting
+  `Terminating` toward the target); the RL-safe path is to not deep-warm at all
+  (recycle → 1 replica/pool).
+- **Recycle scale-on-hold (`scale_on_hold`, default on)** (`recycle.py`): once
+  `reuse_git_restore_sandbox` claims and holds a recyclable sandbox for its group, it
+  drops that image's warm pool (`unwarm_image`) so the controller doesn't
+  **replenish** a replacement the reuse never claims — removing the *sustained*
+  idle-warm footprint (steady state ~1× the held count instead of ~2×) and the
+  ongoing claim-driven replenishment that feeds #1215 (the peak during the initial
+  concurrent-claim burst can still transiently ~2× until claims are staged too).
+  Quarantine/rotation re-claims JIT re-warm first. Verified safe by probe: a claimed
+  sandbox survives its pool being scaled to 0 / deleted (a `SandboxClaim` detaches it
+  from warm-pool ownership). Non-recyclable (fresh-claim-per-task) images keep their
+  pools. `scale_on_hold=False` restores resident pools.
 - **Node-aware disk window sizing** (`sizing.py`, `config.py`, `fleet.py`):
   `recommend_window_disk` / `recommend_window_pipelined` gained a `nodes` arg so the
   disk budget is the **whole pool's** usable disk (distinct images spread across nodes),

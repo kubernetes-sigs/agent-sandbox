@@ -150,8 +150,10 @@ class AsyncSandboxFleet:
   async def ensure_templates(self):
     return await self._to_thread(self._fleet.ensure_templates)
 
-  async def start_warmpools(self, wait: bool = True):
-    return await self._to_thread(self._fleet.start_warmpools, wait)
+  async def start_warmpools(self, wait: bool = True,
+                            create_budget: int | None = None):
+    return await self._to_thread(self._fleet.start_warmpools, wait,
+                                 create_budget=create_budget)
 
   async def prepull(self, wait: bool = True):
     return await self._to_thread(self._fleet.prepull, wait)

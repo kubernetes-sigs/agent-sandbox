@@ -123,7 +123,8 @@ so the simple case stays simple.
   `JsonlSource`; `SweBenchSource` (HF) in `adapters/swebench.py` (`swebench` extra).
 - **`FleetConfig`** (pydantic): `clusters: list[ClusterConfig]`, `placement`,
   `max_concurrent`, `max_warmpool_size`, `window_size` (None=auto),
-  `ready_timeout`, `template` (`TemplateSpec`), `template_name_fn`
+  `ready_timeout`, `warm_create_budget` (1000 — stage the warm fill in waves of ≤ N
+  in-flight creates; 0 = all at once), `template` (`TemplateSpec`), `template_name_fn`
   (default `r2e-img-<md5[:12]>`), `labels`.
 - **`SandboxHandle`** (`handles.py`): per claim — `task`, **`cluster`** (name +
   connection), `claim_name`, `sandbox_id`, **`hostname`** (stable in-cluster DNS),
@@ -139,7 +140,7 @@ so the simple case stays simple.
 | preflight checks | `preflight() -> dict[cluster, PreflightReport]` (raises on hard failures) |
 | compute replicas | `plan() -> FleetPlan` (per-cluster, per-image replicas + window) |
 | set templates | `ensure_templates()` (across selected clusters) |
-| pools / start warmpools | `start_warmpools(wait=True)` (distributes pools across clusters per placement+sizing) |
+| pools / start warmpools | `start_warmpools(wait=True, create_budget=None)` (distributes pools across clusters per placement+sizing; staged in ≤`warm_create_budget` in-flight-create waves) |
 | (optional) pre-pull | `prepull(wait=True)` / `prepull_delete()` (per cluster) |
 | setup | `setup()` — preflight → plan → (optional prepull) → start warm pools |
 | start claims | `acquire(task) -> SandboxHandle`, `acquire_batch(tasks) -> [SandboxHandle]` (placement-routed) |

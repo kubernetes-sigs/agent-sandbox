@@ -33,6 +33,7 @@ actually produced identical outputs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -346,6 +347,104 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
     futs = [ex.submit(_run_group, g) for g in groups]
     for fut in as_completed(futs):
       fut.result()                            # surface executor-level errors
+  return results
+
+
+async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency, *,
+                                          reset: GitRestoreReset | None = None,
+                                          max_reuses: int = 32,
+                                          reset_timeout: float = 5.0,
+                                          use_session: bool = True,
+                                          scale_on_hold: bool = True):
+  """Async twin of `reuse_git_restore_sandbox` for `AsyncSandboxFleet`.
+
+  Same semantics — group by image, reset-and-reuse one held sandbox per group,
+  quarantine/rotate, `scale_on_hold` — but each group is an **asyncio coroutine**
+  instead of a thread. Blocking git/exec/claim calls are offloaded to the fleet's
+  bounded pool (`afleet._to_thread`), so coroutines let you **hold far more
+  concurrent groups than OS threads allow** (the sync executor is one thread per
+  held sandbox). Effective *exec* concurrency is still bounded by that pool and the
+  apiserver exec path — coroutines lift the driver-side ceiling, not the exec-plane
+  one (a native async I/O backend would lift that too). ``process_fn`` may be sync
+  or async. Returns one result per task in ``tasks`` order (per-task exceptions are
+  captured, not raised)."""
+  reset = reset or GitRestoreReset()
+  results: list = [None] * len(tasks)
+  by_image: dict[str, list[tuple[int, Task]]] = {}
+  for i, t in enumerate(tasks):
+    by_image.setdefault(t.image, []).append((i, t))
+  groups = list(by_image.values())
+  sync = afleet._fleet                          # the wrapped SandboxFleet
+  obs = sync._obs
+  sem = asyncio.Semaphore(max(1, concurrency))
+
+  async def _process(handle, i, t):
+    fam = repo_family(t)
+    t0 = time.monotonic()
+    status = "ok"
+    try:
+      with obs.phase("process", cluster=handle.cluster_name, family=fam):
+        results[i] = await afleet._call(process_fn, t, handle)
+    except BaseException as e:                   # noqa: BLE001 — capture, keep batch alive
+      status = "error"
+      results[i] = e
+      logger.error("task %s failed: %s", t.id, e)
+    finally:
+      obs.task_done(handle.cluster_name, fam, status, time.monotonic() - t0)
+
+  async def _run_group(group):
+    async with sem:
+      handle = None
+      baseline = None
+      uses = 0
+      recyclable = None
+      try:
+        for pos, (i, t) in enumerate(group):
+          if handle is None:
+            if scale_on_hold and recyclable:     # re-claim: pool was dropped, JIT re-warm
+              await afleet._to_thread(sync.warm_image, t.image,
+                                      replicas_override=1, wait=True)
+            handle = await afleet.acquire(t)
+            if use_session:
+              try:
+                await afleet._to_thread(handle.open_session)
+              except Exception as e:             # noqa: BLE001 — fall back to one-shot exec
+                logger.warning("session open failed on %s (%s); one-shot exec",
+                               handle.pod_name, e)
+            if recyclable is None:               # first claim: prime + decide
+              baseline = await afleet._to_thread(reset.prime, handle)
+              recyclable = reset.recyclable(baseline)
+              if not recyclable:
+                logger.info("image %s not git-recyclable — fresh claim per task", t.image)
+            elif recyclable:
+              baseline = await afleet._to_thread(reset.prime, handle)
+            if scale_on_hold and recyclable:     # holding → stop the pool replenishing
+              await afleet._to_thread(sync.unwarm_image, t.image)
+            uses = 0
+          await _process(handle, i, t)
+          if pos == len(group) - 1:
+            break
+          if not recyclable:                      # can't reset → fresh claim per task
+            await afleet.release(handle); handle = None; continue
+          uses += 1
+          if uses >= max_reuses:                  # planned rotation (drift bound)
+            with obs.phase("rotate", cluster=handle.cluster_name):
+              await afleet.release(handle)
+            handle = None; continue
+          with obs.phase("reset", cluster=handle.cluster_name):
+            outcome = await afleet._to_thread(reset.reset, handle, baseline,
+                                              timeout=reset_timeout)
+          if not outcome.clean:                   # dirty → quarantine, fresh claim next
+            logger.warning("quarantine sandbox %s after reset: %s",
+                           handle.pod_name, outcome.reason)
+            with obs.phase("quarantine", cluster=handle.cluster_name):
+              await afleet.release(handle)
+            handle = None
+      finally:
+        if handle is not None:
+          await afleet.release(handle)
+
+  await asyncio.gather(*(_run_group(g) for g in groups))
   return results
 
 

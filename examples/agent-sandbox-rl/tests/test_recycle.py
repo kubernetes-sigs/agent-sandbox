@@ -339,3 +339,38 @@ def test_determinism_canary_identical(make_cluster, monkeypatch):
   assert out["identical"] is True
   assert out["reset_clean"] is True
   f.teardown()
+
+
+# --- async executor (AsyncSandboxFleet) ----------------------------------- #
+async def test_reuse_async_one_claim_per_image(make_cluster, monkeypatch):
+  from agent_sandbox_rl import AsyncSandboxFleet
+  from agent_sandbox_rl.recycle import reuse_git_restore_sandbox_async
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  af = AsyncSandboxFleet(FleetConfig(max_concurrent=4), registry=ClusterRegistry([c]))
+  af.load_tasks(["img", "img", "img", "img"])   # 4 tasks, 1 image
+  await af.setup()
+  res = await reuse_git_restore_sandbox_async(
+      af, af.tasks, lambda t, h: h.pod_name, concurrency=4, use_session=False)
+  assert len(res) == 4 and all(isinstance(x, str) for x in res)
+  assert c.sandbox_client.create_sandbox.call_count == 1   # one claim reused (÷G)
+  await af.teardown()
+  af.close()
+
+
+async def test_reuse_async_scale_on_hold_drops_pool(make_cluster, monkeypatch):
+  import unittest.mock as m
+  from agent_sandbox_rl import AsyncSandboxFleet
+  from agent_sandbox_rl.recycle import reuse_git_restore_sandbox_async
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  af = AsyncSandboxFleet(FleetConfig(max_concurrent=4), registry=ClusterRegistry([c]))
+  af.load_tasks(["img", "img", "img", "img"])
+  await af.setup()
+  uw = m.MagicMock(wraps=af._fleet.unwarm_image)
+  monkeypatch.setattr(af._fleet, "unwarm_image", uw)
+  await reuse_git_restore_sandbox_async(
+      af, af.tasks, lambda t, h: 1, concurrency=1, use_session=False, scale_on_hold=True)
+  assert uw.call_count == 1                       # held sandbox drops its pool
+  await af.teardown()
+  af.close()

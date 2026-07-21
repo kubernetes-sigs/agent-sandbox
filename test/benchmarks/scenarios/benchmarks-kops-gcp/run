@@ -250,9 +250,12 @@ if [[ "${CNI}" == "cilium" ]]; then
   kops validate cluster --wait 5m
 fi
 
-# Deploy to cluster
+# Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
+# (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
+# actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
 echo "Deploying to cluster..."
-dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions
+dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
+  ${CONTROLLER_ARGS:+--controller-args "${CONTROLLER_ARGS}"}
 
 # Wait for controller to be ready
 echo "Waiting for controller to be ready..."
@@ -270,6 +273,7 @@ echo "Benchmark completed successfully."
 #   fill              long-running background sandboxes (scale)
 #   probe             low-concurrency launch latency
 #   throughput-mifN   closed-loop churn capped at N in-flight
+#   claims-warm       SandboxClaim burst against a provisioned warm pool
 #
 # Keep fill (fill-per-node * nodes) + max(mifN) below spare pod capacity
 # (roughly 3 * 110 minus system pods on the default cluster); the test
@@ -291,6 +295,10 @@ echo "Running stress test"
 # kube-scheduler, the sandbox controller, and kubelets are collected by the
 # stress tool itself (metrics.jsonl.gz; see --collect-metrics).
 set +o errexit
+# STRESS_EXTRA_ARGS appends verbatim extra flags (word-split on purpose) so
+# scenarios can pass tool flags without this script growing an env knob for
+# each one (e.g. --client-connections=4 in benchmarks-kops-gcp-claims).
+# shellcheck disable=SC2086
 go run ./test/stress \
   --phases="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
@@ -298,8 +306,10 @@ go run ./test/stress \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \
   --throughput-min-seconds="${STRESS_THROUGHPUT_MIN_SECONDS:-45}" \
   --create-concurrency="${STRESS_CREATE_CONCURRENCY:-50}" \
+  --claims-warm-count="${STRESS_CLAIMS_WARM:-300}" \
   --timeout="${STRESS_TIMEOUT:-30m}" \
-  --output-dir="${STRESS_OUTPUT_DIR}"
+  --output-dir="${STRESS_OUTPUT_DIR}" \
+  ${STRESS_EXTRA_ARGS:-}
 stress_status=$?
 set -o errexit
 capture_stress_diagnostics

@@ -46,12 +46,20 @@ presented to the API server for anything — and the router rejects it with
 docstring in `sandbox-router/authz/tokenreview.go`): any authenticated
 Bearer token can address *any* Sandbox in the cluster.
 
+Scoped-token mode also rejects the `X-Sandbox-UID` and `X-Sandbox-Pod-IP`
+routing headers, because each would let the proxy pick a dial target
+*other* than the `(namespace, name)` the token authorizes (a UID→IP cache
+lookup, or a raw IP) while `X-Sandbox-ID` still names the authorized box.
+So the router resolves purely by DNS name — which is why each sandbox
+here ships a headless `Service`. Routing by `(namespace, name)` keeps the
+pod actually reached equal to the one the token is scoped to.
+
 ## Files
 
 | File | Role |
 |---|---|
-| [`sandbox.yaml`](sandbox.yaml) | `Sandbox` named `box-a`. `automountServiceAccountToken: false` — the pod has no K8s credential to begin with. Runs the MCP server on port 8000, non-root, dropped caps, `RuntimeDefault` seccomp. |
-| [`sandbox-box-b.yaml`](sandbox-box-b.yaml) | Identical second `Sandbox`, `box-b` — the target for the negative (scoping) test. |
+| [`sandbox.yaml`](sandbox.yaml) | `Sandbox` named `box-a` plus a headless `Service` (same name) so the router resolves it by `box-a.default.svc.cluster.local`. `automountServiceAccountToken: false` — the pod has no K8s credential to begin with. Runs the MCP server on port 8000, non-root, dropped caps, `RuntimeDefault` seccomp. |
+| [`sandbox-box-b.yaml`](sandbox-box-b.yaml) | Identical second `Sandbox` + `Service`, `box-b` — the target for the negative (scoping) test. |
 | [`Dockerfile`](Dockerfile) | `python:3.11-slim` + `pip install mcp` + `mcp_server.py`. Runs continuously (unlike `mcp-server-sandbox`'s per-`kubectl-exec` process). |
 | [`mcp_server.py`](mcp_server.py) | MCP server over the `streamable-http` transport. Same `list_blobs` / `write_random_blob` / `read_blob` tools as `mcp-server-sandbox`, forked as a starting point. |
 | [`client.py`](client.py) | Host-side MCP client. Talks to the router over plain HTTP with the `X-Sandbox-*` routing headers plus `Authorization: Bearer <token>` — no `kubectl`, no `ssh`, anywhere in this file. The negative tests assert the exact status code (403 wrong sandbox, 401 forged/expired), not just "some failure". |

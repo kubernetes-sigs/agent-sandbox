@@ -8,6 +8,12 @@ spec:
   # sandbox-router's --authz-mode=scoped-token. Nothing in this pod ever
   # needs to call the K8s API.
   podTemplate:
+    metadata:
+      # A label we control, so the headless Service below can select this
+      # pod. (The controller also stamps agents.x-k8s.io/sandbox-name-hash,
+      # but its value is a hash we can't name in a static manifest.)
+      labels:
+        router-scoped-mcp/sandbox: box-a
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -48,3 +54,23 @@ spec:
       resources:
         requests:
           storage: 1Gi
+---
+# Headless Service so the router can resolve box-a by its
+# (namespace, name) DNS name — box-a.default.svc.cluster.local. In
+# scoped-token mode this is the ONLY routing path the router accepts:
+# it rejects the X-Sandbox-UID cache fast-path and X-Sandbox-Pod-IP
+# override, because those could send a valid box-a token to a different
+# pod. Routing strictly by (namespace, name) keeps the dial target equal
+# to what the token authorizes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: box-a
+spec:
+  clusterIP: None
+  selector:
+    router-scoped-mcp/sandbox: box-a
+  ports:
+  - name: mcp
+    port: 8000
+    targetPort: mcp

@@ -32,9 +32,9 @@ export PATH="${BINDIR}:${PATH}"
 
 export KUBECONFIG="${WORKDIR}/kubeconfig"
 
-# Install kOps to bin dir
+# Install kOps to bin dir.
 echo "Installing kOps to ${BINDIR}..."
-GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.35.0
+GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.36.0
 
 # Install resourcectl to bin dir
 echo "Installing resourcectl to ${BINDIR}..."
@@ -127,6 +127,16 @@ trap cleanup EXIT
 CNI="${CNI:-cilium}"
 echo "Using CNI: ${CNI}"
 
+# Cluster-scale experiment: 20 worker nodes instead of 3. Per-node launch
+# throughput is wall-limited at ~5 pods/s (node I/O; see the Node Kernel
+# report page), so cluster throughput scales with node count -- this run
+# pushes ~100 pods/s through the control plane to find the cluster-scale
+# bottlenecks (apiserver CPU hit 4.5-5.5 cores at ~87/s in the 1122-era
+# runs; the sandbox controller workqueue and KCM client QPS are the other
+# candidates).
+STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
+echo "Using node count: ${STRESS_NODE_COUNT}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -138,7 +148,7 @@ kops create cluster \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
   --control-plane-size=n2-standard-8 \
-  --node-count=3 \
+  --node-count="${STRESS_NODE_COUNT}" \
   --node-size=n2-standard-8
 
 # Spec tuning is applied as separate `kops edit cluster --set` blocks rather
@@ -172,10 +182,25 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # throughput-mif100..600 (saturation), and KCM's garbage collector is on
 # the sandbox delete path (sandbox -> ownerRef cascade -> pod delete), so
 # the closed-loop delete drain paces the whole benchmark: mif200 slots
-# cycled in ~8.8s of which only 1.6s was launch.
+# cycled in ~8.8s of which only 1.6s was launch. Raising to 100/200 still
+# left KCM throttling client-side, so go to 500/500 to take the client
+# limiter out of the measurement entirely.
 kops edit cluster --name "${CLUSTER_NAME}" \
-  --set cluster.spec.kubeControllerManager.kubeAPIQPS=100 \
-  --set cluster.spec.kubeControllerManager.kubeAPIBurst=200
+  --set cluster.spec.kubeControllerManager.kubeAPIQPS=500 \
+  --set cluster.spec.kubeControllerManager.kubeAPIBurst=500
+
+# kubeScheduler.qps/burst: the scheduler's client defaults (50/100) throttle
+# it under churn -- every sandbox is a pod to schedule, and each pod costs
+# the scheduler a binding plus status writes, which shows up as
+# kube-scheduler client-side throttle wait on the stress report's Rate
+# Limiting page. Match KCM at 500/500. Note these fields render into the
+# KubeSchedulerConfiguration file's clientConnection.qps/burst (the
+# scheduler's kubeAPIQPS/kubeAPIBurst spec fields map to the legacy
+# --kube-api-qps/--kube-api-burst flags, which current kube-schedulers no
+# longer accept).
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubeScheduler.qps=500 \
+  --set cluster.spec.kubeScheduler.burst=500
 
 
 if [[ "${CNI}" == "cilium" ]]; then
@@ -225,9 +250,12 @@ if [[ "${CNI}" == "cilium" ]]; then
   kops validate cluster --wait 5m
 fi
 
-# Deploy to cluster
+# Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
+# (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
+# actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
 echo "Deploying to cluster..."
-dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions
+dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
+  ${CONTROLLER_ARGS:+--controller-args "${CONTROLLER_ARGS}"}
 
 # Wait for controller to be ready
 echo "Waiting for controller to be ready..."
@@ -245,6 +273,7 @@ echo "Benchmark completed successfully."
 #   fill              long-running background sandboxes (scale)
 #   probe             low-concurrency launch latency
 #   throughput-mifN   closed-loop churn capped at N in-flight
+#   claims-warm       SandboxClaim burst against a provisioned warm pool
 #
 # Keep fill (fill-per-node * nodes) + max(mifN) below spare pod capacity
 # (roughly 3 * 110 minus system pods on the default cluster); the test
@@ -266,15 +295,21 @@ echo "Running stress test"
 # kube-scheduler, the sandbox controller, and kubelets are collected by the
 # stress tool itself (metrics.jsonl.gz; see --collect-metrics).
 set +o errexit
+# STRESS_EXTRA_ARGS appends verbatim extra flags (word-split on purpose) so
+# scenarios can pass tool flags without this script growing an env knob for
+# each one (e.g. --client-connections=4 in benchmarks-kops-gcp-claims).
+# shellcheck disable=SC2086
 go run ./test/stress \
-  --phases="${STRESS_PHASES:-fill,probe,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \
   --throughput-min-seconds="${STRESS_THROUGHPUT_MIN_SECONDS:-45}" \
   --create-concurrency="${STRESS_CREATE_CONCURRENCY:-50}" \
+  --claims-warm-count="${STRESS_CLAIMS_WARM:-300}" \
   --timeout="${STRESS_TIMEOUT:-30m}" \
-  --output-dir="${STRESS_OUTPUT_DIR}"
+  --output-dir="${STRESS_OUTPUT_DIR}" \
+  ${STRESS_EXTRA_ARGS:-}
 stress_status=$?
 set -o errexit
 capture_stress_diagnostics

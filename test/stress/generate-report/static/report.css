@@ -400,3 +400,151 @@ th.sortable[data-order="desc"]::after {
     font-family: var(--font-sans);
     overflow-x: auto;
 }
+
+/* Watch events page */
+.watch-results {
+    margin-top: 16px;
+    border-top: 2px solid var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+}
+
+.watch-row {
+    border-bottom: 1px solid #e5e5e0;
+    cursor: pointer;
+}
+
+.watch-row:hover {
+    background-color: #faf9f6;
+}
+
+.watch-row-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 6px 8px;
+    white-space: nowrap;
+}
+
+.watch-row-head:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: -2px;
+}
+
+.watch-time {
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.watch-offset {
+    color: #a3a19b;
+    font-size: 0.9em;
+}
+
+.watch-phase {
+    color: var(--accent-primary);
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.watch-kind {
+    font-weight: 500;
+    flex-shrink: 0;
+}
+
+.watch-name {
+    color: var(--accent-primary);
+    text-decoration: none;
+    flex-shrink: 0;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.watch-name:hover {
+    text-decoration: underline;
+}
+
+.watch-summary {
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+}
+
+.watch-reason {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.watch-muted {
+    color: #a3a19b;
+}
+
+.diff-old {
+    color: var(--accent-danger);
+    background-color: #fef2f2;
+    padding: 0 3px;
+    border-radius: 2px;
+    text-decoration: line-through;
+    text-decoration-color: rgba(185, 28, 28, 0.45);
+}
+
+.diff-new {
+    color: var(--accent-success);
+    background-color: #f0fdf4;
+    padding: 0 3px;
+    border-radius: 2px;
+}
+
+.diff-arrow {
+    color: var(--text-secondary);
+}
+
+.watch-row-detail {
+    padding: 4px 8px 14px 8px;
+    cursor: auto;
+}
+
+.watch-diff-table {
+    font-size: 0.8rem;
+}
+
+.watch-diff-table td {
+    padding: 4px 12px;
+    vertical-align: top;
+}
+
+.watch-diff-table td:last-child {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.watch-object {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    background-color: #f1f0ea;
+    border-radius: 4px;
+    padding: 12px;
+    max-height: 480px;
+    overflow: auto;
+    white-space: pre-wrap;
+}
+
+.watch-more {
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    padding: 6px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background-color: var(--card-bg);
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.watch-more:hover {
+    background-color: rgba(28, 26, 23, 0.05);
+}

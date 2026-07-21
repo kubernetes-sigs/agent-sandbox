@@ -2618,9 +2618,12 @@ func TestReconcilePoolMaxRefillRate(t *testing.T) {
 		r := newReconciler(2, 0, &now, createTemplate(poolNamespace))
 
 		// Pass 1: full bucket grants one second of creates, remainder paced.
+		// A partial grant emits Sandbox watch events, so the next reconcile
+		// is watch-driven rather than a timed requeue that would race the
+		// cache and risk duplicate creates.
 		requeue, err := r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
-		require.Equal(t, 500*time.Millisecond, requeue, "requeue must land on the next token")
+		require.Zero(t, requeue, "partial grant relies on the Sandbox watch, not a timed requeue")
 		require.Equal(t, 2, countOwned(t, r, warmPool))
 
 		// Pass 2, same instant: bucket empty, zero creates, same wait.
@@ -2629,11 +2632,12 @@ func TestReconcilePoolMaxRefillRate(t *testing.T) {
 		require.Equal(t, 500*time.Millisecond, requeue)
 		require.Equal(t, 2, countOwned(t, r, warmPool), "no creates may happen with an empty bucket")
 
-		// Pass 3, +500ms: exactly one token accrued.
+		// Pass 3, +500ms: exactly one token accrued. Partial grant again, so
+		// the watch (not a timer) drives the next reconcile.
 		now = now.Add(500 * time.Millisecond)
 		requeue, err = r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
-		require.Equal(t, 500*time.Millisecond, requeue)
+		require.Zero(t, requeue)
 		require.Equal(t, 3, countOwned(t, r, warmPool))
 
 		// Pass 4, +2s: accrual caps at capacity, which covers the remaining
@@ -2712,11 +2716,12 @@ func TestReconcilePoolMaxRefillRate(t *testing.T) {
 		require.Equal(t, 1, countOwned(t, r, warmPool))
 
 		// Hold expired: the rate now shapes the FLOW — one create per second,
-		// starting with at most one second's worth (capacity 1).
+		// starting with at most one second's worth (capacity 1). The partial
+		// grant's own watch event drives the next reconcile (no timer).
 		now = now.Add(3500 * time.Millisecond)
 		requeue, err = r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
-		require.Equal(t, time.Second, requeue, "remainder paced at 1/rate")
+		require.Zero(t, requeue, "partial grant relies on the Sandbox watch, not a timed requeue")
 		require.Equal(t, 2, countOwned(t, r, warmPool))
 
 		// Next token: pool back to full, stream stops. Status keeps

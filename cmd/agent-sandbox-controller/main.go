@@ -18,6 +18,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -159,6 +160,14 @@ func main() {
 	// Validation checks for sandboxWarmPoolMaxBatchSize (maximum batch size for sandbox creation and deletion in SandboxWarmPool controller)
 	if sandboxWarmPoolMaxBatchSize <= 0 {
 		setupLog.Error(nil, "sandbox-warm-pool-max-batch-size must be greater than 0")
+		os.Exit(1)
+	}
+	// Fail fast on nonsensical refill rates: flag parsing accepts "NaN" and
+	// "+Inf", and a negative rate would silently disable pacing (the
+	// controller treats <= 0 as unpaced), which is confusing to debug.
+	if math.IsNaN(sandboxWarmPoolMaxRefillRate) || math.IsInf(sandboxWarmPoolMaxRefillRate, 0) || sandboxWarmPoolMaxRefillRate < 0 {
+		setupLog.Error(nil, "sandbox-warm-pool-max-refill-rate must be a finite value >= 0 (0 disables pacing)",
+			"value", sandboxWarmPoolMaxRefillRate)
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)

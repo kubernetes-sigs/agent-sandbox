@@ -46,11 +46,13 @@ func findHistogram(t *testing.T, name string) *dto.Metric {
 }
 
 func TestRESTClientLatencyMetrics(t *testing.T) {
+	// Idempotent: safe even if another test already registered.
+	RegisterRESTClientLatencyMetrics()
 	requestLatency.Reset()
 	rateLimiterLatency.Reset()
 
 	u := url.URL{Scheme: "https", Host: "apiserver.example:6443", Path: "/api/v1/namespaces/default/pods"}
-	// Observe through the client-go hooks to verify init() wired them up.
+	// Observe through the client-go hooks to verify registration wired them up.
 	clientmetrics.RequestLatency.Observe(context.Background(), "GET", u, 250*time.Millisecond)
 	clientmetrics.RateLimiterLatency.Observe(context.Background(), "GET", u, 5*time.Millisecond)
 

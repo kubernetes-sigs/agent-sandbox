@@ -17,6 +17,7 @@ package metrics
 import (
 	"context"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -68,18 +69,28 @@ var (
 	)
 )
 
-func init() {
-	metrics.Registry.MustRegister(requestLatency, rateLimiterLatency)
+var registerRESTClientOnce sync.Once
 
-	// client-go's clientmetrics.Register is guarded by a sync.Once that
-	// controller-runtime's pkg/metrics init() already consumes (wiring only
-	// RequestResult), so a second Register call would be a silent no-op.
-	// Assign the exported hook variables directly instead. This happens at
-	// package init, before the manager (or any client) issues requests, and
-	// Register never overwrites hooks whose RegisterOpts field is nil, so the
-	// assignment is safe regardless of package init order.
-	clientmetrics.RequestLatency = &latencyAdapter{metric: requestLatency}
-	clientmetrics.RateLimiterLatency = &latencyAdapter{metric: rateLimiterLatency}
+// RegisterRESTClientLatencyMetrics registers the latency histograms with
+// controller-runtime's global registry and installs the client-go latency
+// hooks. It is called explicitly by the controller binary (not in init()) so
+// that other binaries importing this package — e.g. sandbox-router, which
+// serves a private Prometheus registry — don't pay for observations that are
+// never exposed. Call it before any client issues requests; it is idempotent.
+func RegisterRESTClientLatencyMetrics() {
+	registerRESTClientOnce.Do(func() {
+		metrics.Registry.MustRegister(requestLatency, rateLimiterLatency)
+
+		// client-go's clientmetrics.Register is guarded by a sync.Once that
+		// controller-runtime's pkg/metrics init() already consumes (wiring
+		// only RequestResult), so a second Register call would be a silent
+		// no-op. Instead, unconditionally overwrite the exported
+		// RequestLatency/RateLimiterLatency hook variables — controller-runtime
+		// leaves both at their no-op defaults, so nothing is lost, and doing
+		// it before any client sends a request means no observation is missed.
+		clientmetrics.RequestLatency = &latencyAdapter{metric: requestLatency}
+		clientmetrics.RateLimiterLatency = &latencyAdapter{metric: rateLimiterLatency}
+	})
 }
 
 type latencyAdapter struct {

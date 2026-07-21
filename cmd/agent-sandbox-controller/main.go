@@ -183,6 +183,12 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
+	// Install client-go REST latency hooks before any client issues requests.
+	// Explicit (not package init) so binaries that import internal/metrics but
+	// don't serve the controller-runtime registry (e.g. sandbox-router) don't
+	// record observations that are never exposed.
+	asmetrics.RegisterRESTClientLatencyMetrics()
+
 	// Initialize Tracing Provider
 	var instrumenter = asmetrics.NewNoOp()
 	if enableTracing {

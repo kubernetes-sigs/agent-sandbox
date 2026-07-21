@@ -19,7 +19,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -214,7 +213,9 @@ func run(cfg *config.Config, log logr.Logger) error {
 			return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
 		}
 		st, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
-			Secret: bytes.TrimSpace(secret),
+			// NewScopedTokenAuthorizer trims whitespace itself, so a
+			// mounted Secret with a trailing newline just works.
+			Secret: secret,
 		})
 		if err != nil {
 			return fmt.Errorf("build scoped-token authorizer: %w", err)

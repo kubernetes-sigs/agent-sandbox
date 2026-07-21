@@ -176,7 +176,7 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 ### Scoped-token authorizer
 
-Set `--authz-mode=scoped-token` to enable the built-in authorizer that closes exactly the gap called out above, but without requiring the caller to hold a cluster-verifiable K8s credential at all. A scoped token is a small HMAC-SHA256-signed value binding `(namespace, name, exp)` — minted with `authz.MintScopedToken` — and the authorizer both verifies the signature/expiry *and* checks that the token's `(namespace, name)` matches the sandbox actually being addressed. A token minted for `box-a` gets 403 against `box-b`; there is no TokenReview round-trip and no K8s API access implied by possessing the token.
+Set `--authz-mode=scoped-token` to enable the built-in authorizer that closes exactly the gap called out above, but without requiring the caller to hold a cluster-verifiable K8s credential at all. A scoped token is a small HMAC-SHA256-signed value binding `(namespace, name, exp)` — minted with `authz.MintScopedToken` — and the authorizer both verifies the signature/expiry *and* checks that the token's `(namespace, name)` matches the sandbox actually being addressed. A token minted for `box-a` gets 403 against `box-b`; there is no TokenReview round-trip and no K8s API access implied by possessing the token. Requests carrying `X-Sandbox-Pod-IP` are rejected outright in this mode: that header overrides the dial target after authorization, which would let a token scoped to one sandbox reach any IP the router can dial — scoped-token routing is by `(namespace, name)` only.
 
 This is the primitive an agent-facing example needs to reproduce the credential-boundary story of `examples/containarium-ssh-sandbox` (agent holds one narrow, single-purpose credential, never a cluster token) using only pieces native to this project — no third-party SSH gateway, no vendor runtime image. `MintScopedToken` is exported so a Sandbox controller (or a test/example harness standing in for one) can mint a token at Sandbox-creation time and hand it to the agent; the router itself never mints, only verifies.
 
@@ -185,7 +185,7 @@ Flags:
 | Flag | Default | Notes |
 |---|---|---|
 | `--authz-mode` | `allow-all` | `allow-all`, `tokenreview`, or `scoped-token`. |
-| `--authz-scoped-token-secret-file` | `""` | Path to a file holding the shared HMAC-SHA256 secret. Required when `--authz-mode=scoped-token`; must match whatever minted the tokens (e.g. the same K8s Secret mounted into the controller and the router). |
+| `--authz-scoped-token-secret-file` | `""` | Path to a file holding the shared HMAC-SHA256 secret. Required when `--authz-mode=scoped-token`; must match whatever minted the tokens (e.g. the same K8s Secret mounted into the controller and the router). At least 32 bytes after whitespace trimming (`authz.MinScopedTokenSecretLen`) — every observed token is an offline brute-force oracle for this secret, so short values are refused at startup. Minter and verifier both trim surrounding whitespace, so a trailing newline in the mounted file is harmless. |
 
 **Follow-up, not in this change.** Nothing here mints tokens automatically at Sandbox creation or rotates the shared secret without a restart — both are natural next steps once a controller-side minting story is agreed, tracked alongside the per-sandbox-authorization follow-up on TokenReview above.
 

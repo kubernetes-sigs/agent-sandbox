@@ -15,6 +15,7 @@
 package authz
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -26,6 +27,33 @@ import (
 	"strings"
 	"time"
 )
+
+// headerSandboxPodIP mirrors proxy.HeaderSandboxPodIP. It cannot be
+// imported: proxy depends on this package. ScopedTokenAuthorizer
+// refuses requests carrying it — the header overrides the dial target
+// after authorization, which would let a token scoped to one sandbox
+// reach any IP the router can dial.
+const headerSandboxPodIP = "X-Sandbox-Pod-Ip"
+
+// MinScopedTokenSecretLen is the minimum accepted secret length, after
+// surrounding whitespace is trimmed. Any observed token is an offline
+// brute-force oracle for the shared secret, and a short secret makes
+// tokens for every sandbox forgeable; 32 bytes matches the
+// HMAC-SHA256 output size.
+const MinScopedTokenSecretLen = 32
+
+// normalizeScopedSecret trims surrounding whitespace (so a mounted
+// Secret with a trailing newline yields the same key for minting and
+// verifying), enforces MinScopedTokenSecretLen, and returns a private
+// copy so later mutation of the caller's slice cannot change auth
+// behavior.
+func normalizeScopedSecret(secret []byte) ([]byte, error) {
+	s := bytes.TrimSpace(secret)
+	if len(s) < MinScopedTokenSecretLen {
+		return nil, fmt.Errorf("scopedtoken: secret must be at least %d bytes after trimming whitespace, got %d", MinScopedTokenSecretLen, len(s))
+	}
+	return append([]byte(nil), s...), nil
+}
 
 // scopedClaims is the signed payload of a scoped token: the
 // (namespace, name) pair the token is bound to, plus an expiry.
@@ -54,8 +82,9 @@ type scopedClaims struct {
 // status or a controller-managed Secret is tracked as a follow-up;
 // the router itself never mints tokens, only verifies them.
 func MintScopedToken(secret []byte, namespace, name string, ttl time.Duration) (string, error) {
-	if len(secret) == 0 {
-		return "", errors.New("scopedtoken: secret must not be empty")
+	key, err := normalizeScopedSecret(secret)
+	if err != nil {
+		return "", err
 	}
 	if namespace == "" || name == "" {
 		return "", errors.New("scopedtoken: namespace and name are required")
@@ -69,7 +98,7 @@ func MintScopedToken(secret []byte, namespace, name string, ttl time.Duration) (
 		return "", fmt.Errorf("scopedtoken: marshal claims: %w", err)
 	}
 	encPayload := base64.RawURLEncoding.EncodeToString(payload)
-	return encPayload + "." + base64.RawURLEncoding.EncodeToString(signScopedToken(secret, encPayload)), nil
+	return encPayload + "." + base64.RawURLEncoding.EncodeToString(signScopedToken(key, encPayload)), nil
 }
 
 func signScopedToken(secret []byte, encPayload string) []byte {
@@ -81,11 +110,13 @@ func signScopedToken(secret []byte, encPayload string) []byte {
 // ScopedTokenOptions configures a ScopedTokenAuthorizer.
 type ScopedTokenOptions struct {
 	// Secret is the shared HMAC-SHA256 key used to verify scoped
-	// tokens. Required, must be non-empty, and must match whatever
-	// minted the token (see MintScopedToken). Rotate by restarting the
-	// router with a new secret; multi-key rotation without downtime is
-	// a follow-up (mirrors how TLSCertFile started single-cert before
-	// hot-reload was added).
+	// tokens. Required, at least MinScopedTokenSecretLen bytes after
+	// whitespace trimming, and must match whatever minted the token
+	// (see MintScopedToken; both sides trim identically, so a mounted
+	// Secret with a trailing newline still interoperates). Rotate by
+	// restarting the router with a new secret; multi-key rotation
+	// without downtime is a follow-up (mirrors how TLSCertFile started
+	// single-cert before hot-reload was added).
 	Secret []byte
 	// Clock returns the current time; nil defaults to time.Now. Tests
 	// override this to exercise expiry deterministically.
@@ -113,14 +144,15 @@ type ScopedTokenAuthorizer struct {
 
 // NewScopedTokenAuthorizer builds an authorizer from o.
 func NewScopedTokenAuthorizer(o ScopedTokenOptions) (*ScopedTokenAuthorizer, error) {
-	if len(o.Secret) == 0 {
-		return nil, errors.New("scopedtoken: Secret is required")
+	key, err := normalizeScopedSecret(o.Secret)
+	if err != nil {
+		return nil, err
 	}
 	clock := o.Clock
 	if clock == nil {
 		clock = time.Now
 	}
-	return &ScopedTokenAuthorizer{secret: o.Secret, clock: clock}, nil
+	return &ScopedTokenAuthorizer{secret: key, clock: clock}, nil
 }
 
 // Authorize implements the Authorizer interface.
@@ -132,6 +164,15 @@ func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, sa
 	claims, err := a.verify(token)
 	if err != nil {
 		return ErrUnauthenticated
+	}
+	// X-Sandbox-Pod-IP replaces the dial target *after* authorization:
+	// the proxy would authorize against the claimed (namespace, name)
+	// and then dial the caller-supplied IP, so a token scoped to one
+	// sandbox could reach anything the router can dial. Scoped tokens
+	// therefore never accept the override — route by (namespace, name)
+	// only.
+	if r.Header.Get(headerSandboxPodIP) != "" {
+		return ErrForbidden
 	}
 	if claims.Namespace != sandboxNamespace || claims.Name != sandboxName {
 		return ErrForbidden
@@ -159,7 +200,9 @@ func (a *ScopedTokenAuthorizer) verify(token string) (*scopedClaims, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return nil, fmt.Errorf("scopedtoken: unmarshal claims: %w", err)
 	}
-	if a.clock().Unix() > claims.Exp {
+	// >= : exp is exclusive — a token is invalid from its exp second
+	// onward, rather than staying valid for the whole exp second.
+	if a.clock().Unix() >= claims.Exp {
 		return nil, errors.New("scopedtoken: token expired")
 	}
 	return &claims, nil

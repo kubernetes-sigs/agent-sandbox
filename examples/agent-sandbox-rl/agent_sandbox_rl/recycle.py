@@ -224,7 +224,8 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
                               reset: GitRestoreReset | None = None,
                               max_reuses: int = 32,
                               reset_timeout: float = 5.0,
-                              use_session: bool = True):
+                              use_session: bool = True,
+                              scale_on_hold: bool = True):
   """Execute ``tasks`` reusing one sandbox per image (claims scale ÷ tasks-per-image).
 
   Tasks are grouped by image; each group runs sequentially inside a single claimed
@@ -246,6 +247,19 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
   quarantine churn) — safe to point this at a mixed image set. A reset whose
   ``exec`` fails (dead pod / no bash) is reported dirty and quarantined, never
   raised into the batch.
+
+  **``scale_on_hold`` (default True):** once a recyclable sandbox is claimed and
+  held for its whole group, its warm pool is dropped (`unwarm_image`) so the
+  controller does not **replenish** a replacement the reuse never claims. This
+  removes the *sustained* idle-warm footprint (steady state ~1× the held count
+  instead of ~2×) and the ongoing claim-driven replenishment that feeds the
+  warm-pool over-creation bug (#1215). Note the *peak* during the initial
+  concurrent-claim burst can still transiently reach ~2× (each claim briefly
+  replenishes before its `unwarm` lands); stage the claims to cut that too. A
+  quarantine/rotation re-claim JIT re-warms the pool first. Verified safe: a
+  claimed sandbox survives its pool being scaled/deleted (a `SandboxClaim`
+  detaches it from warm-pool ownership). Non-recyclable (fresh-claim-per-task)
+  images keep their pools. Set False to keep pools resident (old behavior).
   """
   reset = reset or GitRestoreReset()
   results = [None] * len(tasks)
@@ -276,6 +290,8 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
     try:
       for pos, (i, t) in enumerate(group):
         if handle is None:                    # first task, or after release
+          if scale_on_hold and recyclable:    # re-claim: pool was dropped, JIT re-warm
+            fleet.warm_image(t.image, replicas_override=1, wait=True)
           handle = fleet.acquire(t)
           if use_session:                     # one held-open exec stream per sandbox
             try:
@@ -291,6 +307,8 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
                           t.image, baseline and "no pristine anchor")
           elif recyclable:                    # recyclable image, fresh sandbox after
             baseline = reset.prime(handle)    # rotate/quarantine → re-anchor pristine
+          if scale_on_hold and recyclable:    # holding it → stop the pool replenishing
+            fleet.unwarm_image(t.image)
           uses = 0
         _process(handle, i, t)
         if pos == len(group) - 1:

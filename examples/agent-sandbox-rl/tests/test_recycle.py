@@ -185,6 +185,90 @@ def test_max_reuses_rotates_sandbox(make_cluster, monkeypatch):
   f.teardown()
 
 
+def _spy_warm(f, monkeypatch):
+  import unittest.mock as m
+  uw = m.MagicMock(wraps=f.unwarm_image)
+  w = m.MagicMock(wraps=f.warm_image)
+  monkeypatch.setattr(f, "unwarm_image", uw)
+  monkeypatch.setattr(f, "warm_image", w)
+  return uw, w
+
+
+def test_scale_on_hold_drops_pool_after_claim(make_cluster, monkeypatch):
+  _patch_clean_exec(monkeypatch)               # resets always clean → held, no re-claim
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["img"] * 4)
+  f.setup()
+  uw, w = _spy_warm(f, monkeypatch)
+  reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1,
+                            use_session=False, scale_on_hold=True)
+  assert c.sandbox_client.create_sandbox.call_count == 1   # one claim reused
+  assert uw.call_count == 1                                 # pool dropped once (holding)
+  assert w.call_count == 0                                  # no re-claim → no JIT re-warm
+  f.teardown()
+
+
+def test_scale_on_hold_rewarms_on_rotation(make_cluster, monkeypatch):
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1)
+  f.load_tasks(["img"] * 5)                     # rotate after every 2 reuses
+  f.setup()
+  uw, w = _spy_warm(f, monkeypatch)
+  reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1,
+                            max_reuses=2, use_session=False, scale_on_hold=True)
+  assert c.sandbox_client.create_sandbox.call_count == 3   # claims at task 1,3,5
+  assert uw.call_count == 3                                 # drop pool on each hold
+  assert w.call_count == 2                                  # JIT re-warm before re-claims (3,5)
+  f.teardown()
+
+
+def test_scale_on_hold_rewarms_on_quarantine(make_cluster, monkeypatch):
+  # prime clean (recyclable) but every reset dirty -> quarantine -> re-claim each time
+  drift = "PRISTINE=abc\nHEAD=abc\nDIRTY=7\nENV=e1\nCFG=g1\nPROCS=5"
+  monkeypatch.setattr(SandboxHandle, "exec",
+                      lambda self, cmd: _CLEAN if "tag -f pristine" in cmd[2] else drift)
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1)
+  f.load_tasks(["img"] * 3)
+  f.setup()
+  uw, w = _spy_warm(f, monkeypatch)
+  reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1,
+                            use_session=False, scale_on_hold=True)
+  assert c.sandbox_client.create_sandbox.call_count == 3   # dirty reset -> fresh claim each task
+  assert uw.call_count == 3                                 # each held claim drops its pool
+  assert w.call_count == 2                                  # JIT re-warm before the 2 re-claims
+
+
+def test_scale_on_hold_skips_non_recyclable(make_cluster, monkeypatch):
+  # no pristine anchor -> not recyclable -> fresh-claim-per-task path keeps the pool
+  empty = "PRISTINE=\nHEAD=\nDIRTY=0\nENV=e1\nCFG=g1\nPROCS=5"
+  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd: empty)
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=1)
+  f.load_tasks(["img"] * 3)
+  f.setup()
+  uw, w = _spy_warm(f, monkeypatch)
+  reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1,
+                            use_session=False, scale_on_hold=True)
+  # non-recyclable never holds -> pool must stay (no unwarm) and no JIT re-warm
+  assert uw.call_count == 0 and w.call_count == 0
+
+
+def test_scale_on_hold_false_keeps_pool(make_cluster, monkeypatch):
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4)
+  f.load_tasks(["img"] * 4)
+  f.setup()
+  uw, w = _spy_warm(f, monkeypatch)
+  reuse_git_restore_sandbox(f, f.tasks, lambda t, h: 1, concurrency=1,
+                            use_session=False, scale_on_hold=False)
+  assert uw.call_count == 0 and w.call_count == 0          # pools left resident
+  f.teardown()
+
+
 def test_recyclable_helper():
   r = GitRestoreReset()
   from agent_sandbox_rl import ResetBaseline

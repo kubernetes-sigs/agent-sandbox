@@ -119,6 +119,13 @@ class FleetConfig(BaseModel):
   warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
+  # Stage the warm fill in waves of <= this many sandbox creates in flight,
+  # waiting for each wave to reach Ready before the next. Bounds the controller's
+  # concurrent create burst (Σ pools×replicas) so a large/deep warm can't trip the
+  # SandboxWarmPool over-creation race (#1215). 0 = warm everything at once (old
+  # behavior). The safe value scales inversely with controller warm-pool worker
+  # concurrency; 1000 is calibrated for a high-worker controller.
+  warm_create_budget: int = 1000
   template: TemplateSpec = Field(default_factory=TemplateSpec)
   template_name_prefix: str = "r2e-img-"
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))

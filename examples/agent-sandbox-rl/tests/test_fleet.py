@@ -249,6 +249,64 @@ def test_start_warmpools_provisions_each_entry(two_cluster_registry):
     assert c.active_replicas >= 1
 
 
+def _spy_waves(monkeypatch, f):
+  """Record how many pools each ``_warm_entries`` call warms (= one wave)."""
+  waves = []
+  orig = f._warm_entries
+  def spy(entries, wait, replicas_override=None):
+    waves.append(len(entries))
+    return orig(entries, wait, replicas_override=replicas_override)
+  monkeypatch.setattr(f, "_warm_entries", spy)
+  return waves
+
+
+def _ten_pools_of_four(c):
+  """A solo-cluster fleet whose plan is 10 pools × 4 replicas (40 creates)."""
+  f = _fleet(ClusterRegistry([c]), max_concurrent=10,
+             warm_per_task=True, max_warmpool_size=4)
+  imgs = [f"img{i}" for i in range(10)]
+  f.load_tasks([img for img in imgs for _ in range(4)])   # 4 tasks/image → 4 replicas
+  assert {e.replicas for e in f.plan().entries} == {4}
+  return f
+
+
+def test_start_warmpools_stages_by_create_budget(make_cluster, monkeypatch):
+  f = _ten_pools_of_four(make_cluster("solo"))
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True, create_budget=4)        # 4 replicas → 1 pool/wave
+  assert waves == [1] * 10                              # 10 pools, 10 waves
+
+
+def test_start_warmpools_entry_over_budget_warms_solo(make_cluster, monkeypatch):
+  # a single pool whose replicas exceed the budget can't be split -> it warms solo
+  c = make_cluster("solo")
+  f = _ten_pools_of_four(c)                     # 10 pools × 4 replicas
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True, create_budget=2) # 2 < 4 -> every pool is oversized
+  assert waves == [1] * 10                      # each warms alone, none dropped
+  assert c.resources.create_warmpool.call_count == 10
+
+
+def test_start_warmpools_budget_zero_warms_all_at_once(make_cluster, monkeypatch):
+  c = make_cluster("solo")
+  f = _ten_pools_of_four(c)
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True, create_budget=0)         # explicit opt-out → single wave
+  assert waves == [10]
+  assert c.resources.create_warmpool.call_count == 10
+
+
+def test_start_warmpools_uses_config_budget_default(make_cluster, monkeypatch):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=10, warm_per_task=True,
+             max_warmpool_size=4, warm_create_budget=8)  # no create_budget arg below
+  imgs = [f"img{i}" for i in range(10)]
+  f.load_tasks([img for img in imgs for _ in range(4)])
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True)                          # falls back to config budget 8 → 2/wave
+  assert waves == [2, 2, 2, 2, 2]
+
+
 def test_acquire_returns_handle_on_right_cluster(two_cluster_registry):
   f = _fleet(two_cluster_registry, placement="image-affinity")
   tasks = f.load_tasks(["imgA", "imgB"])

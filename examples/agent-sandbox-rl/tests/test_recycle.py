@@ -358,7 +358,7 @@ async def test_reuse_async_one_claim_per_image(make_cluster, monkeypatch):
   af.close()
 
 
-async def test_reuse_async_scale_on_hold_drops_pool(make_cluster, monkeypatch):
+async def test_reuse_async_scale_on_hold_refcounts_pool(make_cluster, monkeypatch):
   import unittest.mock as m
   from agent_sandbox_rl import AsyncSandboxFleet
   from agent_sandbox_rl.recycle import reuse_git_restore_sandbox_async
@@ -367,10 +367,49 @@ async def test_reuse_async_scale_on_hold_drops_pool(make_cluster, monkeypatch):
   af = AsyncSandboxFleet(FleetConfig(max_concurrent=4), registry=ClusterRegistry([c]))
   af.load_tasks(["img", "img", "img", "img"])
   await af.setup()
-  uw = m.MagicMock(wraps=af._fleet.unwarm_image)
-  monkeypatch.setattr(af._fleet, "unwarm_image", uw)
+  spr = m.MagicMock(wraps=af._fleet.set_pool_replicas)
+  monkeypatch.setattr(af._fleet, "set_pool_replicas", spr)
   await reuse_git_restore_sandbox_async(
       af, af.tasks, lambda t, h: 1, concurrency=1, use_session=False, scale_on_hold=True)
-  assert uw.call_count == 1                       # held sandbox drops its pool
+  # K=1: holding drives desired to 0 (active 1 − held 1) — cancels replenishment
+  assert spr.call_count >= 1
+  assert any(call.args[1] == 0 for call in spr.call_args_list)
   await af.teardown()
   af.close()
+
+
+async def test_reuse_async_sharded_runs_k_sandboxes_per_image(make_cluster, monkeypatch):
+  from agent_sandbox_rl import AsyncSandboxFleet
+  from agent_sandbox_rl.recycle import reuse_git_restore_sandbox_async
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  af = AsyncSandboxFleet(FleetConfig(max_concurrent=8, max_warmpool_size=3),
+                         registry=ClusterRegistry([c]))
+  af.load_tasks(["img"] * 6)                       # 1 image, 6 tasks
+  await af.setup()
+  res = await reuse_git_restore_sandbox_async(
+      af, af.tasks, lambda t, h: h.pod_name, concurrency=8,
+      use_session=False, shards_per_image=3)
+  assert len(res) == 6 and all(isinstance(x, str) for x in res)
+  # 3 shards → 3 concurrent sandboxes for the one image (each recycles 2 tasks)
+  assert c.sandbox_client.create_sandbox.call_count == 3
+  await af.teardown()
+  af.close()
+
+
+def test_reuse_guarded_by_circuit_breaker(make_cluster, monkeypatch):
+  # the recycle path must be guarded too (that's where over-creation bit us)
+  import time
+  from agent_sandbox_rl import FleetOvercommitError
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=2,
+             overcommit_factor=1.5, breaker_poll_s=0.02)
+  f.load_tasks(["img"] * 4)
+  f.setup()
+  monkeypatch.setattr(f, "live_owned_count", lambda: 999)   # simulate runaway
+  def slow(t, h):
+    time.sleep(0.15)                                        # let the breaker poll
+    return 1
+  with pytest.raises(FleetOvercommitError):
+    reuse_git_restore_sandbox(f, f.tasks, slow, concurrency=1, use_session=False)

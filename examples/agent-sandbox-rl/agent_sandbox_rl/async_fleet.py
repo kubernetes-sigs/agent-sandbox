@@ -352,7 +352,10 @@ class AsyncSandboxFleet:
       raise ValueError("epochs must be >= 1")
     conc = concurrency or self.config.max_concurrent
     obs = self._fleet._obs
-    with obs.run(strategy) as report:
+    if self._fleet.plan_ is None:              # give the circuit breaker a footprint
+      await self.plan()
+    expected = self._fleet.plan_.total_replicas if self._fleet.plan_ else None
+    with self._fleet.overcommit_guard(expected), obs.run(strategy) as report:
       self._fleet.report = report
       try:
         report.environment = await self._to_thread(self._fleet.describe_environment)

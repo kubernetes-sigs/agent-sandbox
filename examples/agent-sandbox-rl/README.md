@@ -414,6 +414,16 @@ images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct im
 spread across nodes) instead of a single node's (None = conservative single-node
 bound; the capacity planner sets it from the probed node count).
 
+**Runaway safeguards** (see `plans/sdk-runaway-safeguards.md`): `overcommit_factor`
+(1.5) + `max_live_sandboxes` (None) — the **circuit breaker**: if live sandboxes this
+run owns exceed `min(expected × factor, max_live_sandboxes)`, the fleet tears down and
+raises `FleetOvercommitError` (catches accidental over-creation; `factor=0` disables);
+`breaker_poll_s` (5.0). `install_teardown_hooks` (True) installs atexit/SIGINT/SIGTERM
+teardown so a killed driver still cleans up; every resource is labelled with
+`fleet.run_id`, and **`reap(run_id=…)`** / `python -m agent_sandbox_rl.reaper` sweeps an
+orphaned run by label. `plan()` also emits **advisory** `plan.warnings` (never fatal)
+for footprint/concurrency beyond what the control plane comfortably absorbs.
+
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,
 `node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`.
 

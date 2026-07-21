@@ -307,8 +307,14 @@ class Resources:
   def list_claims(self, label_selector: str | None = None) -> list[str]:
     return self._list(constants.CLAIMS_PLURAL, label_selector)
 
+  def list_sandboxes(self, label_selector: str | None = None) -> list[str]:
+    return self._list(constants.SANDBOXES_PLURAL, label_selector)
+
   def delete_claim(self, name: str) -> None:
     self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim")
+
+  def delete_sandbox(self, name: str) -> None:
+    self._delete(constants.SANDBOXES_PLURAL, name, "Sandbox")
 
   def managed_selector(self) -> str:
     return f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}"

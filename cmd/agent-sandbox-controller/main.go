@@ -33,7 +33,10 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
@@ -44,6 +47,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -76,6 +80,7 @@ func main() {
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
 	var enableWarmPoolEviction bool
+	var cacheLabelSelectors bool
 	var printVersion bool
 	var webhookPort int
 	var webhookCertDir string
@@ -119,6 +124,14 @@ func main() {
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
+	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
+		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
+			controllers.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
+			"labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode "+
+			"CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources "+
+			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
+			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
+			"this flag is enabled.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -298,6 +311,34 @@ func main() {
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
+	}
+	// Strip metadata.managedFields from every cached object (CRs included).
+	// Nothing in this repo reads managedFields, other writers inflate it (the
+	// kubelet server-side-applies pod status on every update), and every
+	// write here is either a merge patch diffed between two equally-stripped
+	// copies (managedFields can never appear in the diff) or an
+	// update/create, where an absent managedFields means "leave server-side
+	// field management unchanged". Pure decode-CPU/memory win.
+	mgrOpts.Cache.DefaultTransform = cache.TransformStripManagedFields()
+	// The Pod cache additionally drops the pod spec except spec.nodeName —
+	// the only spec field any controller reads (see PodCacheTransform).
+	mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
+		&corev1.Pod{}: {Transform: controllers.PodCacheTransform},
+	}
+	if cacheLabelSelectors {
+		trackedOnly, err := labels.NewRequirement(controllers.SandboxNameHashLabel, selection.Exists, nil)
+		if err != nil {
+			setupLog.Error(err, "unable to build cache label selector")
+			os.Exit(1)
+		}
+		sel := labels.NewSelector().Add(*trackedOnly)
+		mgrOpts.Cache.ByObject[&corev1.Pod{}] = cache.ByObject{
+			Label:     sel,
+			Transform: controllers.PodCacheTransform,
+		}
+		mgrOpts.Cache.ByObject[&corev1.Service{}] = cache.ByObject{Label: sel}
+		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
+			"label", controllers.SandboxNameHashLabel)
 	}
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{

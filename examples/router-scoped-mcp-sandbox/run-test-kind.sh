@@ -70,6 +70,7 @@ cleanup() {
   kubectl delete --ignore-not-found secret scoped-token-secret
   kubectl delete --ignore-not-found deploy sandbox-router
   kubectl delete --ignore-not-found svc sandbox-router-svc
+  kubectl delete --ignore-not-found -f "${REPO_ROOT}/sandbox-router/deploy/rbac.yaml"
   kubectl delete --ignore-not-found serviceaccount sandbox-router
   rm -f "${SECRET_FILE}"
   if [ -n "${VENV_DIR:-}" ]; then rm -rf "${VENV_DIR}"; fi
@@ -78,6 +79,9 @@ trap cleanup EXIT
 
 echo "Deploying sandbox-router with --authz-mode=scoped-token..."
 kubectl apply -f "${REPO_ROOT}/sandbox-router/deploy/serviceaccount.yaml"
+# rbac.yaml grants the pod list/watch the router's pod-IP cache needs;
+# without it the cache never syncs and /readyz never goes ready.
+kubectl apply -f "${REPO_ROOT}/sandbox-router/deploy/rbac.yaml"
 kubectl apply -f "${REPO_ROOT}/sandbox-router/deploy/service.yaml"
 sed -e "s|registry.k8s.io/agent-sandbox/sandbox-router-go:latest|${ROUTER_IMAGE}|" \
     -e "s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|" \

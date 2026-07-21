@@ -32,13 +32,16 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // configureAPIConnections optionally shards the controller's Kubernetes API
 // traffic across `connections` independent TCP+TLS+HTTP/2 connections.
 //
-// Why: the kube-apiserver advertises SETTINGS_MAX_CONCURRENT_STREAMS=100 by
-// default (k8s.io/apiserver pkg/server/secure_serving.go, overridable only
-// server-side via --http2-max-streams-per-connection), and client-go
-// multiplexes all requests from one rest.Config onto a single HTTP/2
-// connection. That caps effective in-flight API requests at ~100 regardless
-// of worker counts or client-side QPS settings. Sharding across N
-// pre-established connections raises the ceiling to ~N*100.
+// Why: the kube-apiserver caps concurrent streams per HTTP/2 connection
+// (SETTINGS_MAX_CONCURRENT_STREAMS). The server-side limit comes from
+// --http2-max-streams-per-connection, which defaults to 0 = the Go HTTP/2
+// server default of 250; managed control planes can advertise less (the GKE
+// clusters we benchmark advertise 100). client-go multiplexes all requests
+// from one rest.Config onto a single HTTP/2 connection, so that advertised
+// limit caps effective in-flight API requests regardless of worker counts or
+// client-side QPS settings. Sharding across N connections (each dialed
+// lazily on first use) raises the ceiling to ~N times the per-connection
+// limit.
 //
 // How: for each shard we copy the rest.Config and set a distinct Dial
 // function. rest.Config.TransportConfig wraps Dial in a fresh
@@ -73,6 +76,12 @@ func configureAPIConnectionsWithDialer(cfg *rest.Config, connections int, baseDi
 	}
 	if cfg.Dial != nil || cfg.Transport != nil {
 		return fmt.Errorf("api-connections > 1 is incompatible with a custom Dial/Transport on the rest.Config")
+	}
+	if cfg.WrapTransport != nil {
+		// Installing the shard router would silently replace a pre-set
+		// wrapper (tracing, instrumentation, ...); refuse instead so the
+		// incompatibility is explicit, mirroring the Dial/Transport check.
+		return fmt.Errorf("api-connections > 1 is incompatible with a pre-set WrapTransport on the rest.Config")
 	}
 
 	shards := make([]http.RoundTripper, 0, connections)

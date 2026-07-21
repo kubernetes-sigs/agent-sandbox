@@ -110,6 +110,14 @@ func TestConfigureAPIConnectionsRejectsCustomDialOrTransport(t *testing.T) {
 	}
 }
 
+func TestConfigureAPIConnectionsRejectsPresetWrapTransport(t *testing.T) {
+	cfg := &rest.Config{Host: "https://example.invalid"}
+	cfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper { return rt }
+	if err := configureAPIConnections(cfg, 2); err == nil {
+		t.Error("expected error for config with pre-set WrapTransport (sharding would silently replace it)")
+	}
+}
+
 // TestShardingCreatesNDistinctConnections verifies the core claim: with
 // --api-connections=N, exactly N distinct TCP connections are dialed, all
 // speak HTTP/2, requests are distributed round-robin across them, and the

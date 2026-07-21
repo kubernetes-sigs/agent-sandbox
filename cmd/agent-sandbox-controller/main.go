@@ -118,9 +118,10 @@ func main() {
 	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "The maximum burst for client-side throttling of the Kubernetes API client.")
 	flag.IntVar(&apiConnections, "api-connections", 1,
 		"Number of independent HTTP/2 connections to the API server for non-watch traffic (writes, uncached reads, events, leader election). "+
-			"The kube-apiserver allows at most ~100 concurrent in-flight requests per HTTP/2 connection (SETTINGS_MAX_CONCURRENT_STREAMS, "+
-			"server default 100), so a single connection caps effective concurrency at ~100 regardless of worker count or QPS settings. "+
-			"Values > 1 shard requests round-robin across that many pre-established connections (~N*100 in-flight ceiling). "+
+			"The kube-apiserver caps concurrent in-flight requests per HTTP/2 connection (SETTINGS_MAX_CONCURRENT_STREAMS; set server-side via "+
+			"--http2-max-streams-per-connection, default 0 = Go's HTTP/2 default of 250, and commonly advertised as 100 on managed control planes), "+
+			"so a single connection bounds effective concurrency at the advertised limit regardless of worker count or QPS settings. "+
+			"Values > 1 shard requests round-robin across that many dedicated connections, each dialed on first use (~N x per-connection limit ceiling). "+
 			"Default 1 preserves the existing single-connection client.")
 	flag.BoolVar(&separateWatchConnection, "separate-watch-connection", false,
 		"Give the manager's informer cache (list/watch streams) a dedicated HTTP/2 connection to the API server, isolated from write traffic. "+

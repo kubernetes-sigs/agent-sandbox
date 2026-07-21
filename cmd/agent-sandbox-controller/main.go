@@ -70,6 +70,8 @@ func main() {
 	var pprofMutexProfileFraction int
 	var kubeAPIQPS float64
 	var kubeAPIBurst int
+	var apiConnections int
+	var separateWatchConnection bool
 	var sandboxConcurrentWorkers int
 	var sandboxClaimConcurrentWorkers int
 	var sandboxWarmPoolConcurrentWorkers int
@@ -114,6 +116,16 @@ func main() {
 			"<=0 disables; 1 samples all events; N>1 samples ~1/N events (e.g. 10 ~= 1/10, 100 ~= 1/100).")
 	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", -1.0, "Client-side QPS limit for the Kubernetes API client (default: -1, no client-side rate limiting)")
 	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "The maximum burst for client-side throttling of the Kubernetes API client.")
+	flag.IntVar(&apiConnections, "api-connections", 1,
+		"Number of independent HTTP/2 connections to the API server for non-watch traffic (writes, uncached reads, events, leader election). "+
+			"The kube-apiserver allows at most ~100 concurrent in-flight requests per HTTP/2 connection (SETTINGS_MAX_CONCURRENT_STREAMS, "+
+			"server default 100), so a single connection caps effective concurrency at ~100 regardless of worker count or QPS settings. "+
+			"Values > 1 shard requests round-robin across that many pre-established connections (~N*100 in-flight ceiling). "+
+			"Default 1 preserves the existing single-connection client.")
+	flag.BoolVar(&separateWatchConnection, "separate-watch-connection", false,
+		"Give the manager's informer cache (list/watch streams) a dedicated HTTP/2 connection to the API server, isolated from write traffic. "+
+			"Prevents watch event delivery to informers from stalling behind bursts of concurrent writes that saturate the shared "+
+			"connection's HTTP/2 stream budget. Default false preserves the existing shared-connection behavior.")
 	flag.IntVar(&sandboxConcurrentWorkers, "sandbox-concurrent-workers", 100, "Max concurrent reconciles for the Sandbox controller")
 	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 50, "Max concurrent reconciles for the SandboxClaim controller")
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
@@ -167,6 +179,10 @@ func main() {
 
 	if kubeAPIBurst <= 0 {
 		setupLog.Error(nil, "kube-api-burst must be greater than 0")
+		os.Exit(1)
+	}
+	if apiConnections < 1 {
+		setupLog.Error(nil, "api-connections must be greater than or equal to 1")
 		os.Exit(1)
 	}
 	// Warning if the total number of workers exceeds the kube API burst limit
@@ -261,6 +277,28 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
+	// Optional API transport tuning (see transport.go). Order matters: the
+	// dedicated watch client must be built before configureAPIConnections
+	// installs its sharding WrapTransport on restConfig.
+	var watchHTTPClient *http.Client
+	if separateWatchConnection {
+		var err error
+		watchHTTPClient, err = newIsolatedHTTPClient(restConfig)
+		if err != nil {
+			setupLog.Error(err, "unable to build dedicated watch connection client")
+			os.Exit(1)
+		}
+		setupLog.Info("informer cache list/watch traffic separated onto a dedicated HTTP/2 connection (--separate-watch-connection)")
+	}
+	if err := configureAPIConnections(restConfig, apiConnections); err != nil {
+		setupLog.Error(err, "unable to configure API connections")
+		os.Exit(1)
+	}
+	if apiConnections > 1 {
+		setupLog.Info("API transport sharding enabled: non-watch API traffic distributed round-robin across independent HTTP/2 connections",
+			"connections", apiConnections)
+	}
+
 	if enableWebhook {
 		if manageWebhookCerts {
 			// Create a temporary client to patch the CRDs and access Secrets
@@ -319,6 +357,12 @@ func main() {
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
 			"label", controllers.SandboxNameHashLabel)
+	}
+	if watchHTTPClient != nil {
+		// The manager cache builds its list/watch REST clients from this
+		// http.Client (RESTClientForConfigAndClient), bypassing restConfig's
+		// WrapTransport, so watch streams stay off the write connections.
+		mgrOpts.Cache.HTTPClient = watchHTTPClient
 	}
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{

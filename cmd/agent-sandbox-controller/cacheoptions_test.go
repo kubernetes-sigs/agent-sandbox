@@ -18,10 +18,38 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	"sigs.k8s.io/agent-sandbox/controllers"
 )
+
+// assertStripsManagedFields runs the configured DefaultTransform against an
+// object carrying managedFields and asserts they come out cleared — presence
+// of SOME transform is not enough, it must be the managedFields strip.
+func assertStripsManagedFields(t *testing.T, opts cache.Options) {
+	t.Helper()
+	if opts.DefaultTransform == nil {
+		t.Fatal("DefaultTransform (managedFields strip) not set")
+	}
+	in := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "cm",
+		ManagedFields: []metav1.ManagedFieldsEntry{{
+			Manager: "kubelet", Operation: metav1.ManagedFieldsOperationApply,
+		}},
+	}}
+	out, err := opts.DefaultTransform(in)
+	if err != nil {
+		t.Fatalf("DefaultTransform: %v", err)
+	}
+	cm, ok := out.(*corev1.ConfigMap)
+	if !ok {
+		t.Fatalf("DefaultTransform returned %T, want *corev1.ConfigMap", out)
+	}
+	if len(cm.GetManagedFields()) != 0 {
+		t.Errorf("DefaultTransform left %d managedFields entries, want 0", len(cm.GetManagedFields()))
+	}
+}
 
 // entriesByType splits the ByObject map into the per-type entries, failing on
 // duplicates: ByObject is keyed by pointer, so an accidental second
@@ -53,9 +81,7 @@ func TestBuildCacheOptionsUnscoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCacheOptions(false): %v", err)
 	}
-	if opts.DefaultTransform == nil {
-		t.Error("DefaultTransform (managedFields strip) not set")
-	}
+	assertStripsManagedFields(t, opts)
 	pod, svc := entriesByType(t, opts)
 	if pod == nil {
 		t.Fatal("no Pod entry in ByObject")
@@ -76,9 +102,7 @@ func TestBuildCacheOptionsScopedToTrackingLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildCacheOptions(true): %v", err)
 	}
-	if opts.DefaultTransform == nil {
-		t.Error("DefaultTransform (managedFields strip) not set")
-	}
+	assertStripsManagedFields(t, opts)
 	pod, svc := entriesByType(t, opts)
 	if pod == nil {
 		t.Fatal("no Pod entry in ByObject")

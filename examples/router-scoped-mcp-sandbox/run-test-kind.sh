@@ -64,6 +64,7 @@ kubectl create secret generic scoped-token-secret \
 
 cleanup() {
   echo "Cleaning up..."
+  [ -n "${PF_PID:-}" ] && kill "${PF_PID}" 2>/dev/null || true
   kubectl delete --ignore-not-found -f "${EXAMPLE_DIR}/sandbox.yaml"
   kubectl delete --ignore-not-found -f "${EXAMPLE_DIR}/sandbox-box-b.yaml"
   kubectl delete --ignore-not-found secret scoped-token-secret
@@ -71,7 +72,7 @@ cleanup() {
   kubectl delete --ignore-not-found svc sandbox-router-svc
   kubectl delete --ignore-not-found serviceaccount sandbox-router
   rm -f "${SECRET_FILE}"
-  rm -rf "${VENV_DIR:-}"
+  if [ -n "${VENV_DIR:-}" ]; then rm -rf "${VENV_DIR}"; fi
 }
 trap cleanup EXIT
 
@@ -102,6 +103,14 @@ kubectl patch deploy sandbox-router --type=strategic -p='{
 }'
 kubectl rollout status deploy/sandbox-router --timeout=120s
 
+# The client runs on the host, where the in-cluster Service DNS name is
+# not resolvable (kind, most local clusters) — port-forward the router
+# Service to localhost instead. client.py's default --router-url matches.
+echo "Port-forwarding the router Service to localhost:18080..."
+kubectl port-forward svc/sandbox-router-svc 18080:8080 &
+PF_PID=$!
+sleep 3
+
 echo "Applying box-a and box-b Sandboxes..."
 export IMAGE="${MCP_IMAGE}"
 envsubst < "${EXAMPLE_DIR}/sandbox.yaml" | kubectl apply -f -
@@ -128,14 +137,14 @@ echo "=== Test 1: box-a's token against box-a — expect success ==="
   --token "${TOKEN_A}" --target-id box-a
 
 echo
-echo "=== Test 2: box-a's token against box-b — expect rejection (scoping) ==="
+echo "=== Test 2: box-a's token against box-b — expect exactly 403 (scoping) ==="
 "${VENV_DIR}/bin/python3" "${EXAMPLE_DIR}/client.py" \
-  --token "${TOKEN_A}" --target-id box-b --expect-forbidden
+  --token "${TOKEN_A}" --target-id box-b --expect-status 403
 
 echo
-echo "=== Test 3: a forged token against box-a — expect rejection ==="
+echo "=== Test 3: a forged token against box-a — expect exactly 401 ==="
 "${VENV_DIR}/bin/python3" "${EXAMPLE_DIR}/client.py" \
-  --token "not-a-real-token" --target-id box-a --expect-forbidden
+  --token "not-a-real-token" --target-id box-a --expect-status 401
 
 echo
 echo "All checks passed."

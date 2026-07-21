@@ -102,10 +102,12 @@ kind load docker-image ${IMAGE_TAG} --name agent-sandbox
 
 ---
 
+## Steps 3 & 4: TLS Certificates with cert-manager
+
 Webhooks should be served over HTTPS with a valid certificate. `cert-manager` can be used to
 automatically handle certificate generation and injection.
 
-### 3. Install cert-manager
+### Step 3: Install cert-manager
 
 If not already installed, install `cert-manager` via official manifests:
 
@@ -141,7 +143,7 @@ kubectl get pods -n cert-manager
 > kubectl apply -f cert-manager-rbac.yaml
 > ```
 
-### 4. Create Issuer and Certificate
+### Step 4: Create Issuer and Certificate
 
 Create a file `cert-manager-resources.yaml`:
 
@@ -237,8 +239,8 @@ If you also see `agents.x-k8s.io/controller-first-observed-at`, you can compare 
 confirm that the webhook observed the creation before the controller did.
 
 > [!NOTE]
-> This test claim references a non-existent template (`nonexistent-template`) and will not
-> successfully start a sandbox (it will show status `TemplateNotFound`). This is expected for this
+> This test claim references a non-existent warm pool (`nonexistent-pool`) and will not
+> successfully start a sandbox (it will show status `WarmPoolNotFound`). This is expected for this
 > test.
 
 Delete the claim after confirming the annotation presence:

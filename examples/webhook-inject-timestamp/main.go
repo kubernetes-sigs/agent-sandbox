@@ -92,10 +92,15 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 		goto writeResponse
 	}
 
-	// Check if annotation already exists
+	// Check if annotation already exists. On failure, admit without mutating and
+	// surface the error in the response; failing the HTTP request here would count
+	// as a webhook call failure, which failurePolicy: Ignore silently drops.
 	if err := json.Unmarshal(ar.Request.Object.Raw, &rawObj); err != nil {
-		http.Error(w, fmt.Sprintf("could not unmarshal raw object: %v", err), http.StatusBadRequest)
-		return
+		log.Printf("could not unmarshal raw object, skipping mutation: %v", err)
+		arResponse.Response.Result = &metav1.Status{
+			Message: fmt.Sprintf("could not unmarshal raw object, skipping mutation: %v", err),
+		}
+		goto writeResponse
 	}
 	if metadata, ok := rawObj["metadata"].(map[string]interface{}); ok {
 		if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
@@ -139,8 +144,12 @@ func handleMutate(w http.ResponseWriter, r *http.Request) {
 
 		patchBytes, err := json.Marshal(patches)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("could not encode patch: %v", err), http.StatusInternalServerError)
-			return
+			// Admit without mutating rather than failing the webhook call.
+			log.Printf("could not encode patch, skipping mutation: %v", err)
+			arResponse.Response.Result = &metav1.Status{
+				Message: fmt.Sprintf("could not encode patch, skipping mutation: %v", err),
+			}
+			goto writeResponse
 		}
 
 		arResponse.Response.Patch = patchBytes

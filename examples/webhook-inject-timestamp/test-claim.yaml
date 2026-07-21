@@ -4,5 +4,5 @@ metadata:
   name: test-webhook-claim
   namespace: default
 spec:
-  sandboxTemplateRef:
-    name: nonexistent-template
+  warmPoolRef:
+    name: nonexistent-pool

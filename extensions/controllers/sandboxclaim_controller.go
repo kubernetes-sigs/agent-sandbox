@@ -53,6 +53,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/rawpatch"
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
@@ -141,6 +142,15 @@ type SandboxClaimReconciler struct {
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
 	AllowedLabelDomains     []string
+	// DisableObservabilityAnnotations skips persisting the observability
+	// annotations (first-observed timestamp, trace context) onto the claim,
+	// removing one API write per claim. The values are still stamped on the
+	// in-memory object, so same-process consumers (startup-latency metrics,
+	// trace propagation to the Sandbox) keep working. Costs the on-object
+	// debugging breadcrumbs and, after a controller restart, the
+	// startup-latency metric for claims first observed by the previous
+	// process. Wired to --disable-claim-observability-annotations.
+	DisableObservabilityAnnotations bool
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -317,28 +327,47 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 // initializeAnnotations initializes trace ID and observation time for active resources missing them.
+//
+// The persisted patch is built directly with rawpatch instead of the
+// historical DeepCopy+client.MergeFrom pattern: MergeFrom serialized the
+// entire claim twice and diffed the two documents just to emit this exact
+// {"metadata":{"annotations":{...}}} body (building that full-object patch
+// was measured at 15.8% of controller CPU in a 300-claim warm-adoption
+// benchmark). rawpatch's tests pin byte-equivalence with MergeFrom for
+// metadata-only set mutations, so nothing changes on the wire.
+//
+// When DisableObservabilityAnnotations is set the API write is skipped
+// entirely, but the annotations are still stamped on the in-memory object so
+// same-process consumers (startup-latency metrics, trace propagation to the
+// Sandbox) keep working.
 func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
 	traceContext := r.Tracer.GetTraceContext(ctx)
-	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
-	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
 
-	if needObservabilityPatch || needTraceContextPatch {
-		patch := client.MergeFrom(claim.DeepCopy())
-		if claim.Annotations == nil {
-			claim.Annotations = make(map[string]string)
-		}
-		if needObservabilityPatch {
-			timestamp := r.getOrRecordObservedTime(claim)
-			claim.Annotations[asmetrics.ObservabilityAnnotation] = timestamp.Format(time.RFC3339Nano)
-		}
-		if needTraceContextPatch {
-			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
-		}
-		if err := r.Patch(ctx, claim, patch); err != nil {
-			return err
-		}
+	stamped := make(map[string]string, 2)
+	if claim.Annotations[asmetrics.ObservabilityAnnotation] == "" {
+		stamped[asmetrics.ObservabilityAnnotation] = r.getOrRecordObservedTime(claim).Format(time.RFC3339Nano)
 	}
-	return nil
+	if traceContext != "" && claim.Annotations[asmetrics.TraceContextAnnotation] == "" {
+		stamped[asmetrics.TraceContextAnnotation] = traceContext
+	}
+	if len(stamped) == 0 {
+		return nil
+	}
+
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string, len(stamped))
+	}
+	maps.Copy(claim.Annotations, stamped)
+
+	if r.DisableObservabilityAnnotations {
+		return nil
+	}
+
+	patch, err := rawpatch.Annotations(stamped)
+	if err != nil {
+		return err
+	}
+	return r.Patch(ctx, claim, patch)
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
@@ -1598,7 +1627,13 @@ func (r *SandboxClaimReconciler) initializeSandboxLaunchTypeLabel(ctx context.Co
 		}
 	}
 
-	patch := client.MergeFrom(sandbox.DeepCopy())
+	// Raw single-label merge patch: byte-identical to what DeepCopy+MergeFrom
+	// computed here, without serializing the whole sandbox twice to diff out
+	// one label (see internal/rawpatch).
+	patch, err := rawpatch.Labels(map[string]string{v1beta1.SandboxLaunchTypeLabel: launchType})
+	if err != nil {
+		return err
+	}
 	if sandbox.Labels == nil {
 		sandbox.Labels = make(map[string]string)
 	}

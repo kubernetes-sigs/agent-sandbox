@@ -185,6 +185,13 @@ type Config struct {
 	// controller's worst-case refill latency (any replenishment delay + cold
 	// launch p99), or the pool runs dry and claims cold-start.
 	SustainedPoolHeadroom time.Duration `json:"sustainedPoolHeadroomNanos"`
+	// SustainedLifecycleBudget is the assumed per-claim ready+delete pipeline
+	// time (everything outside the dwell) used when estimating the phase's
+	// peak concurrent pods in checkClusterCapacity. If the cluster's
+	// Ready/delete path is slower than this under load, raise it so the
+	// capacity check demands enough headroom to keep queueing out of the
+	// latency measurement.
+	SustainedLifecycleBudget time.Duration `json:"sustainedLifecycleBudgetNanos"`
 
 	// ClientConnections shards the harness's own mutating requests across N
 	// HTTP/2 connections (1 = share the watches' single connection, the
@@ -250,6 +257,7 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.ClaimDwell, "claim-dwell", 5*time.Second, "How long each sustained claim is held after Ready before deletion")
 	flag.IntVar(&cfg.SustainedNamespaces, "sustained-namespaces", 1, "Spread the sustained phase's pools and claims across N pre-created namespaces (1 = run in the test namespace)")
 	flag.DurationVar(&cfg.SustainedPoolHeadroom, "sustained-pool-headroom", 10*time.Second, "Warm pool sizing for the sustained phase: each namespace's pool has ceil(rate/namespaces * headroom-seconds) replicas; must cover the controller's worst-case refill latency")
+	flag.DurationVar(&cfg.SustainedLifecycleBudget, "sustained-lifecycle-budget", 5*time.Second, "Assumed per-claim ready+delete pipeline time (beyond --claim-dwell) used to size the sustained phase's pod-capacity estimate; raise it if the cluster's Ready/delete path is slower under load")
 	flag.IntVar(&cfg.ClientConnections, "client-connections", 1, "Shard the harness's mutating API requests across N HTTP/2 connections; 1 = single connection shared with watches (historical behavior, subject to the apiserver's ~100-streams-per-connection cap)")
 	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
 	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
@@ -628,17 +636,24 @@ func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 				return test.runClaimsWarmPhase(ctx, number)
 			}})
 		case raw == string(PhaseClaimsWarmSustained):
-			if test.cfg.SustainedRate <= 0 {
-				return nil, fmt.Errorf("phase %q requires --sustained-rate > 0", raw)
+			// Finite checks: flag.Float64Var accepts "NaN" and "+Inf" (NaN
+			// even passes a <= 0 test), and non-finite values would flow
+			// into pool sizing and the capacity estimate where float->int
+			// conversion is implementation-defined.
+			if test.cfg.SustainedRate <= 0 || math.IsNaN(test.cfg.SustainedRate) || math.IsInf(test.cfg.SustainedRate, 0) {
+				return nil, fmt.Errorf("phase %q requires a finite --sustained-rate > 0", raw)
 			}
-			if test.cfg.SustainedSeconds <= 0 {
-				return nil, fmt.Errorf("phase %q requires --sustained-seconds > 0", raw)
+			if test.cfg.SustainedSeconds <= 0 || math.IsNaN(test.cfg.SustainedSeconds) || math.IsInf(test.cfg.SustainedSeconds, 0) {
+				return nil, fmt.Errorf("phase %q requires a finite --sustained-seconds > 0", raw)
 			}
 			if test.cfg.SustainedNamespaces < 1 {
 				return nil, fmt.Errorf("phase %q requires --sustained-namespaces >= 1", raw)
 			}
 			if test.cfg.SustainedPoolHeadroom <= 0 {
 				return nil, fmt.Errorf("phase %q requires --sustained-pool-headroom > 0", raw)
+			}
+			if test.cfg.SustainedLifecycleBudget <= 0 {
+				return nil, fmt.Errorf("phase %q requires --sustained-lifecycle-budget > 0", raw)
 			}
 			runs = append(runs, phaseRun{number, PhaseClaimsWarmSustained, func(ctx context.Context) error {
 				return test.runClaimsWarmSustainedPhase(ctx, number)
@@ -724,9 +739,10 @@ func checkClusterCapacity(cfg Config, info *ClusterInfo) error {
 		// Steady state: the pools stay full (refill replaces adopted
 		// sandboxes) while adopted sandboxes live for roughly the ready
 		// latency + dwell + deletion pipeline before their pods go away;
-		// budget ~5s of pipeline on top of the dwell.
+		// --sustained-lifecycle-budget bounds the pipeline part on top of
+		// the dwell.
 		poolTotal := sustainedPoolReplicasPerNamespace(cfg) * cfg.SustainedNamespaces
-		inFlight := int(math.Ceil(cfg.SustainedRate * (cfg.ClaimDwell.Seconds() + 5)))
+		inFlight := int(math.Ceil(cfg.SustainedRate * (cfg.ClaimDwell.Seconds() + cfg.SustainedLifecycleBudget.Seconds())))
 		if n := poolTotal + inFlight; n > extra {
 			extra = n
 		}

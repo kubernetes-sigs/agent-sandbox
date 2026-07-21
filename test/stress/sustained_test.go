@@ -134,3 +134,32 @@ func TestSustainedExpectedClaims(t *testing.T) {
 		t.Errorf("sustainedExpectedClaims = %d, want 18000", got)
 	}
 }
+
+func TestCheckClusterCapacitySustained(t *testing.T) {
+	base := Config{
+		Phases:                   []string{string(PhaseClaimsWarmSustained)},
+		SustainedRate:            100,
+		SustainedNamespaces:      1,
+		SustainedPoolHeadroom:    10 * time.Second,
+		ClaimDwell:               5 * time.Second,
+		SustainedLifecycleBudget: 5 * time.Second,
+	}
+	// pool = ceil(100*10) = 1000, inFlight = ceil(100*(5+5)) = 1000 => 2000.
+	if err := checkClusterCapacity(base, &ClusterInfo{PodCapacity: 2000}); err != nil {
+		t.Errorf("capacity 2000 should fit needed 2000: %v", err)
+	}
+	if err := checkClusterCapacity(base, &ClusterInfo{PodCapacity: 1999}); err == nil {
+		t.Error("capacity 1999 should fail for needed 2000")
+	}
+
+	// A slower assumed ready+delete pipeline must raise the requirement:
+	// budget 15s => inFlight = ceil(100*(5+15)) = 2000 => needed 3000.
+	slow := base
+	slow.SustainedLifecycleBudget = 15 * time.Second
+	if err := checkClusterCapacity(slow, &ClusterInfo{PodCapacity: 2000}); err == nil {
+		t.Error("capacity 2000 should fail once the lifecycle budget raises needed to 3000")
+	}
+	if err := checkClusterCapacity(slow, &ClusterInfo{PodCapacity: 3000}); err != nil {
+		t.Errorf("capacity 3000 should fit needed 3000: %v", err)
+	}
+}

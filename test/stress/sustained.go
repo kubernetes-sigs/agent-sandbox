@@ -371,11 +371,13 @@ func (s *stressTest) cleanupSustained(ctx context.Context, number PhaseNumber, n
 	}
 	phase := PhaseClaimsWarmSustained
 
-	// Delete claims that never made it to their own delete (failed, timed
-	// out, or the phase aborted mid-dwell).
+	// Delete every created claim that was never OBSERVED deleted — including
+	// ones whose delete was attempted but failed (or whose DELETED event the
+	// watch missed), so a failed delete can't leak a claim into later phases.
+	// Re-deleting an already-gone claim is just a cheap NotFound.
 	var leftovers []types.NamespacedName
 	for _, rec := range s.tracker.Records() {
-		if rec.PhaseNumber == number && !rec.CreateReturned.IsZero() && rec.SandboxDeleted.IsZero() && rec.DeleteCalled.IsZero() {
+		if rec.PhaseNumber == number && !rec.CreateReturned.IsZero() && rec.SandboxDeleted.IsZero() {
 			leftovers = append(leftovers, types.NamespacedName{Name: rec.Name, Namespace: rec.Namespace})
 		}
 	}

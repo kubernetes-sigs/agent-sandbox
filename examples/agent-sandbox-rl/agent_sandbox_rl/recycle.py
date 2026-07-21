@@ -152,7 +152,10 @@ class GitRestoreReset:
                      getattr(handle, "pod_name", "?"), e)
       return ResetBaseline()          # empty → recyclable() False → fresh path
     return ResetBaseline(
-        pristine_sha=d.get("PRISTINE", "") or d.get("HEAD", ""),
+        # Only trust the `pristine` tag we set; do NOT fall back to HEAD. If
+        # `git tag -f pristine` failed, PRISTINE is empty → recyclable() is False
+        # → fresh-claim path (never reuse without a verifiable pristine anchor).
+        pristine_sha=d.get("PRISTINE", ""),
         env_hash=d.get("ENV", ""),
         config_hash=d.get("CFG", ""),
         proc_count=int(d.get("PROCS", "0") or 0))

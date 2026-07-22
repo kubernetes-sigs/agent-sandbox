@@ -2614,6 +2614,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 		sandbox                        *sandboxv1beta1.Sandbox
 		expectedObservations           int
 		expectedControllerObservations int
+		expectedAnnotation             bool
 		setupReconciler                func(r *SandboxClaimReconciler)
 	}{
 		{
@@ -2633,6 +2634,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			},
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations: 1,
+			expectedAnnotation:   true,
 		},
 		{
 			name: "skips recording when webhook annotation is missing",
@@ -2645,6 +2647,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			},
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations: 0,
+			expectedAnnotation:   true,
 		},
 		{
 			name: "ignores ready condition = false",
@@ -2657,6 +2660,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			},
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations: 0,
+			expectedAnnotation:   false,
 		},
 		{
 			name: "ignores success if status was already ready in previous loop",
@@ -2670,6 +2674,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
 			},
 			expectedObservations: 0,
+			expectedAnnotation:   true, // backfilled!
 		},
 		{
 			name: "uses unknown launch type when sandbox is nil",
@@ -2689,6 +2694,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			sandbox:              nil,
 			expectedObservations: 1,
+			expectedAnnotation:   true,
 		},
 		{
 			name: "records controller latency using stored time",
@@ -2711,6 +2717,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			oldStatus:                      &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations:           1,
 			expectedControllerObservations: 1,
+			expectedAnnotation:             true,
 			setupReconciler: func(r *SandboxClaimReconciler) {
 				key := types.NamespacedName{Name: "stored-time", Namespace: "default"}
 				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-stored-time"})
@@ -2735,6 +2742,32 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			oldStatus:                      &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations:           0,
 			expectedControllerObservations: 1,
+			expectedAnnotation:             true,
+		},
+		{
+			name: "does not re-record when creation latency already marked (e.g. after resume)",
+			claim: &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "resumed",
+					CreationTimestamp: pastTime,
+					Annotations: map[string]string{
+						asmetrics.CreationLatencyRecordedAnnotation: "true",
+						asmetrics.WebhookAnnotation:                 time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+						asmetrics.ObservabilityAnnotation:           time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+				Status: extensionsv1beta1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			// Simulate resume: Ready went False (suspended) -> True again.
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse}},
+			},
+			expectedObservations:           0,
+			expectedControllerObservations: 0,
+			expectedAnnotation:             true,
 		},
 	}
 
@@ -2746,14 +2779,16 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 
 			scheme := newScheme(t)
 			warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool).Build()
+			// Include the test claim object in the fake client so Patch calls will succeed.
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, tc.claim).Build()
 			r := &SandboxClaimReconciler{Client: fakeClient}
 
 			if tc.setupReconciler != nil {
 				tc.setupReconciler(r)
 			}
 
-			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
+			err := r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
+			require.NoError(t, err)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
@@ -2765,8 +2800,118 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			if countController != tc.expectedControllerObservations {
 				t.Errorf("expected %d observations for ClaimControllerStartupLatency, got %d", tc.expectedControllerObservations, countController)
 			}
+
+			// Verify the annotation was stamped/updated in the fake client
+			updatedClaim := &extensionsv1beta1.SandboxClaim{}
+			err = fakeClient.Get(ctx, types.NamespacedName{Name: tc.claim.Name, Namespace: tc.claim.Namespace}, updatedClaim)
+			require.NoError(t, err)
+
+			hasAnnotation := updatedClaim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true"
+			if hasAnnotation != tc.expectedAnnotation {
+				t.Errorf("expected annotation presence to be %t, got %t", tc.expectedAnnotation, hasAnnotation)
+			}
 		})
 	}
+}
+
+func TestRecordCreationLatencyMetric_SuspendResumeFlow(t *testing.T) {
+	ctx := context.Background()
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	// Reset metrics
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	scheme := newScheme(t)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+
+	// 1. Create a claim transitioning to Ready for the first time (no annotation yet)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "flow-test",
+			Namespace:         "default",
+			CreationTimestamp: pastTime,
+			Annotations: map[string]string{
+				asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, claim).Build()
+	r := &SandboxClaimReconciler{Client: fakeClient}
+
+	// First Ready transition reconcile:
+	err := r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil)
+	require.NoError(t, err)
+
+	// Verify metrics recorded
+	count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
+	require.Equal(t, 1, count)
+	countCtrl := testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency)
+	require.Equal(t, 1, countCtrl)
+
+	// Verify annotation is stamped on the client
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, updatedClaim)
+	require.NoError(t, err)
+	require.Equal(t, "true", updatedClaim.Annotations[asmetrics.CreationLatencyRecordedAnnotation])
+
+	// 2. Simulate suspend/resume (False -> True)
+	// Reset metric counters to verify no *additional* observations are recorded.
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	// The old status before resumption is Ready=False
+	oldStatusBeforeResumption := &extensionsv1beta1.SandboxClaimStatus{
+		Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse}},
+	}
+
+	// Reconcile resume (using the claim that now contains the annotation)
+	err = r.recordCreationLatencyMetric(ctx, updatedClaim, oldStatusBeforeResumption, nil)
+	require.NoError(t, err)
+
+	// Verify no observations are recorded during resume
+	count = testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
+	require.Equal(t, 0, count)
+	countCtrl = testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency)
+	require.Equal(t, 0, countCtrl)
+}
+
+func TestRecordCreationLatencyMetric_NotFoundSwallowed(t *testing.T) {
+	ctx := context.Background()
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	scheme := newScheme(t)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "not-found-test",
+			Namespace:         "default",
+			CreationTimestamp: pastTime,
+			Annotations: map[string]string{
+				asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		},
+	}
+
+	// Create fake client WITHOUT the claim object so Patch returns NotFound
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool).Build()
+	r := &SandboxClaimReconciler{Client: fakeClient}
+
+	// recordCreationLatencyMetric should swallow the NotFound error and return nil
+	err := r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil)
+	require.NoError(t, err)
 }
 
 func TestSandboxClaimCreationMetric(t *testing.T) {
@@ -3646,10 +3791,24 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		},
 	}
 
+	// Simulate informer cache lag: while cacheStale is true, every Get of the
+	// adopted sandbox returns the frozen warm-pool-owned view, no matter what
+	// was patched.
+	cacheStale := true
+	staleSandbox := adoptedSandbox.DeepCopy()
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(template, warmPool, claim, adoptedSandbox, extraSandbox).
 		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == "adopted-sb" && cacheStale {
+					staleSandbox.DeepCopyInto(sb)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
 		Build()
 
 	warmSandboxQueue := queue.NewSimpleSandboxQueue()
@@ -3670,37 +3829,36 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
 
-	// Run reconcile. Adoption is triggered on this pass, but the sandbox is not yet
-	// observed as controlled by the claim (cache lag), so the reconcile must NOT finalize
-	// the claim and must requeue to try again. Post-#1107 the requeue is a bounded
-	// fixed-delay requeue with a nil error (not an exponentially-rate-limited error), so
-	// the compounding backoff that inflated adoption tail latency no longer occurs.
+	// Run reconcile. completeAdoption patches the sandbox in place and the client
+	// writes the server response back into the object, so adoption finalizes in this
+	// same pass: no error, no polling requeue (later passes are watch-driven via the
+	// Owns() Sandbox watch), and the claim status records the adopted sandbox.
 	res, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Fatalf("Expected reconcile to requeue without error during cache lag, got error: %v", err)
+		t.Fatalf("Expected reconcile to finalize adoption without error, got error: %v", err)
 	}
-	if res.RequeueAfter != adoptionCacheLagRequeueDelay {
-		t.Fatalf("Expected the bounded cache-lag requeue (%v), got RequeueAfter=%v", adoptionCacheLagRequeueDelay, res.RequeueAfter)
+	if !res.IsZero() {
+		t.Fatalf("Expected no requeue (convergence is watch-driven), got %+v", res)
 	}
 
-	// Verify that the claim status was NOT updated with the sandbox name (adoption deferred)
+	// Verify that the claim status WAS finalized with the adopted sandbox in the same pass.
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 
-	if updatedClaim.Status.SandboxStatus.Name == "adopted-sb" {
-		t.Error("expected claim status to NOT be updated with 'adopted-sb' during cache lag")
+	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+		t.Errorf("expected claim status to be finalized with 'adopted-sb' in the adoption pass, got %q", updatedClaim.Status.SandboxStatus.Name)
 	}
 
-	// The cache-lag retry is a benign signal: the Ready condition must report the
-	// specific AdoptionPending reason, not a generic reconciler failure.
+	// Adoption is finalized but the sandbox is not Ready yet; the condition reflects
+	// sandbox state, not a reconciler failure.
 	readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	if readyCondition == nil {
-		t.Fatal("expected Ready condition to be set during cache lag")
+		t.Fatal("expected Ready condition to be set after the adoption pass")
 	}
-	if readyCondition.Reason != "AdoptionPending" {
-		t.Errorf("expected Ready condition reason %q during cache lag, got %q (message: %q)", "AdoptionPending", readyCondition.Reason, readyCondition.Message)
+	if readyCondition.Reason != "SandboxNotReady" {
+		t.Errorf("expected Ready condition reason %q after the adoption pass, got %q (message: %q)", "SandboxNotReady", readyCondition.Reason, readyCondition.Message)
 	}
 
 	// Verify that the extra warm sandbox was NOT adopted (it should still have its warm pool labels)
@@ -3712,37 +3870,49 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Error("expected extra warm sandbox to still have warm pool label, meaning it was not incorrectly adopted during cache lag")
 	}
 
-	// Simulate the cache catching up!
-	// Fetch the adopted sandbox object, add the SandboxClaim owner reference, and update it in fakeClient.
-	var adopted sandboxv1beta1.Sandbox
-	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &adopted); err != nil {
-		t.Fatalf("failed to get adopted sandbox: %v", err)
-	}
-	adopted.OwnerReferences = []metav1.OwnerReference{{
-		APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-		Kind:       "SandboxClaim",
-		Name:       "test-claim",
-		UID:        "claim-uid-123",
-		Controller: ptr.To(true), // nolint:modernize
-	}}
-	if err := fakeClient.Update(context.Background(), &adopted); err != nil {
-		t.Fatalf("failed to update adopted sandbox with claim owner ref: %v", err)
-	}
-
-	// Run reconcile AGAIN
-	_, err = reconciler.Reconcile(context.Background(), req)
+	// Run reconcile AGAIN while the cache is STILL stale. The pass re-sends the
+	// idempotent adoption patch and must neither error, nor wipe the finalized
+	// status, nor adopt the extra warm sandbox.
+	res, err = reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Fatalf("Expected second Reconcile to succeed after cache caught up, but failed: %v", err)
+		t.Fatalf("Expected stale-cache Reconcile to succeed, but failed: %v", err)
 	}
-
-	// Verify that the claim status WAS updated this time!
+	if !res.IsZero() {
+		t.Fatalf("Expected no requeue on the stale-cache pass, got %+v", res)
+	}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 		t.Fatalf("failed to get claim: %v", err)
 	}
 	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
-		t.Errorf("expected claim status to be updated with 'adopted-sb' on 2nd pass, got %q", updatedClaim.Status.SandboxStatus.Name)
+		t.Errorf("expected claim status to remain 'adopted-sb' during cache lag, got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-extra", Namespace: "default"}, &extra); err != nil {
+		t.Fatalf("failed to get extra warm sandbox: %v", err)
+	}
+	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
+		t.Error("expected extra warm sandbox to still have warm pool label during cache lag (should not have been adopted)")
 	}
 
+	// Cache converges: the next pass takes the fast path (status lookup,
+	// IsControlledBy) and is stable.
+	cacheStale = false
+	res, err = reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Expected post-convergence Reconcile to succeed, but failed: %v", err)
+	}
+	if !res.IsZero() {
+		t.Fatalf("Expected no requeue after convergence, got %+v", res)
+	}
+
+	// Verify that the claim status is unchanged.
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+		t.Fatalf("failed to get claim: %v", err)
+	}
+	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+		t.Errorf("expected claim status to remain 'adopted-sb' after convergence, got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+
+	var adopted sandboxv1beta1.Sandbox
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "adopted-sb", Namespace: "default"}, &adopted); err != nil {
 		t.Fatalf("failed to get adopted sandbox: %v", err)
 	}
@@ -3755,15 +3925,17 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Fatalf("failed to get extra warm sandbox: %v", err)
 	}
 	if _, ok := extra.Labels[warmPoolSandboxLabel]; !ok {
-		t.Error("expected extra warm sandbox to still have warm pool label after 2nd pass (should not have been adopted)")
+		t.Error("expected extra warm sandbox to still have warm pool label after convergence (should not have been adopted)")
 	}
 }
 
-// TestSandboxClaimAdoptionCacheLagDoesNotRepatch verifies that while the informer cache
-// keeps returning the stale (warm-pool-owned) view of an already-adopted sandbox, the
-// bounded cache-lag requeues wait for convergence WITHOUT re-sending the adoption patch
-// on every pass.
-func TestSandboxClaimAdoptionCacheLagDoesNotRepatch(t *testing.T) {
+// TestSandboxClaimAdoptionCacheLagRepatchesIdempotently verifies that while the informer
+// cache keeps returning the stale (warm-pool-owned) view of an already-adopted sandbox,
+// every pass finalizes the claim from the freshly re-patched object: no error, no polling
+// requeue (convergence is watch-driven via the Owns() Sandbox watch), and the finalized
+// status is never wiped. The idempotent adoption re-patch on stale passes is an accepted
+// trade-off of finalizing in-pass without per-claim in-memory dedup state.
+func TestSandboxClaimAdoptionCacheLagRepatchesIdempotently(t *testing.T) {
 	scheme := newScheme(t)
 
 	claim := &extensionsv1beta1.SandboxClaim{
@@ -3858,30 +4030,46 @@ func TestSandboxClaimAdoptionCacheLagDoesNotRepatch(t *testing.T) {
 	}
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
 
-	// Pass 1: adoption is triggered (patches the sandbox) and defers via bounded requeue.
+	// Pass 1: adoption patches the sandbox and finalizes the claim in the same pass.
 	res, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
 		t.Fatalf("pass 1: expected nil error, got: %v", err)
 	}
-	if res.RequeueAfter != adoptionCacheLagRequeueDelay {
-		t.Fatalf("pass 1: expected RequeueAfter=%v, got %v", adoptionCacheLagRequeueDelay, res.RequeueAfter)
+	if !res.IsZero() {
+		t.Fatalf("pass 1: expected no requeue, got %+v", res)
 	}
-	patchesAfterFirstPass := sandboxPatches
-	if patchesAfterFirstPass == 0 {
+	patchesAfterLastPass := sandboxPatches
+	if patchesAfterLastPass == 0 {
 		t.Fatal("pass 1: expected the adoption patch to be sent")
 	}
 
-	// Passes 2 and 3: cache still stale — must keep requeueing WITHOUT re-patching.
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+		t.Fatalf("pass 1: failed to get claim: %v", err)
+	}
+	if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+		t.Fatalf("pass 1: expected status to be finalized with 'adopted-sb', got %q", updatedClaim.Status.SandboxStatus.Name)
+	}
+
+	// Passes 2 and 3: cache still stale — each pass re-sends the idempotent adoption
+	// patch, returns without error, and leaves the finalized status intact.
 	for pass := 2; pass <= 3; pass++ {
 		res, err = reconciler.Reconcile(context.Background(), req)
 		if err != nil {
 			t.Fatalf("pass %d: expected nil error, got: %v", pass, err)
 		}
-		if res.RequeueAfter != adoptionCacheLagRequeueDelay {
-			t.Fatalf("pass %d: expected RequeueAfter=%v, got %v", pass, adoptionCacheLagRequeueDelay, res.RequeueAfter)
+		if !res.IsZero() {
+			t.Fatalf("pass %d: expected no requeue, got %+v", pass, res)
 		}
-		if sandboxPatches != patchesAfterFirstPass {
-			t.Fatalf("pass %d: expected no additional sandbox patches while cache lags, got %d (was %d)", pass, sandboxPatches, patchesAfterFirstPass)
+		if sandboxPatches <= patchesAfterLastPass {
+			t.Fatalf("pass %d: expected the idempotent adoption re-patch while cache lags, got %d (was %d)", pass, sandboxPatches, patchesAfterLastPass)
+		}
+		patchesAfterLastPass = sandboxPatches
+		if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
+			t.Fatalf("pass %d: failed to get claim: %v", pass, err)
+		}
+		if updatedClaim.Status.SandboxStatus.Name != "adopted-sb" {
+			t.Errorf("pass %d: expected finalized status to be preserved during cache lag, got %q", pass, updatedClaim.Status.SandboxStatus.Name)
 		}
 	}
 }
@@ -3889,7 +4077,8 @@ func TestSandboxClaimAdoptionCacheLagDoesNotRepatch(t *testing.T) {
 // TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus verifies that a claim whose
 // status was already finalized with a sandbox (e.g. a controller restart racing a stale
 // informer) does NOT have its SandboxStatus.Name/PodIPs wiped or its Ready condition
-// downgraded by a benign cache-lag adoption retry pass.
+// downgraded by a pass that reads the stale (warm-pool-owned) view: the pass re-sends
+// the idempotent adoption patch and re-finalizes from the authoritative object.
 func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 	scheme := newScheme(t)
 
@@ -3962,6 +4151,18 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 			},
 		}},
 		},
+		// The sandbox is live and Ready; informer lag on the ownership patch does not
+		// erase its status, so the stale view still carries it.
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{"10.1.2.3"},
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "Ready",
+				Message:            "Sandbox is ready",
+				LastTransitionTime: metav1.Now(),
+			}},
+		},
 	}
 
 	// Frozen warm-pool-owned view: served on every Get to simulate an informer
@@ -3983,7 +4184,7 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 		}).
 		Build()
 
-	// Fresh reconciler (empty triggeredAdoptions), as after a controller restart.
+	// Fresh reconciler, as after a controller restart.
 	reconciler := &SandboxClaimReconciler{
 		Client:           fakeClient,
 		Scheme:           scheme,
@@ -3997,8 +4198,8 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error during cache lag, got: %v", err)
 	}
-	if res.RequeueAfter != adoptionCacheLagRequeueDelay {
-		t.Fatalf("expected RequeueAfter=%v, got %v", adoptionCacheLagRequeueDelay, res.RequeueAfter)
+	if !res.IsZero() {
+		t.Fatalf("expected no requeue, got %+v", res)
 	}
 
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
@@ -4020,12 +4221,12 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 	}
 }
 
-// TestSandboxClaimFreshAdoptionDoesNotRepatchDuringCacheLag verifies that the primary
-// warm-adoption entry point (adoptSandboxFromCandidates) records the completed adoption
-// in the dedup cache, so the very next cache-lag pass waits via the bounded requeue
-// without re-sending the adoption patch — and without wiping the status finalized on
-// the adoption pass.
-func TestSandboxClaimFreshAdoptionDoesNotRepatchDuringCacheLag(t *testing.T) {
+// TestSandboxClaimFreshAdoptionStaleCacheKeepsFinalizedStatus verifies that after the
+// primary warm-adoption entry point (adoptSandboxFromCandidates) finalizes status on the
+// adoption pass, later passes that still read the stale (warm-pool-owned) view stay
+// error-free, need no polling requeue, and never wipe the finalized status — the stale
+// pass just re-sends the idempotent adoption patch.
+func TestSandboxClaimFreshAdoptionStaleCacheKeepsFinalizedStatus(t *testing.T) {
 	scheme := newScheme(t)
 
 	// No assigned-sandbox annotation: adoption goes through the candidate queue.
@@ -4138,19 +4339,16 @@ func TestSandboxClaimFreshAdoptionDoesNotRepatchDuringCacheLag(t *testing.T) {
 		t.Fatalf("pass 1: expected status to be finalized with 'warm-sb', got %q", updatedClaim.Status.SandboxStatus.Name)
 	}
 
-	// Passes 2 and 3: cache still shows the warm-pool owner — must wait via the
-	// bounded requeue WITHOUT re-sending the adoption patch, and WITHOUT wiping
-	// the status finalized on pass 1.
+	// Passes 2 and 3: cache still shows the warm-pool owner — each pass re-finalizes
+	// from the freshly re-patched object without error, without a polling requeue,
+	// and without wiping the status finalized on pass 1.
 	for pass := 2; pass <= 3; pass++ {
 		res, err := reconciler.Reconcile(context.Background(), req)
 		if err != nil {
 			t.Fatalf("pass %d: expected nil error, got: %v", pass, err)
 		}
-		if res.RequeueAfter != adoptionCacheLagRequeueDelay {
-			t.Fatalf("pass %d: expected RequeueAfter=%v, got %v", pass, adoptionCacheLagRequeueDelay, res.RequeueAfter)
-		}
-		if sandboxPatches != patchesAfterFirstPass {
-			t.Fatalf("pass %d: expected no additional sandbox patches while cache lags, got %d (was %d)", pass, sandboxPatches, patchesAfterFirstPass)
+		if !res.IsZero() {
+			t.Fatalf("pass %d: expected no requeue, got %+v", pass, res)
 		}
 		if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-claim", Namespace: "default"}, updatedClaim); err != nil {
 			t.Fatalf("pass %d: failed to get claim: %v", pass, err)
@@ -4363,6 +4561,25 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "claim-other", Namespace: "default"},
 		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "other-warmpool"}},
 	}
+	// Bound claim: already has a sandbox recorded in status, so pool events must
+	// not re-enqueue it (its reconciles are driven by the claim/sandbox watches).
+	claimBound := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-bound", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPoolName}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "adopted-sandbox"},
+		},
+	}
+	// Deleting claim: Reconcile returns immediately for it, so it is skipped too.
+	claimDeleting := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "claim-deleting",
+			Namespace:         "default",
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Finalizers:        []string{"test-finalizer"},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPoolName}},
+	}
 
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: warmPoolName, Namespace: "default"},
@@ -4375,7 +4592,7 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 	// Let's use the WithIndex option on the fake client builder to support the matchingFields query!
 	fakeClientWithIndex := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(claim1, claim2, claimOther, warmPool).
+		WithObjects(claim1, claim2, claimOther, claimBound, claimDeleting, warmPool).
 		WithIndex(&extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, func(obj client.Object) []string {
 			c := obj.(*extensionsv1beta1.SandboxClaim)
 			if c.Spec.WarmPoolRef.Name == "" {
@@ -4393,7 +4610,7 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 	requests := reconciler.mapWarmPoolToClaims(context.Background(), warmPool)
 
 	if len(requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(requests))
+		t.Fatalf("expected 2 requests (unbound claims only), got %d: %v", len(requests), requests)
 	}
 
 	expectedNames := map[string]bool{"claim-1": true, "claim-2": true}
@@ -4404,6 +4621,42 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 		if req.Namespace != "default" {
 			t.Errorf("expected namespace 'default', got %s", req.Namespace)
 		}
+	}
+}
+
+// TestWarmPoolMapWatchPredicate pins the event classes the pool->claims map watch
+// reacts to: status-only pool updates (generation unchanged) must be filtered out,
+// while spec changes (generation bump) still pass so unbound claims wake up.
+func TestWarmPoolMapWatchPredicate(t *testing.T) {
+	pred := predicate.GenerationChangedPredicate{}
+
+	oldPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-warmpool",
+			Namespace:       "default",
+			Generation:      1,
+			ResourceVersion: "100",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(5))},
+	}
+
+	// Status-only update: resourceVersion moves, generation does not.
+	statusOnlyPool := oldPool.DeepCopy()
+	statusOnlyPool.ResourceVersion = "101"
+	statusOnlyPool.Status.ReadyReplicas = 3
+
+	if pred.Update(event.UpdateEvent{ObjectOld: oldPool, ObjectNew: statusOnlyPool}) {
+		t.Errorf("expected status-only pool update (generation unchanged) to be filtered out")
+	}
+
+	// Spec update: the API server bumps metadata.generation.
+	specChangedPool := oldPool.DeepCopy()
+	specChangedPool.ResourceVersion = "102"
+	specChangedPool.Generation = 2
+	specChangedPool.Spec.Replicas = new(int32(10))
+
+	if !pred.Update(event.UpdateEvent{ObjectOld: oldPool, ObjectNew: specChangedPool}) {
+		t.Errorf("expected spec (generation) pool update to pass the predicate")
 	}
 }
 

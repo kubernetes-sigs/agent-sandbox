@@ -1,5 +1,5 @@
 .PHONY: all
-all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify
+all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify verify-olm
 
 .PHONY: fix-go-generate
 fix-go-generate:
@@ -178,6 +178,14 @@ toc-update:
 .PHONY: toc-verify
 toc-verify:
 	./dev/tools/verify-toc
+
+.PHONY: fix-olm-manifests
+fix-olm-manifests:
+	./dev/tools/sync-olm-manifests
+
+.PHONY: verify-olm
+verify-olm:
+	./dev/tools/verify-olm-manifests
 
 .PHONY: clean
 clean:

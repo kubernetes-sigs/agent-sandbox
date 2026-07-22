@@ -70,23 +70,6 @@ var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 // ErrWarmPoolNotFound is a sentinel error indicating a SandboxWarmPool was not found.
 var ErrWarmPoolNotFound = errors.New("SandboxWarmPool not found")
 
-// errAdoptionTriggeredRetry signals that warm-pool adoption was just completed for a
-// sandbox and the claim must be requeued so a later pass observes the sandbox as
-// controlled by this claim once the informer cache converges. It is a sentinel (not a
-// generic error) so Reconcile can convert it into a bounded requeue instead
-// of returning an error: an error would route through the exponential failure rate
-// limiter, and because the same retry recurs each pass until the cache catches up the
-// backoff compounds and, under concurrent claims, adoption tail latency balloons
-// (#1107).
-var errAdoptionTriggeredRetry = errors.New("triggered adoption completion, retry")
-
-// adoptionCacheLagRequeueDelay is how long to wait before re-checking that a
-// just-completed adoption is visible in the informer cache. Long enough to
-// cover typical watch latency (so most claims converge in one extra pass) and
-// to bound the rate of redundant adoption patches while the cache lags, but
-// far below the multi-second exponential backoff it replaces.
-const adoptionCacheLagRequeueDelay = 50 * time.Millisecond
-
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}
 
@@ -147,36 +130,6 @@ func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTi
 	return actual.(observedTimeEntry), loaded
 }
 
-// triggeredAdoptionEntry records that completeAdoption already patched the
-// named sandbox over to a claim (identified by UID), so cache-lag requeues
-// can wait for the informer to converge without re-sending the patch.
-type triggeredAdoptionEntry struct {
-	uid     types.UID
-	sandbox string
-}
-
-// triggeredAdoptionMap is a type-safe wrapper around sync.Map that only
-// stores triggeredAdoptionEntry values.
-type triggeredAdoptionMap struct {
-	inner sync.Map
-}
-
-func (m *triggeredAdoptionMap) Load(key types.NamespacedName) (triggeredAdoptionEntry, bool) {
-	val, ok := m.inner.Load(key)
-	if !ok {
-		return triggeredAdoptionEntry{}, false
-	}
-	return val.(triggeredAdoptionEntry), true
-}
-
-func (m *triggeredAdoptionMap) Store(key types.NamespacedName, entry triggeredAdoptionEntry) {
-	m.inner.Store(key, entry)
-}
-
-func (m *triggeredAdoptionMap) Delete(key types.NamespacedName) {
-	m.inner.Delete(key)
-}
-
 // SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
@@ -186,7 +139,6 @@ type SandboxClaimReconciler struct {
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
-	triggeredAdoptions      triggeredAdoptionMap
 	AllowedLabelDomains     []string
 }
 
@@ -211,7 +163,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if k8errors.IsNotFound(err) {
 			// Fallback cleanup to prevent memory leaks if the delete predicate was missed or a stale request is processed.
 			r.observedTimes.Delete(req.NamespacedName)
-			r.triggeredAdoptions.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
@@ -323,7 +274,9 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
+	if err := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); err != nil {
+		return ctrl.Result{}, errors.Join(reconcileErr, err)
+	}
 
 	// Determine Result
 	var result ctrl.Result
@@ -346,25 +299,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		// TODO: This 1-minute requeue creates a latency regression vs an immediate watch trigger.
 		// Consider adding a lightweight SandboxTemplate -> claims map watch to reconcile promptly.
 		requeueDelay := 1 * time.Minute
-		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
-			requeueDelay = result.RequeueAfter
-		}
-		return ctrl.Result{RequeueAfter: requeueDelay}, nil
-	}
-
-	// Adoption was just triggered for a warm-pool sandbox. The sandbox is now patched
-	// to us, but the informer cache may still show the warm-pool owner. Requeue
-	// with a bounded delay to let the cache converge, WITHOUT returning an
-	// error: returning an error would route through the exponential failure rate
-	// limiter (and, under bursts, the shared 10qps bucket limiter), and because this
-	// same retry recurs on each pass until the cache catches up the backoff compounds
-	// (5ms*(2^k-1)) and adoption tail latency balloons (#1107). The nil error lets the
-	// workqueue Forget the key, resetting the failure counter. Status is intentionally
-	// not finalized with the sandbox on this pass (sandbox is nil here), preserving the
-	// duplicate-adoption protection during cache lag.
-	if errors.Is(reconcileErr, errAdoptionTriggeredRetry) {
-		logger.V(4).Info("Adoption triggered; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
-		requeueDelay := adoptionCacheLagRequeueDelay
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
 		}
@@ -611,17 +545,6 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				ObservedGeneration: claim.Generation,
 			}
 		}
-		if errors.Is(err, errAdoptionTriggeredRetry) {
-			// Benign retry signal, not a claim failure: adoption was patched and we
-			// are only waiting for the informer cache to converge before finalizing.
-			return metav1.Condition{
-				Type:               string(v1beta1.SandboxConditionReady),
-				Status:             metav1.ConditionFalse,
-				Reason:             "AdoptionPending",
-				Message:            "Warm-pool sandbox adoption triggered; waiting for cache to converge",
-				ObservedGeneration: claim.Generation,
-			}
-		}
 		if errors.Is(err, ErrInvalidMetadata) {
 			reason = "InvalidMetadata"
 			return metav1.Condition{
@@ -720,13 +643,6 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 }
 
 func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) {
-	// A cache-lag adoption retry is a benign look-again, not a state change. If the
-	// claim status was already finalized with a sandbox (the adoption pass itself, or
-	// a controller restart racing a stale informer), leave the recorded Name/PodIPs
-	// and existing conditions untouched instead of transiently wiping them.
-	if sandbox == nil && errors.Is(err, errAdoptionTriggeredRetry) && claim.Status.SandboxStatus.Name != "" {
-		return
-	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 	r.syncFinishedCondition(claim, sandbox, isClaimExpired)
@@ -958,14 +874,6 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 
 			logger.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
-
-			// Record the completed adoption so a later pass that still sees the
-			// stale warm-pool-owned view (informer cache lag) waits via the
-			// bounded requeue instead of re-sending the adoption patch.
-			r.triggeredAdoptions.Store(
-				types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
-				triggeredAdoptionEntry{uid: claim.UID, sandbox: adopted.Name},
-			)
 
 			if r.Recorder != nil {
 				r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxAdopted", "Adoption", "Adopted warm pool Sandbox %q", adopted.Name)
@@ -1528,7 +1436,6 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
-				r.triggeredAdoptions.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
 				launchType := v1beta1.SandboxLaunchTypeCold
 				if claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] == statusName ||
 					claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] == statusName ||
@@ -1564,7 +1471,6 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: sbName}, sandbox); err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox", "sandbox", sbName, "claim", claim.Name)
-				r.triggeredAdoptions.Delete(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace})
 				if fromLabel {
 					if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
 						logger.Error(err, "Failed to migrate legacy sandbox label to annotation (non-fatal)", "claim", claim.Name)
@@ -1594,14 +1500,6 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						return nil, fmt.Errorf("failed to remove invalid sandbox reference: %w", err)
 					}
 				} else {
-					// If we already sent the adoption patch for this exact claim+sandbox,
-					// the cache just hasn't converged yet — keep waiting via the bounded
-					// requeue without re-sending the (idempotent but redundant) patch.
-					adoptionKey := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-					if prev, ok := r.triggeredAdoptions.Load(adoptionKey); ok && prev.uid == claim.UID && prev.sandbox == sbName {
-						logger.V(4).Info("Adoption already triggered, waiting for cache to converge", "sandbox", sbName, "claim", claim.Name)
-						return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
-					}
 					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
 						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
 							logger.V(4).Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
@@ -1609,7 +1507,6 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
 					} else {
-						r.triggeredAdoptions.Store(adoptionKey, triggeredAdoptionEntry{uid: claim.UID, sandbox: sbName})
 						if fromLabel {
 							if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
 								logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
@@ -1617,13 +1514,13 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 								logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 							}
 						}
-						// Adoption was completed in-place (completeAdoption patched our controllerRef
-						// and the Warm label). Signal a retry so a later pass observes the sandbox as
-						// controlled by us once the cache converges. Returned as a sentinel so
-						// Reconcile requeues immediately with a bounded delay rather than routing
-						// through the exponential failure rate limiter (#1107).
-						logger.Info("Triggered adoption completion for sandbox, requeueing", "sandbox", sbName, "claim", claim.Name)
-						return nil, fmt.Errorf("%w: sandbox %s", errAdoptionTriggeredRetry, sbName)
+						// completeAdoption wrote the API server's response back into
+						// `sandbox`, so returning it finalizes the claim status in this same
+						// pass. No requeue for cache lag: a stale pass just re-sends the
+						// idempotent patch, and the Owns(&Sandbox{}) watch drives convergence
+						// once the cache catches up (#1107).
+						logger.V(4).Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
+						return sandbox, nil
 					}
 				}
 			}
@@ -1791,7 +1688,23 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	}
 }
 
-// mapWarmPoolToClaims maps a SandboxWarmPool to a list of SandboxClaims that reference it.
+// mapWarmPoolToClaims maps a SandboxWarmPool to the SandboxClaims that reference it
+// and still depend on warm-pool state.
+//
+// Claims that are already bound to a sandbox (status.sandboxStatus.name set) are
+// skipped: pool events exist to wake claims that are still WAITING on the pool
+// (binding/adoption), and a bound claim's reconciliation is driven by its own
+// events and by the Owns(&Sandbox{}) watch. Note the bound path does still read
+// the pool/template on reconcile (reconcileActive fetches them for metadata and
+// NetworkPolicy reconciliation) — the deliberate trade-off here is that pool or
+// template spec changes no longer proactively re-enqueue every bound claim;
+// bound claims pick such changes up on their next reconcile from any other
+// trigger. If the bound sandbox is later deleted, the sandbox delete event
+// (Owns watch) re-reconciles the claim and clears status.sandboxStatus.name,
+// after which the claim receives pool events again.
+// Claims being deleted are likewise skipped since Reconcile returns immediately
+// for them. Unbound claims are always enqueued: they may be waiting for the pool
+// to appear (ErrWarmPoolNotFound requeue path) or for a usable pool spec.
 func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj client.Object) []ctrl.Request {
 	warmPool, ok := obj.(*extensionsv1beta1.SandboxWarmPool)
 	if !ok {
@@ -1806,6 +1719,9 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 	requests := make([]ctrl.Request, 0, len(claims.Items))
 	for i := range claims.Items {
 		claim := &claims.Items[i]
+		if claim.Status.SandboxStatus.Name != "" || !claim.DeletionTimestamp.IsZero() {
+			continue
+		}
 		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
 	}
 	return requests
@@ -1836,7 +1752,18 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		Watches(
 			&extensionsv1beta1.SandboxWarmPool{},
 			handler.EnqueueRequestsFromMapFunc(r.mapWarmPoolToClaims),
-			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			// GenerationChangedPredicate (instead of ResourceVersionChangedPredicate)
+			// drops pool STATUS-only updates, which churn on every adoption /
+			// replenishment and previously fanned out to every claim referencing
+			// the pool (O(pool status writes x claims) no-op reconciles during
+			// bursts). Claims never wait on pool status: newly adoptable warm
+			// sandboxes reach claims through the Sandbox watch feeding the
+			// in-memory WarmSandboxQueue, and a claim that finds the queue empty
+			// falls through to cold-start in the same reconcile rather than
+			// blocking on pool capacity. Pool create/delete events and spec
+			// (generation) changes still pass, covering claims requeueing on
+			// ErrWarmPoolNotFound / ErrTemplateNotFound.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
 		// TODO: Keep a lightweight SandboxTemplate -> claims map watch to promptly reconcile
 		// claims when a missing template is created, instead of relying on the 1-minute fallback.
@@ -1932,24 +1859,38 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1beta1.SandboxClaim,
 	oldStatus *extensionsv1beta1.SandboxClaimStatus,
 	sandbox *v1beta1.Sandbox,
-) {
+) error {
 	logger := log.FromContext(ctx)
 
 	newStatus := &claim.Status
 	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1beta1.SandboxConditionReady))
 	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		return
+		return nil
+	}
+
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+
+	// Record startup/creation latency at most once per claim.
+	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
+		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
+			r.observedTimes.Delete(key)
+		}
+		return nil
 	}
 
 	// Do not record creation metric if we have already seen the ready state.
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1beta1.SandboxConditionReady))
 	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
 		// Already Ready before this reconcile; drain any entry re-added by a post-Ready UpdateFunc.
-		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
 		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
 			r.observedTimes.Delete(key)
 		}
-		return
+		// Backfill the annotation if missing so a future suspend/resume doesn't re-record.
+		if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
+			logger.Error(err, "Failed to stamp creation-latency-recorded annotation on already-Ready claim", "claim", claim.Name)
+			return err
+		}
+		return nil
 	}
 
 	launchType := getLaunchType(sandbox)
@@ -1965,6 +1906,34 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
+
+	// Mark the claim so a later Ready transition (e.g. a resume) does not re-record.
+	if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
+		logger.Error(err, "Failed to stamp creation-latency-recorded annotation; a resume may re-record creation latency", "claim", claim.Name)
+		return err
+	}
+	return nil
+}
+
+// markCreationLatencyRecorded stamps the one-shot annotation that prevents the
+// creation/startup latency histograms from being re-recorded on a later Ready
+// transition.
+func (r *SandboxClaimReconciler) markCreationLatencyRecorded(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
+		return nil
+	}
+	patch := client.MergeFrom(claim.DeepCopy())
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] = "true"
+	if err := r.Patch(ctx, claim, patch); err != nil {
+		if k8errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func hasSandboxExpiredCondition(conditions []metav1.Condition) bool {

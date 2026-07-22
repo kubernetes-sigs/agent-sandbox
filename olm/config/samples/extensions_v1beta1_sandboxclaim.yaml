@@ -1,0 +1,8 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: example-claim
+  namespace: default
+spec:
+  warmPoolRef:
+    name: example-warmpool

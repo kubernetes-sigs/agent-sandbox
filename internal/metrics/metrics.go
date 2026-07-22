@@ -44,6 +44,10 @@ const (
 	OwnedBySandboxClaim    = "SandboxClaim"    // Sandbox owned by a SandboxClaim
 	OwnedBySandboxWarmPool = "SandboxWarmPool" // Sandbox owned by a SandboxWarmPool
 	OwnedByNone            = "None"            // Sandbox not owned by any extension controller
+
+	// CreationLatencyRecordedAnnotation marks a SandboxClaim whose startup/creation latency
+	// has already been recorded, preventing double-recording (e.g. after a suspend/resume).
+	CreationLatencyRecordedAnnotation = "agents.x-k8s.io/creation-latency-recorded"
 )
 
 // sandboxLatencyBuckets defines the shared histogram bucket boundaries (in milliseconds)

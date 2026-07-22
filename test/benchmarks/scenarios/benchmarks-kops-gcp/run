@@ -137,6 +137,15 @@ echo "Using CNI: ${CNI}"
 STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
 echo "Using node count: ${STRESS_NODE_COUNT}"
 
+# Control-plane sizing: on n2-standard-8 the throughput phases pin
+# kube-apiserver at a flat ~5.6-5.7 cores across mif200/400/600 (a plateau
+# despite 3x offered load, i.e. saturation) on a node that also runs etcd,
+# KCM (~0.35) and the scheduler (~0.23). 16 vCPUs takes apiserver CPU out of
+# the picture so client-side bottlenecks (controller workers, HTTP/2
+# per-connection stream cap) are measured against a server that can keep up.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-n2-standard-16}"
+echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -147,7 +156,7 @@ kops create cluster \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
-  --control-plane-size=n2-standard-8 \
+  --control-plane-size="${STRESS_CONTROL_PLANE_SIZE}" \
   --node-count="${STRESS_NODE_COUNT}" \
   --node-size=n2-standard-8
 

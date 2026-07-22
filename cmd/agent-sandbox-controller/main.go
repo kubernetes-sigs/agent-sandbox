@@ -383,6 +383,7 @@ func main() {
 
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
 			Client:              mgr.GetClient(),
+			APIReader:           mgr.GetAPIReader(),
 			Scheme:              mgr.GetScheme(),
 			WarmSandboxQueue:    warmSandboxQueue,
 			Recorder:            mgr.GetEventRecorder("sandboxclaim-controller"),

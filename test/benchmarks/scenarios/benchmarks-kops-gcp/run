@@ -137,6 +137,20 @@ echo "Using CNI: ${CNI}"
 STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
 echo "Using node count: ${STRESS_NODE_COUNT}"
 
+# Control-plane sizing: on n2-standard-8 the throughput phases pin
+# kube-apiserver at a flat ~5.6-5.7 cores across mif200/400/600 (a plateau
+# despite 3x offered load, i.e. saturation) on a node that also runs etcd,
+# KCM (~0.35 cores) and the scheduler (~0.23). Going to 16 vCPUs (8-core
+# kindnet run 2079750013621112832 vs 16-core cilium run 2079885693798060032;
+# CNI differs but the apiserver signals are CNI-independent) let the
+# apiserver burn 9.25 cores, dropped its mean request latency 34.7ms ->
+# 6.6ms, and lifted mif600 claim throughput 60/s -> 91/s, with the sandbox
+# controller's workqueue wait collapsing 445ms -> 3ms downstream. Override via
+# STRESS_CONTROL_PLANE_SIZE (e.g. back to n2-standard-8) to reproduce the
+# saturated-server regime.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-n2-standard-16}"
+echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -147,7 +161,7 @@ kops create cluster \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
-  --control-plane-size=n2-standard-8 \
+  --control-plane-size="${STRESS_CONTROL_PLANE_SIZE}" \
   --node-count="${STRESS_NODE_COUNT}" \
   --node-size=n2-standard-8
 

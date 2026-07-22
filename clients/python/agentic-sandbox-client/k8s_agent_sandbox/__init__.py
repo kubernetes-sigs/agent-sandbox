@@ -29,7 +29,7 @@ try:
 except ImportError:
     class AsyncSandboxClient:  # type: ignore[no-redef]
         """Placeholder that raises ImportError when async extras are missing."""
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args: object, **kwargs: object) -> None:
             raise ImportError(
                 "AsyncSandboxClient requires the 'async' extras. "
                 "Install with: pip install k8s-agent-sandbox[async]"

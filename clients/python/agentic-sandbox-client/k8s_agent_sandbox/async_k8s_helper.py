@@ -15,11 +15,9 @@
 import asyncio
 import logging
 import time
+from typing import Any
 
 from kubernetes_asyncio import client, config, watch
-
-logger = logging.getLogger(__name__)
-
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
@@ -32,19 +30,26 @@ from .constants import (
     SANDBOX_PLURAL_NAME,
     CREATED_BY_LABEL,
 )
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .exceptions import (
+    SandboxMetadataError,
+    SandboxNotFoundError,
+    SandboxTemplateNotFoundError,
+    SandboxWarmPoolNotFoundError,
+)
 from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncK8sHelper:
     """Async helper class for Kubernetes API interactions using kubernetes_asyncio."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._api_client: client.ApiClient | None = None
 
-    async def _ensure_initialized(self):
+    async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
         async with self._init_lock:
@@ -89,7 +94,7 @@ class AsyncK8sHelper:
             }
         }
 
-        spec = {
+        spec: dict[str, Any] = {
             "warmPoolRef": {
                 "name": warmpool,
             }
@@ -118,7 +123,9 @@ class AsyncK8sHelper:
             body=manifest,
         )
 
-    async def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
+    async def resolve_sandbox_name(
+        self, claim_name: str, namespace: str, timeout: int
+    ) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
@@ -155,7 +162,7 @@ class AsyncK8sHelper:
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event["object"]
                         status = claim_object.get("status") or {}
-                        
+
                         for cond in status.get("conditions", []):
                             if (
                                 cond.get("type") == "Ready"
@@ -172,14 +179,20 @@ class AsyncK8sHelper:
 
                         sandbox_status = status.get("sandbox", {})
                         # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
-                        name = sandbox_status.get("name", "") or sandbox_status.get("Name", "")
+                        name = sandbox_status.get("name", "") or sandbox_status.get(
+                            "Name", ""
+                        )
                         if name:
-                            logger.info(f"Resolved sandbox name '{name}' from claim status")
+                            logger.info(
+                                f"Resolved sandbox name '{name}' from claim status"
+                            )
                             return name
             finally:
                 await w.close()
 
-    async def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
+    async def wait_for_sandbox_ready(
+        self, name: str, namespace: str, timeout: int
+    ) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
         Returns the selected pod IP from the sandbox status when ready, or None if
@@ -192,7 +205,9 @@ class AsyncK8sHelper:
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
+                raise TimeoutError(
+                    f"Sandbox {name} did not become ready within {timeout} seconds."
+                )
             w = watch.Watch()
             try:
                 async for event in w.stream(
@@ -211,19 +226,24 @@ class AsyncK8sHelper:
                         status = sandbox_object.get("status") or {}
                         conditions = status.get("conditions", [])
                         for cond in conditions:
-                            if cond.get("type") == "Ready" and cond.get("status") == "True":
+                            if (
+                                cond.get("type") == "Ready"
+                                and cond.get("status") == "True"
+                            ):
                                 logger.info(f"Sandbox {name} is ready.")
                                 pod_ips = status.get("podIPs", [])
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
-                        logger.error(f"Sandbox {name} was deleted before becoming ready.")
+                        logger.error(
+                            f"Sandbox {name} was deleted before becoming ready."
+                        )
                         raise SandboxNotFoundError(
                             f"Sandbox {name} was deleted before becoming ready."
                         )
             finally:
                 await w.close()
 
-    async def delete_sandbox_claim(self, name: str, namespace: str):
+    async def delete_sandbox_claim(self, name: str, namespace: str) -> None:
         """Deletes a SandboxClaim custom resource."""
         await self._ensure_initialized()
 
@@ -241,7 +261,7 @@ class AsyncK8sHelper:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
-    async def get_sandbox(self, name: str, namespace: str):
+    async def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""
         await self._ensure_initialized()
 
@@ -275,7 +295,9 @@ class AsyncK8sHelper:
                 return None
             raise
 
-    async def list_sandbox_claims(self, namespace: str, label_selector: str | None = None) -> list[str]:
+    async def list_sandbox_claims(
+        self, namespace: str, label_selector: str | None = None
+    ) -> list[str]:
         """Lists all SandboxClaim custom resources in a namespace.
 
         Args:
@@ -295,7 +317,9 @@ class AsyncK8sHelper:
             )
             if label_selector is not None:
                 kwargs["label_selector"] = label_selector
-            response = await self.custom_objects_api.list_namespaced_custom_object(**kwargs)
+            response = await self.custom_objects_api.list_namespaced_custom_object(
+                **kwargs
+            )
             return [
                 item.get("metadata", {}).get("name")
                 for item in response.get("items", [])
@@ -305,12 +329,16 @@ class AsyncK8sHelper:
             logger.error(f"Error listing sandbox claims in namespace {namespace}: {e}")
             raise
 
-    async def wait_for_gateway_ip(self, gateway_name: str, namespace: str, timeout: int) -> str:
+    async def wait_for_gateway_ip(
+        self, gateway_name: str, namespace: str, timeout: int
+    ) -> str:
         """Waits for the Gateway to be assigned an external IP."""
         await self._ensure_initialized()
 
         deadline = time.monotonic() + timeout
-        logger.info(f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'...")
+        logger.info(
+            f"Waiting for Gateway '{gateway_name}' in namespace '{namespace}'..."
+        )
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -338,20 +366,22 @@ class AsyncK8sHelper:
                             ip_address = address.get("value")
                             if not ip_address:
                                 continue
-                            
-                            if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
+
+                            if not is_valid_ip(
+                                ip_address
+                            ) and not is_valid_gateway_hostname(ip_address):
                                 logger.warning(
                                     "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
                                     ip_address,
                                 )
                                 continue
-                                
+
                             logger.info(f"Gateway ready. IP: {ip_address}")
                             return ip_address
             finally:
                 await w.close()
 
-    async def close(self):
+    async def close(self) -> None:
         """Closes the shared Kubernetes API client session."""
         if self._api_client:
             await self._api_client.close()

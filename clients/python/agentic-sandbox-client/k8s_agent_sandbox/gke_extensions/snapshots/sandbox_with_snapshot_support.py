@@ -13,24 +13,28 @@
 # limitations under the License.
 
 import logging
+from typing import Any
+
 from kubernetes.client import ApiException
-from k8s_agent_sandbox.exceptions import SnapshotNotFoundError
-from .snapshot_engine import SnapshotEngine, SnapshotResponse
-from k8s_agent_sandbox.sandbox import Sandbox
+from pydantic import BaseModel
+
 from k8s_agent_sandbox.constants import (
+    PODSNAPSHOT_NAME_ANNOTATION,
     SANDBOX_API_GROUP,
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
-    PODSNAPSHOT_NAME_ANNOTATION,
 )
+from k8s_agent_sandbox.exceptions import SnapshotNotFoundError
+from k8s_agent_sandbox.sandbox import Sandbox
+
+from .snapshot_engine import SnapshotEngine, SnapshotResponse
 from .utils import (
-    check_pod_restored_from_snapshot,
     RestoreCheckResult,
-    wait_for_pod_termination,
+    check_pod_restored_from_snapshot,
     wait_for_pod_ready,
+    wait_for_pod_termination,
     wait_for_sandbox_propagation,
 )
-from pydantic import BaseModel
 
 SUCCESS_CODE = 0
 ERROR_CODE = 1
@@ -41,33 +45,40 @@ logger = logging.getLogger(__name__)
 OPERATING_MODE_RUNNING = "Running"
 OPERATING_MODE_SUSPENDED = "Suspended"
 
+
 class SuspendResponse(BaseModel):
     """Result of a suspend operation."""
+
     success: bool
     snapshot_response: SnapshotResponse | None = None
     error_reason: str = ""
     error_code: int = 0
 
+
 class ResumeResponse(BaseModel):
     """Result of a resume operation."""
+
     success: bool
     restored_from_snapshot: bool | None = None
     snapshot_uid: str | None = None
     error_reason: str = ""
     error_code: int = 0
+
 
 class RestorationResponse(BaseModel):
     """Result of a restore operation."""
+
     success: bool
     restored_from_snapshot: bool | None = None
     snapshot_uid: str | None = None
     error_reason: str = ""
     error_code: int = 0
 
+
 class SandboxWithSnapshotSupport(Sandbox):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._snapshots = SnapshotEngine(
+        self._snapshots: SnapshotEngine | None = SnapshotEngine(
             namespace=self.namespace,
             k8s_helper=self.k8s_helper,
             get_pod_name_func=self.get_pod_name,
@@ -81,7 +92,7 @@ class SandboxWithSnapshotSupport(Sandbox):
     @property
     def is_active(self) -> bool:
         return super().is_active and self._snapshots is not None
-    
+
     def _is_restored_from_snapshot(self, snapshot_uid: str) -> RestoreCheckResult:
         """
         Checks if this sandbox was restored from the provided snapshot.
@@ -115,52 +126,66 @@ class SandboxWithSnapshotSupport(Sandbox):
     def is_suspended(self) -> bool:
         """
         Checks if the sandbox is currently suspended by inspecting the Sandbox CR.
-        A sandbox is considered suspended if the spec.operatingMode is set to Suspended. 
+        A sandbox is considered suspended if the spec.operatingMode is set to Suspended.
         """
         try:
-            sandbox_cr = self.k8s_helper.custom_objects_api.get_namespaced_custom_object(
-                group=SANDBOX_API_GROUP,
-                version=SANDBOX_API_VERSION,
-                namespace=self.namespace,
-                plural=SANDBOX_PLURAL_NAME,
-                name=self.sandbox_id
+            sandbox_cr = (
+                self.k8s_helper.custom_objects_api.get_namespaced_custom_object(
+                    group=SANDBOX_API_GROUP,
+                    version=SANDBOX_API_VERSION,
+                    namespace=self.namespace,
+                    plural=SANDBOX_PLURAL_NAME,
+                    name=self.sandbox_id,
+                )
             )
-            spec_operating_mode = sandbox_cr.get("spec", {}).get("operatingMode", OPERATING_MODE_RUNNING)
+            spec_operating_mode = sandbox_cr.get("spec", {}).get(
+                "operatingMode", OPERATING_MODE_RUNNING
+            )
             pod_ips = sandbox_cr.get("status", {}).get("podIPs")
-            
+
             is_spec_suspended = spec_operating_mode == OPERATING_MODE_SUSPENDED
-            
+
             # TODO: Replace this with Suspended status when it's available
             if is_spec_suspended and pod_ips:
-                logger.info(f"Sandbox '{self.sandbox_id}' is in the process of suspending (spec.operatingMode='{OPERATING_MODE_SUSPENDED}' but podIPs still present).")
+                logger.info(
+                    f"Sandbox '{self.sandbox_id}' is in the process of suspending (spec.operatingMode='{OPERATING_MODE_SUSPENDED}' but podIPs still present)."
+                )
             elif not is_spec_suspended and not pod_ips:
-                logger.info(f"Sandbox '{self.sandbox_id}' is in the process of resuming/starting (spec.operatingMode='{spec_operating_mode}' but no podIPs assigned).")
-                
+                logger.info(
+                    f"Sandbox '{self.sandbox_id}' is in the process of resuming/starting (spec.operatingMode='{spec_operating_mode}' but no podIPs assigned)."
+                )
+
             return is_spec_suspended
         except Exception as e:
-            logger.error(f"Failed to check if Sandbox '{self.sandbox_id}' is suspended: {e}")
+            logger.error(
+                f"Failed to check if Sandbox '{self.sandbox_id}' is suspended: {e}"
+            )
             return False
 
-    def _set_operating_mode(self, operating_mode: str):
+    def _set_operating_mode(self, operating_mode: str) -> None:
         self.k8s_helper.custom_objects_api.patch_namespaced_custom_object(
             group=SANDBOX_API_GROUP,
             version=SANDBOX_API_VERSION,
             namespace=self.namespace,
             plural=SANDBOX_PLURAL_NAME,
             name=self.sandbox_id,
-            body={"spec": {"operatingMode": operating_mode}}
+            body={"spec": {"operatingMode": operating_mode}},
         )
 
     def _get_latest_snapshot_uid(self) -> str | None:
         if self.snapshots:
             list_result = self.snapshots.list()
             if not list_result.success:
-                raise RuntimeError(f"Snapshot list request failed: {list_result.error_reason}")
+                raise RuntimeError(
+                    f"Snapshot list request failed: {list_result.error_reason}"
+                )
             if list_result.snapshots:
                 return list_result.snapshots[0].snapshot_uid
         return None
 
-    def suspend(self, snapshot_before_suspend: bool = True, wait_timeout: int = 180) -> SuspendResponse:
+    def suspend(
+        self, snapshot_before_suspend: bool = True, wait_timeout: int = 180
+    ) -> SuspendResponse:
         """
         Suspends the sandbox.
 
@@ -177,21 +202,25 @@ class SandboxWithSnapshotSupport(Sandbox):
                 success=True,
                 snapshot_response=None,
                 error_reason="",
-                error_code=SUCCESS_CODE
+                error_code=SUCCESS_CODE,
             )
 
         # Ensure the sandbox name hash is fetched and cached before we terminate the pod.
         try:
             sandbox_name_hash = self.get_sandbox_name_hash()
             if not sandbox_name_hash:
-                raise ValueError(f"Sandbox name hash resolved to empty or None: {sandbox_name_hash}")
+                raise ValueError(
+                    f"Sandbox name hash resolved to empty or None: {sandbox_name_hash}"
+                )
         except Exception as e:
-            logger.error(f"Cannot suspend Sandbox: failed to retrieve required name hash label: {e}")
+            logger.error(
+                f"Cannot suspend Sandbox: failed to retrieve required name hash label: {e}"
+            )
             return SuspendResponse(
                 success=False,
                 snapshot_response=None,
                 error_reason=f"Failed to resolve sandbox name hash: {e}",
-                error_code=ERROR_CODE
+                error_code=ERROR_CODE,
             )
 
         snapshot_response = None
@@ -200,19 +229,23 @@ class SandboxWithSnapshotSupport(Sandbox):
             trigger_name = f"suspend-{self.sandbox_id}"
             snapshot_response = self.snapshots.create(trigger_name)
             if not snapshot_response.success:
-                logger.error(f"Snapshot before suspend failed: {snapshot_response.error_reason}")
+                logger.error(
+                    f"Snapshot before suspend failed: {snapshot_response.error_reason}"
+                )
                 return SuspendResponse(
                     success=False,
                     snapshot_response=snapshot_response,
                     error_reason=f"Snapshot failed: {snapshot_response.error_reason}",
-                    error_code=ERROR_CODE
+                    error_code=ERROR_CODE,
                 )
 
         pod_name_to_wait = self.get_pod_name()
         pod_uid_to_wait = None
         if pod_name_to_wait:
             try:
-                pod = self.k8s_helper.core_v1_api.read_namespaced_pod(pod_name_to_wait, self.namespace)
+                pod = self.k8s_helper.core_v1_api.read_namespaced_pod(
+                    pod_name_to_wait, self.namespace
+                )
                 pod_uid_to_wait = pod.metadata.uid
             except ApiException as e:
                 if e.status != 404:
@@ -220,16 +253,18 @@ class SandboxWithSnapshotSupport(Sandbox):
 
         try:
             self._set_operating_mode(OPERATING_MODE_SUSPENDED)
-            logger.info(f"Sandbox '{self.sandbox_id}' suspended (operatingMode set to {OPERATING_MODE_SUSPENDED}).")
+            logger.info(
+                f"Sandbox '{self.sandbox_id}' suspended (operatingMode set to {OPERATING_MODE_SUSPENDED})."
+            )
         except Exception as e:
             logger.error(f"Failed to suspend Sandbox '{self.sandbox_id}': {e}")
             return SuspendResponse(
                 success=False,
                 snapshot_response=snapshot_response,
                 error_reason=f"Failed to patch operatingMode: {e}",
-                error_code=ERROR_CODE
+                error_code=ERROR_CODE,
             )
-          
+
         # Explicitly close the container connection since the pod is being terminated.
         try:
             self.connector.close()
@@ -241,24 +276,45 @@ class SandboxWithSnapshotSupport(Sandbox):
             )
         self._pod_name = None
 
-        if wait_for_pod_termination(self.k8s_helper, self.namespace, pod_name_to_wait, pod_uid_to_wait, wait_timeout):
-            logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")
-            return SuspendResponse(
-                success=True,
-                snapshot_response=snapshot_response,
-                error_reason="",
-                error_code=SUCCESS_CODE
+        if pod_name_to_wait and pod_uid_to_wait:
+            if wait_for_pod_termination(
+                self.k8s_helper,
+                self.namespace,
+                pod_name_to_wait,
+                str(pod_uid_to_wait),
+                wait_timeout,
+            ):
+                logger.info(f"Sandbox '{self.sandbox_id}' pod successfully terminated.")
+                return SuspendResponse(
+                    success=True,
+                    snapshot_response=snapshot_response,
+                    error_reason="",
+                    error_code=SUCCESS_CODE,
+                )
+
+            logger.warning(
+                f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to terminate."
             )
-        
-        logger.warning(f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to terminate.")
+            return SuspendResponse(
+                success=False,
+                snapshot_response=snapshot_response,
+                error_reason="Timed out waiting for pod to terminate.",
+                error_code=ERROR_CODE,
+            )
+
+        logger.info(
+            f"Sandbox '{self.sandbox_id}' pod successfully terminated (no pod to wait for)."
+        )
         return SuspendResponse(
-            success=False,
+            success=True,
             snapshot_response=snapshot_response,
-            error_reason="Timed out waiting for pod to terminate.",
-            error_code=ERROR_CODE
+            error_reason="",
+            error_code=SUCCESS_CODE,
         )
 
-    def _restore_internal(self, target_snapshot_uid: str | None, wait_timeout: int) -> RestorationResponse:
+    def _restore_internal(
+        self, target_snapshot_uid: str | None, wait_timeout: int
+    ) -> RestorationResponse:
         """Internal restore logic shared by resume() and restore()."""
         # Clear cached pod name and connection before resuming to ensure we pick up the new pod
         try:
@@ -273,55 +329,69 @@ class SandboxWithSnapshotSupport(Sandbox):
 
         try:
             self._set_operating_mode(OPERATING_MODE_RUNNING)
-            logger.info(f"Sandbox '{self.sandbox_id}' pod created successfully (operatingMode set to {OPERATING_MODE_RUNNING}).")
+            logger.info(
+                f"Sandbox '{self.sandbox_id}' pod created successfully (operatingMode set to {OPERATING_MODE_RUNNING})."
+            )
         except Exception as e:
-            logger.error(f"Failed to create a new pod for Sandbox '{self.sandbox_id}': {e}")
+            logger.error(
+                f"Failed to create a new pod for Sandbox '{self.sandbox_id}': {e}"
+            )
             return RestorationResponse(
                 success=False,
                 restored_from_snapshot=False,
                 snapshot_uid=None,
                 error_reason=f"Failed to patch operatingMode: {e}",
-                error_code=ERROR_CODE
+                error_code=ERROR_CODE,
             )
 
-        if wait_for_pod_ready(self.k8s_helper, self.namespace, self.get_pod_name, wait_timeout):
+        if wait_for_pod_ready(
+            self.k8s_helper, self.namespace, self.get_pod_name, wait_timeout
+        ):
             if not target_snapshot_uid:
-                logger.info(f"No previous snapshots found for Sandbox '{self.sandbox_id}'. Skipping restore verification.")
+                logger.info(
+                    f"No previous snapshots found for Sandbox '{self.sandbox_id}'. Skipping restore verification."
+                )
                 return RestorationResponse(
                     success=True,
                     restored_from_snapshot=False,
                     snapshot_uid=None,
                     error_reason="",
-                    error_code=SUCCESS_CODE
+                    error_code=SUCCESS_CODE,
                 )
 
             restore_check = self._is_restored_from_snapshot(target_snapshot_uid)
             if restore_check.success:
-                logger.info(f"Sandbox '{self.sandbox_id}' successfully restored from snapshot '{target_snapshot_uid}'.")
+                logger.info(
+                    f"Sandbox '{self.sandbox_id}' successfully restored from snapshot '{target_snapshot_uid}'."
+                )
                 return RestorationResponse(
                     success=True,
                     restored_from_snapshot=True,
                     snapshot_uid=target_snapshot_uid,
                     error_reason="",
-                    error_code=SUCCESS_CODE
+                    error_code=SUCCESS_CODE,
                 )
             else:
-                logger.error(f"Sandbox '{self.sandbox_id}' was not restored from snapshot '{target_snapshot_uid}': {restore_check.error_reason}")
+                logger.error(
+                    f"Sandbox '{self.sandbox_id}' was not restored from snapshot '{target_snapshot_uid}': {restore_check.error_reason}"
+                )
                 return RestorationResponse(
                     success=False,
                     restored_from_snapshot=False,
                     snapshot_uid=target_snapshot_uid,
                     error_reason=f"Pod ready but not restored from snapshot: {restore_check.error_reason}",
-                    error_code=ERROR_CODE
+                    error_code=ERROR_CODE,
                 )
-        
-        logger.warning(f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to become ready.")
+
+        logger.warning(
+            f"Timed out waiting for Sandbox '{self.sandbox_id}' pod to become ready."
+        )
         return RestorationResponse(
             success=False,
             restored_from_snapshot=False,
             snapshot_uid=target_snapshot_uid,
             error_reason="Timed out waiting for pod to become ready.",
-            error_code=ERROR_CODE
+            error_code=ERROR_CODE,
         )
 
     def resume(self, wait_timeout: int = 180) -> ResumeResponse:
@@ -335,13 +405,15 @@ class SandboxWithSnapshotSupport(Sandbox):
             ResumeResponse: An object containing the success status, restoration details, and any error information.
         """
         if not self.is_suspended():
-            logger.info(f"Sandbox '{self.sandbox_id}' is already running (not suspended).")
+            logger.info(
+                f"Sandbox '{self.sandbox_id}' is already running (not suspended)."
+            )
             return ResumeResponse(
                 success=True,
                 restored_from_snapshot=False,
                 snapshot_uid=None,
                 error_reason="",
-                error_code=SUCCESS_CODE
+                error_code=SUCCESS_CODE,
             )
 
         # Capture the snapshot UID before patching sandbox mode to guarantee we verify
@@ -355,16 +427,14 @@ class SandboxWithSnapshotSupport(Sandbox):
                 restored_from_snapshot=False,
                 snapshot_uid=None,
                 error_reason=f"Failed to get latest snapshot UID: {e}",
-                error_code=ERROR_CODE
+                error_code=ERROR_CODE,
             )
 
         try:
             body = {
                 "spec": {
                     "additionalPodMetadata": {
-                        "annotations": {
-                            PODSNAPSHOT_NAME_ANNOTATION: None
-                        }
+                        "annotations": {PODSNAPSHOT_NAME_ANNOTATION: None}
                     }
                 }
             }
@@ -379,8 +449,12 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_code=ERROR_CODE,
             )
 
-        if not wait_for_sandbox_propagation(self.k8s_helper, self.namespace, self.sandbox_id, None):
-            logger.error("Timed out waiting for restore annotation cleanup to propagate to Sandbox spec.")
+        if not wait_for_sandbox_propagation(
+            self.k8s_helper, self.namespace, self.sandbox_id, None
+        ):
+            logger.error(
+                "Timed out waiting for restore annotation cleanup to propagate to Sandbox spec."
+            )
             return ResumeResponse(
                 success=False,
                 restored_from_snapshot=False,
@@ -400,13 +474,21 @@ class SandboxWithSnapshotSupport(Sandbox):
 
     def _verify_snapshot_exists(self, snapshot_uid: str) -> None:
         """Verifies that a snapshot exists for this sandbox."""
-        list_result = self.snapshots.list()
+        snapshots = self.snapshots
+        if snapshots is None:
+            raise RuntimeError("Snapshot support is not available for this sandbox.")
+
+        list_result = snapshots.list()
         if not list_result.success:
             raise RuntimeError(f"Failed to list snapshots: {list_result.error_reason}")
         if not any(snap.snapshot_uid == snapshot_uid for snap in list_result.snapshots):
-            raise SnapshotNotFoundError(f"Snapshot '{snapshot_uid}' does not exist for this sandbox.")
+            raise SnapshotNotFoundError(
+                f"Snapshot '{snapshot_uid}' does not exist for this sandbox."
+            )
 
-    def restore(self, snapshot_uid: str, sandbox_ready_timeout: int = 180) -> RestorationResponse:
+    def restore(
+        self, snapshot_uid: str, sandbox_ready_timeout: int = 180
+    ) -> RestorationResponse:
         """Restores this sandbox from a specific snapshot."""
         try:
             self._verify_snapshot_exists(snapshot_uid)
@@ -417,31 +499,35 @@ class SandboxWithSnapshotSupport(Sandbox):
                     restored_from_snapshot=False,
                     snapshot_uid=snapshot_uid,
                     error_reason="Sandbox is currently running and cannot be restored.",
-                    error_code=ERROR_CODE
+                    error_code=ERROR_CODE,
                 )
 
             body = {
                 "spec": {
                     "additionalPodMetadata": {
-                        "annotations": {
-                            PODSNAPSHOT_NAME_ANNOTATION: snapshot_uid
-                        }
+                        "annotations": {PODSNAPSHOT_NAME_ANNOTATION: snapshot_uid}
                     }
                 }
             }
             self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
 
-            if not wait_for_sandbox_propagation(self.k8s_helper, self.namespace, self.sandbox_id, snapshot_uid):
-                logger.error(f"Timed out waiting for snapshot UID to propagate to Sandbox spec.")
+            if not wait_for_sandbox_propagation(
+                self.k8s_helper, self.namespace, self.sandbox_id, snapshot_uid
+            ):
+                logger.error(
+                    "Timed out waiting for snapshot UID to propagate to Sandbox spec."
+                )
                 return RestorationResponse(
                     success=False,
                     restored_from_snapshot=False,
                     snapshot_uid=snapshot_uid,
                     error_reason="Internal Error: Timed out waiting for sandbox restoration.",
-                    error_code=INTERNAL_ERROR_CODE
+                    error_code=INTERNAL_ERROR_CODE,
                 )
 
-            logger.info(f"Restoring sandbox '{self.sandbox_id}' from snapshot '{snapshot_uid}'.")
+            logger.info(
+                f"Restoring sandbox '{self.sandbox_id}' from snapshot '{snapshot_uid}'."
+            )
             return self._restore_internal(snapshot_uid, sandbox_ready_timeout)
 
         except SnapshotNotFoundError as e:
@@ -451,19 +537,21 @@ class SandboxWithSnapshotSupport(Sandbox):
                 restored_from_snapshot=False,
                 snapshot_uid=snapshot_uid,
                 error_reason=str(e),
-                error_code=ERROR_CODE
+                error_code=ERROR_CODE,
             )
         except Exception as e:
-            logger.error(f"Unexpected error during restore for Sandbox '{self.sandbox_id}': {e}")
+            logger.error(
+                f"Unexpected error during restore for Sandbox '{self.sandbox_id}': {e}"
+            )
             return RestorationResponse(
                 success=False,
                 restored_from_snapshot=False,
                 snapshot_uid=snapshot_uid,
                 error_reason=f"Unexpected error: {e}",
-                error_code=ERROR_CODE
+                error_code=ERROR_CODE,
             )
-    
-    def terminate(self):
+
+    def terminate(self) -> None:
         """
         Cleans up the manually generated trigger resources and terminates the Sandbox.
         """
@@ -473,4 +561,3 @@ class SandboxWithSnapshotSupport(Sandbox):
         finally:
             super().terminate()
             self._snapshots = None
-        

@@ -552,6 +552,9 @@ class SandboxHandler(BaseHTTPRequestHandler):
 
 class TestRequestExceptions(unittest.TestCase):
     """Integration tests: real HTTP server + SandboxConnector.send_request()."""
+    port: int
+    server: HTTPServer
+    server_thread: threading.Thread
 
     @classmethod
     def setUpClass(cls):

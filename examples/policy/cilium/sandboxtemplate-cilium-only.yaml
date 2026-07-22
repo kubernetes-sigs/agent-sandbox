@@ -1,0 +1,135 @@
+# Unmanaged mode: the agent-sandbox controller does not generate a
+# Kubernetes NetworkPolicy for sandboxes from this template. All isolation
+# comes from the policies in this directory (default-deny floor +
+# per-template allowlists, optional FQDNNetworkPolicy, optional forward proxy).
+#
+# In v1beta1 the resource model is Template <- WarmPool <- Claim. The Claim
+# does NOT reference the Template directly — it references a WarmPool, which
+# references the Template. All three are bundled here so the example applies
+# in one shot.
+#
+# Pair with:
+#   - default-deny-egress-netpol.yaml  (no flag) OR default-deny-egress.yaml
+#                                       (CCNP — needs cluster flag)
+#   - allowlist-cidr.yaml               (internal services by IP/port)
+#   - allowlist-fqdn.yaml               (FQDNNetworkPolicy — needs cluster flag)
+#   - egress-gateway.yaml               (forward proxy for stable identity +
+#                                       per-request credential injection)
+#
+# The `app: my-agent-sandbox` label that the per-template policies select on
+# is set in the SandboxTemplate's podTemplate.metadata.labels — NOT on the
+# SandboxClaim's additionalPodMetadata. Why: warm-pool pods exist before any
+# Claim adopts them, so additionalPodMetadata from the Claim is too late.
+# Setting the label at template level guarantees every pod created from this
+# template carries it, warm-pool or claim-adopted.
+
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: my-agent-sandbox
+  namespace: agent-sandbox-demo
+spec:
+  # Step aside entirely; the policies in this directory enforce isolation.
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    metadata:
+      labels:
+        # Selected by every per-template allow policy in this directory.
+        # Must be set here (not on the Claim) so warm-pool pods carry it too.
+        app: my-agent-sandbox
+    spec:
+      # automountServiceAccountToken defaults to false in agent-sandbox; we set
+      # it explicitly to make the AUTH-1 posture (no in-pod credentials)
+      # visible in the manifest.
+      automountServiceAccountToken: false
+      # Build a combined CA bundle: the system trust store (so TLS to
+      # non-bumped destinations like api.openai.com keeps working) PLUS the
+      # gateway's CA (so TLS to bumped destinations validates against
+      # Squid's per-site signed certs). Without this, ssl_bump'd destinations
+      # would fail TLS verification in the sandbox.
+      #
+      # The gateway-ca-bundle ConfigMap is admin-created out-of-band — see
+      # README §7.5 for the openssl + kubectl create commands.
+      initContainers:
+        - name: build-ca-bundle
+          image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              cat /etc/ssl/certs/ca-certificates.crt /gateway-ca/ca.crt \
+                > /shared/ca-bundle.pem
+          volumeMounts:
+            - name: gateway-ca
+              mountPath: /gateway-ca
+              readOnly: true
+            - name: ca-bundle
+              mountPath: /shared
+      containers:
+        - name: agent
+          image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+          command: ["/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"]
+          # Route all HTTP(S) egress through the forward proxy. The default-deny
+          # floor blocks any other egress destination (except cluster DNS and
+          # whatever allowlist-cidr.yaml explicitly opens).
+          env:
+            - name: HTTPS_PROXY
+              value: "http://egress-gateway.agent-sandbox-egress.svc:3128"
+            - name: HTTP_PROXY
+              value: "http://egress-gateway.agent-sandbox-egress.svc:3128"
+            # Do not proxy in-cluster traffic.
+            - name: NO_PROXY
+              value: ".svc,.cluster.local,localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+            # Tell common clients to trust the combined bundle (system + the
+            # gateway's CA). curl, Python's `requests`/`ssl`, and Node all
+            # honor these.
+            - name: CURL_CA_BUNDLE
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/ssl/certs/ca-bundle-with-gateway.pem
+          volumeMounts:
+            - name: ca-bundle
+              mountPath: /etc/ssl/certs/ca-bundle-with-gateway.pem
+              subPath: ca-bundle.pem
+              readOnly: true
+      volumes:
+        - name: gateway-ca
+          configMap:
+            name: gateway-ca-bundle
+        - name: ca-bundle
+          emptyDir: {}
+
+---
+# Pre-warmed pool. Claims adopt from this pool; without it, claims have
+# nothing to adopt and stay Pending.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: my-agent-sandbox-pool
+  namespace: agent-sandbox-demo
+spec:
+  # Demo size. For production, drive replicas from an HPA — see
+  # examples/hpa-swp-scaling/ for the pattern.
+  replicas: 1
+  sandboxTemplateRef:
+    name: my-agent-sandbox
+  updateStrategy:
+    # OnReplenish keeps existing warm pods even if the template changes;
+    # flip to Recreate if you want immediate rollout.
+    type: OnReplenish
+
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: demo-claim
+  namespace: agent-sandbox-demo
+spec:
+  warmPoolRef:
+    name: my-agent-sandbox-pool

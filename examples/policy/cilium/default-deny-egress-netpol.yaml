@@ -1,0 +1,30 @@
+# Per-namespace default-deny egress for agent-sandbox Pods (standard
+# Kubernetes NetworkPolicy variant).
+#
+# Covers: CUJ SAND-EGRESS-1 in clusters where you do NOT want to opt into the
+# CiliumClusterwideNetworkPolicy CRD (which requires
+# --enable-cilium-clusterwide-network-policy on GKE Dataplane v2).
+#
+# Standard Kubernetes NetworkPolicy is always enforced on GKE Dataplane v2
+# regardless of `networkPolicy.enabled` (that field is a legacy Calico
+# toggle), so this manifest needs no cluster flags.
+#
+# Apply one copy per namespace that runs sandbox pods. Selects on the
+# controller-injected label `agents.x-k8s.io/sandbox-template-ref-hash`, so it
+# only deny-floors agent-sandbox pods (not anything else in the namespace).
+# Per-template allow policies (allowlist-cidr.yaml, allowlist-fqdn.yaml) open
+# specific holes; standard NetworkPolicy union semantics apply.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-sandbox-default-deny-egress
+  namespace: agent-sandbox-demo
+spec:
+  podSelector:
+    matchExpressions:
+      - key: agents.x-k8s.io/sandbox-template-ref-hash
+        operator: Exists
+  policyTypes:
+    - Egress
+  # Empty egress list = default-deny egress for selected pods.
+  egress: []

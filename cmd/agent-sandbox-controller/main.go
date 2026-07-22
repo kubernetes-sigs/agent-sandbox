@@ -118,15 +118,17 @@ func main() {
 	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "The maximum burst for client-side throttling of the Kubernetes API client.")
 	flag.IntVar(&apiConnections, "api-connections", 1,
 		"Number of independent HTTP/2 connections to the API server for non-watch traffic (writes, uncached reads, events, leader election). "+
-			"The kube-apiserver caps concurrent in-flight requests per HTTP/2 connection (SETTINGS_MAX_CONCURRENT_STREAMS; set server-side via "+
-			"--http2-max-streams-per-connection, default 0 = Go's HTTP/2 default of 250, and commonly advertised as 100 on managed control planes), "+
+			"The kube-apiserver caps concurrent in-flight requests per HTTP/2 connection (SETTINGS_MAX_CONCURRENT_STREAMS; 100 by default, "+
+			"configurable server-side via --http2-max-streams-per-connection), "+
 			"so a single connection bounds effective concurrency at the advertised limit regardless of worker count or QPS settings. "+
 			"Values > 1 shard requests round-robin across that many dedicated connections, each dialed on first use (~N x per-connection limit ceiling). "+
 			"Default 1 preserves the existing single-connection client.")
 	flag.BoolVar(&separateWatchConnection, "separate-watch-connection", false,
-		"Give the manager's informer cache (list/watch streams) a dedicated HTTP/2 connection to the API server, isolated from write traffic. "+
-			"Prevents watch event delivery to informers from stalling behind bursts of concurrent writes that saturate the shared "+
-			"connection's HTTP/2 stream budget. Default false preserves the existing shared-connection behavior.")
+		"Give the manager's informer cache (list/watch streams) a dedicated HTTP/2 connection to the API server. "+
+			"Watch events arrive on existing long-lived streams, so this isolates their frames from TCP/connection-level queuing behind "+
+			"bursts of request traffic on a shared connection (HTTP/2 stream prioritization does not help in practice). "+
+			"The per-connection cap on concurrent request streams is addressed separately by --api-connections. "+
+			"Default false preserves the existing shared-connection behavior.")
 	flag.IntVar(&sandboxConcurrentWorkers, "sandbox-concurrent-workers", 100, "Max concurrent reconciles for the Sandbox controller")
 	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 50, "Max concurrent reconciles for the SandboxClaim controller")
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")

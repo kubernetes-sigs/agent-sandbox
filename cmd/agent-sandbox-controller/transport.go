@@ -33,15 +33,13 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // traffic across `connections` independent TCP+TLS+HTTP/2 connections.
 //
 // Why: the kube-apiserver caps concurrent streams per HTTP/2 connection
-// (SETTINGS_MAX_CONCURRENT_STREAMS). The server-side limit comes from
-// --http2-max-streams-per-connection, which defaults to 0 = the Go HTTP/2
-// server default of 250; managed control planes can advertise less (the GKE
-// clusters we benchmark advertise 100). client-go multiplexes all requests
-// from one rest.Config onto a single HTTP/2 connection, so that advertised
-// limit caps effective in-flight API requests regardless of worker counts or
-// client-side QPS settings. Sharding across N connections (each dialed
-// lazily on first use) raises the ceiling to ~N times the per-connection
-// limit.
+// (SETTINGS_MAX_CONCURRENT_STREAMS) — 100 by default, configurable
+// server-side via --http2-max-streams-per-connection. client-go multiplexes
+// all requests from one rest.Config onto a single HTTP/2 connection, so that
+// advertised limit caps effective in-flight API requests regardless of
+// worker counts or client-side QPS settings. Sharding across N connections
+// (each dialed lazily on first use) raises the ceiling to ~N times the
+// per-connection limit.
 //
 // How: for each shard we copy the rest.Config and set a distinct Dial
 // function. rest.Config.TransportConfig wraps Dial in a fresh
@@ -123,10 +121,13 @@ func configureAPIConnectionsWithDialer(cfg *rest.Config, connections int, baseDi
 // newIsolatedHTTPClient returns an *http.Client for cfg that is guaranteed
 // its own dedicated TCP+TLS+HTTP/2 connection, never shared with (or wrapped
 // by) any other client built from cfg. Used to give the manager cache's
-// list/watch streams (manager.Options.Cache.HTTPClient) a connection that
-// write bursts cannot congest: watch event delivery otherwise stalls behind
-// hundreds of concurrent write streams competing for the same connection's
-// SETTINGS_MAX_CONCURRENT_STREAMS budget.
+// list/watch streams (manager.Options.Cache.HTTPClient) their own
+// connection: watch events arrive on existing long-lived streams, so the
+// benefit is isolating their frames from TCP/connection-level queuing behind
+// bursts of request traffic on a shared connection (HTTP/2 stream
+// prioritization does not help in practice). The per-connection cap on
+// concurrent request streams is addressed separately by
+// configureAPIConnections.
 //
 // Call this BEFORE configureAPIConnections installs its WrapTransport on cfg
 // (the copy also defensively clears WrapTransport). The distinct Dial forces

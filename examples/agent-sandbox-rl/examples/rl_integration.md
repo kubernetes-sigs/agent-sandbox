@@ -176,6 +176,44 @@ fleet then replaces `eval_deepswe.py`'s inline warm-pool management.
 Requires R2E-Gym, which isn't on PyPI — install it from its checkout
 (`pip install -e path/to/R2E-Gym`). There is no `r2egym` extra.
 
+### Training loop (agentic GRPO): warm + recycle env
+
+tunix's agentic GRPO learner owns the episode loop — it builds one env per rollout
+via `env_class(single_example, group_id=…, pair_index=…, **env_kwargs)` and calls
+`reset`/`step`/`close`. To run those episodes on **warm, recycled** pods instead of
+cold-created ones, subclass the SWE env so it checks a pod out of a shared pool
+(git-restore-reset between episodes) rather than creating one:
+
+```python
+from examples.deepswe.swe_env import SWEEnv                 # tunix reference env
+from agent_sandbox_rl import Task, GitRestoreReset
+from agent_sandbox_rl.adapters.r2egym import make_fleet_repo_env, r2egym_command_files
+
+class FleetSWEEnv(SWEEnv):
+    def __init__(self, entry, *, pool, **kw):               # pool via env_kwargs
+        super().__init__(entry, **kw)                       # entry, group_id, pair_index…
+        self._pool = pool
+    def _task(self):
+        return Task(id=self.entry["instance_id"], image=self.entry["docker_image"],
+                    metadata={"ds": self.entry})            # keep_row → R2E-Gym grading
+    def _initial_observation(self):
+        self._handle, self._baseline = self._pool.checkout(self._task())
+        self.env = make_fleet_repo_env(self._handle, command_files=r2egym_command_files())
+        return self.env.get_task_instruction()
+    def close(self):                                        # return for reuse, don't delete
+        self._pool.checkin(self._task(), self._handle, self._baseline)
+```
+
+where `pool.checkout` reuses an idle warm sandbox for the image (running
+`GitRestoreReset.reset` first, quarantining on a dirty reset) or claims a fresh one,
+and `checkin` returns it. Build the fleet once and inject the pool via
+`GRPOLearner(env_class=FleetSWEEnv, env_kwargs={"pool": pool}, …)`. Run
+`determinism_canary` before training — a dirty reset silently biases rewards. A
+group's `G` rollouts run concurrently (each holds its own pod while active), so the
+win is **pod _creates_ scale with peak concurrency, not total episodes** — warm pods
+are reused across episodes/steps rather than created per rollout. Size
+`max_concurrent` to the peak concurrent episodes, not the number of problems.
+
 ## TorchRL / SkyRL
 
 Wrap `acquire`/`release` around an episode in your `EnvBase`/env:

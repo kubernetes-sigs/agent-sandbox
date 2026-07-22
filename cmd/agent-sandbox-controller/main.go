@@ -300,34 +300,38 @@ func main() {
 				"namespace", webhookNamespace,
 			)
 
-			// Pre-flight check: If specified tls.crt/tls.key don't exist, check for single-file cert.pem (e.g. GKE DCD)
 			tlsCrtPath := filepath.Join(webhookCertDir, webhookCertName)
 			tlsKeyPath := filepath.Join(webhookCertDir, webhookKeyName)
-			certPemPath := filepath.Join(webhookCertDir, "cert.pem")
 
 			_, errCrt := os.Stat(tlsCrtPath)
 			_, errKey := os.Stat(tlsKeyPath)
 
-			if errCrt != nil || errKey != nil {
-				if webhookCertName == "tls.crt" && webhookKeyName == "tls.key" {
-					if _, errCertPem := os.Stat(certPemPath); errCertPem == nil {
+			// If default files (tls.crt / tls.key) are missing, check for single-file cert.pem (e.g. GKE DCD)
+			if (errCrt != nil || errKey != nil) && webhookCertName == "tls.crt" && webhookKeyName == "tls.key" {
+				if os.IsNotExist(errCrt) && os.IsNotExist(errKey) {
+					certPemPath := filepath.Join(webhookCertDir, "cert.pem")
+					if _, errPem := os.Stat(certPemPath); errPem == nil {
 						setupLog.Info("Found single-file webhook certificate and key (e.g. GKE Dynamic Certificate Delivery)", "path", certPemPath)
 						webhookCertName = "cert.pem"
 						webhookKeyName = "cert.pem"
-					} else {
-						setupLog.Error(errCrt, "required webhook cert/key files missing", "certPath", tlsCrtPath, "keyPath", tlsKeyPath,
-							"hint", "with --manage-webhook-certs=false you must pre-provision tls.crt/tls.key or cert.pem via cert-manager, GKE, or similar")
-						os.Exit(1)
+						tlsCrtPath = certPemPath
+						tlsKeyPath = certPemPath
+						errCrt = nil
+						errKey = nil
 					}
-				} else {
-					if errCrt != nil {
-						setupLog.Error(errCrt, "required webhook cert file missing", "path", tlsCrtPath)
-					}
-					if errKey != nil {
-						setupLog.Error(errKey, "required webhook key file missing", "path", tlsKeyPath)
-					}
-					os.Exit(1)
 				}
+			}
+
+			// Report missing file error if either cert or key is unavailable
+			if errCrt != nil || errKey != nil {
+				errToLog := errCrt
+				if errToLog == nil {
+					errToLog = errKey
+				}
+				setupLog.Error(errToLog, "required webhook cert/key file missing",
+					"certPath", tlsCrtPath, "keyPath", tlsKeyPath,
+					"hint", "with --manage-webhook-certs=false you must pre-provision tls.crt/tls.key or cert.pem via cert-manager, GKE, or similar")
+				os.Exit(1)
 			}
 		}
 	}

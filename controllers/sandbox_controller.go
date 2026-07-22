@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -585,9 +586,107 @@ func isControllerManagedPodAnnotation(key string) bool {
 	}
 }
 
+func servicePortsForSandbox(sandbox *sandboxv1beta1.Sandbox) []corev1.ServicePort {
+	type servicePortKey struct {
+		port     int32
+		protocol corev1.Protocol
+	}
+
+	explicitNamesByPort := map[servicePortKey]string{}
+	reservedNames := map[string]struct{}{}
+	addContainerPorts := func(container corev1.Container) {
+		for _, containerPort := range container.Ports {
+			if containerPort.ContainerPort == 0 {
+				continue
+			}
+			protocol := containerPort.Protocol
+			if protocol == "" {
+				protocol = corev1.ProtocolTCP
+			}
+			key := servicePortKey{
+				port:     containerPort.ContainerPort,
+				protocol: protocol,
+			}
+			if _, ok := explicitNamesByPort[key]; !ok {
+				explicitNamesByPort[key] = ""
+			}
+			// Deduplicate Service ports by (port, protocol). Preserve the first
+			// explicit container port name for each Service port. If another
+			// Service port reuses that explicit name, the first one keeps it,
+			// matching apiserver named-port lookup behavior.
+			if containerPort.Name == "" || explicitNamesByPort[key] != "" {
+				continue
+			}
+			if _, reserved := reservedNames[containerPort.Name]; reserved {
+				continue
+			}
+			explicitNamesByPort[key] = containerPort.Name
+			reservedNames[containerPort.Name] = struct{}{}
+		}
+	}
+	for _, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		addContainerPorts(container)
+	}
+	for _, container := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			addContainerPorts(container)
+		}
+	}
+	if len(explicitNamesByPort) == 0 {
+		return nil
+	}
+
+	keys := make([]servicePortKey, 0, len(explicitNamesByPort))
+	for key := range explicitNamesByPort {
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(a, b servicePortKey) int {
+		if a.port < b.port {
+			return -1
+		}
+		if a.port > b.port {
+			return 1
+		}
+		return strings.Compare(string(a.protocol), string(b.protocol))
+	})
+
+	servicePorts := make([]corev1.ServicePort, 0, len(keys))
+	for _, key := range keys {
+		name := explicitNamesByPort[key]
+		if name == "" {
+			// Unnamed Service ports use a generated name. If the generated name
+			// conflicts with a reserved explicit name, change the generated name
+			// to preserve the user provided names for ports.
+			name = generatedServicePortName(key.port, key.protocol, reservedNames)
+		}
+		reservedNames[name] = struct{}{}
+		servicePorts = append(servicePorts, corev1.ServicePort{
+			Name:       name,
+			Protocol:   key.protocol,
+			Port:       key.port,
+			TargetPort: intstr.FromInt32(key.port),
+		})
+	}
+	return servicePorts
+}
+
+func generatedServicePortName(port int32, protocol corev1.Protocol, reservedNames map[string]struct{}) string {
+	baseName := fmt.Sprintf("p-%d-%s", port, strings.ToLower(string(protocol)))
+	if _, reserved := reservedNames[baseName]; !reserved {
+		return baseName
+	}
+	for suffix := 2; ; suffix++ {
+		name := fmt.Sprintf("%s-%d", baseName, suffix)
+		if _, reserved := reservedNames[name]; !reserved {
+			return name
+		}
+	}
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
 	logger := log.FromContext(ctx)
 	desired := sandbox.Spec.Service
+	desiredPorts := servicePortsForSandbox(sandbox)
 
 	service := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
@@ -611,6 +710,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 					Selector: map[string]string{
 						sandboxLabel: nameHash,
 					},
+					Ports: desiredPorts,
 				},
 			}
 			service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
@@ -691,6 +791,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		service.Spec.Selector = map[string]string{
 			sandboxLabel: nameHash,
 		}
+		service.Spec.Ports = desiredPorts
 
 		if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 			return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
@@ -717,6 +818,10 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			service.Spec.Selector = desiredSelector
 			needsUpdate = true
 		}
+		if desired != nil && *desired && !servicePortsEqual(service.Spec.Ports, desiredPorts) {
+			service.Spec.Ports = desiredPorts
+			needsUpdate = true
+		}
 
 		if needsUpdate {
 			logger.Info("Reconciling owned service drift", "Service.Namespace", service.Namespace, "Service.Name", service.Name, "Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name)
@@ -728,6 +833,21 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 	r.setServiceStatus(sandbox, service)
 	return service, nil
+}
+
+func servicePortsEqual(a, b []corev1.ServicePort) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name ||
+			a[i].Protocol != b[i].Protocol ||
+			a[i].Port != b[i].Port ||
+			a[i].TargetPort != b[i].TargetPort {
+			return false
+		}
+	}
+	return true
 }
 
 // clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.

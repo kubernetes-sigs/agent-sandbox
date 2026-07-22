@@ -1877,6 +1877,10 @@ func TestCreateSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	}
 }
 
+// testNetworkedPodIP is a placeholder Pod IP used by warm-pool sandbox
+// fixtures to mark "backing Pod exists and is networked".
+const testNetworkedPodIP = "10.244.0.5"
+
 func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1966,6 +1970,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						Reason: "DependenciesReady",
 					},
 				},
+				// PodIPs marks that the backing Pod exists and is networked.
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 	}
@@ -2008,6 +2014,14 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		now := metav1.Now()
 		sb.DeletionTimestamp = &now
 		sb.Finalizers = []string{"test-finalizer"}
+		return sb
+	}
+
+	// createRotatingSandbox simulates a warm-pool sandbox whose backing Pod has
+	// been deleted or is not networked yet while its queue entry is still present.
+	createRotatingSandbox := func(name string, creationTime metav1.Time) *sandboxv1beta1.Sandbox {
+		sb := createWarmPoolSandbox(name, creationTime, false)
+		sb.Status.PodIPs = nil
 		return sb
 	}
 
@@ -2103,6 +2117,29 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "not-ready-1",
+			expectNewSandboxCreated: false,
+		},
+		{
+			name: "skips warm pool sandboxes with no backing pod and falls through to cold creation",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createRotatingSandbox("rotating-sb-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
+				createRotatingSandbox("rotating-sb-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
+		},
+		{
+			name: "adopts not-ready sandbox with backing pod, skipping rotating sandboxes without pods",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				createRotatingSandbox("rotating-sb", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
+				createWarmPoolSandbox("not-ready-with-pod", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "not-ready-with-pod",
 			expectNewSandboxCreated: false,
 		},
 		{
@@ -2318,16 +2355,18 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			// 1. Initialize the Queue
 			warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
-			// 2. Seed the Queue with the existing objects from the test case
+			// 2. Seed stale queue entries too; production can retain keys after
+			//    a sandbox stops being adoptable, and pop-side validation must
+			//    reject them.
 			for _, obj := range tc.existingObjects {
 				if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok {
-					// Only add valid, adoptable sandboxes to the queue
-					if isAdoptable(sb) == nil {
-						warmPoolName := getWarmPoolName(sb)
-						namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sb.Namespace, warmPoolName)
-						key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
-						warmSandboxQueue.Add(namespacedWarmPoolName, key)
+					warmPoolName := getWarmPoolName(sb)
+					if warmPoolName == "" {
+						continue
 					}
+					namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(sb.Namespace, warmPoolName)
+					key := queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name, NodeName: sb.Status.NodeName}
+					warmSandboxQueue.Add(namespacedWarmPoolName, key)
 				}
 			}
 
@@ -2441,6 +2480,144 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxClaimPreservesAssignedWarmPoolSandboxWithoutPodIPs(t *testing.T) {
+	scheme := newScheme(t)
+	ctx := context.Background()
+	warmPoolUID := types.UID("warmpool-uid-123")
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+				},
+			},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: warmPoolUID},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       types.UID("claim-uid"),
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "rotating-sb",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name}},
+	}
+	rotatingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rotating-sb",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash(template.Name),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       warmPool.Name,
+				UID:        warmPoolUID,
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: "PodRecreating",
+			}},
+			PodIPs: nil,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, rotatingSandbox).
+		WithStatusSubresource(claim).
+		Build()
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	_, err := reconciler.getOrCreateSandbox(ctx, claim, template)
+	require.Error(t, err, "completing an in-progress assignment should ask reconcile to retry")
+
+	var updatedClaim extensionsv1beta1.SandboxClaim
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, &updatedClaim))
+	require.Equal(t, rotatingSandbox.Name, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+
+	var updatedSandbox sandboxv1beta1.Sandbox
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: rotatingSandbox.Name, Namespace: rotatingSandbox.Namespace}, &updatedSandbox))
+	require.True(t, metav1.IsControlledBy(&updatedSandbox, claim))
+}
+
+func TestGetCandidateRequeuesUnnetworkedWarmPoolSandboxes(t *testing.T) {
+	scheme := newScheme(t)
+	ctx := context.Background()
+	warmPoolUID := types.UID("warmpool-uid-123")
+	poolName := "test-pool"
+	key := queue.SandboxKey{Namespace: "default", Name: "rotating-sb", NodeName: "node-a"}
+	rotatingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      key.Name,
+			Namespace: key.Namespace,
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash(poolName),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       "SandboxWarmPool",
+				Name:       poolName,
+				UID:        warmPoolUID,
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Status: sandboxv1beta1.SandboxStatus{PodIPs: nil},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: key.Namespace, UID: types.UID("claim-uid")},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: poolName}},
+	}
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(key.Namespace, poolName)
+	warmSandboxQueue.Add(namespacedWarmPoolName, key)
+	reconciler := &SandboxClaimReconciler{
+		Client:           fake.NewClientBuilder().WithScheme(scheme).WithObjects(rotatingSandbox).Build(),
+		Scheme:           scheme,
+		WarmSandboxQueue: warmSandboxQueue,
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	candidate, _, err := reconciler.getCandidate(ctx, claim)
+	require.NoError(t, err)
+	require.Nil(t, candidate)
+
+	requeued, ok := warmSandboxQueue.Get(namespacedWarmPoolName)
+	require.True(t, ok, "unnetworked candidate should be returned to the queue")
+	require.Equal(t, key, requeued)
+}
+
 func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 	q := queue.NewSimpleSandboxQueue()
 	handler := &sandboxEventHandler{sandboxQueue: q}
@@ -2859,6 +3036,7 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				Conditions: []metav1.Condition{{
 					Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 				}},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 
@@ -3523,6 +3701,9 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				Controller: ptr.To(true), // nolint:modernize
 			}},
 		},
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{testNetworkedPodIP},
+		},
 	}
 
 	// 2. Invalid Sandbox (Different Namespace, but identical hash)
@@ -3540,6 +3721,9 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 				Name:       "test-warmpool",
 				Controller: ptr.To(true), // nolint:modernize
 			}},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{testNetworkedPodIP},
 		},
 	}
 
@@ -3618,6 +3802,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			},
 		}},
 		},
+		Status: sandboxv1beta1.SandboxStatus{PodIPs: []string{testNetworkedPodIP}},
 	}
 
 	// Another sandbox in the warm pool that we want to make sure doesn't get adopted
@@ -3643,6 +3828,7 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			Conditions: []metav1.Condition{{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 			}},
+			PodIPs: []string{testNetworkedPodIP},
 		},
 	}
 
@@ -4620,6 +4806,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 				sandboxTemplateRefHash: templateHash,
 			},
 		},
+		Status: sandboxv1beta1.SandboxStatus{PodIPs: []string{testNetworkedPodIP}},
 	}
 
 	// 3. Verify it is rejected
@@ -4730,6 +4917,7 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			},
 			Status: sandboxv1beta1.SandboxStatus{
 				NodeName: nodeName,
+				PodIPs:   []string{testNetworkedPodIP},
 				Conditions: []metav1.Condition{
 					{
 						Type:   string(sandboxv1beta1.SandboxConditionReady),
@@ -5013,6 +5201,7 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 							Type:   string(sandboxv1beta1.SandboxConditionReady),
 							Status: metav1.ConditionTrue,
 						}},
+						PodIPs: []string{testNetworkedPodIP},
 					},
 				}
 				existingObjects = append(existingObjects, readyWarmSandbox)

@@ -801,6 +801,19 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			continue
 		}
 
+		// PodIPs is the adoption boundary: without it, the backing Pod is missing
+		// or not networked yet. Keep the candidate in the queue so it can be
+		// retried once networking completes. Normalize NodeName from the latest
+		// Sandbox status before requeueing so a stale queue key does not erase
+		// placement information used by pickSmart.
+		if len(adopted.Status.PodIPs) == 0 {
+			if adopted.Status.NodeName != "" {
+				adoptedKey.NodeName = adopted.Status.NodeName
+			}
+			skipped = append(skipped, adoptedKey)
+			continue
+		}
+
 		// Candidate is valid! Now check if it is Ready
 		if isSandboxReady(adopted) {
 			// Found a Ready sandbox! Adopt it immediately.
@@ -1982,6 +1995,10 @@ func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1
 	return nil
 }
 
+// isAdoptable evaluates static ownership and validity only.
+// Transient runtime conditions (e.g., waiting for PodIPs or image pulling)
+// MUST NOT be checked here; failures in isAdoptable trigger permanent queue
+// eviction and premature claim unassignments. Transient checks belong in getCandidate.
 func isAdoptable(candidate *v1beta1.Sandbox) error {
 	if !candidate.DeletionTimestamp.IsZero() {
 		return fmt.Errorf("sandbox is deleted")

@@ -252,6 +252,13 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
+	// Instrument the API client transport (rest_client_transport_* metrics):
+	// connection-acquisition wait, dial rate, and in-flight requests. This
+	// makes client-side HTTP/2 stream-slot saturation directly observable —
+	// it queues requests before they are sent, so no server-side metric can
+	// see it.
+	asmetrics.InstrumentRESTConfig(restConfig)
+
 	if enableWebhook {
 		if manageWebhookCerts {
 			// Create a temporary client to patch the CRDs and access Secrets

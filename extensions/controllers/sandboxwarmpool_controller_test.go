@@ -58,6 +58,17 @@ func newFakeClient(scheme *runtime.Scheme, initialObjs ...runtime.Object) client
 		Build()
 }
 
+// syncPoolExpectations simulates the informer watch catching up with every
+// write the reconciler issued. The fake client is strongly consistent (writes
+// are immediately visible to the next List), so after a reconcile the state a
+// real watch would eventually report is already in the "cache"; dropping the
+// pool's expectations mirrors that. Production observation happens in
+// warmPoolSandboxEventHandler; tests that exercise cache lag use
+// laggingClient and withhold this call instead.
+func syncPoolExpectations(r *SandboxWarmPoolReconciler, warmPool *extensionsv1beta1.SandboxWarmPool) {
+	r.exp().Forget(types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name})
+}
+
 func createPoolSandbox(poolName, namespace, poolNameHash string, template *extensionsv1beta1.SandboxTemplate, suffix string) *sandboxv1beta1.Sandbox {
 	templateRefHash := ""
 	var podTemplateHash, sandboxBlueprintHash string
@@ -255,10 +266,10 @@ func TestReconcilePool(t *testing.T) {
 
 			ctx := context.Background()
 
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
-			err = r.reconcilePool(ctx, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			// Verify final state - count sandboxes with correct warm pool label
@@ -391,10 +402,10 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 
 			ctx := context.Background()
 
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
-			err = r.reconcilePool(ctx, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			list := &sandboxv1beta1.SandboxList{}
@@ -479,7 +490,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 		expectedPoolNameHash := sandboxcontrollers.NameHash(poolName)
 
-		err := r.reconcilePool(ctx, warmPool)
+		_, err := r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
 
 		list := &sandboxv1beta1.SandboxList{}
@@ -574,7 +585,7 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 	}
 
-	err := r.reconcilePool(ctx, warmPool)
+	_, err := r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
 
 	list := &sandboxv1beta1.SandboxList{}
@@ -669,7 +680,7 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
 			}
 
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			list := &sandboxv1beta1.SandboxList{}
@@ -782,9 +793,9 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 
 			ctx := context.Background()
 
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
-			err = r.reconcilePool(ctx, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
@@ -876,16 +887,37 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		err := r.reconcilePool(ctx, warmPool)
+		_, err := r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
 
-		// The stuck sandbox should be deleted and replaced
+		// First pass: the stuck sandbox is deleted. Its replacement is NOT
+		// created in the same pass: a just-deleted sandbox still occupies
+		// capacity as terminating until the deletion is observed, so the
+		// create path holds to keep the population bounded by spec.replicas
+		// (#1215).
 		list := &sandboxv1beta1.SandboxList{}
 		err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
 		require.NoError(t, err)
 
-		// Should have: 1 healthy (kept) + 1 newly created replacement = 2
 		poolCount := int32(0)
+		for _, sb := range list.Items {
+			if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
+				poolCount++
+			}
+		}
+		require.Equal(t, replicas-1, poolCount, "stuck sandbox should be deleted without a same-pass replacement")
+
+		// Second pass (the fake client's "cache" observed the deletion): the
+		// replacement is created. Should have: 1 healthy (kept) + 1 newly
+		// created replacement = 2.
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+
+		list = &sandboxv1beta1.SandboxList{}
+		err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+		require.NoError(t, err)
+
+		poolCount = 0
 		for _, sb := range list.Items {
 			if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
 				poolCount++
@@ -906,7 +938,7 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		err := r.reconcilePool(ctx, warmPool)
+		_, err := r.reconcilePool(ctx, warmPool)
 		require.NoError(t, err)
 
 		// Both should be kept (one healthy, one still within grace period)
@@ -1005,8 +1037,9 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			ctx := context.Background()
 
 			// Initial reconciliation to create the sandboxes
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
+			syncPoolExpectations(&r, warmPool)
 
 			// Get initial hash label
 			template, _, initialHash, err := r.fetchTemplateAndHash(ctx, warmPool)
@@ -1033,9 +1066,17 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 			require.NoError(t, err)
 			require.NotEqual(t, initialHash, updatedHash, "Hashes should differ after template update")
 
-			// Reconcile again to trigger rollout (or lack thereof)
-			err = r.reconcilePool(ctx, warmPool)
+			// Reconcile again to trigger rollout (or lack thereof). Under the
+			// Recreate strategy the first pass deletes the stale sandboxes;
+			// the replacements are created on the next pass, after the
+			// deletions have been observed (create gating counts terminating
+			// sandboxes against the target, #1215).
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
+			syncPoolExpectations(&r, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+			syncPoolExpectations(&r, warmPool)
 
 			// Verify state after update
 			err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
@@ -1063,8 +1104,9 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 				require.NoError(t, err)
 
 				// Reconcile to trigger replenishment
-				err = r.reconcilePool(ctx, warmPool)
+				_, err = r.reconcilePool(ctx, warmPool)
 				require.NoError(t, err)
+				syncPoolExpectations(&r, warmPool)
 
 				// Verify that we have 2 sandboxes: one old (v1) and one new (v2)
 				err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
@@ -1147,8 +1189,9 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 	ctx := context.Background()
 
 	// Initial reconcile
-	err := r.reconcilePool(ctx, warmPool)
+	_, err := r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
+	syncPoolExpectations(&r, warmPool)
 
 	sandboxes := &sandboxv1beta1.SandboxList{}
 	err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
@@ -1180,8 +1223,14 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 	err = r.Update(ctx, warmPool)
 	require.NoError(t, err)
 
-	// Reconcile again to trigger rollout
-	err = r.reconcilePool(ctx, warmPool)
+	// Reconcile again to trigger rollout. The first pass deletes the stale
+	// sandboxes; replacements are created on the following pass, once the
+	// deletions have been observed (terminating sandboxes count against the
+	// create target, #1215).
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	syncPoolExpectations(&r, warmPool)
+	_, err = r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
 
 	// Verify state after update
@@ -1399,8 +1448,9 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 	}
 
 	// Initial reconcile to create sandboxes
-	err := r.reconcilePool(ctx, warmPool)
+	_, err := r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
+	syncPoolExpectations(&r, warmPool)
 
 	// Verify initial state
 	sandboxes := &sandboxv1beta1.SandboxList{}
@@ -1417,8 +1467,13 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 	err = r.Update(ctx, updatedTemplate)
 	require.NoError(t, err)
 
-	// Reconcile again, should trigger rollout (deletion and recreation)
-	err = r.reconcilePool(ctx, warmPool)
+	// Reconcile again, should trigger rollout: the first pass deletes the
+	// stale sandboxes, the second (after the deletions are observed) creates
+	// the replacements (#1215).
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	syncPoolExpectations(&r, warmPool)
+	_, err = r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
 
 	// Verify that sandboxes now have the updated DNSPolicy
@@ -1667,7 +1722,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 				EnableWarmPoolEviction: tc.controllerEnable,
 			}
 
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			list := &sandboxv1beta1.SandboxList{}
@@ -1872,8 +1927,9 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 			ctx := context.Background()
 
 			// Initial reconcile
-			err := r.reconcilePool(ctx, warmPool)
+			_, err := r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
+			syncPoolExpectations(&r, warmPool)
 
 			sandboxes := &sandboxv1beta1.SandboxList{}
 			err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))
@@ -1902,8 +1958,13 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 				require.NotEqual(t, initialHash, updatedHash, "sandbox blueprint hash should change after template update")
 			}
 
-			// Recreate strategy should delete stale sandbox and create a fresh one
-			err = r.reconcilePool(ctx, warmPool)
+			// Recreate strategy should delete the stale sandbox on the first
+			// pass and create the fresh one on the next pass, after the
+			// deletion has been observed (#1215).
+			_, err = r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+			syncPoolExpectations(&r, warmPool)
+			_, err = r.reconcilePool(ctx, warmPool)
 			require.NoError(t, err)
 
 			err = r.List(ctx, sandboxes, client.InNamespace(poolNamespace))

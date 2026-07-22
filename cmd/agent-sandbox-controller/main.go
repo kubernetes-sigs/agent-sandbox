@@ -430,6 +430,7 @@ func main() {
 			Scheme:                 mgr.GetScheme(),
 			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
 			EnableWarmPoolEviction: enableWarmPoolEviction,
+			Recorder:               mgr.GetEventRecorder("sandboxwarmpool-controller"),
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)

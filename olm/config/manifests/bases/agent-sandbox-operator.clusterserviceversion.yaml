@@ -95,23 +95,46 @@ spec:
       kind: Sandbox
       name: sandboxes.agents.x-k8s.io
       version: v1beta1
+    - description: Sandbox provides an isolated, stateful runtime environment for
+        AI agent workloads.
+      displayName: Sandbox
+      kind: Sandbox
+      name: sandboxes.agents.x-k8s.io
+      version: v1alpha1
     - description: SandboxClaim requests a Sandbox from a warm pool for use by an
         AI agent.
       displayName: Sandbox Claim
       kind: SandboxClaim
       name: sandboxclaims.extensions.agents.x-k8s.io
       version: v1beta1
+    - description: SandboxClaim requests a Sandbox from a warm pool for use by an
+        AI agent.
+      displayName: Sandbox Claim
+      kind: SandboxClaim
+      name: sandboxclaims.extensions.agents.x-k8s.io
+      version: v1alpha1
     - description: SandboxTemplate defines a reusable specification for creating Sandboxes.
       displayName: Sandbox Template
       kind: SandboxTemplate
       name: sandboxtemplates.extensions.agents.x-k8s.io
       version: v1beta1
+    - description: SandboxTemplate defines a reusable specification for creating Sandboxes.
+      displayName: Sandbox Template
+      kind: SandboxTemplate
+      name: sandboxtemplates.extensions.agents.x-k8s.io
+      version: v1alpha1
     - description: SandboxWarmPool maintains a pool of pre-provisioned Sandboxes for
         fast allocation.
       displayName: Sandbox Warm Pool
       kind: SandboxWarmPool
       name: sandboxwarmpools.extensions.agents.x-k8s.io
       version: v1beta1
+    - description: SandboxWarmPool maintains a pool of pre-provisioned Sandboxes for
+        fast allocation.
+      displayName: Sandbox Warm Pool
+      kind: SandboxWarmPool
+      name: sandboxwarmpools.extensions.agents.x-k8s.io
+      version: v1alpha1
   description: |
     ## About
 

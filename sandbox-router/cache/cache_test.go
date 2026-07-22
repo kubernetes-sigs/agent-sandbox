@@ -338,6 +338,54 @@ func TestCache_GetByNameAfterAdd(t *testing.T) {
 	}
 }
 
+// TestCache_UnclaimedWarmPoolPodNotInNameIndex: warm-pool Pods that no
+// SandboxClaim has adopted yet must be reachable only by UID, so callers
+// cannot reach a pool Pod another workload will adopt by guessing
+// pool-generated names. The claim controller removes the warm-pool label
+// on adoption; the resulting Pod update makes the entry name-routable.
+func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
+	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	pod.Labels[PodWarmPoolLabel] = "pool-hash"
+	c, client, cancel := newCache(t, pod)
+	defer cancel()
+
+	// UID lookup works, name lookup must not.
+	if !waitFor(t, func() bool { _, ok := c.Get(testUID); return ok }) {
+		t.Fatalf("unclaimed pod missing from UID map")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatalf("unclaimed warm-pool pod must not be name-routable")
+	}
+
+	// Adoption: the label is removed → the update indexes the entry.
+	adopted := pod.DeepCopy()
+	delete(adopted.Labels, PodWarmPoolLabel)
+	if _, err := client.CoreV1().Pods(testPodNS).Update(t.Context(), adopted, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
+		t.Fatalf("adopted pod was not added to the name index")
+	}
+}
+
+// TestCache_UpsertUnindexRemovesNameKey covers the reverse flip: an entry
+// that was name-indexed and is re-upserted with indexName=false (e.g. the
+// warm-pool label reappears via relist) must leave no stale name key.
+func TestCache_UpsertUnindexRemovesNameKey(t *testing.T) {
+	c := &Cache{log: logr.Discard(), entries: map[types.UID]Entry{}, byName: map[string]types.UID{}}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
+	if _, ok := c.GetByName(testPodNS, testPodName); !ok {
+		t.Fatalf("entry should be name-indexed")
+	}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, false)
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatalf("unindexed entry must not be name-routable")
+	}
+	if _, ok := c.Get(testUID); !ok {
+		t.Fatalf("UID entry must survive unindexing")
+	}
+}
+
 func TestCache_GetByNameGoneAfterDelete(t *testing.T) {
 	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
 	c, client, cancel := newCache(t, pod)
@@ -363,8 +411,8 @@ func TestCache_UpsertRenameDropsStaleNameKey(t *testing.T) {
 		entries: make(map[types.UID]Entry),
 		byName:  make(map[string]types.UID),
 	}
-	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: "old-name", Namespace: testPodNS})
-	c.upsert(testUID, Entry{PodIP: testPodIP2, SandboxName: "new-name", Namespace: testPodNS})
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: "old-name", Namespace: testPodNS}, true)
+	c.upsert(testUID, Entry{PodIP: testPodIP2, SandboxName: "new-name", Namespace: testPodNS}, true)
 
 	if _, ok := c.GetByName(testPodNS, "old-name"); ok {
 		t.Fatalf("stale name key must be dropped on rename")
@@ -387,9 +435,9 @@ func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
 		entries: make(map[types.UID]Entry),
 		byName:  make(map[string]types.UID),
 	}
-	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS})
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
 	// New Pod claims the name first (add before delete)...
-	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS})
+	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}, true)
 	// ...then the old Pod's delete arrives late.
 	c.remove(testUID)
 
@@ -406,7 +454,7 @@ func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
 
 	// Delete-then-add ordering must also converge on the new entry.
 	c.remove(testUID2)
-	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS})
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
 	if e, ok := c.GetByName(testPodNS, testPodName); !ok || e.PodIP != testPodIP {
 		t.Fatalf("delete-then-add must repopulate the name index: %+v ok=%v", e, ok)
 	}
@@ -446,7 +494,7 @@ func TestCache_InvalidateByNameIPMismatchPreservesFreshEntry(t *testing.T) {
 		entries: make(map[types.UID]Entry),
 		byName:  make(map[string]types.UID),
 	}
-	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS})
+	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}, true)
 
 	if c.InvalidateByName(testPodNS, testPodName, testPodIP) {
 		t.Fatalf("IP mismatch must not report an eviction")

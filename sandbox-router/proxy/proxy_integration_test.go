@@ -313,19 +313,22 @@ func (s *stubLookup) InvalidateByName(namespace, name, podIP string) bool {
 
 // TestIntegration_CacheInvalidationOnDialError exercises the KEP-NNNN
 // active invalidation: when the proxy dials a cached IP and the dial
-// fails, the cache entry is evicted so the next request for the same UID
-// falls through to DNS instead of retrying the stale IP.
+// fails because the host is unreachable, the cache entry is evicted so
+// the next request for the same UID falls through to DNS instead of
+// retrying the stale IP.
 func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
-	cfg.ProxyTimeout = 2 * time.Second
-	cfg.ResponseHeaderTimeout = 1 * time.Second
+	cfg.ProxyTimeout = time.Second // bounds the blackhole dial below
+	cfg.ResponseHeaderTimeout = time.Second
 	// Disable retries so a single dial failure shows up cleanly as one
 	// upstream error and one invalidation.
 	cfg.UpstreamMaxRetries = 0
 
+	// 255.255.255.255 fails the dial instantly with ENETUNREACH — a
+	// dead-host failure, unlike a refusal from a live host, which
+	// intentionally does not evict (see the wrong-port test below).
 	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
-		"sandbox-uid-xyz": {PodIP: "127.0.0.1", SandboxName: "s", Namespace: "ns"},
+		"sandbox-uid-xyz": {PodIP: "255.255.255.255", SandboxName: "s", Namespace: "ns"},
 	}}
 
 	reg := prometheus.NewRegistry()
@@ -339,14 +342,11 @@ func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 	}))
 	defer router.Close()
 
-	// Dial a guaranteed-closed port — the proxy will hit a dial-class
-	// error and the ErrorHandler must invalidate the cache entry for
-	// the UID we passed in.
 	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
 	req.Header.Set(HeaderSandboxID, "s")
 	req.Header.Set(HeaderSandboxUID, "sandbox-uid-xyz")
 	req.Header.Set(HeaderSandboxNamespace, "ns")
-	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
+	req.Header.Set(HeaderSandboxPort, "8888")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -481,18 +481,18 @@ func TestIntegration_NameIndexRoutesWithoutUID(t *testing.T) {
 }
 
 // TestIntegration_CacheInvalidationOnNameDialError mirrors the UID-path
-// active-invalidation test for name-resolved targets: a dial failure on
-// an IP that came from the name index must evict that entry so the next
-// request doesn't retry the stale IP.
+// active-invalidation test for name-resolved targets: a dead-host dial
+// failure on an IP that came from the name index must evict that entry
+// so the next request doesn't retry the stale IP.
 func TestIntegration_CacheInvalidationOnNameDialError(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
-	cfg.ProxyTimeout = 2 * time.Second
-	cfg.ResponseHeaderTimeout = 1 * time.Second
+	cfg.ProxyTimeout = time.Second // bounds the blackhole dial
+	cfg.ResponseHeaderTimeout = time.Second
 	cfg.UpstreamMaxRetries = 0
 
+	// 255.255.255.255: instant ENETUNREACH (dead host).
 	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
-		"warm-uid-1": {PodIP: "127.0.0.1", SandboxName: "warm-sandbox", Namespace: "tenants"},
+		"warm-uid-1": {PodIP: "255.255.255.255", SandboxName: "warm-sandbox", Namespace: "tenants"},
 	}}
 
 	router := httptest.NewServer(NewHandler(Options{
@@ -505,7 +505,7 @@ func TestIntegration_CacheInvalidationOnNameDialError(t *testing.T) {
 	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
 	req.Header.Set(HeaderSandboxID, "warm-sandbox")
 	req.Header.Set(HeaderSandboxNamespace, "tenants")
-	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
+	req.Header.Set(HeaderSandboxPort, "8888")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -519,11 +519,82 @@ func TestIntegration_CacheInvalidationOnNameDialError(t *testing.T) {
 	defer lookup.mu.Unlock()
 	// The handler must pass the IP it actually dialed so the cache can
 	// refuse the eviction if the entry was refreshed mid-dial.
-	if len(lookup.invalidatedByName) != 1 || lookup.invalidatedByName[0] != "tenants/warm-sandbox=127.0.0.1" {
-		t.Fatalf("expected one name invalidation for tenants/warm-sandbox=127.0.0.1, got %v", lookup.invalidatedByName)
+	if len(lookup.invalidatedByName) != 1 || lookup.invalidatedByName[0] != "tenants/warm-sandbox=255.255.255.255" {
+		t.Fatalf("expected one name invalidation for tenants/warm-sandbox=255.255.255.255, got %v", lookup.invalidatedByName)
 	}
 	if len(lookup.entries) != 0 {
 		t.Fatalf("entry should have been removed from cache, still have %v", lookup.entries)
+	}
+}
+
+// TestIntegration_NoEvictionOnConnectionRefused is the regression for the
+// wrong-port review finding: a connection refusal proves a live host, so
+// a caller-selected bad port (or a transiently down listener) must not
+// evict the entry — for warm-pool sandboxes it is the only working route,
+// and DNS can never take over. A follow-up request with the right port
+// through the same name entry must still succeed.
+func TestIntegration_NoEvictionOnConnectionRefused(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "still-routable")
+	}))
+	defer backend.Close()
+
+	u, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.ResponseHeaderTimeout = time.Second
+	cfg.UpstreamMaxRetries = 0
+
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"warm-uid-1": {PodIP: u.Hostname(), SandboxName: "warm-sandbox", Namespace: "tenants"},
+	}}
+
+	router := httptest.NewServer(NewHandler(Options{
+		Config: &cfg,
+		Cache:  lookup,
+		Logger: logr.Discard(),
+	}))
+	defer router.Close()
+
+	send := func(port string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest("GET", router.URL+"/x", nil)
+		req.Header.Set(HeaderSandboxID, "warm-sandbox")
+		req.Header.Set(HeaderSandboxNamespace, "tenants")
+		req.Header.Set(HeaderSandboxPort, port)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		return resp
+	}
+
+	// Wrong port: the live backend host refuses the connection. 502 to
+	// the caller, but the entry must survive.
+	resp := send(pickFreePortStr(t))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("wrong-port status: got %d want 502", resp.StatusCode)
+	}
+	lookup.mu.Lock()
+	if len(lookup.invalidated) != 0 || len(lookup.invalidatedByName) != 0 {
+		lookup.mu.Unlock()
+		t.Fatalf("refusal must not evict, got %v / %v", lookup.invalidated, lookup.invalidatedByName)
+	}
+	lookup.mu.Unlock()
+
+	// Right port through the same name entry still routes.
+	resp = send(u.Port())
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "still-routable" {
+		t.Fatalf("correct-port: got %d %q, want 200 still-routable", resp.StatusCode, body)
 	}
 }
 

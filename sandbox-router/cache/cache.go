@@ -60,6 +60,12 @@ const (
 	// promote it to api/v1beta1 so we can import it directly.
 	PodSandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 
+	// PodWarmPoolLabel marks a warm-pool Pod that has not been adopted by
+	// a SandboxClaim yet; adoption removes it. Duplicated from
+	// api/v1beta1.SandboxWarmPoolLabel to keep this package free of the
+	// CRD dependency, like PodSandboxNameHashLabel above.
+	PodWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
+
 	// defaultResync is the informer relist period. Short enough to catch
 	// missed events; long enough to not hammer the API server. Matches
 	// typical controller-runtime defaults.
@@ -241,11 +247,18 @@ func (c *Cache) onAddOrUpdate(obj any) {
 		c.remove(uid)
 		return
 	}
+	// Unclaimed warm-pool Pods stay out of the name index: before the
+	// index existed they were reachable only with the UID (a de-facto
+	// capability), and keeping that property prevents a caller from
+	// reaching — and pre-poisoning — a pool Pod another workload will
+	// adopt, just by guessing pool-generated names. Adoption removes the
+	// label, and the resulting Pod update indexes the entry.
+	_, unclaimed := pod.Labels[PodWarmPoolLabel]
 	c.upsert(uid, Entry{
 		PodIP:       pod.Status.PodIP,
 		SandboxName: pod.Name,
 		Namespace:   pod.Namespace,
-	})
+	}, !unclaimed)
 }
 
 func (c *Cache) onDelete(obj any) {
@@ -263,20 +276,26 @@ func (c *Cache) onDelete(obj any) {
 	}
 }
 
-func (c *Cache) upsert(uid types.UID, e Entry) {
+// upsert stores (or refreshes) the entry. indexName controls whether the
+// entry is reachable through the byName index; unclaimed warm-pool Pods
+// pass false so they stay UID-only.
+func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 	c.mu.Lock()
 	prev, existed := c.entries[uid]
 	c.entries[uid] = e
 	// Drop a stale name key only when it still points at this UID, so a
-	// newer Pod that already claimed the name is never clobbered.
+	// newer Pod that already claimed the name is never clobbered. This
+	// also unindexes an entry whose update flipped indexName to false.
 	if existed {
-		if pk := nameKey(prev.Namespace, prev.SandboxName); pk != nameKey(e.Namespace, e.SandboxName) && c.byName[pk] == uid {
+		if pk := nameKey(prev.Namespace, prev.SandboxName); (pk != nameKey(e.Namespace, e.SandboxName) || !indexName) && c.byName[pk] == uid {
 			delete(c.byName, pk)
 		}
 	}
-	// Last writer wins on name collisions (relist/compaction edge cases
-	// where delete-then-add ordering isn't contractual).
-	c.byName[nameKey(e.Namespace, e.SandboxName)] = uid
+	if indexName {
+		// Last writer wins on name collisions (relist/compaction edge
+		// cases where delete-then-add ordering isn't contractual).
+		c.byName[nameKey(e.Namespace, e.SandboxName)] = uid
+	}
 	c.mu.Unlock()
 	if !existed {
 		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace)

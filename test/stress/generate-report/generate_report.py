@@ -1136,6 +1136,14 @@ def main():
         shutil.copy(watch_file, output_dir / watch_log_name)
         print(f"Copied watch log: {output_dir / watch_log_name}")
 
+    # Copy the scrape log so metrics.html can fetch and parse it client-side,
+    # under the bare name for the same prow .gz-stripping reason as above.
+    # Unlike the watch log, metrics.jsonl is a hard input requirement (main()
+    # exits at the top without it), so the copy is unconditional.
+    metrics_log_name = "metrics.jsonl"
+    shutil.copy(metrics_file, output_dir / metrics_log_name)
+    print(f"Copied metrics log: {output_dir / metrics_log_name}")
+
     def render_page(template_name, output_filename, context):
         template = env.get_template(template_name)
         rendered = template.render(context)
@@ -1250,6 +1258,15 @@ def main():
         "phases": js_phases
     }
     render_page("watch.html", "watch.html", watch_ctx)
+
+    # Metric explorer context
+    metrics_ctx = {
+        "active_page": "metrics",
+        "summary": summary,
+        "metrics_log": metrics_log_name,
+        "phases": js_phases
+    }
+    render_page("metrics.html", "metrics.html", metrics_ctx)
 
     print("All report pages generated successfully!")
 

@@ -772,8 +772,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		client.InNamespace(sandbox.Namespace),
 		client.MatchingFields{podSandboxNameHashIndex: nameHash},
 	); err != nil {
-		logger.Error(err, "Failed to list pods")
-		return nil, fmt.Errorf("pod list failed: %w", err)
+		return nil, fmt.Errorf("failed to list pods for sandbox %s/%s (%s=%q): %w", sandbox.Namespace, sandbox.Name, podSandboxNameHashIndex, nameHash, err)
 	}
 
 	if len(podList.Items) > 1 {
@@ -1062,23 +1061,23 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	propagatedLabelsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedLabelsAnnotation]
 	if propagatedLabelsStr != "" {
 		propagatedLabels := strings.SplitSeq(propagatedLabelsStr, ",")
-		for k := range propagatedLabels {
-			if k == "" {
+		for labelKey := range propagatedLabels {
+			if labelKey == "" {
 				continue
 			}
-			if isSystemLabel(k) {
-				if k == sandboxLabel {
+			if isSystemLabel(labelKey) {
+				if labelKey == sandboxLabel {
 					continue
 				}
-				if _, exists := pod.Labels[k]; exists {
-					delete(pod.Labels, k)
+				if _, exists := pod.Labels[labelKey]; exists {
+					delete(pod.Labels, labelKey)
 					updated = true
-					logger.V(1).Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", k)
+					logger.V(4).Info("Removed unauthorized system label from Pod", "pod", pod.Name, "key", labelKey)
 				}
 				continue
 			}
-			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[k]; !ok {
-				delete(pod.Labels, k)
+			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Labels[labelKey]; !ok {
+				delete(pod.Labels, labelKey)
 				updated = true
 			}
 		}
@@ -1138,22 +1137,22 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 	propagatedAnnotationsStr := pod.Annotations[sandboxv1beta1.SandboxPropagatedAnnotationsAnnotation]
 	if propagatedAnnotationsStr != "" {
 		propagatedAnnotations := strings.SplitSeq(propagatedAnnotationsStr, ",")
-		for k := range propagatedAnnotations {
-			if k == "" {
+		for annotationKey := range propagatedAnnotations {
+			if annotationKey == "" {
 				continue
 			}
-			if isSystemAnnotation(k) {
-				if isControllerManagedPodAnnotation(k) {
+			if isSystemAnnotation(annotationKey) {
+				if isControllerManagedPodAnnotation(annotationKey) {
 					continue
 				}
-				if _, exists := pod.Annotations[k]; exists {
-					delete(pod.Annotations, k)
+				if _, exists := pod.Annotations[annotationKey]; exists {
+					delete(pod.Annotations, annotationKey)
 					updated = true
 				}
 				continue
 			}
-			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[k]; !ok {
-				delete(pod.Annotations, k)
+			if _, ok := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[annotationKey]; !ok {
+				delete(pod.Annotations, annotationKey)
 				updated = true
 			}
 		}

@@ -37,6 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -2621,6 +2622,41 @@ func TestReconcilePod(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcilePod_ListError(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "test-ns",
+			UID:       types.UID("test-uid"),
+		},
+	}
+	nameHash := "test-hash"
+	listErr := errors.New("simulated list error")
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(Scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+				return listErr
+			},
+		}).
+		Build()
+
+	r := SandboxReconciler{
+		Client:        fakeClient,
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+
+	pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+	require.Error(t, err)
+	assert.Nil(t, pod)
+	require.ErrorIs(t, err, listErr)
+	assert.Contains(t, err.Error(), "failed to list pods for sandbox test-ns/test-sandbox")
+	assert.Contains(t, err.Error(), podSandboxNameHashIndex+"=\"test-hash\"")
 }
 
 func TestReconcileService(t *testing.T) {

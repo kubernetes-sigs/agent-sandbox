@@ -501,7 +501,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 
 			// Verify pod template annotations
 			require.Equal(t, "from-podtemplate", sb.Spec.PodTemplate.ObjectMeta.Annotations["pod-annotation"])
-			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation])
+			require.Equal(t, "true", sb.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation])
 		}
 	})
 }
@@ -1609,7 +1609,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller true respects explicit template value false",
 			controllerEnable: true,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "false",
+				autoscalerSafeToEvictAnnotation: "false",
 			},
 			expectedEvictionVal: "false",
 		},
@@ -1617,7 +1617,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller false respects explicit template value false",
 			controllerEnable: false,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "false",
+				autoscalerSafeToEvictAnnotation: "false",
 			},
 			expectedEvictionVal: "false",
 		},
@@ -1625,7 +1625,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller true respects explicit template value true",
 			controllerEnable: true,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "true",
+				autoscalerSafeToEvictAnnotation: "true",
 			},
 			expectedEvictionVal: "true",
 		},
@@ -1633,7 +1633,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			name:             "controller false respects explicit template value true",
 			controllerEnable: false,
 			templateAnnotations: map[string]string{
-				warmPoolEvictionAnnotation: "true",
+				autoscalerSafeToEvictAnnotation: "true",
 			},
 			expectedEvictionVal: "true",
 		},
@@ -1676,7 +1676,7 @@ func TestReconcilePool_EvictionOverride(t *testing.T) {
 			require.Len(t, list.Items, 1)
 
 			sb := list.Items[0]
-			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]
+			val, exists := sb.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation]
 			if tc.expectedEvictionVal != "" {
 				require.True(t, exists, "expected eviction annotation to exist")
 				require.Equal(t, tc.expectedEvictionVal, val)

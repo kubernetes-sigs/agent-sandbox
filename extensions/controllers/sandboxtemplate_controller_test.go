@@ -25,6 +25,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,10 +33,33 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
+
+// assertManagedNetworkPolicySelectsTemplateBackedPod verifies the managed
+// NetworkPolicy podSelector matches labels propagated to template-backed Pods
+// by the core Sandbox controller (sandbox-template-ref-hash).
+func assertManagedNetworkPolicySelectsTemplateBackedPod(t *testing.T, templateName string, np *networkingv1.NetworkPolicy) {
+	t.Helper()
+
+	selector, err := metav1.LabelSelectorAsSelector(&np.Spec.PodSelector)
+	if err != nil {
+		t.Fatalf("pod selector: %v", err)
+	}
+
+	expectedHash := SandboxTemplateRefHash(templateName)
+	podLabels := labels.Set{
+		sandboxv1beta1.SandboxTemplateRefHashLabel: expectedHash,
+	}
+	if selector.Empty() {
+		t.Errorf("managed NetworkPolicy podSelector is empty (selects all pods in namespace)")
+	} else if !selector.Matches(podLabels) {
+		gotHash := np.Spec.PodSelector.MatchLabels[sandboxv1beta1.SandboxTemplateRefHashLabel]
+		t.Errorf("managed NetworkPolicy podSelector: %s: expected %q, got %q",
+			sandboxv1beta1.SandboxTemplateRefHashLabel, expectedHash, gotHash)
+	}
+}
 
 func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	templateDefault := &extensionsv1beta1.SandboxTemplate{
@@ -160,10 +184,6 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if !hasIPv6LinkLocalExcept {
 					t.Errorf("Expected IPv6 Egress Except list to contain fe80::/10, got %v", ipv6Peer.IPBlock.Except)
 				}
-				expectedLabelKey := sandboxTemplateRefHash
-				if _, ok := np.Spec.PodSelector.MatchLabels[expectedLabelKey]; !ok {
-					t.Errorf("Expected PodSelector MatchLabels to contain %q", expectedLabelKey)
-				}
 			},
 		},
 		{
@@ -172,10 +192,6 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			existingObjects:     []client.Object{templateWithNP},
 			expectNetworkPolicy: true,
 			validateNetworkPolicy: func(t *testing.T, np *networkingv1.NetworkPolicy) {
-				expectedHash := sandboxcontrollers.NameHash("test-template-custom")
-				if np.Spec.PodSelector.MatchLabels[sandboxTemplateRefHash] != expectedHash {
-					t.Errorf("unexpected pod selector hash")
-				}
 				if np.Spec.Ingress[0].From[0].PodSelector.MatchLabels["app"] != "ingress" {
 					t.Errorf("unexpected custom ingress rule")
 				}
@@ -243,6 +259,9 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 
 			if tc.expectNetworkPolicy && tc.validateNetworkPolicy != nil {
 				tc.validateNetworkPolicy(t, &np)
+			}
+			if tc.expectNetworkPolicy {
+				assertManagedNetworkPolicySelectsTemplateBackedPod(t, tc.templateToReconcile.Name, &np)
 			}
 
 			var updatedTemplate extensionsv1beta1.SandboxTemplate

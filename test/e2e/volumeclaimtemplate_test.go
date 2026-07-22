@@ -128,3 +128,54 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 	}
 	require.True(t, found, "expected pod to have a 'data' volume backed by PVC")
 }
+
+func TestSandboxVolumeClaimTemplatesImmutable(t *testing.T) {
+	vct := sandboxv1beta1.PersistentVolumeClaimTemplate{
+		EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+		},
+	}
+	pausePod := sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "pause", Image: "registry.k8s.io/pause:3.10"}}}}
+
+	cases := []struct {
+		name    string
+		initial []sandboxv1beta1.PersistentVolumeClaimTemplate
+		mutate  func([]sandboxv1beta1.PersistentVolumeClaimTemplate) []sandboxv1beta1.PersistentVolumeClaimTemplate
+	}{
+		{"set→modified-set", []sandboxv1beta1.PersistentVolumeClaimTemplate{vct}, func(v []sandboxv1beta1.PersistentVolumeClaimTemplate) []sandboxv1beta1.PersistentVolumeClaimTemplate {
+			return append(v, vct)
+		}},
+		{"unset→set", nil, func(_ []sandboxv1beta1.PersistentVolumeClaimTemplate) []sandboxv1beta1.PersistentVolumeClaimTemplate {
+			return []sandboxv1beta1.PersistentVolumeClaimTemplate{vct}
+		}},
+		{"set→unset", []sandboxv1beta1.PersistentVolumeClaimTemplate{vct}, func(_ []sandboxv1beta1.PersistentVolumeClaimTemplate) []sandboxv1beta1.PersistentVolumeClaimTemplate {
+			return nil
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tc := framework.NewTestContext(t)
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("sandbox-vct-immutable-%d", time.Now().UnixNano())}}
+			require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "vct-immutable", Namespace: ns.Name},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate:          pausePod,
+					VolumeClaimTemplates: c.initial,
+				}},
+			}
+			require.NoError(t, tc.CreateWithCleanup(t.Context(), sb))
+
+			latest := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: sb.Name, Namespace: ns.Name}, latest))
+			latest.Spec.VolumeClaimTemplates = c.mutate(latest.Spec.VolumeClaimTemplates)
+
+			err := tc.Update(t.Context(), latest)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "volumeClaimTemplates is immutable")
+		})
+	}
+}

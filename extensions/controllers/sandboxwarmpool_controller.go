@@ -48,7 +48,7 @@ const (
 	sandboxTemplateRefHash          = sandboxv1beta1.SandboxTemplateRefHashLabel
 	warmPoolSandboxLabel            = sandboxv1beta1.SandboxWarmPoolLabel
 	sandboxCreateDeleteMaxBatchSize = 300
-	warmPoolEvictionAnnotation      = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+	autoscalerSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 	// sandboxWarmPoolLabelIndex is the cache field index over the warmPoolSandboxLabel
 	// value on warm sandboxes, so reconcilePool's member lookup is O(pool members) instead
 	// of O(sandboxes-in-namespace).
@@ -413,12 +413,12 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 
 	// Respect the template's custom eviction annotation if explicitly specified.
 	// Only apply the default eviction behavior if the annotation is not defined.
-	if _, exists := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation]; !exists {
+	if _, exists := sandbox.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation]; !exists {
 		if r.EnableWarmPoolEviction {
 			if sandbox.Spec.PodTemplate.ObjectMeta.Annotations == nil {
 				sandbox.Spec.PodTemplate.ObjectMeta.Annotations = make(map[string]string)
 			}
-			sandbox.Spec.PodTemplate.ObjectMeta.Annotations[warmPoolEvictionAnnotation] = "true"
+			sandbox.Spec.PodTemplate.ObjectMeta.Annotations[autoscalerSafeToEvictAnnotation] = "true"
 		}
 	}
 

@@ -61,8 +61,8 @@ Choose one of the following installation methods.
 To install the standard Open Source Agent Sandbox controller and CRDs, apply the base manifests followed by the extensions for warm pools:
 
 ```shell
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/manifest.yaml
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/extensions.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/extensions.yaml
 ```
 
 **Note on API Versions**: The OSS controller serves the `v1beta1` API. If you use this installation, you must update the apiVersion in the YAML examples throughout this guide from `extensions.agents.x-k8s.io/v1alpha1` to `extensions.agents.x-k8s.io/v1beta1`.

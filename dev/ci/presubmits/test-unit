@@ -13,26 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import shutil
 import sys
 
 from shared import utils
 
 
 def main():
-    """ invokes unit tests and outputs a junit report in the ARTIFACTS dir
+    """ invokes unit tests
 
-    The ARTIFACTS environment variable is set by prow.
+    dev/tools/test-unit writes the junit_*.xml reports straight into
+    $ARTIFACTS (set by prow), so no copy step is needed here.
     """
-    repo_root = utils.get_repo_root()
-    exit_code = utils.run_dev_tool("test-unit")
-
-    artifact_dir = os.getenv("ARTIFACTS")
-    if artifact_dir:
-        shutil.copy(f"{repo_root}/bin/unit-junit.xml", f"{artifact_dir}/junit.xml")
-
-    return exit_code
+    return utils.run_dev_tool("test-unit")
 
 
 if __name__ == "__main__":

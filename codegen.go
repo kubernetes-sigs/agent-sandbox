@@ -27,3 +27,4 @@ package agentsandbox
 //go:generate go tool -modfile=tools.mod sigs.k8s.io/controller-tools/cmd/controller-gen paths=./extensions/controllers/... output:rbac:dir=helm/templates rbac:roleName=agent-sandbox-controller-extensions,fileName=extensions-rbac.generated.yaml
 //go:generate ./dev/tools/sort-crd-versions
 //go:generate ./dev/tools/client-gen-go.sh
+//go:generate ./dev/tools/sync-olm-manifests

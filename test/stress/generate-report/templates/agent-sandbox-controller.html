@@ -30,6 +30,28 @@
     </div>
 </div>
 
+<div class="grid">
+    <div class="card chart-card">
+        <div class="card-title">Sandbox Workqueue Depth Over Time</div>
+        <div class="chart-container">
+            <canvas id="queueDepthChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 32px;">
+    <div class="card-title">Sandbox Workqueue by Phase</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        Queue time is latency added before the controller even starts reconciling;
+        work time is the reconcile itself. High queue time with low work time means
+        the controller is queueing, not slow &mdash; the levers are reconcile
+        concurrency (MaxConcurrentReconciles) and the controller's client QPS.
+    </div>
+    <div class="table-container">
+        <table id="controller-queue-table"></table>
+    </div>
+</div>
+
 <div class="card">
     <div class="card-title">Reconciliations by Phase</div>
     <div class="table-container">
@@ -38,6 +60,33 @@
 </div>
 
 <script>
+    const controllerQueue = {{ controller_queue | tojson }};
+    const msBadge = (warn, bad) => v =>
+        badge(v > bad ? 'danger' : v > warn ? 'warning' : 'success',
+              v >= 1000 ? (v / 1000).toFixed(2) + 's' : v.toFixed(1) + 'ms');
+    renderTable('#controller-queue-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'items', label: 'Items'},
+        {key: 'avg_queue_ms', label: 'Avg Queue Time', render: msBadge(250, 1000)},
+        {key: 'avg_work_ms', label: 'Avg Work Time', render: msBadge(50, 250)},
+        {key: 'retries', label: 'Retries'},
+        {key: 'depth_avg', label: 'Depth (avg)', render: v => v.toFixed(1)},
+        {key: 'depth_max', label: 'Depth (max)'}
+    ], controllerQueue);
+
+    const depthChartData = {{ depth_chart_data | tojson }};
+    {
+        const timestamps = depthChartData.map(d => d.ts);
+        const labels = timeLabels(timestamps);
+        const pointTimes = timestamps.map(ts => new Date(ts).getTime());
+        new Chart(document.getElementById('queueDepthChart').getContext('2d'), {
+            type: 'line',
+            data: { labels: labels, datasets: [lineDataset('sandbox workqueue depth (max per 15s)', depthChartData.map(d => d.depth), 0)] },
+            options: lineChartOptions('Queue depth'),
+            plugins: [phaseBands({{ phases | tojson }}, pointTimes, labels)]
+        });
+    }
+
     const controllerOps = {{ controller_ops | tojson }};
     renderTable('#controller-ops-table', [
         {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},

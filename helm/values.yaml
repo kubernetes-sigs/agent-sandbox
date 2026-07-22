@@ -39,7 +39,7 @@ controller:
   # pprofMutexProfileFraction: 10
   # kubeApiQps: -1.0
   # kubeApiBurst: 10
-  # sandboxConcurrentWorkers: 1
+  # sandboxConcurrentWorkers: 100
   ##### The following are only active when controller.extensions=true.
   # sandboxClaimConcurrentWorkers: 50
   # sandboxWarmPoolConcurrentWorkers: 1

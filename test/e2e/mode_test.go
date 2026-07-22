@@ -423,7 +423,8 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), unownedPod))
 
-	// 2. Create the Sandbox object with operatingMode = Suspended.
+	// 2. Create the Sandbox object with operatingMode = Suspended and Service = true.
+	serviceReq := true
 	sandboxObj := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sandboxName,
@@ -432,6 +433,7 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 		Spec: sandboxv1beta1.SandboxSpec{
 			OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				Service: &serviceReq,
 				PodTemplate: sandboxv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -447,9 +449,13 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
-	// 3. The controller should reconcile the Sandbox, see the unowned Pod with a matching name,
-	// and refuse to delete or modify it. The Sandbox should report Suspended=False with Reason=PodNotOwned.
+	nameHash := NameHash(sandboxObj.Name)
+	svc := "my-sandbox-conflict"
+	fqdn := fmt.Sprintf("my-sandbox-conflict.%s.svc.cluster.local", ns.Name)
+	selector := "agents.x-k8s.io/sandbox-name-hash=" + nameHash
+
 	expectedStatus := sandboxv1beta1.SandboxStatus{
+		Service: svc, ServiceFQDN: fqdn, LabelSelector: selector,
 		Conditions: []metav1.Condition{
 			{
 				Type:               string(sandboxv1beta1.SandboxConditionSuspended),

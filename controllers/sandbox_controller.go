@@ -249,7 +249,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
-		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
 		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 		sandbox.Status.NodeName = pod.Spec.NodeName
 	}
@@ -458,6 +458,20 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return nil
 	}
 
+	// Pod scheduling produces a status change containing nothing but the
+	// node name (the pod is bound seconds before it runs, so nodeName lands
+	// in its own reconcile, then podIPs and Ready land together shortly
+	// after). While the sandbox is still transitioning, don't spend an API
+	// request on the node name alone: it rides along with the next status
+	// write instead, normally the Ready transition. Once the sandbox is
+	// Ready the deferral no longer applies -- a node change on a Ready
+	// sandbox should be impossible, but if it happens, write it through
+	// rather than leave a Ready sandbox with a wrong or missing node name.
+	if nodeNameOnlyChange(oldStatus, &sandbox.Status) &&
+		!meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
+		return nil
+	}
+
 	if err := r.Status().Update(ctx, sandbox); err != nil {
 		logger.Error(err, "Failed to update sandbox status")
 		return err
@@ -465,6 +479,17 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// nodeNameOnlyChange reports whether the node assignment is the only
+// difference between the two statuses.
+func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool {
+	if oldStatus.NodeName == newStatus.NodeName {
+		return false
+	}
+	scratch := newStatus.DeepCopy()
+	scratch.NodeName = oldStatus.NodeName
+	return reflect.DeepEqual(oldStatus, scratch)
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.
@@ -477,7 +502,18 @@ func GetNumericHash(input string) uint32 {
 // NameHash generates an FNV-1a hash from a string and returns
 // it as a fixed-length hexadecimal string.
 func NameHash(objectName string) string {
-	return fmt.Sprintf("%08x", GetNumericHash(objectName))
+	h := GetNumericHash(objectName)
+	const hex = "0123456789abcdef"
+	var buf [8]byte
+	buf[0] = hex[(h>>28)&0xf]
+	buf[1] = hex[(h>>24)&0xf]
+	buf[2] = hex[(h>>20)&0xf]
+	buf[3] = hex[(h>>16)&0xf]
+	buf[4] = hex[(h>>12)&0xf]
+	buf[5] = hex[(h>>8)&0xf]
+	buf[6] = hex[(h>>4)&0xf]
+	buf[7] = hex[h&0xf]
+	return string(buf[:])
 }
 
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix

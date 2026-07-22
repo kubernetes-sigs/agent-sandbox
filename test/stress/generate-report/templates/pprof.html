@@ -26,7 +26,11 @@
 <div class="card">
     <div class="card-title">
         <span>kube-apiserver CPU profile</span>
-        <span class="badge badge-info" id="profile-info"></span>
+        <span>
+            <span class="badge badge-search" id="profile-search-info" hidden></span>
+            <span class="badge badge-zoom" id="profile-zoom-info" hidden></span>
+            <span class="badge badge-info" id="profile-info"></span>
+        </span>
     </div>
     <div class="profile-controls">
         <label for="profile-select">Profile:</label>
@@ -54,6 +58,10 @@
     const container = document.getElementById('flamegraph');
     const select = document.getElementById('profile-select');
     const info = document.getElementById('profile-info');
+    const searchInfo = document.getElementById('profile-search-info');
+    const searchInput = document.getElementById('profile-search');
+    const zoomInfo = document.getElementById('profile-zoom-info');
+    let profileTotal = 0; // current profile's total value, for zoom percentages
 
     const chart = flamegraph()
         .width(Math.max(container.clientWidth, 600))
@@ -61,6 +69,34 @@
         .minFrameSize(2)
         .transitionDuration(250)
         .sort(true);
+
+    // Summarize the filtered CPU: `sum` is d3-flame-graph's inclusive total
+    // (each matched subtree counted once, so recursion and nested matches
+    // don't double count); self time is the matched frames' own samples,
+    // pprof's "flat".
+    chart.setSearchHandler((results, sum, totalValue) => {
+        if (!results.length || !searchInput.value) {
+            searchInfo.hidden = true;
+            return;
+        }
+        const pct = totalValue > 0 ? (sum / totalValue * 100).toFixed(1) : '0.0';
+        searchInfo.textContent = `filter: ${(sum / 1e9).toFixed(1)} cpu-s incl. sub-calls (${pct}%), ` +
+            `${(searchSelfTime(results) / 1e9).toFixed(1)} cpu-s self`;
+        searchInfo.hidden = false;
+    });
+
+    // d3-flame-graph invokes onClick after zooming to the clicked frame (and
+    // resetZoom routes through the same path with the root), so this is the
+    // one place that always knows the current zoom target.
+    chart.onClick(d => {
+        if (!d || !d.parent) {
+            zoomInfo.hidden = true;
+            return;
+        }
+        const pct = profileTotal > 0 ? (d.value / profileTotal * 100).toFixed(1) : '0.0';
+        zoomInfo.textContent = `showing: ${(d.value / 1e9).toFixed(1)} cpu-s (${pct}%)`;
+        zoomInfo.hidden = false;
+    });
 
     async function show(file) {
         info.textContent = 'loading…';
@@ -72,7 +108,17 @@
             d3.select(container).datum(tree).call(chart);
             const seconds = profile.durationNanos / 1e9;
             const cores = profile.durationNanos > 0 ? tree.value / profile.durationNanos : 0;
-            info.textContent = `${pick.label}: ${(tree.value / 1e9).toFixed(1)} cpu-s over ${seconds.toFixed(0)}s (${cores.toFixed(1)} cores)`;
+            profileTotal = tree.value;
+            zoomInfo.hidden = true;
+            info.textContent = `total: ${(tree.value / 1e9).toFixed(1)} cpu-s over ${seconds.toFixed(0)}s (${cores.toFixed(1)} cores)`;
+            info.title = pick.label; // sample type, e.g. cpu/nanoseconds
+            // Carry the active filter (and its summary badge) over to the
+            // newly selected profile.
+            if (searchInput.value) {
+                chart.search(searchInput.value);
+            } else {
+                searchInfo.hidden = true;
+            }
         } catch (err) {
             info.textContent = 'load failed';
             container.innerHTML = `<div class="card-desc">Failed to load <code>${escapeHtml(file)}</code>: ${escapeHtml(err.message)}.<br>` +
@@ -82,8 +128,13 @@
     }
 
     select.addEventListener('change', () => show(select.value));
-    document.getElementById('profile-search').addEventListener('input', e => {
-        if (e.target.value) { chart.search(e.target.value); } else { chart.clear(); }
+    searchInput.addEventListener('input', e => {
+        if (e.target.value) {
+            chart.search(e.target.value);
+        } else {
+            chart.clear();
+            searchInfo.hidden = true;
+        }
     });
     document.getElementById('profile-reset').addEventListener('click', () => chart.resetZoom());
     show(select.value);

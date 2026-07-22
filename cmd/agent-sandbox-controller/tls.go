@@ -342,8 +342,8 @@ func statRegularFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
-		return fmt.Errorf("%s is a directory, expected a file", path)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
 	}
 	return nil
 }

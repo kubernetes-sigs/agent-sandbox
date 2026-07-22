@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -5660,15 +5661,45 @@ func TestSandboxClaimStatusPatchCarriesOptimisticLock(t *testing.T) {
 	require.Equal(t, "adopted-sb", updatedClaim.Status.SandboxStatus.Name)
 }
 
-// TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics verifies that
-// an optimistic-lock 409 on the claim status patch (the signature of a pass
-// that computed status from a stale cache view) is dropped as benign: no
-// reconcile error, no requeue storm, and — because the latency metrics record
-// only after an authoritative status write — no duplicate startup-latency
-// histogram observation (#940).
+// histogramSampleCount sums the observation counts across all series of a histogram
+// collector by gathering it through a dedicated registry. (testutil.CollectAndCount
+// counts series, not observations, so it cannot detect duplicate records landing in
+// an existing series — and >1 observations per claim is exactly the #940 failure
+// mode this suite guards against.)
+func histogramSampleCount(t *testing.T, c prometheus.Collector) uint64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(c); err != nil {
+		t.Fatalf("failed to register collector: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+	var total uint64
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			total += m.GetHistogram().GetSampleCount()
+		}
+	}
+	return total
+}
+
+// TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics verifies the
+// #940 fix end to end: an authoritative pass records the startup-latency
+// histograms EXACTLY once, and a later pass that computed status from a stale
+// (pre-Ready) cache view has its optimistic-lock 409 dropped as benign — no
+// reconcile error, no requeue storm, no stale status commit, and no second
+// histogram observation. The guarded failure mode is >1 observations per
+// claim (328 observations for 320 claims measured on post-#1118 main), so the
+// assertions pin exact sample counts, not series counts.
 func TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T) {
 	scheme := newScheme(t)
 	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+	// Annotations normally stamped by the webhook / an earlier controller pass,
+	// required for the two startup-latency histograms to record at all.
+	claim.Annotations[asmetrics.WebhookAnnotation] = time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano)
+	claim.Annotations[asmetrics.ObservabilityAnnotation] = time.Now().Add(-4 * time.Second).Format(time.RFC3339Nano)
 
 	asmetrics.ClaimStartupLatency.Reset()
 	asmetrics.ClaimControllerStartupLatency.Reset()
@@ -5679,16 +5710,29 @@ func TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T)
 		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
 	)
 
+	// Pass 1 runs against live state; pass 2 serves a frozen pre-Ready claim
+	// view and rejects its doomed status patch with the optimistic-lock 409.
+	staleClaimView := false
+	var preReadyClaim *extensionsv1beta1.SandboxClaim
 	statusPatchAttempts := 0
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(template, warmPool, claim, adopted).
 		WithStatusSubresource(claim).
 		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if cl, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && key.Name == "test-claim" && staleClaimView {
+					preReadyClaim.DeepCopyInto(cl)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
 			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 				if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" {
 					statusPatchAttempts++
-					return conflict
+					if staleClaimView {
+						return conflict
+					}
 				}
 				return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
 			},
@@ -5703,31 +5747,61 @@ func TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T)
 		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
 	}
 
+	// Pass 1 (authoritative): the status patch persists and the Ready
+	// transition is observed exactly once.
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
-	res, err := reconciler.Reconcile(context.Background(), req)
-	if err != nil {
-		t.Fatalf("expected the stale status conflict to be dropped as benign (nil error), got: %v", err)
-	}
-	if !res.IsZero() {
-		t.Fatalf("expected no requeue (convergence is watch-driven), got %+v", res)
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("pass 1: expected nil error, got: %v", err)
 	}
 	if statusPatchAttempts != 1 {
-		t.Errorf("expected exactly 1 status patch attempt, got %d", statusPatchAttempts)
+		t.Fatalf("pass 1: expected exactly 1 status patch, got %d", statusPatchAttempts)
+	}
+	if got := histogramSampleCount(t, asmetrics.ClaimStartupLatency); got != 1 {
+		t.Fatalf("pass 1: expected exactly 1 ClaimStartupLatency observation, got %d", got)
+	}
+	if got := histogramSampleCount(t, asmetrics.ClaimControllerStartupLatency); got != 1 {
+		t.Fatalf("pass 1: expected exactly 1 ClaimControllerStartupLatency observation, got %d", got)
 	}
 
-	// The stale pass must not record Ready-transition metrics: the write was
-	// rejected, so the transition it computed was never observed on the server.
-	if got := testutil.CollectAndCount(asmetrics.ClaimStartupLatency); got != 0 {
-		t.Errorf("expected 0 ClaimStartupLatency series after a dropped stale status write, got %d", got)
+	// Freeze the stale view: the claim as a lagging cache would serve it —
+	// binding annotation present, status not yet converged.
+	bound := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, bound))
+	preReadyClaim = bound.DeepCopy()
+	preReadyClaim.Status = extensionsv1beta1.SandboxClaimStatus{}
+	staleClaimView = true
+
+	// Pass 2 (stale): the recomputed "fresh" Ready transition must be
+	// arbitrated away by the server-side optimistic lock.
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("pass 2: expected the stale status conflict to be dropped as benign (nil error), got: %v", err)
 	}
-	if got := testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency); got != 0 {
-		t.Errorf("expected 0 ClaimControllerStartupLatency series after a dropped stale status write, got %d", got)
+	if !res.IsZero() {
+		t.Fatalf("pass 2: expected no requeue (convergence is watch-driven), got %+v", res)
+	}
+	if statusPatchAttempts != 2 {
+		t.Errorf("pass 2: expected the doomed stale patch to be attempted once (2 attempts total), got %d", statusPatchAttempts)
 	}
 
-	// The persisted status was never touched.
+	// Exactly-once metrics: a count >1 here is the #940 duplicate-observation
+	// regression this test exists to catch.
+	if got := histogramSampleCount(t, asmetrics.ClaimStartupLatency); got != 1 {
+		t.Errorf("expected exactly 1 ClaimStartupLatency observation after the stale pass (>1 = #940 duplicate records), got %d", got)
+	}
+	if got := histogramSampleCount(t, asmetrics.ClaimControllerStartupLatency); got != 1 {
+		t.Errorf("expected exactly 1 ClaimControllerStartupLatency observation after the stale pass (>1 = #940 duplicate records), got %d", got)
+	}
+
+	// The stale pass must not have regressed the persisted status. (Unfreeze
+	// the stale view so this reads the live object.)
+	staleClaimView = false
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
-	require.Empty(t, updatedClaim.Status.Conditions, "dropped conflict must not commit any status change")
+	require.Equal(t, "adopted-sb", updatedClaim.Status.SandboxStatus.Name, "dropped conflict must not clear the committed binding")
+	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond, "dropped conflict must not remove the committed Ready condition")
+	require.Equal(t, metav1.ConditionTrue, readyCond.Status, "dropped conflict must not flip the committed Ready condition")
 }
 
 // TestSandboxClaimAdoptionConflictRetriedInPass verifies that a 409 on the

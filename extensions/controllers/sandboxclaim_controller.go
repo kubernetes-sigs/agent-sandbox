@@ -1738,11 +1738,19 @@ func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
 		return true
 	}
-	if !equality.Semantic.DeepEqual(oldSb.Status.Conditions, newSb.Status.Conditions) {
-		return true
-	}
 	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {
 		return true
+	}
+	for _, condType := range []string{
+		string(v1beta1.SandboxConditionReady),
+		string(v1beta1.SandboxConditionFinished),
+	} {
+		if !equality.Semantic.DeepEqual(
+			meta.FindStatusCondition(oldSb.Status.Conditions, condType),
+			meta.FindStatusCondition(newSb.Status.Conditions, condType),
+		) {
+			return true
+		}
 	}
 	return false
 }

@@ -275,7 +275,7 @@ fi
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
 echo "Deploying to cluster..."
 dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
-  ${CONTROLLER_ARGS:+--controller-args "${CONTROLLER_ARGS}"}
+  ${CONTROLLER_ARGS:+--controller-args="${CONTROLLER_ARGS}"}
 
 # Wait for controller to be ready
 echo "Waiting for controller to be ready..."

@@ -875,8 +875,116 @@ def main():
                 "limit": pod_capacity
             })
 
+    # Node-level CPU from node-exporter (source 'node'; captured when the
+    # scenario deploys the DaemonSet). node_cpu_seconds_total is a counter
+    # per cpu per mode; summing per-scrape deltas over cpus per node gives
+    # cpu-seconds by mode, so busy% = 1 - (idle + iowait) / total. iowait is
+    # carried separately: it is the waiting-on-disk share, the node-level
+    # number that distinguishes I/O starvation from CPU starvation.
+    def node_role(instance):
+        return "control-plane" if ("control-plane" in instance or "master" in instance) else "worker"
+
+    def cpu_shares(modes):
+        total = sum(modes.values())
+        if total <= 0:
+            return None
+        idle = modes.get("idle", 0.0)
+        iowait = modes.get("iowait", 0.0)
+        return ((total - idle - iowait) / total * 100, iowait / total * 100)
+
+    print("Querying node CPU by phase...")
+    node_cpu_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["node_cpu_seconds_total"],
+        labels={"mode": "mode", "cpu": "cpu"},
+        group_by=["instance", "mode"],
+        where="source = 'node'")
+
+    node_mode_seconds = {}
+    for phase_name, instance, mode, seconds in node_cpu_raw:
+        node_mode_seconds.setdefault((phase_name, instance), {})[mode] = seconds
+
+    # Per phase: one row for the control plane, one aggregated over workers.
+    node_cpu_summary = []
+    nodes_per_phase = {}
+    for (phase_name, instance), modes in node_mode_seconds.items():
+        shares = cpu_shares(modes)
+        if shares is not None:
+            nodes_per_phase.setdefault(phase_name, {}).setdefault(node_role(instance), []).append(shares)
+    for phase_name, roles in nodes_per_phase.items():
+        for role, shares in roles.items():
+            busy = [s[0] for s in shares]
+            iowait = [s[1] for s in shares]
+            node_cpu_summary.append({
+                "phase_name": phase_name,
+                "role": role,
+                "nodes": len(shares),
+                "busy_avg_pct": sum(busy) / len(busy),
+                "busy_max_pct": max(busy),
+                "iowait_avg_pct": sum(iowait) / len(iowait),
+                "iowait_max_pct": max(iowait),
+            })
+    node_cpu_summary.sort(key=lambda r: (phase_order_map_early.get(r["phase_name"], 99), r["role"]))
+
+    print("Querying node CPU timeseries...")
+    node_cpu_ts_raw = metrics_timeseries(
+        conn, metrics_path_str,
+        metrics=["node_cpu_seconds_total"],
+        labels={"mode": "mode", "cpu": "cpu"},
+        group_by=["instance", "mode"],
+        where="source = 'node'")
+
+    ts_modes = {}
+    for ts, instance, mode, seconds in node_cpu_ts_raw:
+        ts_modes.setdefault((ts, instance), {})[mode] = seconds
+    ts_roles = {}
+    for (ts, instance), modes in ts_modes.items():
+        shares = cpu_shares(modes)
+        if shares is not None:
+            ts_roles.setdefault(ts, {}).setdefault(node_role(instance), []).append(shares)
+    node_chart_data = []
+    for ts in sorted(ts_roles):
+        row = {"ts": ts}
+        for role, shares in ts_roles[ts].items():
+            prefix = "cp" if role == "control-plane" else "worker"
+            row[prefix + "_busy"] = sum(s[0] for s in shares) / len(shares)
+            row[prefix + "_iowait"] = sum(s[1] for s in shares) / len(shares)
+        node_chart_data.append(row)
+
     # 4. Analyzer rules to identify findings
     findings = []
+
+    # Node CPU / iowait checks: a saturated control-plane node slows every
+    # component on it (etcd, apiserver, KCM, scheduler), while iowait points
+    # at the disk instead.
+    cp_worst = None
+    io_worst = None
+    for row in node_cpu_summary:
+        if not row['phase_name'].startswith('throughput'):
+            continue
+        # Gate on the busiest node, not the role average: on an HA control
+        # plane one saturated node (e.g. the etcd leader) must not be
+        # averaged away by idle peers.
+        if row['role'] == 'control-plane' and (cp_worst is None or row['busy_max_pct'] > cp_worst['busy_max_pct']):
+            cp_worst = row
+        if io_worst is None or row['iowait_max_pct'] > io_worst['iowait_max_pct']:
+            io_worst = row
+
+    if cp_worst and cp_worst['busy_max_pct'] > 75.0:
+        findings.append({
+            "severity": "critical" if cp_worst['busy_max_pct'] > 90.0 else "warning",
+            "title": f"Control Plane CPU Saturation ({cp_worst['busy_max_pct']:.0f}% busy)",
+            "desc": f"During phase {cp_worst['phase_name']} the busiest control-plane node ran at {cp_worst['busy_max_pct']:.0f}% CPU busy (iowait {cp_worst['iowait_max_pct']:.1f}%). etcd, the apiserver, kube-controller-manager and the scheduler share these cores, so every control-plane latency — including client-observed etcd latency — inflates under this. Consider a larger control-plane machine type.",
+            "link": "nodes.html"
+        })
+
+    if io_worst and io_worst['iowait_max_pct'] > 10.0:
+        findings.append({
+            "severity": "critical" if io_worst['iowait_max_pct'] > 25.0 else "warning",
+            "title": f"Node I/O Wait ({io_worst['iowait_max_pct']:.1f}% iowait)",
+            "desc": f"During phase {io_worst['phase_name']}, a {io_worst['role']} node spent up to {io_worst['iowait_max_pct']:.1f}% of CPU time waiting on I/O. The disk, not the CPU, is pacing that node.",
+            "link": "nodes.html"
+        })
 
     # CRI check
     cri_run_pod_latency_max = 0.0
@@ -1233,6 +1341,16 @@ def main():
         "phases": js_phases
     }
     render_page("capacity.html", "capacity.html", capacity_ctx)
+
+    # Node resources context
+    nodes_ctx = {
+        "active_page": "nodes",
+        "summary": summary,
+        "node_cpu_summary": node_cpu_summary,
+        "chart_data": node_chart_data,
+        "phases": js_phases
+    }
+    render_page("nodes.html", "nodes.html", nodes_ctx)
 
     # CPU profiles context
     pprof_ctx = {

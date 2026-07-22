@@ -76,6 +76,7 @@ func main() {
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
 	var enableWarmPoolEviction bool
+	var cacheLabelSelectors bool
 	var printVersion bool
 	var webhookPort int
 	var webhookCertDir string
@@ -119,6 +120,14 @@ func main() {
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
+	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
+		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
+			controllers.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
+			"labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode "+
+			"CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources "+
+			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
+			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
+			"this flag is enabled.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -298,6 +307,18 @@ func main() {
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
+	}
+	// managedFields stripping, the Pod spec diet, and (optionally) the
+	// tracking-label scoping; see buildCacheOptions for the rationale.
+	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)
+	if err != nil {
+		setupLog.Error(err, "unable to build cache options")
+		os.Exit(1)
+	}
+	mgrOpts.Cache = cacheOpts
+	if cacheLabelSelectors {
+		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
+			"label", controllers.SandboxNameHashLabel)
 	}
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{

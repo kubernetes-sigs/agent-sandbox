@@ -322,7 +322,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if err := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, errors.Join(reconcileErr, err)
 	}
 
 	// Determine Result
@@ -2015,7 +2015,13 @@ func (r *SandboxClaimReconciler) markCreationLatencyRecorded(ctx context.Context
 		claim.Annotations = make(map[string]string)
 	}
 	claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] = "true"
-	return r.Patch(ctx, claim, patch)
+	if err := r.Patch(ctx, claim, patch); err != nil {
+		if k8errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func hasSandboxExpiredCondition(conditions []metav1.Condition) bool {

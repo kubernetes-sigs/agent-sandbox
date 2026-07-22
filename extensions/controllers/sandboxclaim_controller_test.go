@@ -2834,6 +2834,38 @@ func TestRecordCreationLatencyMetric_SuspendResumeFlow(t *testing.T) {
 	require.Equal(t, 0, countCtrl)
 }
 
+func TestRecordCreationLatencyMetric_NotFoundSwallowed(t *testing.T) {
+	ctx := context.Background()
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	scheme := newScheme(t)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "not-found-test",
+			Namespace:         "default",
+			CreationTimestamp: pastTime,
+			Annotations: map[string]string{
+				asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		},
+	}
+
+	// Create fake client WITHOUT the claim object so Patch returns NotFound
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool).Build()
+	r := &SandboxClaimReconciler{Client: fakeClient}
+
+	// recordCreationLatencyMetric should swallow the NotFound error and return nil
+	err := r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil)
+	require.NoError(t, err)
+}
+
 func TestSandboxClaimCreationMetric(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},

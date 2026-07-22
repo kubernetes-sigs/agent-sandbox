@@ -4416,6 +4416,25 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "claim-other", Namespace: "default"},
 		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "other-warmpool"}},
 	}
+	// Bound claim: already has a sandbox recorded in status, so pool events must
+	// not re-enqueue it (its reconciles are driven by the claim/sandbox watches).
+	claimBound := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-bound", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPoolName}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "adopted-sandbox"},
+		},
+	}
+	// Deleting claim: Reconcile returns immediately for it, so it is skipped too.
+	claimDeleting := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "claim-deleting",
+			Namespace:         "default",
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Finalizers:        []string{"test-finalizer"},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPoolName}},
+	}
 
 	warmPool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{Name: warmPoolName, Namespace: "default"},
@@ -4428,7 +4447,7 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 	// Let's use the WithIndex option on the fake client builder to support the matchingFields query!
 	fakeClientWithIndex := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(claim1, claim2, claimOther, warmPool).
+		WithObjects(claim1, claim2, claimOther, claimBound, claimDeleting, warmPool).
 		WithIndex(&extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, func(obj client.Object) []string {
 			c := obj.(*extensionsv1beta1.SandboxClaim)
 			if c.Spec.WarmPoolRef.Name == "" {
@@ -4446,7 +4465,7 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 	requests := reconciler.mapWarmPoolToClaims(context.Background(), warmPool)
 
 	if len(requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(requests))
+		t.Fatalf("expected 2 requests (unbound claims only), got %d: %v", len(requests), requests)
 	}
 
 	expectedNames := map[string]bool{"claim-1": true, "claim-2": true}
@@ -4457,6 +4476,42 @@ func TestMapWarmPoolToClaims(t *testing.T) {
 		if req.Namespace != "default" {
 			t.Errorf("expected namespace 'default', got %s", req.Namespace)
 		}
+	}
+}
+
+// TestWarmPoolMapWatchPredicate pins the event classes the pool->claims map watch
+// reacts to: status-only pool updates (generation unchanged) must be filtered out,
+// while spec changes (generation bump) still pass so unbound claims wake up.
+func TestWarmPoolMapWatchPredicate(t *testing.T) {
+	pred := predicate.GenerationChangedPredicate{}
+
+	oldPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-warmpool",
+			Namespace:       "default",
+			Generation:      1,
+			ResourceVersion: "100",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{Replicas: new(int32(5))},
+	}
+
+	// Status-only update: resourceVersion moves, generation does not.
+	statusOnlyPool := oldPool.DeepCopy()
+	statusOnlyPool.ResourceVersion = "101"
+	statusOnlyPool.Status.ReadyReplicas = 3
+
+	if pred.Update(event.UpdateEvent{ObjectOld: oldPool, ObjectNew: statusOnlyPool}) {
+		t.Errorf("expected status-only pool update (generation unchanged) to be filtered out")
+	}
+
+	// Spec update: the API server bumps metadata.generation.
+	specChangedPool := oldPool.DeepCopy()
+	specChangedPool.ResourceVersion = "102"
+	specChangedPool.Generation = 2
+	specChangedPool.Spec.Replicas = new(int32(10))
+
+	if !pred.Update(event.UpdateEvent{ObjectOld: oldPool, ObjectNew: specChangedPool}) {
+		t.Errorf("expected spec (generation) pool update to pass the predicate")
 	}
 }
 

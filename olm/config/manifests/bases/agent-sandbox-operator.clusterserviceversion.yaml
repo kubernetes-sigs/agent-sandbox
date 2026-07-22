@@ -8,7 +8,8 @@ metadata:
           "apiVersion": "agents.x-k8s.io/v1beta1",
           "kind": "Sandbox",
           "metadata": {
-            "name": "hello-world"
+            "name": "hello-world",
+            "namespace": "default"
           },
           "spec": {
             "podTemplate": {
@@ -16,7 +17,7 @@ metadata:
                 "containers": [
                   {
                     "name": "my-container",
-                    "image": "busybox:latest"
+                    "image": "busybox:1.37.0"
                   }
                 ],
                 "restartPolicy": "Never"
@@ -37,7 +38,7 @@ metadata:
                 "containers": [
                   {
                     "name": "my-container",
-                    "image": "busybox:latest"
+                    "image": "busybox:1.37.0"
                   }
                 ],
                 "restartPolicy": "Never"

@@ -8,5 +8,5 @@ spec:
     spec:
       containers:
       - name: my-container
-        image: busybox:latest
+        image: busybox:1.37.0
       restartPolicy: Never

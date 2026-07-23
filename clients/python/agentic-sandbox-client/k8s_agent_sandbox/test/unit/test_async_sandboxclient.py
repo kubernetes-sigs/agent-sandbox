@@ -188,15 +188,15 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_clears_registry(self):
         mock_sandbox = MagicMock()
-        mock_sandbox._close_connection = AsyncMock()
+        mock_sandbox.close_connection = AsyncMock()
         self.client._active_connection_sandboxes[("ns", "claim")] = mock_sandbox
         self.mock_k8s_helper.close = AsyncMock()
 
         await self.client.close()
 
         self.assertEqual(len(self.client._active_connection_sandboxes), 0)
-        mock_sandbox._close_connection.assert_called_once()
-        self.mock_k8s_helper.close.assert_called_once()
+        mock_sandbox.close_connection.assert_awaited_once()
+        self.mock_k8s_helper.close.assert_awaited_once()
 
     async def test_context_manager(self):
         self.mock_k8s_helper.close = AsyncMock()

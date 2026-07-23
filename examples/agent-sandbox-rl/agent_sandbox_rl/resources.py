@@ -354,11 +354,24 @@ class Resources:
                       group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION)
 
   def count_pods(self, label_selector: str | None = None) -> int:
-    """Number of pods matching ``label_selector`` in this namespace (the actual
-    live footprint — sandbox pods carry the fleet labels via the pod template)."""
+    """Count pods matching ``label_selector`` in this namespace (the run's live
+    footprint) **without transferring the full pod list** — the circuit breaker
+    polls this repeatedly and the target scale is tens of thousands of pods.
+
+    Uses a ``limit=1`` list + ``metadata.remainingItemCount`` (a server-provided
+    hint) to get the total cheaply; falls back to a full list only when the server
+    omits the hint yet more pages exist."""
     kwargs = {"label_selector": label_selector} if label_selector else {}
-    pods = self.core_api.list_namespaced_pod(namespace=self.namespace, **kwargs)
-    return len(pods.items)
+    resp = self.core_api.list_namespaced_pod(namespace=self.namespace, limit=1, **kwargs)
+    meta = resp.metadata
+    remaining = getattr(meta, "remaining_item_count", None)
+    if remaining is not None:
+      return len(resp.items) + remaining
+    if not getattr(meta, "_continue", None):
+      return len(resp.items)                 # single page holds the whole set
+    # more pages exist but no count hint: fall back to a full (unpaged) list.
+    resp = self.core_api.list_namespaced_pod(namespace=self.namespace, **kwargs)
+    return len(resp.items)
 
   def delete_claim(self, name: str) -> None:
     self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim")

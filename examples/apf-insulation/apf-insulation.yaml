@@ -1,0 +1,219 @@
+# API Priority and Fairness (APF) insulation for the agent-sandbox controller.
+#
+# OPT-IN OVERLAY: nothing in the default install applies this file. It changes
+# cluster behavior only when a cluster operator runs
+#   kubectl apply -f examples/apf-insulation/apf-insulation.yaml
+# and is fully reverted by
+#   kubectl delete -f examples/apf-insulation/apf-insulation.yaml
+# See docs/apf-insulation.md for the sizing rule, how to measure, and caveats.
+#
+# WHY: out of the box, ALL of the controller's API traffic matches the
+# built-in `service-accounts` FlowSchema (matchingPrecedence 9000) and lands
+# in the shared `workload-low` priority level, together with every other
+# non-kube-system ServiceAccount in the cluster. Two failure modes follow:
+#   1. Another tenant's ServiceAccount can flood workload-low and queue the
+#      claim-adoption writes behind its traffic (cross-tenant interference).
+#   2. The controller's OWN bulk traffic — warm-pool replenishment creates
+#      (hundreds of sandboxes + pods + services after a large claim burst) —
+#      shares the same seats as the latency-critical adoption writes
+#      (self-interference).
+#
+# This overlay gives the controller two dedicated priority levels:
+#   - agent-sandbox-critical: the SandboxClaim -> Ready hot path (claim
+#     writes, sandbox adoption update/patch + status, the synchronous
+#     adoption-time pod patch) plus coordination leases (losing leader
+#     election mid-burst would abort every in-flight reconcile, and lease
+#     renewals are tiny).
+#   - agent-sandbox-bulk: everything else the controller does —
+#     replenishment creates/deletes, informer lists/watches, child-object
+#     management, discovery. Still dedicated (other tenants cannot queue
+#     it), but it can never crowd out the critical level.
+# Controller events are explicitly routed to the pre-existing shared
+# `workload-low` level: they are sacrificial and must never compete with
+# either dedicated level.
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: agent-sandbox-critical
+  labels:
+    app: agent-sandbox-controller
+spec:
+  type: Limited
+  limited:
+    # 40 shares. Seats are FRACTIONS of the server-wide seat total:
+    #   seats(level) = shares(level) / sum(all levels' shares)
+    #                  x (--max-requests-inflight + --max-mutating-requests-inflight)
+    # On Kubernetes 1.35 the built-in mandatory+suggested levels sum to 245
+    # shares (catch-all 5, global-default 20, leader-election 10, node-high
+    # 40, system 30, workload-high 40, workload-low 100); adding critical=40
+    # and bulk=25 brings the total to 310, so critical gets 40/310 ~= 13% of
+    # the server's seats: ~77 seats at the apiserver defaults (400 read +
+    # 200 mutating = 600 seats), ~516 seats on a control plane tuned to
+    # 3000 read + 1000 mutating = 4000 seats. Size so that seats(critical)
+    # >= 2x the demand-seats high watermark measured at your peak claim rate
+    # (see docs/apf-insulation.md: a 300-claim simultaneous burst measured a
+    # 272-seat demand high watermark, so the 600-seat default server limits
+    # are NOT enough at that rate — raise the server limits, not the shares).
+    nominalConcurrencyShares: 40
+    # Keep 75% of the critical seats reserved even when other levels want to
+    # borrow; only 25% is lendable. The hot path must never find its seats
+    # loaned out at the start of a burst.
+    lendablePercent: 25
+    limitResponse:
+      # Queue (never 429): the controller retries with backoff, but a
+      # rejected adoption write costs a full reconcile round-trip.
+      type: Queue
+      queuing:
+        # This level serves a single flow (one ServiceAccount), so
+        # shuffle-sharding width is mostly irrelevant; 16 queues x hand size
+        # 4 are the upstream-suggested defaults for a dedicated level.
+        queues: 16
+        handSize: 4
+        # Deep enough to absorb a full burst's write storm (hundreds of
+        # in-flight adoption writes) without rejections.
+        queueLengthLimit: 100
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: agent-sandbox-bulk
+  labels:
+    app: agent-sandbox-controller
+spec:
+  type: Limited
+  limited:
+    # 25 shares = 25/310 ~= 8% of the server's seats (~48 seats at the
+    # 600-seat apiserver defaults, ~322 at 4000 seats). Replenishment bursts
+    # get real dedicated capacity, but always less than the critical level,
+    # so refill can never crowd out adoption writes. Same derivation as
+    # above: seats scale with the server-wide inflight limits, fractions
+    # preserved.
+    nominalConcurrencyShares: 25
+    # Most bulk capacity is lendable back to the rest of the cluster when
+    # the pool is quiescent; refill is throughput work, not latency work.
+    lendablePercent: 75
+    limitResponse:
+      type: Queue
+      queuing:
+        # Same single-flow reasoning as the critical level.
+        queues: 16
+        handSize: 4
+        # Replenishment offers large batches; queue them rather than 429
+        # them (a rejected create is retried by the pool controller anyway,
+        # at strictly higher total cost).
+        queueLengthLimit: 100
+---
+# Latency-critical hot path: everything on the SandboxClaim -> Ready chain.
+# matchingPrecedence must beat agent-sandbox-bulk (1000) and the built-in
+# service-accounts schema (9000); lower number wins.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: agent-sandbox-critical
+  labels:
+    app: agent-sandbox-controller
+spec:
+  priorityLevelConfiguration:
+    name: agent-sandbox-critical
+  matchingPrecedence: 900
+  distinguisherMethod:
+    type: ByUser
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: agent-sandbox-controller
+            namespace: agent-sandbox-system
+      resourceRules:
+        # Claim reconcile writes: annotation updates, adoption update
+        # (optimistic lock), status patch.
+        - apiGroups: ["extensions.agents.x-k8s.io"]
+          resources: ["sandboxclaims", "sandboxclaims/status"]
+          verbs: ["*"]
+          clusterScope: true
+          namespaces: ["*"]
+        # Claim adoption on the Sandbox object (ownership/label patch) and
+        # the sandbox status patch that forwards Ready to the claim.
+        # Creates/deletes/lists/watches of sandboxes are deliberately NOT
+        # here — they are replenishment bulk.
+        - apiGroups: ["agents.x-k8s.io"]
+          resources: ["sandboxes", "sandboxes/status", "sandboxes/finalizers"]
+          verbs: ["get", "update", "patch"]
+          clusterScope: true
+          namespaces: ["*"]
+        # Synchronous adoption-time pod patch (strips safe-to-evict, applies
+        # claim labels) — sits on the pod-Ready -> claim-Ready chain.
+        - apiGroups: [""]
+          resources: ["pods"]
+          verbs: ["update", "patch"]
+          clusterScope: true
+          namespaces: ["*"]
+        # Leader-election lease renewals: tiny, and starving them mid-burst
+        # would drop leadership and abort every in-flight reconcile.
+        - apiGroups: ["coordination.k8s.io"]
+          resources: ["leases"]
+          verbs: ["*"]
+          clusterScope: true
+          namespaces: ["*"]
+---
+# Controller events: sacrificial. Route to the pre-existing shared
+# workload-low level so they never occupy a seat in either dedicated level.
+# Precedence must be lower (= match earlier) than agent-sandbox-bulk's
+# catch-rest rule below.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: agent-sandbox-events
+  labels:
+    app: agent-sandbox-controller
+spec:
+  priorityLevelConfiguration:
+    name: workload-low
+  matchingPrecedence: 950
+  distinguisherMethod:
+    type: ByUser
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: agent-sandbox-controller
+            namespace: agent-sandbox-system
+      resourceRules:
+        - apiGroups: ["", "events.k8s.io"]
+          resources: ["events"]
+          verbs: ["*"]
+          clusterScope: true
+          namespaces: ["*"]
+---
+# Catch-rest for the controller: replenishment creates/deletes, informer
+# list/watch, child objects (pods, services, PVCs, secrets, configmaps),
+# CRD patching, discovery. Dedicated seats so no other tenant can queue it,
+# below-critical shares so it cannot crowd out adoption writes.
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: agent-sandbox-bulk
+  labels:
+    app: agent-sandbox-controller
+spec:
+  priorityLevelConfiguration:
+    name: agent-sandbox-bulk
+  matchingPrecedence: 1000
+  distinguisherMethod:
+    type: ByUser
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: agent-sandbox-controller
+            namespace: agent-sandbox-system
+      resourceRules:
+        - apiGroups: ["*"]
+          resources: ["*"]
+          verbs: ["*"]
+          clusterScope: true
+          namespaces: ["*"]
+      nonResourceRules:
+        - nonResourceURLs: ["*"]
+          verbs: ["*"]

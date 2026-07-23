@@ -1690,8 +1690,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -1754,8 +1754,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -1800,8 +1800,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "my-warm-pool",
 							UID:        "pool-uid",
 							Controller: new(true),
@@ -1919,8 +1919,8 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),

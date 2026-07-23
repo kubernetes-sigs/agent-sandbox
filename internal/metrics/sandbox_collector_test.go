@@ -276,7 +276,7 @@ func TestSandboxCollector(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
-								Kind:       "SandboxWarmPool",
+								Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 								Name:       "my-warmpool",
 								UID:        "9012",
 								Controller: &trueVal,

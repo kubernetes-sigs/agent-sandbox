@@ -3987,8 +3987,8 @@ func TestSandboxClaimAdoptionCacheLagRepatchesIdempotently(t *testing.T) {
 				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -4145,8 +4145,8 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -4275,8 +4275,8 @@ func TestSandboxClaimFreshAdoptionStaleCacheKeepsFinalizedStatus(t *testing.T) {
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -4804,7 +4804,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	legacyOwnedSandbox.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
-			Kind:       "SandboxWarmPool",
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 			Name:       "test-pool",
 			UID:        "pool-uid-123",
 			Controller: ptr.To(true), // nolint:modernize
@@ -4820,7 +4820,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	foreignGroupSandbox.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion: "apps/v1",
-			Kind:       "SandboxWarmPool",
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 			Name:       "test-pool",
 			UID:        "pool-uid-123",
 			Controller: ptr.To(true), // nolint:modernize
@@ -5401,7 +5401,7 @@ func TestSandboxClaimReconcile_PatchErrorPreservesStatus(t *testing.T) {
 				sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim",
+				APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind,
 				Name: "test-claim", UID: "claim-uid", Controller: new(true),
 			}},
 		},

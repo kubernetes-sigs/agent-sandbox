@@ -575,14 +575,14 @@ func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]strin
 	if ref == nil {
 		return nil
 	}
-	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-	if gvk.Group != extensionsv1beta1.GroupVersion.Group {
+	g, k := utils.GetGroupKind(ref)
+	if g != extensionsv1beta1.GroupVersion.Group {
 		return nil
 	}
 
 	var labels map[string]string
 
-	if gvk.Kind == "SandboxWarmPool" {
+	if k == extensionsv1beta1.SandboxWarmPoolKind {
 		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
 			if labels == nil {
 				labels = make(map[string]string, 2)

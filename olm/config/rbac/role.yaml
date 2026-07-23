@@ -1,0 +1,72 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-sandbox-controller
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - pods
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agents.x-k8s.io
+  resources:
+  - sandboxes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agents.x-k8s.io
+  resources:
+  - sandboxes/finalizers
+  - sandboxes/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - apiextensions.k8s.io
+  resourceNames:
+  - sandboxclaims.extensions.agents.x-k8s.io
+  - sandboxes.agents.x-k8s.io
+  - sandboxtemplates.extensions.agents.x-k8s.io
+  - sandboxwarmpools.extensions.agents.x-k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch

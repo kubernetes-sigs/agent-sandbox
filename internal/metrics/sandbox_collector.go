@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/internal/utils"
@@ -137,6 +138,9 @@ func (c *SandboxCollector) Collect(ch chan<- prometheus.Metric) {
 
 		ownedByStr := "None"
 		controllerRef := metav1.GetControllerOf(&sandbox)
+		// Owner references keep the apiVersion that was current when they
+		// were written; sandboxes created before the v1beta1 upgrade still
+		// carry the v1alpha1 group version. Match on group, not version.
 		if g, k := utils.GetGroupKind(controllerRef); g == extensionsv1beta1.GroupVersion.Group &&
 			(k == extensionsv1beta1.SandboxClaimKind || k == extensionsv1beta1.SandboxWarmPoolKind) {
 			ownedByStr = k

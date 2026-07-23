@@ -1,0 +1,91 @@
+{
+  "skill_name": "triage-issues",
+  "evals": [
+    {
+      "id": 1,
+      "name": "eval-core-bug-p0",
+      "prompt": "Triage open issue #101 in open_issues.json against roadmap.md. Determine priority label (priority/critical-urgent to priority/awaiting-more-evidence) and Kanban Priority (P0-P4).",
+      "expected_output": "Issue #101 assigned priority/critical-urgent (P0) due to resource leak / data integrity in core controller.",
+      "files": [
+        "evals/files/roadmap.md",
+        "evals/files/open_issues.json"
+      ],
+      "assertions": [
+        "Issue #101 is assigned priority/critical-urgent (P0)",
+        "Rationale cites core controller bug, data integrity, or resource leak"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "eval-roadmap-inheritance-p1-p2",
+      "prompt": "Triage open issues #201 and #202 in open_issues.json against roadmap.md. Determine priority labels and Kanban Priority based on roadmap status.",
+      "expected_output": "Issue #201 assigned priority/important-soon (P1) for In Progress item; Issue #202 assigned priority/important-longterm (P2) for Planned item.",
+      "files": [
+        "evals/files/roadmap.md",
+        "evals/files/open_issues.json"
+      ],
+      "assertions": [
+        "Issue #201 is assigned priority/important-soon (P1)",
+        "Issue #202 is assigned priority/important-longterm (P2)",
+        "Rationale references roadmap status (In Progress vs Planned)"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "eval-honor-existing-label-p1",
+      "prompt": "Triage open issue #301 in open_issues.json which already has label priority/important-soon.",
+      "expected_output": "Issue #301 retains priority/important-soon (P1) with a note that existing label was honored.",
+      "files": [
+        "evals/files/roadmap.md",
+        "evals/files/open_issues.json"
+      ],
+      "assertions": [
+        "Issue #301 retains priority/important-soon (P1)",
+        "Output notes that existing priority label was preserved/honored"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "eval-low-signal-and-backlog-p3-p4",
+      "prompt": "Triage open issues #401 (cleanup refactor) and #501 (empty body / triage/needs-information).",
+      "expected_output": "Issue #401 assigned priority/backlog (P3); Issue #501 assigned priority/awaiting-more-evidence (P4).",
+      "files": [
+        "evals/files/roadmap.md",
+        "evals/files/open_issues.json"
+      ],
+      "assertions": [
+        "Issue #401 is assigned priority/backlog (P3)",
+        "Issue #501 is assigned priority/awaiting-more-evidence (P4)"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "eval-security-vulnerability-p0",
+      "prompt": "Triage open issue #601 (critical security vulnerability / CVE).",
+      "expected_output": "Issue #601 assigned priority/critical-urgent (P0) for critical security vulnerability.",
+      "files": [
+        "evals/files/roadmap.md",
+        "evals/files/open_issues.json"
+      ],
+      "assertions": [
+        "Issue #601 is assigned priority/critical-urgent (P0)",
+        "Rationale cites security or dependency vulnerability"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "eval-full-suite-report-completeness",
+      "prompt": "Run full triage on open_issues.json against roadmap.md and write issue-triage-report.md.",
+      "expected_output": "A complete issue-triage-report.md grouping all 7 open issues by priority tier (P0-P4) with roadmap mapping and second-look section.",
+      "files": [
+        "evals/files/roadmap.md",
+        "evals/files/open_issues.json"
+      ],
+      "assertions": [
+        "The report contains all 7 open issues (#101, #201, #202, #301, #401, #501, #601)",
+        "Issues are grouped by priority tier from P0 to P4",
+        "The report includes a second look or judgment calls section"
+      ]
+    }
+  ]
+}

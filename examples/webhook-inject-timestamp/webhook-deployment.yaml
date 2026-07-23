@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-deployment
+  namespace: agent-sandbox-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhook
+  template:
+    metadata:
+      labels:
+        app: webhook
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: webhook
+        image: kind.local/webhook-image:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8443
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+      volumes:
+      - name: certs
+        secret:
+          secretName: webhook-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-service
+  namespace: agent-sandbox-system
+spec:
+  ports:
+  - port: 443
+    targetPort: 8443
+  selector:
+    app: webhook

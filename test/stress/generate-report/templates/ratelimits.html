@@ -1,0 +1,121 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Rate Limiting - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}API Rate Limiting (Client-side & Priority/Fairness){% endblock %}
+
+{% block content %}
+{% if client_ratelimit_ops %}
+<div class="grid">
+    <div class="card chart-card">
+        <div class="card-title">Average Client-side Throttle Wait Over Time (per component)</div>
+        <div class="chart-container">
+            <canvas id="throttleChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Client-side API Throttling by Phase</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        Time requests spent queued in each component's own client-side rate limiter
+        (client-go QPS/burst; cilium-agent's k8s client exposes the equivalent metric)
+        before being sent to the apiserver. Sustained waits here mean the component's
+        client limits are the bottleneck, not the apiserver. Not all components export
+        this metric — the agent-sandbox controller (controller-runtime) currently does not.
+    </div>
+    <div class="table-container">
+        <table id="client-throttle-table"></table>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-title">No client-side throttling metrics in this run</div>
+    <div class="card-desc">
+        metrics.jsonl contains no <code>rest_client_rate_limiter_duration_seconds</code> or
+        <code>cilium_k8s_client_rate_limiter_duration_seconds</code> samples.
+    </div>
+</div>
+{% endif %}
+
+<div class="card" style="margin-top: 32px;">
+    <div class="card-title">API Priority &amp; Fairness Wait by Phase</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        Server-side queueing at the apiserver, per priority level
+        (<code>apiserver_flowcontrol_request_wait_duration_seconds</code>). Waits here mean
+        the apiserver is shedding or delaying load; near-zero waits mean P&amp;F is not a factor.
+    </div>
+    {% if apf_ops %}
+    <div class="table-container">
+        <table id="apf-table"></table>
+    </div>
+    {% else %}
+    <div class="card-desc">No flowcontrol wait samples in this run.</div>
+    {% endif %}
+</div>
+
+<script>
+    const clientThrottle = {{ client_ratelimit_ops | tojson }};
+    const waitBadge = v =>
+        v > 1000 ? badge('danger', (v / 1000).toFixed(2) + 's')
+        : v > 100 ? badge('warning', v.toFixed(0) + 'ms')
+        : badge('success', v.toFixed(1) + 'ms');
+    if (clientThrottle.length) {
+        renderTable('#client-throttle-table', [
+            {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+            {key: 'source', label: 'Component', render: v => `<code>${escapeHtml(v)}</code>`},
+            {key: 'verb', label: 'Verb', render: v => `<code>${escapeHtml(v)}</code>`},
+            {key: 'count_delta', label: 'Requests'},
+            {key: 'total_wait_s', label: 'Total Wait', render: v => v.toFixed(1) + 's'},
+            {key: 'avg_wait_ms', label: 'Avg Wait', render: waitBadge}
+        ], clientThrottle);
+
+        const chartData = {{ chart_data | tojson }};
+        const phases = {{ phases | tojson }};
+        const sources = [...new Set(chartData.map(d => d.source))];
+        const timestamps = [...new Set(chartData.map(d => d.ts))].sort();
+        const formattedLabels = timeLabels(timestamps);
+        const pointTimes = timestamps.map(ts => new Date(ts).getTime());
+        const pointIndex = new Map(chartData.map(d => [`${d.source}|${d.ts}`, d.avg_wait_s]));
+        const datasets = sources.map((source, idx) => lineDataset(
+            source,
+            timestamps.map(ts => pointIndex.get(`${source}|${ts}`) ?? null),
+            idx));
+        new Chart(document.getElementById('throttleChart').getContext('2d'), {
+            type: 'line',
+            data: { labels: formattedLabels, datasets: datasets },
+            options: lineChartOptions('Avg throttle wait (seconds)'),
+            plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+        });
+    }
+
+    const apfOps = {{ apf_ops | tojson }};
+    if (apfOps.length) {
+        renderTable('#apf-table', [
+            {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+            {key: 'priority_level', label: 'Priority Level', render: v => `<code>${escapeHtml(v)}</code>`},
+            {key: 'count_delta', label: 'Requests'},
+            {key: 'total_wait_s', label: 'Total Wait', render: v => v.toFixed(2) + 's'},
+            {key: 'avg_wait_ms', label: 'Avg Wait', render: v =>
+                badge(v > 100 ? 'danger' : v > 10 ? 'warning' : 'success',
+                      v >= 100 ? (v / 1000).toFixed(2) + 's' : v.toFixed(1) + 'ms')}
+        ], apfOps);
+    }
+</script>
+{% endblock %}

@@ -3,7 +3,7 @@
 # Go toolchain always runs natively instead of under QEMU emulation. Running `go build`
 # under emulation can crash the Go runtime/GC ("found pointer to free object").
 # See https://github.com/golang/go/issues/69255#issuecomment-2523276831
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.5 AS builder
 
 # Declare TARGETARCH/TARGETOS to make them available in this build stage.
 ARG TARGETARCH
@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /chrome-sand
 
 #----------------------
 # Use a base image with a minimal set of packages.
-FROM debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+FROM debian:13-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
 #----------------------
 # Install general prerequisite packages.

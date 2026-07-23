@@ -4,7 +4,7 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 
 ## Concurrency Settings
 
-* `--sandbox-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the Sandbox controller.
+* `--sandbox-concurrent-workers` (default: 100): The maximum number of concurrent reconciles for the Sandbox controller.
 * `--sandbox-claim-concurrent-workers` (default: 50): The maximum number of concurrent reconciles for the SandboxClaim controller.
 * `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller.
 * `--sandbox-warm-pool-max-batch-size` (default: 300): The maximum number of sandboxes the SandboxWarmPool controller will create/delete in a single batch.
@@ -57,7 +57,7 @@ kubectl patch deployment agent-sandbox-controller \
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-concurrent-workers=10"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-claim-concurrent-workers=100"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-concurrent-workers=10"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-max-batch-size=500"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-max-batch-size=500"}
   ]'
 ```
 This method safely appends the new flags without overwriting existing necessary arguments like `--leader-elect=true` or `--extensions=true`.

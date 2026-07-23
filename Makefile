@@ -1,5 +1,5 @@
 .PHONY: all
-all: fix-go-generate build lint-go lint-api test-unit toc-verify
+all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify verify-olm
 
 .PHONY: fix-go-generate
 fix-go-generate:
@@ -11,12 +11,42 @@ install-gen-tools:
 
 GOPATH ?= $(shell go env GOPATH)
 
+PYTHON ?= python3
+
+CRD_REF_DOCS_VERSION := v0.3.0
 .PHONY: generate-api-docs
-generate-api-docs: ## Generate API reference documentation
+REF_CRD_PATH="./docs/api.md"
+generate-api-docs: # Generate API reference documentation
 	@echo "Generating API Docs..."
-	go install github.com/elastic/crd-ref-docs@latest
-	$(GOPATH)/bin/crd-ref-docs --source-path=./ --config=./docs/crd-ref-docs.yaml --renderer=markdown --output-path=./docs/api.md --max-depth=10
-	rm -rf ./tmp-api-source
+	go install github.com/elastic/crd-ref-docs@$(CRD_REF_DOCS_VERSION)
+	$(GOPATH)/bin/crd-ref-docs --source-path=./ --config=./docs/crd-ref-docs.yaml --renderer=markdown --output-path=$(REF_CRD_PATH) --max-depth=10
+
+GOMARKDOC_VERSION := v1.1.0
+.PHONY: generate-go-docs
+REF_GO_PATH := "./docs/go_sdk_reference.md"
+generate-go-docs: # Generate Go SDK reference documentation
+	@echo "Generating Go SDK Documentation..."
+	go install github.com/princjef/gomarkdoc/cmd/gomarkdoc@$(GOMARKDOC_VERSION)
+	$(GOPATH)/bin/gomarkdoc \
+		--repository.url "https://github.com/kubernetes-sigs/agent-sandbox" \
+		--repository.default-branch "main" \
+		--repository.path "/" \
+		./clients/go/sandbox/... > $(REF_GO_PATH).tmp1
+	sed 's/^#/##/' < $(REF_GO_PATH).tmp1 > $(REF_GO_PATH).tmp2
+	tail -n +2 < $(REF_GO_PATH).tmp2 > $(REF_GO_PATH)
+	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2
+
+PYDOC_MARKDOWN_VERSION := 4.8.2
+.PHONY: generate-python-docs
+REF_PYTHON_PATH := "./docs/python_sdk_reference.md"
+generate-python-docs: # Generate Python SDK reference documentation
+	@echo "Generating Python SDK Documentation..."
+	$(PYTHON) -m venv .venv
+	.venv/bin/python -m pip install --upgrade pip
+	.venv/bin/python -m pip install pydoc-markdown==$(PYDOC_MARKDOWN_VERSION)
+	.venv/bin/pydoc-markdown -I ./clients/python/agentic-sandbox-client/ -m k8s_agent_sandbox.sandbox_client -m k8s_agent_sandbox.models > $(REF_PYTHON_PATH).tmp1
+	sed 's/^#/##/' < $(REF_PYTHON_PATH).tmp1 > $(REF_PYTHON_PATH)
+	rm $(REF_PYTHON_PATH).tmp1
 
 VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
 
@@ -77,6 +107,10 @@ test-e2e-race:
 .PHONY: test-e2e-benchmarks
 test-e2e-benchmarks:
 	./dev/ci/presubmits/test-e2e --suite benchmarks
+
+.PHONY: test-skill-eval
+test-skill-eval:
+	./dev/ci/presubmits/test-skill-eval
 
 .PHONY: lint-go
 lint-go:
@@ -144,6 +178,14 @@ toc-update:
 .PHONY: toc-verify
 toc-verify:
 	./dev/tools/verify-toc
+
+.PHONY: fix-olm-manifests
+fix-olm-manifests:
+	./dev/tools/sync-olm-manifests
+
+.PHONY: verify-olm
+verify-olm:
+	./dev/tools/verify-olm-manifests
 
 .PHONY: clean
 clean:

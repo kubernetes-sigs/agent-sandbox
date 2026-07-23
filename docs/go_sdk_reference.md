@@ -183,7 +183,7 @@ func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace stri
 CreateSandbox provisions a new sandbox and returns a managed handle. On failure, the orphaned claim is cleaned up.
 
 <a name="Client.DeleteAll"></a>
-#### func \(\*Client\) [DeleteAll](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L219>)
+#### func \(\*Client\) [DeleteAll](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L242>)
 
 ```go
 func (c *Client) DeleteAll(ctx context.Context)
@@ -192,7 +192,7 @@ func (c *Client) DeleteAll(ctx context.Context)
 DeleteAll closes and deletes all tracked sandboxes. Best\-effort.
 
 <a name="Client.DeleteSandbox"></a>
-#### func \(\*Client\) [DeleteSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L201>)
+#### func \(\*Client\) [DeleteSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L224>)
 
 ```go
 func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string) error
@@ -201,7 +201,7 @@ func (c *Client) DeleteSandbox(ctx context.Context, claimName, namespace string)
 DeleteSandbox closes the handle \(if tracked\) and deletes the claim.
 
 <a name="Client.EnableAutoCleanup"></a>
-#### func \(\*Client\) [EnableAutoCleanup](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L235>)
+#### func \(\*Client\) [EnableAutoCleanup](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L258>)
 
 ```go
 func (c *Client) EnableAutoCleanup() (stop func())
@@ -210,7 +210,7 @@ func (c *Client) EnableAutoCleanup() (stop func())
 EnableAutoCleanup calls DeleteAll on SIGINT/SIGTERM. Call the returned function to stop the signal handler.
 
 <a name="Client.GetSandbox"></a>
-#### func \(\*Client\) [GetSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L112>)
+#### func \(\*Client\) [GetSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L111>)
 
 ```go
 func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*Sandbox, error)
@@ -219,7 +219,7 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 GetSandbox retrieves an existing sandbox by claim name. Returns the cached handle if connected, otherwise re\-attaches.
 
 <a name="Client.ListActiveSandboxes"></a>
-#### func \(\*Client\) [ListActiveSandboxes](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L169>)
+#### func \(\*Client\) [ListActiveSandboxes](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L192>)
 
 ```go
 func (c *Client) ListActiveSandboxes() []Key
@@ -228,7 +228,7 @@ func (c *Client) ListActiveSandboxes() []Key
 ListActiveSandboxes returns tracked sandboxes, pruning inactive handles.
 
 <a name="Client.ListAllSandboxes"></a>
-#### func \(\*Client\) [ListAllSandboxes](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L185>)
+#### func \(\*Client\) [ListAllSandboxes](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go#L208>)
 
 ```go
 func (c *Client) ListAllSandboxes(ctx context.Context, namespace string) ([]string, error)

@@ -100,11 +100,10 @@ func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace stri
 	}
 
 	key := Key{Namespace: namespace, ClaimName: sb.ClaimName()}
-	c.mu.Lock()
-	c.registry[key] = sb
-	c.mu.Unlock()
-
-	return sb, nil
+	// The registry key is built from the server-assigned (GenerateName) claim
+	// name, which is unique to this sb, so a hit means a concurrent GetSandbox
+	// attached to the very claim we just created and registered first.
+	return c.trackOrAdoptRace(key, sb), nil
 }
 
 // GetSandbox retrieves an existing sandbox by claim name. Returns the
@@ -117,18 +116,17 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 
 	c.mu.Lock()
 	existing := c.registry[key]
-	c.mu.Unlock()
-
 	if existing != nil && existing.IsReady() {
+		c.mu.Unlock()
 		return existing, nil
 	}
-
-	// Evict stale handle.
+	// Evict stale handle atomically: we already know existing is nil or
+	// not-ready, and no concurrent caller can have changed it since we
+	// still hold the lock.
 	if existing != nil {
-		c.mu.Lock()
 		delete(c.registry, key)
-		c.mu.Unlock()
 	}
+	c.mu.Unlock()
 
 	sandboxOpts := c.opts
 	sandboxOpts.Namespace = namespace
@@ -158,11 +156,36 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 		return nil, fmt.Errorf("sandbox: failed to re-attach to claim %q in %q: %w", claimName, namespace, err)
 	}
 
+	// A concurrent GetSandbox/CreateSandbox for the same key may have installed
+	// a ready handle while we were attaching; adopt it if so.
+	return c.trackOrAdoptRace(key, sb), nil
+}
+
+// trackOrAdoptRace resolves the registry race that both CreateSandbox and
+// GetSandbox can hit: another goroutine may have installed a ready handle for
+// key while sb was being opened/attached. Under the lock it re-checks for a
+// tracked ready handle; if one exists it adopts that handle and tears down only
+// sb's redundant transport (Disconnect), returning the tracked handle.
+// Otherwise it registers sb and returns it.
+//
+// Disconnect (not Close) is deliberate: sb and the tracked handle reference the
+// SAME shared claim, so Close would deleteClaim and destroy the sandbox out from
+// under the handle we return. Disconnect runs on a detached context because the
+// caller's ctx may already be cancelled/near-deadline, which would make
+// Disconnect bail before tearing down the transport — leaking the very handle we
+// discard.
+func (c *Client) trackOrAdoptRace(key Key, sb *Sandbox) *Sandbox {
 	c.mu.Lock()
+	if tracked := c.registry[key]; tracked != nil && tracked.IsReady() {
+		c.mu.Unlock()
+		if derr := sb.Disconnect(context.Background()); derr != nil {
+			c.log.Error(derr, "disconnecting redundant handle after registry race", "claim", key.ClaimName, "namespace", key.Namespace)
+		}
+		return tracked
+	}
 	c.registry[key] = sb
 	c.mu.Unlock()
-
-	return sb, nil
+	return sb
 }
 
 // ListActiveSandboxes returns tracked sandboxes, pruning inactive handles.

@@ -133,6 +133,7 @@ func (r *SandboxWarmPoolReconciler) exp() *warmPoolExpectations {
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
 // Reconcile implements the reconciliation loop for SandboxWarmPool.
@@ -388,11 +389,25 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
 				sb := &activeSandboxes[idx]
 				r.exp().ExpectDeletion(poolKey, sb.UID)
-				if err := r.deletePoolSandbox(ctx, sb); err != nil {
-					r.exp().DeletionObserved(poolKey, sb.UID)
-					return err
+				err := r.Delete(ctx, sb)
+				if err == nil {
+					return nil
 				}
-				return nil
+				// No delete watch event will lower this expectation: on
+				// NotFound the object is already gone (its delete event may
+				// have fired before the expectation was raised), and on any
+				// other error nothing was deleted. Observe synthetically so
+				// the pool is not blocked until the expectations timeout —
+				// the same recovery kube's ReplicaSet controller applies to
+				// failed deletes.
+				r.exp().DeletionObserved(poolKey, sb.UID)
+				if k8serrors.IsNotFound(err) {
+					// Not an error for the batch: the desired outcome
+					// (sandbox gone) already holds.
+					return nil
+				}
+				logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name, "namespace", sb.Namespace)
+				return err
 			})
 			if deleteErr != nil {
 				logger.Error(deleteErr, "Failed to delete pool sandboxes")
@@ -733,16 +748,6 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	}
 
 	logger.Info("Created new pool sandbox", "sandbox", sandbox.Name, "poolName", warmPool.Name)
-	return nil
-}
-
-// deletePoolSandbox deletes a Sandbox CR from the warm pool. Ignores not found errors to not abort the batch deletion if some sandboxes are already deleted.
-func (r *SandboxWarmPoolReconciler) deletePoolSandbox(ctx context.Context, sb *sandboxv1beta1.Sandbox) error {
-	logger := log.FromContext(ctx)
-	if err := r.Delete(ctx, sb); err != nil && client.IgnoreNotFound(err) != nil {
-		logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name, "namespace", sb.Namespace)
-		return err
-	}
 	return nil
 }
 

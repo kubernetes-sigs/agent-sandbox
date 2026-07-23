@@ -468,6 +468,123 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 	})
 }
 
+// phantomListClient wraps the fake client to model the opposite staleness of
+// laggingClient: List still reports a sandbox that is ALREADY GONE from the
+// backing store (its delete watch event fired, but the reconciler's List ran
+// against a snapshot that predates it). Deleting a phantom yields NotFound.
+type phantomListClient struct {
+	client.WithWatch
+	phantoms []sandboxv1beta1.Sandbox
+}
+
+func (c *phantomListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := c.WithWatch.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if sl, ok := list.(*sandboxv1beta1.SandboxList); ok {
+		sl.Items = append(sl.Items, c.phantoms...)
+	}
+	return nil
+}
+
+// TestReconcilePool_ExcessDeleteNotFoundLowersExpectation: an excess delete
+// that hits NotFound (the sandbox vanished between our stale List and the
+// Delete call — its delete watch event has already been processed, so no
+// future event will arrive) must lower its deletion expectation immediately.
+// Without the synthetic observation the pool would stay blocked from creating
+// or deleting for up to expectationsTimeout (5 minutes).
+func TestReconcilePool_ExcessDeleteNotFoundLowersExpectation(t *testing.T) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(3)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-1215",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+	poolKey := types.NamespacedName{Namespace: poolNamespace, Name: poolName}
+
+	controller := true
+	newSandbox := func(suffix string, ready metav1.ConditionStatus, age time.Duration) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
+		sb.UID = types.UID("uid" + suffix)
+		// Pre-set the launch-type label so the reconcile does not try to
+		// backfill it with an Update (which would NotFound on the phantom
+		// before the delete path is ever reached).
+		sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] = sandboxv1beta1.SandboxLaunchTypeWarm
+		sb.CreationTimestamp = metav1.Time{Time: time.Now().Add(-age)}
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: ready,
+		}}
+		sb.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       "SandboxWarmPool",
+			Name:       poolName,
+			UID:        warmPool.UID,
+			Controller: &controller,
+		}}
+		return sb
+	}
+
+	// Three healthy Ready sandboxes exist for real. A fourth — not Ready and
+	// newest, so the excess-delete victim sort picks it first — appears only
+	// in List: it is already gone from the store, so deleting it → NotFound.
+	real1 := newSandbox("-a", metav1.ConditionTrue, time.Minute)
+	real2 := newSandbox("-b", metav1.ConditionTrue, time.Minute)
+	real3 := newSandbox("-c", metav1.ConditionTrue, time.Minute)
+	phantom := newSandbox("-phantom", metav1.ConditionFalse, time.Second)
+
+	scheme := newTestScheme()
+	pc := &phantomListClient{
+		WithWatch: newFakeClient(scheme, template, warmPool, real1, real2, real3),
+		phantoms:  []sandboxv1beta1.Sandbox{*phantom},
+	}
+	r := SandboxWarmPoolReconciler{
+		Client:       pc,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	ctx := context.Background()
+
+	// The reconcile sees 4 > 3, picks the phantom (unready first), and its
+	// Delete returns NotFound.
+	_, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err, "a NotFound excess delete is not an error")
+
+	// The deletion expectation must be lowered synchronously: no watch event
+	// will ever arrive for the phantom.
+	require.True(t, r.exp().SatisfiedExpectations(poolKey),
+		"NotFound delete must lower its expectation immediately, not wait for the 5m timeout")
+	require.False(t, r.exp().IsPendingDeletion(poolKey, phantom.UID))
+
+	// All real sandboxes survived.
+	for _, name := range []string{real1.Name, real2.Name, real3.Name} {
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: name}, &sandboxv1beta1.Sandbox{}))
+	}
+
+	// And the pool is immediately unblocked: with the phantom gone from List
+	// (cache caught up) and replicas raised, the next reconcile creates
+	// right away instead of being expectation-blocked.
+	pc.phantoms = nil
+	newReplicas := int32(4)
+	warmPool.Spec.Replicas = &newReplicas
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	list := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, pc.List(ctx, list, client.InNamespace(poolNamespace)))
+	require.Len(t, list.Items, 4, "next reconcile must not be blocked by the phantom's stale expectation")
+}
+
 // TestReconcilePool_YoungNotReadyArmsGraceRequeue: a reconcile that observes
 // not-yet-Ready sandboxes still inside the readiness grace period must
 // self-schedule the post-grace evaluation (RequeueAfter = time until the

@@ -17,7 +17,7 @@ paginate: true
 
 Every new pod goes through a startup pipeline before it can serve work:
 
-```
+```text
 API Server  -->  Scheduler  -->  Kubelet  -->  Image Pull  -->  Runtime  -->  Ready
    ~10ms         ~50ms          ~100ms       ~200ms-5s       varies       SUM
 ```
@@ -37,7 +37,7 @@ API Server  -->  Scheduler  -->  Kubelet  -->  Image Pull  -->  Runtime  -->  Re
 
 Pre-provision sandboxes via [SandboxWarmPool](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/warm-pools.md) so claims bind instantly to ready pods:
 
-```
+```text
                     Warm Pool (pre-created)
                    +--+--+--+--+--+--+--+--+
                    |OK|OK|OK|OK|OK|OK|OK|OK|  <-- Ready sandboxes
@@ -57,9 +57,9 @@ The pool absorbs the entire cold start pipeline.
 
 **Batched drain loop**: fire claims in batches, 100ms settle between batches
 
-```
+```text
 batch_size = min(max(4, pool_size/2), 8)
-max_claims = pool_size * 2    (guarantee depletion)
+max_claims = pool_size * 2    (maximum claim budget)
 
 repeat:
   sleep 100ms            (reconciler settle)
@@ -105,13 +105,13 @@ After: [strategic merge patch](https://kubernetes.io/docs/tasks/manage-kubernete
 
 # Dynamic Batch Sizing
 
-```
+```text
 batch_size = min(max(4, pool_size / 2), 8)
 ```
 
 | Pool | Batch | Batches to drain (2x claims) | Why this ratio |
 |------|-------|------------------------------|----------------|
-| 4 | 4 | 2 | drain in 2, guaranteed depletion |
+| 4 | 4 | 2 | drain in 2, tests refill pressure |
 | 6 | 4 | 3 | min=4 prevents too-small batches |
 | 8 | 4 | 4 | pool=2xbatch, refill races drain |
 | 12 | 6 | 4 | proportional, tests refill under load |
@@ -119,8 +119,8 @@ batch_size = min(max(4, pool_size / 2), 8)
 | 20 | 8 | 5 | capped, more batches to drain |
 | 24 | 8 | 6 | same cap, longer sustained pressure |
 
-**Pool depletion rule**: pool = batch x 2 is the minimum for all-warm runc/gvisor.
-Below that (pool-4 with batch-4), the pool drains completely in one batch.
+**Observed**: runc pool-4 stayed all-warm despite batch=pool; gVisor pool-4 saw 1 cold start.
+Larger pools (batch x 2+) consistently avoid depletion for both runtimes.
 
 **Why cap at 8**: beyond 8 parallel claims, the reconciler work queue serializes
 them anyway (~160ms cycle). More parallel writes = more etcd contention, no throughput gain.
@@ -131,7 +131,7 @@ them anyway (~160ms cycle). More parallel writes = more etcd contention, no thro
 
 Claims between warm*1.2 and 1s -- warm but slower. NOT runtime-specific.
 
-```
+```text
 runc  pool-8 batch-1:   0.321  0.319  0.480  0.322   (3 green + 1 grey)
 gvisor pool-8 batch-1:  0.320  0.318  0.475  0.314   (3 green + 1 grey)
 kata  pool-8 batch-1:   0.333  0.467  0.336  0.333   (3 green + 1 grey)
@@ -285,7 +285,7 @@ The pool eliminates the cold start difference entirely -- for warm claims.
 
 # Throughput Curves
 
-```
+```text
 claims/sec
   |
 11|              R.........R.........R         R = runc
@@ -342,7 +342,7 @@ kata: pool size bounded by host CPU/RAM, but overhead is **6x lower** than full 
 
 Combine fast burst (gVisor) with hardware isolation (kata) using separate pools:
 
-```
+```text
                  SandboxClaim
                       |
              SLA-based routing
@@ -459,31 +459,17 @@ container rootfs. Lower latency, lower CPU overhead for I/O-heavy workloads.
 | Max practical pool | 16 (limited by cold penalty) | 24+ (cold is tolerable) |
 | **Gap to gVisor cold** | **8-12x slower** | **~3x slower** |
 
-With kata 4.0's cold start dropping to ~3-4s, the hybrid strategy shifts:
-kata pools can be the **primary** runtime (not just safety net),
-with gVisor reserved for ultra-low-latency burst.
+With kata 4.0's cold start dropping to ~3-4s, kata and gVisor can coexist
+side by side -- making the best of both worlds. SLA annotations on SandboxClaims
+can route workloads to the optimal pool, maximizing hybrid utilization.
 
 ---
 
-# Key Takeaways
+# Key Takeaways: Kata 4.0 Outlook
 
-1. **Warm P99 < 0.83s for ALL runtimes** -- the pool makes runc, gvisor, and kata equivalent for warm claims
+All findings from the previous Key Takeaways slide remain valid, plus:
 
-2. **kata's overall P99 = 13.5s** at pool-16, but **warm-only P99 = 0.58s** -- cold starts ruin the tail, not the pool
-
-3. **gVisor is the burst runtime** -- runc-like P99 + syscall isolation, no VM cost, same 10/s throughput ceiling
-
-4. **10 claims/sec is the reconciler ceiling** -- runtime-independent, v0.5.0rc1's parallel creation + in-memory selection are the enablers
-
-5. **Grey zone is controller overhead, not runtime** -- bimodal ~160ms gap from reconciler serialization + etcd contention, same across all runtimes
-
-6. **Batch size caps at 8** -- beyond that, reconciler serialization dominates; the P95-P99 spread stays tight (0.01-0.05s) confirming bounded contention
-
-7. **Hybrid pools unlock both speed and security** -- route by SLA, size by resource budget
-
-8. **1s threshold is the right UX boundary** -- no claims land in the 1-7s dead zone; clean warm/cold separation
-
-9. **kata 4.0 narrows the gap** -- Rust runtime + Cloud Hypervisor + VM templating could bring cold starts from 8-13s to ~3-4s, making kata viable as a primary pool runtime
+1. **kata 4.0 narrows the cold start gap** -- Rust runtime + Cloud Hypervisor + VM templating could bring cold starts from 8-13s to ~3-4s, reducing the penalty when pools deplete
 
 ## Further reading
 

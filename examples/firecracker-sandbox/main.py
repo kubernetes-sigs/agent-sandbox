@@ -16,15 +16,15 @@
 Sandbox runtime for agent-sandbox.
 
 A lightweight HTTP API exposed inside every Firecracker sandbox pod. Clients
-(the verification script, the ``k8s_agent_sandbox`` Python SDK, or any HTTP
-tool) call these endpoints to drive the sandbox:
+(any HTTP client — see the example's ``test_client.py`` for direct-HTTP
+usage) call these endpoints to drive the sandbox:
 
   GET  /health       -> 204
   GET  /metrics      -> cgroup CPU / memory / IO stats
   POST /init         -> accept env vars / timestamp sync
   GET  /envs         -> current environment variables
   GET  /files        -> download a file  (?path=...)
-  POST /files        -> upload a file    (multipart or JSON)
+  POST /files        -> upload a file    (multipart/form-data only)
   POST /exec         -> execute a shell command -> {stdout, stderr, exit_code}
 
 The server is intentionally small — it only covers the endpoints exercised by
@@ -207,9 +207,9 @@ def exec_command(req: ExecRequest) -> ExecResponse:
 
     env = {**os.environ, **(req.env or {})}
 
-    # If args are supplied, run them directly (no shell). Otherwise run cmd via
-    # the user's shell, matching `sh -c` semantics.
-    if req.args:
+    # If args are supplied (even as an empty list), run them directly (no
+    # shell). Otherwise run cmd via the user's shell, matching `sh -c` semantics.
+    if req.args is not None:
         argv = [req.cmd, *req.args]
         use_shell = False
     else:

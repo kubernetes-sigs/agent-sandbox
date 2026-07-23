@@ -16,7 +16,7 @@ diagram below for the full endpoint list.
 ## Architecture
 
 ```text
-   Python client / k8s_agent_sandbox SDK
+   Control plane / HTTP client
           │
           │  HTTP (port 8888)
           │  ───── port-forward ─── OR ─── sandbox-router (X-Sandbox-ID) ───┐
@@ -57,8 +57,8 @@ diagram below for the full endpoint list.
    (`FailedCreatePodSandBox ... ENOENT`). On a custom node, configure
    containerd's `[plugins."io.containerd.snapshotter.v1.devmapper"]` or use
    a kata-deploy distribution that bundles a compatible snapshotter. You can
-   verify with `ctr -n k8s.io snapshots ls | grep devmapper` or by
-   confirming `containerd` was started with the devmapper plugin enabled.
+   verify with `ctr plugins ls | grep devmapper` and require the status to
+   be `ok`.
 3. A Kubernetes cluster with the agent-sandbox controller installed
    (see the top-level [`README.md`](../../README.md)).
 4. [`kubectl`](https://kubernetes.io/docs/tasks/tools/) configured to talk to

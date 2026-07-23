@@ -75,9 +75,14 @@ if [[ "${CHECK_KVM}" == "true" ]]; then
 
     if [[ ! -r /dev/kvm ]] || [[ ! -w /dev/kvm ]]; then
         echo "Warning: /dev/kvm exists but permissions look incorrect."
-        echo "Try: sudo chmod 666 /dev/kvm"
+        echo "Grant the runtime account access through a dedicated group or udev rule;"
+        echo "do not chmod 666 /dev/kvm."
     fi
     echo "### KVM support detected at /dev/kvm ###"
+    echo ""
+    echo "Note: this check runs on the local machine. For remote clusters, ensure every"
+    echo "      target node has /dev/kvm. A more thorough approach would use a privileged"
+    echo "      DaemonSet probe to validate KVM on each node before labeling."
 else
     echo "### Step 1: Skipped (--skip-kvm-check) ###"
     echo "Ensure every target node has /dev/kvm before scheduling kata-fc pods."

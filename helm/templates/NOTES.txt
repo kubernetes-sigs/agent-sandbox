@@ -11,15 +11,97 @@ to v1beta1. Without a serving conversion webhook, requests that require
 conversion will fail. Migrate all stored objects to v1beta1 before using
 namespaced mode, or keep a cluster-scoped conversion webhook available.
 
+{{- $watchNamespaces := include "agent-sandbox.watchNamespaces" . | fromJsonArray }}
 {{- $controllerNamespace := include "agent-sandbox.namespace" . }}
 {{- $leaderElectionNamespace := include "agent-sandbox.leaderElectionNamespace" . }}
+{{- $manualWatchNamespaces := without $watchNamespaces $controllerNamespace }}
 
-NOTE: ClusterRoles and ClusterRoleBindings are not rendered in namespaced mode.
-The chart does not generate workload or leader-election Roles and RoleBindings
-for that mode. Advanced users must set up the appropriate Roles and RoleBindings
-for the watched namespace(s) ({{ .Values.controller.watchNamespace }}) and bind
-them to the agent-sandbox-controller ServiceAccount in {{ $controllerNamespace }}.
-{{- if .Values.controller.leaderElect }} They must also configure leader-election
-RBAC in {{ $leaderElectionNamespace }}.{{- end }}
+{{- if has $controllerNamespace $watchNamespaces }}
+
+Workload RBAC for the watched controller namespace {{ $controllerNamespace }}
+is included in this Helm release.
+{{- end }}
+
+{{- if and .Values.controller.leaderElect (ne $leaderElectionNamespace $controllerNamespace) }}
+
+Apply the following leader-election Role and RoleBinding in
+{{ $leaderElectionNamespace }}. Helm does not create resources outside the
+controller namespace:
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-controller-leader-election
+  namespace: {{ $leaderElectionNamespace }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller-leader-election
+  namespace: {{ $leaderElectionNamespace }}
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: {{ $controllerNamespace }}
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller-leader-election
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+
+{{- if $manualWatchNamespaces }}
+
+Apply the following Role and RoleBinding in each watched namespace outside the
+controller namespace:
+{{- end }}
+{{- range $manualWatchNamespaces }}
+{{- $ns := . }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-controller
+  namespace: {{ $ns }}
+rules:
+{{ $.Files.Get "files/rbac.namespaced.generated.yaml" -}}
+{{- if $.Values.controller.extensions }}
+{{ $.Files.Get "files/extensions-rbac.namespaced.generated.yaml" -}}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller
+  namespace: {{ $ns }}
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: {{ include "agent-sandbox.namespace" $ }}
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
 
 {{- end }}

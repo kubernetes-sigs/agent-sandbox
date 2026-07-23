@@ -1,18 +1,22 @@
-{{- if not .Values.controller.watchNamespace }}
+{{- $watchNamespaces := include "agent-sandbox.watchNamespaces" . | fromJsonArray -}}
+{{- $controllerNamespace := include "agent-sandbox.namespace" . -}}
+{{- $controllerNamespaceWatched := has $controllerNamespace $watchNamespaces -}}
+{{- if or (not .Values.controller.watchNamespace) $controllerNamespaceWatched }}
 {{/*
-Webhook certificate management Role - only rendered in cluster-scoped mode.
-Grants permissions to create and update the agent-sandbox-webhook-certs Secret
-for self-signed certificate generation.
-Not needed in namespaced mode where webhooks are disabled.
+Role for the agent-sandbox-controller in the release namespace.
+In cluster-scoped mode: grants webhook certificate management permissions.
+In namespaced mode: includes workload RBAC from generated files when the
+controller namespace is watched.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: agent-sandbox-controller
-  namespace: {{ include "agent-sandbox.namespace" . }}
+  namespace: {{ $controllerNamespace }}
   labels:
     {{- include "agent-sandbox.labels" . | nindent 4 }}
 rules:
+{{- if not .Values.controller.watchNamespace }}
 - apiGroups:
   - ""
   resources:
@@ -29,4 +33,10 @@ rules:
   - get
   - patch
   - update
+{{- else }}
+{{ .Files.Get "files/rbac.namespaced.generated.yaml" -}}
+{{- if .Values.controller.extensions }}
+{{ .Files.Get "files/extensions-rbac.namespaced.generated.yaml" -}}
+{{- end }}
+{{- end }}
 {{- end }}

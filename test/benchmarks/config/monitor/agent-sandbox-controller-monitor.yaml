@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agent-sandbox-controller-monitor
+  namespace: monitoring
+  labels:
+    k8s-app: agent-sandbox-controller
+spec:
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
+  namespaceSelector:
+    matchNames:
+      - agent-sandbox-system
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 10s

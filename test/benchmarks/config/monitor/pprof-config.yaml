@@ -1,0 +1,56 @@
+# Note: This config is kept separate from the global perf-tests/pprof.yaml to avoid
+# log spam in tests where the agent-sandbox controller is not installed.
+# This config assumes the agent-sandbox controller is installed as a workload on the node.
+# Once agent-sandbox controller is a GKE addon in the control plane, this config should be updated.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scraper-proxy-role
+rules:
+- apiGroups: [""]
+  resources: ["services/proxy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scraper-proxy-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scraper-proxy-role
+subjects:
+- kind: User
+  name: system:mastertest
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-sandbox-controller
+  namespace: scraper
+  labels:
+    pprof-scraper: "true"
+data:
+  config: |
+    - name: cpu
+      url: https://127.0.0.1:443/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:8080/proxy/debug/pprof/profile?seconds=30
+      interval: 1m
+    - name: heap
+      url: https://127.0.0.1:443/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:8080/proxy/debug/pprof/heap
+      interval: 1m
+    - name: goroutine
+      url: https://127.0.0.1:443/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:8080/proxy/debug/pprof/goroutine
+      interval: 1m
+    - name: allocs
+      url: https://127.0.0.1:443/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:8080/proxy/debug/pprof/allocs
+      interval: 1m
+    - name: block
+      url: https://127.0.0.1:443/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:8080/proxy/debug/pprof/block
+      interval: 1m
+    - name: mutex
+      url: https://127.0.0.1:443/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:8080/proxy/debug/pprof/mutex
+      interval: 1m
+    - name: trace
+      url: https://127.0.0.1:443/api/v1/namespaces/agent-sandbox-system/services/agent-sandbox-controller:8080/proxy/debug/pprof/trace?seconds=30
+      interval: 1m

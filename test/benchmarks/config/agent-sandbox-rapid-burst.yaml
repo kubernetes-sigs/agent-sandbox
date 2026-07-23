@@ -1,0 +1,283 @@
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+{{$qps := DefaultParam .CL2_QPS 100}}
+{{$warmpool_size := DefaultParam .CL2_WARMPOOL_SIZE 200}}
+{{$namespacePrefix := DefaultParam .CL2_NAMESPACE_PREFIX "agent-sandbox"}}
+{{$burstSize := DefaultParam .CL2_BURST_SIZE 50}}
+{{$totalBursts := DefaultParam .CL2_TOTAL_BURSTS 100}}
+{{$SLEEP_FOR_CLUSTER_PREP := DefaultParam .CL2_SLEEP_FOR_CLUSTER_PREP "10m"}}
+{{$ENABLE_SYSTEM_POD_METRICS := DefaultParam .CL2_ENABLE_SYSTEM_POD_METRICS true}}
+{{$ENABLE_CLUSTER_OOMS_TRACKER := DefaultParam .CL2_ENABLE_CLUSTER_OOMS_TRACKER false}}
+{{$CLUSTER_OOMS_FAILURE_ENABLED := DefaultParam .CL2_CLUSTER_OOMS_FAILURE_ENABLED true}}
+{{$sandboxClaimControllerStartupLatencyThreshold50Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_50_MS 1000}}
+{{$sandboxClaimControllerStartupLatencyThreshold90Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90_MS 1000}}
+{{$sandboxClaimControllerStartupLatencyThreshold99Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS 5000}}
+{{$ENABLE_SCHEDULING_METRICS := DefaultParam .CL2_ENABLE_SCHEDULING_METRICS true}}
+
+# Filtered burst throughput. Uses `> 0` to filter out pauses between bursts so that average/percentile metrics reflect active creation periods.
+{{$claimThroughputQuery := `((sum(irate(agent_sandbox_claim_controller_startup_latency_ms_count[5m])) by (launch_type, sandbox_template)) > 0)[%v:5s]`}}
+{{$claimControllerStartupLatencyQuery := `sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le)`}}
+
+name: agent-sandbox-rapid-burst
+namespace:
+  number: {{$namespaces}}
+  prefix: {{$namespacePrefix}}
+tuningSets:
+- name: BurstCreate
+  qpsLoad:
+    qps: {{$qps}}
+
+steps:
+- name: Waiting for {{$SLEEP_FOR_CLUSTER_PREP}} before starting the test to allow cluster preparation.
+  measurements:
+  - Identifier: WaitForClusterPrep
+    Method: Sleep
+    Params:
+      duration: {{$SLEEP_FOR_CLUSTER_PREP}}
+
+- name: Start Startup Latency Measurement
+  measurements:
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: start
+      labelSelector: "app=agent-sandbox-load-test"
+  - Identifier: SandboxClaimControllerStartupLatency
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      metricName: Agent Sandbox Claim Startup Latency (ms)
+      metricVersion: v1
+      unit: ms
+      queries:
+        - name: ControllerStartupLatency50
+          query: histogram_quantile(0.50, {{$claimControllerStartupLatencyQuery}})
+          threshold: {{$sandboxClaimControllerStartupLatencyThreshold50Ms}}
+          requireSamples: true
+        - name: ControllerStartupLatency90
+          query: histogram_quantile(0.90, {{$claimControllerStartupLatencyQuery}})
+          threshold: {{$sandboxClaimControllerStartupLatencyThreshold90Ms}}
+          requireSamples: true
+        - name: ControllerStartupLatency99
+          query: histogram_quantile(0.99, {{$claimControllerStartupLatencyQuery}})
+          threshold: {{$sandboxClaimControllerStartupLatencyThreshold99Ms}}
+          requireSamples: true
+
+  - Identifier: SandboxClaimControllerThroughput
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      metricName: Agent Sandbox Claim Throughput
+      metricVersion: v1
+      dimensions:
+      - launch_type
+      - sandbox_template
+      unit: 1/s
+      queries:
+      - name: Max
+        query: max_over_time({{$claimThroughputQuery}})
+      - name: Avg
+        query: avg_over_time({{$claimThroughputQuery}})
+      - name: Perc99
+        query: quantile_over_time(0.99, {{$claimThroughputQuery}})
+      - name: Perc90
+        query: quantile_over_time(0.90, {{$claimThroughputQuery}})
+      - name: Perc50
+        query: quantile_over_time(0.50, {{$claimThroughputQuery}})
+
+  - Identifier: SchedulingThroughput
+    Method: SchedulingThroughput
+    Params:
+      action: start
+      labelSelector: "app=agent-sandbox-load-test"
+      measurmentInterval: 1s
+{{if $ENABLE_SCHEDULING_METRICS}}
+  - Identifier: SchedulingMetrics
+    Method: SchedulingMetrics
+    Params:
+      action: start
+{{end}}
+  - Identifier: APIResponsivenessPrometheus
+    Method: APIResponsivenessPrometheus
+    Params:
+      action: start
+  - Identifier: APIResponsivenessPrometheusSimple
+    Method: APIResponsivenessPrometheus
+    Params:
+      action: start
+  - Identifier: APIAvailability
+    Method: APIAvailability
+    Params:
+      action: start
+      pollFrequency: "5s"
+      hostPollTimeoutSeconds: 5
+{{if $ENABLE_SCHEDULING_METRICS}}
+  - Identifier: TestMetrics
+    Method: TestMetrics
+    Params:
+      action: start
+      systemPodMetricsEnabled: {{$ENABLE_SYSTEM_POD_METRICS}}
+      clusterOOMsTrackerEnabled: {{$ENABLE_CLUSTER_OOMS_TRACKER}}
+      clusterOOMsFailureEnabled: {{$CLUSTER_OOMS_FAILURE_ENABLED}}
+{{end}}
+
+- name: Setup Sandbox Template
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: template
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"
+
+- name: Setup Sandbox Warm Pool
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: "cluster-loader-sandbox-warmpool-custom.yaml"
+
+- name: Wait for Warm Pool Sandboxes to be Ready
+  measurements:
+  - Identifier: WaitForWarmPoolSandboxes
+    Method: WaitForGenericK8sObjects
+    Params:
+      action: start
+      objectGroup: "agents.x-k8s.io"
+      objectVersion: "v1beta1"
+      objectResource: "sandboxes"
+      labelSelector: "agents.x-k8s.io/warm-pool-sandbox"
+      namespaceRange: {min: 1, max: {{$namespaces}}}
+      successfulConditions: ["Ready=True"]
+      failedConditions: []
+      minDesiredObjectCount: {{MultiplyInt $warmpool_size $namespaces}}
+      maxFailedObjectCount: 0
+      timeout: 20m
+
+# --- START BURST LOOP ---
+{{range $i := Loop $totalBursts}}
+{{$burstIteration := AddInt $i 1}}
+{{$replicaCount := MultiplyInt $burstIteration $burstSize}}
+
+- name: Create Burst {{$burstIteration}} Sandbox Claims ({{$burstSize}})
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: {{$replicaCount}}
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-claim
+      objectTemplatePath: "cluster-loader-sandbox-claim.yaml"
+
+- name: Wait for Burst {{$burstIteration}} Sandbox Claims to be Ready
+  measurements:
+  - Identifier: WaitForBurst{{$burstIteration}}SandboxClaims
+    Method: WaitForGenericK8sObjects
+    Params:
+      action: start
+      objectGroup: extensions.agents.x-k8s.io
+      objectVersion: v1beta1
+      objectResource: sandboxclaims
+      namespaceRange: {min: 1, max: {{$namespaces}}}
+      successfulConditions: ["Ready=True"]
+      failedConditions: []
+      minDesiredObjectCount: {{MultiplyInt $replicaCount $namespaces}}
+      maxFailedObjectCount: 0
+      timeout: 2m
+      refreshInterval: 200ms
+
+- name: Pause 20 Seconds After Burst {{$burstIteration}}
+  measurements:
+  - Identifier: WaitAfterBurst{{$burstIteration}}
+    Method: Sleep
+    Params:
+      duration: 20s
+{{end}}
+# --- END BURST LOOP ---
+
+- name: Pause 2m to allow Prometheus to scrape the metrics
+  measurements:
+  - Identifier: WaitAfterTest
+    Method: Sleep
+    Params:
+      duration: 2m
+
+- name: Gather Results
+  measurements:
+  - Identifier: SandboxStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
+      labelSelector: "app=agent-sandbox-load-test"
+  - Identifier: SandboxClaimControllerStartupLatency
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+      enableViolations: true
+  - Identifier: SandboxClaimControllerThroughput
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+  - Identifier: SchedulingThroughput
+    Method: SchedulingThroughput
+    Params:
+      action: gather
+      enableViolations: false
+{{if $ENABLE_SCHEDULING_METRICS}}
+  - Identifier: SchedulingMetrics
+    Method: SchedulingMetrics
+    Params:
+      action: gather
+{{end}}
+  - Identifier: APIResponsivenessPrometheus
+    Method: APIResponsivenessPrometheus
+    Params:
+      action: gather
+      enableViolations: false
+  - Identifier: APIResponsivenessPrometheusSimple
+    Method: APIResponsivenessPrometheus
+    Params:
+      action: gather
+      enableViolations: false
+      useSimpleLatencyQuery: true
+      summaryName: APIResponsivenessPrometheus_simple
+  - Identifier: APIAvailability
+    Method: APIAvailability
+    Params:
+      action: gather
+{{if $ENABLE_SCHEDULING_METRICS}}
+  - Identifier: TestMetrics
+    Method: TestMetrics
+    Params:
+      action: gather
+      systemPodMetricsEnabled: {{$ENABLE_SYSTEM_POD_METRICS}}
+      clusterOOMsTrackerEnabled: {{$ENABLE_CLUSTER_OOMS_TRACKER}}
+      clusterOOMsFailureEnabled: {{$CLUSTER_OOMS_FAILURE_ENABLED}}
+{{end}}
+
+- name: Delete Sandbox Claims
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: agent-claim
+      objectTemplatePath: "cluster-loader-sandbox-claim.yaml"
+
+- name: Delete Sandbox Warm Pool
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: warmpool
+      objectTemplatePath: "cluster-loader-sandbox-warmpool-custom.yaml"
+
+- name: Delete Sandbox Templates
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: BurstCreate
+    objectBundle:
+    - basename: template
+      objectTemplatePath: "cluster-loader-sandbox-template.yaml"

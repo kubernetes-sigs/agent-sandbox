@@ -1,0 +1,128 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: hermes-agent
+  namespace: hermes-demo
+spec:
+  # Claims must not inject env or volumeClaimTemplates: with Disallowed,
+  # such claims are REJECTED outright instead of silently taking the cold
+  # (non-warm-pool) provisioning path. Demonstrated in step 6.
+  envVarsInjectionPolicy: Disallowed
+  volumeClaimTemplatesPolicy: Disallowed
+
+  # Per-sandbox headless Service -> stable DNS (sandbox.status.serviceFQDN).
+  # A fronting gateway routes users to their agent by this name.
+  service: true
+
+  # This standalone demo has no gateway pod to scope ingress to, so the
+  # NetworkPolicy is left unmanaged. The full platform this example distills
+  # (see README) uses networkPolicyManagement: Managed with ingress
+  # restricted to its gateway on ports 9119/8642 — with shared in-sandbox
+  # credentials, that NetworkPolicy is the per-user isolation boundary.
+  networkPolicyManagement: Unmanaged
+
+  podTemplate:
+    spec:
+      # runc (kind / default runtime). Production runs
+      # runtimeClassName: gvisor on GKE Sandbox nodes for kernel-syscall
+      # isolation; this demo stays on runc because kubectl port-forward
+      # (used in the walkthrough) is not supported to gVisor-sandboxed pods.
+      securityContext:
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+        runAsNonRoot: true
+      initContainers:
+        # Pre-seed a minimal config.yaml on the PVC BEFORE Hermes' own
+        # first-boot seed (which only copies its example if the file is
+        # absent): sets the default model so chat works out of the box with
+        # the provided provider key. Existing configs are never touched —
+        # the PVC is seeded once, then owned by the agent's state.
+        - name: seed-config
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              if [ ! -f /opt/data/config.yaml ]; then
+                printf 'model:\n  default: "%s"\n' "google/gemini-flash-latest" > /opt/data/config.yaml
+              fi
+          securityContext:
+            runAsUser: 10000
+            runAsGroup: 10000
+          volumeMounts:
+            - name: data
+              mountPath: /opt/data
+      containers:
+        - name: hermes
+          image: nousresearch/hermes-agent:v2026.7.7.2 # amd64-only
+          imagePullPolicy: IfNotPresent
+          args: ["sleep", "infinity"] # s6-supervised services carry the workload
+          ports:
+            - name: dashboard
+              containerPort: 9119
+            - name: openai-api
+              containerPort: 8642
+          envFrom:
+            - secretRef:
+                name: hermes-provider-keys
+          env:
+            - name: HERMES_DASHBOARD
+              value: "1"
+            - name: HERMES_DASHBOARD_HOST
+              value: "0.0.0.0"
+            - name: HERMES_DASHBOARD_BASIC_AUTH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: dashboard-username
+            - name: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: dashboard-password
+            # HMAC key for dashboard session cookies. Because it is stable
+            # across pod recreation, login sessions SURVIVE suspend/resume.
+            - name: HERMES_DASHBOARD_BASIC_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: dashboard-session-secret
+            # First-boot-only seed: starts the supervised messaging gateway /
+            # API server on a fresh volume; later boots follow state
+            # persisted on the PVC.
+            - name: HERMES_GATEWAY_BOOTSTRAP_STATE
+              value: "running"
+            - name: API_SERVER_ENABLED
+              value: "true"
+            - name: API_SERVER_HOST
+              value: "0.0.0.0"
+            - name: API_SERVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: api-server-key
+          # Aggressive probe: Hermes binds :9119 within a few seconds. A lazy
+          # probe (10s/5s) measurably added 10-15s of pure wait to every
+          # resume — probe cadence is resume latency.
+          readinessProbe:
+            tcpSocket:
+              port: 9119
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - name: data
+              mountPath: /opt/data # HERMES_HOME: sessions, memory, skills
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+        # storageClassName omitted => cluster default (kind & GKE both work)

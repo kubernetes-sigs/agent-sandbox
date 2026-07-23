@@ -1,0 +1,19 @@
+{{- $controllerNamespace := include "agent-sandbox.namespace" . -}}
+{{- $leaderElectionNamespace := include "agent-sandbox.leaderElectionNamespace" . -}}
+{{- if and .Values.controller.watchNamespace .Values.controller.leaderElect (eq $leaderElectionNamespace $controllerNamespace) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller-leader-election
+  namespace: {{ $controllerNamespace }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: {{ $controllerNamespace }}
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller-leader-election
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

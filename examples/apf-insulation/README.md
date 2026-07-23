@@ -9,6 +9,12 @@ traffic is insulated from its latency-critical claim-adoption writes.
 This is a cluster-operator decision. **Nothing in the default install
 applies these manifests, and they change nothing until you apply them.**
 
+Note this is isolation, **not a latency optimization at typical rates**: on
+an uncontended cluster APF wait is already ~0 and the overlay does not
+change request latency (measured A/B). Its value is guaranteed claim-path
+capacity under multi-tenant contention and at higher claim rates — see
+[docs/apf-insulation.md](../../docs/apf-insulation.md).
+
 ## Apply
 
 ```sh

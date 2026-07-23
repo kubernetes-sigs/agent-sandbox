@@ -52,9 +52,15 @@ spec:
     # 200 mutating = 600 seats), ~516 seats on a control plane tuned to
     # 3000 read + 1000 mutating = 4000 seats. Size so that seats(critical)
     # >= 2x the demand-seats high watermark measured at your peak claim rate
-    # (see docs/apf-insulation.md: a 300-claim simultaneous burst measured a
-    # 272-seat demand high watermark, so the 600-seat default server limits
-    # are NOT enough at that rate — raise the server limits, not the shares).
+    # (see docs/apf-insulation.md). Historical context: during the latency
+    # investigation, at PRE-optimization controller write volumes, a
+    # 300-claim simultaneous burst measured a 272-seat demand high watermark
+    # — above the 600-seat default server limits; the fix is raising the
+    # server limits, not the shares. Current optimized write volumes measure
+    # far lower demand (86-seat critical high watermark at 45 claims/s
+    # sustained) and do not saturate stock limits — this overlay is
+    # isolation for multi-tenant and higher-rate regimes, not a latency
+    # optimization at typical rates.
     nominalConcurrencyShares: 40
     # Keep 75% of the critical seats reserved even when other levels want to
     # borrow; only 25% is lendable. The hot path must never find its seats

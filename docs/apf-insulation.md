@@ -10,6 +10,16 @@ the standard install is a cluster-operator decision: the right seat sizing
 depends on the server's inflight limits, the cluster's other tenants, and
 the target claim rate — there is no universally safe default.
 
+**What to expect:** this is an isolation and capacity-guarantee mechanism,
+**not a latency optimization at typical rates**. On a single-tenant cluster
+whose apiserver seats are not saturated, APF queueing wait is already ~0 and
+applying the overlay does not change request latency — measured A/B, the
+controller's traffic simply moves into its dedicated levels with no latency
+delta. The value is what happens under contention: other tenants can no
+longer queue the claim path, the controller's own refill bursts can no
+longer crowd out its adoption writes, and the claim path keeps guaranteed
+seats when the cluster is busy.
+
 ## The problem: everything shares `workload-low`
 
 Out of the box, all of the controller's API traffic matches the built-in
@@ -63,13 +73,23 @@ seats. Fractions are preserved; only the server limits move.
 ## The sizing rule: `seats(critical) >= 2x demand high watermark`
 
 Dedicated seats only help if there are enough of them — an undersized
-dedicated level becomes the queueing point itself. Measured on a 300-claim
-simultaneous-burst benchmark: with the server at the 600-seat defaults the
+dedicated level becomes the queueing point itself.
+
+*Historical context (measured during the latency investigation, at
+pre-optimization controller write volumes):* on a 300-claim
+simultaneous-burst benchmark, with the server at the 600-seat defaults, the
 critical level's ~77 seats were exceeded by a measured **272-seat demand
 high watermark**, producing an APF wait p99 of ~359ms *inside the
-controller's own priority level*. Raising the server limits to 4000 seats
+controller's own priority level*; raising the server limits to 4000 seats
 (critical ≈ 516) put the level back above demand with ~2x headroom, and the
-burst p90 improved 1740ms → 1094ms with no code or manifest change.
+burst p90 improved 1740ms → 1094ms with no manifest change. That experiment
+is why the sizing rule below exists — but note it reflects a controller
+that issued several times more writes per claim than the current one.
+**Current optimized write volumes do not saturate the stock 600-seat limits
+at a 45/s sustained claim rate** (measured demand high watermarks: 86 seats
+critical, 52 bulk), which is exactly why the overlay is protection for
+multi-tenant and higher-rate regimes rather than a latency optimization at
+typical rates.
 
 Rule of thumb: at your **peak** claim rate,
 

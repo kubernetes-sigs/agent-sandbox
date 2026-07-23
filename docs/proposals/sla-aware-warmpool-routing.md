@@ -91,7 +91,7 @@ Two annotations on `SandboxClaim.metadata.annotations`, using the existing
 
 | Annotation | Values | Default | Description |
 |------------|--------|---------|-------------|
-| `agents.x-k8s.io/isolation` | `process`, `hardware` | `process` | Isolation tier requested |
+| `agents.x-k8s.io/isolation` | `process`, `hardware` | *(unset — no routing)* | Isolation tier requested. When absent, the claim passes through unchanged. |
 | `agents.x-k8s.io/overflow` | `allow`, `deny` | `allow` | Whether to fall back to another tier's pool when the preferred pool is exhausted |
 
 **`isolation` values**:
@@ -147,7 +147,7 @@ Webhook intercepts
     ├── Has routing annotations? ──No──▶ Allow unchanged
     │
     ▼
-Parse and validate isolation tier (default: process)
+Parse and validate isolation tier (required when routing)
     │
     ├── Unknown tier value? ──Yes──▶ Reject (admission error)
     │
@@ -292,8 +292,11 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get"]
     resourceNames: ["sandbox-routing-config"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["list", "watch"]
 ```
 
 ## Evidence

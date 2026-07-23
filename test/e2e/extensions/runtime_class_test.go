@@ -38,9 +38,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// runtimeClassPtrFromEnv returns a pointer to the SANDBOX_RUNTIME_CLASS value
-// for use in PodSpec.RuntimeClassName. "default" means the cluster's default
-// runtime (runc on most clusters) — returns nil so RuntimeClassName is unset.
 func isVMRuntime(runtimeClass string) bool {
 	return strings.HasPrefix(runtimeClass, "kata")
 }

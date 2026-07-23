@@ -8,10 +8,11 @@ behaviour across different container runtimes (runc, gVisor, kata).
 
 - A Kubernetes cluster with agent-sandbox deployed (CRDs + controller).
 - `KUBECONFIG` pointing at the cluster.
-- For gVisor tests: RuntimeClass `gvisor` installed. On OpenShift, gVisor can
-  be installed on worker nodes even though it is not included natively.
-- For kata tests: RuntimeClass `kata` (or `kata-remote`) installed via the
-  sandboxed-containers operator or equivalent.
+- For gVisor tests: RuntimeClass `gvisor` installed.
+  See [gVisor installation guide](https://gvisor.dev/docs/user_guide/install/).
+- For kata tests: RuntimeClass `kata` installed. Requires nodes with hardware
+  virtualization (`/dev/kvm`). See
+  [Kata Containers installation guide](https://github.com/kata-containers/kata-containers/tree/main/docs/install).
 
 ## Tests and Benchmarks
 
@@ -89,7 +90,7 @@ SANDBOX_RUNTIME_CLASS=kata \
 `TestRuntimeClassBurstRecovery` fires claims in batches to simulate sustained
 load. The batch size is computed dynamically:
 
-```
+```text
 batchSize = min(max(4, poolSize / 2), 8)
 ```
 
@@ -119,7 +120,7 @@ customer-experience boundary) and quality zone boundaries.
 
 ### CSV columns
 
-```
+```text
 batch,claim,latency_sec,type,wall_offset_sec,ready_at_start
 ```
 
@@ -137,7 +138,7 @@ batch,claim,latency_sec,type,wall_offset_sec,ready_at_start
 The file starts with `# key,value` metadata lines (cluster ID, instance type,
 runtime class, calibration results) and ends with summary stats:
 
-```
+```text
 # total_batches,6
 # total_claims,48
 # warm_claims,48
@@ -168,7 +169,7 @@ etcd write contention, and watch event coalescing — it is runtime-independent.
 
 CSV files are written to an auto-constructed subdirectory:
 
-```
+```text
 <cluster_id>_<instance_type>_<date>_<runtime_class>/
   burst_recovery_<runtime>_pool4.csv
   burst_recovery_<runtime>_pool8.csv
@@ -185,7 +186,7 @@ If the directory already exists, a numeric suffix is appended (`_2`, `_3`, ...).
 A Marp-compatible slide deck with benchmark findings, architecture diagrams,
 and analysis is available at:
 
-```
+```text
 test/e2e/extensions/warm-pool-benchmark-slides.md
 ```
 

@@ -182,8 +182,11 @@ class SandboxHandle:
   def exec(self, command, timeout: float | None = None) -> str:
     """Run a command inside the sandbox (router-free, via the pod's exec API).
 
-    ``timeout`` (seconds) bounds the wait; ``None`` waits until the command
-    finishes (the default for both paths — a session never silently caps a command).
+    ``timeout`` (seconds) bounds the wait on the **session** path; ``None`` (default)
+    waits until the command finishes. The one-shot path always runs to completion
+    (``_preload_content=True`` blocks), so a finite ``timeout`` takes effect only when
+    a session is attached — the point being that attaching a session no longer
+    silently caps a command (the previous 120s default).
 
     If a persistent `SandboxSession` is attached (``open_session()``), the command
     is piped over that single held-open stream — no per-command websocket connect

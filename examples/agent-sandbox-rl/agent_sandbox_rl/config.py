@@ -134,6 +134,11 @@ class FleetConfig(BaseModel):
   overcommit_factor: float = 1.5
   max_live_sandboxes: int | None = None      # optional absolute hard ceiling
   breaker_poll_s: float = 5.0
+  # Trip only after the ceiling is breached for this many *consecutive* polls, so a
+  # transient spike (a claim briefly double-warms before scale-down; Terminating-pod
+  # GC lag) can't tear down a healthy run on a single sample. One healthy poll resets
+  # the counter. Sustained breach = breaker_trip_polls × breaker_poll_s.
+  breaker_trip_polls: int = 3
   # Guaranteed teardown (#4): install atexit + SIGINT/SIGTERM handlers that tear
   # the fleet down on any exit path (orphan defense; pairs with the run-id label +
   # reaper). Set False if the host owns signal handling.

@@ -126,6 +126,15 @@ class SandboxFleet:
     # fall back when no registry was given at all.
     self.registry = (registry if registry is not None
                      else self._default_registry(self.config))
+    # A caller-supplied registry was built before the run-id was stamped above, so
+    # its clusters' Resources.labels lack it — the pods it creates would then carry
+    # no run-id and be invisible to the breaker/reaper. Ensure every cluster
+    # (default or supplied) carries this run's labels. Idempotent for the default.
+    for _c in self.registry:
+      try:
+        _c.resources.labels.update(self.config.labels)
+      except Exception:  # noqa: BLE001 — a non-standard registry may differ; best-effort
+        pass
     self.placement = get_placement(self.config.placement)
     self.tasks: list[Task] = []
     self.plan_: FleetPlan | None = None
@@ -198,18 +207,29 @@ class SandboxFleet:
     stop = threading.Event()
     tripped = {"n": 0}
 
+    need = max(1, self.config.breaker_trip_polls)
+
     def _loop():
+      breaches = 0
       while not stop.wait(self.config.breaker_poll_s):
         n = self.live_owned_count()
         if n > ceiling:
-          logger.error("circuit breaker TRIPPED: %d live sandboxes > ceiling %d "
-                       "(expected %d) — aborting run + tearing down", n, ceiling, expected)
+          breaches += 1
+          logger.warning("circuit breaker: %d live pods > ceiling %d (breach %d/%d "
+                         "consecutive; expected %d)", n, ceiling, breaches, need, expected)
+          if breaches < need:
+            continue                          # transient spike — wait for a sustained breach
+          logger.error("circuit breaker TRIPPED: %d live pods > ceiling %d for %d "
+                       "consecutive polls (expected %d) — aborting run + tearing down",
+                       n, ceiling, breaches, expected)
           tripped["n"] = n
           try:
             self.teardown()
           except Exception:  # noqa: BLE001
             logger.warning("teardown during breaker trip failed", exc_info=True)
           return
+        else:
+          breaches = 0                        # healthy poll resets; only SUSTAINED breach trips
 
     th = threading.Thread(target=_loop, name="asrl-breaker", daemon=True)
     th.start()

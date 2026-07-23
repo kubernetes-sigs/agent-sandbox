@@ -16,10 +16,11 @@
 sweep for an **orphaned** run whose driver died without tearing down.
 
     from agent_sandbox_rl import reap
-    reap(run_id="ab12cd34ef56", context="my-ctx", namespace="rl")   # one run
-    reap(context="my-ctx", namespace="rl")                          # all asrl-managed
+    reap(run_id="ab12cd34ef56", context="my-ctx", namespace="rl")   # one run (recommended)
+    reap(all_managed=True, context="my-ctx", namespace="rl")        # EVERY run (opt-in)
 
     python -m agent_sandbox_rl.reaper --run-id ab12cd34ef56 --context my-ctx --namespace rl
+    python -m agent_sandbox_rl.reaper --all --namespace rl          # every run (opt-in)
 
 Deletes claims → warmpools → sandboxes → templates (order matters: claims first so
 they stop holding sandboxes; warmpools next so the controller stops replenishing),
@@ -44,10 +45,20 @@ logger = logging.getLogger("agent_sandbox_rl.reap")
 
 def reap(run_id: str | None = None, *, context: str | None = None,
          namespace: str = "default", kubeconfig: str | None = None,
-         in_cluster: bool = False, delete_pods: bool = True) -> dict:
-  """Delete resources matching a run-id (or all asrl-managed if ``run_id`` is None).
+         in_cluster: bool = False, delete_pods: bool = True,
+         all_managed: bool = False) -> dict:
+  """Delete resources for a single run (``run_id``), or — only when
+  ``all_managed=True`` — **every** agent-sandbox-rl run in the namespace.
 
-  Returns a dict of per-kind deletion counts. Safe to run repeatedly (idempotent)."""
+  The all-managed sweep is opt-in on purpose: it force-deletes (grace 0) pods of
+  *healthy concurrent runs* too, so it must never be the accidental default of a
+  "clean up my killed run" invocation. Returns per-kind deletion counts;
+  idempotent."""
+  if run_id is None and not all_managed:
+    raise ValueError(
+        "reap requires a run_id; to sweep EVERY agent-sandbox-rl run in the "
+        "namespace (including healthy concurrent ones) pass all_managed=True "
+        "(CLI: --all)")
   selector = (f"{constants.RUN_ID_LABEL}={run_id}" if run_id
               else f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}")
   cluster = Cluster(
@@ -86,7 +97,10 @@ def reap(run_id: str | None = None, *, context: str | None = None,
 
 def main(argv=None) -> None:
   p = argparse.ArgumentParser(description="Reap agent-sandbox-rl resources by label.")
-  p.add_argument("--run-id", default=None, help="reap one run; omit to reap all asrl-managed")
+  p.add_argument("--run-id", default=None, help="reap one run by id (recommended)")
+  p.add_argument("--all", action="store_true",
+                 help="sweep ALL agent-sandbox-rl runs in the namespace, incl. healthy "
+                      "concurrent ones (required when --run-id is omitted)")
   p.add_argument("--context", default=None)
   p.add_argument("--namespace", default="default")
   p.add_argument("--kubeconfig", default=None)
@@ -94,9 +108,12 @@ def main(argv=None) -> None:
   p.add_argument("--keep-pods", action="store_true", help="don't force-delete pods")
   a = p.parse_args(argv)
   logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-  counts = reap(a.run_id, context=a.context, namespace=a.namespace,
-                kubeconfig=a.kubeconfig, in_cluster=a.in_cluster,
-                delete_pods=not a.keep_pods)
+  try:
+    counts = reap(a.run_id, context=a.context, namespace=a.namespace,
+                  kubeconfig=a.kubeconfig, in_cluster=a.in_cluster,
+                  delete_pods=not a.keep_pods, all_managed=a.all)
+  except ValueError as e:
+    p.error(str(e))
   print(counts)
 
 

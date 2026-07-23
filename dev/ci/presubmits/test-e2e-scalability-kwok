@@ -99,10 +99,10 @@ mkdir -p "${CL2_REPORT_DIR}"
 
 TEST_CONFIG="${repo_root}/test/benchmarks/config/agent-sandbox-continuous-burst.yaml"
 
-# Scale parameters: default to fast POC scale (QPS: 5, duration: 10s, warmpool: 5)
-QPS="${CL2_QPS:-5}"
-DURATION="${CL2_DURATION_SECONDS:-10}"
-WARMPOOL="${CL2_WARMPOOL_SIZE:-5}"
+# Scale parameters: matching perf-tests claims-warm burst (QPS: 300, duration: 1s -> 300 claims total, warmpool: 300)
+QPS="${CL2_QPS:-300}"
+DURATION="${CL2_DURATION_SECONDS:-1}"
+WARMPOOL="${CL2_WARMPOOL_SIZE:-300}"
 
 echo "Running ClusterLoader2 benchmark (QPS=${QPS}, Duration=${DURATION}s, WarmPool=${WARMPOOL})..."
 CL2_QPS="${QPS}" CL2_DURATION_SECONDS="${DURATION}" CL2_WARMPOOL_SIZE="${WARMPOOL}" CL2_ENABLE_SCHEDULING_METRICS="false" "${BINDIR}/clusterloader2" \

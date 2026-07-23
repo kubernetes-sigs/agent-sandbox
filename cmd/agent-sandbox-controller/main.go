@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -31,6 +32,7 @@ import (
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/rest"
 
 	"github.com/felixge/fgprof"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -43,6 +45,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -90,10 +93,13 @@ func main() {
 	var metricsCertDir string
 	var tlsMinVersion string
 	var tlsCipherSuites string
+	var watchNamespace string
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&watchNamespace, "namespace", "",
+		"Namespace(s) to watch. Comma-separated for multiple. Falls back to WATCH_NAMESPACE env var. Empty means cluster-scoped (all namespaces).")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
@@ -200,6 +206,11 @@ func main() {
 	}
 	if sandboxWarmPoolUnschedulableRecheckInterval <= 0 {
 		setupLog.Error(nil, "--sandbox-warm-pool-unschedulable-recheck-interval must be a positive duration", "value", sandboxWarmPoolUnschedulableRecheckInterval)
+		os.Exit(1)
+	}
+	watchNamespaces, err := parseWatchNamespaces(watchNamespace)
+	if err != nil {
+		setupLog.Error(err, "invalid namespace configuration")
 		os.Exit(1)
 	}
 
@@ -419,6 +430,22 @@ func main() {
 		os.Exit(1)
 	}
 	mgrOpts.Cache = cacheOpts
+	if len(watchNamespaces) > 0 {
+		defaultNamespaces := make(map[string]cache.Config, len(watchNamespaces))
+		for _, ns := range watchNamespaces {
+			defaultNamespaces[ns] = cache.Config{}
+		}
+		mgrOpts.Cache.DefaultNamespaces = defaultNamespaces
+		if enableLeaderElection && leaderElectionNamespace == "" {
+			_, inClusterConfigErr := rest.InClusterConfig()
+			if err := validateLeaderElectionNamespace(inClusterConfigErr); err != nil {
+				setupLog.Error(err, "unable to determine leader election namespace")
+				os.Exit(1)
+			}
+			setupLog.Info("leader-election-namespace not set; controller-runtime will use the pod's own namespace from the service account")
+		}
+		setupLog.Info("running in namespaced mode", "namespaces", watchNamespaces)
+	}
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
 			"label", controllers.SandboxNameHashLabel)
@@ -485,6 +512,7 @@ func main() {
 						allowedDomains = append(allowedDomains, d)
 					}
 				}
+
 			}
 		} else if !os.IsNotExist(err) {
 			setupLog.Error(err, "failed to read configuration file", "path", configPath)
@@ -561,4 +589,44 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func validateLeaderElectionNamespace(inClusterConfigErr error) error {
+	if inClusterConfigErr == nil {
+		return nil
+	}
+	if errors.Is(inClusterConfigErr, rest.ErrNotInCluster) {
+		return errors.New("--leader-election-namespace must be set when running in namespaced mode outside a cluster")
+	}
+	return fmt.Errorf("check in-cluster configuration for automatic namespace detection: %w", inClusterConfigErr)
+}
+
+// parseWatchNamespaces returns the list of namespaces to watch, following the
+// Operator SDK convention: flag value takes precedence, then WATCH_NAMESPACE env var,
+// empty means cluster-scoped. Accepts comma-separated values for multi-namespace mode.
+func parseWatchNamespaces(flagValue string) ([]string, error) {
+	v := flagValue
+	source := "--namespace"
+	if v == "" {
+		v = os.Getenv("WATCH_NAMESPACE")
+		source = "WATCH_NAMESPACE"
+	}
+	if v == "" {
+		return nil, nil
+	}
+	var result []string
+	seen := map[string]struct{}{}
+	for ns := range strings.SplitSeq(v, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			if _, ok := seen[ns]; ok {
+				continue
+			}
+			seen[ns] = struct{}{}
+			result = append(result, ns)
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one non-empty namespace", source)
+	}
+	return result, nil
 }

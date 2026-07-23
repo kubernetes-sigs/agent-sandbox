@@ -78,7 +78,7 @@ class SandboxSession:
     self._seq = 0
     self._resp = stream(
         core_api.connect_get_namespaced_pod_exec, pod, namespace,
-        command=["bash"], stderr=True, stdin=True, stdout=True, tty=True,
+        command=["bash", "-l"], stderr=True, stdin=True, stdout=True, tty=True,
         _preload_content=False)
     # Let the shell come up and drain the initial prompt/banner.
     deadline = time.monotonic() + open_timeout
@@ -87,7 +87,12 @@ class SandboxSession:
     if not self.is_open:                        # honor open_timeout explicitly
       raise TimeoutError(
           f"session websocket did not open within {open_timeout}s on {pod}")
-    self.run("stty -echo 2>/dev/null; true")   # quiet the pty echo where supported
+    # `bash -l` matches the one-shot `bash -lc` path (sources /etc/profile* where
+    # conda activation lives) so a session and a fallback one-shot share the env.
+    # Quiet the pty echo and clear PS1/PROMPT_COMMAND so no prompt/banner leaks
+    # into command output.
+    self.run("stty -echo 2>/dev/null; PS1=''; PROMPT_COMMAND=''; true",
+             timeout=open_timeout)
 
   @property
   def is_open(self) -> bool:
@@ -96,7 +101,13 @@ class SandboxSession:
     except Exception:  # noqa: BLE001
       return False
 
-  def run(self, command, timeout: float = 120.0) -> str:
+  def run(self, command, timeout: float | None = None) -> str:
+    """Run ``command`` over the session, returning combined stdout/stderr.
+
+    ``timeout=None`` waits indefinitely (parity with the one-shot exec path, whose
+    ``_preload_content=True`` blocks until the command finishes) — so attaching a
+    session never silently caps a command. On timeout or a closed socket the session
+    is closed before raising, so its stale buffer can't bleed into the next call."""
     self._seq += 1
     # Assemble the marker at runtime ("__A""B" -> "AB") so the literal never
     # appears in the pty-echoed command line — only in the command's output.
@@ -107,12 +118,16 @@ class SandboxSession:
     self._resp.write_stdin(f'printf "%s%s\\n" "{head}" "{tail}"\n')
     marker = tok
     buf = []
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
     while True:
-      remaining = deadline - time.monotonic()
-      if remaining <= 0:
-        break
-      self._resp.update(timeout=min(1.0, remaining))   # honor small timeouts
+      if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          break
+        upd = min(1.0, remaining)
+      else:
+        upd = 1.0
+      self._resp.update(timeout=upd)             # honor small timeouts
       if self._resp.peek_stderr():
         buf.append(self._resp.read_stderr())   # combine stderr (exec() returns both)
       if self._resp.peek_stdout():
@@ -123,6 +138,7 @@ class SandboxSession:
           return out.replace("\r\n", "\n")
       if not self.is_open:
         break
+    self.close()                                 # drop stale state; never reuse a timed-out session
     raise TimeoutError(f"session.run timed out/closed on {self.pod}")
 
   def close(self) -> None:
@@ -163,8 +179,11 @@ class SandboxHandle:
   _cluster: "Cluster" = field(default=None, repr=False)
   _session: Optional["SandboxSession"] = field(default=None, repr=False)
 
-  def exec(self, command) -> str:
+  def exec(self, command, timeout: float | None = None) -> str:
     """Run a command inside the sandbox (router-free, via the pod's exec API).
+
+    ``timeout`` (seconds) bounds the wait; ``None`` waits until the command
+    finishes (the default for both paths — a session never silently caps a command).
 
     If a persistent `SandboxSession` is attached (``open_session()``), the command
     is piped over that single held-open stream — no per-command websocket connect
@@ -175,7 +194,7 @@ class SandboxHandle:
     is cached per thread rather than rebuilt per call.
     """
     if self._session is not None and self._session.is_open:
-      return self._session.run(command)
+      return self._session.run(command, timeout=timeout)
     core = self._cluster.exec_core_api()
     return exec_in_pod(core, self.pod_name, self._cluster.namespace, command)
 

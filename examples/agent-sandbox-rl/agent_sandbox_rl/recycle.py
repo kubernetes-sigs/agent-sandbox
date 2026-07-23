@@ -47,6 +47,11 @@ logger = logging.getLogger("agent_sandbox_rl.recycle")
 
 _DEFAULT_WIPE = ("/tmp/*", "/var/tmp/*", "$HOME/.cache/*")
 
+# Sentinel for "task not processed yet" in the results list, so a group's infra
+# error only overwrites genuinely-unprocessed slots — not a task that legitimately
+# returned None (which `is None` would clobber).
+_UNSET = object()
+
 
 @dataclass
 class ResetBaseline:
@@ -211,10 +216,16 @@ class GitRestoreReset:
       return "head_mismatch"
     if (d.get("DIRTY", "0") or "0") != "0":
       return "worktree_dirty"
-    if self.check_env and base.env_hash and d.get("ENV", "") != base.env_hash:
-      return "env_drift"                     # site-packages tripwire (the big hole)
-    if self.check_config and base.config_hash and d.get("CFG", "") != base.config_hash:
-      return "config_or_hooks_drift"         # booby-trap tripwire
+    if self.check_env:                       # site-packages tripwire (the big hole)
+      if not base.env_hash:
+        return "env_baseline_missing"        # requested but no baseline → can't verify, quarantine
+      if d.get("ENV", "") != base.env_hash:
+        return "env_drift"
+    if self.check_config:                    # booby-trap tripwire
+      if not base.config_hash:
+        return "config_baseline_missing"
+      if d.get("CFG", "") != base.config_hash:
+        return "config_or_hooks_drift"
     # process-count backstop: allow a little slack for transient exec children
     try:
       if base.proc_count and int(d.get("PROCS", "0")) > base.proc_count + 2:
@@ -266,7 +277,7 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
   images keep their pools. Set False to keep pools resident (old behavior).
   """
   reset = reset or GitRestoreReset()
-  results = [None] * len(tasks)
+  results = [_UNSET] * len(tasks)
   by_image: dict[str, list[tuple[int, Task]]] = {}
   for i, t in enumerate(tasks):
     by_image.setdefault(t.image, []).append((i, t))
@@ -341,7 +352,7 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
       logger.error("recycle group failed on %s: %s",
                    group[0][1].image if group else "?", e)
       for gi, _gt in group:
-        if results[gi] is None:
+        if results[gi] is _UNSET:
           results[gi] = e
     finally:
       if handle is not None:
@@ -365,7 +376,7 @@ def reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *,
             fut.result()                        # _run_group captures per-group; this is a backstop
           except Exception:  # noqa: BLE001 — never let one group abort the batch
             logger.error("recycle group raised past its own handler", exc_info=True)
-  return results
+  return [None if r is _UNSET else r for r in results]   # unprocessed → None
 
 
 async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency, *,
@@ -394,7 +405,7 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
   warm is left when shards finish. ``process_fn`` may be sync or async; results are
   returned in ``tasks`` order (per-task exceptions captured, not raised)."""
   reset = reset or GitRestoreReset()
-  results: list = [None] * len(tasks)
+  results: list = [_UNSET] * len(tasks)
   by_image: dict[str, list[tuple[int, Task]]] = {}
   for i, t in enumerate(tasks):
     by_image.setdefault(t.image, []).append((i, t))
@@ -503,7 +514,7 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
         # (KeyboardInterrupt/SystemExit still propagate).
         logger.error("recycle group failed on %s: %s", img, e)
         for gi, _gt in group:
-          if results[gi] is None:
+          if results[gi] is _UNSET:
             results[gi] = e
       finally:
         holding = handle is not None
@@ -529,7 +540,7 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
     # so one group's infra error can't discard the whole batch's results.
     await asyncio.gather(*(_run_group(img, g) for img, g in groups),
                          return_exceptions=True)
-  return results
+  return [None if r is _UNSET else r for r in results]   # unprocessed → None
 
 
 def determinism_canary(fleet, task, process_fn, *,

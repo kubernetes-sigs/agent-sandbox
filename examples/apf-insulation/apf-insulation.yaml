@@ -62,13 +62,20 @@ spec:
     # isolation for multi-tenant and higher-rate regimes, not a latency
     # optimization at typical rates.
     nominalConcurrencyShares: 40
-    # Keep 75% of the critical seats reserved even when other levels want to
-    # borrow; only 25% is lendable. The hot path must never find its seats
-    # loaned out at the start of a burst.
-    lendablePercent: 25
+    # Lend NOTHING from the critical level (0 = the v1 default, stated
+    # explicitly): the hot path's allocation is a hard floor that other
+    # levels can never borrow from, matching the guarantee the docs
+    # advertise. Any lendablePercent > 0 would let other levels (which
+    # default to an unbounded borrowingLimitPercent) hold part of these
+    # seats exactly when a burst starts.
+    lendablePercent: 0
     limitResponse:
-      # Queue (never 429): the controller retries with backoff, but a
-      # rejected adoption write costs a full reconcile round-trip.
+      # Queue rather than reject: requests buffer up to queueLengthLimit
+      # per queue, and only overflow beyond that is rejected with 429.
+      # The controller retries a rejected adoption write with backoff, but
+      # it costs a full reconcile round-trip — so prefer queueing and watch
+      # the rejected-requests PromQL in docs/apf-insulation.md (it must
+      # stay zero).
       type: Queue
       queuing:
         # This level serves a single flow (one ServiceAccount), so
@@ -76,8 +83,9 @@ spec:
         # 4 are the upstream-suggested defaults for a dedicated level.
         queues: 16
         handSize: 4
-        # Deep enough to absorb a full burst's write storm (hundreds of
-        # in-flight adoption writes) without rejections.
+        # PER-QUEUE depth (not a total): sized to absorb a full burst's
+        # write storm across the flow's hand of queues; overflow beyond a
+        # full queue is rejected with 429.
         queueLengthLimit: 100
 ---
 apiVersion: flowcontrol.apiserver.k8s.io/v1
@@ -105,9 +113,10 @@ spec:
         # Same single-flow reasoning as the critical level.
         queues: 16
         handSize: 4
-        # Replenishment offers large batches; queue them rather than 429
-        # them (a rejected create is retried by the pool controller anyway,
-        # at strictly higher total cost).
+        # PER-QUEUE depth: buffer replenishment batches up to this limit
+        # per queue; overflow beyond a full queue is rejected with 429 (a
+        # rejected create is retried by the pool controller anyway, at
+        # strictly higher total cost — keep rejections at zero).
         queueLengthLimit: 100
 ---
 # Latency-critical hot path: everything on the SandboxClaim -> Ready chain.

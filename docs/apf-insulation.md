@@ -18,7 +18,10 @@ controller's traffic simply moves into its dedicated levels with no latency
 delta. The value is what happens under contention: other tenants can no
 longer queue the claim path, the controller's own refill bursts can no
 longer crowd out its adoption writes, and the claim path keeps guaranteed
-seats when the cluster is busy.
+seats when the cluster is busy. The critical level lends none of its seats
+(`lendablePercent: 0`), so its allocation is a hard floor other levels can
+never borrow from; the bulk level deliberately lends most of its capacity
+back to the cluster when the pool is quiescent.
 
 ## The problem: everything shares `workload-low`
 
@@ -58,8 +61,11 @@ On Kubernetes 1.35 the built-in mandatory + suggested levels sum to 245
 nominal concurrency shares. The overlay adds `critical = 40` and
 `bulk = 25`, bringing the total to 310:
 
-* `agent-sandbox-critical`: 40/310 ≈ 13% of the server's seats.
-* `agent-sandbox-bulk`: 25/310 ≈ 8%.
+* `agent-sandbox-critical`: 40/310 ≈ 13% of the server's seats —
+  non-lendable (`lendablePercent: 0`), so this entire allocation is the
+  guaranteed floor the sizing rule below is stated against.
+* `agent-sandbox-bulk`: 25/310 ≈ 8% — 75% lendable, so only ~25% of it is a
+  guaranteed floor; refill is throughput work and borrows back under load.
 
 Because the shares are fractions, **raising the server-wide inflight limits
 multiplies every level's seats with no manifest change**. For example, with
@@ -135,8 +141,9 @@ histogram_quantile(0.99, sum by (le) (
 ))
 ```
 
-**Rejections** (must stay zero — both levels queue rather than 429, so any
-rejection means the queue length limit was exhausted):
+**Rejections** (must stay zero — both levels buffer requests up to their
+per-queue `queueLengthLimit`, and anything beyond an exhausted queue is
+rejected with 429, so any rejection here means a queue overflowed):
 
 ```promql
 sum by (priority_level) (
@@ -144,12 +151,15 @@ sum by (priority_level) (
 )
 ```
 
-**Verify the schemas actually match** (non-zero dispatch on both dedicated
-levels while the controller is busy):
+**Verify the schemas actually match** (non-zero dispatch for all three
+FlowSchemas while the controller is busy — grouping by `flow_schema` as well
+as `priority_level` proves the intended schema did the routing, and covers
+`agent-sandbox-events`, whose traffic lands in `workload-low` and would be
+invisible to a priority-level-only filter):
 
 ```promql
-sum by (priority_level) (
-  rate(apiserver_flowcontrol_dispatched_requests_total{priority_level=~"agent-sandbox-.*"}[5m])
+sum by (flow_schema, priority_level) (
+  rate(apiserver_flowcontrol_dispatched_requests_total{flow_schema=~"agent-sandbox-.*"}[5m])
 )
 ```
 

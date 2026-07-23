@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -55,8 +56,8 @@ const sandboxUID = types.UID("test-sandbox-uid")
 
 func sandboxControllerRef(name string) metav1.OwnerReference {
 	return metav1.OwnerReference{
-		APIVersion:         "agents.x-k8s.io/v1beta1",
-		Kind:               "Sandbox",
+		APIVersion:         sandboxv1beta1.GroupVersion.String(),
+		Kind:               sandboxv1beta1.SandboxKind,
 		Name:               name,
 		UID:                sandboxUID,
 		Controller:         new(true),
@@ -1516,8 +1517,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "my-warm-pool",
 							UID:        "pool-uid",
 							Controller: new(true),
@@ -1639,8 +1640,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "my-warm-pool",
 							UID:        "pool-uid",
 							Controller: new(true),
@@ -1689,8 +1690,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -1753,8 +1754,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -1799,8 +1800,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "my-warm-pool",
 							UID:        "pool-uid",
 							Controller: new(true),
@@ -1918,8 +1919,8 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -3127,8 +3128,8 @@ func TestCheckOwnership(t *testing.T) {
 	}
 
 	sandboxOwnerRef := metav1.OwnerReference{
-		APIVersion:         "agents.x-k8s.io/v1beta1",
-		Kind:               "Sandbox",
+		APIVersion:         sandboxv1beta1.GroupVersion.String(),
+		Kind:               sandboxv1beta1.SandboxKind,
 		Name:               sandboxName,
 		UID:                sandboxUID,
 		Controller:         new(true),
@@ -3266,8 +3267,8 @@ func TestReconcilePVCs(t *testing.T) {
 						Namespace: sandboxNs,
 						OwnerReferences: []metav1.OwnerReference{
 							{
-								APIVersion:         "agents.x-k8s.io/v1beta1",
-								Kind:               "Sandbox",
+								APIVersion:         sandboxv1beta1.GroupVersion.String(),
+								Kind:               sandboxv1beta1.SandboxKind,
 								Name:               sandboxName,
 								UID:                sandboxUID,
 								Controller:         new(true),

@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
@@ -53,6 +53,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
@@ -1485,7 +1486,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			}
 
 			controllerRef := metav1.GetControllerOf(sandbox)
-			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
+			if utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 				// Still in warm pool. Try to complete adoption!
 				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
 				if err := verifySandboxCandidate(sandbox, claim); err != nil {
@@ -1782,7 +1783,8 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 		// Verify this policy was actually created by this controller
 		// before deleting it. We check if the SandboxClaim is the controller.
 		controllerRef := metav1.GetControllerOf(existingNP)
-		isControlledByClaim := controllerRef != nil && controllerRef.UID == claim.UID && controllerRef.Kind == "SandboxClaim"
+		isControlledByClaim := utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind) &&
+			controllerRef.UID == claim.UID
 
 		if !isControlledByClaim {
 			// A user manually created a policy with our reserved name. We should not delete it, but log a warning so it can be resolved.
@@ -2045,11 +2047,7 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	// written and are not rewritten by storage migration, so warm sandboxes
 	// created by a pre-v1beta1 pool controller still carry the v1alpha1
 	// group version after an upgrade. Match on group+kind, not version.
-	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
-	if err != nil {
-		return fmt.Errorf("parsing owner reference apiVersion %q of sandbox %s/%s: %w", controllerRef.APIVersion, candidate.Namespace, candidate.Name, err)
-	}
-	if refGV.Group != extensionsv1beta1.GroupVersion.Group || controllerRef.Kind != "SandboxWarmPool" {
+	if !utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil
@@ -2104,11 +2102,11 @@ func (h *warmPoolEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 }
 
 func getWarmPoolName(obj metav1.Object) string {
-	if ctrl := metav1.GetControllerOf(obj); ctrl != nil && ctrl.Kind == "SandboxWarmPool" {
+	if ctrl := metav1.GetControllerOf(obj); utils.MatchesGroupKind(ctrl, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 		return ctrl.Name
 	}
 	for _, ref := range obj.GetOwnerReferences() {
-		if ref.Kind == "SandboxWarmPool" {
+		if utils.MatchesGroupKind(&ref, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 			return ref.Name
 		}
 	}

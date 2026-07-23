@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -45,6 +44,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const (
@@ -575,14 +575,14 @@ func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]strin
 	if ref == nil {
 		return nil
 	}
-	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-	if gvk.Group != extensionsv1beta1.GroupVersion.Group {
+	g, k := utils.GetGroupKind(ref)
+	if g != extensionsv1beta1.GroupVersion.Group {
 		return nil
 	}
 
 	var labels map[string]string
 
-	if gvk.Kind == "SandboxWarmPool" {
+	if k == extensionsv1beta1.SandboxWarmPoolKind {
 		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
 			if labels == nil {
 				labels = make(map[string]string, 2)

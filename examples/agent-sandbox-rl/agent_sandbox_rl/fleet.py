@@ -161,12 +161,16 @@ class SandboxFleet:
     return f"{constants.RUN_ID_LABEL}={self.run_id}"
 
   def live_owned_count(self) -> int:
-    """Live Sandbox CRs this run owns (by run-id label), across clusters."""
+    """Live sandbox **pods** this run owns (by run-id label), across clusters.
+
+    The Sandbox controller does not copy the run-id label onto Sandbox CRs, so we
+    count pods instead — the pod template carries the fleet labels (incl. run-id),
+    so this reflects the actual live footprint, including #1215 over-creation."""
     sel = self.run_selector()
     n = 0
     for c in self.registry:
       try:
-        n += len(c.resources.list_sandboxes(label_selector=sel))
+        n += c.resources.count_pods(label_selector=sel)
       except Exception:  # noqa: BLE001 — a transient list error must not crash the breaker
         pass
     return n
@@ -235,8 +239,13 @@ class SandboxFleet:
         self._prev_handlers.pop(sig, None)
 
   def _on_signal(self, signum, frame):
-    logger.warning("signal %d → tearing down fleet run %s", signum, self.run_id)
-    self._safe_teardown()
+    # Do NOT tear down inline: this handler can fire while the main thread holds
+    # self._lock, and teardown → release_all → release re-acquires it → deadlock.
+    # Instead unwind (raise), which releases any held lock, and let the atexit hook
+    # (_safe_teardown, registered in _install_teardown_hooks) run teardown outside
+    # the signal context.
+    logger.warning("signal %d → aborting fleet run %s (teardown via atexit)",
+                   signum, self.run_id)
     prev = self._prev_handlers.get(signum)
     if callable(prev) and prev not in (signal.SIG_DFL, signal.SIG_IGN):
       prev(signum, frame)

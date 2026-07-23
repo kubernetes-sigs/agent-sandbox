@@ -23,15 +23,17 @@ sweep for an **orphaned** run whose driver died without tearing down.
 
 Deletes claims → warmpools → sandboxes → templates (order matters: claims first so
 they stop holding sandboxes; warmpools next so the controller stops replenishing),
-then force-deletes any pods carrying the label. Deleting the CRs also cascades their
-pods via owner refs; the explicit pod delete is a belt-and-suspenders sweep.
+then force-deletes any pods carrying the run-id label. Claims/warmpools/templates
+carry the run-id label directly. Deleting claims + warmpools **cascades the Sandbox
+CRs** via owner refs — Sandbox CRs themselves don't carry the run-id label (the
+controller doesn't copy it), so the sandbox pass is a best-effort no-op unless a
+future controller propagates it. Sandbox **pods** do carry the label (via the pod
+template), so the pod delete-collection is a real, direct sweep.
 """
 from __future__ import annotations
 
 import argparse
 import logging
-
-from kubernetes import client
 
 from . import constants
 from .cluster import Cluster
@@ -53,7 +55,7 @@ def reap(run_id: str | None = None, *, context: str | None = None,
                     in_cluster=in_cluster),
       labels=constants.DEFAULT_LABELS)
   r = cluster.resources
-  counts: dict[str, int] = {}
+  counts: dict[str, int | str] = {}
 
   def _sweep(kind, lister, deleter):
     names = lister(label_selector=selector)

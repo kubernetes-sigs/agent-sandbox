@@ -139,7 +139,13 @@ class Resources:
         },
         "spec": {
             "podTemplate": {
-                "metadata": {"labels": {"sandbox": template_name}},
+                # Propagate the fleet labels (incl. the per-run RUN_ID_LABEL) onto
+                # the pod template so every sandbox POD carries them — the Sandbox
+                # controller does not copy the claim/pool run-id label onto Sandbox
+                # CRs, so pods are how a run attributes its live footprint (circuit
+                # breaker count + reaper pod sweep). `sandbox=<template>` is kept for
+                # the colocation affinity above.
+                "metadata": {"labels": {**self.labels, "sandbox": template_name}},
                 "spec": pod_spec,
             }
         },
@@ -308,28 +314,40 @@ class Resources:
     return self._list(constants.CLAIMS_PLURAL, label_selector)
 
   def list_sandboxes(self, label_selector: str | None = None) -> list[str]:
-    return self._list(constants.SANDBOXES_PLURAL, label_selector)
+    # Sandbox is in the CORE group, not extensions — pass it explicitly.
+    return self._list(constants.SANDBOXES_PLURAL, label_selector,
+                      group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION)
+
+  def count_pods(self, label_selector: str | None = None) -> int:
+    """Number of pods matching ``label_selector`` in this namespace (the actual
+    live footprint — sandbox pods carry the fleet labels via the pod template)."""
+    kwargs = {"label_selector": label_selector} if label_selector else {}
+    pods = self.core_api.list_namespaced_pod(namespace=self.namespace, **kwargs)
+    return len(pods.items)
 
   def delete_claim(self, name: str) -> None:
     self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim")
 
   def delete_sandbox(self, name: str) -> None:
-    self._delete(constants.SANDBOXES_PLURAL, name, "Sandbox")
+    self._delete(constants.SANDBOXES_PLURAL, name, "Sandbox",
+                 group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION)
 
   def managed_selector(self) -> str:
     return f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}"
 
-  def _list(self, plural: str, label_selector: str | None) -> list[str]:
+  def _list(self, plural: str, label_selector: str | None, *,
+            group: str = constants.GROUP, version: str = constants.VERSION) -> list[str]:
     kwargs = {"label_selector": label_selector} if label_selector else {}
     objs = self.custom_api.list_namespaced_custom_object(
-        group=constants.GROUP, version=constants.VERSION,
+        group=group, version=version,
         namespace=self.namespace, plural=plural, **kwargs)
     return [o["metadata"]["name"] for o in objs.get("items", [])]
 
-  def _delete(self, plural: str, name: str, kind: str) -> None:
+  def _delete(self, plural: str, name: str, kind: str, *,
+              group: str = constants.GROUP, version: str = constants.VERSION) -> None:
     try:
       self.custom_api.delete_namespaced_custom_object(
-          group=constants.GROUP, version=constants.VERSION,
+          group=group, version=version,
           namespace=self.namespace, plural=plural, name=name,
           body=client.V1DeleteOptions(grace_period_seconds=0))
       logger.info("Deleted %s '%s'", kind, name)

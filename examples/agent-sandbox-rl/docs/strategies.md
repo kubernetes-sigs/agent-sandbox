@@ -54,7 +54,7 @@ fleet.run(rollout_fn, strategy="naive", keep_warm=True)       # reuse across ste
 | **Warm-pool strategy** | when pools exist & footprint | `run(strategy=…)`: `naive` / `sliding` / `pipelined` / `none` | `pipelined` eval; `naive`/`sliding` RL |
 | **Concurrency-aware sizing** (default) | pool depth = image's share of the budget | `max_concurrent`, `max_warmpool_size` | eval (1:1), minimal footprint |
 | **Instant-claim (pre-warm)** | one warm replica **per task** | `FleetConfig.warm_per_task=True` | RL (G rollouts share an image) |
-| **Staged warm fill** | warm in waves to bound the controller's create burst | `FleetConfig.warm_create_budget` (1000; `0`=all at once) | large/deep warms — avoids the #1215 over-creation race |
+| **Staged warm fill** | warm in waves to bound the controller's create burst | `FleetConfig.warm_create_budget` (1000; `0`=all at once) | large/deep warms — mitigates the #1215 over-creation race (bounds the burst) |
 | **Replica co-location** | pack a pool's replicas on one node → 1 pull/node | `TemplateSpec.colocate_replicas=True` | deep pools (RL), cache reuse |
 | **Cross-epoch reuse** | keep pools resident across passes | `run(epochs=N)` / `keep_warm=True` | repeated passes (RL epochs) |
 | **Node layer cache** | re-use already-pulled layers | `TemplateSpec.image_pull_policy=IfNotPresent` (default) | every repeated run |

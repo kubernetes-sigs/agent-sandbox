@@ -40,3 +40,24 @@ The controller image reference.
 {{- $tag := required "image.tag is required" .Values.image.tag }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
+
+{{/*
+The normalized, deduplicated list of watched namespaces as JSON.
+*/}}
+{{- define "agent-sandbox.watchNamespaces" -}}
+{{- $watchNamespaces := list -}}
+{{- range splitList "," (default "" .Values.controller.watchNamespace) -}}
+{{- $namespace := trim . -}}
+{{- if and $namespace (not (has $namespace $watchNamespaces)) -}}
+{{- $watchNamespaces = append $watchNamespaces $namespace -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $watchNamespaces -}}
+{{- end }}
+
+{{/*
+The effective leader-election namespace for an in-cluster Helm deployment.
+*/}}
+{{- define "agent-sandbox.leaderElectionNamespace" -}}
+{{- default (include "agent-sandbox.namespace" .) .Values.controller.leaderElectionNamespace -}}
+{{- end }}

@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/rest"
 
 	"github.com/felixge/fgprof"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -43,6 +45,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -85,6 +88,7 @@ func main() {
 	var webhookNamespace string
 	var manageWebhookCerts bool
 	var enableWebhook bool
+	var watchNamespace string
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
@@ -93,10 +97,12 @@ func main() {
 	flag.StringVar(&webhookKeyName, "webhook-key-name", defaultWebhookKeyName, "The filename of the webhook private key within --webhook-cert-dir. Only used when --manage-webhook-certs=false.")
 	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
 	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
-	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Manage webhook serving certs and patch CRD conversion caBundles on startup. Set to false when certs and CRD/webhook configuration are managed externally by a certificate provisioner.")
-	flag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable webhook server and webhook registrations.")
+	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Manage webhook serving certs and patch CRD conversion caBundles on startup. Set to false when certs and CRD/webhook configuration are managed externally (e.g., GKE Dynamic Certificate Delivery).")
+	flag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable webhook server and CRD conversion webhook registrations. Must be false when running in namespaced mode (--namespace).")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&watchNamespace, "namespace", "",
+		"Namespace(s) to watch. Comma-separated for multiple. Falls back to WATCH_NAMESPACE env var. Empty means cluster-scoped (all namespaces). Setting this requires --enable-webhook=false.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
@@ -153,6 +159,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	watchNamespaces, err := parseWatchNamespaces(watchNamespace)
+	if err != nil {
+		setupLog.Error(err, "invalid namespace configuration")
+		os.Exit(1)
+	}
+	if err := validateWebhookConfiguration(enableWebhook, watchNamespaces); err != nil {
+		setupLog.Error(err, "invalid webhook configuration")
+		os.Exit(1)
+	}
 	setupLog.Info("Concurrency settings",
 		"sandbox", sandboxConcurrentWorkers,
 		"sandboxClaim", sandboxClaimConcurrentWorkers,
@@ -194,9 +209,14 @@ func main() {
 	}
 
 	if !enableWebhook {
-		setupLog.Info("webhook subsystem disabled (--enable-webhook=false); " +
-			"installed CRDs must use conversion.strategy=None — the stock CRDs in k8s/crds " +
-			"and helm/crds use Webhook conversion and API version conversion will fail without the webhook server")
+		if len(watchNamespaces) > 0 {
+			setupLog.Info("webhook subsystem disabled for namespaced mode; migrate stored v1alpha1 objects to v1beta1 " +
+				"or keep a cluster-scoped or externally managed conversion webhook available")
+		} else {
+			setupLog.Info("webhook subsystem disabled (--enable-webhook=false); " +
+				"installed CRDs must use conversion.strategy=None — the stock CRDs in k8s/crds " +
+				"and helm/crds use Webhook conversion and API version conversion will fail without the webhook server")
+		}
 		if manageWebhookCerts {
 			setupLog.Info("--manage-webhook-certs has no effect when --enable-webhook=false")
 		}
@@ -325,6 +345,9 @@ func main() {
 			webhookCertName = resolvedCertName
 			webhookKeyName = resolvedKeyName
 		}
+	} else if len(watchNamespaces) > 0 {
+		setupLog.Info("namespaced mode: skipping webhook cert generation and CRD patching; " +
+			"CRDs and their conversion webhooks must be managed cluster-wide")
 	}
 
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
@@ -352,6 +375,23 @@ func main() {
 				},
 			},
 		})
+	}
+	if len(watchNamespaces) > 0 {
+		defaultNamespaces := make(map[string]cache.Config, len(watchNamespaces))
+		for _, ns := range watchNamespaces {
+			defaultNamespaces[ns] = cache.Config{}
+		}
+		mgrOpts.Cache.DefaultNamespaces = defaultNamespaces
+		if enableLeaderElection && leaderElectionNamespace == "" {
+			_, inClusterConfigErr := rest.InClusterConfig()
+			if err := validateLeaderElectionNamespace(inClusterConfigErr); err != nil {
+				setupLog.Error(err, "unable to determine leader election namespace")
+				os.Exit(1)
+			}
+			// In-cluster: controller-runtime resolves the namespace from the pod's service account.
+			setupLog.Info("leader-election-namespace not set; controller-runtime will use the pod's own namespace from the service account")
+		}
+		setupLog.Info("running in namespaced mode", "namespaces", watchNamespaces)
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOpts)
@@ -472,4 +512,51 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func validateWebhookConfiguration(enableWebhook bool, watchNamespaces []string) error {
+	if enableWebhook && len(watchNamespaces) > 0 {
+		return errors.New("--enable-webhook must be false when running in namespaced mode (--namespace)")
+	}
+	return nil
+}
+
+func validateLeaderElectionNamespace(inClusterConfigErr error) error {
+	if inClusterConfigErr == nil {
+		return nil
+	}
+	if errors.Is(inClusterConfigErr, rest.ErrNotInCluster) {
+		return errors.New("--leader-election-namespace must be set when running in namespaced mode outside a cluster")
+	}
+	return fmt.Errorf("check in-cluster configuration for automatic namespace detection: %w", inClusterConfigErr)
+}
+
+// parseWatchNamespaces returns the list of namespaces to watch, following the
+// Operator SDK convention: flag value takes precedence, then WATCH_NAMESPACE env var,
+// empty means cluster-scoped. Accepts comma-separated values for multi-namespace mode.
+func parseWatchNamespaces(flagValue string) ([]string, error) {
+	v := flagValue
+	source := "--namespace"
+	if v == "" {
+		v = os.Getenv("WATCH_NAMESPACE")
+		source = "WATCH_NAMESPACE"
+	}
+	if v == "" {
+		return nil, nil
+	}
+	var result []string
+	seen := map[string]struct{}{}
+	for ns := range strings.SplitSeq(v, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			if _, ok := seen[ns]; ok {
+				continue
+			}
+			seen[ns] = struct{}{}
+			result = append(result, ns)
+		}
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one non-empty namespace", source)
+	}
+	return result, nil
 }

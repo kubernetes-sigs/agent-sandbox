@@ -88,7 +88,23 @@ the pod is `Unschedulable`, the sandbox is **held** (kept, counted, not
 replaced) with a rate-limited 1-minute requeue. Genuinely stuck sandboxes (pod
 scheduled or missing) are still replaced exactly as before.
 
-### 4. Not-progressing signal
+### 4. Self-scheduled post-grace evaluation (also fixes a latent upstream reliability defect)
+
+Live-repro forensics found a reachability gap: in a **quiet cluster**, a pool
+whose sandboxes settle at Ready=False receives **no further reconciles** —
+pod `FailedScheduling` events never touch the Sandbox objects, and the next
+guaranteed reconcile is the ~10h cache resync. That means upstream's 5-minute
+stuck-sandbox GC never actually fires at its deadline without ambient traffic
+(a latent upstream defect), and by extension the unschedulable hold and the
+NotProgressing signal would be unreachable too.
+
+Fix: whenever a reconcile observes not-yet-Ready sandboxes still inside the
+grace period, it returns `RequeueAfter = time until the earliest grace
+deadline (+2s slack)`, composed with any other pending requeue by taking the
+minimum. The post-grace evaluation (stuck GC, unschedulable hold,
+NotProgressing) is now deterministic and self-driving.
+
+### 5. Not-progressing signal
 
 When a pool is holding unschedulable sandboxes it emits a
 `WarmPoolNotProgressing` **Warning Event** on the SandboxWarmPool (once per
@@ -128,6 +144,12 @@ markers on the warm-pool reconciler are strict subsets of existing grants).
     requeue, `WarmPoolNotProgressing` Warning emitted exactly once, and
     `WarmPoolProgressing` emitted when the sandbox goes Ready; genuinely stuck
     and pod-missing sandboxes are still replaced.
+  - **Self-scheduled grace requeue** (fake clock, exact asserts): young
+    not-Ready sandboxes arm `RequeueAfter` = earliest remaining grace (+slack);
+    a settled Ready pool arms nothing; and a full quiet-cluster walk-through —
+    reconcile inside grace, advance the clock by exactly the returned requeue
+    with NO external events, and the unschedulable hold plus exactly one
+    `WarmPoolNotProgressing` event fire deterministically.
   - Watch-handler bookkeeping: owned add/delete events lower expectations;
     orphan/foreign-owned events are ignored.
 - Existing suite updated where semantics deliberately changed (stuck GC and

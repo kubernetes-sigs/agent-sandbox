@@ -468,6 +468,200 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 	})
 }
 
+// TestReconcilePool_YoungNotReadyArmsGraceRequeue: a reconcile that observes
+// not-yet-Ready sandboxes still inside the readiness grace period must
+// self-schedule the post-grace evaluation (RequeueAfter = time until the
+// EARLIEST grace deadline, plus slack). Without this, a pool that settles at
+// Ready=False in a quiet cluster gets no further reconciles until the ~10h
+// resync (pod FailedScheduling events never touch Sandbox objects), so
+// neither the stuck-sandbox GC nor the unschedulable-hold/NotProgressing
+// signal is ever reached — a latent reliability gap in the upstream stuck-GC
+// as well.
+func TestReconcilePool_YoungNotReadyArmsGraceRequeue(t *testing.T) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(3)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-1215",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+
+	// Whole-second base: metav1.Time truncates to seconds on storage round-trips.
+	base := time.Now().Truncate(time.Second)
+	controller := true
+	newSandbox := func(suffix string, age time.Duration, ready metav1.ConditionStatus) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
+		sb.UID = types.UID("uid" + suffix)
+		sb.CreationTimestamp = metav1.Time{Time: base.Add(-age)}
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: ready,
+		}}
+		sb.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       "SandboxWarmPool",
+			Name:       poolName,
+			UID:        warmPool.UID,
+			Controller: &controller,
+		}}
+		return sb
+	}
+
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{
+		Client: newFakeClient(scheme,
+			template, warmPool,
+			newSandbox("-ready", 10*time.Minute, metav1.ConditionTrue),
+			newSandbox("-young2m", 2*time.Minute, metav1.ConditionFalse),
+			newSandbox("-young4m", 4*time.Minute, metav1.ConditionFalse),
+		),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		now:          func() time.Time { return base },
+	}
+	ctx := context.Background()
+
+	requeueAfter, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	// Earliest deadline wins: the 4-minute-old sandbox has 1 minute of grace
+	// left. The fake clock makes this exact.
+	require.Equal(t, warmPoolReadinessGracePeriod-4*time.Minute+graceRequeueSlack, requeueAfter,
+		"requeue must target the earliest remaining grace deadline")
+
+	// A fully Ready pool arms no grace requeue.
+	rReady := SandboxWarmPoolReconciler{
+		Client: newFakeClient(scheme,
+			template, warmPool,
+			newSandbox("-r1", 10*time.Minute, metav1.ConditionTrue),
+			newSandbox("-r2", 10*time.Minute, metav1.ConditionTrue),
+			newSandbox("-r3", 10*time.Minute, metav1.ConditionTrue),
+		),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		now:          func() time.Time { return base },
+	}
+	requeueAfter, err = rReady.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Zero(t, requeueAfter, "a settled Ready pool must not self-requeue")
+}
+
+// TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation walks the exact
+// quiet-cluster sequence end to end on a fake clock, with NO external events
+// between reconciles: the pool's only sandbox sits at Ready=False with an
+// unschedulable pod. Reconcile 1 (inside the grace period) arms the
+// self-scheduled requeue; reconcile 2 — modeling that requeue firing, nothing
+// else having touched the pool — crosses the grace deadline and must apply
+// the unschedulable hold and emit exactly one WarmPoolNotProgressing event.
+func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(1)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-1215",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+
+	// Whole-second base: metav1.Time truncates to seconds on storage round-trips.
+	base := time.Now().Truncate(time.Second)
+	controller := true
+	sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-quiet")
+	sb.UID = "uid-quiet"
+	sb.CreationTimestamp = metav1.Time{Time: base}
+	sb.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+	}}
+	sb.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: extensionsv1beta1.GroupVersion.String(),
+		Kind:       "SandboxWarmPool",
+		Name:       poolName,
+		UID:        warmPool.UID,
+		Controller: &controller,
+	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: poolNamespace},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodScheduled,
+				Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable,
+			}},
+		},
+	}
+
+	current := base
+	recorder := events.NewFakeRecorder(16)
+	scheme := newTestScheme()
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb, pod))
+	r := SandboxWarmPoolReconciler{
+		Client:       lc,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		Recorder:     recorder,
+		now:          func() time.Time { return current },
+	}
+	ctx := context.Background()
+
+	// Reconcile 1: inside the grace period. No hold, no event yet — but the
+	// post-grace evaluation is self-scheduled.
+	requeueAfter, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Equal(t, warmPoolReadinessGracePeriod+graceRequeueSlack, requeueAfter)
+	select {
+	case e := <-recorder.Events:
+		t.Fatalf("no event may fire inside the grace period, got: %s", e)
+	default:
+	}
+
+	// The self-scheduled requeue fires (nothing else touched the pool).
+	current = current.Add(requeueAfter)
+	requeueAfter, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+
+	// Past grace: unschedulable hold applies (sandbox kept, no replacement)
+	// and exactly one WarmPoolNotProgressing warning is emitted.
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}))
+	require.Equal(t, 0, lc.createCount())
+	require.Equal(t, unschedulableRequeueDelay, requeueAfter)
+	select {
+	case e := <-recorder.Events:
+		require.Contains(t, e, reasonWarmPoolNotProgressing)
+		require.Contains(t, e, corev1.EventTypeWarning)
+	default:
+		t.Fatal("expected WarmPoolNotProgressing after the self-scheduled post-grace reconcile")
+	}
+
+	// The rate-limited hold requeue fires again: still held, no duplicate.
+	current = current.Add(requeueAfter)
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	select {
+	case e := <-recorder.Events:
+		t.Fatalf("unexpected duplicate event while state is unchanged: %s", e)
+	default:
+	}
+}
+
 // TestWarmPoolSandboxEventHandler_ObservesOwnedEvents covers the watch-side
 // bookkeeping: add/delete events for pool-owned sandboxes lower the matching
 // expectations; unowned or foreign-owned objects are ignored.

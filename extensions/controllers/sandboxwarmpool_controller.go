@@ -73,6 +73,10 @@ const (
 	// holding unschedulable sandboxes instead of churning delete/create (#1215).
 	unschedulableRequeueDelay = time.Minute
 
+	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
+	// re-evaluation lands strictly after the deadline despite clock jitter.
+	graceRequeueSlack = 2 * time.Second
+
 	// Event reasons surfaced on the SandboxWarmPool when the pool cannot make
 	// progress toward spec.replicas (and when progress resumes).
 	reasonWarmPoolNotProgressing = "WarmPoolNotProgressing"
@@ -99,6 +103,18 @@ type SandboxWarmPoolReconciler struct {
 	// in a not-progressing state (used to emit transition events exactly once).
 	notProgressingMu sync.Mutex
 	notProgressing   map[types.NamespacedName]struct{}
+
+	// now is a test hook for the reconciler's clock; nil means time.Now.
+	now func() time.Time
+}
+
+// clockNow returns the reconciler's current time (time.Now unless a test
+// injected a fake clock).
+func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 // exp returns the reconciler's expectations tracker, lazily initializing it so
@@ -208,11 +224,31 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// active, but they still occupy capacity until fully gone.
 	activeSandboxes, terminatingReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
 
-	now := time.Now()
+	now := r.clockNow()
 	var healthySandboxes []sandboxv1beta1.Sandbox
 	unschedulableReplicas := int32(0)
+	// nextGraceDeadline is the time remaining until the earliest readiness
+	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
+	var nextGraceDeadline time.Duration
 	for _, sb := range activeSandboxes {
-		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() && now.Sub(sb.CreationTimestamp.Time) > warmPoolReadinessGracePeriod {
+		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
+			age := now.Sub(sb.CreationTimestamp.Time)
+			if age <= warmPoolReadinessGracePeriod {
+				// Not Ready but still within the grace period. In a quiet
+				// cluster nothing else touches the Sandbox objects of a pool
+				// that settles at Ready=False (pod FailedScheduling events do
+				// not), so without a self-scheduled requeue the post-grace
+				// evaluation would only ever run on ambient traffic or the
+				// ~10h resync — leaving both the stuck-sandbox GC and the
+				// unschedulable-hold/NotProgressing signal unreachable.
+				// Requeue for the earliest grace deadline so the evaluation
+				// is deterministic.
+				if remaining := warmPoolReadinessGracePeriod - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
+					nextGraceDeadline = remaining
+				}
+				healthySandboxes = append(healthySandboxes, sb)
+				continue
+			}
 			// Deleting an unschedulable sandbox only produces an equally
 			// unschedulable replacement: under a capacity shortfall the old
 			// delete-and-replace behavior becomes an unbounded delete->create
@@ -226,7 +262,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			}
 			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
-				"age", now.Sub(sb.CreationTimestamp.Time).Round(time.Second))
+				"age", age.Round(time.Second))
 			r.exp().ExpectDeletion(poolKey, sb.UID)
 			if err := r.Delete(ctx, &sb); err != nil {
 				r.exp().DeletionObserved(poolKey, sb.UID)
@@ -300,7 +336,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		case !r.exp().TryExpectCreations(poolKey, int(sandboxesToCreate)):
 			logger.Info("Skipping sandbox creation: waiting for in-flight creates/deletes to be observed",
 				"poolName", warmPool.Name)
-			requeueAfter = expectationsPendingRequeueDelay
+			requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
 		default:
 			logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 			// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
@@ -328,7 +364,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		if !r.exp().SatisfiedExpectations(poolKey) {
 			logger.Info("Skipping excess sandbox deletion: waiting for in-flight creates/deletes to be observed",
 				"poolName", warmPool.Name)
-			requeueAfter = expectationsPendingRequeueDelay
+			requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
 		} else {
 			sandboxesToDelete := min(currentReplicas-desiredReplicas, maxBatchSize)
 			logger.Info("Deleting excess sandboxes", "count", sandboxesToDelete)
@@ -373,18 +409,33 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
 			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
 			unschedulableReplicas, desiredReplicas, warmPoolReadinessGracePeriod))
-		if requeueAfter == 0 || unschedulableRequeueDelay < requeueAfter {
-			requeueAfter = unschedulableRequeueDelay
-		}
+		requeueAfter = minNonZeroDuration(requeueAfter, unschedulableRequeueDelay)
 	} else {
 		r.setNotProgressing(warmPool, poolKey, false, "")
 	}
+
+	// Self-schedule the post-grace evaluation for not-yet-Ready sandboxes so
+	// the stuck-GC and the unschedulable-hold run on time even in a cluster
+	// with no ambient traffic.
+	requeueAfter = minNonZeroDuration(requeueAfter, nextGraceDeadline)
 
 	if tmplErr != nil && !k8serrors.IsNotFound(tmplErr) {
 		allErrors = errors.Join(allErrors, tmplErr)
 	}
 
 	return requeueAfter, allErrors
+}
+
+// minNonZeroDuration returns the smaller of two requeue delays, treating zero
+// as "no requeue requested".
+func minNonZeroDuration(a, b time.Duration) time.Duration {
+	if a == 0 {
+		return b
+	}
+	if b == 0 {
+		return a
+	}
+	return min(a, b)
 }
 
 // setNotProgressing tracks the pool's not-progressing state and emits a

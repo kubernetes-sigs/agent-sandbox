@@ -53,6 +53,78 @@ election, and which controllers it registers — rather than cluster-wide behavi
   `SandboxWarmPool`, `SandboxClaim`).
 * `--version`: Print version information and exit.
 
+## Namespace Scoping
+
+By default the controller watches all namespaces. Use `--namespace` (or the `WATCH_NAMESPACE` environment variable) to restrict it to one or more namespaces.
+
+* `--namespace` (default: `""`, cluster-scoped): Comma-separated list of namespaces to watch. When set, the controller only caches and reconciles resources in those namespaces. Falls back to the `WATCH_NAMESPACE` environment variable when the flag is not provided.
+
+The controller does not register admission or conversion webhooks. All field defaults
+are declared as `+kubebuilder:default` markers in the CRD schema and are applied by
+the API server directly, so admission behavior is identical in namespaced and
+cluster-scoped modes.
+
+### Controller argument behavior
+
+The following behavior assumes `--leader-elect=true`.
+
+| `--namespace` | Leader namespace explicit | Leader namespace empty, in-cluster | Leader namespace empty, out-of-cluster |
+|---|---|---|---|
+| Empty | Starts cluster-scoped; Lease in specified namespace | Starts cluster-scoped; Lease in Pod namespace | Startup fails: leader-election namespace cannot be determined |
+| Single | Starts single-namespace; Lease in specified namespace | Starts single-namespace; Lease in Pod namespace | Startup fails: explicit leader-election namespace required |
+| Multiple | Starts multi-namespace; Lease in specified namespace | Starts multi-namespace; Lease in Pod namespace | Startup fails: explicit leader-election namespace required |
+
+If leader-election RBAC is missing, the process can remain running while the
+controllers fail to acquire leadership and therefore do not reconcile.
+
+### Helm behavior
+
+When `controller.watchNamespace` is set, the chart does not render controller
+`ClusterRole` or `ClusterRoleBinding` resources and does not generate workload
+or leader-election `Role` or `RoleBinding` resources. Installation NOTES leave
+those namespace-scoped permissions to advanced users. They must create workload
+permissions in every watched namespace and, when leader election is enabled,
+leader-election permissions in the effective leader namespace, all bound to the
+controller ServiceAccount.
+
+### Single-namespace mode
+
+```yaml
+      containers:
+      - name: agent-sandbox-controller
+        image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller
+        args:
+        - --leader-elect=true
+        - --namespace=my-team-ns
+```
+
+When `--leader-election-namespace` is not set and the controller is running in-cluster, controller-runtime resolves the lease namespace from the pod's own service-account namespace (typically `agent-sandbox-system`). When running out-of-cluster you must set `--leader-election-namespace` explicitly.
+
+By default, the Helm chart injects `--leader-election-namespace=<release-namespace>` in namespaced mode. Advanced users must create the required leader-election Role and RoleBinding in that namespace, or in the namespace selected by `controller.leaderElectionNamespace`.
+
+### Multi-namespace mode
+
+```yaml
+        args:
+        - --leader-elect=true
+        - --namespace=team-a,team-b,team-c
+        - --leader-election-namespace=agent-sandbox-system
+```
+
+For multi-namespace deployments you must set `--leader-election-namespace` explicitly when running out-of-cluster; in-cluster the pod's own namespace is used.
+
+### Downward API / environment variable
+
+The `WATCH_NAMESPACE` environment variable follows the [Operator SDK convention](https://sdk.operatorframework.io/docs/building-operators/golang/operator-scope/) and is useful for Helm or OLM deployments where the watched namespace is the pod's own namespace:
+
+```yaml
+        env:
+        - name: WATCH_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+```
+
 ## Cluster Settings
 
 * `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to

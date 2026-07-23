@@ -140,21 +140,32 @@ spec:
           serviceAccount:
             name: agent-sandbox-controller
             namespace: agent-sandbox-system
+      # VERBS ARE DELIBERATELY NARROW: only the write verbs each resource
+      # needs on the reconcile hot path are listed. Everything else —
+      # informer list/watch (including relists), reads, deletes,
+      # deletecollection — deliberately falls through to agent-sandbox-bulk
+      # (the catch-rest schema for this ServiceAccount at precedence 1000;
+      # this schema matches first at 900 only for the verbs below). A
+      # wildcard here would route informer relists into the critical level
+      # and dilute the guarantee it exists to provide.
       resourceRules:
-        # Claim reconcile writes: annotation updates, adoption update
-        # (optimistic lock), status patch.
+        # Claim reconcile writes: annotation/adoption update (optimistic
+        # lock) and metadata patches = update; status patch and annotation
+        # merge patches = patch. The controller never creates or deletes
+        # claims (users do), and claim reads come from the informer cache.
         - apiGroups: ["extensions.agents.x-k8s.io"]
           resources: ["sandboxclaims", "sandboxclaims/status"]
-          verbs: ["*"]
+          verbs: ["update", "patch"]
           clusterScope: true
           namespaces: ["*"]
         # Claim adoption on the Sandbox object (ownership/label patch) and
-        # the sandbox status patch that forwards Ready to the claim.
+        # the sandbox status update/patch that forwards Ready to the claim.
         # Creates/deletes/lists/watches of sandboxes are deliberately NOT
-        # here — they are replenishment bulk.
+        # here — they are replenishment bulk; sandbox reads come from the
+        # informer cache.
         - apiGroups: ["agents.x-k8s.io"]
           resources: ["sandboxes", "sandboxes/status", "sandboxes/finalizers"]
-          verbs: ["get", "update", "patch"]
+          verbs: ["update", "patch"]
           clusterScope: true
           namespaces: ["*"]
         # Synchronous adoption-time pod patch (strips safe-to-evict, applies
@@ -164,11 +175,13 @@ spec:
           verbs: ["update", "patch"]
           clusterScope: true
           namespaces: ["*"]
-        # Leader-election lease renewals: tiny, and starving them mid-burst
-        # would drop leadership and abort every in-flight reconcile.
+        # Leader election: each renewal is a lease get + update, and
+        # (re)acquisition is a create; starving any of them mid-burst would
+        # drop leadership and abort every in-flight reconcile. No
+        # list/watch/delete — leader election issues none on the hot path.
         - apiGroups: ["coordination.k8s.io"]
           resources: ["leases"]
-          verbs: ["*"]
+          verbs: ["get", "create", "update"]
           clusterScope: true
           namespaces: ["*"]
 ---
@@ -202,9 +215,12 @@ spec:
           namespaces: ["*"]
 ---
 # Catch-rest for the controller: replenishment creates/deletes, informer
-# list/watch, child objects (pods, services, PVCs, secrets, configmaps),
-# CRD patching, discovery. Dedicated seats so no other tenant can queue it,
-# below-critical shares so it cannot crowd out adoption writes.
+# list/watch — including full relists, which land here BY DESIGN because the
+# critical schema lists only hot-path write verbs — child objects (pods,
+# services, PVCs, secrets, configmaps), CRD patching, discovery, and any
+# read/delete verb the critical schema deliberately excludes. Dedicated
+# seats so no other tenant can queue it, below-critical shares so it cannot
+# crowd out adoption writes.
 apiVersion: flowcontrol.apiserver.k8s.io/v1
 kind: FlowSchema
 metadata:

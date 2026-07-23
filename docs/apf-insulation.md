@@ -44,9 +44,14 @@ priority order: **claim path > bulk refill > events**.
 
 | class | APF objects | contents |
 |---|---|---|
-| claim path | `agent-sandbox-critical` (PriorityLevelConfiguration + FlowSchema, precedence 900) | SandboxClaim writes and status, sandbox adoption update/patch and status, the synchronous adoption-time pod patch, leader-election leases |
-| bulk refill | `agent-sandbox-bulk` (PriorityLevelConfiguration + FlowSchema, precedence 1000) | everything else: refill creates/deletes, informer list/watch, child objects, discovery |
+| claim path | `agent-sandbox-critical` (PriorityLevelConfiguration + FlowSchema, precedence 900) | hot-path **write verbs only**: SandboxClaim `update`/`patch` (incl. status), sandbox `update`/`patch` (incl. status/finalizers), adoption-time pod `update`/`patch`, leader-election lease `get`/`create`/`update` |
+| bulk refill | `agent-sandbox-bulk` (PriorityLevelConfiguration + FlowSchema, precedence 1000) | everything else: refill creates/deletes, **all informer list/watch (relists land here by design)**, reads, child objects, discovery |
 | events | `agent-sandbox-events` (FlowSchema only, precedence 950) | controller Events, routed to the pre-existing shared `workload-low` level — sacrificial by design |
+
+The critical schema deliberately lists no read or collection verbs: routing
+informer relists or deletes through the critical level would dilute the very
+capacity guarantee it exists to provide, so those fall through to the bulk
+catch-rest schema (higher precedence number = evaluated after critical).
 
 ## How seats are derived (and why the manifest has no absolute numbers)
 

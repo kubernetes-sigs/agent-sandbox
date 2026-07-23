@@ -25,7 +25,9 @@ recycle counterpart of `run_swebench_fleet.py`. Env-configured:
   RUNTIME_CLASS=gvisor python run_swebench_recycle.py
 
 Safeguards are on by default (circuit breaker + run-id label + staged warm); if a
-run is killed abruptly, sweep it with `python -m agent_sandbox_rl.reaper --namespace rl`.
+run is killed abruptly, sweep just that run with its id (printed at startup):
+`python -m agent_sandbox_rl.reaper --run-id <id> --namespace rl`. (Reaping *every*
+run in the namespace needs an explicit `--all` — it also deletes healthy runs.)
 """
 
 import json

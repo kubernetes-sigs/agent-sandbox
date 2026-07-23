@@ -55,11 +55,18 @@ class Resources:
     against the CRD schema but not persisted.
     """
     try:
-      self.custom_api.get_namespaced_custom_object(
+      existing = self.custom_api.get_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
           name=template_name)
       logger.info("SandboxTemplate '%s' already exists.", template_name)
+      # Template names are deterministic per image (r2e-img-<md5>), so a template
+      # left over from a previous/other run is reused as-is — and its pod-template
+      # labels would carry the OLD run-id, making this run's pods invisible to the
+      # circuit breaker and mis-targeted by the reaper (the #1215 safeguards).
+      # Reconcile the run/managed labels so pods this run spawns are attributed to
+      # this run.
+      self._reconcile_template_labels(template_name, existing)
       return False
     except client.ApiException as e:
       if e.status != 404:
@@ -150,6 +157,34 @@ class Resources:
             }
         },
     }
+
+  def _reconcile_template_labels(self, template_name: str, existing: dict) -> None:
+    """Patch a pre-existing template's metadata + pod-template labels up to this
+    run's labels when they differ, so a reused/leftover template doesn't attribute
+    this run's pods to a stale run-id (breaker/reaper correctness, #1215). Only
+    patches on mismatch; failures warn (the safeguards degrade, not the run)."""
+    desired_meta = dict(self.labels)
+    desired_pod = {**self.labels, "sandbox": template_name}
+    cur_meta = ((existing.get("metadata") or {}).get("labels")) or {}
+    cur_pod = ((((existing.get("spec") or {}).get("podTemplate") or {})
+                .get("metadata") or {}).get("labels")) or {}
+    stale = (any(cur_meta.get(k) != v for k, v in desired_meta.items())
+             or any(cur_pod.get(k) != v for k, v in desired_pod.items()))
+    if not stale:
+      return
+    try:
+      self.custom_api.patch_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
+          name=template_name,
+          body={"metadata": {"labels": desired_meta},
+                "spec": {"podTemplate": {"metadata": {"labels": desired_pod}}}})
+      logger.info("Reconciled labels on pre-existing SandboxTemplate '%s' "
+                  "(run-id refresh)", template_name)
+    except client.ApiException:
+      logger.warning("Failed to reconcile labels on SandboxTemplate '%s'; the "
+                     "circuit breaker/reaper may under-count this run's pods for "
+                     "its image", template_name, exc_info=True)
 
   def delete_template(self, template_name: str) -> None:
     self._delete(constants.TEMPLATES_PLURAL, template_name, "SandboxTemplate")

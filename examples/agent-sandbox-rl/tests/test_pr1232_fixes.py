@@ -81,12 +81,33 @@ def test_pod_template_carries_run_and_managed_labels():
 
 
 # --- #1: count_pods + breaker counts pods --------------------------------- #
-def test_count_pods():
+def test_count_pods_uses_remaining_item_count():
   r = _res()
-  r.core_api.list_namespaced_pod.return_value = MagicMock(items=[1, 2, 3])
-  assert r.count_pods(label_selector="run=x") == 3
+  resp = MagicMock(items=[object()])            # only 1 object transferred
+  resp.metadata.remaining_item_count = 41
+  r.core_api.list_namespaced_pod.return_value = resp
+  assert r.count_pods(label_selector="run=x") == 42   # 1 + 41, no full list
   _, kw = r.core_api.list_namespaced_pod.call_args
-  assert kw["label_selector"] == "run=x"
+  assert kw["label_selector"] == "run=x" and kw["limit"] == 1
+
+
+def test_count_pods_small_set_single_page():
+  r = _res()
+  resp = MagicMock(items=[object()])
+  resp.metadata.remaining_item_count = None
+  resp.metadata._continue = None                # whole set fit in the first page
+  r.core_api.list_namespaced_pod.return_value = resp
+  assert r.count_pods() == 1
+
+
+def test_count_pods_fallback_full_list_when_no_hint():
+  r = _res()
+  page = MagicMock(items=[object()])
+  page.metadata.remaining_item_count = None
+  page.metadata._continue = "tok"               # more pages, but server gave no count hint
+  full = MagicMock(items=[object(), object(), object()])
+  r.core_api.list_namespaced_pod.side_effect = [page, full]
+  assert r.count_pods() == 3
 
 
 def test_live_owned_count_counts_pods_by_run_id(make_cluster):

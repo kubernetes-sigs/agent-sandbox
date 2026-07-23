@@ -362,14 +362,32 @@ func (s *stressTest) createNamespace(ctx context.Context, name string) error {
 // and — for multi-namespace runs — the extra namespaces themselves. Like the
 // probe/throughput deletes, failures are logged rather than returned so
 // cleanup problems do not mask the phase's measurement, and the end-of-run
-// namespace deletion is the backstop for the main namespace.
+// namespace deletion is the backstop for the main namespace. That backstop
+// only covers the main namespace, so when the phase context was cancelled
+// (timeout or shutdown) and extra namespaces exist, cleanup still runs — on
+// a context detached from the cancelled one — or the -sN namespaces would
+// leak.
 func (s *stressTest) cleanupSustained(ctx context.Context, number PhaseNumber, namespaces []sustainedNamespaceClients, poolName, templateName string) {
-	if ctx.Err() != nil || len(namespaces) == 0 {
-		// Shutting down (namespace cleanup removes remaining objects), or
-		// the phase failed before any namespace was resolved.
+	if len(namespaces) == 0 {
+		// The phase failed before any namespace was resolved.
 		return
 	}
 	phase := PhaseClaimsWarmSustained
+	if ctx.Err() != nil {
+		if len(namespaces) == 1 && namespaces[0].name == s.namespace {
+			// Shutting down, and everything lives in the main test
+			// namespace: the end-of-run namespace deletion removes it.
+			return
+		}
+		// Shutting down with extra namespaces created outside the main test
+		// namespace: no backstop removes those, so clean up anyway on a
+		// detached context, bounded like the end-of-run cleanup so a wedged
+		// cluster cannot hang shutdown.
+		log.Printf("[%s#%d] phase context cancelled; cleaning up extra namespaces on a detached context", phase, number)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+	}
 
 	// Delete every created claim that was never OBSERVED deleted — including
 	// ones whose delete was attempted but failed (or whose DELETED event the

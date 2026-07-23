@@ -138,7 +138,7 @@ sequentially.
 
 ### Webhook flow
 
-```
+```text
 SandboxClaim CREATE
     │
     ▼
@@ -147,10 +147,14 @@ Webhook intercepts
     ├── Has routing annotations? ──No──▶ Allow unchanged
     │
     ▼
-Parse isolation tier (default: process)
+Parse and validate isolation tier (default: process)
+    │
+    ├── Unknown tier value? ──Yes──▶ Reject (admission error)
     │
     ▼
 Look up tier's pool list from ConfigMap
+    │
+    ├── Tier missing or empty? ──Yes──▶ Reject (misconfiguration)
     │
     ▼
 For each pool in preference order:
@@ -174,6 +178,9 @@ compatibility.
 ### Webhook implementation (simplified)
 
 ```go
+var validTiers = map[string]bool{"process": true, "hardware": true}
+var validOverflow = map[string]bool{"allow": true, "deny": true}
+
 func (h *RoutingWebhook) Handle(ctx context.Context, req admission.Request) admission.Response {
     claim := &extensionsv1beta1.SandboxClaim{}
     if err := h.Decoder.Decode(req, claim); err != nil {
@@ -184,39 +191,60 @@ func (h *RoutingWebhook) Handle(ctx context.Context, req admission.Request) admi
     if tier == "" {
         return admission.Allowed("no routing annotation")
     }
+    if !validTiers[tier] {
+        return admission.Denied(fmt.Sprintf("invalid isolation tier %q, must be process or hardware", tier))
+    }
 
-    pool := h.selectPool(ctx, tier, claim.Annotations)
+    overflow := claim.Annotations["agents.x-k8s.io/overflow"]
+    if overflow == "" {
+        overflow = "allow"
+    }
+    if !validOverflow[overflow] {
+        return admission.Denied(fmt.Sprintf("invalid overflow value %q, must be allow or deny", overflow))
+    }
+
+    ns := req.Namespace
+    pool, err := h.selectPool(ctx, tier, overflow, ns)
+    if err != nil {
+        return admission.Denied(err.Error())
+    }
 
     mutated := claim.DeepCopy()
     mutated.Spec.WarmPoolRef.Name = pool
     return admission.PatchResponseFromRaw(req.Object.Raw, mutated)
 }
 
-func (h *RoutingWebhook) selectPool(ctx context.Context, tier string, annotations map[string]string) string {
+func (h *RoutingWebhook) selectPool(ctx context.Context, tier, overflow, ns string) (string, error) {
     cfg := h.config.Load()
-    overflow := annotations["agents.x-k8s.io/overflow"] != "deny"
 
-    if pool, ok := h.firstHealthyPool(ctx, cfg.Tiers[tier].Pools); ok {
-        return pool
+    tierCfg, ok := cfg.Tiers[tier]
+    if !ok || len(tierCfg.Pools) == 0 {
+        return "", fmt.Errorf("no pools configured for tier %q", tier)
     }
 
-    if overflow {
+    if pool, found := h.firstHealthyPool(ctx, tierCfg.Pools, ns); found {
+        return pool, nil
+    }
+
+    if overflow == "allow" {
         otherTier := "hardware"
         if tier == "hardware" {
             otherTier = "process"
         }
-        if pool, ok := h.firstHealthyPool(ctx, cfg.Tiers[otherTier].Pools); ok {
-            return pool
+        if otherCfg, ok := cfg.Tiers[otherTier]; ok {
+            if pool, found := h.firstHealthyPool(ctx, otherCfg.Pools, ns); found {
+                return pool, nil
+            }
         }
     }
 
-    return cfg.Tiers[tier].Pools[0].Name
+    return tierCfg.Pools[0].Name, nil
 }
 
-func (h *RoutingWebhook) firstHealthyPool(ctx context.Context, pools []PoolRef) (string, bool) {
+func (h *RoutingWebhook) firstHealthyPool(ctx context.Context, pools []PoolRef, ns string) (string, bool) {
     for _, p := range pools {
         pool := &extensionsv1beta1.SandboxWarmPool{}
-        if err := h.Client.Get(ctx, client.ObjectKey{Name: p.Name, Namespace: h.namespace}, pool); err != nil {
+        if err := h.Client.Get(ctx, client.ObjectKey{Name: p.Name, Namespace: ns}, pool); err != nil {
             continue
         }
         if pool.Status.ReadyReplicas > 0 {
@@ -238,7 +266,7 @@ webhooks:
   - name: routing.sandbox.agents.x-k8s.io
     admissionReviewVersions: ["v1"]
     sideEffects: None
-    failurePolicy: Ignore
+    failurePolicy: Fail
     clientConfig:
       service:
         name: sandbox-routing-webhook
@@ -264,7 +292,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "watch"]
+    verbs: ["get", "list", "watch"]
     resourceNames: ["sandbox-routing-config"]
 ```
 
@@ -332,7 +360,7 @@ claim = SandboxClaim(
         "agents.x-k8s.io/isolation": "hardware",
         "agents.x-k8s.io/overflow": "allow",
     }},
-    spec={"warmPoolRef": {"name": "placeholder"}},
+    spec={"warmPoolRef": {"name": "pool-default"}},
 )
 ```
 
@@ -361,16 +389,27 @@ failure mode, and has no integration with kubectl workflows.
 
 ## Security considerations
 
-1. **Webhook availability**: `failurePolicy: Ignore` ensures claims are admitted even
-   when the webhook is down. Unrouted claims use their original `warmPoolRef` — the
-   worst case is no routing, not blocked admission.
+1. **Webhook availability**: `failurePolicy: Fail` blocks claim creation when the
+   webhook is unavailable. This is deliberate — with `Ignore`, a `hardware`/`deny`
+   claim would pass through with its original placeholder `warmPoolRef`, silently
+   violating the requested isolation guarantee. Operators who prefer availability
+   over isolation enforcement can change to `Ignore`, understanding that webhook
+   downtime degrades routing to best-effort.
 
-2. **Annotation abuse**: A user could set `isolation: hardware` to preferentially
-   consume expensive kata pool slots. Mitigated by the fact that routing policy is
-   operator-controlled (ConfigMap), and pool capacity is bounded by `Replicas`.
-   Namespace-scoped `namespaceSelector` limits which namespaces can use routing.
+2. **CREATE-only operations**: The webhook intercepts only `CREATE`, not `UPDATE`.
+   This is correct because `spec.warmPoolRef` is effectively immutable after the
+   claim controller adopts a sandbox — changing it post-adoption has no effect.
+   Annotation changes on existing claims do not re-route.
 
-3. **Pool exhaustion**: Rapid claims can exhaust all pools regardless of routing.
+3. **Annotation abuse**: Routing annotations are **advisory, not an authorization
+   boundary**. Any user who can create a `SandboxClaim` in a routing-enabled
+   namespace can request `isolation: hardware` and consume kata pool capacity.
+   Mitigations: `namespaceSelector` limits which namespaces participate in routing,
+   and pool capacity is bounded by `Replicas`. For stricter enforcement, operators
+   can deploy a `ValidatingAdmissionPolicy` that restricts which namespaces or
+   subjects may use specific tier values. Per-tier quotas are deferred to future work.
+
+4. **Pool exhaustion**: Rapid claims can exhaust all pools regardless of routing.
    Kubernetes native ResourceQuota and LimitRange apply. Future work may add
    per-tier rate limits.
 

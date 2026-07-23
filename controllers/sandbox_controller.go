@@ -214,14 +214,32 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
+	// Initialize trace ID / observability / first-ready annotations for active
+	// resources missing them (inline, no re-reconcile). Folding the already-Ready
+	// first-ready sentinel into this patch avoids a second write on upgrade when
+	// both the observability and flap-guard annotations are missing.
 	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	needTraceContextPatch := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
+	needObservabilityPatch := sandbox.Annotations == nil || sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] == ""
+	alreadyReady := meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	needFirstReadyBackfill := alreadyReady &&
+		(sandbox.Annotations == nil || sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] == "")
+
+	if needTraceContextPatch || needObservabilityPatch || needFirstReadyBackfill {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+		if needTraceContextPatch {
+			sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+		}
+		if needObservabilityPatch {
+			sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if needFirstReadyBackfill {
+			// Sentinel: true first-ready time is unknown (pre-upgrade or prior stamp failure).
+			sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = "unknown"
+		}
 
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
@@ -260,6 +278,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else if metricsErr := r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus); metricsErr != nil {
+			err = errors.Join(err, metricsErr)
 		}
 	}
 	// return errors seen
@@ -508,6 +528,150 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+// backfillFirstReadyAnnotation stamps the SandboxFirstReadyAnnotation with a
+// sentinel value when the sandbox was previously Ready but the annotation is
+// missing (e.g. a prior Patch failed). Prefer the early Reconcile patch that
+// folds this sentinel in with other missing annotations when the sandbox is
+// already Ready; this helper remains as a safety net if the early path was
+// skipped. This arms the persistent guard so that future readiness flaps are
+// highly unlikely to double-count metrics. Double counting would only happen if
+// both the original happy-path stamp and this backfill Patch fail exactly at
+// the transitions between both NotReady->Ready and Ready->NotReady, as well as
+// all reconcile cycles where it stays Ready. The sentinel "unknown" is used
+// instead of a timestamp to signal that the actual first-ready time is unknown.
+func (r *SandboxReconciler) backfillFirstReadyAnnotation(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
+	if sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] != "" {
+		return nil
+	}
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = "unknown"
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return fmt.Errorf("backfill sandbox first-ready annotation: %w", err)
+	}
+	return nil
+}
+
+// recordSandboxCreationMetrics detects the first transition to Ready=True and records
+// sandbox lifecycle metrics (creation latency, ready latency). It stamps the
+// sandbox-first-ready-at annotation to prevent duplicate recording on re-Ready
+// events (e.g. readiness probe flaps). Returns an error if the annotation patch
+// fails so that the reconciler retries; the retry is safe because the status
+// already persists Ready=True, so the oldReady guard will skip metric recording.
+//
+// When the sandbox was previously Ready but the annotation is missing (e.g. a
+// prior Patch failed, or a pre-existing sandbox from before this controller
+// version), the method backfills the annotation with a sentinel value to arm the
+// persistent guard before the next readiness flap can re-record metrics.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) error {
+	logger := log.FromContext(ctx)
+
+	// Only record on the first transition to Ready=True.
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		// Not Ready yet. If the sandbox was previously Ready but the annotation
+		// is missing (prior Patch failed), backfill it now so the persistent
+		// guard is armed before the sandbox can flap back to Ready.
+		if wasReady {
+			return r.backfillFirstReadyAnnotation(ctx, sandbox)
+		}
+		return nil
+	}
+
+	if wasReady {
+		// Already Ready before this reconcile; backfill the annotation if
+		// needed (e.g. prior Patch failed, or pre-existing sandbox from before
+		// this controller version).
+		return r.backfillFirstReadyAnnotation(ctx, sandbox)
+	}
+
+	// Persistent guard: if the first-ready annotation is already set, metrics were
+	// already recorded for this Sandbox on a previous reconcile. This prevents
+	// duplicate histogram observations when readiness flaps (Ready → NotReady → Ready).
+	if sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] != "" {
+		return nil
+	}
+
+	// Resolve metric labels.
+	launchType := asmetrics.LaunchTypeCold
+	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	templateName := "unknown"
+	if tmpl, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
+		templateName = tmpl
+	}
+
+	ownedBy := resolveOwnedBy(sandbox)
+
+	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType, "ownedBy", ownedBy)
+
+	// 1. Creation latency (Sandbox.CreationTimestamp → Ready.LastTransitionTime).
+	if !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
+		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+		if latency >= 0 {
+			asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
+		}
+	}
+
+	// 2. Ready latency (observability annotation → Ready.LastTransitionTime).
+	// Use the same Ready instant as creation latency so reconcile processing
+	// after the condition transition is not included. metav1.Time is
+	// second-precision, so when the observability annotation is stamped in the
+	// same reconcile the truncated Ready instant can land slightly before the
+	// nano-precision stamp; treat that as zero rather than skipping.
+	if observedTimeStr := sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation]; observedTimeStr != "" {
+		observedTime, parseErr := time.Parse(time.RFC3339Nano, observedTimeStr)
+		if parseErr != nil {
+			logger.Error(parseErr, "Failed to parse sandbox observability annotation, skipping ready latency metric", "value", observedTimeStr)
+		} else if !newReady.LastTransitionTime.IsZero() {
+			latency := max(newReady.LastTransitionTime.Sub(observedTime), time.Duration(0))
+			asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
+		}
+	}
+
+	// Stamp the first-ready annotation to prevent duplicate recording on re-Ready events.
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = make(map[string]string)
+	}
+	sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return fmt.Errorf("stamp first-ready annotation: %w", err)
+	}
+	return nil
+}
+
+// resolveOwnedBy determines the owner of a Sandbox from its controller owner reference.
+// Owner references keep the apiVersion that was current when they were written and
+// are not rewritten by storage migration, so sandboxes created by a pre-v1beta1
+// extensions controller still carry the v1alpha1 group version after an upgrade.
+// Match on group+kind, not version, so owned_by stays stable across API bumps.
+func resolveOwnedBy(sandbox *sandboxv1beta1.Sandbox) string {
+	controllerRef := metav1.GetControllerOf(sandbox)
+	if controllerRef == nil {
+		return asmetrics.OwnedByNone
+	}
+	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
+	if err != nil || refGV.Group != extensionsv1beta1.GroupVersion.Group {
+		return asmetrics.OwnedByNone
+	}
+	switch controllerRef.Kind {
+	case "SandboxClaim":
+		return asmetrics.OwnedBySandboxClaim
+	case "SandboxWarmPool":
+		return asmetrics.OwnedBySandboxWarmPool
+	default:
+		return asmetrics.OwnedByNone
+	}
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only

@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -169,11 +170,14 @@ func TestSandboxVolumeClaimTemplatesImmutable(t *testing.T) {
 			}
 			require.NoError(t, tc.CreateWithCleanup(t.Context(), sb))
 
-			latest := &sandboxv1beta1.Sandbox{}
-			require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: sb.Name, Namespace: ns.Name}, latest))
-			latest.Spec.VolumeClaimTemplates = c.mutate(latest.Spec.VolumeClaimTemplates)
-
-			err := tc.Update(t.Context(), latest)
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &sandboxv1beta1.Sandbox{}
+				if err := tc.Get(t.Context(), types.NamespacedName{Name: sb.Name, Namespace: ns.Name}, latest); err != nil {
+					return err
+				}
+				latest.Spec.VolumeClaimTemplates = c.mutate(latest.Spec.VolumeClaimTemplates)
+				return tc.Update(t.Context(), latest)
+			})
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "volumeClaimTemplates is immutable")
 		})

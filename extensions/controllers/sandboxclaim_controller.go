@@ -1853,21 +1853,6 @@ func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Cont
 	}
 }
 
-// recordSandboxCreationLatency records the sandbox creation latency.
-func (r *SandboxClaimReconciler) recordSandboxCreationLatency(sandbox *v1beta1.Sandbox, launchType string, templateName string) {
-	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {
-		return
-	}
-	sandboxReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1beta1.SandboxConditionReady))
-	if sandboxReady == nil || sandboxReady.Status != metav1.ConditionTrue || sandboxReady.LastTransitionTime.IsZero() {
-		return
-	}
-	latency := sandboxReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-	if latency >= 0 {
-		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
-	}
-}
-
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	ctx context.Context,
@@ -1921,7 +1906,6 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
-	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
 
 	// Mark the claim so a later Ready transition (e.g. a resume) does not re-record.
 	if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {

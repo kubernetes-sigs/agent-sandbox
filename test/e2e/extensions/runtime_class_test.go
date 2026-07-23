@@ -520,20 +520,20 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			cw := csv.NewWriter(csvFile)
 			defer cw.Flush()
 
-			cw.Write([]string{"# cluster_id", clusterID})
-			cw.Write([]string{"# instance_type", instanceType})
-			cw.Write([]string{"# runtime_class", runtimeClass})
-			cw.Write([]string{"# pool_size", strconv.Itoa(poolSize)})
-			cw.Write([]string{"# workload_sec", strconv.Itoa(workloadSec)})
-			cw.Write([]string{"# warm_baseline_sec", fmt.Sprintf("%.3f", warmBaseline.Seconds())})
-			cw.Write([]string{"# warm_cold_threshold_sec", fmt.Sprintf("%.3f", warmColdThreshold.Seconds())})
-			cw.Write([]string{"# calib_pool_size", strconv.Itoa(calibPoolSize)})
-			cw.Write([]string{"# batch_refill_sec", fmt.Sprintf("%.3f", batchRefill.Seconds())})
-			cw.Write([]string{"# refill_per_slot_sec", fmt.Sprintf("%.3f", refillPerSlot.Seconds())})
-			cw.Write([]string{"# batch_size", strconv.Itoa(batchSize)})
-			cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
-			cw.Write([]string{"# settle_ms", "100"})
-			cw.Write([]string{"batch", "claim", "latency_sec", "type", "wall_offset_sec", "ready_at_start"})
+			_ = cw.Write([]string{"# cluster_id", clusterID})
+			_ = cw.Write([]string{"# instance_type", instanceType})
+			_ = cw.Write([]string{"# runtime_class", runtimeClass})
+			_ = cw.Write([]string{"# pool_size", strconv.Itoa(poolSize)})
+			_ = cw.Write([]string{"# workload_sec", strconv.Itoa(workloadSec)})
+			_ = cw.Write([]string{"# warm_baseline_sec", fmt.Sprintf("%.3f", warmBaseline.Seconds())})
+			_ = cw.Write([]string{"# warm_cold_threshold_sec", fmt.Sprintf("%.3f", warmColdThreshold.Seconds())})
+			_ = cw.Write([]string{"# calib_pool_size", strconv.Itoa(calibPoolSize)})
+			_ = cw.Write([]string{"# batch_refill_sec", fmt.Sprintf("%.3f", batchRefill.Seconds())})
+			_ = cw.Write([]string{"# refill_per_slot_sec", fmt.Sprintf("%.3f", refillPerSlot.Seconds())})
+			_ = cw.Write([]string{"# batch_size", strconv.Itoa(batchSize)})
+			_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
+			_ = cw.Write([]string{"# settle_ms", "100"})
+			_ = cw.Write([]string{"batch", "claim", "latency_sec", "type", "wall_offset_sec", "ready_at_start"})
 
 			var claimCounter atomic.Int64
 			var allRecords []claimRecord
@@ -640,7 +640,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 					r.wallOffset.Seconds(),
 					r.readyAtStart)
 
-				cw.Write([]string{
+				_ = cw.Write([]string{
 					strconv.Itoa(r.batch),
 					strconv.Itoa(r.claimIndex),
 					fmt.Sprintf("%.3f", r.latency.Seconds()),
@@ -687,17 +687,17 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("  CSV report:          %s", csvPath)
 			t.Logf("=======================================================================")
 
-			cw.Write([]string{})
-			cw.Write([]string{"# total_batches", strconv.Itoa(batchNum)})
-			cw.Write([]string{"# total_claims", strconv.Itoa(totalClaims)})
-			cw.Write([]string{"# warm_claims", strconv.Itoa(warmCount)})
-			cw.Write([]string{"# cold_claims", strconv.Itoa(totalClaims - warmCount)})
-			cw.Write([]string{"# green_claims", strconv.Itoa(greenCount)})
-			cw.Write([]string{"# grey_zone_claims", strconv.Itoa(greyZoneCount)})
-			cw.Write([]string{"# worst_start_sec", fmt.Sprintf("%.3f", worstStart.Seconds())})
-			cw.Write([]string{"# over_cold_claims", strconv.Itoa(overColdCount)})
-			cw.Write([]string{"# total_duration_sec", fmt.Sprintf("%.3f", totalDuration.Seconds())})
-			cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
+			_ = cw.Write([]string{})
+			_ = cw.Write([]string{"# total_batches", strconv.Itoa(batchNum)})
+			_ = cw.Write([]string{"# total_claims", strconv.Itoa(totalClaims)})
+			_ = cw.Write([]string{"# warm_claims", strconv.Itoa(warmCount)})
+			_ = cw.Write([]string{"# cold_claims", strconv.Itoa(totalClaims - warmCount)})
+			_ = cw.Write([]string{"# green_claims", strconv.Itoa(greenCount)})
+			_ = cw.Write([]string{"# grey_zone_claims", strconv.Itoa(greyZoneCount)})
+			_ = cw.Write([]string{"# worst_start_sec", fmt.Sprintf("%.3f", worstStart.Seconds())})
+			_ = cw.Write([]string{"# over_cold_claims", strconv.Itoa(overColdCount)})
+			_ = cw.Write([]string{"# total_duration_sec", fmt.Sprintf("%.3f", totalDuration.Seconds())})
+			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
 		})
 	}
 }
@@ -757,7 +757,7 @@ func workloadPodSpec(rcPtr *string, workloadSec int) corev1.PodSpec {
 func benchPoolSizes(cpuCapacity int64) []int {
 	if v := os.Getenv("SANDBOX_POOL_SIZES"); v != "" {
 		var sizes []int
-		for _, s := range strings.Split(v, ",") {
+		for s := range strings.SplitSeq(v, ",") {
 			if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
 				sizes = append(sizes, n)
 			}
@@ -809,7 +809,6 @@ func BenchmarkRuntimeClassColdStart(b *testing.B) {
 	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
 
 	for _, image := range benchImages() {
-		image := image
 		b.Run(shortImageName(image), func(b *testing.B) {
 			podSpec := runtimeClassPodSpec(rcPtr, image)
 
@@ -864,9 +863,7 @@ func BenchmarkRuntimeClassWarmClaim(b *testing.B) {
 	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
 
 	for _, image := range benchImages() {
-		image := image
 		for _, poolSize := range poolSizes {
-			poolSize := poolSize
 			name := fmt.Sprintf("%s/pool-%d", shortImageName(image), poolSize)
 
 			b.Run(name, func(b *testing.B) {

@@ -315,6 +315,9 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	// --- Calibrate once: warm baseline + batched refill rate ---
 	cpus, err := tc0.ClusterCPUCapacity(t.Context())
 	require.NoError(t, err)
+	if isVMRuntime(runtimeClass) && cpus == 0 {
+		t.Skip("skipping VM runtime burst test: no worker CPU capacity reported")
+	}
 	calibPoolSize := max(4, len(workers)*2)
 	if isVMRuntime(runtimeClass) && int64(calibPoolSize) > cpus {
 		calibPoolSize = int(cpus)

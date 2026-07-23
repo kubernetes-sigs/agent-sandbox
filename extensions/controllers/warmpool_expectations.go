@@ -26,6 +26,16 @@ import (
 // controller's ExpectationsTimeout: long enough for a watch event to arrive
 // under heavy apiserver load, short enough that a lost event cannot wedge a
 // pool forever.
+//
+// The trade, explicitly: while an expectation is outstanding the pool can
+// neither create nor delete-excess, so a lost or badly delayed watch event
+// can idle a pool for up to this long (the 30s fallback requeue only
+// re-checks satisfaction, it does not shorten this window). At scale that can
+// surface as a ~5m warm-fill p99 outlier. This is conservative by design:
+// under-creation for a few minutes is recoverable, while trusting a stale
+// cache too early re-opens the #1215 over-creation runaway. If warm pools
+// (high churn, normally fast event delivery) ever prove to deserve a shorter
+// timeout than kube's, this constant is the single knob.
 const expectationsTimeout = 5 * time.Minute
 
 // warmPoolExpectations tracks in-flight Sandbox creations and deletions per

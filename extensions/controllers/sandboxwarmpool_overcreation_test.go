@@ -585,6 +585,15 @@ func TestReconcilePool_ExcessDeleteNotFoundLowersExpectation(t *testing.T) {
 	require.Len(t, list.Items, 4, "next reconcile must not be blocked by the phantom's stale expectation")
 }
 
+// zeroGraceJitter disables the grace-requeue jitter for the duration of a
+// test so fake-clock assertions can be exact; restored on cleanup.
+func zeroGraceJitter(t *testing.T) {
+	t.Helper()
+	prev := graceRequeueJitterFactor
+	graceRequeueJitterFactor = 0
+	t.Cleanup(func() { graceRequeueJitterFactor = prev })
+}
+
 // TestReconcilePool_YoungNotReadyArmsGraceRequeue: a reconcile that observes
 // not-yet-Ready sandboxes still inside the readiness grace period must
 // self-schedule the post-grace evaluation (RequeueAfter = time until the
@@ -595,6 +604,7 @@ func TestReconcilePool_ExcessDeleteNotFoundLowersExpectation(t *testing.T) {
 // signal is ever reached — a latent reliability gap in the upstream stuck-GC
 // as well.
 func TestReconcilePool_YoungNotReadyArmsGraceRequeue(t *testing.T) {
+	zeroGraceJitter(t)
 	const poolName = "test-pool"
 	const poolNamespace = "default"
 	replicas := int32(3)
@@ -655,6 +665,29 @@ func TestReconcilePool_YoungNotReadyArmsGraceRequeue(t *testing.T) {
 	require.Equal(t, warmPoolReadinessGracePeriod-4*time.Minute+graceRequeueSlack, requeueAfter,
 		"requeue must target the earliest remaining grace deadline")
 
+	// With the default jitter factor, the requeue is spread inside
+	// [base, base*(1+factor)] — never earlier than the deadline, never more
+	// than 50% beyond it.
+	graceRequeueJitterFactor = 0.5
+	jitterBase := warmPoolReadinessGracePeriod - 4*time.Minute + graceRequeueSlack
+	for range 20 {
+		rj := SandboxWarmPoolReconciler{
+			Client: newFakeClient(scheme,
+				template, warmPool,
+				newSandbox("-jitter", 4*time.Minute, metav1.ConditionFalse),
+			),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			now:          func() time.Time { return base },
+		}
+		got, jerr := rj.reconcilePool(ctx, warmPool)
+		require.NoError(t, jerr)
+		require.GreaterOrEqual(t, got, jitterBase, "jitter must never fire before the grace deadline")
+		require.LessOrEqual(t, got, time.Duration(float64(jitterBase)*(1+graceRequeueJitterFactor)),
+			"jitter must be bounded by the configured factor")
+	}
+	graceRequeueJitterFactor = 0
+
 	// A fully Ready pool arms no grace requeue.
 	rReady := SandboxWarmPoolReconciler{
 		Client: newFakeClient(scheme,
@@ -680,6 +713,7 @@ func TestReconcilePool_YoungNotReadyArmsGraceRequeue(t *testing.T) {
 // else having touched the pool — crosses the grace deadline and must apply
 // the unschedulable hold and emit exactly one WarmPoolNotProgressing event.
 func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
+	zeroGraceJitter(t)
 	const poolName = "test-pool"
 	const poolNamespace = "default"
 	replicas := int32(1)

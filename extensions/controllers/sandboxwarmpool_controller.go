@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -76,6 +77,18 @@ const (
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
 	graceRequeueSlack = 2 * time.Second
+)
+
+// graceRequeueJitterFactor spreads the self-scheduled post-grace requeues of
+// a fleet warmed together (whose grace deadlines therefore cluster) across a
+// wait.Jitter window of up to +50% of the remaining grace, instead of letting
+// every pool re-reconcile inside the same ~2s slack window (thundering herd
+// of unschedulable-pod checks + status updates at 500-18K pools). No single
+// pool's post-grace evaluation is delayed more than 1.5x its remaining grace.
+// Package variable so deterministic fake-clock tests can zero it.
+var graceRequeueJitterFactor = 0.5
+
+const (
 
 	// Event reasons surfaced on the SandboxWarmPool when the pool cannot make
 	// progress toward spec.replicas (and when progress resumes).
@@ -431,7 +444,12 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	// Self-schedule the post-grace evaluation for not-yet-Ready sandboxes so
 	// the stuck-GC and the unschedulable-hold run on time even in a cluster
-	// with no ambient traffic.
+	// with no ambient traffic. Jittered so a fleet warmed together does not
+	// re-reconcile in one synchronized post-grace spike (wait.Jitter treats
+	// factor <= 0 as a default, so guard the tests' zeroed factor).
+	if nextGraceDeadline > 0 && graceRequeueJitterFactor > 0 {
+		nextGraceDeadline = wait.Jitter(nextGraceDeadline, graceRequeueJitterFactor)
+	}
 	requeueAfter = minNonZeroDuration(requeueAfter, nextGraceDeadline)
 
 	if tmplErr != nil && !k8serrors.IsNotFound(tmplErr) {

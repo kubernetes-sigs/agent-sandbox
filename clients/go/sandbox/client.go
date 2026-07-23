@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
@@ -42,9 +43,11 @@ type Client struct {
 	tracer  trace.Tracer
 	svcName string
 
-	mu         sync.Mutex
-	registry   map[Key]*Sandbox
-	stopSignal context.CancelFunc // non-nil when signal handler is active
+	mu              sync.Mutex
+	registry        map[Key]*Sandbox
+	stopSignal      context.CancelFunc // non-nil when signal handler is active
+	stopAutoCleanup func()             // non-nil when auto-cleanup is enabled
+	cleanupEnabled  bool               // tracks whether cleanup has been enabled
 }
 
 // NewClient creates a Client with shared configuration.
@@ -65,14 +68,22 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 
 	tracer, svcName := newTracer(opts)
 
-	return &Client{
+	c := &Client{
 		opts:     opts,
 		k8s:      k8s,
 		log:      opts.Logger,
 		tracer:   tracer,
 		svcName:  svcName,
 		registry: make(map[Key]*Sandbox),
-	}, nil
+	}
+
+	// Enable automatic cleanup if requested
+	if opts.CleanupOnSignal {
+		// Register signal handler for SIGINT/SIGTERM
+		_ = c.EnableAutoCleanup()
+	}
+
+	return c, nil
 }
 
 // CreateSandbox provisions a new sandbox and returns a managed handle.
@@ -261,6 +272,7 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 		c.mu.Unlock()
 		return func() {}
 	}
+	c.cleanupEnabled = true
 	ctx, cancel := context.WithCancel(context.Background())
 	c.stopSignal = cancel
 	c.mu.Unlock()
@@ -268,12 +280,39 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 
+	// Create stop function that resets state
+	stopFunc := func() {
+		signal.Stop(ch)
+		cancel()
+		c.mu.Lock()
+		c.cleanupEnabled = false
+		c.stopSignal = nil
+		c.stopAutoCleanup = nil
+		c.mu.Unlock()
+	}
+
+	c.mu.Lock()
+	c.stopAutoCleanup = stopFunc
+	c.mu.Unlock()
+
 	go func() {
 		select {
 		case sig := <-ch:
-			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
-			c.DeleteAll(context.Background())
+			// Stop signal handling immediately so subsequent signals use default behavior
 			signal.Stop(ch)
+			// Reset state so cleanup is not considered active
+			c.mu.Lock()
+			c.cleanupEnabled = false
+			c.stopSignal = nil
+			c.stopAutoCleanup = nil
+			c.mu.Unlock()
+
+			c.log.Info("signal received, cleaning up sandboxes", "signal", sig.String())
+			// Run cleanup with bounded timeout to avoid blocking termination indefinitely
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+			c.DeleteAll(cleanupCtx)
+
 			// Re-raise so the default handler terminates the process.
 			p, _ := os.FindProcess(os.Getpid())
 			_ = p.Signal(sig)
@@ -282,7 +321,22 @@ func (c *Client) EnableAutoCleanup() (stop func()) {
 		}
 	}()
 
-	return func() {
-		cancel()
+	return stopFunc
+}
+
+// DisableAutoCleanup stops the automatic cleanup signal handler.
+// Safe to call even if auto-cleanup was never enabled.
+func (c *Client) DisableAutoCleanup() {
+	c.mu.Lock()
+	stop := c.stopAutoCleanup
+	if stop != nil {
+		c.stopAutoCleanup = nil
+		c.stopSignal = nil
+		c.cleanupEnabled = false
+	}
+	c.mu.Unlock()
+
+	if stop != nil {
+		stop()
 	}
 }

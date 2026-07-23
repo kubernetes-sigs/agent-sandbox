@@ -35,6 +35,11 @@ import (
 
 func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 	t.Helper()
+	return newTestClientWithOptions(t, nil)
+}
+
+func newTestClientWithOptions(t *testing.T, customize func(*Options)) (*Client, *fakeextensions.Clientset) {
+	t.Helper()
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	opts := Options{
@@ -43,6 +48,9 @@ func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 		APIURL:              "http://localhost:9999",
 		SandboxReadyTimeout: 2 * time.Second,
 		Quiet:               true,
+	}
+	if customize != nil {
+		customize(&opts)
 	}
 	opts.setDefaults()
 	opts.K8sHelper = &K8sHelper{
@@ -458,6 +466,27 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	stop2()
 }
 
+func TestClient_EnableAutoCleanup_FromOptions_Idempotent(t *testing.T) {
+	client, _ := newTestClientWithOptions(t, func(opts *Options) {
+		opts.CleanupOnSignal = true
+	})
+
+	// Manually call EnableAutoCleanup again (should be safe/idempotent)
+	_ = client.EnableAutoCleanup()
+
+	// Verify cleanup is still enabled (not broken by double-enable)
+	client.mu.Lock()
+	enabled := client.cleanupEnabled
+	client.mu.Unlock()
+
+	if !enabled {
+		t.Error("cleanup should still be enabled after calling EnableAutoCleanup twice")
+	}
+
+	// Clean up signal handlers
+	client.DisableAutoCleanup()
+}
+
 // TestResolveSandboxName_FromClaimStatus verifies the new resolution path.
 func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
@@ -526,4 +555,79 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 	if state.SandboxName != "warm-pool-sandbox-xyz" {
 		t.Errorf("expected warm-pool-sandbox-xyz, got %s", state.SandboxName)
 	}
+}
+
+func TestClient_CleanupOnSignal_Default(t *testing.T) {
+	// Verify CleanupOnSignal defaults to false
+	var opts Options
+	if opts.CleanupOnSignal {
+		t.Error("CleanupOnSignal should default to false")
+	}
+
+	// Create client with default options
+	client, _ := newTestClient(t)
+
+	// Verify cleanup is not enabled
+	client.mu.Lock()
+	enabled := client.cleanupEnabled
+	client.mu.Unlock()
+
+	if enabled {
+		t.Error("cleanup should not be enabled by default")
+	}
+}
+
+func TestClient_CleanupOnSignal_Enabled(t *testing.T) {
+	client, _ := newTestClientWithOptions(t, func(opts *Options) {
+		opts.CleanupOnSignal = true
+	})
+
+	// Verify cleanup is enabled
+	client.mu.Lock()
+	enabled := client.cleanupEnabled
+	hasStopSignal := client.stopSignal != nil
+	client.mu.Unlock()
+
+	if !enabled {
+		t.Error("cleanup should be enabled when CleanupOnSignal is true")
+	}
+
+	if !hasStopSignal {
+		t.Error("signal handler should be registered when CleanupOnSignal is true")
+	}
+
+	// Clean up signal handler
+	client.DisableAutoCleanup()
+}
+
+func TestClient_MultipleClients_Independent(t *testing.T) {
+	// Client 1 with cleanup enabled
+	client1, _ := newTestClientWithOptions(t, func(opts *Options) {
+		opts.CleanupOnSignal = true
+	})
+
+	// Client 2 with cleanup disabled
+	client2, _ := newTestClient(t)
+
+	// Verify client 1 has cleanup enabled
+	client1.mu.Lock()
+	enabled1 := client1.cleanupEnabled
+	client1.mu.Unlock()
+
+	if !enabled1 {
+		t.Error("client 1 should have cleanup enabled")
+	}
+
+	// Verify client 2 does not have cleanup enabled
+	client2.mu.Lock()
+	enabled2 := client2.cleanupEnabled
+	client2.mu.Unlock()
+
+	if enabled2 {
+		t.Error("client 2 should not have cleanup enabled")
+	}
+
+	// Clean up signal handlers
+	client1.DisableAutoCleanup()
+	client2.DisableAutoCleanup()
 }

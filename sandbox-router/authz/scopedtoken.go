@@ -45,6 +45,26 @@ import (
 // dial target always matches what was authorized.
 var untrustedRoutingHeaders = []string{"X-Sandbox-Pod-Ip", "X-Sandbox-Uid"}
 
+// scopedTokenVersion is the token format version. It is both the
+// leading component of the wire format (version.payload.signature) and
+// part of the signed MAC context (see scopedTokenMACContext). A
+// version discriminator lets a future format (key IDs, extra claims,
+// different claim semantics) coexist with outstanding v1 tokens during
+// a rollout instead of forcing a flag-day: the verifier switches on
+// this prefix before doing anything else. Adding it now is free;
+// retrofitting it later would invalidate every already-minted token.
+const scopedTokenVersion = "v1"
+
+// scopedTokenMACContext domain-separates the HMAC. The MAC is taken
+// over this fixed context string followed by the base64 payload, so a
+// signature produced here cannot be verified by — nor collide with —
+// any other component that happens to HMAC data with the same shared
+// Secret. Without it, any protocol that HMAC-SHA256s a base64 blob
+// with this key would produce cross-verifiable signatures. The version
+// is baked into the context so v1 and a future v2 also can't
+// cross-verify.
+const scopedTokenMACContext = "agent-sandbox/scoped-token/" + scopedTokenVersion + "."
+
 // MinScopedTokenSecretLen is the minimum accepted secret length, after
 // surrounding whitespace is trimmed. Any observed token is an offline
 // brute-force oracle for the shared secret, and a short secret makes
@@ -83,7 +103,9 @@ type scopedClaims struct {
 }
 
 // MintScopedToken produces a token bound to (namespace, name), signed
-// with secret and valid until ttl elapses.
+// with secret and valid until ttl elapses. The wire format is
+// version.payload.signature (see scopedTokenVersion); the signature is
+// domain-separated (see scopedTokenMACContext).
 //
 // This lives in the router's package for now so the pattern can be
 // exercised end-to-end (tests, examples) without a second component.
@@ -108,11 +130,13 @@ func MintScopedToken(secret []byte, namespace, name string, ttl time.Duration) (
 		return "", fmt.Errorf("scopedtoken: marshal claims: %w", err)
 	}
 	encPayload := base64.RawURLEncoding.EncodeToString(payload)
-	return encPayload + "." + base64.RawURLEncoding.EncodeToString(signScopedToken(key, encPayload)), nil
+	encSig := base64.RawURLEncoding.EncodeToString(signScopedToken(key, encPayload))
+	return scopedTokenVersion + "." + encPayload + "." + encSig, nil
 }
 
 func signScopedToken(secret []byte, encPayload string) []byte {
 	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(scopedTokenMACContext))
 	mac.Write([]byte(encPayload))
 	return mac.Sum(nil)
 }
@@ -191,7 +215,14 @@ func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, sa
 }
 
 func (a *ScopedTokenAuthorizer) verify(token string) (*scopedClaims, error) {
-	encPayload, encSig, ok := strings.Cut(token, ".")
+	// Wire format is version.payload.signature. Switch on the version
+	// prefix before anything else so a future format can be handled (or
+	// cleanly rejected) here without breaking outstanding v1 tokens.
+	version, rest, ok := strings.Cut(token, ".")
+	if !ok || version != scopedTokenVersion {
+		return nil, errors.New("scopedtoken: malformed token")
+	}
+	encPayload, encSig, ok := strings.Cut(rest, ".")
 	if !ok {
 		return nil, errors.New("scopedtoken: malformed token")
 	}

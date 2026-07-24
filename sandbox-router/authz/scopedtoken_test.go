@@ -16,7 +16,12 @@ package authz
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -181,6 +186,68 @@ func TestScopedToken_SecretIsCopied(t *testing.T) {
 	}
 	if err := auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box"); err != nil {
 		t.Fatalf("expected allow after mutating caller's slice, got %v", err)
+	}
+}
+
+// The wire format carries a leading version discriminator
+// (version.payload.signature) so a future format can coexist with
+// outstanding v1 tokens. Pin it so the format isn't changed silently.
+func TestScopedToken_TokenCarriesVersionPrefix(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if !strings.HasPrefix(tok, "v1.") {
+		t.Fatalf("expected token to start with %q, got %q", "v1.", tok)
+	}
+	if got := strings.Count(tok, "."); got != 2 {
+		t.Fatalf("expected version.payload.signature (2 dots), got %d in %q", got, tok)
+	}
+}
+
+// A token without the version prefix (the pre-v1 two-part format) must
+// be rejected rather than silently accepted, so the discriminator
+// actually gates verification.
+func TestScopedToken_RejectsUnversionedToken(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	unversioned := strings.TrimPrefix(tok, "v1.")
+	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
+	err = auth.Authorize(context.Background(), reqWithBearer(unversioned), "ns", "box")
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated for unversioned token, got %v", err)
+	}
+}
+
+// Domain separation: the MAC is taken over a fixed context string plus
+// the payload, so a bare HMAC-SHA256 of the payload with the same
+// secret — what another protocol reusing the key would produce — is not
+// a valid signature here.
+func TestScopedToken_MACIsDomainSeparated(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	key, err := normalizeScopedSecret(secret)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	claims := scopedClaims{Namespace: "ns", Name: "box", Exp: time.Now().Add(time.Minute).Unix()}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	encPayload := base64.RawURLEncoding.EncodeToString(payload)
+
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(encPayload)) // no context prefix
+	bareSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	forged := "v1." + encPayload + "." + bareSig
+
+	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
+	if err := auth.Authorize(context.Background(), reqWithBearer(forged), "ns", "box"); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated for context-less signature, got %v", err)
 	}
 }
 

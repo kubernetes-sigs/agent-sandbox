@@ -25,8 +25,16 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 cleanup() { kubectl delete namespace "$NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-echo "=== 1. install template + warm pool"
-kubectl apply -f 00-prereqs.yaml -f 10-sandboxtemplate.yaml -f 20-sandboxwarmpool.yaml
+echo "=== 1. install prereqs (throwaway credentials) + template + warm pool"
+kubectl apply -f 00-prereqs.yaml
+# Platform credentials are never committed; generate throwaway values.
+kubectl -n "$NS" delete secret hermes-platform-secrets --ignore-not-found >/dev/null
+kubectl -n "$NS" create secret generic hermes-platform-secrets \
+  --from-literal=dashboard-username=platform \
+  --from-literal=dashboard-password="$(openssl rand -hex 16)" \
+  --from-literal=dashboard-session-secret="$(openssl rand -hex 32)" \
+  --from-literal=api-server-key="$(openssl rand -hex 24)"
+kubectl apply -f 10-sandboxtemplate.yaml -f 20-sandboxwarmpool.yaml
 for _ in $(seq 1 120); do
   READY=$(kubectl -n "$NS" get sandboxes -l agents.x-k8s.io/warm-pool-sandbox \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' | grep -c True || true)
@@ -67,15 +75,21 @@ pass "resumed: state survived on the reattached PVC"
 
 echo "=== 6. injection policy rejects env-carrying claims"
 kubectl apply -f 40-claim-rejected.yaml
-REJECTED=""
+# Wait for the POSITIVE rejection signal, not merely "not bound yet" — a
+# broken policy that binds after a few seconds must fail this test.
+REASON=""
 for _ in $(seq 1 12); do
-  BOUND=$(kubectl -n "$NS" get sandboxclaim hermes-mallory -o jsonpath='{.status.sandbox.name}' 2>/dev/null || true)
-  if [ -z "$BOUND" ]; then REJECTED=yes; else REJECTED=""; break; fi
+  REASON=$(kubectl -n "$NS" get sandboxclaim hermes-mallory \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+  [ "$REASON" = "EnvVarsInjectionRejected" ] && break
   sleep 5
 done
-[ -n "$REJECTED" ] || fail "env-carrying claim unexpectedly bound sandbox '$BOUND'"
+[ "$REASON" = "EnvVarsInjectionRejected" ] \
+  || fail "claim was not rejected (Ready reason='$REASON')"
+BOUND=$(kubectl -n "$NS" get sandboxclaim hermes-mallory -o jsonpath='{.status.sandbox.name}' 2>/dev/null || true)
+[ -z "$BOUND" ] || fail "env-carrying claim unexpectedly bound sandbox '$BOUND'"
 kubectl delete -f 40-claim-rejected.yaml >/dev/null
-pass "env-carrying claim never bound (policy enforced)"
+pass "claim rejected with EnvVarsInjectionRejected and never bound"
 
 echo "=== 7. gateway: signup, proxy, idle-suspend, wake-on-connect"
 if command -v docker >/dev/null && command -v kind >/dev/null; then

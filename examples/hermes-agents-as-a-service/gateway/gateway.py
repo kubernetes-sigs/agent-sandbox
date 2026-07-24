@@ -73,7 +73,15 @@ except config.ConfigException:
 crd = client.CustomObjectsApi()
 
 app = Flask(__name__)
+# Cap proxied request bodies: Flask rejects anything larger with 413 before
+# request.get_data() would buffer it in memory.
+app.config["MAX_CONTENT_LENGTH"] = \
+    int(os.environ.get("MAX_BODY_MB", "32")) * 1024 * 1024
 last_activity: dict[str, float] = {}
+# Open proxy streams per user. While > 0 the sweeper must not suspend: a
+# response still streaming after IDLE_TIMEOUT is activity, not idleness.
+in_flight: dict[str, int] = {}
+flight_lock = threading.Lock()
 
 
 def claim_name(user: str) -> str:
@@ -270,8 +278,19 @@ def proxy(user, path):
             if attempt == 4:
                 return jsonify(error="upstream unavailable"), 502
             time.sleep(1)
+    with flight_lock:
+        in_flight[user] = in_flight.get(user, 0) + 1
+
+    def relay():
+        try:
+            yield from r.iter_content(chunk_size=None)
+        finally:  # runs on stream completion AND client disconnect
+            with flight_lock:
+                in_flight[user] = max(in_flight.get(user, 1) - 1, 0)
+            last_activity[user] = time.time()
+
     return Response(
-        r.iter_content(chunk_size=None),
+        relay(),
         status=r.status_code,
         headers=[(k, v) for k, v in r.headers.items()
                  if k.lower() not in ("transfer-encoding", "connection")])
@@ -281,20 +300,28 @@ def idle_sweeper():
     """Suspend agents idle for IDLE_TIMEOUT (pod deleted, PVC survives)."""
     while True:
         time.sleep(15)
-        claims = crd.list_namespaced_custom_object(
-            GROUP, VERSION, NAMESPACE, "sandboxclaims")["items"]
-        for c in claims:
-            user = c["metadata"]["name"].removeprefix("hermes-")
-            try:
-                sandbox = sandbox_of(c)
-            except client.ApiException:
-                continue
-            if sandbox is None or derive_state(sandbox) != "Ready":
-                continue
-            idle = time.time() - last_activity.setdefault(user, time.time())
-            if idle >= IDLE_TIMEOUT:
-                print(f"suspending {user} (idle {int(idle)}s)", flush=True)
-                set_operating_mode(sandbox["metadata"]["name"], "Suspended")
+        try:
+            claims = crd.list_namespaced_custom_object(
+                GROUP, VERSION, NAMESPACE, "sandboxclaims")["items"]
+            for c in claims:
+                user = c["metadata"]["name"].removeprefix("hermes-")
+                if in_flight.get(user, 0) > 0:
+                    continue  # an open proxy stream counts as activity
+                try:
+                    sandbox = sandbox_of(c)
+                except client.ApiException:
+                    continue
+                if sandbox is None or derive_state(sandbox) != "Ready":
+                    continue
+                idle = time.time() - last_activity.setdefault(user, time.time())
+                if idle >= IDLE_TIMEOUT:
+                    print(f"suspending {user} (idle {int(idle)}s)", flush=True)
+                    set_operating_mode(sandbox["metadata"]["name"], "Suspended")
+        except Exception as e:
+            # A transient API error must not kill this daemon thread — that
+            # would silently stop idle suspension for good.
+            print(f"sweeper: transient error, retrying next cycle: {e}",
+                  flush=True)
 
 
 if __name__ == "__main__":

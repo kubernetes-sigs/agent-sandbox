@@ -57,8 +57,19 @@ kind cluster + the manifest above already applied).
 
 ## 1. Install the platform resources
 
+First the namespace, then the shared platform credentials. These reach
+**every** tenant sandbox (a warm-pool constraint: pod env is stamped before
+any user exists), so they are **never committed** — generate fresh values
+per install:
+
 ```sh
-kubectl apply -f 00-prereqs.yaml -f 10-sandboxtemplate.yaml -f 20-sandboxwarmpool.yaml
+kubectl apply -f 00-prereqs.yaml
+kubectl -n hermes-demo create secret generic hermes-platform-secrets \
+  --from-literal=dashboard-username=platform \
+  --from-literal=dashboard-password="$(openssl rand -hex 16)" \
+  --from-literal=dashboard-session-secret="$(openssl rand -hex 32)" \
+  --from-literal=api-server-key="$(openssl rand -hex 24)"
+kubectl apply -f 10-sandboxtemplate.yaml -f 20-sandboxwarmpool.yaml
 ```
 
 Watch the two warm spares boot (first time pulls the ~GB agent image —
@@ -110,13 +121,20 @@ kubectl -n hermes-demo port-forward "pod/$POD" 9119:9119 8642:8642 &
 PF_PID=$!
 ```
 
-- Dashboard: open http://localhost:9119 — basic auth `platform` /
-  `demo-password-change-me` (from `00-prereqs.yaml`).
+- Dashboard: open http://localhost:9119 — basic auth `platform` / the
+  password generated in step 1:
+
+```sh
+kubectl -n hermes-demo get secret hermes-platform-secrets \
+  -o jsonpath='{.data.dashboard-password}' | base64 -d; echo
+```
+
 - OpenAI-compatible API:
 
 ```sh
-curl -s -H "Authorization: Bearer demo-api-server-key-16chars-min" \
-  http://localhost:8642/v1/models
+API_KEY=$(kubectl -n hermes-demo get secret hermes-platform-secrets \
+  -o jsonpath='{.data.api-server-key}' | base64 -d)
+curl -s -H "Authorization: Bearer $API_KEY" http://localhost:8642/v1/models
 ```
 
 (Actual chat completions additionally need a real LLM key in the
@@ -326,6 +344,8 @@ which hardens every piece shown here:
 - The Hermes image is amd64-only; on arm64 Macs use a kind-on-colima/amd64
   setup or a cloud cluster.
 - Shared platform credentials (dashboard/API) are the warm-pool trade-off:
-  pod env exists before the user does. Per-user isolation in the full
-  platform comes from per-user gateway tokens plus the NetworkPolicy
-  boundary, not from per-pod secrets.
+  pod env exists before the user does, so the same credentials reach every
+  tenant sandbox. Generate them per install (step 1) and never commit
+  usable values. Per-user isolation in the full platform comes from
+  per-user gateway tokens plus the NetworkPolicy boundary scoping sandbox
+  ingress to the gateway — not from per-pod secrets.

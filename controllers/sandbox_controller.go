@@ -20,12 +20,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -483,7 +483,7 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) error {
 	logger := log.FromContext(ctx)
 
-	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
+	if apiequality.Semantic.DeepEqual(oldStatus, &sandbox.Status) {
 		return nil
 	}
 
@@ -518,7 +518,7 @@ func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool
 	}
 	scratch := newStatus.DeepCopy()
 	scratch.NodeName = oldStatus.NodeName
-	return reflect.DeepEqual(oldStatus, scratch)
+	return apiequality.Semantic.DeepEqual(oldStatus, scratch)
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.
@@ -747,7 +747,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			service.Labels[sandboxLabel] = nameHash
 			needsUpdate = true
 		}
-		if !reflect.DeepEqual(service.Spec.Selector, desiredSelector) {
+		if !apiequality.Semantic.DeepEqual(service.Spec.Selector, desiredSelector) {
 			service.Spec.Selector = desiredSelector
 			needsUpdate = true
 		}

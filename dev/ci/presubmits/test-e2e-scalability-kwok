@@ -56,20 +56,21 @@ echo "  Burst Duration:    ${DURATION}s"
 echo "  Controller QPS:    ${CONTROLLER_QPS} (Workers: ${CONTROLLER_WORKERS})"
 echo "======================================================="
 
-WORKDIR="${repo_root}/.build-kwok"
-rm -rf "${WORKDIR}"
-mkdir -p "${WORKDIR}/bin"
-BINDIR="${WORKDIR}/bin"
+CACHE_DIR="${HOME}/.cache/agent-sandbox-test-bin"
+mkdir -p "${CACHE_DIR}"
+BINDIR="${CACHE_DIR}"
 export PATH="${BINDIR}:${PATH}"
+WORKDIR="${repo_root}/.build-kwok"
+mkdir -p "${WORKDIR}"
 
 KWOK_VERSION="v0.6.0"
 KWOKCTL="${BINDIR}/kwokctl"
 
 if [[ ! -x "${KWOKCTL}" ]]; then
   echo "Installing kwokctl ${KWOK_VERSION}..."
-  curl -fsSL "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64" -o "${KWOKCTL}"
+  curl -fsSL --retry 5 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64" -o "${KWOKCTL}"
   chmod +x "${KWOKCTL}"
-  curl -fsSL "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwok-linux-amd64" -o "${BINDIR}/kwok"
+  curl -fsSL --retry 5 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwok-linux-amd64" -o "${BINDIR}/kwok"
   chmod +x "${BINDIR}/kwok"
 fi
 
@@ -85,26 +86,20 @@ cleanup() {
     cp "${WORKDIR}/controller.log" "${CL2_REPORT_DIR}/controller.log" 2>/dev/null || true
   fi
   "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
-  rm -rf "/dev/shm/kwok-etcd-${CLUSTER_NAME}" 2>/dev/null || true
   rm -rf "${WORKDIR}"
   echo "Cleanup complete."
 }
 trap cleanup EXIT
 
 echo "Ensuring clean start for kwok simulated cluster..."
-"${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" || true
-rm -rf "/dev/shm/kwok-etcd-${CLUSTER_NAME}"
-mkdir -p "/dev/shm/kwok-etcd-${CLUSTER_NAME}"
-mkdir -p "${HOME}/.kwok/clusters/${CLUSTER_NAME}"
-ln -sfn "/dev/shm/kwok-etcd-${CLUSTER_NAME}" "${HOME}/.kwok/clusters/${CLUSTER_NAME}/etcd"
+"${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
 
-"${KWOKCTL}" create cluster --name="${CLUSTER_NAME}" --wait=2m \
+"${KWOKCTL}" create cluster --name="${CLUSTER_NAME}" --wait=5m \
   --runtime=binary \
   --disable-qps-limits \
   --extra-args="kube-apiserver=max-requests-inflight=2000" \
   --extra-args="kube-apiserver=max-mutating-requests-inflight=1000" \
   --extra-args="etcd=unsafe-no-fsync=true"
-
 
 KUBECONFIG="${WORKDIR}/kubeconfig"
 "${KWOKCTL}" get kubeconfig --name="${CLUSTER_NAME}" > "${KUBECONFIG}"

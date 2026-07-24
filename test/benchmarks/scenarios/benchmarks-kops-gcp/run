@@ -455,6 +455,7 @@ if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
     kubectl logs --namespace stress-node-profiler "${pod}" -c offcpu-trace > "${STRESS_OUTPUT_DIR}/profiler-offcpu-${node}.log" || true
     kubectl logs --namespace stress-node-profiler "${pod}" -c nodestat > "${STRESS_OUTPUT_DIR}/profiler-nodestat-${node}.log" || true
     kubectl logs --namespace stress-node-profiler "${pod}" -c ctr-events > "${STRESS_OUTPUT_DIR}/profiler-ctr-events-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c kubelet-log > "${STRESS_OUTPUT_DIR}/profiler-kubelet-${node}.log" || true
   done
 fi
 

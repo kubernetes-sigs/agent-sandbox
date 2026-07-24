@@ -38,6 +38,10 @@
 #     containerStatuses), the delta distribution exposes timer-driven poll
 #     loops: a flat histogram over [0, interval] means kubelet polled at
 #     that interval; a spike near zero means event-driven.
+#   - kubelet-log: the kubelet journal, for the events kubelet logs but does
+#     not export as metrics - above all "Housekeeping took longer than
+#     expected", which discriminates whether pod-dispatch delay is kubelet's
+#     sync loop blocking on housekeeping or upstream watch delivery.
 #
 # Deployed by test/benchmarks/scenarios/benchmarks-kops-gcp/run (gated by
 # STRESS_NODE_PROFILER); per-node logs are harvested into the artifacts
@@ -391,6 +395,30 @@ spec:
         - -c
         - |
           nsenter -t 1 -m -- sh -c 'ctr --namespace k8s.io events' 2>&1 || echo "ctr events failed"
+          sleep infinity
+        securityContext:
+          privileged: true
+      - name: kubelet-log
+        image: bpftrace:latest
+        # Follow the host's kubelet journal. Motivation (run
+        # 2080723438359547904): at mif600, pods wait ~1.2-1.9s between the
+        # scheduler's binding write and kubelet's first action, while every
+        # measurable neighbor is fast (kubelet first-sync 212ms flat, rate
+        # limiter 0% waits, PLEG 1.0s steady, containerd mostly idle with
+        # creations running up to 10-wide). The two remaining suspects are
+        # apiserver->kubelet watch delivery and kubelet's sync loop blocking
+        # on its synchronous housekeeping pass while teardown churns at
+        # ~8 pods/s/node. Housekeeping blockage has no metric in this
+        # kubelet, but it logs "Housekeeping took longer than expected"
+        # warnings - so the journal discriminates the two: warnings present
+        # means sync-loop dispatch, a clean log points at watch delivery.
+        # short-iso-precise timestamps make the entries joinable against
+        # watch.jsonl and ctr-events.
+        command:
+        - sh
+        - -c
+        - |
+          nsenter -t 1 -m -- sh -c 'journalctl -u kubelet.service -f -o short-iso-precise --no-pager' 2>&1 || echo "journalctl failed"
           sleep infinity
         securityContext:
           privileged: true

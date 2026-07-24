@@ -1,0 +1,94 @@
+# 1. Tenant-A Sandboxes InferencePool (GAIE model tracking Sandbox Pods & Endpoint Picker)
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: tenant-a-sandboxes-pool
+  namespace: tenant-a
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: agent-sandbox
+  targetPorts:
+    - number: 5678
+  endpointPickerRef:
+    name: sandbox-router-svc
+    port:
+      number: 50051
+    failureMode: FailClose
+---
+# 2. HTTPRoute (Standard Gateway API HTTPRoute referencing InferencePool)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tenant-a-sandboxes-route
+  namespace: tenant-a
+spec:
+  parentRefs:
+  - name: sandbox-edge-gateway
+    namespace: default
+  hostnames:
+  - "*.tenant-a.sandbox.local"
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: tenant-a-sandboxes-pool
+      port: 5678
+---
+# 3. Tenant-A sandbox-router ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-router-sa
+  namespace: tenant-a
+---
+# 4. Tenant-A sandbox-router Callout Deployment (Pure gRPC Engine)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router
+  namespace: tenant-a
+  labels:
+    app: sandbox-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      serviceAccountName: sandbox-router-sa
+      containers:
+      - name: sandbox-router
+        image: sandbox-router:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50051
+          name: grpc-ext-proc
+        env:
+        - name: PORT
+          value: "50051"
+        - name: MANAGER_ENDPOINT
+          value: "http://sandbox-suspension-manager-svc.default.svc.cluster.local:8090/v1/sandboxes/resume"
+---
+# 5. Tenant-A sandbox-router gRPC Callout Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router-svc
+  namespace: tenant-a
+spec:
+  selector:
+    app: sandbox-router
+  ports:
+  - name: grpc-ext-proc
+    appProtocol: h2c
+    port: 50051
+    targetPort: 50051

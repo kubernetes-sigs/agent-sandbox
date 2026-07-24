@@ -83,6 +83,10 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+              ttlSecondsAfterCreated:
+                format: int32
+                minimum: 0
+                type: integer
               volumeClaimTemplates:
                 items:
                   properties:
@@ -322,6 +326,10 @@ spec:
                 required:
                 - name
                 type: object
+              ttlSecondsAfterCreated:
+                format: int32
+                minimum: 0
+                type: integer
               warmpool:
                 default: default
                 type: string

@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +38,7 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // Create a test scheme with extensions types registered.
@@ -153,6 +155,28 @@ func createVolumeClaimTemplate(name string, storageClass string) sandboxv1beta1.
 			},
 		},
 	}
+}
+
+func TestSandboxWarmPoolReconcileDeletesExpiredTTL(t *testing.T) {
+	scheme := newTestScheme()
+	ttl := int32(60)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "expired-pool",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{TTLSecondsAfterCreated: &ttl},
+	}
+	client := newFakeClient(scheme, warmPool)
+	reconciler := &SandboxWarmPoolReconciler{Client: client, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}})
+	require.NoError(t, err)
+
+	fetched := &extensionsv1beta1.SandboxWarmPool{}
+	err = client.Get(context.Background(), types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}, fetched)
+	require.True(t, k8serrors.IsNotFound(err))
 }
 
 func TestReconcilePool(t *testing.T) {

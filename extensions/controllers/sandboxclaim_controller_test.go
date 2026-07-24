@@ -1212,6 +1212,28 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
+	scheme := newScheme(t)
+	ttl := int32(60)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "expired-claim",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{TTLSecondsAfterCreated: &ttl},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, Tracer: asmetrics.NewNoOp()}
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
+	require.NoError(t, err)
+
+	fetched := &extensionsv1beta1.SandboxClaim{}
+	err = client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched)
+	require.True(t, k8errors.IsNotFound(err))
+}
+
 // TestSandboxClaimCleanupPolicy verifies that the Claim deletes itself
 // based on its own timestamp, and deletes the Sandbox if Policy=Retain.
 func TestSandboxClaimCleanupPolicy(t *testing.T) {

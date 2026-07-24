@@ -93,6 +93,7 @@ func TestSandboxClaimConversion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create src v1alpha1 SandboxClaim
 			wpPolicy := WarmPoolPolicy(tc.warmPool)
+			ttl := int32(300)
 			src := &SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      tc.claimName,
@@ -106,6 +107,7 @@ func TestSandboxClaimConversion(t *testing.T) {
 					},
 				},
 				Spec: SandboxClaimSpec{
+					TTLSecondsAfterCreated: &ttl,
 					TemplateRef: SandboxTemplateRef{
 						Name: tc.templateName,
 					},
@@ -148,6 +150,9 @@ func TestSandboxClaimConversion(t *testing.T) {
 			}
 
 			// Verify WarmPoolRef name in v1beta1
+			if dst.Spec.TTLSecondsAfterCreated == nil || *dst.Spec.TTLSecondsAfterCreated != ttl {
+				t.Errorf("unexpected ttlSecondsAfterCreated: %v", dst.Spec.TTLSecondsAfterCreated)
+			}
 			if dst.Spec.WarmPoolRef.Name != tc.expectedWarmPoolRef {
 				t.Errorf("expected WarmPoolRef.Name %q, got %q", tc.expectedWarmPoolRef, dst.Spec.WarmPoolRef.Name)
 			}
@@ -164,6 +169,9 @@ func TestSandboxClaimConversion(t *testing.T) {
 			}
 
 			// Verify round-trip preserves fields losslessly (due to state annotation preservation)
+			if roundTrip.Spec.TTLSecondsAfterCreated == nil || *roundTrip.Spec.TTLSecondsAfterCreated != ttl {
+				t.Errorf("roundtrip ttlSecondsAfterCreated mismatch: %v", roundTrip.Spec.TTLSecondsAfterCreated)
+			}
 			if roundTrip.Spec.TemplateRef.Name != src.Spec.TemplateRef.Name {
 				t.Errorf("roundtrip TemplateRef mismatch: expected %q, got %q", src.Spec.TemplateRef.Name, roundTrip.Spec.TemplateRef.Name)
 			}

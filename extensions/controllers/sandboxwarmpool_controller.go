@@ -42,6 +42,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 )
 
 const (
@@ -89,6 +90,15 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, nil
 	}
 
+	poolTTLExpired, poolTTLTimeLeft := lifecycle.TimeLeftAfterCreated(time.Now(), warmPool.CreationTimestamp, warmPool.Spec.TTLSecondsAfterCreated)
+	if poolTTLExpired {
+		logger.Info("Deleting SandboxWarmPool because ttlSecondsAfterCreated expired", "warmPool", warmPool.Name)
+		if err := r.Delete(ctx, warmPool); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Save old status for comparison
 	oldStatus := warmPool.Status.DeepCopy()
 
@@ -103,7 +113,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: poolTTLTimeLeft}, nil
 }
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.

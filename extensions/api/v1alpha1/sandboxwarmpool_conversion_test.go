@@ -42,6 +42,7 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			ttl := int32(300)
 			src := &SandboxWarmPool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "my-warmpool",
@@ -55,7 +56,8 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 					},
 				},
 				Spec: SandboxWarmPoolSpec{
-					Replicas: 3,
+					Replicas:               3,
+					TTLSecondsAfterCreated: &ttl,
 					TemplateRef: SandboxTemplateRef{
 						Name: "my-template",
 					},
@@ -96,6 +98,9 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 			}
 
 			// Verify v1beta1 fields
+			if dst.Spec.TTLSecondsAfterCreated == nil || *dst.Spec.TTLSecondsAfterCreated != ttl {
+				t.Errorf("unexpected ttlSecondsAfterCreated: %v", dst.Spec.TTLSecondsAfterCreated)
+			}
 			if dst.Spec.Replicas == nil || *dst.Spec.Replicas != 3 {
 				t.Errorf("unexpected replicas: %v", dst.Spec.Replicas)
 			}
@@ -125,6 +130,9 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 			}
 
 			// Verify round-trip preserves all fields
+			if roundTrip.Spec.TTLSecondsAfterCreated == nil || *roundTrip.Spec.TTLSecondsAfterCreated != ttl {
+				t.Errorf("roundtrip ttlSecondsAfterCreated mismatch: %v", roundTrip.Spec.TTLSecondsAfterCreated)
+			}
 			if roundTrip.Spec.Replicas != src.Spec.Replicas {
 				t.Errorf("roundtrip Replicas mismatch: expected %d, got %d", src.Spec.Replicas, roundTrip.Spec.Replicas)
 			}

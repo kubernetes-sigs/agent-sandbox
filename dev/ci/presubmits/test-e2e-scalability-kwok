@@ -166,6 +166,9 @@ CL2_DURATION_SECONDS="${DURATION}" \
 CL2_WARMPOOL_SIZE="${WARMPOOL}" \
 CL2_ENABLE_SCHEDULING_METRICS="false" \
 CL2_ENABLE_API_AVAILABILITY="false" \
+CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_50_MS="${CL2_THRESHOLD_50_MS:-10000}" \
+CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90_MS="${CL2_THRESHOLD_90_MS:-15000}" \
+CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS="${CL2_THRESHOLD_99_MS:-30000}" \
 "${BINDIR}/clusterloader2" \
   --testconfig="${TEST_CONFIG}" \
   --kubeconfig="${KUBECONFIG}" \
@@ -200,9 +203,15 @@ def parse_histogram(metric_name, data):
         return None
     def get_percentile(p):
         target = p * total
+        prev_le, prev_count = 0.0, 0.0
         for le, count in buckets:
             if count >= target:
-                return le
+                if count == prev_count:
+                    return le
+                # Linear interpolation between adjacent buckets
+                fraction = (target - prev_count) / (count - prev_count)
+                return prev_le + fraction * (le - prev_le)
+            prev_le, prev_count = le, count
         return float("inf")
     return get_percentile(0.50), get_percentile(0.90), get_percentile(0.99), int(total)
 
@@ -217,7 +226,7 @@ try:
         if res:
             p50, p90, p99, count = res
             print(f"  • {desc} (Sample Size: {count}):")
-            print(f"      P50: <= {p50} ms | P90: <= {p90} ms | P99: <= {p99} ms")
+            print(f"      P50: ~{p50:.1f} ms | P90: ~{p90:.1f} ms | P99: ~{p99:.1f} ms")
         else:
             print(f"  • {desc}: No metrics recorded")
 except Exception as e:

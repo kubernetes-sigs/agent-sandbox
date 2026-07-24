@@ -101,7 +101,6 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".spec.replicas"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
-// +kubebuilder:conversion:strategy=Webhook
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.
 type SandboxWarmPool struct {
 	metav1.TypeMeta `json:",inline"`

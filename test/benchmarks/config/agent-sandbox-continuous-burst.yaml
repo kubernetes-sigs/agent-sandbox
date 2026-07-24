@@ -14,7 +14,7 @@
 {{$ENABLE_SCHEDULING_METRICS := DefaultParam .CL2_ENABLE_SCHEDULING_METRICS true}}
 
 # Standard continuous throughput. Uses un-filtered irate since continuous scenario has no breaks or idle time.
-{{$claimThroughputQuery := `sum(irate(agent_sandbox_claim_controller_startup_latency_ms_count[5m])) by (launch_type, sandbox_template)[%v:5s]`}}
+{{$claimThroughputQuery := `(sum(irate(agent_sandbox_claim_controller_startup_latency_ms_count[5m])) by (launch_type, sandbox_template))[%v:5s]`}}
 {{$claimControllerStartupLatencyQuery := `sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le)`}}
 
 name: agent-sandbox-continuous-burst

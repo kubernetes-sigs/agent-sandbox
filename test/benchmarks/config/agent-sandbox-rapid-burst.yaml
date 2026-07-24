@@ -45,7 +45,7 @@ steps:
     Method: GenericPrometheusQuery
     Params:
       action: start
-      metricName: Agent Sandbox Claim Startup Latency (ms)
+      metricName: Agent Sandbox Claim Controller Startup Latency (ms)
       metricVersion: v1
       unit: ms
       queries:

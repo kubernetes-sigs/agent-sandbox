@@ -1,6 +1,7 @@
 # Note: This config is kept separate from the global perf-tests/pprof.yaml to avoid
 # log spam in tests where the agent-sandbox controller is not installed.
 # This config assumes the agent-sandbox controller is installed as a workload on the node.
+# Requires the controller to be started with --enable-pprof-debug (or at least --enable-pprof) on the metrics server.
 # Once agent-sandbox controller is a GKE addon in the control plane, this config should be updated.
 ---
 apiVersion: rbac.authorization.k8s.io/v1

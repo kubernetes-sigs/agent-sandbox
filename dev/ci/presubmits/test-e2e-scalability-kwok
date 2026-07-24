@@ -31,11 +31,11 @@ export PATH="${BINDIR}:${PATH}"
 KWOK_VERSION="v0.6.0"
 KWOKCTL="${BINDIR}/kwokctl"
 
-if ! command -v kwokctl &>/devnull; then
+if [[ ! -x "${KWOKCTL}" ]]; then
   echo "Installing kwokctl ${KWOK_VERSION}..."
-  curl -sL "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64" -o "${KWOKCTL}"
+  curl -fsSL "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64" -o "${KWOKCTL}"
   chmod +x "${KWOKCTL}"
-  curl -sL "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwok-linux-amd64" -o "${BINDIR}/kwok"
+  curl -fsSL "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwok-linux-amd64" -o "${BINDIR}/kwok"
   chmod +x "${BINDIR}/kwok"
 fi
 
@@ -65,7 +65,7 @@ NUM_NODES="${SIMULATED_NODES:-10}"
 "${KWOKCTL}" scale node --name="${CLUSTER_NAME}" --replicas="${NUM_NODES}"
 
 echo "Deploying Agent Sandbox CRDs & System Namespace..."
-kubectl create namespace agent-sandbox-system || true
+kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f k8s/crds/
 
 echo "Waiting for CRDs to be established..."

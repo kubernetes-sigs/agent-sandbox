@@ -1,7 +1,7 @@
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
-  name: load-test-template
+  name: template-{{.Index}}
 spec:
   podTemplate:
     metadata:

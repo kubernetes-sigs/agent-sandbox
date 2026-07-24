@@ -28,10 +28,17 @@ func (c ConditionType) String() string { return string(c) }
 const (
 	// SandboxConditionSuspended indicates the sandbox is administratively suspended.
 	SandboxConditionSuspended ConditionType = "Suspended"
-	// SandboxReasonSuspendedPodTerminated indicates that the pod has been terminated.
+	// SandboxReasonSuspendedPodTerminated indicates the Suspended condition is True because the backing Pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
 	// SandboxReasonSuspendedPodNotTerminated indicates the pod has not been terminated yet.
+	// Deprecated: Use SandboxReasonSuspendedPodTerminating instead.
 	SandboxReasonSuspendedPodNotTerminated = "PodNotTerminated"
+	// SandboxReasonSuspendedPodTerminating indicates the Suspended condition is False because the backing Pod is still terminating.
+	SandboxReasonSuspendedPodTerminating = "PodTerminating"
+	// SandboxReasonSuspendedPodNotOwned indicates the Suspended condition is False because a Pod exists with the Sandbox's name but is not owned by this Sandbox.
+	SandboxReasonSuspendedPodNotOwned = "PodNotOwned"
+	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is running.
+	SandboxReasonNotSuspended = "NotSuspended"
 
 	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"

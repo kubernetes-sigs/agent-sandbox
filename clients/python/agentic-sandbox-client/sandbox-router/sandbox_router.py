@@ -292,7 +292,39 @@ def _env_var_is_truthy(name: str) -> bool:
     return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
 
-def _resolve_target(headers, url, scheme: str) -> tuple[str, str]:
+def _raw_path_with_query(url, scope) -> str:
+    """Return the original request path and query without decoding dot segments."""
+    raw_path = scope.get("raw_path") if scope else None
+    if isinstance(raw_path, bytes):
+        try:
+            path = raw_path.decode("ascii")
+        except UnicodeDecodeError:
+            path = url.path
+    elif isinstance(raw_path, str):
+        path = raw_path
+    else:
+        path = url.path
+
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    raw_query = scope.get("query_string") if scope else None
+    if isinstance(raw_query, bytes):
+        try:
+            query = raw_query.decode("ascii")
+        except UnicodeDecodeError:
+            query = url.query
+    elif isinstance(raw_query, str):
+        query = raw_query
+    else:
+        query = url.query
+
+    if query:
+        return f"{path}?{query}"
+    return path
+
+
+def _resolve_target(headers, url, scheme: str, scope=None) -> tuple[str, str]:
     """Return the backend URL and sandbox ID from routing headers."""
     sandbox_id = headers.get("X-Sandbox-ID")
     if not sandbox_id:
@@ -323,7 +355,7 @@ def _resolve_target(headers, url, scheme: str) -> tuple[str, str]:
     else:
         target_host = f"{sandbox_id}.{namespace}.svc.{cluster_domain}"
 
-    target_url = str(url.replace(scheme=scheme, hostname=target_host, port=port))
+    target_url = f"{scheme}://{target_host}:{port}{_raw_path_with_query(url, scope)}"
     return target_url, sandbox_id
 
 
@@ -646,6 +678,7 @@ async def proxy_websocket(websocket: WebSocket, full_path: str):
             websocket.headers,
             websocket.url,
             "ws",
+            websocket.scope,
         )
     except RoutingError as exc:
         await websocket.close(code=1008, reason=str(exc))
@@ -719,6 +752,7 @@ async def proxy_request(request: Request, full_path: str):
             request.headers,
             request.url,
             "http",
+            request.scope,
         )
     except RoutingError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

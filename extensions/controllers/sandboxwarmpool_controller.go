@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,11 +31,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -53,6 +59,41 @@ const (
 	// value on warm sandboxes, so reconcilePool's member lookup is O(pool members) instead
 	// of O(sandboxes-in-namespace).
 	sandboxWarmPoolLabelIndex = ".metadata.labels[" + warmPoolSandboxLabel + "]"
+
+	// warmPoolReadinessGracePeriod is how long a pool sandbox may stay
+	// non-Ready before the reconciler considers it stuck and replaces it.
+	warmPoolReadinessGracePeriod = 5 * time.Minute
+
+	// expectationsPendingRequeueDelay is the fallback requeue used when create
+	// or delete work is skipped because previously issued writes have not been
+	// observed by the informer cache yet. Watch events normally retrigger the
+	// pool much sooner; this only guards against lost events.
+	expectationsPendingRequeueDelay = 30 * time.Second
+
+	// unschedulableRequeueDelay is the rate-limited retry interval for a pool
+	// holding unschedulable sandboxes instead of churning delete/create (#1215).
+	unschedulableRequeueDelay = time.Minute
+
+	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
+	// re-evaluation lands strictly after the deadline despite clock jitter.
+	graceRequeueSlack = 2 * time.Second
+)
+
+// graceRequeueJitterFactor spreads the self-scheduled post-grace requeues of
+// a fleet warmed together (whose grace deadlines therefore cluster) across a
+// wait.Jitter window of up to +50% of the remaining grace, instead of letting
+// every pool re-reconcile inside the same ~2s slack window (thundering herd
+// of unschedulable-pod checks + status updates at 500-18K pools). No single
+// pool's post-grace evaluation is delayed more than 1.5x its remaining grace.
+// Package variable so deterministic fake-clock tests can zero it.
+var graceRequeueJitterFactor = 0.5
+
+const (
+
+	// Event reasons surfaced on the SandboxWarmPool when the pool cannot make
+	// progress toward spec.replicas (and when progress resumes).
+	reasonWarmPoolNotProgressing = "WarmPoolNotProgressing"
+	reasonWarmPoolProgressing    = "WarmPoolProgressing"
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
@@ -61,12 +102,61 @@ type SandboxWarmPoolReconciler struct {
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
+	// Recorder emits pool-level Events (e.g. WarmPoolNotProgressing). May be
+	// nil (tests); all uses are nil-guarded.
+	Recorder events.EventRecorder
+
+	// expectations tracks in-flight sandbox creations/deletions per pool so a
+	// reconcile never re-creates toward the target off a cache that has not
+	// observed its own previous writes (#1215). Access via exp().
+	expectations *warmPoolExpectations
+	expOnce      sync.Once
+
+	// notProgressingMu guards notProgressing, the set of pools currently held
+	// in a not-progressing state (used to emit transition events exactly once).
+	notProgressingMu sync.Mutex
+	notProgressing   map[types.NamespacedName]struct{}
+
+	// now is a test hook for the reconciler's clock; nil means time.Now.
+	now func() time.Time
+}
+
+// clockNow returns the reconciler's current time (time.Now unless a test
+// injected a fake clock).
+func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// exp returns the reconciler's expectations tracker.
+//
+// In production the tracker is initialized before any reconcile runs:
+// SetupWithManager calls exp() while building the sandbox watch handler, and
+// the manager only starts workers after setup. The sync.Once exists for
+// zero-value construction (tests build SandboxWarmPoolReconciler literals and
+// some drive reconcilePool from multiple goroutines): a bare
+// `if r.expectations == nil` lazy-init would be an unsynchronized read/write
+// of the field — a data race with no happens-before edge publishing the
+// tracker's contents — whereas Once gives mutual exclusion plus safe
+// publication, at the cost of one atomic load per call after init.
+func (r *SandboxWarmPoolReconciler) exp() *warmPoolExpectations {
+	r.expOnce.Do(func() {
+		if r.expectations == nil {
+			r.expectations = newWarmPoolExpectations()
+		}
+	})
+	return r.expectations
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
 // Reconcile implements the reconciliation loop for SandboxWarmPool.
 func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -77,6 +167,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Get(ctx, req.NamespacedName, warmPool); err != nil {
 		if k8serrors.IsNotFound(err) {
 			logger.Info("SandboxWarmPool resource not found. Ignoring since object must be deleted")
+			r.forgetPool(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get SandboxWarmPool")
@@ -86,6 +177,7 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Handle deletion
 	if !warmPool.DeletionTimestamp.IsZero() {
 		logger.Info("SandboxWarmPool is being deleted")
+		r.forgetPool(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -93,7 +185,8 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	oldStatus := warmPool.Status.DeepCopy()
 
 	// Reconcile the pool (create or delete Sandboxes as needed)
-	if err := r.reconcilePool(ctx, warmPool); err != nil {
+	requeueAfter, err := r.reconcilePool(ctx, warmPool)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -103,12 +196,27 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// forgetPool drops per-pool bookkeeping (expectations, not-progressing state)
+// once a pool is gone or terminating.
+func (r *SandboxWarmPoolReconciler) forgetPool(key types.NamespacedName) {
+	r.exp().Forget(key)
+	r.notProgressingMu.Lock()
+	delete(r.notProgressing, key)
+	r.notProgressingMu.Unlock()
 }
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
-func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) error {
+// It returns an optional requeue delay (used when work was deliberately held
+// back, e.g. unsatisfied expectations or unschedulable sandboxes) and any
+// errors encountered.
+func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) (time.Duration, error) {
 	logger := log.FromContext(ctx)
+
+	poolKey := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
+	var requeueAfter time.Duration
 
 	// Compute hash of the warm pool name for the pool label
 	poolNameHash := sandboxcontrollers.NameHash(warmPool.Name)
@@ -124,7 +232,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		client.MatchingFields{sandboxWarmPoolLabelIndex: poolNameHash},
 	); err != nil {
 		logger.Error(err, "Failed to list sandboxes")
-		return err
+		return 0, err
 	}
 
 	// Fetch template and compute hash once to avoid repeated expensive operations,
@@ -133,22 +241,65 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// for external consumer compatibility
 	template, currentPodTemplateHash, currentSandboxBlueprintHash, tmplErr := r.fetchTemplateAndHash(ctx, warmPool)
 
-	// Delete stale pods, filter pods by ownership and adopt orphans
-	activeSandboxes, allErrors := r.filterActiveSandboxes(ctx, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
+	// Delete stale pods, filter pods by ownership and adopt orphans.
+	// terminatingReplicas counts pool-owned sandboxes that are deleting (or
+	// were deleted by us but not yet observed by the cache): they are not
+	// active, but they still occupy capacity until fully gone.
+	activeSandboxes, terminatingReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
 
-	const warmPoolReadinessGracePeriod = 5 * time.Minute
-
-	now := time.Now()
+	now := r.clockNow()
 	var healthySandboxes []sandboxv1beta1.Sandbox
+	unschedulableReplicas := int32(0)
+	// nextGraceDeadline is the time remaining until the earliest readiness
+	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
+	var nextGraceDeadline time.Duration
 	for _, sb := range activeSandboxes {
-		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() && now.Sub(sb.CreationTimestamp.Time) > warmPoolReadinessGracePeriod {
+		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
+			age := now.Sub(sb.CreationTimestamp.Time)
+			if age <= warmPoolReadinessGracePeriod {
+				// Not Ready but still within the grace period. In a quiet
+				// cluster nothing else touches the Sandbox objects of a pool
+				// that settles at Ready=False (pod FailedScheduling events do
+				// not), so without a self-scheduled requeue the post-grace
+				// evaluation would only ever run on ambient traffic or the
+				// ~10h resync — leaving both the stuck-sandbox GC and the
+				// unschedulable-hold/NotProgressing signal unreachable.
+				// Requeue for the earliest grace deadline so the evaluation
+				// is deterministic.
+				if remaining := warmPoolReadinessGracePeriod - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
+					nextGraceDeadline = remaining
+				}
+				healthySandboxes = append(healthySandboxes, sb)
+				continue
+			}
+			// Deleting an unschedulable sandbox only produces an equally
+			// unschedulable replacement: under a capacity shortfall the old
+			// delete-and-replace behavior becomes an unbounded delete->create
+			// loop (#1215). Hold the sandbox and retry on a rate-limited
+			// requeue instead; the scheduler will place it when capacity
+			// frees up.
+			if r.isSandboxPodUnschedulable(ctx, &sb) {
+				unschedulableReplicas++
+				healthySandboxes = append(healthySandboxes, sb)
+				continue
+			}
 			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
-				"age", now.Sub(sb.CreationTimestamp.Time).Round(time.Second))
+				"age", age.Round(time.Second))
+			r.exp().ExpectDeletion(poolKey, sb.UID)
 			if err := r.Delete(ctx, &sb); err != nil {
+				r.exp().DeletionObserved(poolKey, sb.UID)
 				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
+				// The sandbox still exists; keep counting it as active so the
+				// create path cannot overshoot spec.replicas.
+				healthySandboxes = append(healthySandboxes, sb)
+				continue
 			}
+			// Successfully deleted: it now occupies capacity as terminating
+			// until the deletion is observed; the replacement is created on a
+			// later reconcile once it no longer counts against the target.
+			terminatingReplicas++
 			continue
 		}
 		healthySandboxes = append(healthySandboxes, sb)
@@ -160,10 +311,16 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		desiredReplicas = *warmPool.Spec.Replicas
 	}
 	currentReplicas := int32(len(activeSandboxes))
+	// totalReplicas is the pool's whole live population: active plus
+	// terminating-but-still-present. Creates are gated on this so the
+	// population can never balloon past spec.replicas while deletes lag (#1215).
+	totalReplicas := currentReplicas + terminatingReplicas
 
 	logger.Info("Pool status",
 		"desired", desiredReplicas,
 		"current", currentReplicas,
+		"terminating", terminatingReplicas,
+		"unschedulable", unschedulableReplicas,
 		"poolName", warmPool.Name,
 		"poolNameHash", poolNameHash)
 
@@ -181,20 +338,43 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 
 	maxBatchSize := int32(r.MaxBatchSize)
 
-	// Create new sandboxes if we need more
-	if currentReplicas < desiredReplicas && tmplErr == nil {
-		sandboxesToCreate := min(desiredReplicas-currentReplicas, maxBatchSize)
-		logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
+	// Create new sandboxes if we need more.
+	// Hard invariant: never create while the existing population (active,
+	// including non-Ready, plus terminating-still-present) already covers
+	// spec.replicas.
+	if totalReplicas < desiredReplicas && tmplErr == nil {
+		sandboxesToCreate := min(desiredReplicas-totalReplicas, maxBatchSize)
 
 		sandboxCR, err := r.buildSandboxCR(warmPool, poolNameHash, template, currentPodTemplateHash, currentSandboxBlueprintHash)
-		if err != nil {
+		switch {
+		case err != nil:
 			logger.Error(err, "Failed to build sandbox CR blueprint")
 			allErrors = errors.Join(allErrors, err)
-		} else {
+		// TryExpectCreations atomically checks that every create and delete
+		// this controller previously issued for the pool has been observed by
+		// the informer cache, and records the new in-flight creates. If prior
+		// writes are still unobserved the cached list above is stale and
+		// creating against it would overshoot the target (the #1215 runaway),
+		// so we skip and let the watch (or a fallback requeue) retrigger us.
+		case !r.exp().TryExpectCreations(poolKey, int(sandboxesToCreate)):
+			logger.Info("Skipping sandbox creation: waiting for in-flight creates/deletes to be observed",
+				"poolName", warmPool.Name)
+			requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
+		default:
+			logger.Info("Creating new pool sandboxes", "count", sandboxesToCreate)
 			// Parallel sandbox creation with adaptive slow-start batching (starts with 1 and doubles on success)
-			_, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
+			successes, createErr := slowStartBatch(ctx, int(sandboxesToCreate), 1, func(_ int) error {
 				return r.createPoolSandbox(ctx, warmPool, sandboxCR)
 			})
+			// Creates that never happened will never produce a watch event;
+			// lower their expectations immediately so the pool is not blocked
+			// until the expectations timeout. lower cannot be negative
+			// (slowStartBatch reports at most the requested count of
+			// successes); the > 0 guard only skips a no-op tracker call on
+			// the everything-succeeded path.
+			if lower := int(sandboxesToCreate) - successes; lower > 0 {
+				r.exp().LowerCreations(poolKey, lower)
+			}
 			if createErr != nil {
 				logger.Error(createErr, "Failed to create pool sandboxes")
 				allErrors = errors.Join(allErrors, createErr)
@@ -202,41 +382,164 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 
-	// Delete excess sandboxes if we have too many
+	// Delete excess sandboxes if we have too many. Like creates, excess
+	// deletes are computed from the cached list, so they are skipped while
+	// expectations are unsatisfied: a stale list could otherwise show a
+	// phantom surplus and delete healthy sandboxes.
 	if currentReplicas > desiredReplicas {
-		sandboxesToDelete := min(currentReplicas-desiredReplicas, maxBatchSize)
-		logger.Info("Deleting excess sandboxes", "count", sandboxesToDelete)
+		if !r.exp().SatisfiedExpectations(poolKey) {
+			logger.Info("Skipping excess sandbox deletion: waiting for in-flight creates/deletes to be observed",
+				"poolName", warmPool.Name)
+			requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
+		} else {
+			sandboxesToDelete := min(currentReplicas-desiredReplicas, maxBatchSize)
+			logger.Info("Deleting excess sandboxes", "count", sandboxesToDelete)
 
-		// Prioritize deleting unready sandboxes before ready ones,
-		// then newest first within each group.
-		slices.SortFunc(activeSandboxes, func(a, b sandboxv1beta1.Sandbox) int {
-			aReady := isSandboxReady(&a)
-			bReady := isSandboxReady(&b)
-			if aReady != bReady {
-				if aReady {
-					return 1 // a ready, b not ready -> b first (delete unready first)
+			// Prioritize deleting unready sandboxes before ready ones,
+			// then newest first within each group.
+			slices.SortFunc(activeSandboxes, func(a, b sandboxv1beta1.Sandbox) int {
+				aReady := isSandboxReady(&a)
+				bReady := isSandboxReady(&b)
+				if aReady != bReady {
+					if aReady {
+						return 1 // a ready, b not ready -> b first (delete unready first)
+					}
+					return -1 // b ready, a not ready -> a first
 				}
-				return -1 // b ready, a not ready -> a first
-			}
-			return b.CreationTimestamp.Compare(a.CreationTimestamp.Time) // newest first
-		})
+				return b.CreationTimestamp.Compare(a.CreationTimestamp.Time) // newest first
+			})
 
-		toDeleteCount := min(sandboxesToDelete, int32(len(activeSandboxes)))
-		// Parallel sandbox deletion with adaptive slow-start batching (starts with 1 and doubles on success)
-		_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
-			return r.deletePoolSandbox(ctx, &activeSandboxes[idx])
-		})
-		if deleteErr != nil {
-			logger.Error(deleteErr, "Failed to delete pool sandboxes")
-			allErrors = errors.Join(allErrors, deleteErr)
+			toDeleteCount := min(sandboxesToDelete, int32(len(activeSandboxes)))
+			// Parallel sandbox deletion with adaptive slow-start batching (starts with 1 and doubles on success)
+			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
+				sb := &activeSandboxes[idx]
+				r.exp().ExpectDeletion(poolKey, sb.UID)
+				err := r.Delete(ctx, sb)
+				if err == nil {
+					return nil
+				}
+				// No delete watch event will lower this expectation: on
+				// NotFound the object is already gone (its delete event may
+				// have fired before the expectation was raised), and on any
+				// other error nothing was deleted. Observe synthetically so
+				// the pool is not blocked until the expectations timeout —
+				// the same recovery kube's ReplicaSet controller applies to
+				// failed deletes.
+				r.exp().DeletionObserved(poolKey, sb.UID)
+				if k8serrors.IsNotFound(err) {
+					// Not an error for the batch: the desired outcome
+					// (sandbox gone) already holds.
+					return nil
+				}
+				logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name, "namespace", sb.Namespace)
+				return err
+			})
+			if deleteErr != nil {
+				logger.Error(deleteErr, "Failed to delete pool sandboxes")
+				allErrors = errors.Join(allErrors, deleteErr)
+			}
 		}
 	}
+
+	// Surface (and clear) the not-progressing signal. A pool with
+	// unschedulable sandboxes past the readiness grace period cannot make
+	// progress toward spec.replicas until cluster capacity frees up; degrade
+	// visibly instead of churning.
+	if unschedulableReplicas > 0 {
+		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
+			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
+			unschedulableReplicas, desiredReplicas, warmPoolReadinessGracePeriod))
+		requeueAfter = minNonZeroDuration(requeueAfter, unschedulableRequeueDelay)
+	} else {
+		r.setNotProgressing(warmPool, poolKey, false, "")
+	}
+
+	// Self-schedule the post-grace evaluation for not-yet-Ready sandboxes so
+	// the stuck-GC and the unschedulable-hold run on time even in a cluster
+	// with no ambient traffic. Jittered so a fleet warmed together does not
+	// re-reconcile in one synchronized post-grace spike (wait.Jitter treats
+	// factor <= 0 as a default, so guard the tests' zeroed factor).
+	if nextGraceDeadline > 0 && graceRequeueJitterFactor > 0 {
+		nextGraceDeadline = wait.Jitter(nextGraceDeadline, graceRequeueJitterFactor)
+	}
+	requeueAfter = minNonZeroDuration(requeueAfter, nextGraceDeadline)
 
 	if tmplErr != nil && !k8serrors.IsNotFound(tmplErr) {
 		allErrors = errors.Join(allErrors, tmplErr)
 	}
 
-	return allErrors
+	return requeueAfter, allErrors
+}
+
+// minNonZeroDuration returns the smaller of two requeue delays, treating zero
+// as "no requeue requested".
+func minNonZeroDuration(a, b time.Duration) time.Duration {
+	if a == 0 {
+		return b
+	}
+	if b == 0 {
+		return a
+	}
+	return min(a, b)
+}
+
+// setNotProgressing tracks the pool's not-progressing state and emits a
+// transition Event: a Warning when the pool stops progressing and a Normal
+// event once progress resumes. Repeated reconciles in the same state do not
+// re-emit.
+func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta1.SandboxWarmPool, poolKey types.NamespacedName, notProgressing bool, message string) {
+	r.notProgressingMu.Lock()
+	_, was := r.notProgressing[poolKey]
+	if notProgressing == was {
+		r.notProgressingMu.Unlock()
+		return
+	}
+	if notProgressing {
+		if r.notProgressing == nil {
+			r.notProgressing = make(map[types.NamespacedName]struct{})
+		}
+		r.notProgressing[poolKey] = struct{}{}
+	} else {
+		delete(r.notProgressing, poolKey)
+	}
+	r.notProgressingMu.Unlock()
+
+	if r.Recorder == nil {
+		return
+	}
+	if notProgressing {
+		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeWarning, reasonWarmPoolNotProgressing, "Reconciling", "%s", message)
+	} else {
+		r.Recorder.Eventf(warmPool, nil, corev1.EventTypeNormal, reasonWarmPoolProgressing, "Reconciling", "Warm pool is progressing again")
+	}
+}
+
+// isSandboxPodUnschedulable reports whether the sandbox's backing pod is
+// currently unschedulable (PodScheduled=False with reason Unschedulable).
+// Missing pods or pods without a definitive PodScheduled=False/Unschedulable
+// condition report false, preserving the delete-and-replace behavior for
+// genuinely stuck sandboxes.
+func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(ctx context.Context, sb *sandboxv1beta1.Sandbox) bool {
+	// The backing pod normally shares the sandbox's name; a sandbox that
+	// adopted a warm pod tracks the pod name in an annotation (same
+	// resolution the sandbox controller uses).
+	podName := sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
+	if podName == "" {
+		podName = sb.Name
+	}
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod); err != nil {
+		return false
+	}
+	if !pod.DeletionTimestamp.IsZero() {
+		return false
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled {
+			return cond.Status == corev1.ConditionFalse && cond.Reason == corev1.PodReasonUnschedulable
+		}
+	}
+	return false
 }
 
 // adoptSandbox sets this warmpool as the owner of an orphaned sandbox.
@@ -260,9 +563,16 @@ func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
 }
 
 // filterActiveSandboxes filters the list of sandboxes, deleting stale ones and adopting orphans.
-func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, error) {
+// It returns the pool's active sandboxes plus the number of pool-owned
+// terminating sandboxes: ones with a deletion timestamp, ones this controller
+// deleted but whose deletion the cache has not observed yet, and ones deleted
+// as stale in this pass. Terminating sandboxes are excluded from active (and
+// so from Ready accounting), but still occupy capacity, so the create path
+// must count them against spec.replicas (#1215).
+func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, poolKey types.NamespacedName, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, int32, error) {
 	logger := log.FromContext(ctx)
 	var activeSandboxes []sandboxv1beta1.Sandbox
+	terminatingReplicas := int32(0)
 	var allErrors error
 
 	vettedHashes := make(map[string]bool)
@@ -285,13 +595,27 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 	}
 
 	for _, sb := range sandboxes {
-		if !sb.DeletionTimestamp.IsZero() {
-			continue
-		}
-
 		controllerRef := metav1.GetControllerOf(&sb)
 		isOrphan := controllerRef == nil
 		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
+
+		if !sb.DeletionTimestamp.IsZero() {
+			// Terminating pool members are no longer active, but they still
+			// occupy capacity until fully gone: count them so create gating
+			// cannot balloon the population while deletes lag (#1215).
+			if isControlledByPool {
+				terminatingReplicas++
+			}
+			continue
+		}
+
+		// A sandbox this controller already deleted may still show up in the
+		// (lagging) cache without a deletion timestamp; treat it as
+		// terminating, not active.
+		if isControlledByPool && r.exp().IsPendingDeletion(poolKey, sb.UID) {
+			terminatingReplicas++
+			continue
+		}
 
 		if !isOrphan && !isControlledByPool {
 			logger.Info("Ignoring sandbox with different controller", "sandbox", sb.Name, "controller", controllerRef.Name)
@@ -301,9 +625,20 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 		if tmplErr == nil && (updateStrategy == extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType || isOrphan) {
 			if r.isSandboxStale(ctx, &sb, template, currentSandboxBlueprintHash, vettedHashes) {
 				logger.Info("Deleting stale sandbox", "sandbox", sb.Name, "isOrphan", isOrphan)
+				// Only pool-owned sandboxes get deletion expectations: the
+				// watch handler can only map owned delete events back to the
+				// pool, and only owned sandboxes count against the target.
+				if isControlledByPool {
+					r.exp().ExpectDeletion(poolKey, sb.UID)
+				}
 				if err := r.Delete(ctx, &sb); err != nil {
+					if isControlledByPool {
+						r.exp().DeletionObserved(poolKey, sb.UID)
+					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
+				} else if isControlledByPool {
+					terminatingReplicas++
 				}
 				continue
 			}
@@ -328,7 +663,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 
 		activeSandboxes = append(activeSandboxes, sb)
 	}
-	return activeSandboxes, allErrors
+	return activeSandboxes, terminatingReplicas, allErrors
 }
 
 // computePodTemplateHash computes a hash of the sandbox template's Spec.PodTemplate.
@@ -443,16 +778,6 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 	}
 
 	logger.Info("Created new pool sandbox", "sandbox", sandbox.Name, "poolName", warmPool.Name)
-	return nil
-}
-
-// deletePoolSandbox deletes a Sandbox CR from the warm pool. Ignores not found errors to not abort the batch deletion if some sandboxes are already deleted.
-func (r *SandboxWarmPoolReconciler) deletePoolSandbox(ctx context.Context, sb *sandboxv1beta1.Sandbox) error {
-	logger := log.FromContext(ctx)
-	if err := r.Delete(ctx, sb); err != nil && client.IgnoreNotFound(err) != nil {
-		logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name, "namespace", sb.Namespace)
-		return err
-	}
 	return nil
 }
 
@@ -614,6 +939,43 @@ func sandboxTemplateRefNameIndexer(obj client.Object) []string {
 	return []string{wp.Spec.TemplateRef.Name}
 }
 
+// warmPoolControllerKey resolves the SandboxWarmPool that controls obj, if any.
+func warmPoolControllerKey(obj client.Object) (types.NamespacedName, bool) {
+	controllerRef := metav1.GetControllerOf(obj)
+	if controllerRef == nil {
+		return types.NamespacedName{}, false
+	}
+	gv, err := schema.ParseGroupVersion(controllerRef.APIVersion)
+	if err != nil || gv.Group != extensionsv1beta1.GroupVersion.Group || controllerRef.Kind != "SandboxWarmPool" {
+		return types.NamespacedName{}, false
+	}
+	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: controllerRef.Name}, true
+}
+
+// warmPoolSandboxEventHandler wraps the standard enqueue-for-owner handler so
+// the expectations tracker observes owned sandbox add/delete events before the
+// owning pool is enqueued. This ordering guarantees that by the time a
+// reconcile triggered by one of our own writes runs, the corresponding
+// expectation has already been lowered.
+type warmPoolSandboxEventHandler struct {
+	handler.EventHandler
+	expectations *warmPoolExpectations
+}
+
+func (h *warmPoolSandboxEventHandler) Create(ctx context.Context, evt event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	if key, ok := warmPoolControllerKey(evt.Object); ok {
+		h.expectations.CreationObserved(key)
+	}
+	h.EventHandler.Create(ctx, evt, q)
+}
+
+func (h *warmPoolSandboxEventHandler) Delete(ctx context.Context, evt event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	if key, ok := warmPoolControllerKey(evt.Object); ok {
+		h.expectations.DeletionObserved(key, evt.Object.GetUID())
+	}
+	h.EventHandler.Delete(ctx, evt, q)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	if r.MaxBatchSize <= 0 {
@@ -632,9 +994,17 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 		return fmt.Errorf("failed to index warm pools by template reference name: %w", err)
 	}
 
+	// Equivalent to Owns(&Sandbox{}), plus expectation observation on
+	// add/delete events (see warmPoolSandboxEventHandler).
+	sandboxHandler := &warmPoolSandboxEventHandler{
+		EventHandler: handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
+			&extensionsv1beta1.SandboxWarmPool{}, handler.OnlyControllerOwner()),
+		expectations: r.exp(),
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1beta1.SandboxWarmPool{}).
-		Owns(&sandboxv1beta1.Sandbox{}).
+		Watches(&sandboxv1beta1.Sandbox{}, sandboxHandler).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Watches(
 			&extensionsv1beta1.SandboxTemplate{},

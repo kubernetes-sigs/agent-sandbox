@@ -207,6 +207,21 @@ func run(cfg *config.Config, log logr.Logger) error {
 		}
 		authorizer = tr
 	}
+	if cfg.AuthzMode == config.AuthzScopedToken {
+		secret, err := os.ReadFile(cfg.AuthzScopedTokenSecretFile)
+		if err != nil {
+			return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
+		}
+		st, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+			// NewScopedTokenAuthorizer trims whitespace itself, so a
+			// mounted Secret with a trailing newline just works.
+			Secret: secret,
+		})
+		if err != nil {
+			return fmt.Errorf("build scoped-token authorizer: %w", err)
+		}
+		authorizer = st
+	}
 
 	// --- Proxy handler -----------------------------------------------------
 	proxyOpts := proxy.Options{

@@ -84,7 +84,8 @@ The following table lists the configurable parameters and their defaults.
 | `namespace.create` | Create the namespace as part of the release | `true` |
 | `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |
 | `controller.leaderElect` | Enable leader election | `true` |
-| `controller.leaderElectionNamespace` | Namespace for the leader election resource (auto-detected if empty) | `""` |
+| `controller.leaderElectionNamespace` | Namespace for the leader election resource (auto-detected if empty). In namespaced mode, the chart creates leader-election RBAC when this is the controller namespace. For another namespace, NOTES prints Role and RoleBinding manifests to apply manually; Helm does not create cross-namespace resources. | `""` |
+| `controller.watchNamespace` | Namespace(s) to watch; comma-separated for multi-namespace mode. Falls back to `WATCH_NAMESPACE` env var. Empty means cluster-scoped. When set, the chart injects `--enable-webhook=false` and `--leader-election-namespace=<release-namespace>`. Workload RBAC for the controller namespace is included when that namespace is watched; NOTES prints manifests for other watched namespaces. **Warning:** If etcd still contains v1alpha1 objects, migrate them to v1beta1 before enabling namespaced mode or keep a cluster-scoped conversion webhook available; API requests requiring conversion will otherwise fail. See the [Helm behavior matrix](../docs/configuration.md#helm-behavior) for the complete flag and RBAC combinations. | `""` |
 | `controller.clusterDomain` | Kubernetes cluster domain for service FQDN generation | `"cluster.local"` |
 | `controller.kubeApiQps` | Client-side QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |

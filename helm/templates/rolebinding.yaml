@@ -1,3 +1,13 @@
+{{- $watchNamespaces := include "agent-sandbox.watchNamespaces" . | fromJsonArray -}}
+{{- $controllerNamespace := include "agent-sandbox.namespace" . -}}
+{{- $controllerNamespaceWatched := has $controllerNamespace $watchNamespaces -}}
+{{- if or (not .Values.controller.watchNamespace) $controllerNamespaceWatched }}
+{{/*
+RoleBinding for the agent-sandbox-controller in the release namespace.
+Binds the controller ServiceAccount to the Role containing either webhook
+certificate management permissions (cluster-scoped mode) or workload RBAC
+(namespaced mode when controller namespace is watched).
+*/}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -13,3 +23,4 @@ roleRef:
   kind: Role
   name: agent-sandbox-controller
   apiGroup: rbac.authorization.k8s.io
+{{- end }}

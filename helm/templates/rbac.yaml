@@ -1,0 +1,3 @@
+{{- if not .Values.controller.watchNamespace }}
+{{ .Files.Get "files/rbac.generated.yaml" }}
+{{- end }}

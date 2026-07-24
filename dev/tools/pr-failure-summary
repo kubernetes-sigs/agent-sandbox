@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Posts digestible CI-failure summaries on open PRs.
+
+For each open PR whose Prow presubmits are failing, this pulls the junit
+results (and, for infra failures, the build log tail) from the job's GCS
+artifacts, classifies each failure as a known flake (matching an open
+`kind/flake` issue) or as likely related to the PR's changes, and maintains a
+single sticky comment on the PR summarizing all of it — so contributors don't
+have to dig through Spyglass.
+
+Stateless and idempotent: the comment itself records which head SHA and run
+IDs it covers, so reruns are no-ops until something changes. Requires `gh`
+to be authenticated.
+
+Typical cron usage:
+    dev/tools/pr-failure-summary --post
+
+Read-only preview (prints the comments it would post):
+    dev/tools/pr-failure-summary
+"""
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import urllib.parse
+import xml.etree.ElementTree as ET
+
+MARKER = "<!-- agent-sandbox/pr-failure-summary -->"
+STATE_RE = re.compile(r"<!-- state=([0-9a-zA-Z:-]+) -->")
+MAX_ERROR_CHARS = 1500
+LOG_TAIL_BYTES = 16384
+# Cap rendered failures per job so a mass failure can't blow past GitHub's
+# ~64KB comment-size limit; the full list is always in the linked logs.
+MAX_FAILURES_PER_JOB = 15
+
+
+def run(cmd, input_text=None, check=True):
+    # timeout so a hung API call can't wedge the whole cron run
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            input=input_text, timeout=120)
+    if check and result.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:3])}... failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def gh(*args, input_text=None):
+    return run(["gh", *args], input_text=input_text)
+
+
+def fetch(url, byte_range=None):
+    cmd = ["curl", "-fsSL", "--max-time", "60", url]
+    if byte_range:
+        cmd += ["-r", byte_range]
+    # Decode leniently: a byte-range fetch can split a multibyte character,
+    # and build logs sometimes contain raw binary.
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def gcs_list(bucket, prefix):
+    names, page_token = [], None
+    while True:
+        params = {"prefix": prefix, "fields": "items(name),nextPageToken"}
+        if page_token:
+            params["pageToken"] = page_token
+        data = fetch(
+            f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?"
+            + urllib.parse.urlencode(params)
+        )
+        if not data:
+            # A failed listing must not masquerade as an empty one: returning
+            # partial results here would make a job with real junit failures
+            # look junit-less and tell the author to just `/retest`. Raise so
+            # the per-PR try/except skips this PR for the run instead.
+            raise RuntimeError(f"GCS listing failed for gs://{bucket}/{prefix}")
+        payload = json.loads(data)
+        names += [item["name"] for item in payload.get("items", [])]
+        page_token = payload.get("nextPageToken")
+        if not page_token:
+            return names
+
+
+def gcs_read(bucket, name, byte_range=None):
+    return fetch(
+        f"https://storage.googleapis.com/{bucket}/{urllib.parse.quote(name)}",
+        byte_range=byte_range,
+    )
+
+
+def parse_junit(xml_text):
+    """Returns [(classname, test_name, message)] for failed testcases."""
+    failures = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return failures
+    for case in root.iter("testcase"):
+        for child in case:
+            if child.tag in ("failure", "error"):
+                msg = (child.text or child.get("message") or "").strip()
+                failures.append((case.get("classname", ""),
+                                 case.get("name", "?"),
+                                 msg[:MAX_ERROR_CHARS]))
+                break
+    return failures
+
+
+def failing_prow_statuses(repo, sha):
+    """Failing Prow contexts for a commit, with their GCS artifact paths."""
+    combined = json.loads(gh("api", f"repos/{repo}/commits/{sha}/status"))
+    statuses = combined.get("statuses", [])
+    out = []
+    for s in statuses:
+        if s.get("state") not in ("failure", "error"):
+            continue
+        target = s.get("target_url") or ""
+        if "/view/gs/" not in target:
+            continue  # not a Prow job
+        gcs_path = target.split("/view/gs/", 1)[1].rstrip("/")
+        bucket, _, path = gcs_path.partition("/")
+        out.append({
+            "context": s["context"],
+            "url": target,
+            "bucket": bucket,
+            "path": path,
+            "run_id": path.rsplit("/", 1)[-1],
+        })
+    return out
+
+
+def collect_job_failures(job):
+    """Returns (test_failures, log_tail). Empty test_failures => infra failure."""
+    failures = []
+    for name in gcs_list(job["bucket"], job["path"] + "/artifacts/"):
+        if re.search(r"junit.*\.xml$", name):
+            failures += parse_junit(gcs_read(job["bucket"], name))
+    if failures:
+        return failures, ""
+    tail = gcs_read(job["bucket"], job["path"] + "/build-log.txt",
+                    byte_range=f"-{LOG_TAIL_BYTES}")
+    lines = [l for l in tail.splitlines() if l.strip()]
+    # Prefer error-looking lines from the tail; fall back to the last lines.
+    errors = [l for l in lines
+              if re.search(r"(?i)\b(error|fail|fatal|panic|timed?\s?out)\b", l)]
+    return [], "\n".join((errors or lines)[-25:])
+
+
+def known_flakes(repo):
+    """Maps fully-qualified test name -> issue number from open kind/flake issues."""
+    issues = json.loads(
+        gh("issue", "list", "--repo", repo, "--label", "kind/flake",
+           "--state", "open", "--limit", "200", "--json", "number,title,body")
+    )
+    mapping = {}
+    for issue in issues:
+        m = re.search(r"<!-- flake-report:test=(\S+) -->", issue.get("body", ""))
+        if m:
+            mapping[m.group(1)] = issue["number"]
+        else:
+            # Fall back to the [FLAKE] <name> title convention (manual issues,
+            # usually a bare short name).
+            t = re.match(r"\[FLAKE\]\s+(\S+)", issue.get("title", ""))
+            if t:
+                mapping[t.group(1)] = issue["number"]
+    return mapping
+
+
+def match_flake(classname, name, flakes):
+    """Finds the flake issue for a junit testcase, or None.
+
+    Prefer the fully-qualified identity (classname.name) so identically-named
+    tests in different packages don't cross-match; fall back to a short-name
+    match only when it's unambiguous across the known flakes.
+    """
+    base = name.split("/", 1)[0]  # go subtests share the parent's flake issue
+    full_ids = {f"{classname}.{name}", f"{classname}.{base}"} if classname else set()
+    for full, number in flakes.items():
+        if full in full_ids:
+            return number
+    candidates = {number for full, number in flakes.items()
+                  if full.rsplit(".", 1)[-1].split("/", 1)[0] == base}
+    if len(candidates) == 1:
+        return candidates.pop()
+    return None
+
+
+_source_dirs_cache = {}
+
+
+def top_dirs(path):
+    """'controllers/foo_test.go' -> 'controllers', 'test/e2e/x/y.go' -> 'test/e2e'.
+
+    Drops the filename before truncating so foo.go and foo_test.go in the same
+    package map to the same dir; top-level files map to '' (callers drop it).
+    """
+    return "/".join(path.split("/")[:-1][:2])
+
+
+def test_source_dirs(test_name):
+    """Best-effort map from a test name to repo dirs containing its source."""
+    base = test_name.split("/", 1)[0]  # strip go subtest suffix
+    if base in _source_dirs_cache:
+        return _source_dirs_cache[base]
+    dirs = set()
+    for pat in (f"func {base}(", f"def {base}("):
+        try:
+            result = subprocess.run(
+                ["git", "grep", "-l", "-F", pat],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            # Degrade to "source unknown" (classification falls through to
+            # ❓) rather than wedging the cron; cached so a stuck git isn't
+            # re-invoked for every failure.
+            break
+        dirs.update(d for d in map(top_dirs, result.stdout.splitlines()) if d)
+    _source_dirs_cache[base] = dirs
+    return dirs
+
+
+def pr_changed_dirs(repo, number):
+    # Paginate the REST files endpoint: `gh pr view --json files` caps at the
+    # first 100 changed files, which would silently degrade overlap detection
+    # on large PRs. --slurp wraps each page in an outer array.
+    pages = json.loads(
+        gh("api", f"repos/{repo}/pulls/{number}/files",
+           "--paginate", "--slurp")
+    )
+    return {d for d in (top_dirs(f["filename"]) for page in pages for f in page)
+            if d}
+
+
+def classify(classname, test_name, flakes, changed_dirs):
+    issue = match_flake(classname, test_name, flakes)
+    if issue:
+        return f"🎲 known flake ([#{issue}](https://github.com/kubernetes-sigs/agent-sandbox/issues/{issue})) — likely not caused by this PR", True
+    overlap = test_source_dirs(test_name) & changed_dirs
+    if overlap:
+        return f"⚠️ exercises code this PR touches (`{sorted(overlap)[0]}`) — likely related to your change", False
+    return "❓ not a known flake — check the error below", False
+
+
+# Output that shows the job died on the PR's own code (compile error, vet or
+# lint finding) rather than on infrastructure — no junit either way, so the
+# log tail is the only way to tell them apart.
+BUILD_FAILURE_RE = re.compile(
+    r"\.go:\d+:\d+:|\bundefined:|\bsyntax error\b|\bcannot find package\b"
+    r"|\bgolangci-lint\b|\bvet: "
+)
+
+
+def looks_like_pr_fault(job, log_tail):
+    """True when a junit-less failure is likely the PR's fault, not infra."""
+    # Lint/verify jobs never write junit; their failures are ~always the PR's.
+    if re.search(r"\b(lint|verify)\b", job["context"]):
+        return True
+    return bool(BUILD_FAILURE_RE.search(log_tail))
+
+
+def code_fence(text):
+    """A backtick fence longer than any backtick run in text, so junit output
+    containing ``` can't break out of the block and inject markdown."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def details_block(summary, text, max_lines=30):
+    fence = code_fence(text)
+    return ["", f"  <details><summary>{summary}</summary>", "",
+            f"  {fence}", *(f"  {l}" for l in text.splitlines()[:max_lines]),
+            f"  {fence}", "  </details>", ""]
+
+
+def build_comment(sha, jobs_summaries, all_known_flakes):
+    # The state fingerprint includes the verdicts, not just the run IDs, so
+    # the comment refreshes when a failure later becomes a known flake (e.g.
+    # after the nightly flake-report files an issue for it).
+    fingerprint = ",".join(sorted(
+        [j["run_id"] for j, _, _, _ in jobs_summaries]
+        + [f"{name}:{verdict}" for _, failures, _, _ in jobs_summaries
+           for name, _, verdict, _ in failures]
+    ))
+    state = f"{sha[:12]}:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:12]
+    lines = [
+        MARKER,
+        f"<!-- state={state} -->",
+        f"## CI failure summary for `{sha[:9]}`",
+        "",
+    ]
+    for job, failures, log_tail, pr_fault in jobs_summaries:
+        lines.append(f"### ❌ `{job['context']}` — [full logs]({job['url']})")
+        if failures:
+            for name, msg, verdict, _ in failures[:MAX_FAILURES_PER_JOB]:
+                lines.append(f"- `{name}` — {verdict}")
+                if msg:
+                    lines += details_block("error", msg)
+            if len(failures) > MAX_FAILURES_PER_JOB:
+                lines.append(
+                    f"- …and {len(failures) - MAX_FAILURES_PER_JOB} more "
+                    "failure(s) in this job — see the full logs above."
+                )
+        elif pr_fault:
+            lines.append(
+                "- The job failed **without producing test results** — the "
+                "log ends in what looks like a build/vet/lint failure, so it "
+                "is likely caused by this PR. See the log below."
+            )
+            if log_tail:
+                lines += details_block("end of build log", log_tail, max_lines=25)
+        else:
+            lines.append(
+                "- The job failed **before tests ran** (cluster bring-up / "
+                "image build / timeout). This looks like an infrastructure "
+                "failure, not your change — comment `/retest`."
+            )
+            if log_tail:
+                lines += details_block("end of build log", log_tail, max_lines=25)
+        lines.append("")
+    if all_known_flakes:
+        lines.append("**Every failure matches a known flake or infrastructure "
+                     "issue — commenting `/retest` should go green.**")
+    lines += [
+        "",
+        "<sub>Generated by [`dev/tools/pr-failure-summary`](https://github.com/"
+        "kubernetes-sigs/agent-sandbox/blob/main/dev/tools/pr-failure-summary). "
+        "It refreshes automatically on new failures.</sub>",
+    ]
+    return "\n".join(lines), state
+
+
+def find_sticky_comment(repo, number):
+    # --slurp wraps each page in an outer array so multi-page output stays
+    # valid JSON.
+    pages = json.loads(
+        gh("api", f"repos/{repo}/issues/{number}/comments", "--paginate", "--slurp")
+    )
+    for c in (c for page in pages for c in page):
+        if MARKER in c.get("body", ""):
+            return c
+    return None
+
+
+def upsert_comment(repo, number, body, state, post):
+    existing = find_sticky_comment(repo, number)
+    if existing:
+        m = STATE_RE.search(existing["body"])
+        if m and m.group(1) == state:
+            return "unchanged"
+        if post:
+            gh("api", "-X", "PATCH",
+               f"repos/{repo}/issues/comments/{existing['id']}",
+               "-f", f"body={body}")
+        return "updated"
+    if post:
+        gh("api", f"repos/{repo}/issues/{number}/comments", "-f", f"body={body}")
+    return "created"
+
+
+def resolve_sticky_comment(repo, number, sha, post):
+    """Collapses a stale failure summary once the PR has no failing jobs.
+
+    A summary left as the last sticky comment on a now-green PR reads as
+    noise, so rewrite it to a one-liner. Idempotent via the state marker.
+    """
+    existing = find_sticky_comment(repo, number)
+    if not existing:
+        return None
+    state = f"{sha[:12]}:resolved"
+    m = STATE_RE.search(existing["body"])
+    if m and m.group(1) == state:
+        return "unchanged"
+    body = "\n".join([
+        MARKER,
+        f"<!-- state={state} -->",
+        f"✅ The CI failures summarized earlier are resolved as of `{sha[:9]}`.",
+    ])
+    if post:
+        gh("api", "-X", "PATCH",
+           f"repos/{repo}/issues/comments/{existing['id']}",
+           "-f", f"body={body}")
+    return "resolved"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--repo", default="kubernetes-sigs/agent-sandbox")
+    parser.add_argument("--limit", type=int, default=30,
+                        help="max open PRs to scan (newest first)")
+    parser.add_argument("--pr", type=int, help="only process this PR number")
+    parser.add_argument("--post", action="store_true",
+                        help="post/update comments (default: print what would be posted)")
+    args = parser.parse_args()
+
+    if args.pr:
+        prs = [json.loads(gh("pr", "view", str(args.pr), "--repo", args.repo,
+                             "--json", "number,headRefOid"))]
+    else:
+        prs = json.loads(
+            gh("pr", "list", "--repo", args.repo, "--state", "open",
+               "--limit", str(args.limit), "--json", "number,headRefOid")
+        )
+
+    flakes = known_flakes(args.repo)
+    errors = 0
+    for pr in prs:
+        number, sha = pr["number"], pr["headRefOid"]
+        # Isolate per-PR failures so one bad PR (rate limit, missing
+        # artifacts) doesn't abort summaries for the rest of the batch.
+        try:
+            jobs = failing_prow_statuses(args.repo, sha)
+            if not jobs:
+                action = resolve_sticky_comment(args.repo, number, sha, args.post)
+                if action == "resolved":
+                    prefix = "" if args.post else "[preview] "
+                    print(f"{prefix}PR #{number}: collapsed stale summary "
+                          "(no failing jobs)", file=sys.stderr)
+                continue
+
+            changed_dirs = pr_changed_dirs(args.repo, number)
+            summaries = []
+            all_ok_to_retest = True
+            for job in jobs:
+                failures, log_tail = collect_job_failures(job)
+                classified = []
+                for classname, name, msg in failures:
+                    verdict, is_flake = classify(classname, name, flakes, changed_dirs)
+                    if not is_flake:
+                        all_ok_to_retest = False
+                    classified.append((name, msg, verdict, is_flake))
+                pr_fault = not failures and looks_like_pr_fault(job, log_tail)
+                if pr_fault:
+                    all_ok_to_retest = False
+                summaries.append((job, classified, log_tail, pr_fault))
+
+            body, state = build_comment(sha, summaries, all_ok_to_retest)
+            action = upsert_comment(args.repo, number, body, state, args.post)
+        except Exception as e:
+            errors += 1
+            print(f"error: PR #{number}: {e}", file=sys.stderr)
+            continue
+        prefix = "" if args.post else "[preview] "
+        print(f"{prefix}PR #{number}: {action} "
+              f"({len(jobs)} failing job(s))", file=sys.stderr)
+        if not args.post and action != "unchanged":
+            print(f"\n----- PR #{number} -----\n{body}\n")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

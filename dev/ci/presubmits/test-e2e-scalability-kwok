@@ -68,6 +68,7 @@ echo "Creating simulated nodes..."
 NUM_NODES="${SIMULATED_NODES:-10}"
 "${KWOKCTL}" scale node --name="${CLUSTER_NAME}" --replicas="${NUM_NODES}"
 kubectl label node node-000000 node-role.kubernetes.io/control-plane="" --overwrite
+kubectl patch node node-000000 --subresource=status --type=merge -p '{"status":{"addresses":[{"type":"InternalIP","address":"127.0.0.1"},{"type":"ExternalIP","address":"127.0.0.1"}]}}'
 
 echo "Deploying Agent Sandbox CRDs & System Namespace..."
 kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -

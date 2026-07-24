@@ -428,6 +428,10 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 					needsUpdate = true
 				}
 			}
+			if !equality.Semantic.DeepEqual(sandbox.Spec.PersistentVolumeClaimRetentionPolicy, template.Spec.PersistentVolumeClaimRetentionPolicy) {
+				sandbox.Spec.PersistentVolumeClaimRetentionPolicy = copyPersistentVolumeClaimRetentionPolicy(template.Spec.PersistentVolumeClaimRetentionPolicy)
+				needsUpdate = true
+			}
 
 			if needsUpdate {
 				logger.V(1).Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)
@@ -694,6 +698,15 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 		delete(labels, v1beta1.CreatedByLabel)
 	}
 	return labels
+}
+
+func copyPersistentVolumeClaimRetentionPolicy(policy *v1beta1.PersistentVolumeClaimRetentionPolicy) *v1beta1.PersistentVolumeClaimRetentionPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &v1beta1.PersistentVolumeClaimRetentionPolicy{
+		WhenDeleted: policy.WhenDeleted,
+	}
 }
 
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, error) {
@@ -1200,6 +1213,7 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] = template.Name
 
 	sandbox.Spec.SandboxBlueprint = *template.Spec.SandboxBlueprint.DeepCopy()
+	sandbox.Spec.PersistentVolumeClaimRetentionPolicy = copyPersistentVolumeClaimRetentionPolicy(template.Spec.PersistentVolumeClaimRetentionPolicy)
 	// Merge volumeClaimTemplates from template and claim according to the template policy
 	if len(claim.Spec.VolumeClaimTemplates) > 0 {
 		resolvedVCTs, err := mergeVolumeClaimTemplates(

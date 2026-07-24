@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+End-to-end test for the python-runtime-sandbox example.
+
+Runs the sandbox runtime's unit tests, then creates a kind cluster, deploys
+the agent-sandbox controller with extensions, builds the sandbox-runtime
+image, applies the Sandbox manifest, port-forwards to the pod, and runs the
+Python tester against it.
+"""
+
+import os
+import subprocess
+import sys
+import time
+
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from dev.ci.shared.runner import TestRunner
+
+EXAMPLE_DIR = os.path.join(_repo_root, "examples", "python-runtime-sandbox")
+RUNTIME_IMAGE = "sandbox-runtime:latest"
+POD_LABEL_SELECTOR = "sandbox=my-python-sandbox"
+
+
+class PythonRuntimeSandboxTestRunner(TestRunner):
+    def __init__(self):
+        super().__init__("python-runtime-sandbox-test", "e2e test for the python-runtime-sandbox example")
+
+    def run_tests(self, args):
+        env = os.environ.copy()
+        env["KUBECONFIG"] = os.path.join(self.repo_root, "bin", "KUBECONFIG")
+
+        def run(cmd, check=True, **kwargs):
+            print(f"+ {' '.join(cmd)}")
+            return subprocess.run(cmd, check=check, **kwargs)
+
+        def kubectl(*kubectl_args, check=True, **kwargs):
+            return run(["kubectl", *kubectl_args], env=env, check=check, **kwargs)
+
+        port_forward = None
+
+        def cleanup():
+            nonlocal port_forward
+            print("\n-- Cleaning up --")
+            if port_forward:
+                port_forward.terminate()
+                port_forward.wait(timeout=10)
+                port_forward = None
+            kubectl("delete", "--ignore-not-found",
+                    "-f", os.path.join(EXAMPLE_DIR, "sandbox-python-kind.yaml"), check=False)
+
+        print("=== python-runtime-sandbox e2e test ===")
+        cleanup()
+
+        try:
+            print("\n-- Installing sandbox-runtime unit test dependencies --")
+            run(["pip", "install", "--break-system-packages",
+                 "fastapi", "pytest", "httpx", "python-multipart"])
+
+            print("\n-- Running sandbox-runtime unit tests --")
+            result = run(["python3", "-m", "pytest", "test_main.py", "-v"],
+                         cwd=EXAMPLE_DIR, check=False)
+            if result.returncode != 0:
+                print("ERROR: unit tests reported failures.", file=sys.stderr)
+                cleanup()
+                return subprocess.CompletedProcess([], 1)
+
+            print("\n-- Building sandbox-runtime image --")
+            run(["docker", "build", "-t", RUNTIME_IMAGE, "--load", EXAMPLE_DIR])
+
+            print("\n-- Loading image into kind cluster --")
+            run(["kind", "load", "docker-image", RUNTIME_IMAGE, "--name", self.name])
+
+            print("\n-- Applying sandbox-python-kind.yaml --")
+            kubectl("apply", "-f", os.path.join(EXAMPLE_DIR, "sandbox-python-kind.yaml"))
+
+            print("\n-- Waiting for sandbox pod to be ready --")
+            kubectl("wait", "--for=condition=ready", "pod",
+                    "--selector", POD_LABEL_SELECTOR, "--timeout=120s")
+
+            pod_name = kubectl(
+                "get", "pods", "-l", POD_LABEL_SELECTOR,
+                "-o", "jsonpath={.items[0].metadata.name}",
+                capture_output=True, text=True,
+            ).stdout.strip()
+
+            print("\n-- Port-forwarding to sandbox pod --")
+            port_forward = subprocess.Popen(
+                ["kubectl", "port-forward", f"pod/{pod_name}", "8888:8888"], env=env)
+            time.sleep(3)
+
+            print("\n-- Running python-runtime-sandbox tester --")
+            result = run(["python3", "tester.py", "127.0.0.1", "8888"],
+                         cwd=EXAMPLE_DIR, check=False)
+            if result.returncode != 0:
+                print("ERROR: tester reported failures.", file=sys.stderr)
+                cleanup()
+                return subprocess.CompletedProcess([], 1)
+
+        except subprocess.CalledProcessError as e:
+            print(f"\nERROR: command failed: {e}", file=sys.stderr)
+            cleanup()
+            return subprocess.CompletedProcess([], 1)
+
+        cleanup()
+        print("\n=== Test passed ===")
+        return subprocess.CompletedProcess([], 0)
+
+
+if __name__ == "__main__":
+    runner = PythonRuntimeSandboxTestRunner()
+    runner.main()

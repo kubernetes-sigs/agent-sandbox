@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+End-to-end test for the gemini-cu-sandbox example.
+
+Runs the sandbox runtime's unit tests, then creates a kind cluster, deploys
+the agent-sandbox controller with extensions, builds the
+sandbox-gemini-runtime and sandbox-router images, applies the
+SandboxTemplate, and runs the computer-use Python unittest.
+
+Requires GEMINI_API_KEY to be set in the environment.
+"""
+
+import os
+import subprocess
+import sys
+
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from dev.ci.shared.runner import TestRunner
+
+EXAMPLE_DIR = os.path.join(_repo_root, "examples", "gemini-cu-sandbox")
+CLIENT_DIR = os.path.join(_repo_root, "clients", "python", "agentic-sandbox-client")
+ROUTER_DIR = os.path.join(CLIENT_DIR, "sandbox-router")
+GEMINI_IMAGE = "sandbox-gemini-runtime:latest"
+ROUTER_IMAGE = "sandbox-router:latest"
+
+
+class GeminiCUSandboxTestRunner(TestRunner):
+    def __init__(self):
+        super().__init__("gemini-cu-test", "e2e test for the gemini-cu-sandbox example")
+
+    def run_tests(self, args):
+        env = os.environ.copy()
+        env["KUBECONFIG"] = os.path.join(self.repo_root, "bin", "KUBECONFIG")
+
+        gemini_api_key = env.get("GEMINI_API_KEY", "")
+        if not gemini_api_key:
+            print("ERROR: GEMINI_API_KEY environment variable is not set.", file=sys.stderr)
+            return subprocess.CompletedProcess([], 1)
+
+        def run(cmd, check=True, **kwargs):
+            print(f"+ {' '.join(cmd)}")
+            return subprocess.run(cmd, check=check, **kwargs)
+
+        def kubectl(*kubectl_args, check=True, **kwargs):
+            return run(["kubectl", *kubectl_args], env=env, check=check, **kwargs)
+
+        def cleanup():
+            print("\n-- Cleaning up --")
+            kubectl("delete", "--ignore-not-found",
+                    "-f", os.path.join(ROUTER_DIR, "sandbox_router.yaml"), check=False)
+            kubectl("delete", "--ignore-not-found",
+                    "sandboxclaim", "sandbox-computeruse-claim", check=False)
+            kubectl("delete", "--ignore-not-found", "secret", "gemini-api-key", check=False)
+            kubectl("delete", "--ignore-not-found",
+                    "-f", os.path.join(EXAMPLE_DIR, "sandbox-gemini-computer-use.yaml"), check=False)
+
+        print("=== gemini-cu-sandbox e2e test ===")
+        cleanup()
+
+        try:
+            print("\n-- Installing sandbox-gemini-runtime unit test dependencies --")
+            run(["pip", "install", "--break-system-packages", "fastapi", "pytest", "httpx"])
+
+            print("\n-- Running sandbox-gemini-runtime unit tests --")
+            result = run(["python3", "-m", "pytest", "test_main.py", "-v"],
+                         cwd=EXAMPLE_DIR, check=False)
+            if result.returncode != 0:
+                print("ERROR: unit tests reported failures.", file=sys.stderr)
+                cleanup()
+                return subprocess.CompletedProcess([], 1)
+
+            print("\n-- Building sandbox-gemini-runtime image --")
+            run(["docker", "build", "-t", GEMINI_IMAGE, "--load", EXAMPLE_DIR])
+
+            print("\n-- Building sandbox-router image --")
+            run(["docker", "buildx", "build", "--load", "-t", ROUTER_IMAGE, ROUTER_DIR])
+
+            print("\n-- Loading images into kind cluster --")
+            run(["kind", "load", "docker-image", GEMINI_IMAGE, "--name", self.name])
+            run(["kind", "load", "docker-image", ROUTER_IMAGE, "--name", self.name])
+
+            print("\n-- Creating gemini-api-key secret --")
+            secret_yaml = subprocess.run(
+                ["kubectl", "create", "secret", "generic", "gemini-api-key",
+                 f"--from-literal=key={gemini_api_key}", "--dry-run=client", "-o", "yaml"],
+                env=env, capture_output=True, text=True, check=True,
+            ).stdout
+            subprocess.run(["kubectl", "apply", "-f", "-"],
+                           input=secret_yaml, text=True, env=env, check=True)
+
+            print("\n-- Deploying sandbox-router --")
+            kubectl("apply", "-f", os.path.join(ROUTER_DIR, "sandbox_router.yaml"))
+
+            print("\n-- Applying sandbox-gemini-computer-use.yaml --")
+            kubectl("apply", "-f", os.path.join(EXAMPLE_DIR, "sandbox-gemini-computer-use.yaml"))
+
+            print("\n-- Installing Python client --")
+            run(["pip", "install", "-e", ".", "--break-system-packages"], cwd=CLIENT_DIR)
+
+            print("\n-- Running computer-use unittest --")
+            result = run(
+                ["python3", "-m", "unittest",
+                 "clients.python.agentic-sandbox-client.test_computer_use_extension"],
+                cwd=self.repo_root,
+                check=False,
+            )
+            if result.returncode != 0:
+                print("ERROR: unittest reported failures.", file=sys.stderr)
+                cleanup()
+                return subprocess.CompletedProcess([], 1)
+
+        except subprocess.CalledProcessError as e:
+            print(f"\nERROR: command failed: {e}", file=sys.stderr)
+            cleanup()
+            return subprocess.CompletedProcess([], 1)
+
+        cleanup()
+        print("\n=== Test passed ===")
+        return subprocess.CompletedProcess([], 0)
+
+
+if __name__ == "__main__":
+    runner = GeminiCUSandboxTestRunner()
+    runner.main()

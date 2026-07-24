@@ -44,9 +44,13 @@ CLUSTER_NAME="kwok-sandbox-scale"
 cleanup() {
   echo "Cleaning up controller & simulated cluster..."
   if [[ -n "${CONTROLLER_PID:-}" ]]; then
-    kill "${CONTROLLER_PID}" || true
+    kill -TERM "${CONTROLLER_PID}" 2>/dev/null || true
+    wait "${CONTROLLER_PID}" 2>/dev/null || true
   fi
-  "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" || true
+  if [[ -f "${WORKDIR}/controller.log" && -d "${CL2_REPORT_DIR:-}" ]]; then
+    cp "${WORKDIR}/controller.log" "${CL2_REPORT_DIR}/controller.log" 2>/dev/null || true
+  fi
+  "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
   rm -rf "${WORKDIR}"
   echo "Cleanup complete."
 }
@@ -63,6 +67,7 @@ export KUBECONFIG
 echo "Creating simulated nodes..."
 NUM_NODES="${SIMULATED_NODES:-10}"
 "${KWOKCTL}" scale node --name="${CLUSTER_NAME}" --replicas="${NUM_NODES}"
+kubectl label node node-000000 node-role.kubernetes.io/control-plane="" --overwrite
 
 echo "Deploying Agent Sandbox CRDs & System Namespace..."
 kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
@@ -85,7 +90,7 @@ go run ./cmd/agent-sandbox-controller \
   --sandbox-concurrent-workers=100 \
   --sandbox-claim-concurrent-workers=100 \
   --sandbox-warm-pool-concurrent-workers=100 \
-  --sandbox-warm-pool-max-batch-size=300 &
+  --sandbox-warm-pool-max-batch-size=300 > "${WORKDIR}/controller.log" 2>&1 &
 CONTROLLER_PID=$!
 sleep 3
 

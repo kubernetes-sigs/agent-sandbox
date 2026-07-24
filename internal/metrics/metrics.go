@@ -31,6 +31,15 @@ const (
 	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
 	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
+	// ClaimFirstReadyAnnotation is the annotation key for the time the SandboxClaim first reached Ready state.
+	// It is usually an RFC3339Nano timestamp, but may be ClaimFirstReadyUnknownSentinel
+	// when the controller has to backfill the guard after the original timestamp Patch fails.
+	ClaimFirstReadyAnnotation = "agents.x-k8s.io/claim-first-ready-at"
+
+	// ClaimFirstReadyUnknownSentinel marks a claim as already counted when the controller
+	// can no longer recover the original first-ready timestamp.
+	ClaimFirstReadyUnknownSentinel = "unknown"
+
 	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 

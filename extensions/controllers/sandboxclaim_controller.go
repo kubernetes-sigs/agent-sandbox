@@ -126,6 +126,10 @@ func (m *observedTimeMap) Delete(key types.NamespacedName) {
 	m.inner.Delete(key)
 }
 
+func (m *observedTimeMap) CompareAndDelete(key types.NamespacedName, old observedTimeEntry) bool {
+	return m.inner.CompareAndDelete(key, old)
+}
+
 func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTimeEntry) (observedTimeEntry, bool) {
 	actual, loaded := m.inner.LoadOrStore(key, entry)
 	return actual.(observedTimeEntry), loaded
@@ -275,9 +279,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	if err := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); err != nil {
-		return ctrl.Result{}, errors.Join(reconcileErr, err)
-	}
+	// Record metrics after status is persisted. Do not short-circuit on metricsErr
+	// before the sentinel handling below: a wasReady claim whose first-ready
+	// annotation backfill fails can co-occur with ErrWarmPoolNotFound, and
+	// returning metricsErr alone would drop the bounded requeue and ride the
+	// exponential failure limiter. The bounded-requeue path relies on the
+	// follow-up pass to retry the annotation patch; non-sentinel returns Join
+	// both errors (mirroring updateStatus).
+	metricsErr := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
 
 	// Determine Result
 	var result ctrl.Result
@@ -303,17 +312,26 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
 		}
+		if metricsErr != nil {
+			logger.V(1).Info("Sandboxclaim first-ready annotation patch failed; will retry on requeue", "error", metricsErr, "request", req.NamespacedName)
+		}
 		return ctrl.Result{RequeueAfter: requeueDelay}, nil
 	}
 
 	// Suppress user configuration and validation errors to avoid crash loops
 	if shouldSuppressError(reconcileErr) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
+		// Still surface metricsErr so the annotation guard is retried; the
+		// suppressed reconcileErr must not mask a failed first-ready stamp.
+		if metricsErr != nil {
+			return result, metricsErr
+		}
 		return result, nil
 	}
 
-	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", reconcileErr, "request", req.NamespacedName)
-	return result, reconcileErr
+	errs := errors.Join(reconcileErr, metricsErr)
+	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
+	return result, errs
 }
 
 // initializeAnnotations initializes trace ID and observation time for active resources missing them.
@@ -1682,7 +1700,7 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 			key := types.NamespacedName{Name: e.Object.GetName(), Namespace: e.Object.GetNamespace()}
 			entry, ok := r.observedTimes.Load(key)
 			if ok && entry.uid == e.Object.GetUID() {
-				r.observedTimes.Delete(key)
+				r.observedTimes.CompareAndDelete(key, entry)
 			}
 			return true
 		},
@@ -1843,8 +1861,7 @@ func (r *SandboxClaimReconciler) recordClaimStartupLatency(ctx context.Context, 
 func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string) {
 	logger := log.FromContext(ctx)
 	if observedTimeString := claim.Annotations[asmetrics.ObservabilityAnnotation]; observedTimeString != "" {
-		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-		defer r.observedTimes.Delete(key)
+		defer r.drainObservedTime(claim)
 
 		observedTime, err := time.Parse(time.RFC3339Nano, observedTimeString)
 		if err != nil {
@@ -1870,7 +1887,42 @@ func (r *SandboxClaimReconciler) recordSandboxCreationLatency(sandbox *v1beta1.S
 	}
 }
 
+// drainObservedTime removes the observedTimes entry for a claim if the UID
+// matches. This is safe to call even when no entry exists.
+func (r *SandboxClaimReconciler) drainObservedTime(claim *extensionsv1beta1.SandboxClaim) {
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
+		r.observedTimes.CompareAndDelete(key, entry)
+	}
+}
+
+// backfillFirstReadyAnnotation stamps the ClaimFirstReadyAnnotation with a
+// sentinel value when the claim was previously Ready but the annotation is
+// missing (e.g. a prior Patch failed). This arms the persistent guard so that
+// future readiness flaps stop recording duplicate metrics. The guard fails open:
+// if both the original timestamp Patch and this backfill Patch keep failing,
+// each subsequent NotReady->Ready transition can re-record metrics until one of
+// those Patches succeeds. The sentinel value is used instead of a timestamp to
+// signal that the actual first-ready time is unknown.
+func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
+		return nil
+	}
+	patch := client.MergeFrom(claim.DeepCopy())
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = asmetrics.ClaimFirstReadyUnknownSentinel
+	if err := r.Patch(ctx, claim, patch); err != nil {
+		return fmt.Errorf("backfill claim first-ready annotation: %w", err)
+	}
+	return nil
+}
+
 // recordCreationLatencyMetric detects and records transitions to Ready state.
+// It returns an error when the first-ready annotation fails to persist so that
+// the reconciler retries. The retry is safe because the status already has
+// Ready=True persisted, so the oldReady guard prevents duplicate metric recording.
 func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	ctx context.Context,
 	claim *extensionsv1beta1.SandboxClaim,
@@ -1881,32 +1933,32 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	newStatus := &claim.Status
 	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1beta1.SandboxConditionReady))
-	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		return nil
-	}
-
-	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
-
-	// Record startup/creation latency at most once per claim.
-	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
-		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
-			r.observedTimes.Delete(key)
-		}
-		return nil
-	}
-
-	// Do not record creation metric if we have already seen the ready state.
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1beta1.SandboxConditionReady))
-	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
-		// Already Ready before this reconcile; drain any entry re-added by a post-Ready UpdateFunc.
-		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
-			r.observedTimes.Delete(key)
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		// Not Ready yet. If the claim was previously Ready but the annotation
+		// is missing (prior Patch failed), backfill it now so the persistent
+		// guard is armed before the claim can flap back to Ready.
+		if wasReady {
+			r.drainObservedTime(claim)
+			return r.backfillFirstReadyAnnotation(ctx, claim)
 		}
-		// Backfill the annotation if missing so a future suspend/resume doesn't re-record.
-		if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
-			logger.Error(err, "Failed to stamp creation-latency-recorded annotation on already-Ready claim", "claim", claim.Name)
-			return err
-		}
+		return nil
+	}
+
+	if wasReady {
+		// Already Ready before this reconcile; drain any entry re-added by a
+		// post-Ready UpdateFunc and backfill the annotation if needed.
+		r.drainObservedTime(claim)
+		return r.backfillFirstReadyAnnotation(ctx, claim)
+	}
+
+	// Persistent guard: if the first-ready annotation is already set, metrics were
+	// already recorded for this claim on a previous reconcile. This prevents duplicate
+	// histogram observations when readiness flaps (Ready → NotReady → Ready).
+	if claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] != "" {
+		r.drainObservedTime(claim)
 		return nil
 	}
 
@@ -1925,31 +1977,15 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
 
-	// Mark the claim so a later Ready transition (e.g. a resume) does not re-record.
-	if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
-		logger.Error(err, "Failed to stamp creation-latency-recorded annotation; a resume may re-record creation latency", "claim", claim.Name)
-		return err
-	}
-	return nil
-}
-
-// markCreationLatencyRecorded stamps the one-shot annotation that prevents the
-// creation/startup latency histograms from being re-recorded on a later Ready
-// transition.
-func (r *SandboxClaimReconciler) markCreationLatencyRecorded(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
-	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
-		return nil
-	}
+	// Stamp the first-ready annotation to prevent duplicate metric recording on
+	// re-Ready events (e.g. readiness probe flaps).
 	patch := client.MergeFrom(claim.DeepCopy())
 	if claim.Annotations == nil {
 		claim.Annotations = make(map[string]string)
 	}
-	claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] = "true"
+	claim.Annotations[asmetrics.ClaimFirstReadyAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := r.Patch(ctx, claim, patch); err != nil {
-		if k8errors.IsNotFound(err) {
-			return nil
-		}
-		return err
+		return fmt.Errorf("stamp claim first-ready annotation: %w", err)
 	}
 	return nil
 }

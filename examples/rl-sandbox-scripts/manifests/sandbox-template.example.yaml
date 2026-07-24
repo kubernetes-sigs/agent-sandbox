@@ -1,0 +1,37 @@
+# A SandboxTemplate for a single real SWE-bench-verified task image.
+# Image source: dataset R2E-Gym/SWE-Bench-Verified, field `docker_image`.
+#
+# The keepalive command (`sleep infinity`) overrides the image entrypoint so
+# the warm pod stays Running and can be claimed and `kubectl exec`'d into.
+#
+# Portability notes:
+#   * No `runtimeClassName` is set (works on standard node pools). For strong
+#     isolation on a gVisor-enabled pool, add `runtimeClassName: gvisor`.
+#   * To pin to a node pool, add a `nodeSelector` under `spec`.
+#   * Anonymous Docker Hub pulls may be rate-limited; add `imagePullSecrets`.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: r2e-img-astropy-12907
+  namespace: rl-tunix-swebench
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: r2e-img-astropy-12907
+    spec:
+      # runtimeClassName: gvisor          # optional, requires a gVisor node pool
+      # nodeSelector:                      # optional
+      #   cloud.google.com/gke-nodepool: standard-pool
+      # imagePullSecrets:                 # optional, for Docker Hub rate limits
+      # - name: dockerhub-pro
+      containers:
+      - name: agent-runtime
+        image: slimshetty/swebench-verified:sweb.eval.x86_64.astropy__astropy-12907
+        command: ["sleep", "infinity"]
+        stdin: true
+        tty: true
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"

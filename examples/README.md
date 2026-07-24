@@ -25,6 +25,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**playwright-sandbox**](./playwright-sandbox): An example of running Playwright with Chromium in a sandbox for web scraping and screenshots.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
+- [**rl-sandbox-scripts**](./rl-sandbox-scripts): Script-based (Python + bash) prototype for running SWE-bench warm-pool RL/eval on Agent Sandbox — strategies, sizing, pre-pull, and an end-to-end benchmark harness.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
 - [**windows-sandbox**](./windows-sandbox): An example of running a Windows guest inside the Agent Sandbox via KVM/QEMU.

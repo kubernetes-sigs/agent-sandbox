@@ -1,0 +1,11 @@
+# A pool of pre-warmed sandboxes for the astropy task image. The controller
+# keeps `replicas` sandboxes Ready so claims are served without cold-start.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: pool-r2e-img-astropy-12907
+  namespace: rl-tunix-swebench
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: r2e-img-astropy-12907

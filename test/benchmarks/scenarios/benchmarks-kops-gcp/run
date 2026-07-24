@@ -127,14 +127,16 @@ trap cleanup EXIT
 CNI="${CNI:-cilium}"
 echo "Using CNI: ${CNI}"
 
-# Cluster-scale experiment: 20 worker nodes instead of 3. Per-node launch
-# throughput is wall-limited at ~5 pods/s (node I/O; see the Node Kernel
-# report page), so cluster throughput scales with node count -- this run
-# pushes ~100 pods/s through the control plane to find the cluster-scale
-# bottlenecks (apiserver CPU hit 4.5-5.5 cores at ~87/s in the 1122-era
-# runs; the sandbox controller workqueue and KCM client QPS are the other
-# candidates).
-STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
+# Cluster-scale experiment: 40 worker nodes. At 20 nodes the cluster walls
+# at ~90 pods/s = ~4.5 creates/s/node, and the wall is node-local (kindnet
+# run 2080606920242106368: containerd run_podsandbox mean ~130ms -> 1.0-1.2s
+# under load, iowait 2.1-2.5 cores/node, node CPU under half busy) while the
+# control plane has headroom (apiserver 9.7 of 16 cores, etcd fsync 1.5ms,
+# KCM/scheduler idle). If the per-node wall holds, 40 nodes should approach
+# ~180 pods/s; the run also probes what saturates next (apiserver CPU is the
+# leading candidate at ~2x its current burn). 40x n2-standard-8 + the
+# n2-standard-16 control plane = 336 N2 vCPUs from the boskos project.
+STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-40}"
 echo "Using node count: ${STRESS_NODE_COUNT}"
 
 # Control-plane sizing: on n2-standard-8 the throughput phases pin

@@ -171,6 +171,21 @@ kops create cluster \
 # list -- so tuning changes stop conflicting with each other. The edits
 # mutate the spec in the state store; `kops update cluster` below applies them.
 
+# Node root volumes: kOps' GCE default is pd-standard (spinning disk), and
+# the bpftrace node profiler (kindnet run 2080606920242106368, 20 nodes)
+# showed the pod launch pipeline is disk-sync-bound on it: containerd spent
+# 2,718s blocked across 923k fsync-family calls (kubelet another 987s at
+# 15ms/call), run_podsandbox mean rose ~130ms -> 1.0-1.2s under load, and
+# iowait hit ~2.1-2.5 cores/node while node CPU stayed under half busy.
+# pd-ssd raises IOPS/GB 40x over pd-standard and attacks that wall
+# directly. The control plane keeps the default: etcd-main fsync was 1.5ms
+# mean there (not a bottleneck), and changing one disk at a time keeps runs
+# attributable.
+STRESS_NODE_VOLUME_TYPE="${STRESS_NODE_VOLUME_TYPE:-pd-ssd}"
+echo "Using node root volume type: ${STRESS_NODE_VOLUME_TYPE}"
+kops edit instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" \
+  --set "spec.rootVolume.type=${STRESS_NODE_VOLUME_TYPE}"
+
 # authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
 # kube-controller-manager and kube-scheduler so the stress test can scrape
 # them through the apiserver pod proxy (the apiserver strips the

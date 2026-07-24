@@ -148,7 +148,19 @@ echo "Using node count: ${STRESS_NODE_COUNT}"
 # controller's workqueue wait collapsing 445ms -> 3ms downstream. Override via
 # STRESS_CONTROL_PLANE_SIZE (e.g. back to n2-standard-8) to reproduce the
 # saturated-server regime.
-STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-n2-standard-16}"
+#
+# Second round: with the node I/O wall lifted, the bottleneck moved back to
+# control-plane CPU. The pd-ssd leg (run 2080670751672766464) reached 151
+# claims/s with the apiserver at 10.5 of 16 n2 cores and 8ms latency; the
+# 40-node leg (run 2080670827233153024) reached 145/s with the apiserver at
+# 12.0 cores and latency degrading to 20ms - saturation on the shared
+# 16-core box. Rather than doubling n2 again, move to c3 (Sapphire Rapids,
+# roughly +35% per core over n2's Cascade/Ice Lake): apiserver request
+# latency benefits from the faster cores directly, not just from more of
+# them. NOTE: c3/c4 machine families do not support pd-standard boot disks,
+# so the control-plane root volume is set to pd-ssd below alongside the
+# nodes'.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
 echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
 
 echo "Creating kOps cluster configuration..."
@@ -170,6 +182,28 @@ kops create cluster \
 # it, and a new knob is a new block instead of another line in a shared flag
 # list -- so tuning changes stop conflicting with each other. The edits
 # mutate the spec in the state store; `kops update cluster` below applies them.
+
+# Node root volumes: kOps' GCE default is pd-standard (spinning disk), and
+# the bpftrace node profiler (kindnet run 2080606920242106368, 20 nodes)
+# showed the pod launch pipeline is disk-sync-bound on it: containerd spent
+# 2,718s blocked across 923k fsync-family calls (kubelet another 987s at
+# 15ms/call), run_podsandbox mean rose ~130ms -> 1.0-1.2s under load, and
+# iowait hit ~2.1-2.5 cores/node while node CPU stayed under half busy.
+# pd-ssd raises IOPS/GB 40x over pd-standard and attacks that wall
+# directly.
+STRESS_NODE_VOLUME_TYPE="${STRESS_NODE_VOLUME_TYPE:-pd-ssd}"
+echo "Using node root volume type: ${STRESS_NODE_VOLUME_TYPE}"
+kops edit instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" \
+  --set "spec.rootVolume.type=${STRESS_NODE_VOLUME_TYPE}"
+
+# Control-plane root volume: required to be non-pd-standard by the c3
+# machine family (see the control-plane sizing note above), and it retires
+# the cluster's last spinning disk. Nothing latency-critical lives on the
+# CP root - the etcd data volumes are separate PDs and already pd-ssd by
+# kOps' GCE default (DefaultGCEEtcdVolumeType; measured 1.5ms mean fsync) -
+# so this is an enabler, not a tuning claim.
+kops edit instancegroup --name "${CLUSTER_NAME}" "control-plane-${ZONE}" \
+  --set "spec.rootVolume.type=pd-ssd"
 
 # authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
 # kube-controller-manager and kube-scheduler so the stress test can scrape

@@ -20,7 +20,7 @@ cd "${repo_root}"
 
 # Customizable scale & execution parameters via Environment Variables:
 #   TEST_SCENARIO:               continuous-burst | rapid-burst (default: continuous-burst)
-#   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 10)
+#   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 35 -> accommodates 3700 pods @ 110 maxPods/node)
 #   CL2_QPS:                     Target claim creation QPS (default: 300)
 #   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 12 -> 3,600 total claims)
 #   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 3700)
@@ -30,7 +30,7 @@ cd "${repo_root}"
 #   CONTROLLER_MAX_BATCH_SIZE:   WarmPool refill batch size (default: 300)
 
 SCENARIO="${TEST_SCENARIO:-continuous-burst}"
-NUM_NODES="${SIMULATED_NODES:-10}"
+NUM_NODES="${SIMULATED_NODES:-35}"
 QPS="${CL2_QPS:-300}"
 DURATION="${CL2_DURATION_SECONDS:-12}"
 WARMPOOL="${CL2_WARMPOOL_SIZE:-3700}"

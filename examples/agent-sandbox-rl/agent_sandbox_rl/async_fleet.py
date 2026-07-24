@@ -235,7 +235,8 @@ class AsyncSandboxFleet:
     return results
 
   async def _run_windowed(self, process_fn, concurrency, window,
-                          replicas_override=None, *, teardown=True):
+                          replicas_override=None, *, teardown=True, executor=None):
+    executor = executor or self._process_parallel
     await self.preflight()
     await self.plan()
     images = list(self.image_counts().keys())
@@ -256,7 +257,7 @@ class AsyncSandboxFleet:
                               replicas_override=replicas_override, wait=True)
         batch_pairs = [(i, t) for img in batch for (i, t) in by_image[img]]
         batch_tasks = [t for _i, t in batch_pairs]
-        batch_results = await self._process_parallel(batch_tasks, process_fn, concurrency)
+        batch_results = await executor(batch_tasks, process_fn, concurrency)
         for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
           results[i] = r
         for img in batch:
@@ -267,11 +268,12 @@ class AsyncSandboxFleet:
     return results
 
   async def _run_pipelined(self, process_fn, concurrency, window,
-                           replicas_override=None, *, teardown=True):
+                           replicas_override=None, *, teardown=True, executor=None):
     """Async double-buffered sliding window: prefetch window N+1's pools (an
     ``asyncio.Task``) while window N's tasks run. Footprint ≤ 2 windows — the
     current window is unwarmed before awaiting the next prefetch, and only one
     prefetch task is ever in flight."""
+    executor = executor or self._process_parallel
     await self.preflight()
     await self.plan()
     images = list(self.image_counts().keys())
@@ -299,7 +301,7 @@ class AsyncSandboxFleet:
                    if n + 1 < len(batches) else None)
         batch_pairs = [(i, t) for img in batch for (i, t) in by_image[img]]
         batch_tasks = [t for _i, t in batch_pairs]
-        batch_results = await self._process_parallel(batch_tasks, process_fn, concurrency)
+        batch_results = await executor(batch_tasks, process_fn, concurrency)
         for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
           results[i] = r
         for img in batch:
@@ -318,40 +320,67 @@ class AsyncSandboxFleet:
         await self.teardown()
     return results
 
-  async def _run_once(self, strategy, process_fn, conc, *, teardown):
+  async def _run_once(self, strategy, process_fn, conc, *, teardown, executor=None):
+    executor = executor or self._process_parallel
     if strategy == "naive":
       try:
         await self.setup()
-        return await self._process_parallel(self.tasks, process_fn, conc)
+        return await executor(self.tasks, process_fn, conc)
       finally:
         if teardown:
           await self.teardown()
     if strategy == "sliding":
       return await self._run_windowed(
-          process_fn, conc, self._fleet.recommended_window(), teardown=teardown)
+          process_fn, conc, self._fleet.recommended_window(), teardown=teardown,
+          executor=executor)
     if strategy == "pipelined":
       return await self._run_pipelined(
           process_fn, conc, self._fleet.recommended_window(pipelined=True),
-          teardown=teardown)
+          teardown=teardown, executor=executor)
     if strategy == "none":
       return await self._run_windowed(
-          process_fn, conc, 1, replicas_override=1, teardown=teardown)
+          process_fn, conc, 1, replicas_override=1, teardown=teardown,
+          executor=executor)
     raise ValueError(f"unknown strategy '{strategy}'")
 
   async def run(self, process_fn: Callable[[Task, SandboxHandle], object | Awaitable],
                 strategy: str = "naive", concurrency: int | None = None,
-                *, epochs: int = 1, keep_warm: bool = False) -> list:
+                *, epochs: int = 1, keep_warm: bool = False,
+                recycle: bool = False, reset=None, max_reuses: int = 32,
+                reset_timeout: float = 5.0, use_session: bool = True,
+                scale_on_hold: bool = True, shards_per_image: int = 1,
+                claim_concurrency: int = 0) -> list:
     """Run all loaded tasks under ``strategy`` with up to ``concurrency``
     concurrent claim+exec. ``process_fn`` may be sync or a coroutine function.
 
     ``epochs``/``keep_warm`` mirror `SandboxFleet.run`: ``epochs>1`` runs N passes
     keeping pools resident between them (returns ``list[list]``); ``keep_warm=True``
     skips the final teardown for caller-driven reuse.
+
+    ``recycle`` is an **orthogonal** modifier (not a strategy): the chosen
+    ``strategy`` still governs warm-pool sizing/timing, but same-image tasks reuse
+    one claimed sandbox (git-restore reset between them) via
+    `recycle.reuse_git_restore_sandbox_async` instead of a fresh claim per task. It
+    applies to multi-task-per-image workloads (RL rollouts) and is a no-op for 1:1
+    eval, so it is off by default. ``reset``/``max_reuses``/``reset_timeout``/
+    ``use_session``/``scale_on_hold``/``shards_per_image``/``claim_concurrency`` are
+    forwarded to the async recycle executor and ignored when ``recycle=False``.
     """
     if epochs < 1:
       raise ValueError("epochs must be >= 1")
     conc = concurrency or self.config.max_concurrent
     obs = self._fleet._obs
+    executor = None
+    if recycle:                                # swap task→sandbox binding, keep warming
+      from .recycle import GitRestoreReset, reuse_git_restore_sandbox_async
+      _reset = reset or GitRestoreReset()
+
+      async def executor(tasks, process_fn, concurrency):  # noqa: E306
+        return await reuse_git_restore_sandbox_async(
+            self, tasks, process_fn, concurrency, reset=_reset,
+            max_reuses=max_reuses, reset_timeout=reset_timeout,
+            use_session=use_session, scale_on_hold=scale_on_hold,
+            shards_per_image=shards_per_image, claim_concurrency=claim_concurrency)
     if self._fleet.plan_ is None:              # give the circuit breaker a footprint
       await self.plan()
     expected = self._fleet.plan_.total_replicas if self._fleet.plan_ else None
@@ -363,7 +392,7 @@ class AsyncSandboxFleet:
         logger.debug("could not collect environment", exc_info=True)
       if epochs == 1:
         results = await self._run_once(strategy, process_fn, conc,
-                                       teardown=not keep_warm)
+                                       teardown=not keep_warm, executor=executor)
       else:
         results = []
         for e in range(epochs):
@@ -371,7 +400,8 @@ class AsyncSandboxFleet:
           logger.info("epoch %d/%d", e + 1, epochs)
           try:
             results.append(await self._run_once(
-                strategy, process_fn, conc, teardown=last and not keep_warm))
+                strategy, process_fn, conc, teardown=last and not keep_warm,
+                executor=executor))
           except BaseException:               # a mid-run epoch never tore down
             if not keep_warm and not last:
               await self.teardown()

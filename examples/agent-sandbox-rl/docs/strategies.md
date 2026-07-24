@@ -32,7 +32,7 @@ The two workloads pull in opposite directions:
 | Workload | Strategy | Sizing flags | Caching levers | Why |
 | :--- | :--- | :--- | :--- | :--- |
 | **Eval (1:1 sweep)** | **`pipelined`** | default (concurrency-aware) | `epochs`/`keep_warm` + `IfNotPresent` + in-region mirror; `prepull` if it fits disk | Pull dominates → overlap window N+1's pull with N's run, and reuse the node cache across passes. `warm_per_task`/`colocate` are no-ops (1 task/image). |
-| **RL (1:G rollouts)** | **`naive`** or **`sliding`** | `warm_per_task=True` (+ `max_warmpool_size ≥ G`), `colocate_replicas=True` | `keep_warm=True` across steps + `IfNotPresent` | Every rollout claims its own ready replica → lowest straggler tail. **Avoid `pipelined`** — deep replicas shrink its window and serialize problems. |
+| **RL (1:G rollouts)** | **`naive`** or **`sliding`** | `warm_per_task=True` (+ `max_warmpool_size ≥ G`), `colocate_replicas=True` — *or* `recycle=True` (reuse one sandbox ÷G) | `keep_warm=True` across steps + `IfNotPresent` | Every rollout claims its own ready replica → lowest straggler tail. **Avoid `pipelined`** — deep replicas shrink its window and serialize problems. Add `recycle=True` when claims (not latency) are the bottleneck — see [§3 Recycling](#recycling-reset-and-reuse--experimental-orthogonal-to-strategy--sizing). |
 | **Tiny run / debug** | `none` | default | — | Lowest footprint (one size-1 pool per image, on demand); inherently sequential. |
 | **Batch may exceed pool capacity** | `pipelined` or `sliding` | default | — | Bounded footprint survives over-subscription where `naive` drops tasks (see [§6](#6-capacity--over-subscription)). |
 
@@ -143,10 +143,26 @@ What they do and don't buy:
 Instant-claim gives each rollout a *fresh* sandbox; **recycling** reuses *one* sandbox
 across a problem's G rollouts, resetting between them — so claims scale with **problems**
 (÷G), not tasks. Where instant-claim cuts claim *latency*, recycling cuts claim *count*
-(and the controller reconciles / API-server writes that scale with it). Use it via
-`reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *, max_reuses,
-reset_timeout)` instead of `fleet.run(...)`; it groups tasks by image and reuses one
-claim per group.
+(and the controller reconciles / API-server writes that scale with it).
+
+Turn it on with the **`recycle=True`** flag on `fleet.run(...)` — an *orthogonal
+modifier*, not a strategy value. The chosen `strategy` still governs warming (pool
+sizing/timing); `recycle` only changes the task→sandbox binding to reset-and-reuse:
+
+```python
+# RL rollouts: warm naive, reuse one sandbox per problem across its G rollouts
+fleet.run(rollout_fn, strategy="naive", recycle=True, max_reuses=G, keep_warm=True)
+await afleet.run(rollout_fn, strategy="naive", recycle=True)   # async twin
+```
+
+It is **off by default** because it only applies to workloads with a resettable
+`/testbed` and multiple tasks per image — for a 1:1 eval sweep it is a no-op, and it
+can be limiting (not every RL/eval shape resets cleanly). `reset` (a `GitRestoreReset`),
+`max_reuses`, `reset_timeout`, `use_session` and `scale_on_hold` are forwarded to the
+recycle executor (async also takes `shards_per_image` / `claim_concurrency`); all are
+ignored when `recycle=False`. Under the hood it groups tasks by image and reuses one
+claim per group via `recycle.reuse_git_restore_sandbox(_async)` — which you can still
+call directly for full control outside `run()`.
 
 The shipped reset tier is **git-restore** (`GitRestoreReset`): `git reset --hard
 pristine` + `clean -xdff` + detach + process/`/tmp` sweep, then a **cleanliness verify**

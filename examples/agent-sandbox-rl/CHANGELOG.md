@@ -30,6 +30,17 @@ Sandbox `v0.5.0rc1` (v1beta1).
   refuses**: the customer owns their cluster. See `plans/sdk-runaway-safeguards.md` (notes).
 
 ### Added (performance & scale)
+- **`recycle=` flag on `run()`** (`fleet.py`, `async_fleet.py`, `strategies.py`):
+  recycling is now an **orthogonal modifier** on the managed runner —
+  `fleet.run(fn, strategy="naive", recycle=True, …)` (and the async twin) — not a
+  strategy value. The chosen warm-pool `strategy` still governs warming; `recycle`
+  swaps the task→sandbox binding to reset-and-reuse via
+  `reuse_git_restore_sandbox(_async)` (executor injection through the strategy
+  functions). Off by default (a no-op for 1:1 eval; only multi-task-per-image shapes
+  benefit, and not every RL/eval scenario resets cleanly). Recycle opts
+  (`reset`/`max_reuses`/`reset_timeout`/`use_session`/`scale_on_hold`; async also
+  `shards_per_image`/`claim_concurrency`) are forwarded and ignored when
+  `recycle=False`. The low-level executors remain public for use outside `run()`.
 - **Sandbox recycling — `reuse_git_restore_sandbox`** (`recycle.py`): reset-and-reuse
   one claimed sandbox across same-image tasks so **claims scale with problems, not
   tasks** (÷ tasks-per-image) — the RL-rollout claim-churn lever. `GitRestoreReset`

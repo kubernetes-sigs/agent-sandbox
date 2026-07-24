@@ -165,7 +165,7 @@ python run_swebench_fleet.py
 | **SandboxHandle** | A claimed sandbox: `hostname`, `pod_name`, `pod_ip`, `endpoint(port)`, `exec(cmd)`, `release()`. |
 | **Placement** | Which cluster serves an image: `round-robin`, `least-loaded`, `capacity-weighted`, `image-affinity`. |
 | **Strategy** | *When* pools exist: `none`, `naive`, `sliding`, `pipelined`. |
-| **Recycling** | *Reuse* one sandbox across same-image tasks (reset between): `reuse_git_restore_sandbox` + `GitRestoreReset` (claims scale ÷ tasks-per-image). |
+| **Recycling** | *Reuse* one sandbox across same-image tasks (reset between): `run(recycle=True)` — orthogonal to strategy — backed by `reuse_git_restore_sandbox` + `GitRestoreReset` (claims scale ÷ tasks-per-image). |
 | **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`). |
 
 ## Warm-pool strategies
@@ -302,15 +302,21 @@ one claimed sandbox and *resets* it between rollouts on the same image, so **cla
 scale with problems, not tasks** (÷ *G*). At the RL shape (G rollouts/problem) that is
 G× fewer claims, controller reconciles, and API-server writes.
 
-```python
-from agent_sandbox_rl import reuse_git_restore_sandbox, determinism_canary
+Turn it on with the **`recycle=True`** flag on `fleet.run(...)` — an *orthogonal
+modifier*, not a strategy value: the chosen `strategy` still governs warming, `recycle`
+only swaps the task→sandbox binding to reset-and-reuse. It's off by default (a no-op for
+1:1 eval; it only helps multi-task-per-image shapes, and not every RL/eval scenario
+resets cleanly).
 
-fleet.setup()
-# reuse one sandbox per image; reset between same-image tasks, quarantine if dirty
-results = reuse_git_restore_sandbox(
-    fleet, fleet.tasks, process_fn, concurrency=40,
-    max_reuses=32, reset_timeout=5.0)
-fleet.teardown()
+```python
+from agent_sandbox_rl import determinism_canary
+
+# reuse one sandbox per image; reset between same-image tasks, quarantine if dirty.
+# strategy warms the pools; run() manages setup / RunReport / teardown.
+results = fleet.run(process_fn, strategy="naive", concurrency=40,
+                    recycle=True, max_reuses=32, reset_timeout=5.0)
+# async twin: await afleet.run(process_fn, strategy="naive", recycle=True, …)
+# low-level (full control outside run()): reuse_git_restore_sandbox(fleet, tasks, fn, conc)
 ```
 
 The reset (`GitRestoreReset`) restores `/testbed` to a pristine git tag, sweeps

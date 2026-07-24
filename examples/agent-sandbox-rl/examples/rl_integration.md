@@ -47,7 +47,7 @@ when a shallow warm pool would otherwise saturate under same-image claims.
 ```python
 from agent_sandbox_rl import (SandboxFleet, FleetConfig, ClusterConfig, TemplateSpec,
                               ResourceSpec, SweBenchSource, Task, swebench_probe,
-                              reuse_git_restore_sandbox, determinism_canary)
+                              determinism_canary)
 from agent_sandbox_rl.sources import to_tasks
 
 # SHALLOW warm: recycle holds ~1 sandbox per problem, so 1 replica/pool is enough.
@@ -62,26 +62,32 @@ problems = to_tasks(SweBenchSource(limit=500))
 tasks = [Task(id=f"p{i:04d}-r{g}", image=t.image)         # P problems × G rollouts
          for i, t in enumerate(problems) for g in range(G)]
 fleet.load_tasks(tasks)
-fleet.setup()                                             # shallow warm (staged by default)
 
-# Correctness gate FIRST — same task twice in one recycled sandbox must be byte-identical:
+# Correctness gate FIRST — same task twice in one recycled sandbox must be byte-identical
+# (on-demand claim; no warm pool needed yet):
 c = determinism_canary(fleet, problems[0], swebench_probe)
 assert c["identical"] and c["reset_clean"], "reset leaks state — recycling is unsafe here"
 
-# One claim per problem; git-restore reset between its G rollouts:
-results = reuse_git_restore_sandbox(fleet, fleet.tasks, rollout_fn, concurrency=500)
-fleet.teardown()
+# recycle=True is an ORTHOGONAL flag on run(): strategy="naive" shallow-warms the pools,
+# recycle reuses one claim per problem across its G rollouts (git-restore reset between).
+# run() manages setup / RunReport / teardown.
+results = fleet.run(rollout_fn, strategy="naive", concurrency=500,
+                    recycle=True, max_reuses=G)
 ```
 
 - **Claims ≈ P, not P·G** — the headline. Reset is git-only by default (`git reset --hard`
   + `clean -xdff` + verify the pristine SHA); a dirty reset **quarantines** the sandbox
   (fresh claim) so contamination can never silently bias rewards. A non-git `/testbed`
   transparently falls back to fresh-claim-per-task.
+- **`recycle` is a flag, not a strategy** — it composes with any warm-pool strategy and is
+  off by default (a no-op for 1:1 eval; it only helps multi-task-per-image shapes). For
+  full control outside `run()`, call `reuse_git_restore_sandbox(fleet, tasks, fn, conc)`
+  directly.
 - **`determinism_canary`** is the ground-truth check — run it before trusting recycling
   for training.
-- **Async** (Ray / SkyRL / tunix loops): `reuse_git_restore_sandbox_async(afleet, …)` —
-  a coroutine per group. `shards_per_image=K` runs K sandboxes/image in parallel (saturate
-  a small image set); `claim_concurrency=N` staged-claims to stay under the apiserver.
+- **Async** (Ray / SkyRL / tunix loops): `await afleet.run(fn, recycle=True, …)` — the
+  async twin. `shards_per_image=K` runs K sandboxes/image in parallel (saturate a small
+  image set); `claim_concurrency=N` staged-claims to stay under the apiserver.
 
 ### Safeguards at scale (on by default)
 Large/deep warm pools can stress the warm-pool controller

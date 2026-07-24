@@ -146,14 +146,18 @@ so the simple case stays simple.
 | start claims | `acquire(task) -> SandboxHandle`, `acquire_batch(tasks) -> [SandboxHandle]` (placement-routed) |
 | return hostname list | `handles()`, `hostnames()`, `endpoints()` (cluster-qualified) |
 | teardown / delete | `release(handle)`, `release_all()`, `teardown(delete_namespace=False)` (routes to owning cluster) |
-| managed batch | `run(process_fn, strategy=None) -> [Result]` |
-| recycle (reset-and-reuse) | `reuse_git_restore_sandbox(fleet, tasks, process_fn, concurrency, *, reset, max_reuses, reset_timeout, use_session)`; `GitRestoreReset.prime/reset/recyclable`; `SandboxHandle.open_session()` (`SandboxSession`); `determinism_canary(...)` |
+| managed batch | `run(process_fn, strategy="naive", *, recycle=False, …) -> [Result]` |
+| recycle (reset-and-reuse) | `run(..., recycle=True, reset=, max_reuses=, reset_timeout=, use_session=, scale_on_hold=)` (flag, orthogonal to strategy) → `reuse_git_restore_sandbox(_async)`; `GitRestoreReset.prime/reset/recyclable`; `SandboxHandle.open_session()` (`SandboxSession`); `determinism_canary(...)` |
 | ergonomics | context manager `__enter__/__exit__` → `setup()`/`teardown()` |
 
-**Sandbox recycling** (`recycle.py`, experimental) is a third execution mode beside
-primitives and the managed runner: reuse one claimed sandbox across same-image tasks,
-resetting between them, so claims scale with *problems* (÷ tasks-per-image) instead of
-tasks. The shipped tier is **git-restore** (`GitRestoreReset`: `git reset --hard
+**Sandbox recycling** (`recycle.py`, experimental) is an **orthogonal modifier on the
+managed runner** — `run(..., recycle=True)` — not a separate execution mode or strategy
+value: the chosen warm-pool `strategy` still governs warming, while `recycle` swaps the
+task→sandbox binding to reuse one claimed sandbox across same-image tasks, resetting
+between them, so claims scale with *problems* (÷ tasks-per-image) instead of tasks. It is
+off by default (a no-op for 1:1 eval; only multi-task-per-image shapes benefit). The
+executors (`reuse_git_restore_sandbox` / `_async`) remain callable directly for control
+outside `run()`. The shipped tier is **git-restore** (`GitRestoreReset`: `git reset --hard
 pristine` + `clean -xdff` + process/`/tmp` sweep, then verify the repo is at the
 pristine SHA and clean); dirty resets **quarantine** to a fresh claim. Reset is
 **git-only by default** — the `pip freeze` env and git-config/hooks tripwires are opt-in

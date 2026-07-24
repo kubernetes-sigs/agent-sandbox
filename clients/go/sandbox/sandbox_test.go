@@ -62,6 +62,14 @@ func defaultTestOpts() Options {
 	return opts
 }
 
+// validateAllOptions aggregates validateCommon and validateWarmPoolName for table tests.
+func validateAllOptions(o *Options) error {
+	if err := o.validateCommon(); err != nil {
+		return err
+	}
+	return validateWarmPoolName(o.WarmPoolName)
+}
+
 func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
 	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
 	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
@@ -206,18 +214,25 @@ func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeext
 // Validation tests
 // ---------------------------------------------------------------------------
 
-func TestNew_MissingWarmPoolName(t *testing.T) {
-	opts := Options{Namespace: "default"}
+func TestOpen_MissingWarmPoolName(t *testing.T) {
+	opts := Options{Namespace: "default", APIURL: "http://localhost:9999", Quiet: true}
 	opts.setDefaults()
-	if err := opts.validate(); err == nil {
-		t.Fatal("expected error for missing WarmPoolName")
+
+	s, _, _ := newTestSandbox(opts)
+	err := s.Open(context.Background())
+	if err == nil {
+		s.Close(context.Background())
+		t.Fatal("expected error from Open() for missing WarmPoolName")
+	}
+	if !strings.Contains(err.Error(), "WarmPoolName is required") {
+		t.Errorf("expected WarmPoolName required error, got: %v", err)
 	}
 }
 
-func TestNew_InvalidPort(t *testing.T) {
+func TestValidation_InvalidServerPort(t *testing.T) {
 	opts := Options{WarmPoolName: "pool", ServerPort: -1}
 	opts.setDefaults()
-	if err := opts.validate(); err == nil {
+	if err := validateAllOptions(&opts); err == nil {
 		t.Fatal("expected error for negative ServerPort")
 	}
 }
@@ -1551,7 +1566,7 @@ func TestValidation_NegativeTimeouts(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.opts.setDefaults()
-			if err := tc.opts.validate(); err == nil {
+			if err := validateAllOptions(&tc.opts); err == nil {
 				t.Errorf("expected validation error for %s", tc.name)
 			}
 		})
@@ -1570,7 +1585,7 @@ func TestValidation_InvalidNames(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.opts.setDefaults()
-			if err := tc.opts.validate(); err == nil {
+			if err := validateAllOptions(&tc.opts); err == nil {
 				t.Errorf("expected validation error for %s", tc.name)
 			}
 		})
@@ -2304,7 +2319,7 @@ func TestValidation_InvalidAPIURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := Options{WarmPoolName: "pool", APIURL: tc.apiURL}
 			opts.setDefaults()
-			if err := opts.validate(); err == nil {
+			if err := validateAllOptions(&opts); err == nil {
 				t.Errorf("expected validation error for APIURL %q", tc.apiURL)
 			}
 		})
@@ -2321,7 +2336,7 @@ func TestValidation_ValidAPIURL(t *testing.T) {
 		t.Run(apiURL, func(t *testing.T) {
 			opts := Options{WarmPoolName: "pool", APIURL: apiURL}
 			opts.setDefaults()
-			if err := opts.validate(); err != nil {
+			if err := validateAllOptions(&opts); err != nil {
 				t.Errorf("unexpected validation error for APIURL %q: %v", apiURL, err)
 			}
 		})
@@ -2628,7 +2643,7 @@ func TestClose_DeleteFailure_ClearsIdentityButKeepsClaim(t *testing.T) {
 func TestValidation_InvalidGatewayScheme(t *testing.T) {
 	opts := Options{WarmPoolName: "pool", GatewayScheme: "ftp"}
 	opts.setDefaults()
-	if err := opts.validate(); err == nil {
+	if err := validateAllOptions(&opts); err == nil {
 		t.Fatal("expected error for invalid GatewayScheme")
 	}
 }

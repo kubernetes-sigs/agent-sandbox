@@ -65,7 +65,7 @@ var (
 // Call Open() to create a sandbox and establish connectivity.
 func New(_ context.Context, opts Options) (*Sandbox, error) {
 	opts.setDefaults()
-	if err := opts.validate(); err != nil {
+	if err := opts.validateCommon(); err != nil {
 		return nil, err
 	}
 
@@ -235,6 +235,10 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 
 	if reconnect {
 		return s.reconnect(openCtx)
+	}
+
+	if err := validateWarmPoolName(s.opts.WarmPoolName); err != nil {
+		return err
 	}
 
 	// Create claim.

@@ -296,3 +296,54 @@ func patchCRDs(ctx context.Context, c client.Client, caPEM []byte, serviceName, 
 
 	return nil
 }
+
+const (
+	defaultWebhookCertName = "tls.crt"
+	defaultWebhookKeyName  = "tls.key"
+	// combinedPEMFileName is the fallback filename checked when the default
+	// cert/key pair is absent: some external certificate provisioners deliver
+	// the serving certificate and private key concatenated in one PEM file.
+	combinedPEMFileName = "cert.pem"
+)
+
+// resolveWebhookCertFiles validates that the webhook serving certificate and
+// key exist in certDir and returns the effective filenames to configure the
+// webhook server with.
+//
+// When certName/keyName are the defaults and neither file exists, it falls
+// back to a single combined PEM file (cert.pem) holding both the certificate
+// and private key blocks; the same filename is then returned for both.
+// crypto/tls supports loading a key pair whose cert and key point at the
+// same file.
+func resolveWebhookCertFiles(certDir, certName, keyName string) (string, string, error) {
+	certErr := statRegularFile(filepath.Join(certDir, certName))
+	keyErr := statRegularFile(filepath.Join(certDir, keyName))
+	if certErr == nil && keyErr == nil {
+		return certName, keyName, nil
+	}
+
+	// Fall back to a combined cert+key PEM only when the defaults were
+	// requested and both are cleanly absent (not on I/O or permission errors).
+	if certName == defaultWebhookCertName && keyName == defaultWebhookKeyName &&
+		os.IsNotExist(certErr) && os.IsNotExist(keyErr) {
+		if statRegularFile(filepath.Join(certDir, combinedPEMFileName)) == nil {
+			return combinedPEMFileName, combinedPEMFileName, nil
+		}
+	}
+
+	if certErr != nil {
+		return "", "", fmt.Errorf("webhook certificate %q: %w", filepath.Join(certDir, certName), certErr)
+	}
+	return "", "", fmt.Errorf("webhook private key %q: %w", filepath.Join(certDir, keyName), keyErr)
+}
+
+func statRegularFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	return nil
+}

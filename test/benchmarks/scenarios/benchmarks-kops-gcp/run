@@ -137,6 +137,20 @@ echo "Using CNI: ${CNI}"
 STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
 echo "Using node count: ${STRESS_NODE_COUNT}"
 
+# Control-plane sizing: on n2-standard-8 the throughput phases pin
+# kube-apiserver at a flat ~5.6-5.7 cores across mif200/400/600 (a plateau
+# despite 3x offered load, i.e. saturation) on a node that also runs etcd,
+# KCM (~0.35 cores) and the scheduler (~0.23). Going to 16 vCPUs (8-core
+# kindnet run 2079750013621112832 vs 16-core cilium run 2079885693798060032;
+# CNI differs but the apiserver signals are CNI-independent) let the
+# apiserver burn 9.25 cores, dropped its mean request latency 34.7ms ->
+# 6.6ms, and lifted mif600 claim throughput 60/s -> 91/s, with the sandbox
+# controller's workqueue wait collapsing 445ms -> 3ms downstream. Override via
+# STRESS_CONTROL_PLANE_SIZE (e.g. back to n2-standard-8) to reproduce the
+# saturated-server regime.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-n2-standard-16}"
+echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -147,7 +161,7 @@ kops create cluster \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
-  --control-plane-size=n2-standard-8 \
+  --control-plane-size="${STRESS_CONTROL_PLANE_SIZE}" \
   --node-count="${STRESS_NODE_COUNT}" \
   --node-size=n2-standard-8
 
@@ -270,12 +284,20 @@ if [[ "${CNI}" == "cilium" ]]; then
   kops validate cluster --wait 5m
 fi
 
+# node-exporter: node-level CPU (incl. iowait), memory and disk stats for
+# every node including the control plane; the stress tool scrapes it via the
+# apiserver pod proxy (see promscrape.go). Without it the report cannot tell
+# control-plane CPU saturation from disk stalls at the node level.
+echo "Deploying node-exporter..."
+kubectl apply -f test/benchmarks/scenarios/benchmarks-kops-gcp/node-exporter.yaml
+kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout=3m
+
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
 echo "Deploying to cluster..."
 dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
-  ${CONTROLLER_ARGS:+--controller-args "${CONTROLLER_ARGS}"}
+  ${CONTROLLER_ARGS:+--controller-args="${CONTROLLER_ARGS}"}
 
 # Wait for controller to be ready
 echo "Waiting for controller to be ready..."

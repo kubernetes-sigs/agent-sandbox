@@ -33,6 +33,10 @@ const (
 
 	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
+
+	// CreationLatencyRecordedAnnotation marks a SandboxClaim whose startup/creation latency
+	// has already been recorded, preventing double-recording (e.g. after a suspend/resume).
+	CreationLatencyRecordedAnnotation = "agents.x-k8s.io/creation-latency-recorded"
 )
 
 var (

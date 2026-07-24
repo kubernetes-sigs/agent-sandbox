@@ -137,7 +137,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			Name: "test-claim", Namespace: "default",
 			Annotations: map[string]string{sandboxv1beta1.SandboxTemplateRefAnnotation: "test-template"},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
+				Name:       "test-claim",
+				UID:        "claim-uid",
+				Controller: new(true),
 			}},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
@@ -593,7 +597,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 						Name:      "test-claim-network-policy", // Matches the claim name
 						Namespace: "default",
 						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
+							Name:       "test-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
 						}},
 					},
 				},
@@ -619,7 +627,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 						Name:      "test-claim-network-policy",
 						Namespace: "default",
 						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "test-claim", UID: "claim-uid", Controller: new(true),
+							APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind, Name: "test-claim", UID: "claim-uid", Controller: new(true),
 						}},
 					},
 				},
@@ -917,8 +925,8 @@ func TestSandboxClaimReconcile(t *testing.T) {
 							sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template-env-override"),
 						},
 						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "test-warmpool-env-override",
 							UID:        "wp-env-override-uid",
 							Controller: new(true),
@@ -1245,7 +1253,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 				Name:      claimName,
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{
-					{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: claimName, UID: types.UID(claimName), Controller: new(true)},
+					{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind, Name: claimName, UID: types.UID(claimName), Controller: new(true)},
 				},
 			},
 			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{}}},
@@ -1352,7 +1360,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 			if tc.sandboxNotOwned {
 				sandbox.Name = "foreign-sandbox"
 				sandbox.OwnerReferences = []metav1.OwnerReference{
-					{APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim", Name: "other-claim", UID: "other-uid", Controller: func() *bool { b := true; return &b }()},
+					{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind, Name: "other-claim", UID: "other-uid", Controller: func() *bool { b := true; return &b }()},
 				}
 				tc.claim.Status.SandboxStatus.Name = sandbox.Name
 			}
@@ -1461,8 +1469,8 @@ func TestSandboxClaimMirrorsFinishedConditionAndSchedulesTTL(t *testing.T) {
 			Name:      claim.Name,
 			Namespace: claim.Namespace,
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxClaim",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
 				Name:       claim.Name,
 				UID:        claim.UID,
 				Controller: &controller,
@@ -1546,8 +1554,8 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 				Name:      claim.Name,
 				Namespace: claim.Namespace,
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxClaim",
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxClaimKind,
 					Name:       claim.Name,
 					UID:        claim.UID,
 					Controller: &controller,
@@ -1685,8 +1693,8 @@ func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
 			Name:      claim.Name,
 			Namespace: claim.Namespace,
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxClaim",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
 				Name:       claim.Name,
 				UID:        claim.UID,
 				Controller: &controller,
@@ -1934,8 +1942,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
-						APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-						Kind:       "SandboxWarmPool",
+						APIVersion: extensionsv1beta1.GroupVersion.String(),
+						Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 						Name:       "test-pool",
 						UID:        warmPoolUID,
 						Controller: new(true),
@@ -2458,8 +2466,9 @@ func TestSandboxEventHandler_Delete_RemovesGhostPods(t *testing.T) {
 			Name:      "ghost-pod",
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				Kind: "SandboxWarmPool",
-				Name: warmPoolName,
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+				Name:       warmPoolName,
 			}},
 		},
 	}
@@ -2539,7 +2548,7 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "adopted-sb", Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim",
+				APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind,
 				Name: "test-claim", UID: "claim-uid", Controller: new(true),
 			}},
 		},
@@ -2614,6 +2623,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 		sandbox                        *sandboxv1beta1.Sandbox
 		expectedObservations           int
 		expectedControllerObservations int
+		expectedAnnotation             bool
 		setupReconciler                func(r *SandboxClaimReconciler)
 	}{
 		{
@@ -2633,6 +2643,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			},
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations: 1,
+			expectedAnnotation:   true,
 		},
 		{
 			name: "skips recording when webhook annotation is missing",
@@ -2645,6 +2656,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			},
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations: 0,
+			expectedAnnotation:   true,
 		},
 		{
 			name: "ignores ready condition = false",
@@ -2657,6 +2669,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			},
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations: 0,
+			expectedAnnotation:   false,
 		},
 		{
 			name: "ignores success if status was already ready in previous loop",
@@ -2670,6 +2683,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
 			},
 			expectedObservations: 0,
+			expectedAnnotation:   true, // backfilled!
 		},
 		{
 			name: "uses unknown launch type when sandbox is nil",
@@ -2689,6 +2703,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			oldStatus:            &extensionsv1beta1.SandboxClaimStatus{},
 			sandbox:              nil,
 			expectedObservations: 1,
+			expectedAnnotation:   true,
 		},
 		{
 			name: "records controller latency using stored time",
@@ -2711,6 +2726,7 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			oldStatus:                      &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations:           1,
 			expectedControllerObservations: 1,
+			expectedAnnotation:             true,
 			setupReconciler: func(r *SandboxClaimReconciler) {
 				key := types.NamespacedName{Name: "stored-time", Namespace: "default"}
 				r.observedTimes.Store(key, observedTimeEntry{timestamp: time.Now().Add(-5 * time.Second), uid: "uid-stored-time"})
@@ -2735,6 +2751,32 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			oldStatus:                      &extensionsv1beta1.SandboxClaimStatus{},
 			expectedObservations:           0,
 			expectedControllerObservations: 1,
+			expectedAnnotation:             true,
+		},
+		{
+			name: "does not re-record when creation latency already marked (e.g. after resume)",
+			claim: &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "resumed",
+					CreationTimestamp: pastTime,
+					Annotations: map[string]string{
+						asmetrics.CreationLatencyRecordedAnnotation: "true",
+						asmetrics.WebhookAnnotation:                 time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+						asmetrics.ObservabilityAnnotation:           time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+				Status: extensionsv1beta1.SandboxClaimStatus{
+					Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				},
+			},
+			// Simulate resume: Ready went False (suspended) -> True again.
+			oldStatus: &extensionsv1beta1.SandboxClaimStatus{
+				Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse}},
+			},
+			expectedObservations:           0,
+			expectedControllerObservations: 0,
+			expectedAnnotation:             true,
 		},
 	}
 
@@ -2746,14 +2788,16 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 
 			scheme := newScheme(t)
 			warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool).Build()
+			// Include the test claim object in the fake client so Patch calls will succeed.
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, tc.claim).Build()
 			r := &SandboxClaimReconciler{Client: fakeClient}
 
 			if tc.setupReconciler != nil {
 				tc.setupReconciler(r)
 			}
 
-			r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
+			err := r.recordCreationLatencyMetric(ctx, tc.claim, tc.oldStatus, tc.sandbox)
+			require.NoError(t, err)
 
 			// Verify the metric was observed in the Prometheus registry
 			count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
@@ -2765,8 +2809,118 @@ func TestRecordCreationLatencyMetric(t *testing.T) {
 			if countController != tc.expectedControllerObservations {
 				t.Errorf("expected %d observations for ClaimControllerStartupLatency, got %d", tc.expectedControllerObservations, countController)
 			}
+
+			// Verify the annotation was stamped/updated in the fake client
+			updatedClaim := &extensionsv1beta1.SandboxClaim{}
+			err = fakeClient.Get(ctx, types.NamespacedName{Name: tc.claim.Name, Namespace: tc.claim.Namespace}, updatedClaim)
+			require.NoError(t, err)
+
+			hasAnnotation := updatedClaim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true"
+			if hasAnnotation != tc.expectedAnnotation {
+				t.Errorf("expected annotation presence to be %t, got %t", tc.expectedAnnotation, hasAnnotation)
+			}
 		})
 	}
+}
+
+func TestRecordCreationLatencyMetric_SuspendResumeFlow(t *testing.T) {
+	ctx := context.Background()
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	// Reset metrics
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	scheme := newScheme(t)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+
+	// 1. Create a claim transitioning to Ready for the first time (no annotation yet)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "flow-test",
+			Namespace:         "default",
+			CreationTimestamp: pastTime,
+			Annotations: map[string]string{
+				asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool, claim).Build()
+	r := &SandboxClaimReconciler{Client: fakeClient}
+
+	// First Ready transition reconcile:
+	err := r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil)
+	require.NoError(t, err)
+
+	// Verify metrics recorded
+	count := testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
+	require.Equal(t, 1, count)
+	countCtrl := testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency)
+	require.Equal(t, 1, countCtrl)
+
+	// Verify annotation is stamped on the client
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	err = fakeClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, updatedClaim)
+	require.NoError(t, err)
+	require.Equal(t, "true", updatedClaim.Annotations[asmetrics.CreationLatencyRecordedAnnotation])
+
+	// 2. Simulate suspend/resume (False -> True)
+	// Reset metric counters to verify no *additional* observations are recorded.
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	// The old status before resumption is Ready=False
+	oldStatusBeforeResumption := &extensionsv1beta1.SandboxClaimStatus{
+		Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse}},
+	}
+
+	// Reconcile resume (using the claim that now contains the annotation)
+	err = r.recordCreationLatencyMetric(ctx, updatedClaim, oldStatusBeforeResumption, nil)
+	require.NoError(t, err)
+
+	// Verify no observations are recorded during resume
+	count = testutil.CollectAndCount(asmetrics.ClaimStartupLatency)
+	require.Equal(t, 0, count)
+	countCtrl = testutil.CollectAndCount(asmetrics.ClaimControllerStartupLatency)
+	require.Equal(t, 0, countCtrl)
+}
+
+func TestRecordCreationLatencyMetric_NotFoundSwallowed(t *testing.T) {
+	ctx := context.Background()
+	pastTime := metav1.Time{Time: time.Now().Add(-10 * time.Second)}
+
+	scheme := newScheme(t)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"}, Spec: extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "tpl"}}}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "not-found-test",
+			Namespace:         "default",
+			CreationTimestamp: pastTime,
+			Annotations: map[string]string{
+				asmetrics.WebhookAnnotation:       time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+				asmetrics.ObservabilityAnnotation: time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano),
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+		},
+	}
+
+	// Create fake client WITHOUT the claim object so Patch returns NotFound
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(warmPool).Build()
+	r := &SandboxClaimReconciler{Client: fakeClient}
+
+	// recordCreationLatencyMetric should swallow the NotFound error and return nil
+	err := r.recordCreationLatencyMetric(ctx, claim, &extensionsv1beta1.SandboxClaimStatus{}, nil)
+	require.NoError(t, err)
 }
 
 func TestSandboxClaimCreationMetric(t *testing.T) {
@@ -2846,8 +3000,8 @@ func TestSandboxClaimCreationMetric(t *testing.T) {
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
-						APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-						Kind:       "SandboxWarmPool",
+						APIVersion: extensionsv1beta1.GroupVersion.String(),
+						Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 						Name:       "test-warmpool",
 						UID:        "pool-uid",
 						Controller: new(true),
@@ -3318,8 +3472,8 @@ func TestSandboxClaimReconcileCleanup(t *testing.T) {
 				Name:      cl.Name,
 				Namespace: cl.Namespace,
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxClaim",
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxClaimKind,
 					Name:       cl.Name,
 					UID:        cl.UID,
 					Controller: &ctrlBool,
@@ -3518,7 +3672,7 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: extensionsv1beta1.GroupVersion.String(),
-				Kind:       "SandboxWarmPool",
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-warmpool",
 				Controller: ptr.To(true), // nolint:modernize
 			}},
@@ -3536,7 +3690,7 @@ func TestVerifySandboxCandidate_NamespaceIsolation(t *testing.T) {
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: extensionsv1beta1.GroupVersion.String(),
-				Kind:       "SandboxWarmPool",
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-warmpool",
 				Controller: ptr.To(true), // nolint:modernize
 			}},
@@ -3603,8 +3757,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -3631,8 +3785,8 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -3833,8 +3987,8 @@ func TestSandboxClaimAdoptionCacheLagRepatchesIdempotently(t *testing.T) {
 				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -3991,8 +4145,8 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 				warmPoolSandboxLabel:             sandboxcontrollers.NameHash("test-pool"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -4121,8 +4275,8 @@ func TestSandboxClaimFreshAdoptionStaleCacheKeepsFinalizedStatus(t *testing.T) {
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -4256,8 +4410,8 @@ func TestSandboxClaimPreventsAdoptionFromWrongWarmPool(t *testing.T) {
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("correct-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "wrong-pool",
 				UID:        "wrong-pool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -4556,8 +4710,8 @@ func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 				extensionsv1beta1.SandboxIDLabel: "claim-uid-legacy",
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxClaim",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
 				Name:       "test-claim-legacy",
 				UID:        "claim-uid-legacy",
 				Controller: ptr.To(true), // nolint:modernize
@@ -4631,8 +4785,8 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	ownedSandbox := unownedSandbox.DeepCopy()
 	ownedSandbox.OwnerReferences = []metav1.OwnerReference{
 		{
-			APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-			Kind:       "SandboxWarmPool",
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 			Name:       "test-pool",
 			UID:        "pool-uid-123",
 			Controller: ptr.To(true), // nolint:modernize
@@ -4650,7 +4804,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	legacyOwnedSandbox.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
-			Kind:       "SandboxWarmPool",
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 			Name:       "test-pool",
 			UID:        "pool-uid-123",
 			Controller: ptr.To(true), // nolint:modernize
@@ -4666,7 +4820,7 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	foreignGroupSandbox.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion: "apps/v1",
-			Kind:       "SandboxWarmPool",
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 			Name:       "test-pool",
 			UID:        "pool-uid-123",
 			Controller: ptr.To(true), // nolint:modernize
@@ -4680,8 +4834,8 @@ func TestIsAdoptable_RejectsUnowned(t *testing.T) {
 	ownedByClaimSandbox := unownedSandbox.DeepCopy()
 	ownedByClaimSandbox.OwnerReferences = []metav1.OwnerReference{
 		{
-			APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-			Kind:       "SandboxClaim",
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       extensionsv1beta1.SandboxClaimKind,
 			Name:       "test-claim",
 			UID:        "claim-uid-123",
 			Controller: ptr.To(true), // nolint:modernize
@@ -4714,8 +4868,8 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 				},
 				OwnerReferences: []metav1.OwnerReference{
 					{
-						APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-						Kind:       "SandboxWarmPool",
+						APIVersion: extensionsv1beta1.GroupVersion.String(),
+						Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 						Name:       "test-pool",
 						UID:        "warmpool-uid",
 						Controller: ptr.To(true), // nolint:modernize
@@ -4997,8 +5151,8 @@ func TestCreateSandboxClaimVolumeClaimTemplatesSuccess(t *testing.T) {
 							sandboxTemplateRefHash: sandboxcontrollers.NameHash("vct-template"),
 						},
 						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "vct-warmpool",
 							UID:        "pool-uid-123",
 							Controller: ptr.To(true), // nolint:modernize
@@ -5247,7 +5401,7 @@ func TestSandboxClaimReconcile_PatchErrorPreservesStatus(t *testing.T) {
 				sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1", Kind: "SandboxClaim",
+				APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind,
 				Name: "test-claim", UID: "claim-uid", Controller: new(true),
 			}},
 		},

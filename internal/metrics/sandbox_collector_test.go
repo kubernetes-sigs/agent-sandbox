@@ -209,7 +209,7 @@ func TestSandboxCollector(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								APIVersion: extensionsv1beta1.GroupVersion.String(),
-								Kind:       "SandboxClaim",
+								Kind:       extensionsv1beta1.SandboxClaimKind,
 								Name:       "my-claim",
 								UID:        "1234",
 								Controller: &trueVal,
@@ -241,7 +241,7 @@ func TestSandboxCollector(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								APIVersion: extensionsv1beta1.GroupVersion.String(),
-								Kind:       "SandboxWarmPool",
+								Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 								Name:       "my-warmpool",
 								UID:        "5678",
 								Controller: &trueVal,
@@ -276,7 +276,7 @@ func TestSandboxCollector(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
-								Kind:       "SandboxWarmPool",
+								Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 								Name:       "my-warmpool",
 								UID:        "9012",
 								Controller: &trueVal,

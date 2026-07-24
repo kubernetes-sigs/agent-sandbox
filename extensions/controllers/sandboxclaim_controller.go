@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
@@ -53,6 +53,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
@@ -274,7 +275,9 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, errs
 	}
 
-	r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox)
+	if err := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); err != nil {
+		return ctrl.Result{}, errors.Join(reconcileErr, err)
+	}
 
 	// Determine Result
 	var result ctrl.Result
@@ -1487,7 +1490,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			}
 
 			controllerRef := metav1.GetControllerOf(sandbox)
-			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
+			if utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 				// Still in warm pool. Try to complete adoption!
 				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
 				if err := verifySandboxCandidate(sandbox, claim); err != nil {
@@ -1821,7 +1824,8 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 		// Verify this policy was actually created by this controller
 		// before deleting it. We check if the SandboxClaim is the controller.
 		controllerRef := metav1.GetControllerOf(existingNP)
-		isControlledByClaim := controllerRef != nil && controllerRef.UID == claim.UID && controllerRef.Kind == "SandboxClaim"
+		isControlledByClaim := utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind) &&
+			controllerRef.UID == claim.UID
 
 		if !isControlledByClaim {
 			// A user manually created a policy with our reserved name. We should not delete it, but log a warning so it can be resolved.
@@ -1913,24 +1917,38 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	claim *extensionsv1beta1.SandboxClaim,
 	oldStatus *extensionsv1beta1.SandboxClaimStatus,
 	sandbox *v1beta1.Sandbox,
-) {
+) error {
 	logger := log.FromContext(ctx)
 
 	newStatus := &claim.Status
 	newReady := meta.FindStatusCondition(newStatus.Conditions, string(v1beta1.SandboxConditionReady))
 	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		return
+		return nil
+	}
+
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+
+	// Record startup/creation latency at most once per claim.
+	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
+		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
+			r.observedTimes.Delete(key)
+		}
+		return nil
 	}
 
 	// Do not record creation metric if we have already seen the ready state.
 	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(v1beta1.SandboxConditionReady))
 	if oldReady != nil && oldReady.Status == metav1.ConditionTrue {
 		// Already Ready before this reconcile; drain any entry re-added by a post-Ready UpdateFunc.
-		key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
 		if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID {
 			r.observedTimes.Delete(key)
 		}
-		return
+		// Backfill the annotation if missing so a future suspend/resume doesn't re-record.
+		if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
+			logger.Error(err, "Failed to stamp creation-latency-recorded annotation on already-Ready claim", "claim", claim.Name)
+			return err
+		}
+		return nil
 	}
 
 	launchType := getLaunchType(sandbox)
@@ -1947,6 +1965,34 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
+
+	// Mark the claim so a later Ready transition (e.g. a resume) does not re-record.
+	if err := r.markCreationLatencyRecorded(ctx, claim); err != nil {
+		logger.Error(err, "Failed to stamp creation-latency-recorded annotation; a resume may re-record creation latency", "claim", claim.Name)
+		return err
+	}
+	return nil
+}
+
+// markCreationLatencyRecorded stamps the one-shot annotation that prevents the
+// creation/startup latency histograms from being re-recorded on a later Ready
+// transition.
+func (r *SandboxClaimReconciler) markCreationLatencyRecorded(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	if claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] == "true" {
+		return nil
+	}
+	patch := client.MergeFrom(claim.DeepCopy())
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[asmetrics.CreationLatencyRecordedAnnotation] = "true"
+	if err := r.Patch(ctx, claim, patch); err != nil {
+		if k8errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func hasSandboxExpiredCondition(conditions []metav1.Condition) bool {
@@ -2042,11 +2088,7 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	// written and are not rewritten by storage migration, so warm sandboxes
 	// created by a pre-v1beta1 pool controller still carry the v1alpha1
 	// group version after an upgrade. Match on group+kind, not version.
-	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
-	if err != nil {
-		return fmt.Errorf("parsing owner reference apiVersion %q of sandbox %s/%s: %w", controllerRef.APIVersion, candidate.Namespace, candidate.Name, err)
-	}
-	if refGV.Group != extensionsv1beta1.GroupVersion.Group || controllerRef.Kind != "SandboxWarmPool" {
+	if !utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil
@@ -2101,11 +2143,11 @@ func (h *warmPoolEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 }
 
 func getWarmPoolName(obj metav1.Object) string {
-	if ctrl := metav1.GetControllerOf(obj); ctrl != nil && ctrl.Kind == "SandboxWarmPool" {
+	if ctrl := metav1.GetControllerOf(obj); utils.MatchesGroupKind(ctrl, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 		return ctrl.Name
 	}
 	for _, ref := range obj.GetOwnerReferences() {
-		if ref.Kind == "SandboxWarmPool" {
+		if utils.MatchesGroupKind(&ref, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 			return ref.Name
 		}
 	}

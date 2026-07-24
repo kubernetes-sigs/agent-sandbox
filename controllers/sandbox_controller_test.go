@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,12 +34,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
@@ -55,8 +58,8 @@ const sandboxUID = types.UID("test-sandbox-uid")
 
 func sandboxControllerRef(name string) metav1.OwnerReference {
 	return metav1.OwnerReference{
-		APIVersion:         "agents.x-k8s.io/v1beta1",
-		Kind:               "Sandbox",
+		APIVersion:         sandboxv1beta1.GroupVersion.String(),
+		Kind:               sandboxv1beta1.SandboxKind,
 		Name:               name,
 		UID:                sandboxUID,
 		Controller:         new(true),
@@ -1516,8 +1519,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "my-warm-pool",
 							UID:        "pool-uid",
 							Controller: new(true),
@@ -1639,8 +1642,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "my-warm-pool",
 							UID:        "pool-uid",
 							Controller: new(true),
@@ -1689,8 +1692,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -1753,8 +1756,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -1799,8 +1802,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxWarmPool",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 							Name:       "my-warm-pool",
 							UID:        "pool-uid",
 							Controller: new(true),
@@ -1918,8 +1921,8 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-							Kind:       "SandboxClaim",
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
 							Name:       "my-claim",
 							UID:        "claim-uid",
 							Controller: new(true),
@@ -2623,6 +2626,24 @@ func TestReconcilePod(t *testing.T) {
 	}
 }
 
+func TestServicePortsForSandboxReturnsNilWithoutContainerPorts(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: "main",
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	require.Nil(t, servicePortsForSandbox(sandbox))
+}
+
 func TestReconcileService(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"
@@ -2635,6 +2656,51 @@ func TestReconcileService(t *testing.T) {
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true)}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning},
 	}
+	sandboxWithPodSpec := func(podSpec corev1.PodSpec) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      sandboxName,
+				Namespace: sandboxNs,
+				UID:       sandboxUID,
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					Service: new(true),
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: podSpec,
+					},
+				},
+				OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			},
+		}
+	}
+	sandboxWithContainers := func(containers ...corev1.Container) *sandboxv1beta1.Sandbox {
+		return sandboxWithPodSpec(corev1.PodSpec{Containers: containers})
+	}
+	sandboxWithPorts := func(containerPorts ...corev1.ContainerPort) *sandboxv1beta1.Sandbox {
+		return sandboxWithContainers(corev1.Container{
+			Name:  "main",
+			Ports: containerPorts,
+		})
+	}
+	sandboxWithNilServiceAndPorts := func(containerPorts ...corev1.ContainerPort) *sandboxv1beta1.Sandbox {
+		sandbox := sandboxWithPorts(containerPorts...)
+		sandbox.Spec.Service = nil
+		return sandbox
+	}
+	servicePortWithName := func(port int32, protocol corev1.Protocol, name string) corev1.ServicePort {
+		return corev1.ServicePort{
+			Name:       name,
+			Protocol:   protocol,
+			Port:       port,
+			TargetPort: intstr.FromInt32(port),
+		}
+	}
+	servicePort := func(port int32, protocol corev1.Protocol) corev1.ServicePort {
+		return servicePortWithName(port, protocol, fmt.Sprintf("p-%d-%s", port, strings.ToLower(string(protocol))))
+	}
+	alwaysRestart := corev1.ContainerRestartPolicyAlways
+	appProtocolHTTP := "http"
 
 	testCases := []struct {
 		name                  string
@@ -2665,6 +2731,187 @@ func TestReconcileService(t *testing.T) {
 					ClusterIP: "None",
 					Selector: map[string]string{
 						sandboxLabel: nameHash,
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "creates a new headless service with container ports when service is true",
+			sandbox: sandboxWithPorts(corev1.ContainerPort{
+				ContainerPort: 8080,
+			}),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePort(8080, corev1.ProtocolTCP),
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "creates a new headless service with native sidecar container ports",
+			sandbox: sandboxWithPodSpec(corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "main",
+				}},
+				InitContainers: []corev1.Container{
+					{
+						Name: "setup",
+						Ports: []corev1.ContainerPort{{
+							Name:          "setup",
+							ContainerPort: 7070,
+						}},
+					},
+					{
+						Name:          "proxy",
+						RestartPolicy: &alwaysRestart,
+						Ports: []corev1.ContainerPort{{
+							Name:          "metrics",
+							ContainerPort: 15020,
+						}},
+					},
+				},
+			}),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePortWithName(15020, corev1.ProtocolTCP, "metrics"),
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "creates a new headless service with sorted unique container ports",
+			sandbox: sandboxWithPorts(
+				corev1.ContainerPort{ContainerPort: 9090, Protocol: corev1.ProtocolUDP},
+				corev1.ContainerPort{ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
+				corev1.ContainerPort{Name: "http", ContainerPort: 8080},
+				corev1.ContainerPort{ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
+				corev1.ContainerPort{ContainerPort: 0, Protocol: corev1.ProtocolTCP},
+			),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePortWithName(8080, corev1.ProtocolTCP, "http"),
+						servicePort(9090, corev1.ProtocolTCP),
+						servicePort(9090, corev1.ProtocolUDP),
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "uses the first container port name when duplicate names are reused",
+			sandbox: sandboxWithContainers(
+				corev1.Container{
+					Name: "main",
+					Ports: []corev1.ContainerPort{{
+						Name:          "http",
+						ContainerPort: 9090,
+					}},
+				},
+				corev1.Container{
+					Name: "sidecar",
+					Ports: []corev1.ContainerPort{{
+						Name:          "http",
+						ContainerPort: 8080,
+					}},
+				},
+			),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePort(8080, corev1.ProtocolTCP),
+						servicePortWithName(9090, corev1.ProtocolTCP, "http"),
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "adjusts generated service port name when it conflicts with an explicit name",
+			sandbox: sandboxWithPorts(
+				corev1.ContainerPort{Name: "p-8080-tcp", ContainerPort: 9090},
+				corev1.ContainerPort{ContainerPort: 8080},
+			),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePortWithName(8080, corev1.ProtocolTCP, "p-8080-tcp-2"),
+						servicePortWithName(9090, corev1.ProtocolTCP, "p-8080-tcp"),
 					},
 				},
 			},
@@ -2705,6 +2952,9 @@ func TestReconcileService(t *testing.T) {
 						Selector: map[string]string{
 							"app": "something-else",
 						},
+						Ports: []corev1.ServicePort{
+							servicePort(9090, corev1.ProtocolTCP),
+						},
 					},
 				},
 			},
@@ -2724,6 +2974,114 @@ func TestReconcileService(t *testing.T) {
 					Selector: map[string]string{
 						sandboxLabel: nameHash,
 					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "repairs port drift on service owned by this sandbox when service is true",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"keep":       "me",
+							sandboxLabel: nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						Selector: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						Ports: []corev1.ServicePort{
+							servicePort(9090, corev1.ProtocolTCP),
+						},
+					},
+				},
+			},
+			sandbox: sandboxWithPorts(corev1.ContainerPort{
+				ContainerPort: 8080,
+			}),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"keep":       "me",
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePort(8080, corev1.ProtocolTCP),
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "preserves unmanaged service port fields when controlled fields match",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "None",
+						Selector: map[string]string{
+							sandboxLabel: nameHash,
+						},
+						Ports: []corev1.ServicePort{{
+							Name:        "p-8080-tcp",
+							Protocol:    corev1.ProtocolTCP,
+							Port:        8080,
+							TargetPort:  intstr.FromInt32(8080),
+							AppProtocol: &appProtocolHTTP,
+						}},
+					},
+				},
+			},
+			sandbox: sandboxWithPorts(corev1.ContainerPort{
+				ContainerPort: 8080,
+			}),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Selector: map[string]string{
+						sandboxLabel: nameHash,
+					},
+					Ports: []corev1.ServicePort{{
+						Name:        "p-8080-tcp",
+						Protocol:    corev1.ProtocolTCP,
+						Port:        8080,
+						TargetPort:  intstr.FromInt32(8080),
+						AppProtocol: &appProtocolHTTP,
+					}},
 				},
 			},
 			wantStatusService:     sandboxName,
@@ -2769,6 +3127,52 @@ func TestReconcileService(t *testing.T) {
 					},
 				},
 			},
+			sandbox: sandboxWithPorts(corev1.ContainerPort{
+				ContainerPort: 8080,
+			}),
+			wantService: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash":  nameHash,
+						sandboxv1beta1.SandboxAdoptableLabel: "true",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePort(8080, corev1.ProtocolTCP),
+					},
+				},
+			},
+			wantStatusService:     sandboxName,
+			wantStatusServiceFQDN: sandboxName + "." + sandboxNs + ".svc.cluster.local",
+		},
+		{
+			name: "adopts unowned headless service and clears existing ports when sandbox has none",
+			initialObjs: []runtime.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxAdoptableLabel: "true",
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						ClusterIP: "None",
+						Ports: []corev1.ServicePort{
+							servicePort(9090, corev1.ProtocolTCP),
+						},
+					},
+				},
+			},
 			sandbox: sandboxObj,
 			wantService: &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2782,6 +3186,7 @@ func TestReconcileService(t *testing.T) {
 					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
 				},
 				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
 					Selector: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
 					},
@@ -2921,17 +3326,15 @@ func TestReconcileService(t *testing.T) {
 					},
 					Spec: corev1.ServiceSpec{
 						ClusterIP: "None",
+						Ports: []corev1.ServicePort{
+							servicePort(9090, corev1.ProtocolTCP),
+						},
 					},
 				},
 			},
-			sandbox: &sandboxv1beta1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxName,
-					Namespace: sandboxNs,
-					UID:       sandboxUID,
-				},
-				Spec: sandboxv1beta1.SandboxSpec{},
-			},
+			sandbox: sandboxWithNilServiceAndPorts(corev1.ContainerPort{
+				ContainerPort: 8080,
+			}),
 			wantService: &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:            sandboxName,
@@ -2946,6 +3349,9 @@ func TestReconcileService(t *testing.T) {
 					ClusterIP: "None",
 					Selector: map[string]string{
 						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+					},
+					Ports: []corev1.ServicePort{
+						servicePort(9090, corev1.ProtocolTCP),
 					},
 				},
 			},
@@ -3127,8 +3533,8 @@ func TestCheckOwnership(t *testing.T) {
 	}
 
 	sandboxOwnerRef := metav1.OwnerReference{
-		APIVersion:         "agents.x-k8s.io/v1beta1",
-		Kind:               "Sandbox",
+		APIVersion:         sandboxv1beta1.GroupVersion.String(),
+		Kind:               sandboxv1beta1.SandboxKind,
 		Name:               sandboxName,
 		UID:                sandboxUID,
 		Controller:         new(true),
@@ -3266,8 +3672,8 @@ func TestReconcilePVCs(t *testing.T) {
 						Namespace: sandboxNs,
 						OwnerReferences: []metav1.OwnerReference{
 							{
-								APIVersion:         "agents.x-k8s.io/v1beta1",
-								Kind:               "Sandbox",
+								APIVersion:         sandboxv1beta1.GroupVersion.String(),
+								Kind:               sandboxv1beta1.SandboxKind,
 								Name:               sandboxName,
 								UID:                sandboxUID,
 								Controller:         new(true),

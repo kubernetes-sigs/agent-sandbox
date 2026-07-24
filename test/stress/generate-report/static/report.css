@@ -590,3 +590,61 @@ th.sortable[data-order="desc"]::after {
 .watch-more:hover {
     background-color: rgba(28, 26, 23, 0.05);
 }
+
+/* ---- Metric explorer ---- */
+
+.mx-metric {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.mx-swatch {
+    display: inline-block;
+    width: 14px;
+    height: 3px;
+    border-radius: 2px;
+    vertical-align: middle;
+}
+
+.mx-rate-label {
+    font-family: var(--font-sans);
+    font-size: 0.85rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.mx-series-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-size: 0.78rem;
+}
+
+.mx-series-table th {
+    text-align: left;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--text-primary);
+    font-weight: 600;
+}
+
+.mx-series-table td {
+    padding: 3px 8px;
+    border-bottom: 1px solid #e5e5e0;
+    white-space: nowrap;
+}
+
+.mx-series-table tbody tr[data-s] {
+    cursor: pointer;
+}
+
+.mx-series-table tbody tr[data-s]:hover {
+    background-color: rgba(28, 26, 23, 0.04);
+}
+
+.mx-series-table td.mx-labels {
+    white-space: normal;
+    word-break: break-word;
+    max-width: 480px;
+}
+

@@ -1,0 +1,23 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: sandboxclaim-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: agent-sandbox-system/webhook-certificate
+webhooks:
+  - name: webhook-service.agent-sandbox-system.svc
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: agent-sandbox-system
+        path: "/mutate"
+      # caBundle will be injected automatically by cert-manager
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: ["extensions.agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        resources: ["sandboxclaims"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5

@@ -41,6 +41,10 @@ const (
 	// PhaseClaimsWarm fires SandboxClaims simultaneously against a fully
 	// provisioned SandboxWarmPool, measuring claim-create -> claim-Ready latency.
 	PhaseClaimsWarm Phase = "claims-warm"
+	// PhaseClaimsWarmSustained streams SandboxClaims at a target rate with
+	// Poisson jitter against continuously replenished warm pools, measuring
+	// whether create -> Ready latency holds over time (see sustained.go).
+	PhaseClaimsWarmSustained Phase = "claims-warm-sustained"
 )
 
 // PhaseNumber is a 1-based index into the run's phase list (Config.Phases /

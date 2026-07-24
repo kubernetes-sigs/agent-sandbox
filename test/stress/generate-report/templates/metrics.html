@@ -1,0 +1,316 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Metric Explorer - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Metric Explorer{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div class="card-title">
+        <span>Metric explorer</span>
+        <span class="badge badge-info" id="mx-status">loading…</span>
+    </div>
+    <div class="profile-controls">
+        <input id="mx-search" type="search" style="max-width: none;"
+               placeholder="Search, e.g.  metric:conn_wait   workqueue source:agent-sandbox-controller   apiserver_request_duration verb:PATCH le:+Inf">
+    </div>
+    <div class="card-desc">
+        Terms are ANDed. <code>metric:</code>, <code>source:</code>, <code>instance:</code> match those
+        fields; any other <code>key:value</code> term matches a label (<code>verb:PATCH</code>,
+        <code>le:+Inf</code>, <code>code:200</code>); bare text matches anywhere; a value starting
+        with <code>=</code> matches exactly. The query is the view: while it matches several metrics
+        you get a list, and one matching metric shows its chart and series. Clicking a metric locks
+        <code>metric:=…</code> into the query; clicking a series locks that whole series (and shows
+        its raw samples) — back out by editing the query. Counter-style metrics
+        (<code>_total</code>/<code>_count</code>/<code>_sum</code>/<code>_bucket</code>) plot as
+        per-second rates by default — untick "rate" for raw cumulative values. Dashed blue lines mark
+        phase starts.
+    </div>
+    <div id="mx-results" class="watch-results"></div>
+    <div style="text-align: center; margin-top: 12px;">
+        <button id="mx-more" type="button" class="watch-more" hidden>Show more</button>
+    </div>
+    <div class="card-desc" style="margin-top: 12px;">
+        The raw scrape log sits next to this page (<a href="{{ metrics_log }}"><code>{{ metrics_log }}</code></a>),
+        one Prometheus sample per line, and is parsed entirely in your browser at view time — so this
+        page must be served over HTTP (a <code>file://</code> URL cannot fetch sibling files).
+    </div>
+</div>
+
+<script src="metrics-explorer.js"></script>
+<script>
+    const METRICS_LOG = {{ metrics_log | tojson }};
+    const PHASES = {{ phases | tojson }};
+    const START_MS = Date.parse({{ summary.startTime | tojson }});
+    const RENDER_CHUNK = 100;
+    const MAX_PLOTTED = CHART_COLORS.length;
+
+    const statusEl = document.getElementById('mx-status');
+    const searchEl = document.getElementById('mx-search');
+    const resultsEl = document.getElementById('mx-results');
+    const moreEl = document.getElementById('mx-more');
+
+    let log = null;
+    let groups = [];   // search result: [{metric, counter, indices}]
+    let rendered = 0;
+
+    // Chart.js plugin drawing a dashed vertical line and label at each phase
+    // start, for charts whose x axis is linear offset-seconds (report.js's
+    // phaseBands assumes a category axis).
+    function phaseLinesSeconds(phases) {
+        return {
+            id: 'phaseLinesSeconds',
+            beforeDraw: (chart) => {
+                const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+                for (const phase of phases) {
+                    if (phase.start_sec < x.min || phase.start_sec > x.max) continue;
+                    const startX = x.getPixelForValue(phase.start_sec);
+                    ctx.strokeStyle = '#1d4ed8';
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath();
+                    ctx.moveTo(startX, top);
+                    ctx.lineTo(startX, bottom);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = '#1d4ed8';
+                    ctx.font = 'bold 11px ' + getComputedStyle(document.documentElement).getPropertyValue('--font-sans').trim();
+                    ctx.textAlign = 'left';
+                    ctx.fillText(phase.name, startX + 6, top + 18);
+                }
+            }
+        };
+    }
+
+    function fmtValue(n) {
+        if (n === null || n === undefined || Number.isNaN(n)) return '—';
+        if (n === 0) return '0';
+        const abs = Math.abs(n);
+        if (abs >= 1e6 || abs < 1e-3) return n.toExponential(2);
+        if (Number.isInteger(n)) return n.toLocaleString();
+        return n.toLocaleString(undefined, { maximumSignificantDigits: 4 });
+    }
+
+    function fmtTime(sec) {
+        const iso = new Date(START_MS + sec * 1000).toISOString();
+        const sign = sec < 0 ? '−' : '+';
+        return `${iso.slice(11, 23)} <span class="watch-muted">${sign}${Math.abs(sec).toFixed(1)}s</span>`;
+    }
+
+    // seriesLabel builds the shortest label that distinguishes s within the
+    // plotted set: parts shared by every plotted series are dropped.
+    function seriesLabel(s, all) {
+        const parts = [];
+        if (new Set(all.map(x => x.source)).size > 1) parts.push(s.source);
+        if (new Set(all.map(x => x.instance)).size > 1) parts.push(s.instance);
+        if (s.labelsStr && new Set(all.map(x => x.labelsStr)).size > 1) parts.push(s.labelsStr);
+        return parts.join(' ') || s.instance || s.source || s.metric;
+    }
+
+    function groupHtml(g, gi) {
+        const fam = log.families.get(g.metric);
+        const kind = g.counter ? 'counter' : 'gauge';
+        return `<div class="watch-row" data-g="${gi}">
+            <div class="watch-row-head" tabindex="0" role="button" title="Lock this metric into the query">
+                <span class="mx-metric">${escapeHtml(g.metric)}</span>
+                ${badge('info', kind)}
+                <span class="watch-muted">${g.indices.length.toLocaleString()} of ${fam.series.toLocaleString()} series match</span>
+            </div>
+        </div>`;
+    }
+
+    function renderMore() {
+        const next = groups.slice(rendered, rendered + RENDER_CHUNK);
+        resultsEl.insertAdjacentHTML('beforeend', next.map((g, i) => groupHtml(g, rendered + i)).join(''));
+        rendered += next.length;
+        moreEl.hidden = rendered >= groups.length;
+        moreEl.textContent = `Show more (${(groups.length - rendered).toLocaleString()} remaining)`;
+    }
+
+    // setQuery drives every drill-down: the query is the single source of
+    // truth for what the page shows.
+    function setQuery(q) {
+        searchEl.value = q;
+        history.replaceState(null, '', q ? '#q=' + encodeURIComponent(q) : '#');
+        runSearch();
+    }
+
+    // lockMetric pins one metric exactly, keeping any field/label filters
+    // already in the query (their raw tokens) but dropping bare text and
+    // previous metric: terms — those were for finding the metric.
+    function lockMetric(metric) {
+        const kept = (searchEl.value || '').trim().split(/\s+/).filter(tok => {
+            const sep = tok.indexOf(':');
+            if (sep <= 0 || sep === tok.length - 1) return false;
+            return tok.slice(0, sep).toLowerCase() !== 'metric';
+        });
+        setQuery([`metric:=${metric}`, ...kept].join(' '));
+    }
+
+    function runSearch() {
+        if (!log) return;
+        for (const canvas of resultsEl.querySelectorAll('canvas')) {
+            const chart = Chart.getChart(canvas);
+            if (chart) chart.destroy();
+        }
+        groups = searchMetricSeries(log, searchEl.value);
+        const matched = groups.reduce((n, g) => n + g.indices.length, 0);
+        resultsEl.innerHTML = '';
+        rendered = 0;
+        statusEl.textContent = `${groups.length.toLocaleString()} metrics, ${matched.toLocaleString()} / ${log.series.length.toLocaleString()} series`;
+        if (groups.length === 1) {
+            // The query pins down one metric: show it expanded, no list.
+            const g = groups[0];
+            resultsEl.insertAdjacentHTML('beforeend', groupHtml(g, 0));
+            const detail = document.createElement('div');
+            detail.className = 'watch-row-detail';
+            resultsEl.querySelector('.watch-row').appendChild(detail);
+            renderDetail(detail, g);
+            moreEl.hidden = true;
+        } else {
+            renderMore();
+        }
+    }
+
+    // renderDetail fills in one expanded metric: rate toggle, chart of the
+    // first MAX_PLOTTED matching series, and the full series table.
+    function renderDetail(detailEl, g) {
+        const sorted = g.indices.slice().sort((a, b) => {
+            const x = log.series[a], y = log.series[b];
+            return x.source.localeCompare(y.source) || x.instance.localeCompare(y.instance)
+                || x.labelsStr.localeCompare(y.labelsStr);
+        });
+        const truncated = sorted.length > MAX_PLOTTED;
+        detailEl.innerHTML = `
+            <div class="profile-controls" style="margin-top: 8px;">
+                <label class="mx-rate-label"><input type="checkbox" class="mx-rate" ${g.counter ? 'checked' : ''}> rate (Δ/s)</label>
+                ${truncated ? `<span class="badge badge-warning">plotting first ${MAX_PLOTTED} of ${sorted.length} series — add terms to narrow</span>` : ''}
+            </div>
+            <div class="chart-container" style="height: 280px;"><canvas></canvas></div>
+            <table class="mx-series-table"><thead>
+                <tr><th></th><th>source</th><th>instance</th><th>labels</th><th>samples</th><th>min</th><th>max</th><th>last</th></tr>
+            </thead><tbody>${sorted.map((si, pos) => {
+                const s = log.series[si];
+                let min = Infinity, max = -Infinity;
+                for (const v of s.v) { if (v < min) min = v; if (v > max) max = v; }
+                const swatch = pos < MAX_PLOTTED
+                    ? `<span class="mx-swatch" style="background:${CHART_COLORS[pos % MAX_PLOTTED]}"></span>` : '';
+                return `<tr data-s="${si}" tabindex="0" title="Lock this series into the query">
+                    <td>${swatch}</td>
+                    <td>${escapeHtml(s.source)}</td>
+                    <td>${escapeHtml(s.instance)}</td>
+                    <td class="mx-labels">${escapeHtml(s.labelsStr)}</td>
+                    <td>${s.t.length.toLocaleString()}</td>
+                    <td>${fmtValue(min)}</td><td>${fmtValue(max)}</td><td>${fmtValue(s.v[s.v.length - 1])}</td>
+                </tr>`;
+            }).join('')}</tbody></table>
+            ${sorted.length === 1 ? `<div class="watch-muted" style="margin-top:10px;">raw samples</div>${samplesHtml(log.series[sorted[0]])}` : ''}`;
+
+        const plot = () => {
+            const canvas = detailEl.querySelector('canvas');
+            const old = Chart.getChart(canvas);
+            if (old) old.destroy();
+            const rate = detailEl.querySelector('.mx-rate').checked;
+            const plotted = sorted.slice(0, MAX_PLOTTED).map(si => log.series[si]);
+            const datasets = plotted.map((s, i) => {
+                const pts = rate ? rateSeries(s) : s;
+                const ds = lineDataset(seriesLabel(s, plotted), pts.t.map((sec, j) => ({ x: sec, y: pts.v[j] })), i);
+                ds.pointRadius = 0;
+                ds.pointHitRadius = 8;
+                return ds;
+            });
+            const options = lineChartOptions(rate ? 'per second' : 'value');
+            options.scales.x.type = 'linear';
+            options.scales.x.title.text = 'seconds since run start';
+            options.plugins.legend.display = datasets.length > 1;
+            new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: { datasets },
+                options,
+                plugins: [phaseLinesSeconds(PHASES)]
+            });
+        };
+        detailEl.querySelector('.mx-rate').addEventListener('change', plot);
+        plot();
+    }
+
+    // Raw sample dump for one series (time, value, Δ/s).
+    function samplesHtml(s) {
+        const rows = [];
+        for (let i = 0; i < s.t.length; i++) {
+            const dt = i > 0 ? s.t[i] - s.t[i - 1] : 0;
+            const rateTxt = i > 0 && dt > 0 ? fmtValue((s.v[i] - s.v[i - 1]) / dt) : '—';
+            rows.push(`<tr><td>${fmtTime(s.t[i])}</td><td>${fmtValue(s.v[i])}</td><td>${rateTxt}</td></tr>`);
+        }
+        return `<table class="mx-series-table"><thead><tr><th>time</th><th>value</th><th>Δ/s</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+    }
+
+    // Clicks drill down by rewriting the query: a metric row locks the
+    // metric, a series row locks the whole series.
+    function activate(e) {
+        if (window.getSelection().toString()) return;
+        const seriesRow = e.target.closest('tr[data-s]');
+        if (seriesRow) {
+            setQuery(lockTerms(log.series[Number(seriesRow.dataset.s)]));
+            return;
+        }
+        const head = e.target.closest('.watch-row-head');
+        if (head) {
+            lockMetric(groups[Number(head.closest('.watch-row').dataset.g)].metric);
+        }
+    }
+
+    resultsEl.addEventListener('click', activate);
+
+    resultsEl.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        if (!e.target.closest('tr[data-s], .watch-row-head')) return;
+        e.preventDefault();
+        activate(e);
+    });
+
+    let debounce = null;
+    searchEl.addEventListener('input', () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+            history.replaceState(null, '', searchEl.value ? '#q=' + encodeURIComponent(searchEl.value) : '#');
+            runSearch();
+        }, 150);
+    });
+
+    moreEl.addEventListener('click', renderMore);
+
+    (async () => {
+        try {
+            log = await loadMetricsLog(METRICS_LOG, START_MS, (stage, detail) => {
+                statusEl.textContent = detail ? `${stage} (${detail})` : stage + '…';
+            });
+            if (location.hash.startsWith('#q=')) {
+                searchEl.value = decodeURIComponent(location.hash.slice(3));
+            }
+            runSearch();
+        } catch (err) {
+            statusEl.textContent = 'load failed';
+            resultsEl.innerHTML = `<div class="card-desc">Failed to load <code>${escapeHtml(METRICS_LOG)}</code>: ${escapeHtml(err.message)}.<br>` +
+                'Note: the scrape log is fetched at view time, so this page must be served over HTTP ' +
+                '(a file:// URL cannot fetch sibling files).</div>';
+        }
+    })();
+</script>
+{% endblock %}

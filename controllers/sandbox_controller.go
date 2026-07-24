@@ -68,6 +68,9 @@ const (
 //
 //   - metadata.managedFields: written via server-side apply by the kubelet on
 //     every status update and never read by any controller here.
+//   - metadata.finalizers: never read on Pods by any controller in this repo
+//     (the sandboxes/finalizers RBAC is for the Sandbox CR itself, not Pods).
+//     Stripping is safe and saves a trivial amount of memory.
 //   - spec: the only spec field any controller reads is spec.nodeName
 //     (propagated to Sandbox status), so it is the only field preserved. The
 //     pod spec the controller WRITES is built from the Sandbox's PodTemplate
@@ -86,6 +89,7 @@ func PodCacheTransform(obj any) (any, error) {
 		return obj, nil
 	}
 	pod.ManagedFields = nil
+	pod.Finalizers = nil
 	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName}
 	return pod, nil
 }

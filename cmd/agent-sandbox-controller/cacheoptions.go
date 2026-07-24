@@ -37,7 +37,8 @@ import (
 //     update/create, where an absent managedFields means "leave server-side
 //     field management unchanged". Pure decode-CPU/memory win.
 //   - The Pod cache additionally drops the pod spec except spec.nodeName —
-//     the only spec field any controller reads (see PodCacheTransform).
+//     the only spec field any controller reads (see PodCacheTransform) —
+//     and metadata.finalizers, which no controller reads on Pods.
 //
 // With scopeToTrackingLabel, the Pod and Service informers are additionally
 // restricted to objects carrying the sandbox tracking label; see the

@@ -3,7 +3,6 @@
 This directory contains examples of how to use the Agent Sandbox. Each subdirectory contains a different example.
 
 - [**agent-sandbox-rl**](./agent-sandbox-rl): Generic, multi-cluster batch orchestration for running SWE-bench-style RL/eval workloads on Agent Sandbox warm pools.
-- [**agents-as-a-service**](./agents-as-a-service): The multi-user platform pattern distilled from a real agents-as-a-service product: per-user claims over a warm pool, suspend/resume as the cost dial, PVC state survival, and injection-policy enforcement.
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.
 - [**apf-insulation**](./apf-insulation): An opt-in API Priority and Fairness overlay giving the controller dedicated apiserver concurrency for high-rate claim workloads (claim path > bulk refill > events).
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
@@ -15,6 +14,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**gke-swap**](./gke-swap): Demonstrates how to configure GKE node memory swap with dedicated Local SSDs to drastically increase Chrome pod density from 120 to 200 pods per node.
 - [**hello-world-sandbox**](./hello-world-sandbox): A simple "Hello World" sandbox example.
 - [**hermes-agent**](./hermes-agent): An example of running Hermes Agent with persistence and custom skills.
+- [**hermes-agents-as-a-service**](./hermes-agents-as-a-service): The multi-user platform pattern distilled from a real agents-as-a-service product: per-user claims over a warm pool, suspend/resume as the cost dial, PVC state survival, and injection-policy enforcement.
 - [**hpa-swp-scaling**](./hpa-swp-scaling): An example of scaling a SandboxWarmPool using Kubernetes Horizontal Pod Autoscaler (HPA).
 - [**jupyterlab**](./jupyterlab): An example of running JupyterLab on Agent-Sandbox.
 - [**keda-scale-to-zero**](./keda-scale-to-zero): An example of scaling a SandboxWarmPool down to zero (and back up) using KEDA and Google Managed Service for Prometheus (GMP).

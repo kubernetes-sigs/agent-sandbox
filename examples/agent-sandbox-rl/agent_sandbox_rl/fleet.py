@@ -850,7 +850,10 @@ class SandboxFleet:
   # --- managed runner ---------------------------------------------------- #
   def run(self, process_fn: Callable[[Task, SandboxHandle], object],
           strategy: str = "naive", concurrency: int | None = None,
-          *, epochs: int = 1, keep_warm: bool = False) -> list:
+          *, epochs: int = 1, keep_warm: bool = False,
+          recycle: bool = False, reset=None, max_reuses: int = 32,
+          reset_timeout: float = 5.0, use_session: bool = True,
+          scale_on_hold: bool = True) -> list:
     """Run all loaded tasks under ``strategy`` (none|naive|sliding|pipelined) with
     up to ``concurrency`` parallel claim+exec (defaults to ``config.max_concurrent``).
 
@@ -860,14 +863,34 @@ class SandboxFleet:
     returns the flat ``list`` (a per-task exception is captured, not raised).
     ``keep_warm=True`` skips the final teardown so a caller's own loop can reuse the
     warm pools; call ``fleet.teardown()`` when done.
+
+    ``recycle`` is an **orthogonal** modifier, not a strategy: with ``recycle=True``
+    the chosen ``strategy`` still governs warm-pool sizing/timing, but tasks sharing
+    an image reuse one claimed sandbox (git-restore reset between them) instead of a
+    fresh claim per task — see `recycle.reuse_git_restore_sandbox`. It only applies
+    to workloads with a resettable ``/testbed`` (multiple tasks per image, e.g. RL
+    rollouts); for 1:1 eval it is a no-op, so it is off by default. ``reset`` (a
+    ``GitRestoreReset``), ``max_reuses``, ``reset_timeout``, ``use_session`` and
+    ``scale_on_hold`` are forwarded to the recycle executor and ignored when
+    ``recycle=False``.
     """
-    from .strategies import STRATEGIES
+    from .strategies import STRATEGIES, process_parallel
     if strategy not in STRATEGIES:
       raise ValueError(f"unknown strategy '{strategy}'; choose from {sorted(STRATEGIES)}")
     if epochs < 1:
       raise ValueError("epochs must be >= 1")
     conc = concurrency or self.config.max_concurrent
     fn = STRATEGIES[strategy]
+    executor = process_parallel
+    if recycle:                               # swap task→sandbox binding, keep warming
+      from .recycle import GitRestoreReset, reuse_git_restore_sandbox
+      _reset = reset or GitRestoreReset()
+
+      def executor(fleet, tasks, process_fn, concurrency):  # noqa: E306
+        return reuse_git_restore_sandbox(
+            fleet, tasks, process_fn, concurrency, reset=_reset,
+            max_reuses=max_reuses, reset_timeout=reset_timeout,
+            use_session=use_session, scale_on_hold=scale_on_hold)
     if self.plan_ is None:
       self.plan()                             # give the circuit breaker a footprint
     expected = self.plan_.total_replicas if self.plan_ else None
@@ -878,7 +901,8 @@ class SandboxFleet:
       except Exception:  # noqa: BLE001 — environment is best-effort
         logger.debug("could not collect environment", exc_info=True)
       if epochs == 1:
-        results = fn(self, process_fn, conc, teardown=not keep_warm)
+        results = fn(self, process_fn, conc, teardown=not keep_warm,
+                     executor=executor)
       else:
         results = []
         for e in range(epochs):
@@ -886,7 +910,7 @@ class SandboxFleet:
           logger.info("epoch %d/%d", e + 1, epochs)
           try:
             results.append(fn(self, process_fn, conc,
-                              teardown=last and not keep_warm))
+                              teardown=last and not keep_warm, executor=executor))
           except BaseException:               # a mid-run epoch never tore down
             if not keep_warm and not last:
               self.teardown()

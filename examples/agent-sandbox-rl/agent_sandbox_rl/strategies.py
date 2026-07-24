@@ -79,18 +79,26 @@ def process_parallel(fleet, tasks, process_fn, concurrency):
   return results
 
 
-def run_naive(fleet, process_fn, concurrency, *, teardown=True):
-  """Pre-warm every image up front, process all tasks in parallel, tear down."""
+def run_naive(fleet, process_fn, concurrency, *, teardown=True,
+              executor=process_parallel):
+  """Pre-warm every image up front, process all tasks in parallel, tear down.
+
+  ``executor`` is the per-batch execution primitive (``(fleet, tasks, process_fn,
+  concurrency) -> results``); it defaults to ``process_parallel`` (fresh
+  claim+release per task) and is swapped for the recycle executor when
+  ``fleet.run(recycle=True)`` — the strategy still governs *warming*, ``executor``
+  governs the task→sandbox binding.
+  """
   try:
     fleet.setup()              # inside try: a setup failure still triggers teardown
-    return process_parallel(fleet, fleet.tasks, process_fn, concurrency)
+    return executor(fleet, fleet.tasks, process_fn, concurrency)
   finally:
     if teardown:
       fleet.teardown()
 
 
 def _run_windowed(fleet, process_fn, concurrency, window, replicas_override=None,
-                  *, teardown=True):
+                  *, teardown=True, executor=process_parallel):
   """Process unique images in batches of ``window``: warm the batch, process its
   tasks in parallel, tear the batch down, then advance."""
   fleet.preflight()
@@ -112,7 +120,7 @@ def _run_windowed(fleet, process_fn, concurrency, window, replicas_override=None
       batch_tasks = [t for _i, t in batch_pairs]
       logger.info("window [%d..%d): %d image(s), %d task(s)",
                   start, start + len(batch), len(batch), len(batch_tasks))
-      batch_results = process_parallel(fleet, batch_tasks, process_fn, concurrency)
+      batch_results = executor(fleet, batch_tasks, process_fn, concurrency)
       for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
         results[i] = r
       for img in batch:
@@ -123,14 +131,17 @@ def _run_windowed(fleet, process_fn, concurrency, window, replicas_override=None
   return results
 
 
-def run_sliding(fleet, process_fn, concurrency, *, teardown=True):
+def run_sliding(fleet, process_fn, concurrency, *, teardown=True,
+                executor=process_parallel):
   """Keep only a window of image pools warm at a time (footprint-bounded)."""
   return _run_windowed(fleet, process_fn, concurrency,
-                       fleet.recommended_window(), teardown=teardown)
+                       fleet.recommended_window(), teardown=teardown,
+                       executor=executor)
 
 
 def _run_pipelined(fleet, process_fn, concurrency, window,
-                   replicas_override=None, *, teardown=True):
+                   replicas_override=None, *, teardown=True,
+                   executor=process_parallel):
   """Double-buffered sliding window: while window N's tasks run, prefetch window
   N+1's pools in the background so image pull overlaps execution.
 
@@ -163,7 +174,7 @@ def _run_pipelined(fleet, process_fn, concurrency, window,
       batch_tasks = [t for _i, t in batch_pairs]
       logger.info("pipelined window [%d/%d]: %d image(s), %d task(s)",
                   n + 1, len(batches), len(batch), len(batch_tasks))
-      batch_results = process_parallel(fleet, batch_tasks, process_fn, concurrency)
+      batch_results = executor(fleet, batch_tasks, process_fn, concurrency)
       for (i, _t), r in zip(batch_pairs, batch_results, strict=True):
         results[i] = r
       for img in batch:
@@ -177,16 +188,19 @@ def _run_pipelined(fleet, process_fn, concurrency, window,
   return results
 
 
-def run_pipelined(fleet, process_fn, concurrency, *, teardown=True):
+def run_pipelined(fleet, process_fn, concurrency, *, teardown=True,
+                  executor=process_parallel):
   """Pipelined sliding window (see `_run_pipelined`)."""
   return _run_pipelined(fleet, process_fn, concurrency,
-                        fleet.recommended_window(pipelined=True), teardown=teardown)
+                        fleet.recommended_window(pipelined=True),
+                        teardown=teardown, executor=executor)
 
 
-def run_none(fleet, process_fn, concurrency, *, teardown=True):
+def run_none(fleet, process_fn, concurrency, *, teardown=True,
+             executor=process_parallel):
   """No pre-warming: one size-1 pool per image, on demand, torn down after."""
   return _run_windowed(fleet, process_fn, concurrency, window=1,
-                       replicas_override=1, teardown=teardown)
+                       replicas_override=1, teardown=teardown, executor=executor)
 
 
 STRATEGIES = {

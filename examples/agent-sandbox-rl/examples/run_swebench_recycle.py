@@ -16,8 +16,10 @@
 
 Builds P problems x G rollouts, warms **shallow** (recycling holds ~1 sandbox per
 problem — do NOT deep-warm), runs a **determinism gate**, then
-`reuse_git_restore_sandbox` so claims scale with problems, not tasks (/G). The
-recycle counterpart of `run_swebench_fleet.py`. Env-configured:
+`fleet.run(..., recycle=True)` so claims scale with problems, not tasks (/G).
+`recycle` is an orthogonal flag: the `strategy` ("naive" here) still governs
+warming; `recycle` swaps the task→sandbox binding to reset-and-reuse. The recycle
+counterpart of `run_swebench_fleet.py`. Env-configured:
 
   PROBLEMS=500 ROLLOUTS=16 MAX_CONCURRENT=500 CPU=250m MEMORY=512Mi \
   DETERMINISM=5 NAMESPACE=rl \
@@ -37,7 +39,7 @@ import time
 
 from agent_sandbox_rl import (ClusterConfig, FleetConfig, ResourceSpec, SandboxFleet,
                               SweBenchSource, Task, TemplateSpec, determinism_canary,
-                              reuse_git_restore_sandbox, swebench_probe)
+                              swebench_probe)
 from agent_sandbox_rl.sources import to_tasks
 
 logging.basicConfig(
@@ -82,9 +84,10 @@ def main():
   print(f"recycle: {len(images)} problems x {rollouts} rollouts = {len(tasks)} tasks; "
         f"mc={max_concurrent}", flush=True)
 
-  fleet.setup()                                        # shallow warm (staged by default)
-
-  # Correctness gate: same task twice in one recycled sandbox must be byte-identical.
+  # Correctness gate FIRST (on-demand claims — no pool needed yet): the same task
+  # run twice in one recycled sandbox must be byte-identical, or the reset leaks
+  # state and recycling is unsafe. Tear down the canary's on-demand pools before
+  # the measured run so it starts from a clean plan.
   determ = []
   for img in images[:determinism]:
     out = determinism_canary(fleet, Task(id=f"canary-{img[-12:]}", image=img), swebench_probe)
@@ -92,15 +95,20 @@ def main():
     print(f"  determinism {'OK ' if determ[-1] else 'FAIL'} {img.split('/')[-1]}", flush=True)
   if determ and not all(determ):
     raise SystemExit("determinism gate FAILED — reset leaks state; recycling is unsafe")
+  if determinism:
+    fleet.teardown()                                   # drop canary on-demand pools
 
   def rollout(task, handle):                           # no-op probe by default
     return swebench_probe(task, handle)
 
+  # Recycle via the run() flag: strategy="naive" shallow-warms the pools, recycle
+  # reuses one sandbox per problem across its G rollouts (max_reuses=G bounds drift
+  # before a rotation). run() manages setup / RunReport / teardown.
   t0 = time.monotonic()
-  with fleet.observer.run("reuse") as rep:
-    reuse_git_restore_sandbox(fleet, fleet.tasks, rollout, max_concurrent)
-    rep.total_s = time.monotonic() - t0
-  fleet.teardown()
+  fleet.run(rollout, strategy="naive", concurrency=max_concurrent,
+            recycle=True, max_reuses=rollouts)
+  rep = fleet.report
+  rep.total_s = time.monotonic() - t0
 
   d = rep.to_dict()
   claims = d.get("claims", 0)

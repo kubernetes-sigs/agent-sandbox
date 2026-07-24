@@ -295,6 +295,9 @@ kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
+# --controller-args must use the = form: its value starts with a dash, and
+# argparse rejects dash-prefixed values passed as a separate argument
+# ("expected one argument").
 echo "Deploying to cluster..."
 dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
   ${CONTROLLER_ARGS:+--controller-args="${CONTROLLER_ARGS}"}

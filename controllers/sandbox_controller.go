@@ -848,7 +848,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 						return nil, fmt.Errorf("failed to delete pod: %w", err)
 					}
 				} else {
-					logger.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					logger.V(4).Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
 			case resourceUnowned:
 				logger.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
@@ -941,11 +941,50 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			// No additional action needed — label applied below.
 		}
 
-		metadataUpdated := r.updatePodMetadata(ctx, pod, sandbox, nameHash)
-		if metadataUpdated || needsUpdate {
-			if err := r.Patch(ctx, pod, patch); err != nil {
-				return nil, fmt.Errorf("failed to patch pod: %w", err)
+		recreateFailedPod := sandbox.Spec.PodFailurePolicy == sandboxv1beta1.PodFailurePolicyRecreate &&
+			pod.Status.Phase == corev1.PodFailed
+
+		// If we're about to recreate a Failed pod, only persist an ownership
+		// adoption. Other metadata changes would be discarded by the delete.
+		if recreateFailedPod {
+			if needsUpdate {
+				if err := r.Patch(ctx, pod, patch); err != nil {
+					return nil, fmt.Errorf("failed to patch pod: %w", err)
+				}
 			}
+		} else {
+			metadataUpdated := r.updatePodMetadata(ctx, pod, sandbox, nameHash)
+			if metadataUpdated || needsUpdate {
+				if err := r.Patch(ctx, pod, patch); err != nil {
+					return nil, fmt.Errorf("failed to patch pod: %w", err)
+				}
+			}
+		}
+
+		// Opt-in Failed-pod recovery: delete the owned Failed pod so the next
+		// reconcile hits the missing-pod create path. Sandbox identity and PVCs
+		// are preserved. Ownership was already established above. See
+		// docs/keps/729-opt-in-pod-recreation-on-failure/.
+		if recreateFailedPod {
+			if pod.DeletionTimestamp.IsZero() {
+				logger.Info("Deleting Failed Pod because .Spec.PodFailurePolicy is Recreate",
+					"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+				if r.Tracer.IsRecording(ctx) {
+					r.Tracer.AddEvent(ctx, "FailedPodDeletedForRecreate", map[string]string{
+						"pod.Name": pod.Name,
+					})
+				}
+				if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
+					return nil, fmt.Errorf("failed to delete Failed pod for recreate: %w", err)
+				}
+			} else {
+				logger.V(4).Info("Failed Pod is already being deleted for recreate",
+					"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			}
+			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				return nil, err
+			}
+			return nil, nil
 		}
 
 		if err := ensurePodNameAnnotation(pod.Name); err != nil {

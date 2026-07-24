@@ -154,13 +154,26 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
+// PodFailurePolicy controls behavior when the backing Pod reaches phase Failed.
+// +kubebuilder:validation:Enum=Ignore;Recreate
+type PodFailurePolicy string
+
+const (
+	// PodFailurePolicyIgnore leaves a Failed Pod in place and surfaces Finished=True
+	// (StatefulSet-like). This is the default.
+	PodFailurePolicyIgnore PodFailurePolicy = "Ignore"
+	// PodFailurePolicyRecreate deletes the controller-owned Failed Pod so a new one
+	// is created. The Sandbox identity and any Sandbox-owned PVCs are retained.
+	PodFailurePolicyRecreate PodFailurePolicy = "Recreate"
+)
+
 // NOTE: When adding, removing, or renaming a field in SandboxBlueprint,
 // also update compareSandboxBlueprint() in extensions/controllers/sandboxwarmpool_controller.go
 // so the SandboxWarmPool staleness check accounts for it. A field left out of that comparison
 // is not tracked for drift, so warm sandboxes will not be detected as stale when it changes.
 
 // SandboxBlueprint defines the configuration shared between Sandbox and SandboxTemplate.
-// It deliberately excludes runtime-only fields (operatingMode, lifecycle).
+// It deliberately excludes runtime-only fields (operatingMode, lifecycle, podFailurePolicy).
 type SandboxBlueprint struct {
 	// podTemplate describes the pod that will be created in the sandbox.
 	// Note: When provisioned via a SandboxTemplate (such as by a SandboxClaim or SandboxWarmPool),
@@ -210,6 +223,16 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
+
+	// podFailurePolicy controls what happens when the backing Pod enters phase Failed.
+	// Ignore (default): leave the Failed pod and surface Finished=True (StatefulSet-like).
+	// Recreate: delete the controller-owned Failed pod so a new one is created;
+	// the Sandbox identity and any Sandbox-owned PVCs are retained.
+	// Combined with restartPolicy Never and a container that always exits non-zero,
+	// Recreate can recreate the Pod indefinitely; there is no backoff in this version.
+	// +kubebuilder:default=Ignore
+	// +optional
+	PodFailurePolicy PodFailurePolicy `json:"podFailurePolicy,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

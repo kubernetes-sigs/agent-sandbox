@@ -209,3 +209,29 @@ func main() {
   {{< /blocks/tab >}}
 {{< /blocks/tabs >}}
 
+## Opt-in recovery from Failed pods
+
+By default, when a Sandbox's backing Pod reaches `phase=Failed` (for example after node-pressure eviction), the controller surfaces `Finished=True` with reason `PodFailed` and does not create a replacement. That matches StatefulSet behavior and keeps one-shot workloads compatible with Claim `ttlSecondsAfterFinished`.
+
+For long-running sandboxes that should recover while preserving Sandbox identity and PVCs, set:
+
+```yaml
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: resilient-sandbox
+spec:
+  podFailurePolicy: Recreate
+  operatingMode: Running
+  podTemplate:
+    spec:
+      containers:
+      - name: workspace
+        image: alpine:latest
+        command: ["sleep", "infinity"]
+```
+
+With `podFailurePolicy: Recreate`, the controller deletes the controller-owned Failed Pod and creates a new one from `podTemplate`. PVCs from `volumeClaimTemplates` stay owned by the Sandbox and are remounted.
+
+`PodSucceeded` is unchanged (still terminal). Combining `Recreate` with `restartPolicy: Never` and a container that always exits non-zero can recreate indefinitely; there is no backoff in this version. See [KEP-729](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/keps/729-opt-in-pod-recreation-on-failure/README.md).
+

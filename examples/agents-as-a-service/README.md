@@ -107,6 +107,7 @@ Three things worth noticing:
 ```sh
 POD=$(kubectl -n hermes-demo get sandbox "$SB" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
 kubectl -n hermes-demo port-forward "pod/$POD" 9119:9119 8642:8642 &
+PF_PID=$!
 ```
 
 - Dashboard: open http://localhost:9119 — basic auth `platform` /
@@ -134,7 +135,7 @@ In the full platform an idle sweeper does this automatically after ~15s of
 inactivity; here we flip the dial by hand:
 
 ```sh
-kill %1 2>/dev/null  # stop the port-forward
+kill "$PF_PID" 2>/dev/null || true  # stop the port-forward
 kubectl -n hermes-demo patch sandbox "$SB" --type merge -p '{"spec":{"operatingMode":"Suspended"}}'
 kubectl -n hermes-demo wait --for=delete "pod/$POD" --timeout=120s
 ```
@@ -238,6 +239,7 @@ kind load docker-image aaas-gateway:demo --name <your-kind-cluster>
 kubectl apply -f 50-gateway.yaml
 kubectl -n hermes-demo rollout status deploy/aaas-gateway
 kubectl -n hermes-demo port-forward svc/aaas-gateway 8080:8080 &
+GW_PF_PID=$!
 ```
 
 Sign up a user — one POST, Ready in ~2s off the warm pool:
@@ -250,19 +252,25 @@ TOKEN=<token from the response>
 ```
 
 Use the agent through the gateway (OpenAI-compatible API under
-`/u/bob/v1/`, dashboard at `/u/bob/`):
+`/u/bob/v1/`, dashboard HTML at `/u/bob/`). The token is accepted **only**
+in the `Authorization` header — never in the URL, where it would leak into
+access logs, browser history and Referer headers:
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/u/bob/v1/models
-open "http://localhost:8080/u/bob/?token=$TOKEN"   # dashboard (Hermes basic-auth)
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/u/bob/ | head -3   # dashboard HTML
 ```
+
+(To browse the dashboard interactively, port-forward straight to the pod as
+in step 3 — a real platform would exchange the token for a session cookie
+rather than ask a browser to send bearer headers.)
 
 Now watch the whole point happen. Stop making requests for ~60s
 (`IDLE_TIMEOUT`), and the sweeper suspends bob's agent:
 
 ```sh
 kubectl -n hermes-demo get pods -w        # bob's pod terminates
-curl -s localhost:8080/users/bob          # {"state":"Suspended",...}
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/users/bob   # {"state":"Suspended",...}
 ```
 
 Then just use it again — the gateway holds the request while the agent
@@ -270,15 +278,20 @@ resumes (**wake-on-connect**; a few seconds on kind):
 
 ```sh
 time curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/u/bob/v1/models
-curl -s localhost:8080/users/bob          # {"state":"Ready",...}
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/users/bob   # {"state":"Ready",...}
 ```
 
-The user experiences a pause; nothing was lost. Account deletion is
-`curl -X DELETE localhost:8080/users/bob` — the claim cascade from step 7.
+The user experiences a pause; nothing was lost. Account deletion (the claim
+cascade from step 7) also requires the user's token:
+
+```sh
+curl -X DELETE -H "Authorization: Bearer $TOKEN" localhost:8080/users/bob
+```
 
 Full cleanup:
 
 ```sh
+kill "$GW_PF_PID" 2>/dev/null || true
 kubectl delete namespace hermes-demo
 ```
 

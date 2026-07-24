@@ -23,7 +23,9 @@ https://github.com/aditya-shantanu/ai-agent-service):
                                    token (only its SHA-256 is stored, as a
                                    claim annotation)
   GET    /users/<user>             derived state: Ready/Waking/Suspended/...
-  DELETE /users/<user>             delete the claim (cascades sandbox + PVC)
+                                   (requires the user's bearer token)
+  DELETE /users/<user>             delete the claim (cascades sandbox + PVC;
+                                   requires the user's bearer token)
   ANY    /u/<user>/<path>          per-user proxy. Requests to a suspended
                                    agent are HELD while it resumes
                                    (wake-on-connect); /u/<user>/v1/* goes to
@@ -41,6 +43,7 @@ gVisor, and benchmarks on top of exactly this resource model.
 
 import hashlib
 import os
+import re
 import secrets
 import threading
 import time
@@ -57,6 +60,11 @@ API_SERVER_KEY = os.environ["API_SERVER_KEY"]  # injected upstream on /v1/*
 IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "60"))
 WAKE_TIMEOUT = int(os.environ.get("WAKE_TIMEOUT", "120"))
 TOKEN_ANNOTATION = "aaas.example.com/token-sha256"
+# RFC 1123 label: lowercase alphanumerics and '-', must start/end
+# alphanumeric. The claim name is "hermes-<user>", so cap the user part at
+# 63 - len("hermes-") to keep the claim a valid Kubernetes object name.
+DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+MAX_USER_LEN = 63 - len("hermes-")
 
 try:
     config.load_incluster_config()
@@ -89,7 +97,14 @@ def get_sandbox(name: str):
 
 def sandbox_of(claim):
     name = (claim.get("status") or {}).get("sandbox", {}).get("name")
-    return get_sandbox(name) if name else None
+    if not name:
+        return None
+    try:
+        return get_sandbox(name)
+    except client.ApiException as e:
+        if e.status == 404:  # stale claim status, e.g. mid-cascade-delete
+            return None
+        raise
 
 
 def condition(obj, ctype: str) -> bool:
@@ -126,9 +141,10 @@ def wait_ready(user: str, timeout: int):
     return None
 
 
-def authorized(user: str, claim) -> bool:
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ") \
-        or request.args.get("token", "")
+def authorized(claim) -> bool:
+    # Header-only on purpose: a ?token= query param would leak the bearer
+    # token into access logs, browser history and Referer headers.
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ")
     want = (claim["metadata"].get("annotations") or {}).get(TOKEN_ANNOTATION, "")
     got = hashlib.sha256(token.encode()).hexdigest()
     return bool(token) and secrets.compare_digest(got, want)
@@ -137,28 +153,34 @@ def authorized(user: str, claim) -> bool:
 @app.post("/users")
 def create_user():
     user = (request.get_json(silent=True) or {}).get("user", "")
-    if not user or not user.replace("-", "").isalnum() or user != user.lower():
+    if not isinstance(user, str) or not DNS1123_LABEL.fullmatch(user) \
+            or len(user) > MAX_USER_LEN:
         return jsonify(error="body must be {'user': '<dns-1123 label>'}"), 400
     if get_claim(user) is not None:
         return jsonify(error="user exists"), 409
     token = secrets.token_urlsafe(32)
     # The claim IS the user record: warmPoolRef only (env/VCTs would be
     # rejected by the template policies), token hash as an annotation.
-    crd.create_namespaced_custom_object(
-        GROUP, VERSION, NAMESPACE, "sandboxclaims", {
-            "apiVersion": f"{GROUP}/{VERSION}",
-            "kind": "SandboxClaim",
-            "metadata": {
-                "name": claim_name(user),
-                "annotations": {
-                    TOKEN_ANNOTATION: hashlib.sha256(token.encode()).hexdigest()},
-            },
-            "spec": {
-                "warmPoolRef": {"name": POOL},
-                "additionalPodMetadata": {
-                    "labels": {"sandbox.users.io/hermes-user": user}},
-            },
-        })
+    try:
+        crd.create_namespaced_custom_object(
+            GROUP, VERSION, NAMESPACE, "sandboxclaims", {
+                "apiVersion": f"{GROUP}/{VERSION}",
+                "kind": "SandboxClaim",
+                "metadata": {
+                    "name": claim_name(user),
+                    "annotations": {
+                        TOKEN_ANNOTATION: hashlib.sha256(token.encode()).hexdigest()},
+                },
+                "spec": {
+                    "warmPoolRef": {"name": POOL},
+                    "additionalPodMetadata": {
+                        "labels": {"sandbox.users.io/hermes-user": user}},
+                },
+            })
+    except client.ApiException as e:
+        if e.status == 409:  # lost a concurrent-signup race for this user
+            return jsonify(error="user exists"), 409
+        raise
     sandbox = wait_ready(user, WAKE_TIMEOUT)
     last_activity[user] = time.time()
     return jsonify(
@@ -174,6 +196,8 @@ def get_user(user):
     claim = get_claim(user)
     if claim is None:
         return jsonify(error="not found"), 404
+    if not authorized(claim):  # only the token holder may read their state
+        return jsonify(error="unauthorized"), 401
     sandbox = sandbox_of(claim)
     return jsonify(user=user, state=derive_state(sandbox),
                    sandbox=(sandbox or {}).get("metadata", {}).get("name"))
@@ -181,8 +205,11 @@ def get_user(user):
 
 @app.delete("/users/<user>")
 def delete_user(user):
-    if get_claim(user) is None:
+    claim = get_claim(user)
+    if claim is None:
         return jsonify(error="not found"), 404
+    if not authorized(claim):  # deletion cascades the PVC: token required
+        return jsonify(error="unauthorized"), 401
     crd.delete_namespaced_custom_object(
         GROUP, VERSION, NAMESPACE, "sandboxclaims", claim_name(user))
     last_activity.pop(user, None)
@@ -197,7 +224,7 @@ def proxy(user, path):
     claim = get_claim(user)
     if claim is None:
         return jsonify(error="unknown user"), 404
-    if not authorized(user, claim):
+    if not authorized(claim):
         return jsonify(error="unauthorized"), 401
     last_activity[user] = time.time()
 
@@ -217,6 +244,10 @@ def proxy(user, path):
     fqdn = (sandbox.get("status") or {}).get("serviceFQDN")
     headers = {k: v for k, v in request.headers
                if k.lower() not in ("host", "authorization")}
+    # Auth is header-only, but never forward a stray ?token= upstream where
+    # the app (or its logs) would see it.
+    params = [(k, v) for k, v in request.args.items(multi=True)
+              if k != "token"]
     if path == "v1" or path.startswith("v1/"):
         upstream = f"http://{fqdn}:8642/{path}"
         headers["Authorization"] = f"Bearer {API_SERVER_KEY}"
@@ -227,7 +258,7 @@ def proxy(user, path):
     for attempt in range(5):
         try:
             r = requests.request(
-                request.method, upstream, params=request.args,
+                request.method, upstream, params=params,
                 data=request.get_data(), headers=headers,
                 stream=True, timeout=300)
             break
@@ -264,4 +295,7 @@ def idle_sweeper():
 
 if __name__ == "__main__":
     threading.Thread(target=idle_sweeper, daemon=True).start()
-    app.run(host="0.0.0.0", port=8080)
+    # threaded=True so one user's wake-on-connect (which can hold a request
+    # for up to WAKE_TIMEOUT) doesn't block everyone else. Still Werkzeug's
+    # dev server — a real deployment would sit behind gunicorn or similar.
+    app.run(host="0.0.0.0", port=8080, threaded=True)

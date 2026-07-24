@@ -103,7 +103,8 @@ if command -v docker >/dev/null && command -v kind >/dev/null; then
 
   echo "waiting for idle sweeper (~75s)..."
   for _ in $(seq 1 30); do
-    STATE=$(curl -s "http://$GW/users/bob" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+    STATE=$(curl -s -H "Authorization: Bearer $TOKEN" "http://$GW/users/bob" \
+      | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
     [ "$STATE" = "Suspended" ] && break
     sleep 5
   done
@@ -115,10 +116,15 @@ if command -v docker >/dev/null && command -v kind >/dev/null; then
     || fail "wake-on-connect request failed"
   pass "wake-on-connect: request held and served after $(( $(date +%s) - T0 ))s"
 
-  curl -s -X DELETE "http://$GW/users/bob" >/dev/null
+  curl -sf -X DELETE -H "Authorization: Bearer $TOKEN" "http://$GW/users/bob" >/dev/null \
+    || fail "gateway user deletion failed"
   kill "$PF" 2>/dev/null || true
+elif [ "${SKIP_GATEWAY:-}" = "1" ]; then
+  echo "WARNING: gateway checks SKIPPED (SKIP_GATEWAY=1) — signup, auth," >&2
+  echo "WARNING: proxy, idle-suspend and wake-on-connect were NOT validated" >&2
+  GATEWAY_SKIPPED=1
 else
-  echo "SKIP: docker/kind not available — gateway checks skipped"
+  fail "docker + kind are required for the gateway checks (set SKIP_GATEWAY=1 to run only the resource-layer checks)"
 fi
 
 echo "=== 8. cascade delete"
@@ -136,4 +142,8 @@ kubectl -n "$NS" get pvc "data-$SB" >/dev/null 2>&1 && fail "PVC not garbage-col
 pass "claim delete cascaded: sandbox + PVC gone"
 
 echo
-echo "All checks passed."
+if [ -n "${GATEWAY_SKIPPED:-}" ]; then
+  echo "Resource-layer checks passed; gateway checks were SKIPPED."
+else
+  echo "All checks passed."
+fi

@@ -53,10 +53,21 @@ spec:
         app: aaas-gateway
     spec:
       serviceAccountName: aaas-gateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000 # matches USER in gateway/Dockerfile
+        runAsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: gateway
           image: aaas-gateway:demo
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8080
           env:

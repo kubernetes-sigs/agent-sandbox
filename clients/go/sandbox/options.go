@@ -25,6 +25,8 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/rest"
+
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 const (
@@ -69,6 +71,10 @@ type Options struct {
 
 	// ServerPort is the port the sandbox runtime listens on. Default: 8888.
 	ServerPort int
+
+	// Env is the list of environment variables to inject into the SandboxClaim.
+	// Setting Env forces a cold start from the warm pool template.
+	Env []extv1beta1.EnvVar
 
 	// SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
 	SandboxReadyTimeout time.Duration

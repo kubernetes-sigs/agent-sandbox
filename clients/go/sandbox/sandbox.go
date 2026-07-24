@@ -238,7 +238,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Create claim.
-	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.tracer, s.traceServiceName)
+	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.tracer, s.traceServiceName)
 	if err != nil {
 		return err
 	}

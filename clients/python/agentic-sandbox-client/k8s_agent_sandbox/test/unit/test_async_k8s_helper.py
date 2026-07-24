@@ -32,6 +32,24 @@ class TestAsyncK8sHelperCreateSandboxClaim(unittest.IsolatedAsyncioTestCase):
         self.helper.custom_objects_api.create_namespaced_custom_object = AsyncMock()
         self.helper.core_v1_api = MagicMock()
 
+    async def test_env_included_in_manifest(self):
+        await self.helper.create_sandbox_claim(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            env={"FOO": "bar", "DEBUG": "true"},
+        )
+
+        call_kwargs = self.helper.custom_objects_api.create_namespaced_custom_object.call_args.kwargs
+        body = call_kwargs["body"]
+        self.assertEqual(
+            body["spec"]["env"],
+            [
+                {"name": "FOO", "value": "bar"},
+                {"name": "DEBUG", "value": "true"},
+            ],
+        )
+
     async def test_lifecycle_included_in_manifest(self):
         lifecycle = {
             "shutdownTime": "2026-12-31T23:59:59Z",

@@ -35,6 +35,7 @@ func fullPodFixture() *corev1.Pod {
 			ManagedFields: []metav1.ManagedFieldsEntry{{
 				Manager: "kubelet", Operation: metav1.ManagedFieldsOperationApply,
 			}},
+			Finalizers: []string{"test-finalizer"},
 		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-7",
@@ -73,6 +74,9 @@ func TestPodCacheTransform(t *testing.T) {
 	// Dropped.
 	if pod.ManagedFields != nil {
 		t.Error("managedFields not stripped")
+	}
+	if pod.Finalizers != nil {
+		t.Error("finalizers not stripped")
 	}
 	if len(pod.Spec.Containers) != 0 || len(pod.Spec.InitContainers) != 0 ||
 		len(pod.Spec.Volumes) != 0 || len(pod.Spec.Tolerations) != 0 {

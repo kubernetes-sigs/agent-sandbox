@@ -40,11 +40,11 @@ CLIENTS="${CL2_K8S_CLIENTS_NUMBER:-20}"
 
 CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"
 CONTROLLER_BURST="${CONTROLLER_KUBE_API_BURST:-2000}"
-CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-1000}"
-CONTROLLER_CLAIM_WORKERS="${CONTROLLER_CLAIM_WORKERS:-1000}"
-CONTROLLER_WARM_POOL_WORKERS="${CONTROLLER_WARM_POOL_WORKERS:-20}"
-CONTROLLER_TEMPLATE_WORKERS="${CONTROLLER_TEMPLATE_WORKERS:-10}"
-CONTROLLER_BATCH="${CONTROLLER_MAX_BATCH_SIZE:-1000}"
+CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-300}"
+CONTROLLER_CLAIM_WORKERS="${CONTROLLER_CLAIM_WORKERS:-300}"
+CONTROLLER_WARM_POOL_WORKERS="${CONTROLLER_WARM_POOL_WORKERS:-1}"
+CONTROLLER_TEMPLATE_WORKERS="${CONTROLLER_TEMPLATE_WORKERS:-1}"
+CONTROLLER_BATCH="${CONTROLLER_MAX_BATCH_SIZE:-300}"
 
 echo "======================================================="
 echo "Executing KWOK Cluster Scalability Presubmit"
@@ -85,6 +85,7 @@ cleanup() {
     cp "${WORKDIR}/controller.log" "${CL2_REPORT_DIR}/controller.log" 2>/dev/null || true
   fi
   "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
+  rm -rf "/dev/shm/kwok-etcd-${CLUSTER_NAME}" 2>/dev/null || true
   rm -rf "${WORKDIR}"
   echo "Cleanup complete."
 }
@@ -92,7 +93,18 @@ trap cleanup EXIT
 
 echo "Ensuring clean start for kwok simulated cluster..."
 "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" || true
-"${KWOKCTL}" create cluster --name="${CLUSTER_NAME}" --wait=2m
+rm -rf "/dev/shm/kwok-etcd-${CLUSTER_NAME}"
+mkdir -p "/dev/shm/kwok-etcd-${CLUSTER_NAME}"
+mkdir -p "${HOME}/.kwok/clusters/${CLUSTER_NAME}"
+ln -sfn "/dev/shm/kwok-etcd-${CLUSTER_NAME}" "${HOME}/.kwok/clusters/${CLUSTER_NAME}/etcd"
+
+"${KWOKCTL}" create cluster --name="${CLUSTER_NAME}" --wait=2m \
+  --runtime=binary \
+  --disable-qps-limits \
+  --extra-args="kube-apiserver=max-requests-inflight=2000" \
+  --extra-args="kube-apiserver=max-mutating-requests-inflight=1000" \
+  --extra-args="etcd=unsafe-no-fsync=true"
+
 
 KUBECONFIG="${WORKDIR}/kubeconfig"
 "${KWOKCTL}" get kubeconfig --name="${CLUSTER_NAME}" > "${KUBECONFIG}"

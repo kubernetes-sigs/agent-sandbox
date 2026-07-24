@@ -1,0 +1,25 @@
+agent-sandbox has been installed.
+
+{{- if .Values.controller.watchNamespace }}
+
+NOTE: Namespaced mode is enabled (watchNamespace={{ .Values.controller.watchNamespace }}).
+
+In namespaced mode the controller skips webhook certificate generation, CRD
+caBundle patching, and the webhook server. Conversion webhooks are required when
+etcd still contains v1alpha1 objects and the API server needs to translate them
+to v1beta1. Without a serving conversion webhook, requests that require
+conversion will fail. Migrate all stored objects to v1beta1 before using
+namespaced mode, or keep a cluster-scoped conversion webhook available.
+
+{{- $controllerNamespace := include "agent-sandbox.namespace" . }}
+{{- $leaderElectionNamespace := include "agent-sandbox.leaderElectionNamespace" . }}
+
+NOTE: ClusterRoles and ClusterRoleBindings are not rendered in namespaced mode.
+The chart does not generate workload or leader-election Roles and RoleBindings
+for that mode. Advanced users must set up the appropriate Roles and RoleBindings
+for the watched namespace(s) ({{ .Values.controller.watchNamespace }}) and bind
+them to the agent-sandbox-controller ServiceAccount in {{ $controllerNamespace }}.
+{{- if .Values.controller.leaderElect }} They must also configure leader-election
+RBAC in {{ $leaderElectionNamespace }}.{{- end }}
+
+{{- end }}

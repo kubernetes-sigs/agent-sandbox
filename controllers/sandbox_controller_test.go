@@ -2567,7 +2567,7 @@ func TestReconcilePod(t *testing.T) {
 				ClusterDomain: "cluster.local",
 			}
 
-			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
 			if tc.expectErr {
 				require.Error(t, err)
 				// Verify that any initially unowned Pod remains unowned (never adopted)

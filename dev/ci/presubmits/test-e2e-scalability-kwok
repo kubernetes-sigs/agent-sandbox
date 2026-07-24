@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "${repo_root}"
+
+# Customizable scale & execution parameters via Environment Variables:
+#   TEST_SCENARIO:               continuous-burst | rapid-burst (default: continuous-burst)
+#   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 50)
+#   CL2_QPS:                     Target claim creation QPS (default: 300)
+#   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 12 -> 3,600 total claims)
+#   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 3700)
+#   CONTROLLER_KUBE_API_QPS:     Controller API QPS (default: 1000)
+#   CONTROLLER_KUBE_API_BURST:   Controller API Burst (default: 2000)
+#   CONTROLLER_WORKERS:          Reconciler worker concurrency (default: 200)
+#   CONTROLLER_MAX_BATCH_SIZE:   WarmPool refill batch size (default: 300)
+
+#   CL2_K8S_CLIENTS_NUMBER:      Number of parallel client-go instances for ClusterLoader2 (default: 20)
+
+SCENARIO="${TEST_SCENARIO:-continuous-burst}"
+NUM_NODES="${SIMULATED_NODES:-100}"
+QPS="${CL2_QPS:-150}"
+DURATION="${CL2_DURATION_SECONDS:-10}"
+WARMPOOL="${CL2_WARMPOOL_SIZE:-1600}"
+CLIENTS="${CL2_K8S_CLIENTS_NUMBER:-20}"
+
+CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"
+CONTROLLER_BURST="${CONTROLLER_KUBE_API_BURST:-2000}"
+CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-300}"
+CONTROLLER_CLAIM_WORKERS="${CONTROLLER_CLAIM_WORKERS:-300}"
+CONTROLLER_WARM_POOL_WORKERS="${CONTROLLER_WARM_POOL_WORKERS:-1}"
+CONTROLLER_TEMPLATE_WORKERS="${CONTROLLER_TEMPLATE_WORKERS:-1}"
+CONTROLLER_BATCH="${CONTROLLER_MAX_BATCH_SIZE:-300}"
+
+echo "======================================================="
+echo "Executing KWOK Cluster Scalability Presubmit"
+echo "  Scenario:          ${SCENARIO}"
+echo "  Simulated Nodes:   ${NUM_NODES}"
+echo "  WarmPool Size:     ${WARMPOOL}"
+echo "  Target QPS:        ${QPS}"
+echo "  Burst Duration:    ${DURATION}s"
+echo "  Controller QPS:    ${CONTROLLER_QPS} (Workers: ${CONTROLLER_WORKERS})"
+echo "======================================================="
+
+CACHE_DIR="${HOME}/.cache/agent-sandbox-test-bin"
+mkdir -p "${CACHE_DIR}"
+BINDIR="${CACHE_DIR}"
+export PATH="${BINDIR}:${PATH}"
+WORKDIR="${repo_root}/.build-kwok"
+mkdir -p "${WORKDIR}"
+
+KWOK_VERSION="v0.6.0"
+KWOKCTL="${BINDIR}/kwokctl"
+
+if [[ ! -x "${KWOKCTL}" ]]; then
+  echo "Installing kwokctl ${KWOK_VERSION}..."
+  curl -fsSL --retry 5 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64" -o "${KWOKCTL}"
+  chmod +x "${KWOKCTL}"
+  curl -fsSL --retry 5 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwok-linux-amd64" -o "${BINDIR}/kwok"
+  chmod +x "${BINDIR}/kwok"
+fi
+
+CLUSTER_NAME="kwok-sandbox-scale"
+
+cleanup() {
+  echo "Cleaning up controller & simulated cluster..."
+  if [[ -n "${CONTROLLER_PID:-}" ]]; then
+    kill -TERM "${CONTROLLER_PID}" 2>/dev/null || true
+    wait "${CONTROLLER_PID}" 2>/dev/null || true
+  fi
+  if [[ -f "${WORKDIR}/controller.log" && -d "${CL2_REPORT_DIR:-}" ]]; then
+    cp "${WORKDIR}/controller.log" "${CL2_REPORT_DIR}/controller.log" 2>/dev/null || true
+  fi
+  "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
+  rm -rf "${WORKDIR}"
+  echo "Cleanup complete."
+}
+trap cleanup EXIT
+
+echo "Ensuring clean start for kwok simulated cluster..."
+"${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
+
+"${KWOKCTL}" create cluster --name="${CLUSTER_NAME}" --wait=5m \
+  --runtime=binary \
+  --disable-qps-limits \
+  --extra-args="kube-apiserver=max-requests-inflight=2000" \
+  --extra-args="kube-apiserver=max-mutating-requests-inflight=1000" \
+  --extra-args="etcd=unsafe-no-fsync=true"
+
+KUBECONFIG="${WORKDIR}/kubeconfig"
+"${KWOKCTL}" get kubeconfig --name="${CLUSTER_NAME}" > "${KUBECONFIG}"
+export KUBECONFIG
+
+echo "Creating simulated nodes (${NUM_NODES})..."
+"${KWOKCTL}" scale node --name="${CLUSTER_NAME}" --replicas="${NUM_NODES}"
+kubectl label node node-000000 node-role.kubernetes.io/control-plane="" --overwrite
+kubectl patch node node-000000 --subresource=status --type=merge -p '{"status":{"addresses":[{"type":"InternalIP","address":"127.0.0.1"},{"type":"ExternalIP","address":"127.0.0.1"}]}}'
+
+echo "Deploying Agent Sandbox CRDs & System Namespace..."
+kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f k8s/crds/
+
+echo "Waiting for CRDs to be established..."
+kubectl wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout=1m
+kubectl wait --for=condition=Established crd/sandboxclaims.extensions.agents.x-k8s.io --timeout=1m
+kubectl wait --for=condition=Established crd/sandboxtemplates.extensions.agents.x-k8s.io --timeout=1m
+kubectl wait --for=condition=Established crd/sandboxwarmpools.extensions.agents.x-k8s.io --timeout=1m
+
+echo "Starting Agent Sandbox Controller against simulated cluster..."
+go run ./cmd/agent-sandbox-controller \
+  --leader-election-namespace=agent-sandbox-system \
+  --extensions=true \
+  --metrics-bind-address=":8081" \
+  --health-probe-bind-address=":8082" \
+  --kube-api-qps="${CONTROLLER_QPS}" \
+  --kube-api-burst="${CONTROLLER_BURST}" \
+  --sandbox-concurrent-workers="${CONTROLLER_WORKERS}" \
+  --sandbox-claim-concurrent-workers="${CONTROLLER_CLAIM_WORKERS}" \
+  --sandbox-warm-pool-concurrent-workers="${CONTROLLER_WARM_POOL_WORKERS}" \
+  --sandbox-template-concurrent-workers="${CONTROLLER_TEMPLATE_WORKERS}" \
+  --sandbox-warm-pool-max-batch-size="${CONTROLLER_BATCH}" > "${WORKDIR}/controller.log" 2>&1 &
+CONTROLLER_PID=$!
+sleep 3
+
+echo "Downloading ClusterLoader2 binary..."
+CL2_TMP_DIR="$(mktemp -d)"
+git clone --depth 1 https://github.com/kubernetes/perf-tests.git "${CL2_TMP_DIR}"
+(cd "${CL2_TMP_DIR}/clusterloader2" && GOBIN="${BINDIR}" go build -o "${BINDIR}/clusterloader2" ./cmd/clusterloader.go)
+
+CL2_REPORT_DIR="${ARTIFACTS:-.}/kwok-cl2-report"
+mkdir -p "${CL2_REPORT_DIR}"
+
+TEST_CONFIG="${repo_root}/test/benchmarks/config/agent-sandbox-${SCENARIO}.yaml"
+if [[ ! -f "${TEST_CONFIG}" ]]; then
+  echo "Error: Scenario configuration ${TEST_CONFIG} not found!"
+  exit 1
+fi
+
+echo "Running ClusterLoader2 benchmark (Scenario=${SCENARIO}, QPS=${QPS}, Duration=${DURATION}s, WarmPool=${WARMPOOL})..."
+# Disable APIAvailability measurement under KWOK simulated clusters:
+# APIAvailability deploys an agnhost pod and attempts `kubectl exec` to check API server latency.
+# Since KWOK virtual pods do not run a real container runtime or process, `kubectl exec` fails with
+# 'no exec found for container agnhost'. Disabling it avoids non-fatal warnings on virtual clusters.
+CL2_RC=0
+CL2_QPS="${QPS}" \
+CL2_DURATION_SECONDS="${DURATION}" \
+CL2_WARMPOOL_SIZE="${WARMPOOL}" \
+CL2_ENABLE_SCHEDULING_METRICS="false" \
+CL2_ENABLE_API_AVAILABILITY="false" \
+CL2_POD_STARTUP_LATENCY_THRESHOLD="${CL2_POD_THRESHOLD:-5s}" \
+CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_50_MS="${CL2_THRESHOLD_50_MS:-300}" \
+CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90_MS="${CL2_THRESHOLD_90_MS:-300}" \
+CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS="${CL2_THRESHOLD_99_MS:-500}" \
+"${BINDIR}/clusterloader2" \
+  --testconfig="${TEST_CONFIG}" \
+  --kubeconfig="${KUBECONFIG}" \
+  --provider=skeleton \
+  --k8s-clients-number="${CLIENTS}" \
+  --delete-stale-namespaces=true \
+  --v=2 \
+  --report-dir="${CL2_REPORT_DIR}" || CL2_RC=$?
+
+echo ""
+echo "======================================================="
+echo " Scraped Agent Sandbox Controller Metrics (:8081/metrics)"
+echo "======================================================="
+python3 -c '
+import urllib.request, re
+
+def parse_histogram(metric_name, data):
+    pattern = re.compile(rf"{metric_name}_bucket\{{[^}}]*le=\"([^\"]+)\"[^}}]*\}}\s+(\d+)")
+    buckets = []
+    total = 0
+    for match in pattern.finditer(data):
+        le_str, count_str = match.groups()
+        c = float(count_str)
+        if le_str == "+Inf":
+            total = c
+        else:
+            buckets.append((float(le_str), c))
+    buckets.sort(key=lambda x: x[0])
+    if total == 0 and buckets:
+        total = buckets[-1][1]
+    if total == 0:
+        return None
+    def get_percentile(p):
+        target = p * total
+        prev_le, prev_count = 0.0, 0.0
+        for le, count in buckets:
+            if count >= target:
+                if count == prev_count:
+                    return le
+                # Linear interpolation between adjacent buckets
+                fraction = (target - prev_count) / (count - prev_count)
+                return prev_le + fraction * (le - prev_le)
+            prev_le, prev_count = le, count
+        return float("inf")
+    return get_percentile(0.50), get_percentile(0.90), get_percentile(0.99), int(total)
+
+try:
+    raw = urllib.request.urlopen("http://127.0.0.1:8081/metrics", timeout=5).read().decode("utf-8")
+    for name, desc in [
+        ("agent_sandbox_claim_controller_startup_latency_ms", "Controller Claim Adoption Latency (ms)"),
+        ("agent_sandbox_claim_startup_latency_ms", "End-to-End Claim Startup Latency (ms)"),
+        ("agent_sandbox_creation_latency_ms", "Sandbox Pod Provisioning Latency (ms)")
+    ]:
+        res = parse_histogram(name, raw)
+        if res:
+            p50, p90, p99, count = res
+            print(f"  • {desc} (Sample Size: {count}):")
+            print(f"      P50: ~{p50:.1f} ms | P90: ~{p90:.1f} ms | P99: ~{p99:.1f} ms")
+        else:
+            print(f"  • {desc}: No metrics recorded")
+except Exception as e:
+    print(f"  Warning: Could not fetch metrics from controller: {e}")
+'
+echo "======================================================="
+
+rm -rf "${CL2_TMP_DIR}"
+if [[ ${CL2_RC} -ne 0 ]]; then
+  echo "KWOK cluster benchmark finished with ClusterLoader2 return code ${CL2_RC} (note: PodStartupLatency SLA fail on local single-node scheduling queue is non-fatal if claim adoption latencies above pass)."
+fi
+exit ${CL2_RC}
+

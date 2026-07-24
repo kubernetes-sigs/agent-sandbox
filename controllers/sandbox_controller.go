@@ -506,8 +506,25 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, sandbox); err != nil {
-		logger.Error(err, "Failed to update sandbox status")
+	// Merge-patch (no resourceVersion precondition) the status subresource.
+	// Two deliberate trade-offs now that the optimistic lock is gone:
+	//   1. A JSON merge patch replaces the whole status.conditions array whenever
+	//      any condition differs from base. That is safe only while this
+	//      controller is the SOLE writer of Sandbox status -- true today, since
+	//      reconciles are workqueue-serialized per object. If a second status
+	//      writer is ever added, switch to MergeFromWithOptimisticLock or SSA.
+	//   2. The old Update's 409 doubled as a stale-informer-cache guard: a
+	//      reconcile computed from a stale read used to fail and re-run with
+	//      fresh data. The patch instead writes through. Status is derived from
+	//      pod state, so it self-heals on the next watch event and converges.
+	base := sandbox.DeepCopy()
+	base.Status = *oldStatus
+	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
+		if k8serrors.IsNotFound(err) {
+			// Sandbox was deleted mid-reconcile
+			return nil
+		}
+		logger.Error(err, "Failed to patch sandbox status")
 		return err
 	}
 

@@ -5557,3 +5557,127 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
 }
+
+func TestSandboxStatusRelevantChange(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldSb    *sandboxv1beta1.Sandbox
+		newSb    *sandboxv1beta1.Sandbox
+		expected bool
+	}{
+		{
+			name:     "No relevant change",
+			oldSb:    &sandboxv1beta1.Sandbox{},
+			newSb:    &sandboxv1beta1.Sandbox{},
+			expected: false,
+		},
+		{
+			name:  "DeletionTimestamp changed",
+			oldSb: &sandboxv1beta1.Sandbox{},
+			newSb: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: time.Now()},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "PodIPs changed",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					PodIPs: []string{"10.0.0.1"},
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					PodIPs: []string{"10.0.0.1", "10.0.0.2"},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Ready condition changed",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse},
+					},
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			// Expiry has no condition type of its own: hasSandboxExpiredCondition
+			// reads the Ready condition's Reason. Here Status stays False and only
+			// the Reason flips (SandboxNotReady -> SandboxExpired), so this must be
+			// treated as relevant -- a Status-only comparison would silently drop
+			// expiry propagation to claims.
+			name: "Ready condition Reason changed to Expired, Status unchanged",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady"},
+					},
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: sandboxv1beta1.SandboxReasonExpired},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Finished condition changed",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionFinished), Status: metav1.ConditionFalse},
+					},
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionFinished), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Irrelevant condition changed",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionSuspended), Status: metav1.ConditionFalse},
+					},
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionSuspended), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := sandboxStatusRelevantChange(tt.oldSb, tt.newSb)
+			require.Equal(t, tt.expected, actual)
+		})
+	}
+}

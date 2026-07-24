@@ -511,6 +511,10 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 	patch := client.MergeFrom(oldClaim)
 
 	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		if k8errors.IsNotFound(err) {
+			// Claim was deleted mid-reconcile
+			return nil
+		}
 		logger.Error(err, "Failed to patch sandboxclaim status")
 		return err
 	}
@@ -1728,6 +1732,48 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 	return requests
 }
 
+// sandboxStatusRelevantChange reports whether a Sandbox update changed a field
+// the SandboxClaim reconciler actually consumes: the Ready condition, the
+// Finished condition, PodIPs (mirrored into claim.Status.SandboxStatus), or the
+// DeletionTimestamp (the claim must react when its adopted Sandbox starts
+// terminating). Only these two conditions are compared — by type, not the whole
+// slice — so churn on conditions the claim does not read (e.g. Suspended) does
+// not trigger a needless claim reconcile.
+//
+// Each condition is compared in full (Status, Reason, Message, ...), NOT just
+// its Status. This matters for expiry: expiry has no condition type of its own —
+// hasSandboxExpiredCondition reads the Ready condition's Reason ==
+// SandboxReasonExpired — so expiry propagates to claims only because we DeepEqual
+// the entire Ready condition. Narrowing this to a Status-only compare would
+// silently stop expiry from reaching claims.
+//
+// Invariant: this predicate deliberately drops all metadata- and spec-only
+// updates on owned Sandboxes (labels, annotations, generation). Nothing in the
+// bound path consumes those today, so this is safe — but any future logic that
+// reconciles Sandbox *metadata* through this Owns watch (e.g. the
+// adoption-hardening direction in #1229) will not fire until this predicate is
+// widened to admit the relevant metadata change.
+func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
+	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {
+		return true
+	}
+	for _, condType := range []string{
+		string(v1beta1.SandboxConditionReady),
+		string(v1beta1.SandboxConditionFinished),
+	} {
+		if !equality.Semantic.DeepEqual(
+			meta.FindStatusCondition(oldSb.Status.Conditions, condType),
+			meta.FindStatusCondition(newSb.Status.Conditions, condType),
+		) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
@@ -1745,9 +1791,20 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		return err
 	}
 
+	sandboxOwnsPredicate := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldSb, ok1 := e.ObjectOld.(*v1beta1.Sandbox)
+			newSb, ok2 := e.ObjectNew.(*v1beta1.Sandbox)
+			if !ok1 || !ok2 {
+				return true
+			}
+			return sandboxStatusRelevantChange(oldSb, newSb)
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1beta1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
-		Owns(&v1beta1.Sandbox{}).
+		Owns(&v1beta1.Sandbox{}, builder.WithPredicates(sandboxOwnsPredicate)).
 		Watches(&v1beta1.Sandbox{}, &sandboxEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(&extensionsv1beta1.SandboxWarmPool{}, &warmPoolEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(

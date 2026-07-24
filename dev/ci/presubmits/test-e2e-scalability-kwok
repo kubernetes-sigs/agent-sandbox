@@ -20,24 +20,24 @@ cd "${repo_root}"
 
 # Customizable scale & execution parameters via Environment Variables:
 #   TEST_SCENARIO:               continuous-burst | rapid-burst (default: continuous-burst)
-#   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 35 -> accommodates 3700 pods @ 110 maxPods/node)
+#   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 50)
 #   CL2_QPS:                     Target claim creation QPS (default: 300)
 #   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 12 -> 3,600 total claims)
 #   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 3700)
 #   CONTROLLER_KUBE_API_QPS:     Controller API QPS (default: 1000)
 #   CONTROLLER_KUBE_API_BURST:   Controller API Burst (default: 2000)
-#   CONTROLLER_WORKERS:          Reconciler worker concurrency (default: 100)
+#   CONTROLLER_WORKERS:          Reconciler worker concurrency (default: 200)
 #   CONTROLLER_MAX_BATCH_SIZE:   WarmPool refill batch size (default: 300)
 
 SCENARIO="${TEST_SCENARIO:-continuous-burst}"
-NUM_NODES="${SIMULATED_NODES:-35}"
+NUM_NODES="${SIMULATED_NODES:-50}"
 QPS="${CL2_QPS:-300}"
 DURATION="${CL2_DURATION_SECONDS:-12}"
 WARMPOOL="${CL2_WARMPOOL_SIZE:-3700}"
 
 CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"
 CONTROLLER_BURST="${CONTROLLER_KUBE_API_BURST:-2000}"
-CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-100}"
+CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-200}"
 CONTROLLER_BATCH="${CONTROLLER_MAX_BATCH_SIZE:-300}"
 
 echo "======================================================="

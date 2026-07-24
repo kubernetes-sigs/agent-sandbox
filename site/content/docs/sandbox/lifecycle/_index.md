@@ -27,7 +27,7 @@ Unlike manual termination, setting a `shutdownTime` provides a guaranteed, hard 
 
 #### Basic Workflow Example with kubectl
 
-The following example demonstrates how to define a sandbox claim with an explicit `shutdownTime`, apply it directly to your cluster using `kubectl`, and verify the scheduled cleanup.
+The following example demonstrates how to define a `Sandbox` with an explicit `shutdownTime`, apply it directly to your cluster using `kubectl`, and verify the scheduled cleanup.
 
 Define the shutdown time (in this example it's the current time plus 1 minute):
 

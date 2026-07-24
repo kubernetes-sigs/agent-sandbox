@@ -5614,6 +5614,29 @@ func TestSandboxStatusRelevantChange(t *testing.T) {
 			expected: true,
 		},
 		{
+			// Expiry has no condition type of its own: hasSandboxExpiredCondition
+			// reads the Ready condition's Reason. Here Status stays False and only
+			// the Reason flips (SandboxNotReady -> SandboxExpired), so this must be
+			// treated as relevant -- a Status-only comparison would silently drop
+			// expiry propagation to claims.
+			name: "Ready condition Reason changed to Expired, Status unchanged",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "SandboxNotReady"},
+					},
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{
+						{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: sandboxv1beta1.SandboxReasonExpired},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
 			name: "Finished condition changed",
 			oldSb: &sandboxv1beta1.Sandbox{
 				Status: sandboxv1beta1.SandboxStatus{

@@ -1733,10 +1733,26 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 }
 
 // sandboxStatusRelevantChange reports whether a Sandbox update changed a field
-// the SandboxClaim reconciler actually consumes: the status Conditions
-// (Ready/Expired/Finished are forwarded into the claim), PodIPs (mirrored into
-// claim.Status.SandboxStatus), or the DeletionTimestamp (the claim must react
-// when its adopted Sandbox starts terminating).
+// the SandboxClaim reconciler actually consumes: the Ready condition, the
+// Finished condition, PodIPs (mirrored into claim.Status.SandboxStatus), or the
+// DeletionTimestamp (the claim must react when its adopted Sandbox starts
+// terminating). Only these two conditions are compared — by type, not the whole
+// slice — so churn on conditions the claim does not read (e.g. Suspended) does
+// not trigger a needless claim reconcile.
+//
+// Each condition is compared in full (Status, Reason, Message, ...), NOT just
+// its Status. This matters for expiry: expiry has no condition type of its own —
+// hasSandboxExpiredCondition reads the Ready condition's Reason ==
+// SandboxReasonExpired — so expiry propagates to claims only because we DeepEqual
+// the entire Ready condition. Narrowing this to a Status-only compare would
+// silently stop expiry from reaching claims.
+//
+// Invariant: this predicate deliberately drops all metadata- and spec-only
+// updates on owned Sandboxes (labels, annotations, generation). Nothing in the
+// bound path consumes those today, so this is safe — but any future logic that
+// reconciles Sandbox *metadata* through this Owns watch (e.g. the
+// adoption-hardening direction in #1229) will not fire until this predicate is
+// widened to admit the relevant metadata change.
 func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
 		return true

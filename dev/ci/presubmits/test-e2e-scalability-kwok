@@ -148,6 +148,7 @@ echo "Running ClusterLoader2 benchmark (Scenario=${SCENARIO}, QPS=${QPS}, Durati
 # APIAvailability deploys an agnhost pod and attempts `kubectl exec` to check API server latency.
 # Since KWOK virtual pods do not run a real container runtime or process, `kubectl exec` fails with
 # 'no exec found for container agnhost'. Disabling it avoids non-fatal warnings on virtual clusters.
+CL2_RC=0
 CL2_QPS="${QPS}" \
 CL2_DURATION_SECONDS="${DURATION}" \
 CL2_WARMPOOL_SIZE="${WARMPOOL}" \
@@ -160,7 +161,61 @@ CL2_ENABLE_API_AVAILABILITY="false" \
   --k8s-clients-number="${CLIENTS}" \
   --delete-stale-namespaces=true \
   --v=2 \
-  --report-dir="${CL2_REPORT_DIR}"
+  --report-dir="${CL2_REPORT_DIR}" || CL2_RC=$?
+
+echo ""
+echo "======================================================="
+echo " Scraped Agent Sandbox Controller Metrics (:8081/metrics)"
+echo "======================================================="
+python3 -c '
+import urllib.request, re
+
+def parse_histogram(metric_name, data):
+    pattern = re.compile(rf"{metric_name}_bucket\{{[^}}]*le=\"([^\"]+)\"[^}}]*\}}\s+(\d+)")
+    buckets = []
+    total = 0
+    for match in pattern.finditer(data):
+        le_str, count_str = match.groups()
+        c = float(count_str)
+        if le_str == "+Inf":
+            total = c
+        else:
+            buckets.append((float(le_str), c))
+    buckets.sort(key=lambda x: x[0])
+    if total == 0 and buckets:
+        total = buckets[-1][1]
+    if total == 0:
+        return None
+    def get_percentile(p):
+        target = p * total
+        for le, count in buckets:
+            if count >= target:
+                return le
+        return float("inf")
+    return get_percentile(0.50), get_percentile(0.90), get_percentile(0.99), int(total)
+
+try:
+    raw = urllib.request.urlopen("http://127.0.0.1:8081/metrics", timeout=5).read().decode("utf-8")
+    for name, desc in [
+        ("agent_sandbox_claim_controller_startup_latency_ms", "Controller Claim Adoption Latency (ms)"),
+        ("agent_sandbox_claim_startup_latency_ms", "End-to-End Claim Startup Latency (ms)"),
+        ("agent_sandbox_creation_latency_ms", "Sandbox Pod Provisioning Latency (ms)")
+    ]:
+        res = parse_histogram(name, raw)
+        if res:
+            p50, p90, p99, count = res
+            print(f"  • {desc} (Sample Size: {count}):")
+            print(f"      P50: <= {p50} ms | P90: <= {p90} ms | P99: <= {p99} ms")
+        else:
+            print(f"  • {desc}: No metrics recorded")
+except Exception as e:
+    print(f"  Warning: Could not fetch metrics from controller: {e}")
+'
+echo "======================================================="
 
 rm -rf "${CL2_TMP_DIR}"
-echo "KWOK cluster benchmark completed successfully."
+if [[ ${CL2_RC} -ne 0 ]]; then
+  echo "KWOK cluster benchmark finished with ClusterLoader2 return code ${CL2_RC} (note: PodStartupLatency SLA fail on local single-node scheduling queue is non-fatal if claim adoption latencies above pass)."
+fi
+exit ${CL2_RC}
+

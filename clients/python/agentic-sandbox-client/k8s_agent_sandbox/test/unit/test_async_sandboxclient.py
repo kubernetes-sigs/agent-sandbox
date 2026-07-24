@@ -54,7 +54,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.client.sandbox_class = self.mock_sandbox_class
 
     async def test_create_sandbox_success(self):
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="resolved-id")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
         mock_sandbox_instance = MagicMock()
@@ -82,7 +82,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(active), 1)
 
     async def test_create_sandbox_failure_cleanup(self):
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             side_effect=Exception("Timeout")
         )
 
@@ -97,7 +97,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_sandbox_cancellation_cleanup(self):
         """CancelledError (BaseException) should still trigger claim cleanup."""
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             side_effect=asyncio.CancelledError()
         )
 
@@ -277,7 +277,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             await self.client.create_sandbox("t", labels={"": "v"})
 
     async def test_create_sandbox_with_pod_metadata(self):
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="resolved-id")
         mock_sandbox_instance = MagicMock()
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
@@ -305,7 +305,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             await self.client.create_sandbox("t", pod_labels={"bad key!": "v"})
 
     async def test_create_sandbox_with_shutdown_after_seconds(self):
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="resolved-id")
         mock_sandbox_instance = MagicMock()
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
@@ -325,7 +325,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             self.assertIn("shutdownTime", lifecycle)
 
     async def test_create_sandbox_with_volume_claim_templates(self):
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="resolved-id")
         mock_sandbox_instance = MagicMock()
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
@@ -377,7 +377,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_create_sandbox_without_shutdown_after_seconds(self):
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="resolved-id")
         mock_sandbox_instance = MagicMock()
         mock_sandbox_instance.terminate = AsyncMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
@@ -483,7 +483,7 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         config = SandboxInClusterConnectionConfig()
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
         mock_k8s_helper = client.k8s_helper
-        mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="my-sandbox")
+        mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="my-sandbox")
 
         mock_sandbox_class = MagicMock()
         mock_sandbox_class.return_value = MagicMock()
@@ -915,7 +915,7 @@ class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTe
         self.client.sandbox_class = self.mock_sandbox_class
 
     async def test_create_sandbox_passes_connection_config(self):
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="sandbox-123")
         self.mock_k8s_helper.wait_for_sandbox_ready = AsyncMock(return_value="10.244.0.5")
 
         mock_sandbox = MagicMock()

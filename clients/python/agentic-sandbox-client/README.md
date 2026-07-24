@@ -337,6 +337,36 @@ sandbox = client.create_sandbox(
 
 The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
+### 9. Startup Latency: How the SDK Waits for Readiness
+
+`create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
+API on an interval, so there is no poll-interval latency added on top of the
+controller's own claim-to-Ready time.
+
+The wait is a **single watch on the SandboxClaim**. The claim controller
+publishes the bound sandbox name (`status.sandbox.name`), the pod IPs
+(`status.sandbox.podIPs`) and the forwarded `Ready` condition in one status
+update when it adopts a warm-pool sandbox, so the first watch event that
+carries the sandbox name normally also carries `Ready=True` and
+`create_sandbox()` returns immediately. On a cold start (no warm sandbox
+available, or `env`/`volume_claim_templates` set, which force cold starts)
+the same watch simply keeps streaming claim updates until the forwarded
+`Ready` condition flips to `True`.
+
+Latency guidance:
+
+- **Do not poll** `Sandbox`/`SandboxClaim` objects with `get_*` calls in a
+  loop to detect readiness; a poll interval of `T` adds an average of `T/2`
+  (uniformly distributed 0..`T`) on top of the controller latency. Use
+  `create_sandbox()` / the claim `Ready` condition watch.
+- `sandbox_ready_timeout` (default 180s) bounds the whole wait; the watch
+  returns as soon as the claim is Ready, the timeout only caps the worst case.
+- The Kubernetes client reuses a single authenticated connection pool for
+  the watch, so no extra TLS handshakes occur on the ready path.
+- With the local-tunnel connection mode, the first request additionally pays
+  for the `kubectl port-forward` startup; the SDK probes the local port every
+  50ms while it comes up. Gateway/in-cluster modes do not have this step.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

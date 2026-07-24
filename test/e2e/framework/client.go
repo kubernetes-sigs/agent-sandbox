@@ -269,8 +269,8 @@ func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicat
 // the provided predicates.
 // It will wait for the object to be created, but if the object is deleted,
 // it will return an error.
-// The timeout is capped at DefaultTimeout (1 minute). A shorter timeout can
-// be specified via the context.
+// When the context carries a deadline, that deadline controls the timeout.
+// Otherwise DefaultTimeout (1 minute) is applied.
 // It uses a watch for more precise timing than polling.
 // It uses a shared WatchSet to avoid per-call watch setup latency.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
@@ -691,6 +691,48 @@ func (cl *ClusterClient) ExecuteOnNode(ctx context.Context, nodeName string, com
 	}
 
 	return stdout.String(), stderr.String(), nil
+}
+
+// ClusterIdentity returns a short string identifying the cluster under test.
+// It checks SANDBOX_CLUSTER_ID first, then derives an identity from the common
+// prefix of worker node names, falling back to the single node name or "unknown".
+func (cl *ClusterClient) ClusterIdentity(ctx context.Context) string {
+	if id := os.Getenv("SANDBOX_CLUSTER_ID"); id != "" {
+		return id
+	}
+	workers, err := cl.WorkerNodes(ctx)
+	if err != nil || len(workers) == 0 {
+		return "unknown"
+	}
+	if len(workers) == 1 {
+		return workers[0].Name
+	}
+	names := make([]string, len(workers))
+	for i, w := range workers {
+		names[i] = w.Name
+	}
+	prefix := longestCommonPrefix(names)
+	prefix = strings.TrimRight(prefix, "-_.")
+	if prefix == "" {
+		return workers[0].Name
+	}
+	return prefix
+}
+
+func longestCommonPrefix(strs []string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	prefix := strs[0]
+	for _, s := range strs[1:] {
+		for i := range prefix {
+			if i >= len(s) || prefix[i] != s[i] {
+				prefix = prefix[:i]
+				break
+			}
+		}
+	}
+	return prefix
 }
 
 // IsKindCluster returns true if the test is running on a kind cluster.

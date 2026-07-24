@@ -35,13 +35,16 @@ from .utils import select_pod_ip
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
-    def __init__(self):
-        try:
-            config.load_incluster_config()
-        except config.ConfigException:
-            config.load_kube_config()
-        self.custom_objects_api = client.CustomObjectsApi()
-        self.core_v1_api = client.CoreV1Api()
+    def __init__(self, api_client: client.ApiClient | None = None):
+        """When ``api_client`` is provided it is used directly; otherwise the
+        default kubeconfig (in-cluster, then ``~/.kube/config``) is loaded."""
+        if api_client is None:
+            try:
+                config.load_incluster_config()
+            except config.ConfigException:
+                config.load_kube_config()
+        self.custom_objects_api = client.CustomObjectsApi(api_client)
+        self.core_v1_api = client.CoreV1Api(api_client)
 
     def create_sandbox_claim(
         self,

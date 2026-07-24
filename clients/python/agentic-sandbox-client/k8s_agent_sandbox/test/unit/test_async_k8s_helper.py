@@ -640,5 +640,56 @@ class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ip, "192.168.1.1")
 
 
+@patch("k8s_agent_sandbox.async_k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.async_k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.async_k8s_helper.client.ApiClient")
+@patch("k8s_agent_sandbox.async_k8s_helper.config")
+class TestAsyncK8sHelperApiClientInjection(unittest.IsolatedAsyncioTestCase):
+
+    async def test_injected_api_client_used_and_no_config_loaded(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        injected = AsyncMock(name="ApiClient")
+        helper = AsyncK8sHelper(api_client=injected)
+        await helper._ensure_initialized()
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+        mock_api_client_cls.assert_not_called()
+        mock_custom_cls.assert_called_once_with(injected)
+        mock_core_cls.assert_called_once_with(injected)
+
+        # A caller-injected client must not be closed by the helper.
+        await helper.close()
+        injected.close.assert_not_awaited()
+
+    async def test_injected_api_client_still_used_after_close(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        injected = AsyncMock(name="ApiClient")
+        helper = AsyncK8sHelper(api_client=injected)
+
+        await helper.close()
+        await helper._ensure_initialized()
+
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+        mock_api_client_cls.assert_not_called()
+        mock_custom_cls.assert_called_once_with(injected)
+        mock_core_cls.assert_called_once_with(injected)
+
+    async def test_internally_created_api_client_is_closed(
+        self, mock_config, mock_api_client_cls, mock_custom_cls, mock_core_cls
+    ):
+        created = AsyncMock(name="ApiClient")
+        mock_api_client_cls.return_value = created
+        helper = AsyncK8sHelper()
+        await helper._ensure_initialized()
+        mock_api_client_cls.assert_called_once_with()
+
+        # A client the helper created must be closed.
+        await helper.close()
+        created.close.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()

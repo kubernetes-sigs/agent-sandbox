@@ -883,6 +883,15 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil
 		}
 
+		// The annotation exists to track a pod whose name differs from the
+		// sandbox name (a warm-pool adoption). Every reader falls back to
+		// the sandbox name when the annotation is absent (resolvePodName,
+		// the Go and Python SDKs), so recording the default would spend an
+		// API request per sandbox to say nothing.
+		if podName == sandbox.Name {
+			return nil
+		}
+
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)

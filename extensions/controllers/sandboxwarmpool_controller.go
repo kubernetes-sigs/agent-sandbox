@@ -239,10 +239,24 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	return allErrors
 }
 
+// resolveUpdateStrategy returns the effective update strategy for the warm pool,
+// defaulting to OnReplenish when unspecified or unknown.
+func resolveUpdateStrategy(warmPool *extensionsv1beta1.SandboxWarmPool) extensionsv1beta1.SandboxWarmPoolUpdateStrategyType {
+	if warmPool.Spec.UpdateStrategy == nil {
+		return extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	}
+	switch warmPool.Spec.UpdateStrategy.Type {
+	case extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType:
+		return extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType
+	default:
+		return extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	}
+}
+
 // adoptSandbox sets this warmpool as the owner of an orphaned sandbox.
 func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sb *sandboxv1beta1.Sandbox) error {
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
-		return err
+		return fmt.Errorf("set controller reference for warm pool sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
 	}
 	setWarmLaunchTypeLabelIfNeeded(sb)
 	return r.Update(ctx, sb)
@@ -268,20 +282,12 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, w
 	vettedHashes := make(map[string]bool)
 
 	// Determine the update strategy, defaulting to OnReplenish if not specified or unknown.
-	var updateStrategyType extensionsv1beta1.SandboxWarmPoolUpdateStrategyType
-	if warmPool.Spec.UpdateStrategy != nil {
-		updateStrategyType = warmPool.Spec.UpdateStrategy.Type
-	}
-
-	var updateStrategy extensionsv1beta1.SandboxWarmPoolUpdateStrategyType
-	switch updateStrategyType {
-	case extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType:
-		updateStrategy = extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType
-	case extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType, "":
-		updateStrategy = extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
-	default:
-		logger.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", updateStrategyType)
-		updateStrategy = extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	updateStrategy := resolveUpdateStrategy(warmPool)
+	if raw := warmPool.Spec.UpdateStrategy; raw != nil &&
+		raw.Type != "" &&
+		raw.Type != extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType &&
+		raw.Type != extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType {
+		logger.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", raw.Type)
 	}
 
 	for _, sb := range sandboxes {
@@ -516,7 +522,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	isOrphan := controllerRef == nil
 	if isOrphan {
 		// Always perform full semantic comparison for orphans.
-		return !r.compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
+		return !compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
 	}
 
 	// If hashes match, it's fresh.
@@ -542,7 +548,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	// Perform a semantic comparison of the sandbox blueprint.
 	// We normalize the pod spec by applying the same secure defaults
 	// used during creation to avoid false positives from controller-injected fields.
-	isStale := !r.compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
+	isStale := !compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
 
 	// Save the result for the next sandbox with this same hash.
 	if sandboxHash != "" {
@@ -554,7 +560,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 
 // comparePodSpecs checks if the pod spec in the sandbox is semantically equal to the template,
 // normalizing for fields that the controller populates by default.
-func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *corev1.PodSpec) bool {
+func comparePodSpecs(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *corev1.PodSpec) bool {
 	// Create what the sandbox SHOULD look like if it were created from the current template.
 	expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
 	ApplySandboxSecureDefaults(template, expectedSpec)
@@ -570,7 +576,7 @@ func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.
 // Note: Comparison is index-based (order-sensitive) to stay consistent with computeSandboxBlueprintHash (+listType=atomic).
 // Making this comparison order-independent without also sorting the templates in computeSandboxBlueprintHash
 // would cause reordered warm sandboxes to fail the hash label check on every reconcile.
-func (r *SandboxWarmPoolReconciler) compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, actualVCTs []sandboxv1beta1.PersistentVolumeClaimTemplate) bool {
+func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, actualVCTs []sandboxv1beta1.PersistentVolumeClaimTemplate) bool {
 	if len(template.Spec.SandboxBlueprint.VolumeClaimTemplates) != len(actualVCTs) {
 		return false
 	}
@@ -587,9 +593,9 @@ func (r *SandboxWarmPoolReconciler) compareVolumeClaimTemplates(template *extens
 
 // compareSandboxBlueprint checks if the sandbox blueprint in the sandbox is semantically equal to the template,
 // ignoring metadata differences and only comparing the fields that are relevant for staleness detection.
-func (r *SandboxWarmPoolReconciler) compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
-	return r.comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
-		r.compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
+func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
+	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
+		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
 		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
 }
 

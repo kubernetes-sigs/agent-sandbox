@@ -18,8 +18,36 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "${repo_root}"
 
+# Customizable scale & execution parameters via Environment Variables:
+#   TEST_SCENARIO:               continuous-burst | rapid-burst (default: continuous-burst)
+#   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 10)
+#   CL2_QPS:                     Target claim creation QPS (default: 300)
+#   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 12 -> 3,600 total claims)
+#   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 3700)
+#   CONTROLLER_KUBE_API_QPS:     Controller API QPS (default: 1000)
+#   CONTROLLER_KUBE_API_BURST:   Controller API Burst (default: 2000)
+#   CONTROLLER_WORKERS:          Reconciler worker concurrency (default: 100)
+#   CONTROLLER_MAX_BATCH_SIZE:   WarmPool refill batch size (default: 300)
+
+SCENARIO="${TEST_SCENARIO:-continuous-burst}"
+NUM_NODES="${SIMULATED_NODES:-10}"
+QPS="${CL2_QPS:-300}"
+DURATION="${CL2_DURATION_SECONDS:-12}"
+WARMPOOL="${CL2_WARMPOOL_SIZE:-3700}"
+
+CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"
+CONTROLLER_BURST="${CONTROLLER_KUBE_API_BURST:-2000}"
+CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-100}"
+CONTROLLER_BATCH="${CONTROLLER_MAX_BATCH_SIZE:-300}"
+
 echo "======================================================="
 echo "Executing KWOK Cluster Scalability Presubmit"
+echo "  Scenario:          ${SCENARIO}"
+echo "  Simulated Nodes:   ${NUM_NODES}"
+echo "  WarmPool Size:     ${WARMPOOL}"
+echo "  Target QPS:        ${QPS}"
+echo "  Burst Duration:    ${DURATION}s"
+echo "  Controller QPS:    ${CONTROLLER_QPS} (Workers: ${CONTROLLER_WORKERS})"
 echo "======================================================="
 
 WORKDIR="${repo_root}/.build-kwok"
@@ -64,8 +92,7 @@ KUBECONFIG="${WORKDIR}/kubeconfig"
 "${KWOKCTL}" get kubeconfig --name="${CLUSTER_NAME}" > "${KUBECONFIG}"
 export KUBECONFIG
 
-echo "Creating simulated nodes..."
-NUM_NODES="${SIMULATED_NODES:-10}"
+echo "Creating simulated nodes (${NUM_NODES})..."
 "${KWOKCTL}" scale node --name="${CLUSTER_NAME}" --replicas="${NUM_NODES}"
 kubectl label node node-000000 node-role.kubernetes.io/control-plane="" --overwrite
 kubectl patch node node-000000 --subresource=status --type=merge -p '{"status":{"addresses":[{"type":"InternalIP","address":"127.0.0.1"},{"type":"ExternalIP","address":"127.0.0.1"}]}}'
@@ -86,12 +113,12 @@ go run ./cmd/agent-sandbox-controller \
   --extensions=true \
   --metrics-bind-address=":8081" \
   --health-probe-bind-address=":8082" \
-  --kube-api-qps=1000 \
-  --kube-api-burst=2000 \
-  --sandbox-concurrent-workers=100 \
-  --sandbox-claim-concurrent-workers=100 \
-  --sandbox-warm-pool-concurrent-workers=100 \
-  --sandbox-warm-pool-max-batch-size=300 > "${WORKDIR}/controller.log" 2>&1 &
+  --kube-api-qps="${CONTROLLER_QPS}" \
+  --kube-api-burst="${CONTROLLER_BURST}" \
+  --sandbox-concurrent-workers="${CONTROLLER_WORKERS}" \
+  --sandbox-claim-concurrent-workers="${CONTROLLER_WORKERS}" \
+  --sandbox-warm-pool-concurrent-workers="${CONTROLLER_WORKERS}" \
+  --sandbox-warm-pool-max-batch-size="${CONTROLLER_BATCH}" > "${WORKDIR}/controller.log" 2>&1 &
 CONTROLLER_PID=$!
 sleep 3
 
@@ -103,14 +130,13 @@ git clone --depth 1 https://github.com/kubernetes/perf-tests.git "${CL2_TMP_DIR}
 CL2_REPORT_DIR="${ARTIFACTS:-.}/kwok-cl2-report"
 mkdir -p "${CL2_REPORT_DIR}"
 
-TEST_CONFIG="${repo_root}/test/benchmarks/config/agent-sandbox-continuous-burst.yaml"
+TEST_CONFIG="${repo_root}/test/benchmarks/config/agent-sandbox-${SCENARIO}.yaml"
+if [[ ! -f "${TEST_CONFIG}" ]]; then
+  echo "Error: Scenario configuration ${TEST_CONFIG} not found!"
+  exit 1
+fi
 
-# Scale parameters: matching perf-tests claims-warm burst (QPS: 300, duration: 1s -> 300 claims total, warmpool: 300)
-QPS="${CL2_QPS:-300}"
-DURATION="${CL2_DURATION_SECONDS:-1}"
-WARMPOOL="${CL2_WARMPOOL_SIZE:-300}"
-
-echo "Running ClusterLoader2 benchmark (QPS=${QPS}, Duration=${DURATION}s, WarmPool=${WARMPOOL})..."
+echo "Running ClusterLoader2 benchmark (Scenario=${SCENARIO}, QPS=${QPS}, Duration=${DURATION}s, WarmPool=${WARMPOOL})..."
 CL2_QPS="${QPS}" CL2_DURATION_SECONDS="${DURATION}" CL2_WARMPOOL_SIZE="${WARMPOOL}" CL2_ENABLE_SCHEDULING_METRICS="false" "${BINDIR}/clusterloader2" \
   --testconfig="${TEST_CONFIG}" \
   --kubeconfig="${KUBECONFIG}" \

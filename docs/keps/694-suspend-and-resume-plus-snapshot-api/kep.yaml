@@ -1,0 +1,11 @@
+title: Suspend And Resume + Snapshot Provider API
+kep-number: 694
+authors:
+  - "@SHRUTI6991"
+  - "@ryanzhang-oss"
+status: implementable
+creation-date: 2026-05-08
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

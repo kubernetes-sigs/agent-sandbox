@@ -15,6 +15,7 @@
 
 import argparse
 import gzip
+import re
 import json
 import os
 import shutil
@@ -158,6 +159,88 @@ def metrics_timeseries(conn, metrics_path, metrics, labels=None, group_by=None, 
         ORDER BY {order_cols}
     """
     return conn.execute(sql).fetchall()
+
+
+
+# --- Node profiler log parsing (test/stress/profiler) ---
+# The node profiler writes per-node text logs (bpftrace map snapshots and
+# /proc/stat samples), not metrics.jsonl records, so they get their own
+# small parsers here. bpftrace maps are cumulative since tracer start; the
+# last snapshot is the whole-run total.
+
+# x86_64 syscall numbers for @slow_syscall_* keys; unknown numbers render
+# as syscall_<nr>. Keep in sync with test/stress/profiler/analyze-fsync.py.
+SYSCALL_NAMES = {
+    0: "read", 1: "write", 2: "open", 3: "close", 7: "poll", 9: "mmap",
+    16: "ioctl", 17: "pread64", 18: "pwrite64", 20: "writev", 23: "select",
+    24: "sched_yield", 34: "pause", 35: "nanosleep", 41: "socket",
+    42: "connect", 43: "accept", 44: "sendto", 45: "recvfrom", 46: "sendmsg",
+    47: "recvmsg", 56: "clone", 57: "fork", 59: "execve", 61: "wait4",
+    72: "fcntl", 73: "flock", 74: "fsync", 75: "fdatasync", 76: "truncate",
+    77: "ftruncate", 82: "rename", 83: "mkdir", 84: "rmdir", 86: "link",
+    87: "unlink", 90: "chmod", 92: "chown", 128: "rt_sigtimedwait",
+    165: "mount", 166: "umount2", 202: "futex", 217: "getdents64",
+    230: "clock_nanosleep", 232: "epoll_wait", 233: "epoll_ctl",
+    247: "waitid", 257: "openat", 258: "mkdirat", 262: "newfstatat",
+    263: "unlinkat", 264: "renameat", 266: "symlinkat", 267: "readlinkat",
+    270: "pselect6", 271: "ppoll", 272: "unshare", 277: "sync_file_range",
+    280: "utimensat",
+    281: "epoll_pwait", 285: "fallocate", 288: "accept4", 306: "syncfs",
+    316: "renameat2", 426: "io_uring_enter", 436: "close_range",
+    439: "faccessat2",
+}
+
+# Blocking in these syscalls is (almost always) a thread waiting for work,
+# not work waiting for the kernel: event loops parked in epoll/poll, Go
+# runtime futexes, timers, and child-process reaping. They dominate raw
+# blocked-time totals and would crowd real signal out of the table.
+IDLE_WAIT_SYSCALLS = {
+    "futex", "epoll_wait", "epoll_pwait", "poll", "ppoll", "select",
+    "pselect6", "nanosleep", "clock_nanosleep", "pause", "rt_sigtimedwait",
+    "wait4", "waitid", "sched_yield", "accept", "accept4", "recvfrom",
+    "recvmsg",
+}
+
+
+def _profiler_ts(hms, run_date):
+    h, m, sec = (int(x) for x in hms.split(":"))
+    return datetime(run_date.year, run_date.month, run_date.day, h, m, sec)
+
+
+def parse_nodestat(path, run_date):
+    """Parses a profiler-nodestat log into per-interval CPU/load samples."""
+    text = Path(path).read_text()
+    snaps = []
+    for m in re.finditer(
+            r"=== nodestat ([\d:]+) ===\ncpu +([\d ]+)\n([\d.]+) ([\d.]+) [\d.]+ \S+",
+            text):
+        jiffies = [int(x) for x in m.group(2).split()]
+        snaps.append((_profiler_ts(m.group(1), run_date), jiffies, float(m.group(3))))
+    intervals = []
+    for (t0, j0, _), (t1, j1, load1) in zip(snaps, snaps[1:]):
+        d = [b - a for a, b in zip(j0, j1)]
+        total = sum(d)
+        if total <= 0:
+            continue
+        idle, iowait = d[3], d[4]
+        intervals.append({
+            "ts": t1,
+            "mid": t0 + (t1 - t0) / 2,
+            "busy_pct": (total - idle - iowait) / total * 100,
+            "iowait_pct": iowait / total * 100,
+            "load1": load1,
+        })
+    return intervals
+
+
+def parse_bpf_final_maps(path):
+    """Returns {(map_name, key_string): value} from a log's last snapshot."""
+    text = Path(path).read_text()
+    last = re.split(r"=== snapshot [\d:]+ ===\n", text)[-1]
+    out = {}
+    for m in re.finditer(r"^@(\w+)\[([^\]]*)\]: (\d+)$", last, re.M):
+        out[(m.group(1), m.group(2))] = out.get((m.group(1), m.group(2)), 0) + int(m.group(3))
+    return out
 
 
 def main():
@@ -951,6 +1034,105 @@ def main():
             row[prefix + "_iowait"] = sum(s[1] for s in shares) / len(shares)
         node_chart_data.append(row)
 
+    # Node profiler data (test/stress/profiler): per-node kernel-side view
+    # of the launch pipeline. nodestat samples every 15s give per-phase CPU /
+    # iowait / load; the bpftrace maps are whole-run cumulative totals.
+    print("Parsing node profiler logs...")
+    run_date = start_time.date()
+    node_stat_chart = []
+    node_stat_phases = []
+    profiler_nodes = sorted(
+        f.name[len("profiler-nodestat-"):-len(".log")]
+        for f in input_dir.glob("profiler-nodestat-*.log"))
+    for node in profiler_nodes:
+        intervals = parse_nodestat(input_dir / f"profiler-nodestat-{node}.log", run_date)
+        for it in intervals:
+            node_stat_chart.append({
+                "ts": it["ts"].strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "node": node,
+                "busy_pct": it["busy_pct"],
+                "iowait_pct": it["iowait_pct"],
+                "load1": it["load1"],
+            })
+        for name, p_start, p_end in phases:
+            in_phase = [it for it in intervals if p_start <= it["mid"] < p_end]
+            if not in_phase:
+                continue
+            node_stat_phases.append({
+                "phase_name": name,
+                "node": node,
+                "busy_pct": sum(it["busy_pct"] for it in in_phase) / len(in_phase),
+                "iowait_pct": sum(it["iowait_pct"] for it in in_phase) / len(in_phase),
+                "load_avg": sum(it["load1"] for it in in_phase) / len(in_phase),
+                "load_max": max(it["load1"] for it in in_phase),
+            })
+    phase_order_map = {name: i for i, (name, _, _) in enumerate(phases)}
+    node_stat_phases.sort(key=lambda r: (phase_order_map.get(r["phase_name"], 99), r["node"]))
+
+    # bpftrace map totals, summed across nodes (whole run; the raw logs and
+    # test/stress/profiler/analyze-fsync.py give per-phase splits).
+    maps_total = {}
+    for pattern in ("profiler-fsync-*.log", "profiler-extra-*.log"):
+        for f in input_dir.glob(pattern):
+            for k, v in parse_bpf_final_maps(f).items():
+                maps_total[k] = maps_total.get(k, 0) + v
+
+    def _split_key(key):
+        parts = key.split(", ", 1)
+        return (parts[0], parts[1] if len(parts) > 1 else "")
+
+    kernel_fsync = {}
+    for (mname, key), v in maps_total.items():
+        comm, rest = _split_key(key)
+        if mname == "calls":
+            row = kernel_fsync.setdefault(comm, {"comm": comm, "calls": 0, "blocked_s": 0.0})
+            row["calls"] += v
+        elif mname == "blocked_us_total":
+            row = kernel_fsync.setdefault(comm, {"comm": comm, "calls": 0, "blocked_s": 0.0})
+            row["blocked_s"] += v / 1e6
+    kernel_fsync = sorted(
+        (dict(r, mean_ms=(r["blocked_s"] * 1000 / r["calls"]) if r["calls"] else 0.0)
+         for r in kernel_fsync.values() if r["calls"] > 0),
+        key=lambda r: -r["blocked_s"])
+
+    def _pair_table(us_map, calls_map, keyfunc=None):
+        rows = {}
+        for (mname, key), v in maps_total.items():
+            if mname not in (us_map, calls_map):
+                continue
+            comm, rest = _split_key(key)
+            if keyfunc:
+                rest = keyfunc(rest)
+            row = rows.setdefault((comm, rest), {"comm": comm, "key": rest, "slow_calls": 0, "blocked_s": 0.0})
+            if mname == us_map:
+                row["blocked_s"] += v / 1e6
+            else:
+                row["slow_calls"] += v
+        out = [r for r in rows.values() if r["slow_calls"] > 0]
+        for r in out:
+            r["mean_ms"] = r["blocked_s"] * 1000 / r["slow_calls"]
+        out.sort(key=lambda r: -r["blocked_s"])
+        return out
+
+    def _syscall_name(nr):
+        try:
+            return SYSCALL_NAMES.get(int(nr), f"syscall_{nr}")
+        except ValueError:
+            return nr
+
+    kernel_syscalls = [
+        r for r in _pair_table("slow_syscall_us_total", "slow_syscall_calls", _syscall_name)
+        if r["key"] not in IDLE_WAIT_SYSCALLS
+    ][:20]
+    kernel_opens = _pair_table("slow_open_us", "slow_open_calls")[:12]
+    # Collapse /proc/self/fd/<n> and /proc/<pid>/... so the table groups by
+    # meaning rather than by file descriptor number.
+    kernel_proc = _pair_table(
+        "slow_proc_us", "slow_proc_paths",
+        lambda path: re.sub(r"/\d+", "/<n>", path))[:12]
+
+    profiler_available = bool(node_stat_phases or kernel_fsync or kernel_syscalls)
+
     # 4. Analyzer rules to identify findings
     findings = []
 
@@ -1129,6 +1311,23 @@ def main():
             "link": "ratelimits.html"
         })
 
+    # Node I/O saturation check (node profiler): high iowait with spare CPU
+    # means the launch pipeline is queueing on the node disk, not computing.
+    io_worst = None
+    for row in node_stat_phases:
+        if row['phase_name'].startswith('throughput'):
+            if io_worst is None or row['iowait_pct'] > io_worst['iowait_pct']:
+                io_worst = row
+
+    if io_worst and io_worst['iowait_pct'] > 10.0:
+        w = io_worst
+        findings.append({
+            "severity": "critical" if w['iowait_pct'] > 25.0 else "warning",
+            "title": f"Node I/O Saturation ({w['iowait_pct']:.0f}% iowait)",
+            "desc": f"During phase {w['phase_name']}, node {w['node']} averaged {w['iowait_pct']:.0f}% iowait with only {w['busy_pct']:.0f}% CPU busy and a 1-minute load average of {w['load_avg']:.0f} (peak {w['load_max']:.0f}) — processes queueing on disk, not computing. Pod churn is sync-write heavy (containerd bolt/content store, overlayfs teardown, kubelet checkpoints); see the Node Kernel page for fsync and slow-syscall attribution.",
+            "link": "node.html"
+        })
+
     # Capacity saturation finding check
     max_active_pods = 0
     for pt in capacity_chart_data:
@@ -1213,6 +1412,7 @@ def main():
         order = next((i for name, i in phase_order.items() if label.endswith(name)), len(phase_order))
         pprof_profiles.append({"file": f.name, "label": label, "order": order})
     pprof_profiles.sort(key=lambda p: (p["order"], p["label"]))
+
 
     # 5. Render Templates using Jinja2
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1385,6 +1585,21 @@ def main():
         "phases": js_phases
     }
     render_page("metrics.html", "metrics.html", metrics_ctx)
+
+    # Node kernel context
+    node_ctx = {
+        "active_page": "node",
+        "summary": summary,
+        "profiler_available": profiler_available,
+        "node_stat_phases": node_stat_phases,
+        "kernel_fsync": kernel_fsync,
+        "kernel_syscalls": kernel_syscalls,
+        "kernel_opens": kernel_opens,
+        "kernel_proc": kernel_proc,
+        "chart_data": node_stat_chart,
+        "phases": js_phases
+    }
+    render_page("node.html", "node.html", node_ctx)
 
     print("All report pages generated successfully!")
 

@@ -1,0 +1,431 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# stress-node-profiler captures node-side data while the stress test runs,
+# to explain where pod startup/teardown time goes on the node
+# (kubelet / containerd / runc / CNI), which API-side watch data cannot see.
+#
+# Per worker node it records:
+#
+#   - fsync-trace: bpftrace histogram of fsync/fdatasync/sync_file_range
+#     calls: who calls them, how often, and total blocked time. This is
+#     off-CPU blocking time, which CPU profilers (perf record) mostly miss.
+#     By construction this counts only fsync-family time; to rank it against
+#     other blocking sources (e.g. cgroup operations, which are writes /
+#     mkdirs on cgroupfs), the same tracer also records total blocked time
+#     per syscall (>=1ms only) for containerd*/runc*/kubelet. Translate the
+#     syscall numbers offline, e.g. `ausyscall x86_64 <nr>` or
+#     `python3 -c "import ctypes..."` / the syscall_64.tbl for the kernel.
+#     Slow opens (>=1ms) are additionally classified by path-prefix bucket
+#     (FIFO rendezvous under /run/containerd vs snapshotter work under
+#     /var/lib/containerd vs cgroupfs, ...), since an open's meaning depends
+#     on what is being opened.
+#     Analyze with test/stress/profiler/analyze-fsync.py.
+#   - ctr-events: the containerd event stream (ms-precision timestamps for
+#     task/container lifecycle). Joined offline against the API-side pod
+#     status updates in watch.jsonl.gz (join key: containerID in
+#     containerStatuses), the delta distribution exposes timer-driven poll
+#     loops: a flat histogram over [0, interval] means kubelet polled at
+#     that interval; a spike near zero means event-driven.
+#   - kubelet-log: the kubelet journal, for the events kubelet logs but does
+#     not export as metrics - above all "Housekeeping took longer than
+#     expected", which discriminates whether pod-dispatch delay is kubelet's
+#     sync loop blocking on housekeeping or upstream watch delivery.
+#
+# Deployed by test/benchmarks/scenarios/benchmarks-kops-gcp/run (gated by
+# STRESS_NODE_PROFILER); per-node logs are harvested into the artifacts
+# directory after the stress test.
+#
+# The pods are privileged with hostPID: bpftrace needs kernel tracepoint
+# access (Ubuntu kernels ship BTF, so no headers are needed), and ctr runs
+# on the host via nsenter into PID 1's mount namespace.
+#
+# Image: bpftrace:latest is rewritten at deploy time to
+# ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG} (built from images/bpftrace/).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stress-node-profiler
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: profiler-scripts
+  namespace: stress-node-profiler
+data:
+  fsync.bt: |
+    // Trace fsync-family syscalls: callers, rates, and blocked time.
+    //
+    // Per-thread "in flight" maps are LRU: entries leak when a thread dies
+    // mid-syscall or a kretprobe return is missed under load, and a full
+    // regular map makes bpftrace 0.21+ emit a per-event warning that
+    // flooded container logs with gigabytes and starved out all data.
+    let @start = lruhash(16384);
+    let @open_start = lruhash(16384);
+    let @open_path = lruhash(16384);
+    let @sys_start = lruhash(16384);
+    let @sys_nr = lruhash(16384);
+
+    BEGIN
+    {
+      printf("fsync tracer started\n");
+    }
+
+    tracepoint:syscalls:sys_enter_fsync,
+    tracepoint:syscalls:sys_enter_fdatasync,
+    tracepoint:syscalls:sys_enter_sync_file_range
+    {
+      @start[tid] = nsecs;
+      @calls[comm, probe] = count();
+    }
+
+    tracepoint:syscalls:sys_exit_fsync,
+    tracepoint:syscalls:sys_exit_fdatasync,
+    tracepoint:syscalls:sys_exit_sync_file_range
+    /@start[tid]/
+    {
+      $us = (nsecs - @start[tid]) / 1000;
+      @latency_us[comm] = hist($us);
+      @blocked_us_total[comm] = sum($us);
+      delete(@start[tid]);
+    }
+
+    // Classify slow opens by path prefix. openat topped the first run's
+    // work-syscall ranking (~67ms mean), but the path decides what it means:
+    // an open under /run/containerd (shim stdio FIFOs) is a rendezvous wait
+    // for the peer to attach, while /var/lib/containerd is snapshotter or
+    // content-store work and /sys/fs/cgroup is cgroup setup. Bounded buckets
+    // keep map cardinality safe for always-on capture (exact paths are
+    // unique per container); zoom with a targeted capture if a bucket
+    // dominates. Deliberately independent ifs, later (more specific) wins:
+    // portable across bpftrace versions without else-if support.
+    kprobe:do_sys_openat2
+    /strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 || comm == "kubelet"/
+    {
+      @open_start[tid] = nsecs;
+      @open_path[tid] = str(uptr(arg1));
+    }
+
+    kretprobe:do_sys_openat2
+    /@open_start[tid]/
+    {
+      $us = (nsecs - @open_start[tid]) / 1000;
+      if ($us >= 1000) {
+        $p = @open_path[tid];
+        $bucket = "other";
+        if (strncmp($p, "/sys", 4) == 0) { $bucket = "/sys"; }
+        if (strncmp($p, "/sys/fs/cgroup", 14) == 0) { $bucket = "/sys/fs/cgroup"; }
+        if (strncmp($p, "/proc", 5) == 0) { $bucket = "/proc"; }
+        if (strncmp($p, "/dev", 4) == 0) { $bucket = "/dev"; }
+        if (strncmp($p, "/var/log", 8) == 0) { $bucket = "/var/log"; }
+        if (strncmp($p, "/var/lib/kubelet", 16) == 0) { $bucket = "/var/lib/kubelet"; }
+        if (strncmp($p, "/var/lib/containerd", 19) == 0) { $bucket = "/var/lib/containerd"; }
+        if (strncmp($p, "/run/containerd", 15) == 0) { $bucket = "/run/containerd"; }
+        @slow_open_us[comm, $bucket] = sum($us);
+        @slow_open_calls[comm, $bucket] = count();
+      }
+      delete(@open_start[tid]);
+      delete(@open_path[tid]);
+    }
+
+    // Complement to the fsync-only numbers above: blocked time per syscall
+    // for the pod-start path processes, so fsync can be ranked against every
+    // other blocking source. Only syscalls blocking >= 1ms are recorded:
+    // this bounds tracer overhead and map size, and anything relevant to a
+    // ~2 pods/s/node limit is far above 1ms. Syscall numbers are printed
+    // numerically; translate offline (e.g. ausyscall x86_64 <nr>).
+    // strncmp prefixes catch containerd-shim-* and runc:[2:INIT] etc.
+    tracepoint:raw_syscalls:sys_enter
+    /strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 || comm == "kubelet"/
+    {
+      @sys_start[tid] = nsecs;
+      @sys_nr[tid] = args->id;
+    }
+
+    tracepoint:raw_syscalls:sys_exit
+    /@sys_start[tid]/
+    {
+      $us = (nsecs - @sys_start[tid]) / 1000;
+      if ($us >= 1000) {
+        @slow_syscall_us_total[comm, @sys_nr[tid]] = sum($us);
+        @slow_syscall_calls[comm, @sys_nr[tid]] = count();
+      }
+      delete(@sys_start[tid]);
+      delete(@sys_nr[tid]);
+    }
+
+    // Periodic snapshots give a time series aligned with the test phases.
+    // Logs are harvested while the tracer is still running, so everything
+    // must be printed here; the END block may never reach the logs.
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
+      print(@calls);
+      print(@blocked_us_total);
+      print(@latency_us);
+      print(@slow_syscall_us_total);
+      print(@slow_syscall_calls);
+      print(@slow_open_us);
+      print(@slow_open_calls);
+    }
+  extra.bt: |
+    // EXPERIMENTAL probes live in their own bpftrace process (the
+    // extra-trace container) so a load failure on a CI kernel cannot take
+    // down the proven fsync.bt data: a kretprobe verifier rejection cost us
+    // a full run's core data when these shared one script.
+    //
+    // Attribute the dominant /proc openat blocking (containerd, ~70ms mean,
+    // ~2 opens per pod cycle): exact paths for opens blocked >= 20ms.
+    // Printed AND CLEARED every snapshot: paths embed pids, so cardinality
+    // is only bounded per window, not per run.
+    let @xopen_start = lruhash(16384);
+    let @xopen_path = lruhash(16384);
+
+    BEGIN
+    {
+      printf("extra tracer started\n");
+    }
+
+    kprobe:do_sys_openat2
+    /strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 || comm == "kubelet"/
+    {
+      @xopen_start[tid] = nsecs;
+      @xopen_path[tid] = str(uptr(arg1));
+    }
+
+    kretprobe:do_sys_openat2
+    /@xopen_start[tid]/
+    {
+      $us = (nsecs - @xopen_start[tid]) / 1000;
+      if ($us >= 20000) {
+        $p = @xopen_path[tid];
+        if (strncmp($p, "/proc", 5) == 0) {
+          @slow_proc_paths[comm, $p] = count();
+          @slow_proc_us[comm, $p] = sum($us);
+        }
+      }
+      delete(@xopen_start[tid]);
+      delete(@xopen_path[tid]);
+    }
+
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
+      print(@slow_proc_paths);
+      print(@slow_proc_us);
+      clear(@slow_proc_paths);
+      clear(@slow_proc_us);
+    }
+  cpu.bt: |
+    // EXPERIMENTAL (own container): CPU sampling profiler at 99Hz.
+    // Complements nodestat (which says how busy the CPUs are) with
+    // attribution: per-comm sample share for every process, plus kernel
+    // stacks for the pod-churn actors. Kernel stacks always symbolize;
+    // user stacks are skipped deliberately — short-lived runc processes
+    // exit before symbolization (perf record on one node is the
+    // escalation if user-space Go turns out dominant).
+    BEGIN
+    {
+      printf("cpu profiler started\n");
+    }
+
+    profile:hz:99
+    {
+      @cpu_samples[comm] = count();
+      if (strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0 ||
+          comm == "kubelet" || strncmp(comm, "cilium", 6) == 0) {
+        @cpu_stacks[comm, kstack(16)] = count();
+      }
+    }
+
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
+      print(@cpu_samples);
+      print(@cpu_stacks);
+      clear(@cpu_samples);
+      clear(@cpu_stacks);
+    }
+  offcpu.bt: |
+    // EXPERIMENTAL (own container): off-CPU time by kernel stack for
+    // containerd* (includes shims). Discriminates the competing theories
+    // for node-side churn contention: mount-table locking (namespace_sem /
+    // mnt_want_write frames) vs ext4 journal & disk flush waits caused by
+    // fsync storms (jbd2 / wait_on_page_writeback / wait_transaction_locked
+    // frames) vs anything else. The trick: when a task resumes inside
+    // finish_task_switch, its kernel stack above schedule() is the path
+    // where it blocked, so the stack IS the sleep site.
+    //
+    // Overhead is bounded by filtering both edges to containerd* tasks;
+    // waits < 1ms are ignored. Maps are printed AND CLEARED each snapshot.
+    // Long idle parks (futex/epoll worker threads) will dominate the sums
+    // with boring stacks; read past them to the filesystem/VFS stacks.
+    // LRU: threads that die while off-CPU never resume, so their entries
+    // leak; a full regular map floods logs with per-event warnings.
+    let @offcpu_since = lruhash(16384);
+
+    BEGIN
+    {
+      printf("offcpu tracer started\n");
+    }
+
+    kprobe:finish_task_switch*
+    {
+      $prev = (struct task_struct *)arg0;
+      if (strncmp($prev->comm, "containerd", 10) == 0 || strncmp($prev->comm, "runc", 4) == 0) {
+        @offcpu_since[$prev->pid] = nsecs;
+      }
+      $last = @offcpu_since[tid];
+      if ($last) {
+        $delta_us = (nsecs - $last) / 1000;
+        delete(@offcpu_since[tid]);
+        if ($delta_us >= 1000 && (strncmp(comm, "containerd", 10) == 0 || strncmp(comm, "runc", 4) == 0)) {
+          @offcpu_us[comm, kstack(20)] = sum($delta_us);
+        }
+      }
+    }
+
+    interval:s:30
+    {
+      time("=== snapshot %H:%M:%S ===\n");
+      print(@offcpu_us);
+      clear(@offcpu_us);
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: stress-node-profiler
+  namespace: stress-node-profiler
+spec:
+  selector:
+    matchLabels:
+      app: stress-node-profiler
+  template:
+    metadata:
+      labels:
+        app: stress-node-profiler
+    spec:
+      # No control-plane toleration: we only profile worker nodes.
+      hostPID: true
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: fsync-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/fsync.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: extra-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/extra.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: cpu-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/cpu.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: offcpu-trace
+        image: bpftrace:latest
+        command: ["bpftrace", "/scripts/offcpu.bt"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      - name: nodestat
+        image: bpftrace:latest
+        # /proc/stat and /proc/loadavg are not namespaced: a plain container
+        # sees host CPU counters. The off-CPU profile showed no dominant
+        # sleeps, making CPU saturation the leading node-ceiling hypothesis;
+        # these snapshots measure it directly (diff cpu jiffies per window).
+        command:
+        - sh
+        - -c
+        - |
+          while true; do
+            echo "=== nodestat $(date -u +%H:%M:%S) ==="
+            head -1 /proc/stat
+            cat /proc/loadavg
+            sleep 15
+          done
+      - name: ctr-events
+        image: bpftrace:latest
+        # Run the host's ctr binary in the host mount namespace. Events are
+        # timestamped by ctr as they arrive; keep the container alive on
+        # failure so the DaemonSet stays healthy and the log is inspectable.
+        command:
+        - sh
+        - -c
+        - |
+          nsenter -t 1 -m -- sh -c 'ctr --namespace k8s.io events' 2>&1 || echo "ctr events failed"
+          sleep infinity
+        securityContext:
+          privileged: true
+      - name: kubelet-log
+        image: bpftrace:latest
+        # Follow the host's kubelet journal. Motivation (run
+        # 2080723438359547904): at mif600, pods wait ~1.2-1.9s between the
+        # scheduler's binding write and kubelet's first action, while every
+        # measurable neighbor is fast (kubelet first-sync 212ms flat, rate
+        # limiter 0% waits, PLEG 1.0s steady, containerd mostly idle with
+        # creations running up to 10-wide). The two remaining suspects are
+        # apiserver->kubelet watch delivery and kubelet's sync loop blocking
+        # on its synchronous housekeeping pass while teardown churns at
+        # ~8 pods/s/node. Housekeeping blockage has no metric in this
+        # kubelet, but it logs "Housekeeping took longer than expected"
+        # warnings - so the journal discriminates the two: warnings present
+        # means sync-loop dispatch, a clean log points at watch delivery.
+        # short-iso-precise timestamps make the entries joinable against
+        # watch.jsonl and ctr-events.
+        command:
+        - sh
+        - -c
+        - |
+          nsenter -t 1 -m -- sh -c 'journalctl -u kubelet.service -f -o short-iso-precise --no-pager' 2>&1 || echo "journalctl failed"
+          sleep infinity
+        securityContext:
+          privileged: true
+      volumes:
+      - name: scripts
+        configMap:
+          name: profiler-scripts
+      - name: sys
+        hostPath:
+          path: /sys

@@ -78,8 +78,19 @@ fi
 export IMAGE_TAG
 echo "Using image tag: ${IMAGE_TAG}"
 
+# STRESS_NODE_PROFILER deploys the bpftrace node-profiler DaemonSet
+# (test/stress/profiler/) during the stress test, capturing node-side pod
+# startup/teardown costs that API-side data cannot see: fsync / off-CPU
+# blocking time, CPU stacks, and the containerd event stream. Best-effort
+# at runtime; needs the bpftrace image pushed below.
+STRESS_NODE_PROFILER="${STRESS_NODE_PROFILER:-true}"
+
 # Push images
-for image in "agent-sandbox-controller" "chrome-sandbox"; do
+PUSH_IMAGES=("agent-sandbox-controller" "chrome-sandbox")
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  PUSH_IMAGES+=("bpftrace")
+fi
+for image in "${PUSH_IMAGES[@]}"; do
   echo "Pushing ${image} to ${IMAGE_PREFIX}..."
   dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
 done
@@ -148,7 +159,19 @@ echo "Using node count: ${STRESS_NODE_COUNT}"
 # controller's workqueue wait collapsing 445ms -> 3ms downstream. Override via
 # STRESS_CONTROL_PLANE_SIZE (e.g. back to n2-standard-8) to reproduce the
 # saturated-server regime.
-STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-n2-standard-16}"
+#
+# Second round: with the node I/O wall lifted, the bottleneck moved back to
+# control-plane CPU. The pd-ssd leg (run 2080670751672766464) reached 151
+# claims/s with the apiserver at 10.5 of 16 n2 cores and 8ms latency; the
+# 40-node leg (run 2080670827233153024) reached 145/s with the apiserver at
+# 12.0 cores and latency degrading to 20ms - saturation on the shared
+# 16-core box. Rather than doubling n2 again, move to c3 (Sapphire Rapids,
+# roughly +35% per core over n2's Cascade/Ice Lake): apiserver request
+# latency benefits from the faster cores directly, not just from more of
+# them. NOTE: c3/c4 machine families do not support pd-standard boot disks,
+# so the control-plane root volume is set to pd-ssd below alongside the
+# nodes'.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
 echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
 
 echo "Creating kOps cluster configuration..."
@@ -170,6 +193,28 @@ kops create cluster \
 # it, and a new knob is a new block instead of another line in a shared flag
 # list -- so tuning changes stop conflicting with each other. The edits
 # mutate the spec in the state store; `kops update cluster` below applies them.
+
+# Node root volumes: kOps' GCE default is pd-standard (spinning disk), and
+# the bpftrace node profiler (kindnet run 2080606920242106368, 20 nodes)
+# showed the pod launch pipeline is disk-sync-bound on it: containerd spent
+# 2,718s blocked across 923k fsync-family calls (kubelet another 987s at
+# 15ms/call), run_podsandbox mean rose ~130ms -> 1.0-1.2s under load, and
+# iowait hit ~2.1-2.5 cores/node while node CPU stayed under half busy.
+# pd-ssd raises IOPS/GB 40x over pd-standard and attacks that wall
+# directly.
+STRESS_NODE_VOLUME_TYPE="${STRESS_NODE_VOLUME_TYPE:-pd-ssd}"
+echo "Using node root volume type: ${STRESS_NODE_VOLUME_TYPE}"
+kops edit instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" \
+  --set "spec.rootVolume.type=${STRESS_NODE_VOLUME_TYPE}"
+
+# Control-plane root volume: required to be non-pd-standard by the c3
+# machine family (see the control-plane sizing note above), and it retires
+# the cluster's last spinning disk. Nothing latency-critical lives on the
+# CP root - the etcd data volumes are separate PDs and already pd-ssd by
+# kOps' GCE default (DefaultGCEEtcdVolumeType; measured 1.5ms mean fsync) -
+# so this is an enabler, not a tuning claim.
+kops edit instancegroup --name "${CLUSTER_NAME}" "control-plane-${ZONE}" \
+  --set "spec.rootVolume.type=pd-ssd"
 
 # authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
 # kube-controller-manager and kube-scheduler so the stress test can scrape
@@ -244,6 +289,34 @@ if [[ "${CNI}" == "cilium" ]]; then
   # bottleneck, and CNI endpoint regeneration latency lives in these metrics).
   kops edit cluster --name "${CLUSTER_NAME}" \
     --set cluster.spec.networking.cilium.enablePrometheusMetrics=true
+fi
+
+# fsync isolation experiment: /var/lib/containerd on tmpfs (worker nodes
+# only). The 1122 profiling measured ~42 fdatasync+fsync calls per pod in
+# containerd (bolt metadata + content store); tmpfs makes those syncs free,
+# so an A/B against this knob measures the true upper bound of the fsync
+# theory. Benchmark-only (images/snapshots do not survive reboot). Default
+# false so the benchmark measures realistic disk-backed nodes.
+STRESS_CONTAINERD_TMPFS="${STRESS_CONTAINERD_TMPFS:-false}"
+if [[ "${STRESS_CONTAINERD_TMPFS}" == "true" ]]; then
+  echo "Adding containerd-on-tmpfs hook to cluster spec..."
+  # `kops get -o yaml` emits top-level keys sorted (apiVersion, kind,
+  # metadata, spec), so appending 2-space-indented keys extends spec.
+  kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster.yaml"
+  cat >> "${WORKDIR}/cluster.yaml" <<'HOOK_EOF'
+  hooks:
+  - name: containerd-tmpfs
+    before:
+    - containerd.service
+    roles:
+    - Node
+    manifest: |
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/mkdir -p /var/lib/containerd
+      ExecStart=/bin/mount -t tmpfs -o size=16g tmpfs /var/lib/containerd
+HOOK_EOF
+  kops replace -f "${WORKDIR}/cluster.yaml"
 fi
 
 echo "Applying cluster configuration..."
@@ -332,6 +405,18 @@ capture_stress_diagnostics() {
   kubectl top nodes > "${STRESS_OUTPUT_DIR}/top-nodes.txt" 2>/dev/null || true
 }
 
+# Deploy the node profiler so node-side pod startup/teardown costs are
+# captured during the stress test. See test/stress/profiler/profiler.yaml
+# for what is recorded and why.
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Deploying node profiler..."
+  # bpftrace:latest -> ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG} (images/bpftrace).
+  sed "s|image: bpftrace:latest|image: ${IMAGE_PREFIX}bpftrace:${IMAGE_TAG}|g" \
+    test/stress/profiler/profiler.yaml | kubectl apply -f -
+  # Best-effort: a missing image or unsupported kernel should not fail the run.
+  kubectl rollout status daemonset/stress-node-profiler --namespace stress-node-profiler --timeout=2m || true
+fi
+
 echo "Running stress test"
 # Prometheus metrics from the apiserver, kube-controller-manager,
 # kube-scheduler, the sandbox controller, and kubelets are collected by the
@@ -355,6 +440,24 @@ go run ./test/stress \
 stress_status=$?
 set -o errexit
 capture_stress_diagnostics
+
+# Harvest per-node profiler logs into the artifacts directory. Log names
+# match what test/stress/profiler/analyze-fsync.py expects
+# (profiler-fsync-<node>.log etc).
+if [[ "${STRESS_NODE_PROFILER}" == "true" ]]; then
+  echo "Harvesting node profiler logs..."
+  kubectl get pods --namespace stress-node-profiler \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.spec.nodeName}{"\n"}{end}' | \
+  while read -r pod node; do
+    kubectl logs --namespace stress-node-profiler "${pod}" -c fsync-trace > "${STRESS_OUTPUT_DIR}/profiler-fsync-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c extra-trace > "${STRESS_OUTPUT_DIR}/profiler-extra-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c cpu-trace > "${STRESS_OUTPUT_DIR}/profiler-cpu-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c offcpu-trace > "${STRESS_OUTPUT_DIR}/profiler-offcpu-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c nodestat > "${STRESS_OUTPUT_DIR}/profiler-nodestat-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c ctr-events > "${STRESS_OUTPUT_DIR}/profiler-ctr-events-${node}.log" || true
+    kubectl logs --namespace stress-node-profiler "${pod}" -c kubelet-log > "${STRESS_OUTPUT_DIR}/profiler-kubelet-${node}.log" || true
+  done
+fi
 
 # Generate stress test report, under the stress-test artifacts dir (the
 # report is part of the stress test, alongside the raw data it renders).

@@ -19,6 +19,9 @@ set -eo pipefail
 IMAGE_PREFIX=${IMAGE_PREFIX:-"us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/"}
 IMAGE_TAG=${IMAGE_TAG:-"latest-main"}
 
+
+RUNTIME_CLASS=${RUNTIME_CLASS:-""}
+
 # Get the directory of this script
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 REPO_ROOT="${DIR}/../.."
@@ -100,7 +103,8 @@ for scenario in "${NODE_SCENARIOS[@]}"; do
         -node-name="${NODE_NAME}" \
         -density="${density}" \
         -image-prefix="${IMAGE_PREFIX}" \
-        -image-tag="${IMAGE_TAG}"; then
+        -image-tag="${IMAGE_TAG}" \
+        -runtime-class-name="${RUNTIME_CLASS}"; then
       echo "Scenario ${scenario} at density ${density} completed successfully."
     else
       echo "Scenario ${scenario} at density ${density} failed."

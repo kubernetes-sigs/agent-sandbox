@@ -46,6 +46,13 @@ const (
 	// TokenReview API. Per-sandbox authorization beyond authentication
 	// is out of v1 scope.
 	AuthzTokenReview AuthzMode = "tokenreview"
+	// AuthzScopedToken authorizes each request against a signed,
+	// per-sandbox token instead of a cluster-verifiable K8s
+	// credential: the token is bound to one (namespace, name) pair at
+	// mint time (see authz.MintScopedToken) and the router rejects it
+	// with 403 against any other sandbox. Use this when the caller
+	// should never need to hold a K8s Bearer token at all.
+	AuthzScopedToken AuthzMode = "scoped-token"
 )
 
 // Config is the parsed runtime configuration. All fields are populated by
@@ -169,6 +176,15 @@ type Config struct {
 	// Projected ServiceAccount tokens carry an aud claim that must
 	// match. Empty disables the audience check.
 	AuthzTokenReviewAudiences []string
+
+	// AuthzScopedTokenSecretFile is the path to a file holding the
+	// shared HMAC-SHA256 secret used to verify scoped tokens (see
+	// authz.ScopedTokenAuthorizer). Required when AuthzMode is
+	// scoped-token. The router never generates this secret — whoever
+	// mints tokens (typically the Sandbox controller) and the router
+	// must share it out-of-band, e.g. the same K8s Secret mounted into
+	// both.
+	AuthzScopedTokenSecretFile string
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -248,15 +264,18 @@ func (c *Config) Validate() error {
 	}
 
 	switch c.AuthzMode {
-	case AuthzAllowAll, AuthzTokenReview:
+	case AuthzAllowAll, AuthzTokenReview, AuthzScopedToken:
 	default:
-		return fmt.Errorf("invalid --authz-mode %q (want allow-all or tokenreview)", c.AuthzMode)
+		return fmt.Errorf("invalid --authz-mode %q (want allow-all, tokenreview, or scoped-token)", c.AuthzMode)
 	}
 	if c.AuthzTokenReviewTTL <= 0 {
 		return fmt.Errorf("--authz-tokenreview-ttl must be positive, got %s", c.AuthzTokenReviewTTL)
 	}
 	if c.AuthzTokenReviewCacheSize <= 0 {
 		return fmt.Errorf("--authz-tokenreview-cache-size must be positive, got %d", c.AuthzTokenReviewCacheSize)
+	}
+	if c.AuthzMode == AuthzScopedToken && c.AuthzScopedTokenSecretFile == "" {
+		return errors.New("--authz-scoped-token-secret-file is required when --authz-mode=scoped-token")
 	}
 	return nil
 }

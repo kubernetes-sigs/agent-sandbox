@@ -25,6 +25,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**playwright-sandbox**](./playwright-sandbox): An example of running Playwright with Chromium in a sandbox for web scraping and screenshots.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
+- [**router-scoped-mcp-sandbox**](./router-scoped-mcp-sandbox): An MCP server reached through sandbox-router's scoped-token authorizer — the agent holds a token bound to one sandbox, never a K8s credential or a third-party gateway.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
 - [**windows-sandbox**](./windows-sandbox): An example of running a Windows guest inside the Agent Sandbox via KVM/QEMU.

@@ -174,6 +174,21 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 **Scope of v1.** TokenReview only **authenticates** the caller — it verifies the token belongs to a known principal in the cluster. It does **not** check whether that principal is allowed to access the specific sandbox they named in `X-Sandbox-ID`. Tightening to per-sandbox authorization needs an agreed identity contract on the Sandbox CR (owner label, annotation, or a SubjectAccessReview-style policy) and is tracked as follow-up after KEP-NNNN lands.
 
+### Scoped-token authorizer
+
+Set `--authz-mode=scoped-token` to enable the built-in authorizer that closes exactly the gap called out above, but without requiring the caller to hold a cluster-verifiable K8s credential at all. A scoped token is a small HMAC-SHA256-signed value binding `(namespace, name, exp)` — minted with `authz.MintScopedToken` — and the authorizer both verifies the signature/expiry *and* checks that the token's `(namespace, name)` matches the sandbox actually being addressed. A token minted for `box-a` gets 403 against `box-b`; there is no TokenReview round-trip and no K8s API access implied by possessing the token. Requests carrying `X-Sandbox-Pod-IP` or `X-Sandbox-UID` are rejected outright in this mode: both override how the proxy picks the dial target *after* authorization (a raw IP, or a UID→IP cache lookup), which would let a token scoped to one sandbox reach a different pod while `X-Sandbox-ID` still names the authorized one. Rejecting them leaves DNS resolution by `(namespace, name)` — exactly the identity the token authorizes — as the only routing path, so the dial target always matches what was authorized. This does mean scoped-token mode needs the sandbox reachable by its `(namespace, name)` DNS name (e.g. a headless `Service`), rather than the UID cache fast-path.
+
+This is the primitive an agent-facing example needs to reproduce the credential-boundary story of `examples/containarium-ssh-sandbox` (agent holds one narrow, single-purpose credential, never a cluster token) using only pieces native to this project — no third-party SSH gateway, no vendor runtime image. `MintScopedToken` is exported so a Sandbox controller (or a test/example harness standing in for one) can mint a token at Sandbox-creation time and hand it to the agent; the router itself never mints, only verifies.
+
+Flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--authz-mode` | `allow-all` | `allow-all`, `tokenreview`, or `scoped-token`. |
+| `--authz-scoped-token-secret-file` | `""` | Path to a file holding the shared HMAC-SHA256 secret. Required when `--authz-mode=scoped-token`; must match whatever minted the tokens (e.g. the same K8s Secret mounted into the controller and the router). At least 32 bytes after whitespace trimming (`authz.MinScopedTokenSecretLen`) — every observed token is an offline brute-force oracle for this secret, so short values are refused at startup. Minter and verifier both trim surrounding whitespace, so a trailing newline in the mounted file is harmless. |
+
+**Follow-up, not in this change.** Nothing here mints tokens automatically at Sandbox creation or rotates the shared secret without a restart — both are natural next steps once a controller-side minting story is agreed, tracked alongside the per-sandbox-authorization follow-up on TokenReview above.
+
 ## TLS / mTLS
 
 The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read from `--tls-cert-file` and `--tls-key-file`. Both files are watched: writing a new file (atomic rename, like Kubernetes Secret projection) triggers an automatic reload with no pod restart.

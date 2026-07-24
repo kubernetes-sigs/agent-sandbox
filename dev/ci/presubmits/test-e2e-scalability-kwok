@@ -40,7 +40,10 @@ CLIENTS="${CL2_K8S_CLIENTS_NUMBER:-20}"
 
 CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"
 CONTROLLER_BURST="${CONTROLLER_KUBE_API_BURST:-2000}"
-CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-200}"
+CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-300}"
+CONTROLLER_CLAIM_WORKERS="${CONTROLLER_CLAIM_WORKERS:-300}"
+CONTROLLER_WARM_POOL_WORKERS="${CONTROLLER_WARM_POOL_WORKERS:-1}"
+CONTROLLER_TEMPLATE_WORKERS="${CONTROLLER_TEMPLATE_WORKERS:-1}"
 CONTROLLER_BATCH="${CONTROLLER_MAX_BATCH_SIZE:-300}"
 
 echo "======================================================="
@@ -119,8 +122,9 @@ go run ./cmd/agent-sandbox-controller \
   --kube-api-qps="${CONTROLLER_QPS}" \
   --kube-api-burst="${CONTROLLER_BURST}" \
   --sandbox-concurrent-workers="${CONTROLLER_WORKERS}" \
-  --sandbox-claim-concurrent-workers="${CONTROLLER_WORKERS}" \
-  --sandbox-warm-pool-concurrent-workers="${CONTROLLER_WORKERS}" \
+  --sandbox-claim-concurrent-workers="${CONTROLLER_CLAIM_WORKERS}" \
+  --sandbox-warm-pool-concurrent-workers="${CONTROLLER_WARM_POOL_WORKERS}" \
+  --sandbox-template-concurrent-workers="${CONTROLLER_TEMPLATE_WORKERS}" \
   --sandbox-warm-pool-max-batch-size="${CONTROLLER_BATCH}" > "${WORKDIR}/controller.log" 2>&1 &
 CONTROLLER_PID=$!
 sleep 3

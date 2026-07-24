@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepagents-k8s-agent-sandbox"
+description = "LangChain DeepAgents backend for Kubernetes agent-sandbox."
+readme = "README.md"
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version"]
+requires-python = ">=3.10"
+dependencies = [
+    "deepagents>=0.6.0,<0.7.0",
+    "k8s-agent-sandbox~=0.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kubernetes-sigs/agent-sandbox/clients/integrations/deepagents"
+Repository = "https://github.com/kubernetes-sigs/agent-sandbox"
+Documentation = "https://github.com/kubernetes-sigs/agent-sandbox/clients/integrations/deepagents"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["deepagents_k8s_agent_sandbox*"]
+exclude = ["tests*"]
+
+[tool.setuptools.exclude-package-data]
+# setuptools_scm automatically bundles tracked files as package data.
+# We need to explicitly exclude test directories and files from being bundled.
+"*" = ["test/*", "tests/*", "*/test/*", "*/tests/*", "test_*.py", "*_test.py"]
+
+[tool.setuptools_scm]
+root = "../../.."
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-xdist",
+    "pytest-asyncio",
+]

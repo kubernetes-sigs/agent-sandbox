@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -74,6 +75,8 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
+	var sandboxWarmPoolReplenishDelay time.Duration
+	var sandboxWarmPoolMaxRefillRate float64
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
@@ -122,6 +125,15 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300.")
+	flag.DurationVar(&sandboxWarmPoolReplenishDelay, "sandbox-warm-pool-replenish-delay", 0,
+		"How long the SandboxWarmPool controller defers creating replacement sandboxes after pool members drop out of the pool "+
+			"(e.g. a burst of SandboxClaims adopting warm sandboxes), so the burst gets API server priority. "+
+			"The hold re-arms while members keep dropping. 0 (default) replenishes immediately.")
+	flag.Float64Var(&sandboxWarmPoolMaxRefillRate, "sandbox-warm-pool-max-refill-rate", 0,
+		"Max rate (sandboxes/second, per pool) at which the SandboxWarmPool controller creates replacement sandboxes, "+
+			"pacing refill into a smooth stream instead of full-deficit bursts that flood the write path and compete with claim adoption. "+
+			"Composes with --sandbox-warm-pool-replenish-delay: the delay defers the start of refill, the rate shapes its flow. "+
+			"0 (default) leaves refill unpaced (whole deficit per reconcile).")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
@@ -169,6 +181,14 @@ func main() {
 	// Validation checks for sandboxWarmPoolMaxBatchSize (maximum batch size for sandbox creation and deletion in SandboxWarmPool controller)
 	if sandboxWarmPoolMaxBatchSize <= 0 {
 		setupLog.Error(nil, "sandbox-warm-pool-max-batch-size must be greater than 0")
+		os.Exit(1)
+	}
+	// Fail fast on nonsensical refill rates: flag parsing accepts "NaN" and
+	// "+Inf", and a negative rate would silently disable pacing (the
+	// controller treats <= 0 as unpaced), which is confusing to debug.
+	if math.IsNaN(sandboxWarmPoolMaxRefillRate) || math.IsInf(sandboxWarmPoolMaxRefillRate, 0) || sandboxWarmPoolMaxRefillRate < 0 {
+		setupLog.Error(nil, "sandbox-warm-pool-max-refill-rate must be a finite value >= 0 (0 disables pacing)",
+			"value", sandboxWarmPoolMaxRefillRate)
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -430,6 +450,8 @@ func main() {
 			Scheme:                 mgr.GetScheme(),
 			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
 			EnableWarmPoolEviction: enableWarmPoolEviction,
+			ReplenishDelay:         sandboxWarmPoolReplenishDelay,
+			MaxRefillRate:          sandboxWarmPoolMaxRefillRate,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)

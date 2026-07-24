@@ -44,6 +44,9 @@
 	{{- end -}}
 	{{- end -}}
 {{- end -}}
+{{- with $e.ctaurl -}}
+<p class="quickstart-cta"><a href="{{ . }}">{{ $e.ctatext }}</a></p>
+{{- end -}}
 </div>
 {{- end -}}
 </div>

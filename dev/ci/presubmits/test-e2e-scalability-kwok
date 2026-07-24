@@ -137,7 +137,16 @@ if [[ ! -f "${TEST_CONFIG}" ]]; then
 fi
 
 echo "Running ClusterLoader2 benchmark (Scenario=${SCENARIO}, QPS=${QPS}, Duration=${DURATION}s, WarmPool=${WARMPOOL})..."
-CL2_QPS="${QPS}" CL2_DURATION_SECONDS="${DURATION}" CL2_WARMPOOL_SIZE="${WARMPOOL}" CL2_ENABLE_SCHEDULING_METRICS="false" "${BINDIR}/clusterloader2" \
+# Disable APIAvailability measurement under KWOK simulated clusters:
+# APIAvailability deploys an agnhost pod and attempts `kubectl exec` to check API server latency.
+# Since KWOK virtual pods do not run a real container runtime or process, `kubectl exec` fails with
+# 'no exec found for container agnhost'. Disabling it avoids non-fatal warnings on virtual clusters.
+CL2_QPS="${QPS}" \
+CL2_DURATION_SECONDS="${DURATION}" \
+CL2_WARMPOOL_SIZE="${WARMPOOL}" \
+CL2_ENABLE_SCHEDULING_METRICS="false" \
+CL2_ENABLE_API_AVAILABILITY="false" \
+"${BINDIR}/clusterloader2" \
   --testconfig="${TEST_CONFIG}" \
   --kubeconfig="${KUBECONFIG}" \
   --provider=skeleton \

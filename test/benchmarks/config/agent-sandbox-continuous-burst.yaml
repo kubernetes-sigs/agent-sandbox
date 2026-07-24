@@ -12,6 +12,7 @@
 {{$sandboxClaimControllerStartupLatencyThreshold90Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90_MS 1000}}
 {{$sandboxClaimControllerStartupLatencyThreshold99Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS 5000}}
 {{$ENABLE_SCHEDULING_METRICS := DefaultParam .CL2_ENABLE_SCHEDULING_METRICS true}}
+{{$ENABLE_API_AVAILABILITY := DefaultParam .CL2_ENABLE_API_AVAILABILITY true}}
 
 # Standard continuous throughput. Uses un-filtered irate since continuous scenario has no breaks or idle time.
 {{$claimThroughputQuery := `(sum(irate(agent_sandbox_claim_controller_startup_latency_ms_count[5m])) by (launch_type, sandbox_template))[%v:5s]`}}
@@ -104,12 +105,14 @@ steps:
     Method: APIResponsivenessPrometheus
     Params:
       action: start
+{{if $ENABLE_API_AVAILABILITY}}
   - Identifier: APIAvailability
     Method: APIAvailability
     Params:
       action: start
       pollFrequency: "5s"
       hostPollTimeoutSeconds: 5
+{{end}}
 {{if $ENABLE_SCHEDULING_METRICS}}
   - Identifier: TestMetrics
     Method: TestMetrics
@@ -227,10 +230,12 @@ steps:
       enableViolations: false
       useSimpleLatencyQuery: true
       summaryName: APIResponsivenessPrometheus_simple
+{{if $ENABLE_API_AVAILABILITY}}
   - Identifier: APIAvailability
     Method: APIAvailability
     Params:
       action: gather
+{{end}}
 {{if $ENABLE_SCHEDULING_METRICS}}
   - Identifier: TestMetrics
     Method: TestMetrics

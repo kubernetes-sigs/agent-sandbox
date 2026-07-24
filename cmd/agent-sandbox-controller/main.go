@@ -38,7 +38,6 @@ import (
 	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
@@ -279,7 +278,6 @@ func main() {
 	scheme := controllers.Scheme
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	if extensions {
-		utilruntime.Must(extensionsv1alpha1.AddToScheme(scheme))
 		utilruntime.Must(extensionsv1beta1.AddToScheme(scheme))
 	}
 
@@ -452,14 +450,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if enableWebhook {
-		if err = ctrl.NewWebhookManagedBy(mgr, &sandboxv1beta1.Sandbox{}).
-			Complete(); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
-			os.Exit(1)
-		}
-	}
-
 	if extensions {
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
@@ -532,25 +522,6 @@ func main() {
 			os.Exit(1)
 		}
 
-		if enableWebhook {
-			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxClaim{}).
-				Complete(); err != nil {
-				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxClaim")
-				os.Exit(1)
-			}
-
-			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxTemplate{}).
-				Complete(); err != nil {
-				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxTemplate")
-				os.Exit(1)
-			}
-
-			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxWarmPool{}).
-				Complete(); err != nil {
-				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxWarmPool")
-				os.Exit(1)
-			}
-		}
 	}
 
 	//+kubebuilder:scaffold:builder

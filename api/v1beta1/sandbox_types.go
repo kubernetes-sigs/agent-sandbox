@@ -284,7 +284,6 @@ type SandboxStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
-// +kubebuilder:conversion:strategy=Webhook
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

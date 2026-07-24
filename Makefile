@@ -59,7 +59,7 @@ LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 	-X $(VERSION_PKG).buildDate=$(BUILD_DATE)
 
 .PHONY: build
-build: build-controller build-sandbox-router
+build: build-controller build-sandbox-router build-sandboxd
 
 .PHONY: build-controller
 build-controller:
@@ -68,6 +68,10 @@ build-controller:
 .PHONY: build-sandbox-router
 build-sandbox-router:
 	go build -ldflags "$(LD_FLAGS)" -o bin/sandbox-router ./sandbox-router/cmd
+
+.PHONY: build-sandboxd
+build-sandboxd:
+	go build -ldflags "$(LD_FLAGS)" -o bin/sandboxd ./packages/sandboxd/cmd/sandboxd
 
 KIND_CLUSTER=agent-sandbox
 

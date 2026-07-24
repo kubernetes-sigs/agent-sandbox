@@ -8,3 +8,5 @@
 # Redacted sample report (environment scrubbed) — the one checked-in example.
 !sample_rl_rollout.md
 !sample_rl_rollout.json
+# Report template (no live data — the blank skeleton report generators fill in).
+!REPORT_TEMPLATE.md

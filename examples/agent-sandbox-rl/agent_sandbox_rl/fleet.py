@@ -23,20 +23,24 @@ release → teardown. Use the primitives directly from an RL loop, or the manage
 
 from __future__ import annotations
 
+import atexit
 import collections
+import contextlib
 import logging
 import math
+import signal
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from kubernetes import client
 
-from . import sizing
+from . import constants, sizing
 from .cluster import Cluster, ClusterRegistry
 from .config import ClusterConfig, FleetConfig
-from .exceptions import FleetError, PreflightError
+from .exceptions import FleetError, FleetOvercommitError, PreflightError
 from .handles import SandboxHandle
 from .observability import Observer, repo_family
 from .placement import get_placement
@@ -81,6 +85,7 @@ class FleetPlan:
   def __init__(self, entries: list[PlanEntry]):
     self.entries = entries
     self._by_image = {e.image: e for e in entries}
+    self.warnings: list[str] = []            # (#5) advisory notes, never fatal
 
   def for_image(self, image: str) -> Optional[PlanEntry]:
     return self._by_image.get(image)
@@ -101,13 +106,35 @@ class SandboxFleet:
 
   def __init__(self, config: FleetConfig | None = None,
                registry: ClusterRegistry | None = None):
-    self.config = config or FleetConfig()
+    # Copy the caller's config so we don't mutate their object when stamping the
+    # run-id label below.
+    src = config or FleetConfig()
+    self.config = (src.model_copy(deep=True) if hasattr(src, "model_copy")
+                   else src.copy(deep=True))
+    # Stamp a per-run label on everything this fleet creates so an orphaned run
+    # can always be swept by the reaper (#4). Set before the registry is built so
+    # it flows into every create call's labels.
+    self.run_id = uuid.uuid4().hex[:12]
+    self.config.labels = {**self.config.labels, constants.RUN_ID_LABEL: self.run_id}
+    self._prev_handlers: dict = {}           # signum -> previous handler (to restore)
+    self._atexit_registered = False
+    self._torndown = False
+    self._teardown_lock = threading.Lock()   # makes _teardown idempotent/reentrant
     # Honor an explicitly-passed registry even when empty — `ClusterRegistry`
     # defines `__len__`, so `registry or …` would treat `ClusterRegistry([])` as
     # falsy and build a default ambient Cluster (which loads kube-config). Only
     # fall back when no registry was given at all.
     self.registry = (registry if registry is not None
                      else self._default_registry(self.config))
+    # A caller-supplied registry was built before the run-id was stamped above, so
+    # its clusters' Resources.labels lack it — the pods it creates would then carry
+    # no run-id and be invisible to the breaker/reaper. Ensure every cluster
+    # (default or supplied) carries this run's labels. Idempotent for the default.
+    for _c in self.registry:
+      try:
+        _c.resources.labels.update(self.config.labels)
+      except Exception:  # noqa: BLE001 — a non-standard registry may differ; best-effort
+        pass
     self.placement = get_placement(self.config.placement)
     self.tasks: list[Task] = []
     self.plan_: FleetPlan | None = None
@@ -136,6 +163,139 @@ class SandboxFleet:
   @property
   def observer(self):
     return self._obs
+
+  # --- runaway safeguards (plans/sdk-runaway-safeguards.md) --------------- #
+  def run_selector(self) -> str:
+    """Label selector for resources this run owns (the reaper key)."""
+    return f"{constants.RUN_ID_LABEL}={self.run_id}"
+
+  def live_owned_count(self) -> int:
+    """Live sandbox **pods** this run owns (by run-id label), across clusters.
+
+    The Sandbox controller does not copy the run-id label onto Sandbox CRs, so we
+    count pods instead — the pod template carries the fleet labels (incl. run-id),
+    so this reflects the actual live footprint, including #1215 over-creation."""
+    sel = self.run_selector()
+    n = 0
+    for c in self.registry:
+      try:
+        n += c.resources.count_pods(label_selector=sel)
+      except Exception:  # noqa: BLE001 — a transient list error must not crash the breaker
+        pass
+    return n
+
+  @contextlib.contextmanager
+  def overcommit_guard(self, expected: int | None = None):
+    """Circuit breaker (#1): a background thread samples ``live_owned_count`` and, if
+    it exceeds ``min(expected × overcommit_factor, max_live_sandboxes)``, tears the
+    fleet down and raises `FleetOvercommitError` on exit. Keys off *intent* so it
+    trips on accidental over-creation (runaway / orphan / #1215), not a large-but-
+    intended run. Disabled when both knobs are off."""
+    factor = self.config.overcommit_factor
+    hard = self.config.max_live_sandboxes
+    if expected is None:
+      expected = self.plan_.total_replicas if self.plan_ else 0
+    ceilings = []
+    if factor and factor > 0 and expected > 0:
+      ceilings.append(int(expected * factor))
+    if hard:
+      ceilings.append(int(hard))
+    ceiling = min(ceilings) if ceilings else None
+    if ceiling is None:
+      yield
+      return
+    stop = threading.Event()
+    tripped = {"n": 0}
+
+    need = max(1, self.config.breaker_trip_polls)
+
+    def _loop():
+      breaches = 0
+      while not stop.wait(self.config.breaker_poll_s):
+        n = self.live_owned_count()
+        if n > ceiling:
+          breaches += 1
+          logger.warning("circuit breaker: %d live pods > ceiling %d (breach %d/%d "
+                         "consecutive; expected %d)", n, ceiling, breaches, need, expected)
+          if breaches < need:
+            continue                          # transient spike — wait for a sustained breach
+          logger.error("circuit breaker TRIPPED: %d live pods > ceiling %d for %d "
+                       "consecutive polls (expected %d) — aborting run + tearing down",
+                       n, ceiling, breaches, expected)
+          tripped["n"] = n
+          try:
+            self.teardown()
+          except Exception:  # noqa: BLE001
+            logger.warning("teardown during breaker trip failed", exc_info=True)
+          return
+        else:
+          breaches = 0                        # healthy poll resets; only SUSTAINED breach trips
+
+    th = threading.Thread(target=_loop, name="asrl-breaker", daemon=True)
+    th.start()
+    try:
+      yield
+    finally:
+      stop.set()
+      th.join(timeout=2)
+    if tripped["n"]:
+      raise FleetOvercommitError(
+          f"live sandboxes {tripped['n']} exceeded ceiling {ceiling} (expected "
+          f"{expected}, factor {factor}) — run aborted, fleet torn down")
+
+  def _install_teardown_hooks(self) -> None:
+    """(#4) atexit + SIGINT/SIGTERM → teardown so a killed/crashing driver still
+    cleans up. Signal install is a no-op off the main thread; atexit always set."""
+    if not self._atexit_registered:
+      atexit.register(self._safe_teardown)
+      self._atexit_registered = True
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      if sig in self._prev_handlers:
+        continue
+      try:
+        self._prev_handlers[sig] = signal.getsignal(sig)
+        signal.signal(sig, self._on_signal)
+      except (ValueError, OSError):        # not main thread / unsupported
+        self._prev_handlers.pop(sig, None)
+
+  def _on_signal(self, signum, frame):
+    # Do NOT tear down inline: this handler can fire while the main thread holds
+    # self._lock, and teardown → release_all → release re-acquires it → deadlock.
+    # Instead unwind (raise), which releases any held lock, and let the atexit hook
+    # (_safe_teardown, registered in _install_teardown_hooks) run teardown outside
+    # the signal context.
+    logger.warning("signal %d → aborting fleet run %s (teardown via atexit)",
+                   signum, self.run_id)
+    prev = self._prev_handlers.get(signum)
+    if callable(prev) and prev not in (signal.SIG_DFL, signal.SIG_IGN):
+      prev(signum, frame)
+    elif signum == signal.SIGINT:
+      raise KeyboardInterrupt
+    else:
+      raise SystemExit(128 + signum)
+
+  def _safe_teardown(self) -> None:
+    if self._torndown:
+      return
+    try:
+      self.teardown()
+    except Exception:  # noqa: BLE001
+      logger.warning("teardown hook failed", exc_info=True)
+
+  def _remove_teardown_hooks(self) -> None:
+    if self._atexit_registered:
+      with contextlib.suppress(Exception):
+        atexit.unregister(self._safe_teardown)
+      self._atexit_registered = False
+    # signal.signal only works on the main thread — when teardown runs from the
+    # breaker thread we can't restore here; leave the (idempotent) handlers in
+    # place rather than silently failing. They're cleared on the next main-thread
+    # teardown / process exit.
+    if threading.current_thread() is threading.main_thread():
+      for sig, prev in list(self._prev_handlers.items()):
+        with contextlib.suppress(ValueError, OSError):
+          signal.signal(sig, prev)
+      self._prev_handlers.clear()
 
   @staticmethod
   def _default_registry(config: FleetConfig) -> ClusterRegistry:
@@ -290,10 +450,36 @@ class SandboxFleet:
           cluster=c.name, image=image, template=template,
           pool=f"pool-{template}", replicas=replicas, tasks=counts[image]))
     self.plan_ = FleetPlan(entries)
+    self._advise(self.plan_)                   # (#5) warn-only capacity/QPS advisory
     logger.info("Plan: %d images across %d cluster(s), %d total warm replicas",
                 len(entries), len(self.plan_.by_cluster()),
                 self.plan_.total_replicas)
     return self.plan_
+
+  def _advise(self, plan: "FleetPlan") -> None:
+    """(#5) Warn — never refuse — when the plan's footprint or claim concurrency
+    looks beyond what the control plane comfortably absorbs. The customer owns
+    their cluster; this is a sign, not a gate."""
+    total = plan.total_replicas
+    nodes = self.config.cluster_nodes
+    if nodes:
+      slots = nodes * 200                      # rough usable pod slots/node
+      if total > slots:
+        plan.warnings.append(
+            f"warm footprint {total} exceeds ~{slots} schedulable slots "
+            f"({nodes} nodes × ~200) — expect Pending pods / capacity churn.")
+    if self.config.max_concurrent > 2000:
+      plan.warnings.append(
+          f"max_concurrent {self.config.max_concurrent} exceeds ~2000 the apiserver "
+          f"typically sustains for concurrent claims — expect 429s and possible "
+          f"over-creation; consider staging claims or a lower cap.")
+    if total > 20000:
+      plan.warnings.append(
+          f"warm footprint {total} is very large; deep warm can trip the warm-pool "
+          f"over-creation race (#1215) — keep the controller's "
+          f"--sandbox-warm-pool-concurrent-workers low and stage the fill.")
+    for msg in plan.warnings:
+      logger.warning("plan advisory: %s", msg)
 
   # --- provisioning ------------------------------------------------------ #
   def _ensure_pool(self, cluster: Cluster, image: str, replicas: int) -> str:
@@ -378,9 +564,49 @@ class SandboxFleet:
       if err is not None:
         raise err
 
-  def start_warmpools(self, wait: bool = True) -> None:
-    """Warm every planned pool, concurrently (bounded by ``max_concurrent``)."""
-    self._warm_entries((self.plan_ or self.plan()).entries, wait)
+  def start_warmpools(self, wait: bool = True,
+                      create_budget: int | None = None) -> None:
+    """Warm every planned pool, concurrently (bounded by ``max_concurrent``).
+
+    The budget (``create_budget`` if given, else ``config.warm_create_budget``)
+    caps how many sandbox creates are in flight per wave; pools are warmed in
+    **waves** whose summed replicas stay under it, waiting for each wave to reach
+    Ready before the next starts. This bounds the controller's concurrent
+    sandbox-create burst (Σ pools×replicas in flight), which avoids the
+    SandboxWarmPool over-creation race (#1215) at large/deep warm targets — the
+    burst that trips it is ``workers × replicas_per_pool``, and waiting between
+    waves lets the informer cache converge. Budget ``0`` warms all at once;
+    ``create_budget=None`` falls back to the config default.
+
+    Note: when staging is active (budget > 0), intermediate waves always block on
+    readiness regardless of ``wait`` — waiting between waves is what makes staging
+    work; only the final wave honors ``wait``. So ``wait=False`` is not fully
+    non-blocking under staging; pass ``create_budget=0`` for the old all-at-once,
+    ``wait``-honoring behavior."""
+    # None = fall back to the configured default; 0 = explicitly warm all at once.
+    budget = self.config.warm_create_budget if create_budget is None else create_budget
+    entries = (self.plan_ or self.plan()).entries
+    if not budget or budget <= 0:
+      self._warm_entries(entries, wait)
+      return
+    wave: list = []
+    wave_creates = 0
+    n_waves = 0
+    for e in entries:
+      # A pool is atomic: if one entry alone exceeds the budget, it warms solo.
+      if wave and wave_creates + e.replicas > budget:
+        n_waves += 1
+        logger.info("staged warm: wave %d — %d pools / %d creates (budget %d)",
+                    n_waves, len(wave), wave_creates, budget)
+        self._warm_entries(wave, wait=True)   # wait so the cache converges first
+        wave, wave_creates = [], 0
+      wave.append(e)
+      wave_creates += e.replicas
+    if wave:
+      n_waves += 1
+      logger.info("staged warm: wave %d — %d pools / %d creates (budget %d)",
+                  n_waves, len(wave), wave_creates, budget)
+      self._warm_entries(wave, wait=wait)
 
   def warm_images(self, images, *, replicas_override: int | None = None,
                   wait: bool = True) -> None:
@@ -419,6 +645,28 @@ class SandboxFleet:
     c.release_replicas(reps)
     self._obs.warm_remove(entry.cluster, reps)
 
+  def set_pool_replicas(self, image: str, replicas: int) -> None:
+    """Patch an image's warm pool to ``replicas`` (scale up or down) without
+    deleting it. Used by **sharded** recycle to cancel the controller's
+    replenishment as held shards claim: keeping ``desired = K − held`` means
+    ``held + warm == K`` per image throughout, so 18K claims never over-provision
+    (unlike ``unwarm_image``, which drops the whole pool). Best-effort on the warm
+    capacity counter — the delta is reconciled at ``teardown`` (reset_counts)."""
+    entry = (self.plan_ or self.plan()).for_image(image)
+    if entry is None:
+      return
+    replicas = max(0, replicas)
+    c = self.registry.get(entry.cluster)
+    c.resources.create_warmpool(entry.pool, entry.template, replicas, reconcile=True)
+    with self._lock:
+      prev = self._warmed.get(image, entry.replicas)
+      self._warmed[image] = replicas
+    delta = replicas - prev
+    if delta > 0:
+      c.reserve_replicas(delta)
+    elif delta < 0:
+      c.release_replicas(-delta)
+
   def prepull(self, wait: bool = True) -> None:
     """Pre-pull each cluster's planned images via a DaemonSet (optional)."""
     from . import prepull as _pp
@@ -437,13 +685,20 @@ class SandboxFleet:
     for c in self.registry:
       _pp.prepull_delete(c)
 
-  def setup(self, prepull: bool = False) -> "SandboxFleet":
-    """preflight → plan → (optional pre-pull) → start (and wait for) warm pools."""
+  def setup(self, prepull: bool = False,
+            create_budget: int | None = None) -> "SandboxFleet":
+    """preflight → plan → (optional pre-pull) → start (and wait for) warm pools.
+
+    ``create_budget`` (if set) stages the warm fill in waves to bound the
+    controller's concurrent create burst — see ``start_warmpools``."""
+    if self.config.install_teardown_hooks:
+      self._install_teardown_hooks()          # (#4) clean up even on kill/crash
+    self._torndown = False
     self.preflight()
     self.plan()
     if prepull:
       self.prepull(wait=True)
-    self.start_warmpools(wait=True)
+    self.start_warmpools(wait=True, create_budget=create_budget)
     return self
 
   # --- claims ------------------------------------------------------------ #
@@ -554,6 +809,14 @@ class SandboxFleet:
       self._teardown(delete_namespace)
 
   def _teardown(self, delete_namespace: bool) -> None:
+    # Idempotent/reentrant: the breaker thread, a strategy's teardown, __exit__,
+    # and signal handlers can all call this — only the first pass this cycle runs
+    # (setup() resets the flag). Deletes are 404-tolerant, but this avoids the
+    # redundant sweeps + the registry/handle race of concurrent teardowns.
+    with self._teardown_lock:
+      if self._torndown:
+        return
+      self._torndown = True
     self.release_all()
     for c in self.registry:
       sel = c.resources.managed_selector()
@@ -576,6 +839,7 @@ class SandboxFleet:
       self._warmed.clear()
       self._ondemand.clear()
     self.plan_ = None
+    self._remove_teardown_hooks()
 
   def __enter__(self) -> "SandboxFleet":
     return self.setup()
@@ -586,7 +850,10 @@ class SandboxFleet:
   # --- managed runner ---------------------------------------------------- #
   def run(self, process_fn: Callable[[Task, SandboxHandle], object],
           strategy: str = "naive", concurrency: int | None = None,
-          *, epochs: int = 1, keep_warm: bool = False) -> list:
+          *, epochs: int = 1, keep_warm: bool = False,
+          recycle: bool = False, reset=None, max_reuses: int = 32,
+          reset_timeout: float = 5.0, use_session: bool = True,
+          scale_on_hold: bool = True) -> list:
     """Run all loaded tasks under ``strategy`` (none|naive|sliding|pipelined) with
     up to ``concurrency`` parallel claim+exec (defaults to ``config.max_concurrent``).
 
@@ -596,22 +863,46 @@ class SandboxFleet:
     returns the flat ``list`` (a per-task exception is captured, not raised).
     ``keep_warm=True`` skips the final teardown so a caller's own loop can reuse the
     warm pools; call ``fleet.teardown()`` when done.
+
+    ``recycle`` is an **orthogonal** modifier, not a strategy: with ``recycle=True``
+    the chosen ``strategy`` still governs warm-pool sizing/timing, but tasks sharing
+    an image reuse one claimed sandbox (git-restore reset between them) instead of a
+    fresh claim per task — see `recycle.reuse_git_restore_sandbox`. It only applies
+    to workloads with a resettable ``/testbed`` (multiple tasks per image, e.g. RL
+    rollouts); for 1:1 eval it is a no-op, so it is off by default. ``reset`` (a
+    ``GitRestoreReset``), ``max_reuses``, ``reset_timeout``, ``use_session`` and
+    ``scale_on_hold`` are forwarded to the recycle executor and ignored when
+    ``recycle=False``.
     """
-    from .strategies import STRATEGIES
+    from .strategies import STRATEGIES, process_parallel
     if strategy not in STRATEGIES:
       raise ValueError(f"unknown strategy '{strategy}'; choose from {sorted(STRATEGIES)}")
     if epochs < 1:
       raise ValueError("epochs must be >= 1")
     conc = concurrency or self.config.max_concurrent
     fn = STRATEGIES[strategy]
-    with self._obs.run(strategy) as report:
+    executor = process_parallel
+    if recycle:                               # swap task→sandbox binding, keep warming
+      from .recycle import GitRestoreReset, reuse_git_restore_sandbox
+      _reset = reset or GitRestoreReset()
+
+      def executor(fleet, tasks, process_fn, concurrency):  # noqa: E306
+        return reuse_git_restore_sandbox(
+            fleet, tasks, process_fn, concurrency, reset=_reset,
+            max_reuses=max_reuses, reset_timeout=reset_timeout,
+            use_session=use_session, scale_on_hold=scale_on_hold)
+    if self.plan_ is None:
+      self.plan()                             # give the circuit breaker a footprint
+    expected = self.plan_.total_replicas if self.plan_ else None
+    with self.overcommit_guard(expected), self._obs.run(strategy) as report:
       self.report = report
       try:
         report.environment = self.describe_environment()
       except Exception:  # noqa: BLE001 — environment is best-effort
         logger.debug("could not collect environment", exc_info=True)
       if epochs == 1:
-        results = fn(self, process_fn, conc, teardown=not keep_warm)
+        results = fn(self, process_fn, conc, teardown=not keep_warm,
+                     executor=executor)
       else:
         results = []
         for e in range(epochs):
@@ -619,7 +910,7 @@ class SandboxFleet:
           logger.info("epoch %d/%d", e + 1, epochs)
           try:
             results.append(fn(self, process_fn, conc,
-                              teardown=last and not keep_warm))
+                              teardown=last and not keep_warm, executor=executor))
           except BaseException:               # a mid-run epoch never tore down
             if not keep_warm and not last:
               self.teardown()

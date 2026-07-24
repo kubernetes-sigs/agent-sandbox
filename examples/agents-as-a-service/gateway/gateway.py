@@ -210,8 +210,12 @@ def delete_user(user):
         return jsonify(error="not found"), 404
     if not authorized(claim):  # deletion cascades the PVC: token required
         return jsonify(error="unauthorized"), 401
-    crd.delete_namespaced_custom_object(
-        GROUP, VERSION, NAMESPACE, "sandboxclaims", claim_name(user))
+    try:
+        crd.delete_namespaced_custom_object(
+            GROUP, VERSION, NAMESPACE, "sandboxclaims", claim_name(user))
+    except client.ApiException as e:
+        if e.status != 404:  # already gone => idempotent success
+            raise
     last_activity.pop(user, None)
     return jsonify(user=user, note="claim deleted; sandbox and PVC cascade")
 

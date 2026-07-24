@@ -261,9 +261,16 @@ curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/u/bob/v1/models
 curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/u/bob/ | head -3   # dashboard HTML
 ```
 
-(To browse the dashboard interactively, port-forward straight to the pod as
-in step 3 — a real platform would exchange the token for a session cookie
-rather than ask a browser to send bearer headers.)
+To browse the dashboard interactively, port-forward straight to **bob's**
+pod (resolved through his claim, as in step 3 — a real platform would
+instead exchange the token for a session cookie rather than ask a browser
+to send bearer headers):
+
+```sh
+BOB_SB=$(kubectl -n hermes-demo get sandboxclaim hermes-bob -o jsonpath='{.status.sandbox.name}')
+BOB_POD=$(kubectl -n hermes-demo get sandbox "$BOB_SB" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+kubectl -n hermes-demo port-forward "pod/$BOB_POD" 9119:9119 &
+```
 
 Now watch the whole point happen. Stop making requests for ~60s
 (`IDLE_TIMEOUT`), and the sweeper suspends bob's agent:

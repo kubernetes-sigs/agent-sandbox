@@ -130,8 +130,17 @@ func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
 	return time.Now()
 }
 
-// exp returns the reconciler's expectations tracker, lazily initializing it so
-// zero-value construction (tests) and SetupWithManager both work.
+// exp returns the reconciler's expectations tracker.
+//
+// In production the tracker is initialized before any reconcile runs:
+// SetupWithManager calls exp() while building the sandbox watch handler, and
+// the manager only starts workers after setup. The sync.Once exists for
+// zero-value construction (tests build SandboxWarmPoolReconciler literals and
+// some drive reconcilePool from multiple goroutines): a bare
+// `if r.expectations == nil` lazy-init would be an unsynchronized read/write
+// of the field — a data race with no happens-before edge publishing the
+// tracker's contents — whereas Once gives mutual exclusion plus safe
+// publication, at the cost of one atomic load per call after init.
 func (r *SandboxWarmPoolReconciler) exp() *warmPoolExpectations {
 	r.expOnce.Do(func() {
 		if r.expectations == nil {
@@ -359,7 +368,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			})
 			// Creates that never happened will never produce a watch event;
 			// lower their expectations immediately so the pool is not blocked
-			// until the expectations timeout.
+			// until the expectations timeout. lower cannot be negative
+			// (slowStartBatch reports at most the requested count of
+			// successes); the > 0 guard only skips a no-op tracker call on
+			// the everything-succeeded path.
 			if lower := int(sandboxesToCreate) - successes; lower > 0 {
 				r.exp().LowerCreations(poolKey, lower)
 			}

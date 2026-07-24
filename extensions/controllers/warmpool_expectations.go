@@ -167,9 +167,21 @@ func (e *warmPoolExpectations) LowerCreations(key types.NamespacedName, n int) {
 }
 
 // ExpectDeletion records that the sandbox with the given UID is about to be
-// deleted by this controller. Recorded before the delete is issued. Empty
-// UIDs are ignored: they cannot be matched to a watch delete event and would
-// collide with each other in the pending set.
+// deleted by this controller.
+//
+// It MUST be recorded before the delete is issued: the watch delete event can
+// be delivered on the informer goroutine while the DELETE call is still in
+// flight (or immediately after it returns), and the handler's
+// DeletionObserved for an expectation that does not exist yet is a no-op —
+// recording afterwards would then leave an expectation nothing will ever
+// lower, wedging the pool until the timeout. The caller cancels with a
+// synthetic DeletionObserved if the delete fails (nothing was deleted, no
+// event will come) — the same record-then-act protocol as the ReplicaSet
+// controller (ExpectDeletions before podControl.DeletePod, DeletionObserved
+// on delete error "because the informer won't observe this deletion").
+//
+// Empty UIDs are ignored: they cannot be matched to a watch delete event and
+// would collide with each other in the pending set.
 func (e *warmPoolExpectations) ExpectDeletion(key types.NamespacedName, uid types.UID) {
 	if uid == "" {
 		return

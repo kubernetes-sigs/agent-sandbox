@@ -88,6 +88,9 @@ var ErrVolumeClaimTemplatesOverrideForbidden = errors.New("overriding volume cla
 // ErrVolumeClaimTemplatesInvalid is a sentinel error indicating that the volumeClaimTemplates configuration is invalid.
 var ErrVolumeClaimTemplatesInvalid = errors.New("invalid volume claim templates")
 
+// ErrWorkspaceResourcesInvalid is a sentinel error indicating that workspaceResources are invalid for the template.
+var ErrWorkspaceResourcesInvalid = errors.New("invalid workspace resources")
+
 var suppressErrors = []error{
 	ErrInvalidMetadata,
 	ErrSandboxNotOwned,
@@ -95,6 +98,7 @@ var suppressErrors = []error{
 	ErrVolumeClaimTemplatesDisallowed,
 	ErrVolumeClaimTemplatesOverrideForbidden,
 	ErrVolumeClaimTemplatesInvalid,
+	ErrWorkspaceResourcesInvalid,
 }
 
 // observedTimeEntry stores the first observed timestamp and the UID of the SandboxClaim.
@@ -586,6 +590,15 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				ObservedGeneration: claim.Generation,
 			}
 		}
+		if errors.Is(err, ErrWorkspaceResourcesInvalid) {
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "WorkspaceResourcesInvalid",
+				Message:            err.Error(),
+				ObservedGeneration: claim.Generation,
+			}
+		}
 		return metav1.Condition{
 			Type:               string(v1beta1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
@@ -694,6 +707,81 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 		delete(labels, v1beta1.CreatedByLabel)
 	}
 	return labels
+}
+
+// hasWorkspaceResourceOverrides reports whether the claim asks to merge any
+// resource requirement into the target container. A nil workspaceResources
+// field or an object with no requests, limits, or claims field returns false.
+func hasWorkspaceResourceOverrides(claim *extensionsv1beta1.SandboxClaim) bool {
+	r := claim.Spec.WorkspaceResources
+	if r == nil {
+		return false
+	}
+	return len(r.Resources.Requests) > 0 || len(r.Resources.Limits) > 0 || r.Resources.Claims != nil
+}
+
+func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *extensionsv1beta1.WorkspaceResources) {
+	if overrides == nil {
+		return
+	}
+	if len(overrides.Resources.Requests) == 0 && len(overrides.Resources.Limits) == 0 && overrides.Resources.Claims == nil {
+		return
+	}
+	if len(overrides.Resources.Requests) > 0 && container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if len(overrides.Resources.Limits) > 0 && container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+	if len(overrides.Resources.Requests) > 0 {
+		maps.Copy(container.Resources.Requests, overrides.Resources.Requests)
+	}
+	if len(overrides.Resources.Limits) > 0 {
+		maps.Copy(container.Resources.Limits, overrides.Resources.Limits)
+	}
+	if overrides.Resources.Claims != nil {
+		container.Resources.Claims = slices.Clone(overrides.Resources.Claims)
+	}
+}
+
+func validateResourceRequirements(requirements corev1.ResourceRequirements) error {
+	for resourceName, request := range requirements.Requests {
+		limit, ok := requirements.Limits[resourceName]
+		if !ok {
+			continue
+		}
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("%w: request for %s (%s) exceeds limit (%s)", ErrWorkspaceResourcesInvalid, resourceName, request.String(), limit.String())
+		}
+	}
+	return nil
+}
+
+func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1beta1.SandboxClaim) error {
+	if !hasWorkspaceResourceOverrides(claim) {
+		return nil
+	}
+	targetContainerName := claim.Spec.WorkspaceResources.ContainerName
+	if targetContainerName == "" {
+		return fmt.Errorf("%w: containerName is required", ErrWorkspaceResourcesInvalid)
+	}
+	for i := range spec.Containers {
+		container := &spec.Containers[i]
+		if container.Name != targetContainerName {
+			continue
+		}
+		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
+		return validateResourceRequirements(container.Resources)
+	}
+	for i := range spec.InitContainers {
+		container := &spec.InitContainers[i]
+		if container.Name != targetContainerName {
+			continue
+		}
+		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
+		return validateResourceRequirements(container.Resources)
+	}
+	return fmt.Errorf("%w: target container %q not found in the SandboxTemplate", ErrWorkspaceResourcesInvalid, targetContainerName)
 }
 
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, error) {
@@ -861,7 +949,11 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				return false, err
 			}
 
-			// Call helper to complete adoption (patch sandbox)
+			// Call helper to complete adoption (patch sandbox).
+			// Note: we deliberately do not call applyClaimWorkspaceResourcesToPodSpec here.
+			// Per-claim workspaceResources cause warm-pool adoption to be skipped earlier
+			// in getOrCreateSandbox (see hasWorkspaceResourceOverrides), so this code path
+			// is only reached for claims without overrides.
 			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
 				if k8errors.IsNotFound(err) {
 					return false, nil
@@ -1309,6 +1401,16 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Apply secure defaults to the sandbox pod spec
 	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
 
+	// Apply claim workspace resource overrides before creating the Sandbox so
+	// per-claim sizing is persisted into the initial pod template.
+	if err := applyClaimWorkspaceResourcesToPodSpec(&sandbox.Spec.PodTemplate.Spec, claim); err != nil {
+		logger.Error(err, "Workspace resource override rejected", "claimName", claim.Name)
+		if r.Recorder != nil && errors.Is(err, ErrWorkspaceResourcesInvalid) {
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeWarning, "WorkspaceResourcesInvalid", "Rejected", "%s", err.Error())
+		}
+		return nil, err
+	}
+
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
@@ -1575,6 +1677,16 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	// If len(claim.Spec.Env) > 0 or len(claim.Spec.VolumeClaimTemplates) > 0, the controller immediately bypasses the warm pool queue.
 	if len(claim.Spec.Env) > 0 || len(claim.Spec.VolumeClaimTemplates) > 0 {
 		logger.Info("Bypassing warm pool adoption because custom configuration is provided (env or volume claim templates)", "claim", claim.Name)
+		return nil, nil
+	}
+
+	// When the claim overrides workspace resources, skip warm-pool adoption and
+	// fall through to cold creation. Warm-pool sandboxes have a backing Pod
+	// already running with the pool's default sizing; adopting and mutating only
+	// Sandbox.Spec.PodTemplate would leave the running Pod at the wrong size
+	// until restart. Cold creation is the supported path for per-claim sizing.
+	if hasWorkspaceResourceOverrides(claim) {
+		logger.Info("Skipping warm-pool adoption for claim with WorkspaceResources override", "claim", claim.Name)
 		return nil, nil
 	}
 

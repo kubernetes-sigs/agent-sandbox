@@ -15,6 +15,7 @@
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -105,6 +106,25 @@ type EnvVar struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
+// WorkspaceResources defines per-claim resource requirement overrides for a
+// named PodSpec container or init container. Requests and limits are merged by
+// resource name; claims replace the target container's resource claims when set,
+// including an empty list.
+type WorkspaceResources struct {
+	// containerName specifies the target regular container or init container for
+	// the resource override.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	ContainerName string `json:"containerName"`
+
+	// resources specifies resource requirements to merge into the target container.
+	// Request and limit entries left unset keep the values from the SandboxTemplate.
+	// Claims replace the target container's resource claims when specified,
+	// including an empty list.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
 // SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
 	// warmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
@@ -133,6 +153,12 @@ type SandboxClaimSpec struct {
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+
+	// workspaceResources overrides resource requirements for a named PodSpec container or init container at claim time.
+	// Unset request and limit entries keep the values from the SandboxTemplate.
+	// Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
+	// +optional
+	WorkspaceResources *WorkspaceResources `json:"workspaceResources,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

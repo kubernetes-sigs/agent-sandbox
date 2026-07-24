@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +51,8 @@ import (
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
+
+const workspaceContainerName = "workspace"
 
 func TestSandboxClaimReconcile(t *testing.T) {
 	template := &extensionsv1beta1.SandboxTemplate{
@@ -1891,16 +1895,17 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			Name:      "test-template",
 			Namespace: "default",
 		},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "test-container",
-						Image: "test-image",
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  workspaceContainerName,
+							Image: "test-image",
+						},
 					},
 				},
-			},
-		}},
+			}},
 		},
 	}
 
@@ -1959,7 +1964,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "test-container",
+							Name:  workspaceContainerName,
 							Image: "test-image",
 						},
 					},
@@ -2001,7 +2006,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "test-container",
+							Name:  workspaceContainerName,
 							Image: "test-image",
 						},
 					},
@@ -2165,6 +2170,43 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectedAdoptedSandbox:  "pool-sb-2",
 			expectNewSandboxCreated: false,
 			simulateConflicts:       1, // Fail update on the first sandbox, succeed on the second
+		},
+		{
+			// Claims that override workspace resources skip warm-pool adoption
+			// and fall through to cold creation. Adopting a warm-pool sandbox
+			// would leave the running Pod at the pool's default sizing until
+			// restart, which silently violates the override.
+			name: "falls through to cold creation when claim sets WorkspaceResources",
+			existingObjects: []client.Object{
+				template,
+				&extensionsv1beta1.SandboxClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-claim",
+						Namespace: "default",
+						UID:       "claim-uid",
+					},
+					Spec: extensionsv1beta1.SandboxClaimSpec{
+						WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+						WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+							ContainerName: workspaceContainerName,
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2000m"),
+									corev1.ResourceMemory: resource.MustParse("4096Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2000m"),
+									corev1.ResourceMemory: resource.MustParse("4096Mi"),
+								},
+							},
+						},
+					},
+				},
+				createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true),
+				createWarmPoolSandbox("pool-sb-2", metav1.Now(), true),
+			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
 		},
 		{
 			name: "preserves template eviction annotation false when adopting sandbox",
@@ -2582,8 +2624,8 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 		Client:           fakeClient,
 		Scheme:           scheme,
 		Recorder:         events.NewFakeRecorder(10),
-		Tracer:           asmetrics.NewNoOp(),
 		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
 	}
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
@@ -2609,6 +2651,653 @@ func TestSandboxClaimNoReAdoption(t *testing.T) {
 	}
 	if val := updatedAdopted.Labels[sandboxv1beta1.SandboxLaunchTypeLabel]; val != sandboxv1beta1.SandboxLaunchTypeWarm {
 		t.Errorf("expected previously adopted sandbox to have launch type label %q, got %q; labels=%v", sandboxv1beta1.SandboxLaunchTypeWarm, val, updatedAdopted.Labels)
+	}
+}
+
+func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: workspaceContainerName, Image: "workspace:latest"},
+							{Name: "codewire-sidecar", Image: "sidecar:latest"},
+						},
+					},
+				},
+			},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("2000m"),
+						corev1.ResourceMemory:           resource.MustParse("4096Mi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("20Gi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("2500m"),
+						corev1.ResourceMemory:           resource.MustParse("8192Mi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var sandbox sandboxv1beta1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); err != nil {
+		t.Fatalf("failed to get created sandbox: %v", err)
+	}
+
+	var workspace, sidecar *corev1.Container
+	for i := range sandbox.Spec.PodTemplate.Spec.Containers {
+		container := &sandbox.Spec.PodTemplate.Spec.Containers[i]
+		switch container.Name {
+		case workspaceContainerName:
+			workspace = container
+		case "codewire-sidecar":
+			sidecar = container
+		}
+	}
+	if workspace == nil {
+		t.Fatal("workspace container not found in created sandbox")
+	}
+	if sidecar == nil {
+		t.Fatal("sidecar container not found in created sandbox")
+	}
+
+	if got := workspace.Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2000m")) != 0 {
+		t.Fatalf("expected workspace CPU request 2000m, got %s", got.String())
+	}
+	if got := workspace.Resources.Limits[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2500m")) != 0 {
+		t.Fatalf("expected workspace CPU limit 2500m, got %s", got.String())
+	}
+	if got := workspace.Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("4096Mi")) != 0 {
+		t.Fatalf("expected workspace memory request 4096Mi, got %s", got.String())
+	}
+	if got := workspace.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("8192Mi")) != 0 {
+		t.Fatalf("expected workspace memory limit 8192Mi, got %s", got.String())
+	}
+	if got := workspace.Resources.Requests[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("20Gi")) != 0 {
+		t.Fatalf("expected workspace disk request 20Gi, got %s", got.String())
+	}
+	if got := workspace.Resources.Limits[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("30Gi")) != 0 {
+		t.Fatalf("expected workspace disk limit 30Gi, got %s", got.String())
+	}
+	if len(sidecar.Resources.Requests) != 0 || len(sidecar.Resources.Limits) != 0 {
+		t.Fatalf("expected sidecar resources to remain untouched, got requests=%v limits=%v", sidecar.Resources.Requests, sidecar.Resources.Limits)
+	}
+}
+
+func TestSandboxClaimCreateRejectsWorkspaceResourcesWithoutWorkspaceContainer(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "pause", Image: "registry.k8s.io/pause:3.10"},
+						},
+					},
+				},
+			},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("2000m"),
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	recorder := events.NewFakeRecorder(10)
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("expected invalid workspaceResources to be recorded in status without reconcile error, got %v", err)
+	}
+
+	var sandbox sandboxv1beta1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); !k8errors.IsNotFound(err) {
+		t.Fatalf("expected no sandbox to be created, got sandbox=%v err=%v", sandbox.Name, err)
+	}
+
+	var updatedClaim extensionsv1beta1.SandboxClaim
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
+		t.Fatalf("failed to get updated claim: %v", err)
+	}
+	condition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if condition == nil {
+		t.Fatal("expected Ready condition to be set")
+	}
+	if condition.Status != metav1.ConditionFalse || condition.Reason != "WorkspaceResourcesInvalid" {
+		t.Fatalf("expected Ready=False WorkspaceResourcesInvalid, got %#v", condition)
+	}
+	if !strings.Contains(condition.Message, `target container "workspace" not found in the SandboxTemplate`) {
+		t.Fatalf("expected missing container message, got %q", condition.Message)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "Warning") || !strings.Contains(event, "WorkspaceResourcesInvalid") {
+			t.Fatalf("expected WorkspaceResourcesInvalid warning event, got %q", event)
+		}
+	default:
+		t.Fatal("expected WorkspaceResourcesInvalid warning event")
+	}
+}
+
+func TestSandboxClaimCreateRejectsWorkspaceResourcesWithRequestAboveLimit(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  workspaceContainerName,
+							Image: "workspace:latest",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("1000m"),
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("2000m"),
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	recorder := events.NewFakeRecorder(10)
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         recorder,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("expected invalid workspaceResources to be recorded in status without reconcile error, got %v", err)
+	}
+
+	var sandbox sandboxv1beta1.Sandbox
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &sandbox); !k8errors.IsNotFound(err) {
+		t.Fatalf("expected no sandbox to be created, got sandbox=%v err=%v", sandbox.Name, err)
+	}
+
+	var updatedClaim extensionsv1beta1.SandboxClaim
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim); err != nil {
+		t.Fatalf("failed to get updated claim: %v", err)
+	}
+	condition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if condition == nil {
+		t.Fatal("expected Ready condition to be set")
+	}
+	if condition.Status != metav1.ConditionFalse || condition.Reason != "WorkspaceResourcesInvalid" {
+		t.Fatalf("expected Ready=False WorkspaceResourcesInvalid, got %#v", condition)
+	}
+	if !strings.Contains(condition.Message, "request for cpu (2) exceeds limit (1)") {
+		t.Fatalf("expected request above limit message, got %q", condition.Message)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "Warning") || !strings.Contains(event, "WorkspaceResourcesInvalid") {
+			t.Fatalf("expected WorkspaceResourcesInvalid warning event, got %q", event)
+		}
+	default:
+		t.Fatal("expected WorkspaceResourcesInvalid warning event")
+	}
+}
+
+// TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption verifies that a claim
+// setting workspaceResources bypasses warm-pool adoption and falls through to
+// cold creation. Adopting a warm-pool sandbox would mutate its podTemplate to
+// advertise the new resources but leave the already-running Pod sized to the
+// pool's defaults until restart, silently violating the override.
+func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
+	scheme := newScheme(t)
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: workspaceContainerName, Image: "workspace:latest"},
+							{Name: "codewire-sidecar", Image: "sidecar:latest"},
+						},
+					},
+				},
+			},
+		},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "pool-uid"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("2000m"),
+						corev1.ResourceMemory:           resource.MustParse("4096Mi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("20Gi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("2000m"),
+						corev1.ResourceMemory:           resource.MustParse("4096Mi"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("20Gi"),
+					},
+				},
+			},
+		},
+	}
+
+	warmSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-sb",
+			Namespace: "default",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+					Kind:       "SandboxWarmPool",
+					Name:       "test-pool",
+					UID:        "pool-uid",
+					Controller: new(true),
+				},
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: workspaceContainerName, Image: "workspace:latest"},
+							{Name: "codewire-sidecar", Image: "sidecar:latest"},
+						},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "Ready",
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, warmSandbox).
+		WithStatusSubresource(claim).
+		Build()
+
+	warmQueue := queue.NewSimpleSandboxQueue()
+	warmQueue.Add(
+		queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name),
+		queue.SandboxKey{Namespace: warmSandbox.Namespace, Name: warmSandbox.Name, NodeName: warmSandbox.Status.NodeName},
+	)
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		WarmSandboxQueue: warmQueue,
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Warm sandbox must still be owned by the warm pool and keep its labels —
+	// adoption did not happen.
+	var afterWarm sandboxv1beta1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "warm-sb", Namespace: "default"}, &afterWarm); err != nil {
+		t.Fatalf("failed to get warm sandbox: %v", err)
+	}
+	if _, ok := afterWarm.Labels[warmPoolSandboxLabel]; !ok {
+		t.Errorf("expected warm pool label to remain on un-adopted warm sandbox")
+	}
+	if ctrl := metav1.GetControllerOf(&afterWarm); ctrl == nil || ctrl.Kind != "SandboxWarmPool" {
+		t.Errorf("expected warm sandbox to still be controlled by SandboxWarmPool, got %v", ctrl)
+	}
+
+	// A fresh cold sandbox was created with the workspace overrides applied.
+	var coldSandbox sandboxv1beta1.Sandbox
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, &coldSandbox); err != nil {
+		t.Fatalf("expected cold sandbox %q to be created, got error: %v", claim.Name, err)
+	}
+	var workspace *corev1.Container
+	for i := range coldSandbox.Spec.PodTemplate.Spec.Containers {
+		if coldSandbox.Spec.PodTemplate.Spec.Containers[i].Name == workspaceContainerName {
+			workspace = &coldSandbox.Spec.PodTemplate.Spec.Containers[i]
+			break
+		}
+	}
+	if workspace == nil {
+		t.Fatal("workspace container not found in cold sandbox")
+	}
+	// Assert both Requests AND Limits so a regression that drops one resource
+	// list does not slip through silently.
+	for _, check := range []struct {
+		name string
+		res  corev1.ResourceName
+		want string
+	}{
+		{"CPU", corev1.ResourceCPU, "2000m"},
+		{"memory", corev1.ResourceMemory, "4096Mi"},
+		{"disk", corev1.ResourceEphemeralStorage, "20Gi"},
+	} {
+		want := resource.MustParse(check.want)
+		if got := workspace.Resources.Requests[check.res]; got.Cmp(want) != 0 {
+			t.Errorf("expected cold workspace %s request %s, got %s", check.name, check.want, got.String())
+		}
+		if got := workspace.Resources.Limits[check.res]; got.Cmp(want) != 0 {
+			t.Errorf("expected cold workspace %s limit %s, got %s", check.name, check.want, got.String())
+		}
+	}
+}
+
+// TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp pins the no-op
+// behavior when workspaceResources names a container but has no resource
+// entries. The helper must not mutate the container's Requests / Limits maps or
+// Claims in that case; they should remain whatever the template specified,
+// including nil.
+func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
+	cases := []struct {
+		name     string
+		current  corev1.ResourceRequirements
+		override extensionsv1beta1.WorkspaceResources
+	}{
+		{
+			name:     "nil current resources stay nil",
+			current:  corev1.ResourceRequirements{},
+			override: extensionsv1beta1.WorkspaceResources{ContainerName: workspaceContainerName},
+		},
+		{
+			name: "populated current resources stay populated and unchanged",
+			current: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")},
+				Claims:   []corev1.ResourceClaim{{Name: "template-claim"}},
+			},
+			override: extensionsv1beta1.WorkspaceResources{ContainerName: workspaceContainerName},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			container := &corev1.Container{Name: workspaceContainerName, Resources: *tc.current.DeepCopy()}
+			applyWorkspaceResourceOverrides(container, &tc.override)
+			if !reflect.DeepEqual(container.Resources, tc.current) {
+				t.Fatalf("expected resources unchanged when override has no resource entries\n  got:    %#v\n  wanted: %#v", container.Resources, tc.current)
+			}
+		})
+	}
+}
+
+func TestHasWorkspaceResourceOverridesEmptyClaimsIsOverride(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Claims: []corev1.ResourceClaim{},
+				},
+			},
+		},
+	}
+	if !hasWorkspaceResourceOverrides(claim) {
+		t.Fatal("expected explicit empty claims list to count as an override")
+	}
+}
+
+func TestApplyWorkspaceResourceOverridesEmptyClaimsClearsTemplateClaims(t *testing.T) {
+	container := &corev1.Container{
+		Name: workspaceContainerName,
+		Resources: corev1.ResourceRequirements{
+			Claims: []corev1.ResourceClaim{{Name: "template-claim", Request: "gpu"}},
+		},
+	}
+
+	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResources{
+		ContainerName: workspaceContainerName,
+		Resources: corev1.ResourceRequirements{
+			Claims: []corev1.ResourceClaim{},
+		},
+	})
+
+	if container.Resources.Claims == nil {
+		t.Fatal("expected explicit empty claims list to be preserved")
+	}
+	if len(container.Resources.Claims) != 0 {
+		t.Fatalf("expected template claims to be cleared, got %#v", container.Resources.Claims)
+	}
+}
+
+func TestApplyWorkspaceResourceOverridesInitializesOnlyOverriddenMaps(t *testing.T) {
+	cases := []struct {
+		name         string
+		override     extensionsv1beta1.WorkspaceResources
+		wantRequests bool
+		wantLimits   bool
+	}{
+		{
+			name: "requests only leaves limits nil",
+			override: extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				},
+			},
+			wantRequests: true,
+		},
+		{
+			name: "limits only leaves requests nil",
+			override: extensionsv1beta1.WorkspaceResources{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")},
+				},
+			},
+			wantLimits: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			container := &corev1.Container{Name: workspaceContainerName}
+			applyWorkspaceResourceOverrides(container, &tc.override)
+			if got := container.Resources.Requests != nil; got != tc.wantRequests {
+				t.Fatalf("requests nil state mismatch: got initialized=%t want %t", got, tc.wantRequests)
+			}
+			if got := container.Resources.Limits != nil; got != tc.wantLimits {
+				t.Fatalf("limits nil state mismatch: got initialized=%t want %t", got, tc.wantLimits)
+			}
+		})
+	}
+}
+
+func TestApplyClaimWorkspaceResourcesToPodSpecTargetsInitContainer(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+				ContainerName: "workspace-sidecar",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+				},
+			},
+		},
+	}
+	spec := &corev1.PodSpec{
+		InitContainers: []corev1.Container{{
+			Name: "workspace-sidecar",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+			},
+		}},
+		Containers: []corev1.Container{{Name: workspaceContainerName}},
+	}
+
+	if err := applyClaimWorkspaceResourcesToPodSpec(spec, claim); err != nil {
+		t.Fatalf("expected init container override to apply, got %v", err)
+	}
+	if got := spec.InitContainers[0].Resources.Requests[corev1.ResourceMemory]; got.Cmp(resource.MustParse("512Mi")) != 0 {
+		t.Fatalf("expected init container memory request 512Mi, got %s", got.String())
+	}
+	if len(spec.Containers[0].Resources.Requests) != 0 {
+		t.Fatalf("expected regular container resources to remain unchanged, got %v", spec.Containers[0].Resources.Requests)
+	}
+}
+
+func TestApplyWorkspaceResourceOverridesPartialOverrideKeepsTemplateValues(t *testing.T) {
+	current := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("500m"),
+			corev1.ResourceMemory:           resource.MustParse("1Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("5Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("1000m"),
+			corev1.ResourceMemory:           resource.MustParse("2Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+		},
+		Claims: []corev1.ResourceClaim{{Name: "template-claim"}},
+	}
+	container := &corev1.Container{Name: workspaceContainerName, Resources: *current.DeepCopy()}
+
+	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResources{
+		ContainerName: workspaceContainerName,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("4096Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceEphemeralStorage: resource.MustParse("20Gi"),
+			},
+			Claims: []corev1.ResourceClaim{{Name: "claim-claim", Request: "gpu"}},
+		},
+	})
+
+	expected := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("500m"),
+			corev1.ResourceMemory:           resource.MustParse("4096Mi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("5Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("1000m"),
+			corev1.ResourceMemory:           resource.MustParse("2Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("20Gi"),
+		},
+		Claims: []corev1.ResourceClaim{{Name: "claim-claim", Request: "gpu"}},
+	}
+	if !reflect.DeepEqual(container.Resources, expected) {
+		t.Fatalf("expected partial override to preserve omitted resources\n  got:    %#v\n  wanted: %#v", container.Resources, expected)
 	}
 }
 

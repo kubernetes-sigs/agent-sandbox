@@ -1,0 +1,52 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+[package]
+name = "pod-agent"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "In-pod bubblewrap tenant manager for agent-sandbox multi-tenant Sandboxes."
+publish = false
+
+[[bin]]
+name = "pod-agent"
+path = "src/main.rs"
+
+[[bin]]
+# This binary runs INSIDE each bubblewrap tenant, started by the pod-agent
+# via bwrap. It exposes WorkerService on a Unix socket bind-mounted into
+# the sandbox. It is built statically wherever possible so it can run
+# inside arbitrary base images without dependency on the host's libc.
+name = "agent-sandbox-worker"
+path = "src/worker.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+parking_lot = "0.12"
+anyhow = "1"
+thiserror = "1"
+nix = { version = "0.29", features = ["mount", "signal", "process", "term", "fs"] }
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["net"] }
+tower = "0.4"
+hyper-util = { version = "0.1", features = ["server"] }
+russh = "0.48"
+ssh-key = { version = "0.6", features = ["ed25519"] }
+async-trait = "0.1"
+libc = "0.2"
+subtle = "2.6"
+tonic-health = "0.12"
+
+[build-dependencies]
+tonic-build = "0.12"

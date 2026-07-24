@@ -17,7 +17,66 @@ import argparse
 import io
 import os
 import subprocess
-import yaml
+import sys
+
+try:
+    import yaml
+except ImportError:
+    # Auto-provision a venv with required dependencies so developers don't
+    # need to manually pip-install before running deploy-to-kube.
+
+    # Backstop against exec-loop: if this var is already set, the path-based
+    # guard below didn't match and we are re-entering after a failed execv.
+    if os.environ.get("_DEPLOY_TO_KUBE_REEXEC") == "1":
+        print(f"Error: dependency bootstrap looped; delete {venv_dir} and re-run.", file=sys.stderr)
+        sys.exit(1)
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    venv_dir = os.path.join(repo_root, "bin", "dev-tools-venv")
+    venv_python = os.path.join(venv_dir, "bin", "python")
+
+    if os.path.abspath(sys.executable) == venv_python:
+        # Already running inside the venv, but deps are still missing —
+        # likely a prior pip install failed partway.
+        print("Reinstalling dev-tools venv dependencies...")
+        try:
+            req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
+            subprocess.check_call(
+                [os.path.join(venv_dir, "bin", "pip"), "install", "--quiet", "-r", req_file],
+            )
+        except (OSError, subprocess.CalledProcessError):
+            print("Error: Failed to install dependencies in venv.", file=sys.stderr)
+            sys.exit(1)
+        # Retry now that deps have been reinstalled — no need to re-exec.
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            print("Error: Failed to install dependencies in venv.", file=sys.stderr)
+            sys.exit(1)
+    elif not os.path.isfile(venv_python):
+        print("Setting up dev-tools venv (missing dependencies)...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+            req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
+            subprocess.check_call(
+                [os.path.join(venv_dir, "bin", "pip"), "install", "--quiet", "-r", req_file],
+            )
+        except (OSError, subprocess.CalledProcessError):
+            print("Error: Failed to set up dev-tools venv.", file=sys.stderr)
+            sys.exit(1)
+        try:
+            os.environ["_DEPLOY_TO_KUBE_REEXEC"] = "1"
+            os.execv(venv_python, [venv_python, __file__] + sys.argv[1:])
+        except OSError:
+            print(f"Error: Stale dev-tools venv — delete {venv_dir} and re-run.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        try:
+            os.environ["_DEPLOY_TO_KUBE_REEXEC"] = "1"
+            os.execv(venv_python, [venv_python, __file__] + sys.argv[1:])
+        except OSError:
+            print(f"Error: Stale dev-tools venv — delete {venv_dir} and re-run.", file=sys.stderr)
+            sys.exit(1)
 
 from shared import utils
 

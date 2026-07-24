@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -134,6 +135,11 @@ func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTi
 // SandboxClaimReconciler reconciles a SandboxClaim object.
 type SandboxClaimReconciler struct {
 	client.Client
+	// APIReader reads directly from the API server, bypassing the informer
+	// cache. Used only to re-read a claim after an optimistic-lock conflict,
+	// where the cache is stale by definition. Falls back to Client when unset
+	// (e.g. in unit tests with a fake client).
+	APIReader               client.Reader
 	Scheme                  *runtime.Scheme
 	WarmSandboxQueue        queue.SandboxQueue
 	Recorder                events.EventRecorder
@@ -205,7 +211,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claimExpired, timeLeft := r.checkExpiration(claim)
 	if claimExpired && !hasClaimExpiredCondition(claim.Status.Conditions) {
 		meta.SetStatusCondition(&claim.Status.Conditions, r.computeReadyCondition(claim, nil, nil, true))
-		if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+		if _, updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
 			logger.V(1).Info("Sandboxclaim UpdateStatus error encountered", "errors", updateErr, "request", req.NamespacedName)
 			return ctrl.Result{}, updateErr
 		}
@@ -258,7 +264,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	postExpiration, postTimeLeft := r.checkExpiration(claim)
 	if postExpiration && !hasClaimExpiredCondition(claim.Status.Conditions) {
 		meta.SetStatusCondition(&claim.Status.Conditions, r.computeReadyCondition(claim, sandbox, reconcileErr, true))
-		if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+		if _, updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
 			errs := errors.Join(reconcileErr, updateErr)
 			logger.V(1).Info("Sandboxclaim UpdateStatus error encountered", "errors", errs, "request", req.NamespacedName)
 			return ctrl.Result{}, errs
@@ -269,14 +275,24 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 	}
 
-	if updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
+	statusAuthoritative, updateErr := r.updateStatus(ctx, originalClaimStatus, claim)
+	if updateErr != nil {
 		errs := errors.Join(reconcileErr, updateErr)
 		logger.V(1).Info("Sandboxclaim UpdateStatus error encountered", "errors", errs, "request", req.NamespacedName)
 		return ctrl.Result{}, errs
 	}
 
-	if err := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); err != nil {
-		return ctrl.Result{}, errors.Join(reconcileErr, err)
+	// Only record Ready-transition metrics when this pass's status view is
+	// authoritative. A dropped optimistic-lock conflict means the pass read a
+	// stale cache view of a transition an earlier pass already committed and
+	// recorded — observing it again would double-count the startup-latency
+	// histograms (#940). The one-shot annotation (#1114) still guards
+	// re-records across resume/restart; this gate closes the stale-view
+	// window before that annotation is visible in the cache.
+	if statusAuthoritative {
+		if err := r.recordCreationLatencyMetric(ctx, claim, originalClaimStatus, sandbox); err != nil {
+			return ctrl.Result{}, errors.Join(reconcileErr, err)
+		}
 	}
 
 	// Determine Result
@@ -485,7 +501,25 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	return sandbox, nil
 }
 
-func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1beta1.SandboxClaimStatus, claim *extensionsv1beta1.SandboxClaim) error {
+// updateStatus persists the computed claim status with an optimistically
+// locked merge patch. The lock is on the object-wide resourceVersion, so a
+// 409 here means the pass computed its status from a cache view that is
+// stale relative to some committed write on the claim — most often an
+// earlier write by this controller (the claim status has a single writer,
+// serialized per key by the workqueue), but equally any concurrent writer
+// touching the object (a user label edit, TTL tooling, a webhook-driven
+// update). Either way the stale patch must not commit — it could transiently
+// regress the persisted status (and re-record the Ready-latency histograms,
+// #940) — so the conflict is dropped as benign: whichever write bumped the
+// resourceVersion emitted its own claim watch event that re-enqueues the
+// claim, and the next pass recomputes from the converged view.
+//
+// The first return value reports whether the pass's view of the status is
+// authoritative (the patch was persisted, or no write was needed); it is
+// false only on the dropped optimistic-lock conflict, in which case callers
+// must not treat the computed status as having been observed (e.g. must not
+// record Ready-transition metrics).
+func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *extensionsv1beta1.SandboxClaimStatus, claim *extensionsv1beta1.SandboxClaim) (bool, error) {
 	logger := log.FromContext(ctx)
 
 	slices.SortFunc(oldStatus.Conditions, func(a, b metav1.Condition) int {
@@ -502,24 +536,36 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 	})
 
 	if equality.Semantic.DeepEqual(oldStatus, &claim.Status) {
-		return nil
+		return true, nil
 	}
 
 	oldClaim := claim.DeepCopy()
 	oldClaim.Status = *oldStatus
 
-	patch := client.MergeFrom(oldClaim)
+	patch := client.MergeFromWithOptions(oldClaim, client.MergeFromWithOptimisticLock{})
 
 	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		if k8errors.IsConflict(err) {
+			// Dropping the conflict with a nil error and no requeue relies
+			// entirely on the conflicting write emitting a claim watch event
+			// that re-enqueues this key. That holds because getTimingPredicate
+			// returns true for every update; if the claim watch ever gains an
+			// event-filtering predicate, this path must requeue explicitly.
+			logger.V(4).Info("Dropping claim status patch computed from a stale cache view (optimistic-lock conflict); awaiting converged watch event",
+				"name", claim.Name,
+				"namespace", claim.Namespace,
+				"staleResourceVersion", oldClaim.ResourceVersion)
+			return false, nil
+		}
 		logger.Error(err, "Failed to patch sandboxclaim status")
-		return err
+		return false, err
 	}
 
 	logger.V(4).Info("Successfully patched sandboxclaim status",
 		"name", claim.Name,
 		"namespace", claim.Namespace,
 		"observedGeneration", claim.Generation)
-	return nil
+	return true, nil
 }
 
 func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) metav1.Condition {
@@ -852,13 +898,23 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 			claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = adopted.Name
 			if err := r.Update(ctx, claim); err != nil {
-				r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
-				if k8errors.IsConflict(err) {
-					// Conflict means someone else updated the claim. We fail and retry.
+				if !k8errors.IsConflict(err) {
+					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+					logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
 					return false, err
 				}
-				logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
-				return false, err
+				// 409: the cached base was stale (typically behind a write this
+				// controller committed itself, e.g. the observability annotation
+				// patch). Retry in-pass against a fresh read instead of failing
+				// the pass — this resolves in single-digit milliseconds and
+				// keeps the popped candidate from being burned on a doomed pass.
+				if retryErr := r.retryAdoptionAnnotation(ctx, claim, adopted.Name); retryErr != nil {
+					// Retries exhausted (persistent contention) or the fresh
+					// read showed the assignment moved: fail the pass and let
+					// the per-item failure backoff pace further retries.
+					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+					return false, retryErr
+				}
 			}
 
 			// Call helper to complete adoption (patch sandbox)
@@ -1003,6 +1059,75 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	}
 
 	return nil
+}
+
+// authoritativeReader returns the reader used to resolve write conflicts
+// against the API server directly (APIReader), falling back to the
+// cache-backed client when none is configured (tests).
+func (r *SandboxClaimReconciler) authoritativeReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// updateClaimOnFreshBase applies a guarded mutation to the claim in the
+// shared fetch-fresh/guard/mutate/copy-back shape: inside a
+// retry.RetryOnConflict loop, re-read the claim from the authoritative reader
+// (the informer cache is stale by definition when the caller conflicted), let
+// mutate inspect and modify the fresh object, persist it when mutate asks for
+// a write, and copy the server-accepted object back into claim so the rest of
+// the pass operates on the accepted base.
+//
+// mutate returns (false, nil) to skip the write; the fresh base is still
+// copied back. Any error from the fresh read or from mutate aborts the
+// attempt with claim left untouched (RetryOnConflict re-runs the closure on
+// conflict errors only).
+func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, mutate func(fresh *extensionsv1beta1.SandboxClaim) (bool, error)) error {
+	reader := r.authoritativeReader()
+	key := client.ObjectKeyFromObject(claim)
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &extensionsv1beta1.SandboxClaim{}
+		if err := reader.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		write, err := mutate(fresh)
+		if err != nil {
+			return err
+		}
+		if write {
+			if err := r.Update(ctx, fresh); err != nil {
+				return err
+			}
+		}
+		fresh.DeepCopyInto(claim)
+		return nil
+	})
+}
+
+// retryAdoptionAnnotation retries the optimistically locked claim update that
+// records an adoption after a 409: verify on a fresh base that no other
+// sandbox has been assigned in the meantime, then re-apply the assignment. On
+// success the fresh, annotated object is copied back into claim so the rest
+// of the adoption pass (sandbox patch, status finalization) operates on the
+// object the server accepted.
+func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) error {
+	return r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
+		if fresh.UID != claim.UID {
+			return false, fmt.Errorf("claim %s was deleted and recreated during adoption", claim.Name)
+		}
+		if assigned := fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]; assigned != "" && assigned != sandboxName {
+			// A different sandbox is already recorded on the authoritative
+			// object; do not overwrite it. The annotation-recovery path of the
+			// next pass completes that adoption instead.
+			return false, fmt.Errorf("claim %s already assigned sandbox %s, not overwriting", claim.Name, assigned)
+		}
+		if fresh.Annotations == nil {
+			fresh.Annotations = make(map[string]string)
+		}
+		fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = sandboxName
+		return true, nil
+	})
 }
 
 // isSandboxReady checks if a sandbox has Ready=True condition.
@@ -1668,6 +1793,11 @@ func (r *SandboxClaimReconciler) getOrRecordObservedTime(obj client.Object) time
 
 // getTimingPredicate returns a predicate that stores the first time an object is seen by the
 // controller, and cleans up the in-memory map entry when the object is deleted.
+//
+// Every event handler returns true: updateStatus's benign drop of
+// optimistic-lock 409s depends on the conflicting write's update event always
+// passing this predicate (it is what re-enqueues the claim). Do not add event
+// filtering here without revisiting that path.
 func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {

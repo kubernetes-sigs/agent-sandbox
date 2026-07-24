@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -5556,4 +5559,374 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
+}
+
+// newOptimisticLockTestObjects builds a claim already annotated with an
+// adopted, claim-owned, Ready sandbox — the shape of the pass that finalizes
+// (or re-finalizes) a bound claim's status.
+func newOptimisticLockTestObjects() (*extensionsv1beta1.SandboxClaim, *extensionsv1beta1.SandboxTemplate, *extensionsv1beta1.SandboxWarmPool, *sandboxv1beta1.Sandbox) {
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "adopted-sb",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "warmpool-uid-123"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	adopted := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-sb",
+			Namespace: "default",
+			UID:       "adopted-sb-uid",
+			Labels: map[string]string{
+				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxClaim",
+				Name:       "test-claim",
+				UID:        "claim-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+		}}},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "Ready",
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second)),
+			}},
+		},
+	}
+	return claim, template, warmPool, adopted
+}
+
+// TestSandboxClaimStatusPatchCarriesOptimisticLock verifies the claim status
+// patch embeds the base object's resourceVersion, so a patch computed from a
+// stale cache view fails with a 409 instead of committing a stale overwrite.
+func TestSandboxClaimStatusPatchCarriesOptimisticLock(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+
+	var statusPatchData []byte
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" {
+					data, err := patch.Data(obj)
+					if err != nil {
+						return err
+					}
+					statusPatchData = data
+				}
+				return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("expected reconcile to succeed, got: %v", err)
+	}
+
+	if statusPatchData == nil {
+		t.Fatal("expected a claim status patch to be issued")
+	}
+	if !strings.Contains(string(statusPatchData), `"resourceVersion"`) {
+		t.Errorf("expected the status patch to carry an optimistic-lock resourceVersion precondition, got: %s", statusPatchData)
+	}
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, "adopted-sb", updatedClaim.Status.SandboxStatus.Name)
+}
+
+// histogramSampleCount sums the observation counts across all series of a histogram
+// collector by gathering it through a dedicated registry. (testutil.CollectAndCount
+// counts series, not observations, so it cannot detect duplicate records landing in
+// an existing series — and >1 observations per claim is exactly the #940 failure
+// mode this suite guards against.)
+func histogramSampleCount(t *testing.T, c prometheus.Collector) uint64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(c); err != nil {
+		t.Fatalf("failed to register collector: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+	var total uint64
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			total += m.GetHistogram().GetSampleCount()
+		}
+	}
+	return total
+}
+
+// TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics verifies the
+// #940 fix end to end: an authoritative pass records the startup-latency
+// histograms EXACTLY once, and a later pass that computed status from a stale
+// (pre-Ready) cache view has its optimistic-lock 409 dropped as benign — no
+// reconcile error, no requeue storm, no stale status commit, and no second
+// histogram observation. The guarded failure mode is >1 observations per
+// claim (328 observations for 320 claims measured on post-#1118 main), so the
+// assertions pin exact sample counts, not series counts.
+func TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T) {
+	scheme := newScheme(t)
+	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
+	// Annotations normally stamped by the webhook / an earlier controller pass,
+	// required for the two startup-latency histograms to record at all.
+	claim.Annotations[asmetrics.WebhookAnnotation] = time.Now().Add(-5 * time.Second).Format(time.RFC3339Nano)
+	claim.Annotations[asmetrics.ObservabilityAnnotation] = time.Now().Add(-4 * time.Second).Format(time.RFC3339Nano)
+
+	asmetrics.ClaimStartupLatency.Reset()
+	asmetrics.ClaimControllerStartupLatency.Reset()
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	// Pass 1 runs against live state; pass 2 serves a frozen pre-Ready claim
+	// view and rejects its doomed status patch with the optimistic-lock 409.
+	staleClaimView := false
+	var preReadyClaim *extensionsv1beta1.SandboxClaim
+	statusPatchAttempts := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, adopted).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if cl, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && key.Name == "test-claim" && staleClaimView {
+					preReadyClaim.DeepCopyInto(cl)
+					return nil
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && subResourceName == "status" {
+					statusPatchAttempts++
+					if staleClaimView {
+						return conflict
+					}
+				}
+				return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	// Pass 1 (authoritative): the status patch persists and the Ready
+	// transition is observed exactly once.
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("pass 1: expected nil error, got: %v", err)
+	}
+	if statusPatchAttempts != 1 {
+		t.Fatalf("pass 1: expected exactly 1 status patch, got %d", statusPatchAttempts)
+	}
+	if got := histogramSampleCount(t, asmetrics.ClaimStartupLatency); got != 1 {
+		t.Fatalf("pass 1: expected exactly 1 ClaimStartupLatency observation, got %d", got)
+	}
+	if got := histogramSampleCount(t, asmetrics.ClaimControllerStartupLatency); got != 1 {
+		t.Fatalf("pass 1: expected exactly 1 ClaimControllerStartupLatency observation, got %d", got)
+	}
+
+	// Freeze the stale view: the claim as a lagging cache would serve it —
+	// binding annotation present, status not yet converged.
+	bound := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, bound))
+	preReadyClaim = bound.DeepCopy()
+	preReadyClaim.Status = extensionsv1beta1.SandboxClaimStatus{}
+	staleClaimView = true
+
+	// Pass 2 (stale): the recomputed "fresh" Ready transition must be
+	// arbitrated away by the server-side optimistic lock.
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("pass 2: expected the stale status conflict to be dropped as benign (nil error), got: %v", err)
+	}
+	if !res.IsZero() {
+		t.Fatalf("pass 2: expected no requeue (convergence is watch-driven), got %+v", res)
+	}
+	if statusPatchAttempts != 2 {
+		t.Errorf("pass 2: expected the doomed stale patch to be attempted once (2 attempts total), got %d", statusPatchAttempts)
+	}
+
+	// Exactly-once metrics: a count >1 here is the #940 duplicate-observation
+	// regression this test exists to catch.
+	if got := histogramSampleCount(t, asmetrics.ClaimStartupLatency); got != 1 {
+		t.Errorf("expected exactly 1 ClaimStartupLatency observation after the stale pass (>1 = #940 duplicate records), got %d", got)
+	}
+	if got := histogramSampleCount(t, asmetrics.ClaimControllerStartupLatency); got != 1 {
+		t.Errorf("expected exactly 1 ClaimControllerStartupLatency observation after the stale pass (>1 = #940 duplicate records), got %d", got)
+	}
+
+	// The stale pass must not have regressed the persisted status. (Unfreeze
+	// the stale view so this reads the live object.)
+	staleClaimView = false
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, "adopted-sb", updatedClaim.Status.SandboxStatus.Name, "dropped conflict must not clear the committed binding")
+	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond, "dropped conflict must not remove the committed Ready condition")
+	require.Equal(t, metav1.ConditionTrue, readyCond.Status, "dropped conflict must not flip the committed Ready condition")
+}
+
+// TestSandboxClaimAdoptionConflictRetriedInPass verifies that a 409 on the
+// optimistically locked claim update recording a warm-pool adoption is retried
+// in the same pass against a fresh read (retry.RetryOnConflict shape): the
+// adoption completes without surfacing an error and without burning the
+// candidate or deferring to another reconcile pass.
+func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
+	scheme := newScheme(t)
+	_, template, warmPool, _ := newOptimisticLockTestObjects()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+	poolNameHash := sandboxcontrollers.NameHash("test-pool")
+	candidate := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-sb-1",
+			Namespace: "default",
+			UID:       "pool-sb-1-uid",
+			Labels: map[string]string{
+				warmPoolSandboxLabel:   poolNameHash,
+				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxWarmPool",
+				Name:       "test-pool",
+				UID:        "warmpool-uid-123",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+		}}},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: "Ready",
+			}},
+		},
+	}
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	// The first claim Update (the adoption annotation write) conflicts, as if
+	// the cached base predated an earlier write; the in-pass retry re-reads and
+	// succeeds.
+	conflictOnce := true
+	claimUpdates := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, candidate).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+					claimUpdates++
+					if conflictOnce {
+						conflictOnce = false
+						return conflict
+					}
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	warmSandboxQueue.Add(
+		queue.GetNamespacedWarmPoolName("default", "test-pool"),
+		queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"},
+	)
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: warmSandboxQueue,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected the adoption conflict to be resolved in-pass, got error: %v", err)
+	}
+	if !res.IsZero() {
+		t.Fatalf("expected adoption to complete in this pass with no requeue, got %+v", res)
+	}
+	if claimUpdates < 2 {
+		t.Errorf("expected the conflicted update to be retried in-pass (>=2 claim updates), got %d", claimUpdates)
+	}
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, "pool-sb-1", updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation],
+		"in-pass retry must record the adoption on the fresh base")
+	require.Equal(t, "pool-sb-1", updatedClaim.Status.SandboxStatus.Name,
+		"adoption must finalize status in the same pass")
+
+	updatedSandbox := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-1", Namespace: "default"}, updatedSandbox))
+	controllerRef := metav1.GetControllerOf(updatedSandbox)
+	require.NotNil(t, controllerRef)
+	require.Equal(t, types.UID("claim-uid-123"), controllerRef.UID, "candidate must be owned by the claim after the retried adoption")
 }

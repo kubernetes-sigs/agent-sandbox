@@ -30,6 +30,19 @@
     </div>
 </div>
 
+<div class="card" style="margin-bottom: 32px;">
+    <div class="card-title">Kubelet Pod Start Pipeline by Phase</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        pod_start_sli is the kubelet's own pod-startup time (excludes image pulls and
+        scheduling); run_podsandbox is the separately-counted CRI call. They are measured
+        over different populations, so "outside run_podsandbox" is their approximate
+        difference (kubelet pod-worker queueing), not an exact split.
+    </div>
+    <div class="table-container">
+        <table id="pod-start-table"></table>
+    </div>
+</div>
+
 <div class="card">
     <div class="card-title">Kubelet Runtime Operations by Phase</div>
     <div class="table-container">
@@ -38,6 +51,17 @@
 </div>
 
 <script>
+    const podStart = {{ pod_start | tojson }};
+    const secBadge = (warn, bad) => v =>
+        badge(v > bad ? 'danger' : v > warn ? 'warning' : 'success', v.toFixed(2) + 's');
+    renderTable('#pod-start-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'count', label: 'Pods Started'},
+        {key: 'start_avg_s', label: 'Avg Pod Start (SLI)', render: secBadge(3, 10)},
+        {key: 'sandbox_avg_s', label: 'of which run_podsandbox', render: secBadge(2, 5)},
+        {key: 'other_avg_s', label: 'outside run_podsandbox (approx)', render: secBadge(2, 5)}
+    ], podStart);
+
     const criOps = {{ cri_ops | tojson }};
     renderTable('#cri-ops-table', [
         {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},

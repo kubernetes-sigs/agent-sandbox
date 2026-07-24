@@ -303,6 +303,24 @@ dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
 echo "Waiting for controller to be ready..."
 kubectl rollout status deployment agent-sandbox-controller --namespace agent-sandbox-system --timeout=10m
 
+# Serve only the beta API: the mere presence of a v1alpha1 version
+# causes the kube-apiserver to build a v1alpha1 version for every resource,
+# in the informer cache, even if v1alpha1 is never used, adding unnecessary
+# load on the control plane.
+for crd in sandboxes.agents.x-k8s.io \
+           sandboxclaims.extensions.agents.x-k8s.io \
+           sandboxtemplates.extensions.agents.x-k8s.io \
+           sandboxwarmpools.extensions.agents.x-k8s.io; do
+  versions=($(kubectl get crd "${crd}" -o jsonpath='{.spec.versions[*].name}' 2>/dev/null)) || continue
+  for i in "${!versions[@]}"; do
+    if [[ "${versions[$i]}" == "v1alpha1" ]]; then
+      echo "Marking ${crd} v1alpha1 as served=false"
+      kubectl patch crd "${crd}" --type=json \
+        -p "[{\"op\": \"replace\", \"path\": \"/spec/versions/${i}/served\", \"value\": false}]"
+    fi
+  done
+done
+
 # Run the benchmarks
 echo "Running benchmarks..."
 dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"

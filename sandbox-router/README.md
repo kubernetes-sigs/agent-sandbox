@@ -38,7 +38,10 @@ Resolution priority (first match wins):
 
 1. `X-Sandbox-Pod-IP` — explicit caller override, used by SDKs that already know the Pod IP.
 2. Cache lookup by `X-Sandbox-UID` — KEP-NNNN's secure fast path. Only attempted when `--cache-enabled=true` and the UID header is present.
-3. DNS form — always works without informer cache or UID, matches the Python router's behavior.
+3. Cache lookup by `X-Sandbox-Namespace`/`X-Sandbox-ID` (name index) — serves callers that send no UID, and is the required path for Sandboxes created with `spec.service: false`, which have no per-sandbox DNS name. Only attempted when `--cache-enabled=true`.
+4. DNS form — works without informer cache or UID, matches the Python router's behavior; requires the Sandbox's per-sandbox headless Service (`spec.service: true`).
+
+Note for service-free Sandboxes (`spec.service: false`): steps 1-3 are the only viable paths. Run the router with `--cache-enabled=true` (or have callers pass `X-Sandbox-Pod-IP`), otherwise requests fall through to the DNS form and fail to resolve.
 
 The router constructs the upstream URL as:
 - DNS form: `http://<ID>.<Namespace>.svc.<cluster-domain>:<port>/<path>?<query>`
@@ -128,9 +131,9 @@ Run `sandbox-router --help` for the full list. The most relevant:
 
 When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes — not the size of the cluster.
 
-For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → cache lookup by `X-Sandbox-UID` → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. Cache misses fall through to DNS — the router never refuses to route a request just because the cache is cold or out of sync.
+For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → cache lookup by `X-Sandbox-UID` → cache lookup by namespace+`X-Sandbox-ID` (name index) → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. Cache misses fall through to DNS — the router never refuses to route a request just because the cache is cold or out of sync. The name index is what makes `spec.service: false` Sandboxes routable end to end: those have no headless Service, so the DNS fallback cannot resolve them.
 
-**Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails (the Pod was rescheduled and the cache hasn't caught up), the cache entry is evicted immediately so the next request for the same UID falls through to DNS instead of retrying the same stale IP. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
+**Active invalidation.** When the proxy dials an IP that came from the cache (by UID or by name) and the dial fails (the Pod was rescheduled and the cache hasn't caught up), the cache entry is evicted immediately so the next request for the same sandbox re-resolves instead of retrying the same stale IP. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
 
 **Cache content.** Only Pods that pass `PodReady=True` and have a non-empty `Status.PodIP` are stored. Pods that flip out of Ready are removed automatically by the informer event handler so traffic doesn't get steered at a degraded Pod.
 

@@ -261,8 +261,10 @@ func TestIntegration_UpstreamConnectErrorReturns502(t *testing.T) {
 
 // stubLookup is a minimal Lookup for integration tests of cache wiring.
 type stubLookup struct {
-	entries     map[types.UID]cache.Entry
-	invalidated []types.UID
+	entries           map[types.UID]cache.Entry
+	byName            map[string]cache.Entry
+	invalidated       []types.UID
+	invalidatedByName []string
 }
 
 func (s *stubLookup) Get(uid types.UID) (cache.Entry, bool) {
@@ -270,10 +272,23 @@ func (s *stubLookup) Get(uid types.UID) (cache.Entry, bool) {
 	return e, ok
 }
 
+func (s *stubLookup) GetByName(namespace, name string) (cache.Entry, bool) {
+	e, ok := s.byName[namespace+"/"+name]
+	return e, ok
+}
+
 func (s *stubLookup) Invalidate(uid types.UID) bool {
 	_, ok := s.entries[uid]
 	delete(s.entries, uid)
 	s.invalidated = append(s.invalidated, uid)
+	return ok
+}
+
+func (s *stubLookup) InvalidateByName(namespace, name string) bool {
+	key := namespace + "/" + name
+	_, ok := s.byName[key]
+	delete(s.byName, key)
+	s.invalidatedByName = append(s.invalidatedByName, key)
 	return ok
 }
 
@@ -328,6 +343,60 @@ func TestIntegration_CacheInvalidationOnDialError(t *testing.T) {
 	}
 	if _, still := lookup.entries["sandbox-uid-xyz"]; still {
 		t.Fatalf("entry should have been removed from cache")
+	}
+}
+
+// TestIntegration_NameCacheInvalidationOnDialError exercises the
+// UID-less counterpart of active invalidation: a request carrying only
+// ID+namespace resolves via the name index, the dial fails, and the
+// ErrorHandler must evict the name-index entry so the next request
+// re-resolves. This is the recovery path for service-free Sandboxes
+// (spec.service: false), which have no DNS fallback.
+func TestIntegration_NameCacheInvalidationOnDialError(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.ResponseHeaderTimeout = 1 * time.Second
+	cfg.UpstreamMaxRetries = 0
+
+	lookup := &stubLookup{byName: map[string]cache.Entry{
+		"ns/s": {PodIP: "127.0.0.1", SandboxName: "s", Namespace: "ns"},
+	}}
+
+	reg := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(reg)
+
+	router := httptest.NewServer(NewHandler(Options{
+		Config:  &cfg,
+		Cache:   lookup,
+		Metrics: metrics,
+		Logger:  logr.Discard(),
+	}))
+	defer router.Close()
+
+	// No X-Sandbox-Uid header: resolution must go through the name index.
+	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
+	req.Header.Set(HeaderSandboxID, "s")
+	req.Header.Set(HeaderSandboxNamespace, "ns")
+	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502", resp.StatusCode)
+	}
+
+	if len(lookup.invalidatedByName) != 1 || lookup.invalidatedByName[0] != "ns/s" {
+		t.Fatalf("expected one name invalidation for ns/s, got %v", lookup.invalidatedByName)
+	}
+	if len(lookup.invalidated) != 0 {
+		t.Fatalf("UID invalidation must not fire on the name path, got %v", lookup.invalidated)
+	}
+	if _, still := lookup.byName["ns/s"]; still {
+		t.Fatalf("name entry should have been removed from cache")
 	}
 }
 

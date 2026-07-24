@@ -95,6 +95,21 @@ type Cache struct {
 
 	mu      sync.RWMutex
 	entries map[types.UID]Entry
+	// names indexes entries by "<namespace>/<sandbox-name>" so requests
+	// that carry only X-Sandbox-ID + X-Sandbox-Namespace (no UID) can
+	// still resolve a Pod IP. This is what makes `spec.service: false`
+	// Sandboxes routable: without it a UID-less request falls back to the
+	// per-sandbox headless Service DNS name, which doesn't exist for
+	// service-free Sandboxes. The value is the owning Sandbox UID, and
+	// removals are guarded on UID equality so a late delete event for an
+	// old Pod can never evict the entry of a same-named successor.
+	names map[string]types.UID
+}
+
+// nameKey builds the names-index key. Namespace+name is unique at any
+// instant (Pod name == Sandbox name, both namespaced).
+func nameKey(namespace, name string) string {
+	return namespace + "/" + name
 }
 
 // Options configure the cache. Namespace is empty for cluster-wide
@@ -143,6 +158,7 @@ func New(o Options) (*Cache, error) {
 		factory:  factory,
 		stopCh:   make(chan struct{}),
 		entries:  make(map[types.UID]Entry),
+		names:    make(map[string]types.UID),
 	}
 
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -184,6 +200,22 @@ func (c *Cache) Get(uid types.UID) (Entry, bool) {
 	c.mu.RLock()
 	e, ok := c.entries[uid]
 	c.mu.RUnlock()
+	return e, ok
+}
+
+// GetByName looks up the cached entry for the Sandbox with the given
+// namespace and name. This serves requests that carry no X-Sandbox-Uid
+// header — the common SDK case — and is the required resolution path for
+// Sandboxes created with `spec.service: false`, which have no DNS name to
+// fall back to.
+func (c *Cache) GetByName(namespace, name string) (Entry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	uid, ok := c.names[nameKey(namespace, name)]
+	if !ok {
+		return Entry{}, false
+	}
+	e, ok := c.entries[uid]
 	return e, ok
 }
 
@@ -245,6 +277,10 @@ func (c *Cache) upsert(uid types.UID, e Entry) {
 	c.mu.Lock()
 	prev, existed := c.entries[uid]
 	c.entries[uid] = e
+	// Last writer wins on the name index: if a same-named Sandbox was
+	// recreated, the informer's add for the new Pod repoints the name at
+	// the new UID; the old UID's late delete is UID-guarded in remove().
+	c.names[nameKey(e.Namespace, e.SandboxName)] = uid
 	c.mu.Unlock()
 	if !existed {
 		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace)
@@ -255,12 +291,28 @@ func (c *Cache) upsert(uid types.UID, e Entry) {
 
 func (c *Cache) remove(uid types.UID) {
 	c.mu.Lock()
-	_, existed := c.entries[uid]
-	delete(c.entries, uid)
+	existed := c.removeLocked(uid)
 	c.mu.Unlock()
 	if existed {
 		c.log.V(1).Info("cache remove", "uid", uid)
 	}
+}
+
+// removeLocked deletes the entry for uid and its name-index mapping.
+// The name mapping is only deleted when it still points at uid — a late
+// delete event for a replaced Pod must not evict its successor's mapping.
+// Callers must hold c.mu.
+func (c *Cache) removeLocked(uid types.UID) bool {
+	e, existed := c.entries[uid]
+	if !existed {
+		return false
+	}
+	delete(c.entries, uid)
+	key := nameKey(e.Namespace, e.SandboxName)
+	if c.names[key] == uid {
+		delete(c.names, key)
+	}
+	return true
 }
 
 // Invalidate evicts the entry for uid if present, returning true when an
@@ -273,11 +325,30 @@ func (c *Cache) remove(uid types.UID) {
 // Safe to call for an unknown UID — the operation is a no-op.
 func (c *Cache) Invalidate(uid types.UID) bool {
 	c.mu.Lock()
-	_, existed := c.entries[uid]
-	delete(c.entries, uid)
+	existed := c.removeLocked(uid)
 	c.mu.Unlock()
 	if existed {
 		c.log.V(1).Info("cache invalidated by caller", "uid", uid)
+	}
+	return existed
+}
+
+// InvalidateByName evicts the entry for the Sandbox with the given
+// namespace and name, if present. It is the name-resolution counterpart
+// of Invalidate: the proxy calls it from its ErrorHandler when a dial to
+// an IP resolved via GetByName fails, so the next request re-resolves
+// instead of retrying a stale IP.
+//
+// Safe to call for an unknown name — the operation is a no-op.
+func (c *Cache) InvalidateByName(namespace, name string) bool {
+	c.mu.Lock()
+	var existed bool
+	if uid, ok := c.names[nameKey(namespace, name)]; ok {
+		existed = c.removeLocked(uid)
+	}
+	c.mu.Unlock()
+	if existed {
+		c.log.V(1).Info("cache invalidated by caller", "namespace", namespace, "name", name)
 	}
 	return existed
 }

@@ -23,14 +23,22 @@ import (
 )
 
 // fakeLookup is a minimal Lookup implementation for tests. It records
-// Invalidate calls so the proxy ErrorHandler tests can assert on them.
+// Invalidate/InvalidateByName calls so the proxy ErrorHandler tests can
+// assert on them.
 type fakeLookup struct {
-	entries     map[types.UID]cache.Entry
-	invalidated []types.UID
+	entries           map[types.UID]cache.Entry
+	byName            map[string]cache.Entry
+	invalidated       []types.UID
+	invalidatedByName []string
 }
 
 func (f *fakeLookup) Get(uid types.UID) (cache.Entry, bool) {
 	e, ok := f.entries[uid]
+	return e, ok
+}
+
+func (f *fakeLookup) GetByName(namespace, name string) (cache.Entry, bool) {
+	e, ok := f.byName[namespace+"/"+name]
 	return e, ok
 }
 
@@ -40,6 +48,16 @@ func (f *fakeLookup) Invalidate(uid types.UID) bool {
 		delete(f.entries, uid)
 	}
 	f.invalidated = append(f.invalidated, uid)
+	return ok
+}
+
+func (f *fakeLookup) InvalidateByName(namespace, name string) bool {
+	key := namespace + "/" + name
+	_, ok := f.byName[key]
+	if ok {
+		delete(f.byName, key)
+	}
+	f.invalidatedByName = append(f.invalidatedByName, key)
 	return ok
 }
 
@@ -74,10 +92,48 @@ func TestResolve(t *testing.T) {
 			wantSource: SourceDNS,
 		},
 		{
-			name:       "no UID supplied, lookup non-nil",
+			name:       "no UID supplied, lookup non-nil, name index empty",
 			target:     Target{ID: "id", Namespace: "ns", Port: 9999},
 			lookup:     &fakeLookup{entries: map[types.UID]cache.Entry{"u1": {PodIP: "10.0.0.42"}}},
 			wantURL:    "http://id.ns.svc.cluster.local:9999",
+			wantSource: SourceDNS,
+		},
+		{
+			name:   "no UID supplied, name index hit",
+			target: Target{ID: "id", Namespace: "ns", Port: 9999},
+			lookup: &fakeLookup{
+				byName: map[string]cache.Entry{"ns/id": {PodIP: "10.0.0.7"}},
+			},
+			wantURL:    "http://10.0.0.7:9999",
+			wantSource: SourceCacheName,
+		},
+		{
+			name:   "UID cache miss falls through to name index",
+			target: Target{ID: "id", UID: "u-gone", Namespace: "ns", Port: 9999},
+			lookup: &fakeLookup{
+				entries: map[types.UID]cache.Entry{},
+				byName:  map[string]cache.Entry{"ns/id": {PodIP: "10.0.0.8"}},
+			},
+			wantURL:    "http://10.0.0.8:9999",
+			wantSource: SourceCacheName,
+		},
+		{
+			name:   "UID hit wins over name index",
+			target: Target{ID: "id", UID: "u1", Namespace: "ns", Port: 9999},
+			lookup: &fakeLookup{
+				entries: map[types.UID]cache.Entry{"u1": {PodIP: "10.0.0.42"}},
+				byName:  map[string]cache.Entry{"ns/id": {PodIP: "10.0.0.99"}},
+			},
+			wantURL:    "http://10.0.0.42:9999",
+			wantSource: SourceCache,
+		},
+		{
+			name:   "name index namespace-scoped: other namespace misses",
+			target: Target{ID: "id", Namespace: "other", Port: 9999},
+			lookup: &fakeLookup{
+				byName: map[string]cache.Entry{"ns/id": {PodIP: "10.0.0.7"}},
+			},
+			wantURL:    "http://id.other.svc.cluster.local:9999",
 			wantSource: SourceDNS,
 		},
 		{

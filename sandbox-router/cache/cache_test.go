@@ -317,6 +317,226 @@ func TestCache_HandlesMultipleSandboxesIndependently(t *testing.T) {
 	}
 }
 
+func TestCache_GetByNameAfterAdd(t *testing.T) {
+	c, client, cancel := newCache(t)
+	defer cancel()
+
+	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	if _, err := client.CoreV1().Pods(testPodNS).Create(t.Context(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
+		t.Fatalf("Add event was not reflected in name index")
+	}
+	e, _ := c.GetByName(testPodNS, testPodName)
+	if e.PodIP != testPodIP || e.SandboxName != testPodName || e.Namespace != testPodNS {
+		t.Fatalf("entry mismatch: %+v", e)
+	}
+	// Same name in a different namespace must not match.
+	if _, ok := c.GetByName("other-ns", testPodName); ok {
+		t.Fatalf("GetByName must be namespace-scoped")
+	}
+}
+
+// TestCache_UnclaimedWarmPoolPodNotInNameIndex: warm-pool Pods that no
+// SandboxClaim has adopted yet must be reachable only by UID, so callers
+// cannot reach a pool Pod another workload will adopt by guessing
+// pool-generated names. The claim controller removes the warm-pool label
+// on adoption; the resulting Pod update makes the entry name-routable.
+func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
+	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	pod.Labels[PodWarmPoolLabel] = "pool-hash"
+	c, client, cancel := newCache(t, pod)
+	defer cancel()
+
+	// UID lookup works, name lookup must not.
+	if !waitFor(t, func() bool { _, ok := c.Get(testUID); return ok }) {
+		t.Fatalf("unclaimed pod missing from UID map")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatalf("unclaimed warm-pool pod must not be name-routable")
+	}
+
+	// Adoption: the label is removed → the update indexes the entry.
+	adopted := pod.DeepCopy()
+	delete(adopted.Labels, PodWarmPoolLabel)
+	if _, err := client.CoreV1().Pods(testPodNS).Update(t.Context(), adopted, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
+		t.Fatalf("adopted pod was not added to the name index")
+	}
+}
+
+// TestCache_UpsertUnindexRemovesNameKey covers the reverse flip: an entry
+// that was name-indexed and is re-upserted with indexName=false (e.g. the
+// warm-pool label reappears via relist) must leave no stale name key.
+func TestCache_UpsertUnindexRemovesNameKey(t *testing.T) {
+	c := &Cache{log: logr.Discard(), entries: map[types.UID]Entry{}, byName: map[string]types.UID{}}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
+	if _, ok := c.GetByName(testPodNS, testPodName); !ok {
+		t.Fatalf("entry should be name-indexed")
+	}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, false)
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatalf("unindexed entry must not be name-routable")
+	}
+	if _, ok := c.Get(testUID); !ok {
+		t.Fatalf("UID entry must survive unindexing")
+	}
+}
+
+func TestCache_GetByNameGoneAfterDelete(t *testing.T) {
+	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	c, client, cancel := newCache(t, pod)
+	defer cancel()
+
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
+		t.Fatalf("initial cache add failed")
+	}
+	if err := client.CoreV1().Pods(testPodNS).Delete(t.Context(), testPodName, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return !ok }) {
+		t.Fatalf("delete event was not reflected in name index")
+	}
+}
+
+func TestCache_UpsertRenameDropsStaleNameKey(t *testing.T) {
+	// A Pod's name can't actually change in K8s, but the cache must not
+	// trust that invariant: exercise the upsert path directly so a
+	// same-UID entry re-keyed under a new name leaves no stale index key.
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: "old-name", Namespace: testPodNS}, true)
+	c.upsert(testUID, Entry{PodIP: testPodIP2, SandboxName: "new-name", Namespace: testPodNS}, true)
+
+	if _, ok := c.GetByName(testPodNS, "old-name"); ok {
+		t.Fatalf("stale name key must be dropped on rename")
+	}
+	e, ok := c.GetByName(testPodNS, "new-name")
+	if !ok || e.PodIP != testPodIP2 {
+		t.Fatalf("new name key missing or wrong: %+v ok=%v", e, ok)
+	}
+}
+
+func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
+	// Warm-pool rotation recreates a Pod with the same sandbox name but a
+	// new UID. DeltaFIFO orders events per namespace/name key, so the old
+	// delete normally lands before the new add — but relist/compaction
+	// edge cases don't guarantee that, and a remove for the old UID must
+	// never orphan the fresh entry from name-based lookups regardless of
+	// arrival order.
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
+	// New Pod claims the name first (add before delete)...
+	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}, true)
+	// ...then the old Pod's delete arrives late.
+	c.remove(testUID)
+
+	e, ok := c.GetByName(testPodNS, testPodName)
+	if !ok || e.PodIP != testPodIP2 {
+		t.Fatalf("late delete for old UID must not evict the recreated Pod's name key: %+v ok=%v", e, ok)
+	}
+	if _, ok := c.Get(testUID); ok {
+		t.Fatalf("old UID entry must be gone")
+	}
+	if e2, ok := c.Get(testUID2); !ok || e2.PodIP != testPodIP2 {
+		t.Fatalf("new UID entry wrong: %+v ok=%v", e2, ok)
+	}
+
+	// Delete-then-add ordering must also converge on the new entry.
+	c.remove(testUID2)
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
+	if e, ok := c.GetByName(testPodNS, testPodName); !ok || e.PodIP != testPodIP {
+		t.Fatalf("delete-then-add must repopulate the name index: %+v ok=%v", e, ok)
+	}
+}
+
+func TestCache_InvalidateByName(t *testing.T) {
+	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	c, _, cancel := newCache(t, pod)
+	defer cancel()
+
+	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
+		t.Fatalf("initial cache add failed")
+	}
+	if !c.InvalidateByName(testPodNS, testPodName, testPodIP) {
+		t.Fatalf("InvalidateByName must report eviction of a live entry")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatalf("entry must be gone from name index after InvalidateByName")
+	}
+	if _, ok := c.Get(testUID); ok {
+		t.Fatalf("entry must be gone from UID map after InvalidateByName")
+	}
+	if c.InvalidateByName(testPodNS, testPodName, testPodIP) {
+		t.Fatalf("second InvalidateByName must be a no-op")
+	}
+}
+
+func TestCache_InvalidateByNameIPMismatchPreservesFreshEntry(t *testing.T) {
+	// The scenario the IP condition exists for: a dial to the OLD Pod's
+	// IP is timing out while the informer caches the recreated Pod (same
+	// name, new UID). By the time the ErrorHandler fires, the name key
+	// resolves to the FRESH entry — evicting it would leave the name
+	// index empty until resync and reintroduce the issue #883 NXDOMAIN
+	// 502s. The eviction must be a no-op when the IPs don't match.
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}, true)
+
+	if c.InvalidateByName(testPodNS, testPodName, testPodIP) {
+		t.Fatalf("IP mismatch must not report an eviction")
+	}
+	e, ok := c.GetByName(testPodNS, testPodName)
+	if !ok || e.PodIP != testPodIP2 {
+		t.Fatalf("fresh entry must survive a mismatched-IP invalidation: %+v ok=%v", e, ok)
+	}
+	if e2, ok := c.Get(testUID2); !ok || e2.PodIP != testPodIP2 {
+		t.Fatalf("UID entry must survive too: %+v ok=%v", e2, ok)
+	}
+
+	// Matching IP still evicts.
+	if !c.InvalidateByName(testPodNS, testPodName, testPodIP2) {
+		t.Fatalf("matching IP must evict")
+	}
+	if _, ok := c.GetByName(testPodNS, testPodName); ok {
+		t.Fatalf("entry must be gone after matching-IP invalidation")
+	}
+}
+
+func TestCache_InvalidateByNameCleansDanglingKey(t *testing.T) {
+	// entries and byName move in lock-step, so a byName key pointing at a
+	// missing entry shouldn't happen — but if it ever does, the key can
+	// never resolve and InvalidateByName must drop it (and report no
+	// eviction) rather than leave it dangling.
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  map[string]types.UID{nameKey(testPodNS, testPodName): testUID},
+	}
+	if c.InvalidateByName(testPodNS, testPodName, testPodIP) {
+		t.Fatalf("dangling key must not report an eviction")
+	}
+	c.mu.RLock()
+	_, still := c.byName[nameKey(testPodNS, testPodName)]
+	c.mu.RUnlock()
+	if still {
+		t.Fatalf("dangling byName key must be deleted")
+	}
+}
+
 func TestApiVersionInGroup(t *testing.T) {
 	cases := map[string]bool{
 		"agents.x-k8s.io/v1beta1":  true,

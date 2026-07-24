@@ -28,8 +28,8 @@ The router **never** creates or looks up Sandbox resources. If the target sandbo
 
 | Header | Required | Default | Notes |
 |---|---|---|---|
-| `X-Sandbox-ID` | yes | — | Sandbox pod name. Used as the host component of the DNS form. |
-| `X-Sandbox-UID` | no | — | Sandbox CR UID. When `--cache-enabled=true` and the Pod-IP cache has an entry for this UID, the router dials the cached live PodIP and bypasses DNS — the KEP-NNNN fast path. Cache miss falls through to DNS form. |
+| `X-Sandbox-ID` | yes | — | Sandbox pod name. With `--cache-enabled=true`, combined with the namespace to look up the live PodIP in the cache's name index; otherwise (or on miss) used as the host component of the DNS form. |
+| `X-Sandbox-UID` | no | — | Sandbox CR UID. When `--cache-enabled=true` and the Pod-IP cache has an entry for this UID, the router dials the cached live PodIP and bypasses DNS — the KEP-NNNN fast path. Cache miss falls through to the name index, then the DNS form. |
 | `X-Sandbox-Namespace` | no | `default` | Must be ASCII letters / digits / hyphens, with at least one alphanumeric. |
 | `X-Sandbox-Port` | no | `8888` | Numeric. |
 | `X-Sandbox-Pod-IP` | no | — | When set, bypasses both cache and DNS and dials this IP directly. |
@@ -38,7 +38,8 @@ Resolution priority (first match wins):
 
 1. `X-Sandbox-Pod-IP` — explicit caller override, used by SDKs that already know the Pod IP.
 2. Cache lookup by `X-Sandbox-UID` — KEP-NNNN's secure fast path. Only attempted when `--cache-enabled=true` and the UID header is present.
-3. DNS form — always works without informer cache or UID, matches the Python router's behavior.
+3. Cache lookup by `X-Sandbox-Namespace`/`X-Sandbox-ID` — the sandbox name is the Pod name, so the cache's name index resolves the same live Pod IP without a UID. Like step 2, only attempted when `--cache-enabled=true`; deployments running with the cache disabled fall straight through to step 4. This is what keeps warm-pool sandboxes (which have no per-sandbox Service, so step 4 is guaranteed NXDOMAIN) routable for SDK traffic that carries no UID or Pod IP. Warm-pool Pods that no SandboxClaim has adopted yet are excluded from the name index — they remain reachable only by UID, preserving the UID-as-capability property so callers cannot reach an unclaimed pool Pod by guessing pool-generated names.
+4. DNS form — compatibility fallback used without an informer cache or after cache misses; matches the Python router's behavior.
 
 The router constructs the upstream URL as:
 - DNS form: `http://<ID>.<Namespace>.svc.<cluster-domain>:<port>/<path>?<query>`
@@ -126,13 +127,13 @@ Run `sandbox-router --help` for the full list. The most relevant:
 
 ## Pod-IP cache (KEP-NNNN fast path)
 
-When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes — not the size of the cluster.
+When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map plus a namespace/name secondary index over the same entries. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes — not the size of the cluster.
 
-For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → cache lookup by `X-Sandbox-UID` → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. Cache misses fall through to DNS — the router never refuses to route a request just because the cache is cold or out of sync.
+For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → cache lookup by `X-Sandbox-UID` → cache lookup by `X-Sandbox-Namespace`/`X-Sandbox-ID` (the name index) → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. The name-index step matters most for warm-pool sandboxes: they have no per-sandbox Service, so for traffic that carries only the ID header the DNS form can never resolve and the name index is the only working path. Cache misses fall through to DNS — the router never refuses to route a request just because the cache is cold or out of sync.
 
-**Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails (the Pod was rescheduled and the cache hasn't caught up), the cache entry is evicted immediately so the next request for the same UID falls through to DNS instead of retrying the same stale IP. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
+**Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails because the host is unreachable (timeout, no route — the Pod was rescheduled and the cache hasn't caught up), the cache entry is evicted immediately — by UID when the UID path resolved it, by namespace/name when the name index did — so the next request for the same sandbox falls through to DNS instead of retrying the same stale IP. A connection *refusal* does not evict: it proves a live host (typically a caller-selected port the Pod isn't listening on), and evicting on it would strand warm-pool traffic on the DNS path until the next resync. Name-keyed evictions are additionally conditional on the entry still holding the IP that failed, so a recreated Pod cached mid-dial is never evicted by a late failure against its predecessor's IP. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
 
-**Cache content.** Only Pods that pass `PodReady=True` and have a non-empty `Status.PodIP` are stored. Pods that flip out of Ready are removed automatically by the informer event handler so traffic doesn't get steered at a degraded Pod.
+**Cache content.** Only Pods that pass `PodReady=True` and have a non-empty `Status.PodIP` are stored. Pods that flip out of Ready are removed automatically by the informer event handler so traffic doesn't get steered at a degraded Pod. Unclaimed warm-pool Pods are stored but not name-indexed (see resolution priority above); adoption by a SandboxClaim removes the `agents.x-k8s.io/warm-pool-sandbox` label and the resulting Pod update makes the entry name-routable.
 
 **RBAC.** Cluster-wide `get`, `list`, `watch` on `pods`. The example `deploy/rbac.yaml` is a `ClusterRole` + `ClusterRoleBinding`; narrow to a `Role` + `RoleBinding` when `--cache-namespace` is set. Note that K8s RBAC has no negative-namespace primitive, so the grant cannot say "all namespaces except kube-system" — the runtime label selector (`agents.x-k8s.io/sandbox-name-hash`) is what keeps system Pods out of the actual watch and the cache. The file's header comment spells this out for auditors.
 

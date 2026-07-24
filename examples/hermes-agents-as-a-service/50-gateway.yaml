@@ -1,0 +1,99 @@
+# The gateway: the control+data plane that turns the resources into a
+# usable service. Build the image first (see README step 8):
+#   docker build -t aaas-gateway:demo gateway/
+#   kind load docker-image aaas-gateway:demo   # (kind clusters)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aaas-gateway
+  namespace: hermes-demo
+---
+# Least privilege: claims are created/deleted per user; sandboxes are only
+# read and patched (operatingMode flips for suspend/resume).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aaas-gateway
+  namespace: hermes-demo
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aaas-gateway
+  namespace: hermes-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aaas-gateway
+subjects:
+  - kind: ServiceAccount
+    name: aaas-gateway
+    namespace: hermes-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aaas-gateway
+  namespace: hermes-demo
+spec:
+  replicas: 1 # in-memory idle clock => single replica by design
+  selector:
+    matchLabels:
+      app: aaas-gateway
+  template:
+    metadata:
+      labels:
+        app: aaas-gateway
+    spec:
+      serviceAccountName: aaas-gateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000 # matches USER in gateway/Dockerfile
+        runAsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: aaas-gateway:demo
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NAMESPACE
+              value: hermes-demo
+            - name: POOL
+              value: hermes-pool
+            - name: IDLE_TIMEOUT
+              value: "60"
+            - name: API_SERVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: api-server-key
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aaas-gateway
+  namespace: hermes-demo
+spec:
+  selector:
+    app: aaas-gateway
+  ports:
+    - port: 8080
+      targetPort: 8080

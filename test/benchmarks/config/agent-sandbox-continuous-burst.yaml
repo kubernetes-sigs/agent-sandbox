@@ -11,6 +11,7 @@
 {{$sandboxClaimControllerStartupLatencyThreshold50Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_50_MS 1000}}
 {{$sandboxClaimControllerStartupLatencyThreshold90Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90_MS 1000}}
 {{$sandboxClaimControllerStartupLatencyThreshold99Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS 5000}}
+{{$podStartupLatencyThreshold := DefaultParam .CL2_POD_STARTUP_LATENCY_THRESHOLD "15s"}}
 {{$ENABLE_SCHEDULING_METRICS := DefaultParam .CL2_ENABLE_SCHEDULING_METRICS true}}
 {{$ENABLE_API_AVAILABILITY := DefaultParam .CL2_ENABLE_API_AVAILABILITY true}}
 
@@ -198,6 +199,7 @@ steps:
     Params:
       action: gather
       labelSelector: "app=agent-sandbox-load-test"
+      threshold: {{$podStartupLatencyThreshold}}
   - Identifier: SandboxClaimControllerStartupLatency
     Method: GenericPrometheusQuery
     Params:

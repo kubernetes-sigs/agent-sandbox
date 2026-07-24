@@ -25,6 +25,8 @@ import pytest
 httpx = pytest.importorskip("httpx")
 pytest.importorskip("kubernetes_asyncio")
 
+from kubernetes_asyncio.client.exceptions import ApiException
+
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
@@ -108,6 +110,159 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             mock_delete.assert_called_once()
+
+    async def test_create_sandbox_with_explicit_claim_name(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            sandbox = await self.client.create_sandbox(
+                "test-warmpool", "test-namespace", claim_name="sandbox-my-task"
+            )
+
+            mock_create.assert_called_once_with(
+                "sandbox-my-task",
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None
+            )
+            self.assertEqual(sandbox, mock_sandbox_instance)
+
+    async def test_create_sandbox_rejects_invalid_claim_name(self):
+        with self.assertRaises(ValueError) as ctx:
+            await self.client.create_sandbox("test-warmpool", claim_name="Invalid_Name")
+        self.assertIn("DNS-1123", str(ctx.exception))
+
+    async def test_create_sandbox_adopts_existing_claim_on_409(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(
+            return_value={"spec": {"warmPoolRef": {"name": "test-warmpool"}}}
+        )
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock,
+                          side_effect=ApiException(status=409)), \
+             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+
+            sandbox = await self.client.create_sandbox(
+                "test-warmpool",
+                "test-namespace",
+                claim_name="sandbox-my-task",
+                adopt_existing=True,
+            )
+
+            self.assertEqual(sandbox, mock_sandbox_instance)
+            self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with(
+                "sandbox-my-task", "test-namespace", 180
+            )
+
+    async def test_create_sandbox_adopt_rejects_warmpool_mismatch(self):
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(
+            return_value={"spec": {"warmPoolRef": {"name": "other-warmpool"}}}
+        )
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock,
+                          side_effect=ApiException(status=409)), \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+
+            with self.assertRaises(ValueError) as ctx:
+                await self.client.create_sandbox(
+                    "test-warmpool",
+                    "test-namespace",
+                    claim_name="sandbox-my-task",
+                    adopt_existing=True,
+                )
+
+            self.assertIn("Refusing to adopt", str(ctx.exception))
+            # The mismatched claim belongs to someone else — never delete it
+            mock_delete.assert_not_called()
+
+    async def test_create_sandbox_409_raises_without_adopt_existing(self):
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock,
+                          side_effect=ApiException(status=409)), \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+
+            with self.assertRaises(ApiException):
+                await self.client.create_sandbox(
+                    "test-warmpool", "test-namespace", claim_name="sandbox-my-task"
+                )
+
+            # The claim was never created by this call, so there is nothing to clean up
+            mock_delete.assert_not_called()
+
+    async def test_create_sandbox_non_409_not_adopted(self):
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock,
+                          side_effect=ApiException(status=403)), \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+
+            with self.assertRaises(ApiException):
+                await self.client.create_sandbox(
+                    "test-warmpool",
+                    "test-namespace",
+                    claim_name="sandbox-my-task",
+                    adopt_existing=True,
+                )
+
+            mock_delete.assert_not_called()
+
+    async def test_create_sandbox_generated_name_cleanup_when_create_fails(self):
+        # A generated name is unambiguously ours: even when the create call
+        # itself errors (it may have persisted server-side), clean up best-effort
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock,
+                          side_effect=ApiException(status=500)), \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+
+            with self.assertRaises(ApiException):
+                await self.client.create_sandbox("test-warmpool", "test-namespace")
+
+            mock_delete.assert_called_once()
+
+    async def test_create_sandbox_explicit_name_no_cleanup_when_create_fails(self):
+        # An explicit name may belong to a prior attempt; without a confirmed
+        # create, never delete it
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock,
+                          side_effect=ApiException(status=500)), \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+
+            with self.assertRaises(ApiException):
+                await self.client.create_sandbox(
+                    "test-warmpool", "test-namespace", claim_name="sandbox-my-task"
+                )
+
+            mock_delete.assert_not_called()
+
+    async def test_create_sandbox_adopted_claim_not_deleted_on_failure(self):
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            side_effect=Exception("Timeout")
+        )
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(
+            return_value={"spec": {"warmPoolRef": {"name": "test-warmpool"}}}
+        )
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock,
+                          side_effect=ApiException(status=409)), \
+             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+
+            with self.assertRaises(Exception) as ctx:
+                await self.client.create_sandbox(
+                    "test-warmpool",
+                    "test-namespace",
+                    claim_name="sandbox-my-task",
+                    adopt_existing=True,
+                )
+
+            self.assertEqual(str(ctx.exception), "Timeout")
+            # An adopted claim belongs to a prior attempt — never delete it on failure
+            mock_delete.assert_not_called()
 
     async def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()

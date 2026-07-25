@@ -162,7 +162,16 @@ echo "Using node count: ${STRESS_NODE_COUNT}"
 # them. NOTE: c3/c4 machine families do not support pd-standard boot disks,
 # so the control-plane root volume is set to pd-ssd below alongside the
 # nodes'.
-STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-44}"
+# c3-standard-88: at mif1600 on c3-standard-44 (run 2081142826250276864)
+# the control-plane NODE ran 86% busy - apiserver 29 cores + etcd 4.9 +
+# KCM/scheduler 2.4 + node overhead - and at that utilization run-queue
+# delay taxes every latency-sensitive thread: etcd round trips doubled
+# (5.9ms -> 11ms) with etcd's own CPU modest, apiserver latency rose to
+# 18ms, and the kubelet status lane (whose service time IS that latency)
+# queued 1.1s. Note the per-process view misleads here: the apiserver
+# alone showed 15 "idle" cores while the box was nearly full. 88 vCPUs
+# targets ~45% node utilization at the same load.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-88}"
 echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
 
 echo "Creating kOps cluster configuration..."

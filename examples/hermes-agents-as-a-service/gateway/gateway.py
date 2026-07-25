@@ -78,10 +78,18 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = \
     int(os.environ.get("MAX_BODY_MB", "32")) * 1024 * 1024
 last_activity: dict[str, float] = {}
-# Open proxy streams per user. While > 0 the sweeper must not suspend: a
-# response still streaming after IDLE_TIMEOUT is activity, not idleness.
+# Admitted proxy requests per user. While > 0 the sweeper must not suspend:
+# a request being served (or still streaming) after IDLE_TIMEOUT is
+# activity, not idleness. The sweeper checks-and-suspends under the same
+# lock that admission increments under, so the pair is atomic.
 in_flight: dict[str, int] = {}
 flight_lock = threading.Lock()
+
+
+def end_flight(user: str):
+    with flight_lock:
+        in_flight[user] = max(in_flight.get(user, 1) - 1, 0)
+    last_activity[user] = time.time()
 
 
 def claim_name(user: str) -> str:
@@ -238,62 +246,73 @@ def proxy(user, path):
         return jsonify(error="unknown user"), 404
     if not authorized(claim):
         return jsonify(error="unauthorized"), 401
-    last_activity[user] = time.time()
 
-    sandbox = sandbox_of(claim)
-    if sandbox is None:
-        return jsonify(error="sandbox not provisioned yet"), 503
-    if derive_state(sandbox) != "Ready":
-        # Wake-on-connect: flip the mode (safe in ANY state, including
-        # mid-suspension) and HOLD the request until Ready.
-        set_operating_mode(sandbox["metadata"]["name"], "Running")
-        sandbox = wait_ready(user, WAKE_TIMEOUT)
-        if sandbox is None:
-            return jsonify(error="agent is waking up, retry shortly"), 503, \
-                {"Retry-After": "10"}
-        last_activity[user] = time.time()
-
-    fqdn = (sandbox.get("status") or {}).get("serviceFQDN")
-    headers = {k: v for k, v in request.headers
-               if k.lower() not in ("host", "authorization")}
-    # Auth is header-only, but never forward a stray ?token= upstream where
-    # the app (or its logs) would see it.
-    params = [(k, v) for k, v in request.args.items(multi=True)
-              if k != "token"]
-    if path == "v1" or path.startswith("v1/"):
-        upstream = f"http://{fqdn}:8642/{path}"
-        headers["Authorization"] = f"Bearer {API_SERVER_KEY}"
-    else:
-        upstream = f"http://{fqdn}:9119/{path}"
-
-    # The pod can be Ready a beat before the server binds; retry the dial.
-    for attempt in range(5):
-        try:
-            r = requests.request(
-                request.method, upstream, params=params,
-                data=request.get_data(), headers=headers,
-                stream=True, timeout=300)
-            break
-        except requests.ConnectionError:
-            if attempt == 4:
-                return jsonify(error="upstream unavailable"), 502
-            time.sleep(1)
+    # Reserve activity the moment the request is admitted — BEFORE the
+    # sandbox is resolved or woken — so the sweeper can never suspend
+    # between admission and the upstream dial. Every early return releases
+    # the reservation; the streaming path hands it to relay(), which
+    # releases it when the response finishes (or the client disconnects).
     with flight_lock:
         in_flight[user] = in_flight.get(user, 0) + 1
-
-    def relay():
-        try:
-            yield from r.iter_content(chunk_size=None)
-        finally:  # runs on stream completion AND client disconnect
-            with flight_lock:
-                in_flight[user] = max(in_flight.get(user, 1) - 1, 0)
+    last_activity[user] = time.time()
+    streaming = False
+    try:
+        sandbox = sandbox_of(claim)
+        if sandbox is None:
+            return jsonify(error="sandbox not provisioned yet"), 503
+        if derive_state(sandbox) != "Ready":
+            # Wake-on-connect: flip the mode (safe in ANY state, including
+            # mid-suspension) and HOLD the request until Ready.
+            set_operating_mode(sandbox["metadata"]["name"], "Running")
+            sandbox = wait_ready(user, WAKE_TIMEOUT)
+            if sandbox is None:
+                return jsonify(error="agent is waking up, retry shortly"), \
+                    503, {"Retry-After": "10"}
             last_activity[user] = time.time()
 
-    return Response(
-        relay(),
-        status=r.status_code,
-        headers=[(k, v) for k, v in r.headers.items()
-                 if k.lower() not in ("transfer-encoding", "connection")])
+        fqdn = (sandbox.get("status") or {}).get("serviceFQDN")
+        headers = {k: v for k, v in request.headers
+                   if k.lower() not in ("host", "authorization")}
+        # Auth is header-only, but never forward a stray ?token= upstream
+        # where the app (or its logs) would see it.
+        params = [(k, v) for k, v in request.args.items(multi=True)
+                  if k != "token"]
+        if path == "v1" or path.startswith("v1/"):
+            upstream = f"http://{fqdn}:8642/{path}"
+            headers["Authorization"] = f"Bearer {API_SERVER_KEY}"
+        else:
+            upstream = f"http://{fqdn}:9119/{path}"
+
+        # The pod can be Ready a beat before the server binds; retry the
+        # dial.
+        for attempt in range(5):
+            try:
+                r = requests.request(
+                    request.method, upstream, params=params,
+                    data=request.get_data(), headers=headers,
+                    stream=True, timeout=300)
+                break
+            except requests.ConnectionError:
+                if attempt == 4:
+                    return jsonify(error="upstream unavailable"), 502
+                time.sleep(1)
+
+        def relay():
+            try:
+                yield from r.iter_content(chunk_size=None)
+            finally:  # runs on stream completion AND client disconnect
+                r.close()  # release the upstream connection either way
+                end_flight(user)
+
+        streaming = True  # relay() now owns the in-flight reservation
+        return Response(
+            relay(),
+            status=r.status_code,
+            headers=[(k, v) for k, v in r.headers.items()
+                     if k.lower() not in ("transfer-encoding", "connection")])
+    finally:
+        if not streaming:
+            end_flight(user)
 
 
 def idle_sweeper():
@@ -305,18 +324,28 @@ def idle_sweeper():
                 GROUP, VERSION, NAMESPACE, "sandboxclaims")["items"]
             for c in claims:
                 user = c["metadata"]["name"].removeprefix("hermes-")
-                if in_flight.get(user, 0) > 0:
-                    continue  # an open proxy stream counts as activity
                 try:
                     sandbox = sandbox_of(c)
                 except client.ApiException:
                     continue
                 if sandbox is None or derive_state(sandbox) != "Ready":
                     continue
-                idle = time.time() - last_activity.setdefault(user, time.time())
-                if idle >= IDLE_TIMEOUT:
-                    print(f"suspending {user} (idle {int(idle)}s)", flush=True)
-                    set_operating_mode(sandbox["metadata"]["name"], "Suspended")
+                # Check-and-suspend atomically with proxy admission (which
+                # increments in_flight under this same lock): a request
+                # admitted after this check can no longer be suspended
+                # mid-flight. One that loses the race instead finds the
+                # sandbox Suspending and takes the wake-on-connect path.
+                with flight_lock:
+                    if in_flight.get(user, 0) > 0:
+                        continue  # requests in flight => the user is active
+                    idle = time.time() - \
+                        last_activity.setdefault(user, time.time())
+                    if idle < IDLE_TIMEOUT:
+                        continue
+                    print(f"suspending {user} (idle {int(idle)}s)",
+                          flush=True)
+                    set_operating_mode(sandbox["metadata"]["name"],
+                                       "Suspended")
         except Exception as e:
             # A transient API error must not kill this daemon thread — that
             # would silently stop idle suspension for good.

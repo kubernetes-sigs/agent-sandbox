@@ -2631,6 +2631,24 @@ func TestTakeRefillTokens(t *testing.T) {
 		require.Equal(t, 2*time.Second, wait, "next token at 1/rate")
 	})
 
+	t.Run("rates beyond int32 range cannot wrap the grant negative", func(t *testing.T) {
+		// A finite rate above MaxInt32 passes the flag validation (which only
+		// rejects NaN/Inf/negative); the bucket capacity then exceeds what an
+		// int32 can hold, and an unconditional float64->int32 narrowing is
+		// implementation-defined — on amd64 it wraps the grant to MinInt32:
+		// no creates and no pacing requeue (arm64 happens to saturate). The
+		// grant must clamp to the request instead, on every platform.
+		r := &SandboxWarmPoolReconciler{MaxRefillRate: 1e18}
+		granted, wait := r.takeRefillTokens(key, 300, base)
+		require.Equal(t, int32(300), granted, "the whole request fits in the bucket")
+		require.Zero(t, wait)
+
+		// And again with a drained-then-huge accrual, for the accrue path.
+		granted, wait = r.takeRefillTokens(key, 250, base.Add(time.Hour))
+		require.Equal(t, int32(250), granted)
+		require.Zero(t, wait)
+	})
+
 	t.Run("refund returns unspent tokens up to capacity", func(t *testing.T) {
 		r := &SandboxWarmPoolReconciler{MaxRefillRate: 2}
 		granted, _ := r.takeRefillTokens(key, 2, base) // drain the initial 2

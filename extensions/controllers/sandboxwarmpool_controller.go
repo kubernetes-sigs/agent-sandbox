@@ -315,7 +315,20 @@ func (r *SandboxWarmPoolReconciler) takeRefillTokens(key types.NamespacedName, w
 		b.last = now
 	}
 
-	granted := min(want, int32(b.tokens))
+	// Only narrow the float64 token count to int32 when the bucket holds
+	// fewer tokens than the request: then 0 <= b.tokens < float64(want) <=
+	// MaxInt32 and the conversion is exact. Converting unconditionally is
+	// implementation-defined for capacities above MaxInt32 (a huge-but-finite
+	// MaxRefillRate passes the flag validation, which only rejects
+	// NaN/Inf/negative): amd64 wraps to MinInt32, turning the grant negative
+	// — no creates issued AND no pacing requeue armed, wedging the pool
+	// (arm64 happens to saturate to MaxInt32). Guarding here (rather than
+	// clamping the flag) keeps the behavior defined on every platform and
+	// also covers programmatically constructed reconcilers.
+	granted := want
+	if b.tokens < float64(want) {
+		granted = int32(b.tokens)
+	}
 	b.tokens -= float64(granted)
 	if granted >= want {
 		return granted, 0

@@ -282,6 +282,20 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # Note this is different from other rate limits: we drop extra events.
 # A diagnostics trade-off that is acceptable here, needs more careful
 # evaluation before using in production clusters.
+# kubeAPIServer.maxRequestsInflight/maxMutatingRequestsInflight (defaults
+# 400/200): APF's total seat budget is derived from these two flags and
+# scales with NOTHING else - not CPU, not node count. Hero run
+# 2081124465281863680 (80 nodes, c3-standard-44): the system priority
+# level (kubelet traffic) queued 53ms mean at 1,663 req/s while the
+# apiserver sat at 35% CPU - pods PATCH 54ms / DELETE 45ms / GET 30ms are
+# the kubelet verbs wearing that APF wait, and throughput regressed below
+# the 40-node run's because twice the kubelets contended for the same 600
+# seats. 1600/800 scales the pool ~2.7x to match the 2x box and 4x nodes;
+# the system level's nominal share grows proportionally.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubeAPIServer.maxRequestsInflight=1600 \
+  --set cluster.spec.kubeAPIServer.maxMutatingRequestsInflight=800
+
 kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubelet.kubeAPIQPS=500 \
   --set cluster.spec.kubelet.eventQPS=5 \

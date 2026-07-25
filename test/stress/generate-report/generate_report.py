@@ -680,6 +680,75 @@ def main():
             "avg_wait_ms": (wait_total / count_delta) * 1000 if count_delta > 0 else 0
         })
 
+    # Limiter regime per (phase, component): a client-go limiter hurts in
+    # two distinguishable ways. A saturated limiter with open-loop callers
+    # QUEUES - a backlog forms and waits grow into the tail (the classic,
+    # loud signature the >100ms finding below catches). A limiter running at
+    # exactly its QPS with closed-loop callers PACES - each request just
+    # waits for the next token, uniformly distributed over 0..1/QPS, so the
+    # mean wait is half the token interval and NO request ever exceeds one
+    # interval. Tail- and threshold-based checks read pacing as healthy: in
+    # run 2080987052014309376 the kubelets ran at ~50 req/s/node against
+    # kubeAPIQPS=50 and paid a uniform 9.1ms mean (0% of waits over 25ms),
+    # which was ~60% of the serialized status-sync lane's service time.
+    # The uniform shape also makes the mean a limit estimator: implied
+    # per-instance QPS ~= 1 / (2 * mean_wait).
+    print("Querying limiter regime by phase and component...")
+    # verb/host must be extracted even though we don't group by them: they
+    # partition the delta computation (mixing label streams corrupts deltas;
+    # see the module comment on _counter_deltas_cte).
+    limiter_regime_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["rest_client_rate_limiter_duration_seconds_count",
+                 "rest_client_rate_limiter_duration_seconds_sum"],
+        labels={"verb": "verb", "host": "host"},
+        group_by=["source", "verb", "instance"])
+    phase_durations = {name: (p_end - p_start).total_seconds()
+                       for name, p_start, p_end in phases}
+    regime_agg = {}
+    for phase_name, source, verb, instance, count_delta, wait_total in limiter_regime_raw:
+        if count_delta <= 0:
+            continue
+        entry = regime_agg.setdefault((phase_name, source, verb),
+                                      {"count": 0.0, "wait": 0.0, "instances": set()})
+        entry["count"] += count_delta
+        entry["wait"] += wait_total
+        entry["instances"].add(instance)
+
+    limiter_regime_ops = []
+    for (phase_name, source, verb), entry in regime_agg.items():
+        duration_s = phase_durations.get(phase_name, 0)
+        if duration_s <= 0 or entry["count"] < 100:
+            continue
+        n_instances = len(entry["instances"])
+        rate_per_instance = entry["count"] / duration_s / n_instances
+        mean_wait_ms = entry["wait"] / entry["count"] * 1000
+        implied_qps = 1000.0 / (2 * mean_wait_ms) if mean_wait_ms >= 1.0 else None
+        if mean_wait_ms >= 100:
+            verdict = "queueing"
+        elif implied_qps is not None and rate_per_instance >= 0.5 * implied_qps:
+            verdict = "pacing"
+        elif mean_wait_ms >= 1.0:
+            # Waits despite sustained-rate headroom: demand SPIKES exceed the
+            # bucket even though the average does not (observed on kubelets at
+            # ~59 req/s/node sustained vs a 100 QPS limit - PLEG-batch sync
+            # bursts drained the bucket; kOps exposes no kubelet burst field).
+            verdict = "bursty"
+        else:
+            verdict = "ok"
+        limiter_regime_ops.append({
+            "phase_name": phase_name,
+            "source": source,
+            "verb": verb,
+            "instances": n_instances,
+            "rate_per_instance": rate_per_instance,
+            "mean_wait_ms": mean_wait_ms,
+            "implied_qps": implied_qps,
+            "verdict": verdict,
+        })
+    limiter_regime_ops.sort(
+        key=lambda r: (phase_order_map_early.get(r["phase_name"], 99), -r["mean_wait_ms"]))
+
     print("Querying client throttling timeseries...")
     client_ratelimit_ts_raw = metrics_timeseries(
         conn, metrics_path_str,
@@ -1129,6 +1198,33 @@ def main():
             "link": "ratelimits.html"
         })
 
+    # Pacing check: the quiet failure mode the >100ms threshold above cannot
+    # see. A limiter running at its QPS with closed-loop callers paces every
+    # request by up to one token interval - mean wait of half the interval,
+    # zero tail - so it looks healthy to percentile checks while taxing 100%
+    # of requests (and any serialized caller loop proportionally).
+    pacing_worst = None
+    for row in limiter_regime_ops:
+        if (row['phase_name'].startswith('throughput') and row['verdict'] == 'pacing'
+                and row['rate_per_instance'] >= 10):
+            if pacing_worst is None or row['mean_wait_ms'] > pacing_worst['mean_wait_ms']:
+                pacing_worst = row
+
+    if pacing_worst:
+        w = pacing_worst
+        findings.append({
+            "severity": "warning",
+            "title": f"{w['source']} {w['verb']} is pacing at its client QPS limit (~{w['implied_qps']:.0f}/s per instance)",
+            "desc": f"During phase {w['phase_name']}, {w['source']} ({w['instances']} instance(s)) ran at "
+                    f"{w['rate_per_instance']:.0f} req/s per instance with a uniform {w['mean_wait_ms']:.1f}ms mean "
+                    f"rate-limiter wait - the signature of a token bucket metering requests at its QPS limit "
+                    f"(implied limit ~{w['implied_qps']:.0f}/s = 1/(2 x mean wait)). Pacing produces no latency tail, "
+                    f"so it evades percentile-based checks, but it taxes every request; serialized callers (e.g. the "
+                    f"kubelet status manager) lose throughput proportionally. Consider raising the component's client "
+                    f"QPS. See the Limiter Regime table on the Rate Limiting page.",
+            "link": "ratelimits.html"
+        })
+
     # Capacity saturation finding check
     max_active_pods = 0
     for pt in capacity_chart_data:
@@ -1333,6 +1429,7 @@ def main():
         "active_page": "ratelimits",
         "summary": summary,
         "client_ratelimit_ops": client_ratelimit_ops,
+        "limiter_regime_ops": limiter_regime_ops,
         "apf_ops": apf_ops,
         "chart_data": client_ratelimit_chart_data,
         "phases": js_phases

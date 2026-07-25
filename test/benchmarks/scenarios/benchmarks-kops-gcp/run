@@ -270,6 +270,21 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubeScheduler.qps=500 \
   --set cluster.spec.kubeScheduler.burst=500
 
+# kubelet.kubeAPIQPS (default 50): the kubelets make multiple pod
+# status updates per pod.
+# Each kubelet status-manager sync is a GET plus a PATCH through one serialized loop,
+# so this becomes a bottleneck when churning more than 5 pods / second / node.
+#
+# kubelet.eventQPS/eventBurst: kubelet event emission has its own limiter,
+# not covered by kubeAPIQPS.
+# Note this is different from other rate limits: we drop extra events.
+# A diagnostics trade-off that is acceptable here, needs more careful
+# evaluation before using in production clusters.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubelet.kubeAPIQPS=500 \
+  --set cluster.spec.kubelet.eventQPS=5 \
+  --set cluster.spec.kubelet.eventBurst=50
+
 
 if [[ "${CNI}" == "cilium" ]]; then
   # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the

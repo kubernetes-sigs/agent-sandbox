@@ -11,8 +11,9 @@ This proposal introduces an optional mutating admission webhook that routes
 `SandboxClaim` resources to the appropriate `SandboxWarmPool` based on isolation-tier
 spec fields. Instead of clients hardcoding a pool name, they declare the isolation
 level they need (`process` or `hardware`) and whether fallback across tiers is
-acceptable. The webhook rewrites `spec.warmPoolRef.name` at admission time, keeping the
-existing controller and CRD surface unchanged.
+acceptable. The webhook rewrites `spec.warmPoolRef.name` at admission time. The
+existing controller logic is unchanged; the only API-surface addition is two optional
+pointer fields on `SandboxClaimSpec` (see [Spec fields](#spec-fields)).
 
 This is a **Kubernetes-native routing option** (Tier 3) for operators running multi-pool
 clusters without an upper-layer orchestrator like Agent Substrate. Deployments using
@@ -140,12 +141,13 @@ Two optional fields on `SandboxClaim.spec`:
 | Field | Type | Values | Default | Description |
 |-------|------|--------|---------|-------------|
 | `spec.isolation` | `*IsolationTier` (enum) | `process`, `hardware` | *(nil — no routing)* | Isolation tier requested. When nil, the claim passes through unchanged. |
-| `spec.overflow` | `*OverflowPolicy` (enum) | `allow`, `deny` | `allow` | Whether to fall back to a lower-isolation tier's pool when the preferred pool is exhausted |
+| `spec.overflow` | `*OverflowPolicy` (enum) | `allow`, `deny` | `allow` | Whether to fall back to a lower-isolation tier's pool when the preferred pool is exhausted. Ignored when `spec.isolation` is nil (no routing). |
 
 Both fields are optional and nil by default, so existing claims without them behave
 exactly as today — full backward compatibility. Because they are typed spec fields,
-values get OpenAPI validation (CEL enum constraint), appear in `kubectl explain
-sandboxclaim.spec`, and follow the standard Kubernetes versioning/deprecation lifecycle.
+values get OpenAPI enum validation (`+kubebuilder:validation:Enum`), appear in
+`kubectl explain sandboxclaim.spec`, and follow the standard Kubernetes
+versioning/deprecation lifecycle.
 
 **API changes required**: The following additions to `SandboxClaimSpec` in
 `extensions/api/v1beta1/sandboxclaim_types.go` are non-breaking — optional pointer
@@ -288,8 +290,10 @@ func (h *RoutingWebhook) Handle(ctx context.Context, req admission.Request) admi
         return admission.Errored(http.StatusBadRequest, err)
     }
 
+    // overflow without isolation is a no-op: routing only activates when the
+    // caller explicitly requests an isolation tier.
     if claim.Spec.Isolation == nil {
-        return admission.Allowed("no isolation tier requested")
+        return admission.Allowed("no isolation tier requested — overflow ignored if set")
     }
     tier := string(*claim.Spec.Isolation)
 
@@ -344,6 +348,7 @@ func (h *RoutingWebhook) selectPool(ctx context.Context, tier, overflow, ns stri
 }
 
 func (h *RoutingWebhook) firstHealthyPool(ctx context.Context, pools []PoolRef, ns string) (string, error) {
+    selected := ""
     for _, p := range pools {
         pool := &extensionsv1beta1.SandboxWarmPool{}
         if err := h.Client.Get(ctx, client.ObjectKey{Name: p.Name, Namespace: ns}, pool); err != nil {
@@ -352,11 +357,11 @@ func (h *RoutingWebhook) firstHealthyPool(ctx context.Context, pools []PoolRef, 
             }
             return "", fmt.Errorf("failed to check pool %q in namespace %q: %w", p.Name, ns, err)
         }
-        if pool.Status.ReadyReplicas > 0 {
-            return p.Name, nil
+        if selected == "" && pool.Status.ReadyReplicas > 0 {
+            selected = p.Name
         }
     }
-    return "", nil
+    return selected, nil
 }
 ```
 
@@ -382,6 +387,9 @@ webhooks:
         apiVersions: ["v1beta1"]
         resources: ["sandboxclaims"]
         operations: ["CREATE"]
+    matchConditions:
+      - name: has-isolation
+        expression: "has(object.spec.isolation)"
     namespaceSelector:
       matchExpressions:
         - key: agents.x-k8s.io/routing-enabled
@@ -518,9 +526,13 @@ failure mode, and has no integration with kubectl workflows.
 1. **Webhook availability**: `failurePolicy: Fail` blocks claim creation when the
    webhook is unavailable. This is deliberate — with `Ignore`, a `hardware`/`deny`
    claim would pass through with its original placeholder `warmPoolRef`, silently
-   violating the requested isolation guarantee. Operators who prefer availability
-   over isolation enforcement can change to `Ignore`, understanding that webhook
-   downtime degrades routing to best-effort.
+   violating the requested isolation guarantee. The `matchConditions` CEL filter
+   (`has(object.spec.isolation)`) narrows the scope: only claims that set
+   `spec.isolation` are sent to the webhook. Claims without routing fields bypass
+   the webhook entirely, even during outages — so webhook downtime never affects
+   non-routed claims. Operators who prefer availability over isolation enforcement
+   can change to `Ignore`, understanding that webhook downtime degrades routing to
+   best-effort.
 
 2. **CREATE-only operations**: The webhook intercepts only `CREATE`, not `UPDATE`.
    This is correct because `spec.warmPoolRef` is effectively immutable after the

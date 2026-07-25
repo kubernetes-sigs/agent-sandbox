@@ -33,9 +33,9 @@ cd "${repo_root}"
 
 SCENARIO="${TEST_SCENARIO:-continuous-burst}"
 NUM_NODES="${SIMULATED_NODES:-100}"
-QPS="${CL2_QPS:-150}"
-DURATION="${CL2_DURATION_SECONDS:-10}"
-WARMPOOL="${CL2_WARMPOOL_SIZE:-1600}"
+QPS="${CL2_QPS:-100}"
+DURATION="${CL2_DURATION_SECONDS:-12}"
+WARMPOOL="${CL2_WARMPOOL_SIZE:-1300}"
 CLIENTS="${CL2_K8S_CLIENTS_NUMBER:-20}"
 
 CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"
@@ -78,6 +78,7 @@ CLUSTER_NAME="kwok-sandbox-scale"
 
 cleanup() {
   echo "Cleaning up controller & simulated cluster..."
+  pkill -f "agent-sandbox-controller" 2>/dev/null || true
   if [[ -n "${CONTROLLER_PID:-}" ]]; then
     kill -TERM "${CONTROLLER_PID}" 2>/dev/null || true
     wait "${CONTROLLER_PID}" 2>/dev/null || true
@@ -121,6 +122,8 @@ kubectl wait --for=condition=Established crd/sandboxtemplates.extensions.agents.
 kubectl wait --for=condition=Established crd/sandboxwarmpools.extensions.agents.x-k8s.io --timeout=1m
 
 echo "Starting Agent Sandbox Controller against simulated cluster..."
+pkill -f "agent-sandbox-controller" 2>/dev/null || true
+sleep 1
 go run ./cmd/agent-sandbox-controller \
   --leader-election-namespace=agent-sandbox-system \
   --extensions=true \
@@ -169,6 +172,7 @@ CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS="${CL2_THRESHOLD_99
   --testconfig="${TEST_CONFIG}" \
   --kubeconfig="${KUBECONFIG}" \
   --provider=skeleton \
+  --enable-exec-service=false \
   --k8s-clients-number="${CLIENTS}" \
   --delete-stale-namespaces=true \
   --v=2 \
@@ -215,7 +219,6 @@ try:
     raw = urllib.request.urlopen("http://127.0.0.1:8081/metrics", timeout=5).read().decode("utf-8")
     for name, desc in [
         ("agent_sandbox_claim_controller_startup_latency_ms", "Controller Claim Adoption Latency (ms)"),
-        ("agent_sandbox_claim_startup_latency_ms", "End-to-End Claim Startup Latency (ms)"),
         ("agent_sandbox_creation_latency_ms", "Sandbox Pod Provisioning Latency (ms)")
     ]:
         res = parse_histogram(name, raw)

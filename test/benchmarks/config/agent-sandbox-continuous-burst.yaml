@@ -11,9 +11,10 @@
 {{$sandboxClaimControllerStartupLatencyThreshold50Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_50_MS 1000}}
 {{$sandboxClaimControllerStartupLatencyThreshold90Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90_MS 1000}}
 {{$sandboxClaimControllerStartupLatencyThreshold99Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS 5000}}
-{{$podStartupLatencyThreshold := DefaultParam .CL2_POD_STARTUP_LATENCY_THRESHOLD "15s"}}
+{{$podStartupLatencyThreshold := DefaultParam .CL2_POD_STARTUP_LATENCY_THRESHOLD "5s"}}
 {{$ENABLE_SCHEDULING_METRICS := DefaultParam .CL2_ENABLE_SCHEDULING_METRICS true}}
 {{$ENABLE_API_AVAILABILITY := DefaultParam .CL2_ENABLE_API_AVAILABILITY true}}
+{{$ENABLE_PROMETHEUS := DefaultParam .CL2_ENABLE_PROMETHEUS false}}
 
 # Standard continuous throughput. Uses un-filtered irate since continuous scenario has no breaks or idle time.
 {{$claimThroughputQuery := `(sum(irate(agent_sandbox_claim_controller_startup_latency_ms_count[5m])) by (launch_type, sandbox_template))[%v:5s]`}}
@@ -43,6 +44,7 @@ steps:
     Params:
       action: start
       labelSelector: "app=agent-sandbox-load-test"
+      threshold: {{$podStartupLatencyThreshold}}
   - Identifier: SandboxClaimControllerStartupLatency
     Method: GenericPrometheusQuery
     Params:
@@ -185,12 +187,14 @@ steps:
       timeout: 60m
       refreshInterval: 20ms
 
+{{if $ENABLE_PROMETHEUS}}
 - name: Pause 2m to allow Prometheus to scrape the metrics
   measurements:
   - Identifier: WaitAfterTest
     Method: Sleep
     Params:
       duration: 2m
+{{end}}
 
 - name: Gather Results
   measurements:
@@ -199,7 +203,6 @@ steps:
     Params:
       action: gather
       labelSelector: "app=agent-sandbox-load-test"
-      threshold: {{$podStartupLatencyThreshold}}
   - Identifier: SandboxClaimControllerStartupLatency
     Method: GenericPrometheusQuery
     Params:

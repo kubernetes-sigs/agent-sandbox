@@ -409,9 +409,17 @@ set +o errexit
 # STRESS_EXTRA_ARGS appends verbatim extra flags (word-split on purpose) so
 # scenarios can pass tool flags without this script growing an env knob for
 # each one (e.g. --client-connections=4 in benchmarks-kops-gcp-claims).
+# The mif sweep tops out at 1200: run 2081094034931060736 (40 nodes, full
+# tuning stack) showed NO component saturated at mif600 - apiserver at
+# 14.8/22 cores, status lane at 477ms p50, 409s at 2 - while measured
+# throughput matched slots/cycle exactly at every level (600/2.52s =
+# 238/s). The offered load, not the cluster, was the ceiling: mif is the
+# stress client's closed-loop concurrency, and each slot's cycle has a
+# ~1.8s floor (mostly the delete/recycle half). 800/1200 raise the offered
+# load to find the first genuinely saturated component.
 # shellcheck disable=SC2086
 go run ./test/stress \
-  --phases="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif1200,throughput-mif800,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \

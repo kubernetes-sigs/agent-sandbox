@@ -392,6 +392,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		latency      time.Duration
 		wallOffset   time.Duration
 		readyAtStart int32
+		breakdown    milestoneBreakdown
 	}
 
 	classifyClaim := func(d time.Duration) string {
@@ -428,6 +429,9 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		t.Run(fmt.Sprintf("pool-%d", poolSize), func(t *testing.T) {
 			tc := framework.NewTestContext(t)
 
+			tracker := newMilestoneTracker(t.Context(), tc.DynamicClient(), ns.Name)
+			defer tracker.Stop()
+
 			claimTimeout := poolFillTime + 30*time.Second
 			t.Logf("[setup] Pool-%d filled in %.3fs", poolSize, poolFillTime.Seconds())
 
@@ -452,7 +456,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# batch_size", strconv.Itoa(batchSize)})
 			_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
 			_ = cw.Write([]string{"# settle_ms", "100"})
-			_ = cw.Write([]string{"batch", "claim", "latency_sec", "type", "wall_offset_sec", "ready_at_start"})
+			_ = cw.Write([]string{"batch", "claim", "latency_sec", "type", "wall_offset_sec", "ready_at_start",
+				"create_ack_ms", "adoption_ms", "schedule_ms", "runtime_ms", "propagate_ms", "e2e_ms", "is_warm"})
 
 			var allRecords []claimRecord
 
@@ -468,30 +473,36 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 					wg.Add(1)
 					go func(idx int) {
 						defer wg.Done()
+						claimName := fmt.Sprintf("claim-%d-%d", poolSize, globalClaimCounter.Add(1))
 						claim := &extensionsv1beta1.SandboxClaim{
 							ObjectMeta: metav1.ObjectMeta{
-								Name:      fmt.Sprintf("claim-%d-%d", poolSize, globalClaimCounter.Add(1)),
+								Name:      claimName,
 								Namespace: ns.Name,
 							},
 							Spec: extensionsv1beta1.SandboxClaimSpec{
 								WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
 							},
 						}
-						start := time.Now()
+						tracker.Register(claimName)
+						createStart := time.Now()
+						tracker.MarkCreateCalled(claimName, createStart)
 						if err := tc.CreateWithCleanup(claimCtx, claim); err != nil {
 							errs[idx] = err
 							return
 						}
-						if err := tc.WaitForObject(claimCtx, claim, predicates.ReadyConditionIsTrue); err != nil {
+						tracker.MarkCreateReturned(claimName, time.Now())
+						if err := tracker.WaitReady(claimCtx, claimName); err != nil {
 							errs[idx] = err
 							return
 						}
+						bd, _ := tracker.CollectBreakdown(claimCtx, tc.ClusterClient, claimName)
 						records[idx] = claimRecord{
 							batch:        batchNum,
 							claimIndex:   idx + 1,
-							latency:      time.Since(start),
+							latency:      time.Since(createStart),
 							wallOffset:   time.Since(testStart),
 							readyAtStart: readyAtStart,
+							breakdown:    bd,
 						}
 					}(i)
 				}
@@ -546,16 +557,21 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 			// --- Data table ---
 			t.Logf("-----------------------------------------------------------------------")
-			t.Logf("%-6s %-6s %-14s %-6s %-16s %-6s",
-				"BATCH", "CLAIM", "LATENCY(sec)", "TYPE", "WALL_OFFSET(sec)", "READY")
+			t.Logf("%-6s %-6s %-12s %-6s %-14s %-6s  %-10s %-10s %-10s %-10s %-10s %-10s %-6s",
+				"BATCH", "CLAIM", "LATENCY(s)", "TYPE", "WALL_OFF(s)", "READY",
+				"ACK_MS", "ADOPT_MS", "SCHED_MS", "RUNTIME_MS", "PROP_MS", "E2E_MS", "WARM")
 			for _, r := range allRecords {
 				claimType := classifyClaim(r.latency)
-				t.Logf("%-6d %-6d %-14.3f %-6s %-16.3f %-6d",
+				bd := r.breakdown
+				warmStr := strconv.FormatBool(bd.IsWarm)
+				t.Logf("%-6d %-6d %-12.3f %-6s %-14.3f %-6d  %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-6s",
 					r.batch, r.claimIndex,
 					r.latency.Seconds(),
 					claimType,
 					r.wallOffset.Seconds(),
-					r.readyAtStart)
+					r.readyAtStart,
+					bd.CreateAckMs, bd.AdoptionMs, bd.ScheduleMs,
+					bd.RuntimeMs, bd.PropagateMs, bd.EndToEndMs, warmStr)
 
 				_ = cw.Write([]string{
 					strconv.Itoa(r.batch),
@@ -564,11 +580,19 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 					claimType,
 					fmt.Sprintf("%.3f", r.wallOffset.Seconds()),
 					strconv.Itoa(int(r.readyAtStart)),
+					fmt.Sprintf("%.1f", bd.CreateAckMs),
+					fmt.Sprintf("%.1f", bd.AdoptionMs),
+					fmt.Sprintf("%.1f", bd.ScheduleMs),
+					fmt.Sprintf("%.1f", bd.RuntimeMs),
+					fmt.Sprintf("%.1f", bd.PropagateMs),
+					fmt.Sprintf("%.1f", bd.EndToEndMs),
+					warmStr,
 				})
 			}
 
 			// --- Summary ---
 			totalDuration := time.Since(testStart)
+			var firstCreate, lastReady time.Time
 			warmCount := 0
 			greenCount := 0
 			greyZoneCount := 0
@@ -576,6 +600,14 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			var worstStart time.Duration
 			greenThreshold := time.Duration(float64(warmBaseline) * 1.2)
 			for _, r := range allRecords {
+				createTime := testStart.Add(r.wallOffset - r.latency)
+				readyTime := testStart.Add(r.wallOffset)
+				if firstCreate.IsZero() || createTime.Before(firstCreate) {
+					firstCreate = createTime
+				}
+				if readyTime.After(lastReady) {
+					lastReady = readyTime
+				}
 				if classifyClaim(r.latency) == "warm" {
 					warmCount++
 				}
@@ -592,6 +624,11 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 					worstStart = r.latency
 				}
 			}
+			var timeToAllReadySec float64
+			if !firstCreate.IsZero() && !lastReady.IsZero() {
+				timeToAllReadySec = lastReady.Sub(firstCreate).Seconds()
+			}
+
 			t.Logf("=======================================================================")
 			t.Logf("  Total batches:       %d (batch_size=%d)", batchNum, batchSize)
 			t.Logf("  Total claims:        %d (%d warm, %d cold)", totalClaims, warmCount, totalClaims-warmCount)
@@ -599,6 +636,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("  Grey (warm..1s):     %d", greyZoneCount)
 			t.Logf("  Worst start:         %.3fs", worstStart.Seconds())
 			t.Logf("  Over cold start:     %d (>%.3fs)", overColdCount, poolFillTime.Seconds())
+			t.Logf("  Time to all ready:   %.3fs", timeToAllReadySec)
 			t.Logf("  Total duration(sec): %.3f", totalDuration.Seconds())
 			t.Logf("  Throughput:          %.1f claims/sec", float64(totalClaims)/totalDuration.Seconds())
 			t.Logf("  CSV report:          %s", csvPath)
@@ -614,6 +652,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# worst_start_sec", fmt.Sprintf("%.3f", worstStart.Seconds())})
 			_ = cw.Write([]string{"# over_cold_claims", strconv.Itoa(overColdCount)})
 			_ = cw.Write([]string{"# total_duration_sec", fmt.Sprintf("%.3f", totalDuration.Seconds())})
+			_ = cw.Write([]string{"# time_to_all_ready_sec", fmt.Sprintf("%.3f", timeToAllReadySec)})
 			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
 		})
 

@@ -62,6 +62,10 @@ rationale) with:
 | Template image | multi-GB `python-runtime-sandbox:latest-main`, not pre-pulled (`--wp-image` via `STRESS_EXTRA_ARGS`) | stretches the not-yet-Ready window so a regressed controller cannot win the race by luck; same image as the live reproductions |
 | Phases | `warmpool-overcreate,warmpool-unschedulable` (`STRESS_PHASES`) | over-creation gate first, then the quiet unschedulable window |
 
+The invariants are node-shape-independent — pass/fail depends only on
+controller behavior, not node throughput (the live validation ran on
+`e2-standard-8` workers with identical verdicts).
+
 ## Running it
 
 Like the other kOps scenarios, this needs GCP credentials, a project with
@@ -104,24 +108,26 @@ with a final report shaped like:
 
 ### Expected FAIL shape (pre-fix controllers)
 
-Against a controller without the expectations gate (anything before the
-issue-1215 fix), the run exits non-zero with errors of the form:
+The stress harness aborts after the first failed phase, and against a
+controller without the expectations gate (anything before the issue-1215
+fix) that is the overcreate phase — so the **full-run FAIL output is the
+overcreate failure only**, exit non-zero with per-pool forensics:
 
 ```
 warmpool-overcreate#1 phase: warm pool invariants violated: N sandbox creates
-beyond target without a preceding delete (over-creation); ... peak concurrent
-population exceeded target in M pool(s) ...
+beyond target without a preceding delete (over-creation); T distinct creates,
+want exactly 500 + replacements; R replacements exceed tolerance 2; peak
+concurrent population exceeded target in M pool(s): max P > 25 replicas
+(worst pools: p1-wp-pool-...(creates=... over=... peak=...), ...)
 ```
 
-(historically N pushed the distinct-create count toward ~10x the target)
-and, for the unschedulable leg:
-
-```
-warmpool-unschedulable#2 phase: warm pool invariants violated: N pool sandbox
-deletes observed (delete/recreate churn on unschedulable pods); M distinct
-sandbox creates for 3 replicas (member UIDs not stable); no
-WarmPoolNotProgressing Warning event within 8m0s ...
-```
+(a live pre-fix run measured 1,535 distinct creates for the 500 target with
+every pool exceeding its population cap, worst peak 75 vs 25; the original
+issue logs showed up to ~10x). The unschedulable phase's failure signature
+on pre-fix controllers — delete/recreate churn, unstable member UIDs, and
+zero `WarmPoolNotProgressing` events within the window — never gets a
+chance to print in a full run; exercise it standalone with
+`STRESS_PHASES=warmpool-unschedulable`.
 
 ## Cost / duration
 

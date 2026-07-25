@@ -2,16 +2,15 @@
 
 > **Note**: For a high-level comparison across all sandboxed container runtimes (`gVisor`, `kata-qemu`, `kata-clh`), see the [**Runtime Comparison Overview**](../README.md).
 
-This directory contains configuration, deployment instructions, and performance benchmark findings for running **gVisor (`runsc`)** isolated containers under high density (60–180 sandboxes) on a single `c4-standard-8` (32 GB RAM, 8 vCPU) GKE instance.
+This directory contains configuration, deployment instructions, and performance benchmark findings for running **gVisor (`runsc`)** isolated containers under high density (60–180 sandboxes) on a single `c4-standard-8` (30 GB RAM, 8 vCPU) GKE instance.
 
-By combining GKE Memory Swap on dedicated Local SSDs with node-level CPU pinning and system log rate-limiting, gVisor-isolated Chrome sandboxes can scale up to **180 concurrent instances** without node instability or Kubelet heartbeat evictions.
+By combining GKE Memory Swap on dedicated Local SSDs with node-level CPU pinning and system log rate-limiting, gVisor-isolated Chrome sandboxes can scale up to **160 concurrent instances** with 100% success (with 180 pods representing the attempted failure threshold).
 
 ---
 
 ## 1. Host Memory Footprint & Page Cache Sharing
 
-### 1.1. Single Pod Memory Breakdown
-Process-level physical RAM (Resident Set Size - RSS) and incremental unique RAM measured across sequential pod deployments on a clean cluster:
+Process-level physical RAM (Resident Set Size - RSS) and incremental host RSS measured across sequential pod deployments on a clean cluster:
 
 | Component | Host RSS | Role & Description |
 | :--- | :--- | :--- |
@@ -19,18 +18,13 @@ Process-level physical RAM (Resident Set Size - RSS) and incremental unique RAM 
 | **gVisor Gofer** (`runsc-gofer`) | **~25.0 MiB** | Guest-to-host filesystem translation proxy. |
 | **Control Shim** | **~34.0 MiB** | Containerd gVisor runtime supervisor. |
 | **Total Resident Footprint** | **~370.0 MiB** | **Per-pod startup host RSS.** |
-| **Incremental Unique RAM** | **~206.0 MiB** | **Pure non-shareable host RAM required per pod.** |
-
-### 1.2. Shared Executable Page Cache & Swap Efficiency
-Multiplying single pod RSS by 180 pods suggests **~66.6 GiB** ($180 \times 370 \text{ MiB}$), exceeding physical 32 GB RAM. The benchmark succeeds because:
-1. **Shared Executable Binary Pages**: The host OS loads Chromium read-only binary pages into Page Cache **once**. All 180 sandboxes map to these shared pages via Gofer, reducing unique RAM to **~206 MiB**.
-2. **Local SSD Swap Eviction**: GKE Memory Swap offloads cold anonymous heaps of idle sandboxes to NVMe storage, preserving RAM for active pod creation.
+| **Incremental Host RSS** | **~206.0 MiB** | **Additional physical host RSS consumed per pod.** |
 
 ---
 
 ## 2. Performance Results (gVisor Density Matrix)
 
-All benchmark runs below were conducted on `c4-standard-8` node pools (8 vCPUs, 32 GB RAM) with node tuning applied.
+All benchmark runs below were conducted on `c4-standard-8` node pools with node tuning applied.
 
 ### 2.1. Baseline Pool (No Swap)
 | Scenario / Pool | Density | Sandbox Ready (Avg/P99) | Chrome Ready (Avg/P99) | Peak Host RAM | CPU PSI Avg | Mem PSI Avg | IO PSI Avg | Test Status |
@@ -55,21 +49,18 @@ All benchmark runs below were conducted on `c4-standard-8` node pools (8 vCPUs, 
 ## 3. Key Takeaways & Impact of Local SSD Swap
 
 ### 3.1. Effect of Local SSD Swap on gVisor (+100% Density Gain)
-- **Doubled Maximum Stable Density (80 → 160 Pods)**: Without swap, gVisor Sentry user-space kernels exhaust host physical RAM at 80 pods. Dedicated Local SSD Swap absorbs cold anonymous memory heaps from idle Chrome processes, enabling gVisor to scale reliably to **160 pods with 100% success**.
+- **Doubled Maximum Stable Density (80 → 160 Pods)**: Without swap, gVisor Sentry user-space kernels exhaust host physical RAM past 80 pods. Dedicated Local SSD Swap absorbs cold anonymous memory heaps from idle Chrome processes, enabling gVisor to scale reliably to **160 pods with 100% success**.
 
 ### 3.2. CPU Pinning & Kubelet Protection (Cores 0–1)
 On untuned nodes, emulating syscalls for 180 Chrome instances consumes high host CPU across all cores. Emulation threads starve Kubelet of CPU time, causing missed heartbeats and leading GKE to flag the node `NotReady`.
 
 Applying the node tuning DaemonSet enforces:
 - `--reserved-cpus=0,1` and `--cpu-manager-policy=static` on Kubelet.
-- Linux cgroups pinning system services and Kubelet strictly to Cores 0 and 1.
-- Guaranteed sandbox workload containers assigned exclusively Cores 2–7.
-- Log storage for `systemd-journald` redirected to Local SSD with rate limits (`RateLimitIntervalSec=30s`, `RateLimitBurst=10000`).
+- Linux cgroups reserving Cores 0 and 1 strictly for system services and Kubelet.
+- Workload containers execute on Cores 2–7, preventing host daemon CPU starvation.
+- Log storage for `systemd-journald` rate-limited (`RateLimitIntervalSec=30s`, `RateLimitBurst=1000`).
 
-Node tuning reduces overall Sandbox Ready P99 latency by **~60%** and Chrome Ready P99 latency by **~40%**, expanding maximum stable density from 140 (untuned) to 160–180 pods.
-
-### 3.2. NVMe SSD Write Queue Saturation (>180 Pods)
-Scaling past 180 pods forces the host to swap ~42 GB of memory pages. The massive parallel write volume saturates the NVMe SSD controller's write queue depths. Kubelet (on Core 0) blocks in D-state trying to write container logs to disk, locking up the node.
+Node tuning reduces overall Sandbox Ready P99 latency by **~60%** and Chrome Ready P99 latency by **~40%**, expanding maximum stable density from 140 (untuned) to **160 pods (tuned)**.
 
 ---
 
@@ -89,8 +80,8 @@ chmod +x deploy_cluster.sh
 Apply host CPU pinning and system log rate limiting:
 
 ```bash
-export KUBECONFIG="$(git rev-parse --show-toplevel)/bin/KUBECONFIG"
 kubectl apply -f ../../node-tuner-daemonset.yaml
+kubectl rollout status daemonset/node-tuner-ds -n kube-system
 ```
 
 ### Step 3: Execute Benchmark

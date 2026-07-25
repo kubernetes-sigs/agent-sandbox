@@ -57,21 +57,6 @@ export KUBECONFIG="${KUBECONFIG:-"${REPO_ROOT}/bin/KUBECONFIG"}"
 gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone "${ZONE}"
 
 echo "Cluster deployed successfully."
-echo "Deploying Agent Sandbox CRDs and Controller..."
-
-# Use the repository's native deployment tool to parse all k8s/ manifests,
-# replace the image paths with the staging artifacts, and apply them.
-"${REPO_ROOT}/dev/tools/deploy-to-kube" \
-    --image-prefix="us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/" \
-    --image-tag="latest-main" \
-    --extensions
-
-# Wait for the controller to be ready
-kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system
-
-echo "Cluster is fully provisioned and ready for gVisor sandboxes."
-echo ""
-echo "================================================================================="
-echo "IMPORTANT: To interact with the cluster from your terminal, run the following:"
-echo "export KUBECONFIG=\"${KUBECONFIG}\""
-echo "================================================================================="
+echo "Please ensure the Agent Sandbox controller and CRDs (including extensions) are deployed on this cluster before running the tests."
+# Example installation (all-in-one controller + extension CRDs):
+# kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox-with-extensions.yaml

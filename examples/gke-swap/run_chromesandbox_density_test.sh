@@ -19,7 +19,7 @@ set -eo pipefail
 IMAGE_PREFIX=${IMAGE_PREFIX:-"us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/"}
 IMAGE_TAG=${IMAGE_TAG:-"latest-main"}
 
-
+# Use the user-specified runtime class, default to empty string (use node's default runtime class)
 RUNTIME_CLASS=${RUNTIME_CLASS:-""}
 
 # Get the directory of this script

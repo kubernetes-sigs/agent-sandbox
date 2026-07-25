@@ -2,7 +2,7 @@
 
 This example demonstrates how to configure Google Kubernetes Engine (GKE) Memory Swap using dedicated Local SSDs to drastically increase the density of `agent-sandbox` workloads (specifically Chromium pods) on a single node.
 
-By enabling swap on a dedicated Local SSD, we can ensure 100% workload success up to the **200 pods per node** on a cost-effective `c4-standard-8` instance (8 vCPUs, 32 GB RAM), whereas the baseline pool collapses and experiences severe workload instability starting from 130 pods per node.
+By enabling swap on a dedicated Local SSD, we can ensure 100% workload success up to the **200 pods per node** on a cost-effective `c4-standard-8` instance (8 vCPUs, 30 GB RAM), whereas the baseline pool collapses and experiences severe workload instability starting from 130 pods per node.
 
 ## Why Swap for Agent Sandboxes?
 
@@ -151,5 +151,5 @@ chmod +x run_chromesandbox_density_test.sh
 
 For gVisor or Kata Containers deployments and benchmarks, refer to:
 - [**`runtimes/README.md`**](./runtimes/README.md) — Multi-runtime comparison summary
-- [**`runtimes/gVisor/README.md`**](./runtimes/gVisor/README.md) — gVisor setup & results (up to 180 pods)
-- [**`runtimes/kata/README.md`**](./runtimes/kata/README.md) — Kata Containers setup & results (`kata-clh` & `kata-qemu`, up to 50/60 pods)
+- [**`runtimes/gVisor/README.md`**](./runtimes/gVisor/README.md) — gVisor setup & results (160 pods max stable density)
+- [**`runtimes/kata/README.md`**](./runtimes/kata/README.md) — Kata Containers setup & results (`kata-clh` & `kata-qemu`, up to 50 pods (kata-clh) / 20 pods (kata-qemu))

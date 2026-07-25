@@ -25,12 +25,13 @@ spec:
           type: Directory
       initContainers:
       - name: apply-node-tuning
-        image: ubuntu:latest
+        image: ubuntu:24.04
         securityContext:
           privileged: true
         volumeMounts:
         - name: host-root
           mountPath: /host
+          mountPropagation: Bidirectional
         command:
          - /bin/bash
          - -c
@@ -72,7 +73,7 @@ spec:
             echo "2. Pinning system.slice: Skipped (node too small)."
           fi
           
-          echo "3. Redirecting journal logs to Local SSD and applying rate limits..."
+          echo "3. Relocating journal logs and applying rate limits..."
           mkdir -p /host/var/lib/containerd/systemd-journal
           mkdir -p /host/var/log/journal
           # Mount only if not already bind-mounted
@@ -90,22 +91,23 @@ spec:
             if [ -f "$KUBELET_CFG" ]; then
               NEEDS_RESTART=0
               
-              # Add reservedSystemCPUs if missing, or update if present
-              if ! grep -q "reservedSystemCPUs" "$KUBELET_CFG"; then
-                echo "reservedSystemCPUs: \"$KUBELET_CPUS\"" >> "$KUBELET_CFG"
-                NEEDS_RESTART=1
-              else
-                # Update existing value to target cpuset
-                sed -i "s/reservedSystemCPUs:.*/reservedSystemCPUs: \"$KUBELET_CPUS\"/" "$KUBELET_CFG"
+              # Update reservedSystemCPUs only if not already set to target value
+              if ! grep -q "reservedSystemCPUs: \"$KUBELET_CPUS\"" "$KUBELET_CFG"; then
+                if ! grep -q "reservedSystemCPUs" "$KUBELET_CFG"; then
+                  echo "reservedSystemCPUs: \"$KUBELET_CPUS\"" >> "$KUBELET_CFG"
+                else
+                  sed -i "s/reservedSystemCPUs:.*/reservedSystemCPUs: \"$KUBELET_CPUS\"/" "$KUBELET_CFG"
+                fi
                 NEEDS_RESTART=1
               fi
               
-              # Enforce cpuManagerPolicy: "static"
-              if ! grep -q "cpuManagerPolicy" "$KUBELET_CFG"; then
-                echo 'cpuManagerPolicy: "static"' >> "$KUBELET_CFG"
-                NEEDS_RESTART=1
-              elif grep -q 'cpuManagerPolicy: "none"' "$KUBELET_CFG" || grep -q "cpuManagerPolicy: none" "$KUBELET_CFG"; then
-                sed -i 's/cpuManagerPolicy:.*/cpuManagerPolicy: "static"/' "$KUBELET_CFG"
+              # Enforce cpuManagerPolicy: "static" only if not already set
+              if ! grep -q 'cpuManagerPolicy: "static"' "$KUBELET_CFG"; then
+                if ! grep -q "cpuManagerPolicy" "$KUBELET_CFG"; then
+                  echo 'cpuManagerPolicy: "static"' >> "$KUBELET_CFG"
+                else
+                  sed -i 's/cpuManagerPolicy:.*/cpuManagerPolicy: "static"/' "$KUBELET_CFG"
+                fi
                 NEEDS_RESTART=1
               fi
 

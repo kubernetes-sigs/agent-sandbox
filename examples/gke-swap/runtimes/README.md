@@ -6,7 +6,7 @@ This directory contains configuration, deployment scripts, and a comprehensive p
 2. **Kata Containers (`kata-qemu`)**: Hardware-virtualized MicroVMs using the QEMU hypervisor.
 3. **Kata Containers (`kata-clh`)**: Hardware-virtualized MicroVMs using the Cloud Hypervisor (CLH) Rust-based VMM.
 
-All metrics reference benchmarks conducted on **`c4-standard-8`** GKE node instances (8 vCPUs, 32 GB physical RAM, ~28 GB allocatable).
+All metrics reference benchmarks conducted on **`c4-standard-8`** GKE node instances (8 vCPUs, 30 GB physical RAM, ~28 GB allocatable).
 
 ---
 
@@ -24,9 +24,9 @@ All metrics reference benchmarks conducted on **`c4-standard-8`** GKE node insta
 
 ## 2. Host Memory Footprint per Pod
 
-Process-level physical memory (Resident Set Size - RSS) and incremental unique RAM measured across sequential pod deployments on a clean cluster:
+Process-level physical memory (Resident Set Size - RSS) and incremental host RSS measured across sequential pod deployments on a clean cluster:
 
-| Runtime | Host RSS per Pod | Unique RAM per Pod | Process Component Breakdown |
+| Runtime | Host RSS per Pod | Incremental Host RSS | Process Component Breakdown |
 | :--- | :--- | :--- | :--- |
 | **gVisor (`runsc`)** | **~370 MiB** | **~206.0 MiB** | <ul><li>`runsc-sandbox` (Sentry): ~311 MiB</li><li>`runsc-gofer` (FS proxy): ~25 MiB</li><li>Control shim: ~34 MiB</li></ul> |
 | **Kata (`kata-qemu`)** | **~1,130 MiB** | **~631.5 MiB** | <ul><li>`qemu-system-x86_64` (VMM): ~678 MiB</li><li>`virtiofsd` (FS daemon): ~421 MiB</li><li>Control shim: ~35 MiB</li></ul> |
@@ -38,8 +38,8 @@ Process-level physical memory (Resident Set Size - RSS) and incremental unique R
 
 To push density ceilings higher, a custom node-tuning DaemonSet was developed and applied across the node pools:
 
-1. **CPU Pinning (`--reserved-cpus=0,1`)**: Linux cgroups and Kubelet static CPU management reserve Cores 0 and 1 strictly for host system daemons and Kubelet. Guaranteed workload containers are pinned exclusively to Cores 2–7, preventing workload pods from starving Kubelet of heartbeat check cycles.
-2. **`systemd-journald` Redirection & Rate-Limiting**: Log storage for `systemd-journald` is redirected away from rootfs to a dedicated Local SSD directory with strict rate limits (`RateLimitIntervalSec=30s`, `RateLimitBurst=10000`) to eliminate logging CPU spikes during boot storms.
+1. **CPU Isolation (`--reserved-cpus=0,1`)**: Linux cgroups and Kubelet static CPU management reserve Cores 0 and 1 strictly for host system daemons and Kubelet, allowing workload containers to run on Cores 2–7 without starving Kubelet of heartbeat check cycles.
+2. **`systemd-journald` Storage Rate-Limiting**: `systemd-journald` log storage is rate-limited (`RateLimitIntervalSec=30s`, `RateLimitBurst=1000`) to eliminate logging CPU spikes during boot storms.
 3. **Kernel ARP Table Scaling**: Linux kernel ARP garbage collection thresholds (`net.ipv4.neigh.default.gc_thresh1/2/3`) are scaled from `128/512/1024` to `2048/4096/8192` to eliminate packet drops across hundreds of internal container veth pairs.
 
 ### Performance Impact of Node Tuning:
@@ -78,8 +78,8 @@ GKE Memory Swap on dedicated Local SSDs significantly extends node capacity for 
 ## 6. Failure Modes Breakdown
 
 ### gVisor (`runsc`)
-- **Untuned Node**: Emulating syscalls for 180 Chrome instances consumes high host CPU. Emulation threads compete with system services, starving Kubelet of CPU cycles until GKE flags the node `NotReady`.
-- **Tuned Node + NVMe Swap**: CPU isolation protects Kubelet on Cores 0–1, enabling scaling to 180 pods. Beyond 180 pods, swapping ~42 GB of memory pages saturates the NVMe SSD controller write queues. Kubelet blocks in D-state attempting log writes, locking up the node.
+- **Untuned Node**: Emulating syscalls for high-density Chrome instances consumes high host CPU. Emulation threads compete with system services, starving Kubelet of CPU cycles until GKE flags the node `NotReady`.
+- **Tuned Node + NVMe Swap**: CPU isolation protects Kubelet on Cores 0–1, enabling scaling to 160 pods with 100% success. At 180 pods, swapping ~25.5 GB of memory pages saturates the NVMe SSD controller write queues, causing Kubelet to block in D-state attempting log writes and triggering workload failures (85.56% success).
 
 ### Kata Containers (`kata-qemu`)
 - **Host Boot Disk Sizing**: Chrome sparse cache files (`/tmp`) generate 80 GB+ of writes across 40+ sandboxes. On default 100 GB boot disks, this triggers host disk pressure GC and crashes `virtiofsd` with `SIGBUS` (exit code 135). Node boot disks must be sized to **≥150–250 GB**.
@@ -96,6 +96,6 @@ GKE Memory Swap on dedicated Local SSDs significantly extends node capacity for 
 
 Explore detailed runtime configuration, density sweep data, and setup instructions for each runtime:
 
-- [**gVisor Guide & Benchmarks**](./gVisor/README.md) — Detailed gVisor execution guide, Sentry memory analysis, 60–180 density sweep matrix, and node tuner configuration.
+- [**gVisor Guide & Benchmarks**](./gVisor/README.md) — Detailed gVisor execution guide, Sentry memory analysis, 60–160 density sweep matrix (180 failure threshold), and node tuner configuration.
 - [**Kata Containers Guide & Benchmarks (`kata-qemu` & `kata-clh`)**](./kata/README.md) — Comprehensive Kata guide covering QEMU vs Cloud Hypervisor VMM comparison, 20–60 density sweeps, and memory limit tuning.
 - [**Default `runc` Baseline Guide**](../README.md) — Main GKE Local SSD Swap example landing page and native container baseline.

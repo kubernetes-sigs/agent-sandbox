@@ -56,5 +56,5 @@ KUBECONFIG="${KUBECONFIG:-"${REPO_ROOT}/bin/KUBECONFIG"}" gcloud container clust
 
 echo "Cluster deployed successfully."
 echo "Please ensure the Agent Sandbox controller and CRDs are deployed on this cluster before running the tests."
-# Example installation:
-# kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml
+# Example installation (all-in-one controller + extension CRDs):
+# kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox-with-extensions.yaml

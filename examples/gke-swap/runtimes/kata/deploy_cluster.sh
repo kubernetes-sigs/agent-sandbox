@@ -39,9 +39,10 @@ gcloud container node-pools create baseline-pool \
     --machine-type c4-standard-8 \
     --num-nodes 1 \
     --max-pods-per-node 256 \
-    --disk-size 250GB \
+    --disk-size 250 \
     --image-type ubuntu_containerd \
-    --enable-nested-virtualization
+    --enable-nested-virtualization \
+    --node-labels sandbox.gke.io/kata=true
 
 echo "Creating lssd-swap node pool (with dedicated LSSD swap, Ubuntu, Nested Virtualization enabled)..."
 gcloud container node-pools create lssd-swap-pool \
@@ -50,9 +51,10 @@ gcloud container node-pools create lssd-swap-pool \
     --machine-type c4-standard-8-lssd \
     --num-nodes 1 \
     --max-pods-per-node 256 \
-    --disk-size 250GB \
+    --disk-size 250 \
     --image-type ubuntu_containerd \
     --enable-nested-virtualization \
+    --node-labels sandbox.gke.io/kata=true \
     --system-config-from-file "${DIR}/../../swap-dedicated-lssd.yaml"
 
 echo "Fetching cluster credentials..."
@@ -79,6 +81,7 @@ handler: kata-qemu
 scheduling:
   nodeSelector:
     kubernetes.io/os: linux
+    sandbox.gke.io/kata: "true"
 EOF
 
 cat <<EOF | kubectl apply -f -
@@ -90,18 +93,10 @@ handler: kata-clh
 scheduling:
   nodeSelector:
     kubernetes.io/os: linux
+    sandbox.gke.io/kata: "true"
 EOF
 
-echo "Deploying Agent Sandbox CRDs and Controller..."
-"${REPO_ROOT}/dev/tools/deploy-to-kube" \
-    --image-prefix="us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/" \
-    --image-tag="latest-main" \
-    --extensions
-
-kubectl rollout status deployment/agent-sandbox-controller -n agent-sandbox-system
-
-echo "================================================================================="
-echo "Cluster is fully provisioned and ready for Cloud Hypervisor sandboxes."
-echo "To interact with the cluster from your terminal, run:"
-echo "export KUBECONFIG=\"${KUBECONFIG}\""
-echo "================================================================================="
+echo "Cluster deployed successfully."
+echo "Please ensure the Agent Sandbox controller and CRDs (including extensions) are deployed on this cluster before running the tests."
+# Example installation (all-in-one controller + extension CRDs):
+# kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox-with-extensions.yaml

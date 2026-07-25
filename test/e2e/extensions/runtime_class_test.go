@@ -260,12 +260,12 @@ func TestRuntimeClassStartupComparison(t *testing.T) {
 }
 
 // TestRuntimeClassBurstRecovery measures how a warm pool behaves under
-// sustained batch load that exceeds pool refill capacity. Calibration (warm
-// baseline and batched refill rate) runs once before the pool-size loop.
-// Claims fire in batches of workers×2 with 100ms reconciler settle between
-// batches, stopping when ReadyReplicas ≤ 1 (pool depleted) or after 2×N
-// total claims. The depletion curve shows how many batches the pool absorbs
-// before cold starts appear.
+// sustained batch load that exceeds pool refill capacity. A single pool is
+// reused across all pool sizes — scaled from 0 to the target between subtests.
+// Each subtest measures its own fill time, then fires claims in dynamically
+// sized batches (min(max(4, poolSize/2), 8)) with 100ms settle between batches,
+// stopping when ReadyReplicas ≤ 1 (pool depleted) or after 2×poolSize total
+// claims.
 //
 // Per-claim data is written to a CSV file for analysis. Set SANDBOX_REPORT_DIR
 // to control output location (default: current directory).
@@ -312,95 +312,75 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	}
 	t.Logf("[config] cluster=%s instanceType=%s reportDir=%s", clusterID, instanceType, reportDir)
 
-	// --- Calibrate once: warm baseline + batched refill rate ---
+	// --- Shared resources: one namespace, template, pool reused across subtests ---
 	cpus, err := tc0.ClusterCPUCapacity(t.Context())
 	require.NoError(t, err)
 	if isVMRuntime(runtimeClass) && cpus == 0 {
 		t.Skip("skipping VM runtime burst test: no worker CPU capacity reported")
 	}
-	calibPoolSize := max(4, len(workers)*2)
-	if isVMRuntime(runtimeClass) && int64(calibPoolSize) > cpus {
-		calibPoolSize = int(cpus)
-	}
-	t.Logf("[calibrate] Creating pool-%d to measure warm baseline and batched refill rate (%d workers)...",
-		calibPoolSize, len(workers))
-	calibNS := &corev1.Namespace{}
-	calibNS.Name = fmt.Sprintf("burst-calib-%d", time.Now().UnixNano())
-	require.NoError(t, tc0.CreateWithCleanup(t.Context(), calibNS))
 
-	calibTemplate := &extensionsv1beta1.SandboxTemplate{
+	fillTimeout := 5 * time.Minute
+
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("burst-%d", time.Now().UnixNano())
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), ns))
+
+	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "calib-template",
-			Namespace: calibNS.Name,
+			Name:      "burst-template",
+			Namespace: ns.Name,
 		},
 	}
-	calibTemplate.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: workloadPodSpec(rcPtr, workloadSec)}
-	require.NoError(t, tc0.CreateWithCleanup(t.Context(), calibTemplate))
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: workloadPodSpec(rcPtr, workloadSec)}
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), template))
 
-	calibReplicas := int32(calibPoolSize)
-	calibPool := &extensionsv1beta1.SandboxWarmPool{
+	calibReplicas := int32(4)
+	if isVMRuntime(runtimeClass) && int64(calibReplicas) > cpus {
+		calibReplicas = int32(cpus)
+	}
+	pool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "calib-pool",
-			Namespace: calibNS.Name,
+			Name:      "burst-pool",
+			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
 			Replicas:    &calibReplicas,
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: calibTemplate.Name},
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
 		},
 	}
-	require.NoError(t, tc0.CreateWithCleanup(t.Context(), calibPool))
-	calibPoolID := types.NamespacedName{Name: calibPool.Name, Namespace: calibNS.Name}
-	// Use generous timeout for calibration — we don't know refill rate yet
-	calibTimeout := 5 * time.Minute
-	calibCtx, calibCancel := context.WithTimeout(t.Context(), calibTimeout)
-	defer calibCancel()
-	require.NoError(t, tc0.WaitForWarmPoolReady(calibCtx, calibPoolID))
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), pool))
+	poolID := types.NamespacedName{Name: pool.Name, Namespace: ns.Name}
 
-	// Measure warm baseline from a single claim
+	t.Logf("[calibrate] Filling pool-%d to measure warm baseline...", calibReplicas)
+	calibCtx, calibCancel := context.WithTimeout(t.Context(), fillTimeout)
+	defer calibCancel()
+	require.NoError(t, tc0.WaitForWarmPoolReady(calibCtx, poolID))
+
 	calibClaim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "calib-warm",
-			Namespace: calibNS.Name,
+			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: calibPool.Name},
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
 		},
 	}
 	calibStart := time.Now()
 	require.NoError(t, tc0.CreateWithCleanup(t.Context(), calibClaim))
 	require.NoError(t, tc0.WaitForObject(calibCtx, calibClaim, predicates.ReadyConditionIsTrue))
 	warmBaseline := time.Since(calibStart)
-
-	// Wait for pool to recover, then drain all and measure batched refill
-	require.NoError(t, tc0.WaitForWarmPoolReady(calibCtx, calibPoolID))
-	for i := range calibPoolSize {
-		claim := &extensionsv1beta1.SandboxClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("calib-drain-%d", i),
-				Namespace: calibNS.Name,
-			},
-			Spec: extensionsv1beta1.SandboxClaimSpec{
-				WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: calibPool.Name},
-			},
-		}
-		require.NoError(t, tc0.CreateWithCleanup(t.Context(), claim))
-		require.NoError(t, tc0.WaitForObject(calibCtx, claim, predicates.ReadyConditionIsTrue))
-	}
-
-	refillStart := time.Now()
-	require.NoError(t, tc0.WaitForWarmPoolReady(calibCtx, calibPoolID))
-	batchRefill := time.Since(refillStart)
-	refillPerSlot := batchRefill / time.Duration(calibPoolSize)
-
 	warmColdThreshold := time.Second
-	t.Logf("[calibrate] warm=%.3fs, pool-%d refill=%.3fs (%.3fs/slot), threshold=%.3fs",
-		warmBaseline.Seconds(), calibPoolSize, batchRefill.Seconds(),
-		refillPerSlot.Seconds(), warmColdThreshold.Seconds())
+	t.Logf("[calibrate] warm=%.3fs, threshold=%.3fs", warmBaseline.Seconds(), warmColdThreshold.Seconds())
 
-	// Clean up calibration pool to prevent CrashLoopBackOff interference
-	t.Logf("[calibrate] cleaning up calibration namespace")
-	require.NoError(t, tc0.Delete(t.Context(), calibNS))
-	require.NoError(t, tc0.WaitForObjectNotFound(t.Context(), calibNS))
+	// Scale to 0 before entering subtest loop
+	require.NoError(t, tc0.Delete(t.Context(), calibClaim))
+	zeroReplicas := int32(0)
+	framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+		p.Spec.Replicas = &zeroReplicas
+	})
+	drainCtx, drainCancel := context.WithTimeout(t.Context(), fillTimeout)
+	require.NoError(t, tc0.WaitForWarmPoolReady(drainCtx, poolID))
+	drainCancel()
 
 	calcBatchSize := func(poolSize int) int {
 		return min(max(4, poolSize/2), 8)
@@ -421,97 +401,35 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		return "cold"
 	}
 
-	estimateSubtestDuration := func(poolSize int) time.Duration {
-		bs := calcBatchSize(poolSize)
-		fill := float64(refillPerSlot) * float64(poolSize)
-		numBatches := float64((poolSize*2 + bs - 1) / bs)
-		perBatch := float64(refillPerSlot) + float64(100*time.Millisecond)
-		return time.Duration((fill + numBatches*perBatch) * 2)
-	}
-
-	var totalEstimate time.Duration
+	var globalClaimCounter atomic.Int64
 	poolSizes := benchPoolSizes(cpus)
-	for _, ps := range poolSizes {
-		totalEstimate += estimateSubtestDuration(ps)
-	}
-	totalEstimate += calibTimeout
-	t.Logf("[budget] estimated total: %s — recommended: -timeout %s",
-		totalEstimate.Round(time.Second),
-		(totalEstimate + 2*time.Minute).Round(time.Minute))
 
 	for i, poolSize := range poolSizes {
 		if i > 0 {
 			time.Sleep(2 * time.Second)
 		}
 
-		// Skip if remaining test time won't fit this subtest
-		subtestEstimate := estimateSubtestDuration(poolSize)
-		if deadline, ok := t.Context().Deadline(); ok {
-			remaining := time.Until(deadline)
-			if subtestEstimate > remaining {
-				t.Logf("[budget] skipping pool-%d: estimated %s exceeds remaining %s",
-					poolSize, subtestEstimate.Round(time.Second), remaining.Round(time.Second))
-				continue
-			}
+		if isVMRuntime(runtimeClass) && int64(poolSize) > cpus {
+			t.Logf("[skip] pool size %d exceeds worker CPU capacity (%d vCPUs)", poolSize, cpus)
+			continue
 		}
 
-		poolSize := poolSize
+		// Scale pool to target and measure fill time
+		targetReplicas := int32(poolSize)
+		framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+			p.Spec.Replicas = &targetReplicas
+		})
+		fillStart := time.Now()
+		fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
+		require.NoError(t, tc0.WaitForWarmPoolReady(fillCtx, poolID))
+		fillCancel()
+		poolFillTime := time.Since(fillStart)
+
 		t.Run(fmt.Sprintf("pool-%d", poolSize), func(t *testing.T) {
 			tc := framework.NewTestContext(t)
 
-			if isVMRuntime(runtimeClass) {
-				cpus, err := tc.ClusterCPUCapacity(t.Context())
-				require.NoError(t, err)
-				if cpus == 0 {
-					t.Skip("no schedulable worker nodes found")
-				}
-				if int64(poolSize) > cpus {
-					t.Skipf("pool size %d exceeds worker CPU capacity (%d vCPUs) — not practical for VM runtime %q",
-						poolSize, cpus, runtimeClass)
-				}
-				t.Logf("[capacity] %d worker vCPUs available, pool size %d — OK", cpus, poolSize)
-			}
-
-			// Proportional timeout for this subtest's operations
-			poolFillTimeout := time.Duration(float64(refillPerSlot)*float64(poolSize)*3) + 30*time.Second
-			claimTimeout := time.Duration(float64(refillPerSlot)*float64(poolSize)) + 30*time.Second
-
-			// --- Setup ---
-			t.Logf("[setup] Creating namespace, template, warm pool (size=%d, workload=%ds, fillTimeout=%s)...",
-				poolSize, workloadSec, poolFillTimeout.Round(time.Millisecond))
-			ns := &corev1.Namespace{}
-			ns.Name = fmt.Sprintf("burst-%d-%d", poolSize, time.Now().UnixNano())
-			require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
-
-			podSpec := workloadPodSpec(rcPtr, workloadSec)
-
-			template := &extensionsv1beta1.SandboxTemplate{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "burst-template",
-					Namespace: ns.Name,
-				},
-			}
-			template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
-			require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
-
-			replicas := int32(poolSize)
-			warmPool := &extensionsv1beta1.SandboxWarmPool{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "burst-pool",
-					Namespace: ns.Name,
-				},
-				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-					Replicas:    &replicas,
-					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
-				},
-			}
-			require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
-
-			warmPoolID := types.NamespacedName{Name: warmPool.Name, Namespace: ns.Name}
-			fillCtx, fillCancel := context.WithTimeout(t.Context(), poolFillTimeout)
-			defer fillCancel()
-			require.NoError(t, tc.WaitForWarmPoolReady(fillCtx, warmPoolID))
-			t.Logf("[setup] Pool ready")
+			claimTimeout := poolFillTime + 30*time.Second
+			t.Logf("[setup] Pool-%d filled in %.3fs", poolSize, poolFillTime.Seconds())
 
 			batchSize := calcBatchSize(poolSize)
 
@@ -530,15 +448,12 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# workload_sec", strconv.Itoa(workloadSec)})
 			_ = cw.Write([]string{"# warm_baseline_sec", fmt.Sprintf("%.3f", warmBaseline.Seconds())})
 			_ = cw.Write([]string{"# warm_cold_threshold_sec", fmt.Sprintf("%.3f", warmColdThreshold.Seconds())})
-			_ = cw.Write([]string{"# calib_pool_size", strconv.Itoa(calibPoolSize)})
-			_ = cw.Write([]string{"# batch_refill_sec", fmt.Sprintf("%.3f", batchRefill.Seconds())})
-			_ = cw.Write([]string{"# refill_per_slot_sec", fmt.Sprintf("%.3f", refillPerSlot.Seconds())})
+			_ = cw.Write([]string{"# pool_fill_sec", fmt.Sprintf("%.3f", poolFillTime.Seconds())})
 			_ = cw.Write([]string{"# batch_size", strconv.Itoa(batchSize)})
 			_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
 			_ = cw.Write([]string{"# settle_ms", "100"})
 			_ = cw.Write([]string{"batch", "claim", "latency_sec", "type", "wall_offset_sec", "ready_at_start"})
 
-			var claimCounter atomic.Int64
 			var allRecords []claimRecord
 
 			fireBatch := func(batchNum, count int, readyAtStart int32, testStart time.Time) []claimRecord {
@@ -555,11 +470,11 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 						defer wg.Done()
 						claim := &extensionsv1beta1.SandboxClaim{
 							ObjectMeta: metav1.ObjectMeta{
-								Name:      fmt.Sprintf("claim-%d-%d", batchNum, claimCounter.Add(1)),
+								Name:      fmt.Sprintf("claim-%d-%d", poolSize, globalClaimCounter.Add(1)),
 								Namespace: ns.Name,
 							},
 							Spec: extensionsv1beta1.SandboxClaimSpec{
-								WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+								WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
 							},
 						}
 						start := time.Now()
@@ -593,9 +508,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			// --- Header ---
 			t.Logf("=======================================================================")
 			t.Logf("  Burst Recovery: runtime=%s pool=%d workload=%ds", runtimeClass, poolSize, workloadSec)
-			t.Logf("  warm=%.3fs  refill/slot=%.3fs (pool-%d: %.3fs)  threshold=%.3fs",
-				warmBaseline.Seconds(), refillPerSlot.Seconds(),
-				calibPoolSize, batchRefill.Seconds(), warmColdThreshold.Seconds())
+			t.Logf("  warm=%.3fs  fill=%.3fs  threshold=%.3fs",
+				warmBaseline.Seconds(), poolFillTime.Seconds(), warmColdThreshold.Seconds())
 			t.Logf("  batchSize=%d  maxClaims=%d  settle=100ms", batchSize, maxClaims)
 			t.Logf("=======================================================================")
 
@@ -612,7 +526,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				}
 
 				var poolStatus extensionsv1beta1.SandboxWarmPool
-				require.NoError(t, tc.Get(t.Context(), warmPoolID, &poolStatus))
+				require.NoError(t, tc.Get(t.Context(), poolID, &poolStatus))
 				readyBefore := poolStatus.Status.ReadyReplicas
 
 				if readyBefore <= 1 && totalClaims > poolSize {
@@ -671,7 +585,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				if r.latency > greenThreshold && r.latency <= warmColdThreshold {
 					greyZoneCount++
 				}
-				if r.latency > batchRefill {
+				if r.latency > poolFillTime {
 					overColdCount++
 				}
 				if r.latency > worstStart {
@@ -684,7 +598,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("  Green (<=warm):      %d", greenCount)
 			t.Logf("  Grey (warm..1s):     %d", greyZoneCount)
 			t.Logf("  Worst start:         %.3fs", worstStart.Seconds())
-			t.Logf("  Over cold start:     %d (>%.3fs)", overColdCount, batchRefill.Seconds())
+			t.Logf("  Over cold start:     %d (>%.3fs)", overColdCount, poolFillTime.Seconds())
 			t.Logf("  Total duration(sec): %.3f", totalDuration.Seconds())
 			t.Logf("  Throughput:          %.1f claims/sec", float64(totalClaims)/totalDuration.Seconds())
 			t.Logf("  CSV report:          %s", csvPath)
@@ -702,6 +616,14 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# total_duration_sec", fmt.Sprintf("%.3f", totalDuration.Seconds())})
 			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
 		})
+
+		// Scale pool to 0 and wait for all sandboxes to terminate before next iteration
+		framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+			p.Spec.Replicas = &zeroReplicas
+		})
+		drainCtx, drainCancel := context.WithTimeout(t.Context(), fillTimeout)
+		require.NoError(t, tc0.WaitForWarmPoolReady(drainCtx, poolID))
+		drainCancel()
 	}
 }
 
@@ -726,7 +648,15 @@ func runtimeClassPodSpec(rcPtr *string, image string) corev1.PodSpec {
 
 func benchImages() []string {
 	if v := os.Getenv("SANDBOX_IMAGES"); v != "" {
-		return strings.Split(v, ",")
+		var images []string
+		for s := range strings.SplitSeq(v, ",") {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				images = append(images, trimmed)
+			}
+		}
+		if len(images) > 0 {
+			return images
+		}
 	}
 	return []string{"registry.k8s.io/pause:3.10"}
 }
@@ -776,8 +706,10 @@ func benchPoolSizes(cpuCapacity int64) []int {
 }
 
 func shortImageName(image string) string {
-	parts := strings.Split(image, "/")
-	return parts[len(parts)-1]
+	if i := strings.LastIndex(image, "/"); i >= 0 {
+		return image[i+1:]
+	}
+	return image
 }
 
 func logBenchHeader(b *testing.B, benchType string, runtimeClass string, poolSizes []int) {
@@ -815,6 +747,8 @@ func BenchmarkRuntimeClassColdStart(b *testing.B) {
 		b.Run(shortImageName(image), func(b *testing.B) {
 			podSpec := runtimeClassPodSpec(rcPtr, image)
 
+			var total time.Duration
+			var worst time.Duration
 			for b.Loop() {
 				tc := framework.NewTestContext(b)
 
@@ -834,8 +768,14 @@ func BenchmarkRuntimeClassColdStart(b *testing.B) {
 				tc.MustCreateWithCleanup(sandbox)
 				tc.MustWaitForObject(sandbox, predicates.ReadyConditionIsTrue)
 
-				b.ReportMetric(time.Since(startTime).Seconds(), "sandbox-ready-sec")
+				d := time.Since(startTime)
+				total += d
+				if d > worst {
+					worst = d
+				}
 			}
+			b.ReportMetric(total.Seconds()/float64(b.N), "sandbox-ready-sec/op")
+			b.ReportMetric(worst.Seconds(), "worst-sec")
 		})
 	}
 }
@@ -918,6 +858,8 @@ func BenchmarkRuntimeClassWarmClaim(b *testing.B) {
 				b.Logf("WarmPool ready with %d replicas", poolSize)
 
 				b.ResetTimer()
+				var total time.Duration
+				var worst time.Duration
 				for b.Loop() {
 					claimName := fmt.Sprintf("claim-%d", benchSandboxCounter.Add(1))
 
@@ -935,8 +877,14 @@ func BenchmarkRuntimeClassWarmClaim(b *testing.B) {
 					tc.MustCreateWithCleanup(claim)
 					tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
 
-					b.ReportMetric(time.Since(startTime).Seconds(), "claim-ready-sec")
+					d := time.Since(startTime)
+					total += d
+					if d > worst {
+						worst = d
+					}
 				}
+				b.ReportMetric(total.Seconds()/float64(b.N), "claim-ready-sec/op")
+				b.ReportMetric(worst.Seconds(), "worst-sec")
 			})
 		}
 	}

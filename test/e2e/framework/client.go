@@ -237,9 +237,7 @@ func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicat
 
 	timeout := DefaultTimeout
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
+		timeout = time.Until(deadline)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -278,9 +276,7 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 
 	timeout := DefaultTimeout
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
+		timeout = time.Until(deadline)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

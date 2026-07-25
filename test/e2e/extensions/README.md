@@ -21,8 +21,8 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `TestRuntimeClassLifecycle` | Test | Full SandboxTemplate → WarmPool → SandboxClaim lifecycle with a given RuntimeClass |
 | `TestRuntimeClassStartupComparison` | Test | Cold start vs warm claim side-by-side, reports speedup ratio |
 | `TestRuntimeClassBurstRecovery` | Test | Sustained batch load against various pool sizes, writes per-claim CSV reports with quality zone stats |
-| `BenchmarkRuntimeClassColdStart` | Benchmark | Raw cold sandbox creation latency per image (`sandbox-ready-sec` metric) |
-| `BenchmarkRuntimeClassWarmClaim` | Benchmark | Warm pool claim latency across image × pool-size combinations (`claim-ready-sec` metric) |
+| `BenchmarkRuntimeClassColdStart` | Benchmark | Raw cold sandbox creation latency per image (`sandbox-ready-sec/op`, `worst-sec` metrics) |
+| `BenchmarkRuntimeClassWarmClaim` | Benchmark | Warm pool claim latency across image × pool-size combinations (`claim-ready-sec/op`, `worst-sec` metrics) |
 
 ## Environment Variables
 
@@ -32,7 +32,7 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_POOL_SIZES` | total worker CPUs | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to the cluster's total worker CPU count when unset. |
 | `SANDBOX_REPORT_DIR` | `.` (cwd) | Base directory for CSV output. A subdirectory is auto-created per run. |
 | `SANDBOX_CLUSTER_ID` | *(auto-detected)* | Override cluster identity string in report paths |
-| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps (simulates real work). `0` uses a pause container. |
+| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery tests. `0` uses a pause container. Not used by benchmarks. |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
 
 ## Quick Start
@@ -103,18 +103,22 @@ batchSize = min(max(4, poolSize / 2), 8)
 Batches fire with a 100ms settle interval between them. The test stops when
 `ReadyReplicas ≤ 1` (pool depleted) or after `2 × poolSize` total claims.
 
-## Calibration
+## Pool Reuse and Fill Measurement
 
-Before the pool-size loop, a one-time calibration phase runs:
+`TestRuntimeClassBurstRecovery` creates a single namespace, template, and pool
+that are reused across all pool sizes. The flow:
 
-1. Creates a calibration pool (size = `max(4, workers×2)`, capped by CPU for VM runtimes).
-2. Claims a single sandbox to measure **warm baseline** — the irreducible
+1. **Calibration**: pool is created at 4 replicas (capped by CPU for VM
+   runtimes). A single claim measures **warm baseline** — the irreducible
    create-claim-watch latency.
-3. Drains and refills the full pool to measure **batch refill rate** and
-   **refill per slot**.
+2. **Scale to 0**: pool is drained, calibration claim deleted.
+3. **Per pool size**: scale pool to target replicas, measure **fill time**
+   (time for `ReadyReplicas` to reach target), run burst claims, scale back
+   to 0. A 2-second cooldown separates iterations.
 
-These values determine the warm/cold threshold (fixed at **1 second** — the
-customer-experience boundary) and quality zone boundaries.
+Fill time accounts for the controller's `slowStartBatch` exponential ramp
+(1, 2, 4, 8… concurrent creates) and is used to derive claim timeouts for
+that specific pool size. The warm/cold threshold is fixed at **1 second**.
 
 ## Reading Results
 
@@ -136,7 +140,7 @@ batch,claim,latency_sec,type,wall_offset_sec,ready_at_start
 ### CSV header and footer
 
 The file starts with `# key,value` metadata lines (cluster ID, instance type,
-runtime class, calibration results) and ends with summary stats:
+runtime class, pool fill time) and ends with summary stats:
 
 ```text
 # total_batches,6
@@ -160,7 +164,7 @@ Claims are classified into quality zones based on latency:
 | **Green** | ≤ warm_baseline × 1.2 | Optimal — indistinguishable from a single warm claim |
 | **Grey** | warm_baseline × 1.2 … 1s | Elevated latency from reconciler serialization, still warm |
 | **Cold** | > 1s | Cold start territory — pool was exhausted |
-| **Over-cold** | > batch_refill time | Worse than a full pool refill cycle |
+| **Over-cold** | > pool fill time | Worse than the measured pool fill time |
 
 The grey zone is caused by controller work-queue serialization (~160ms cycle),
 etcd write contention, and watch event coalescing — it is runtime-independent.
@@ -181,14 +185,3 @@ Example: `vvoron420gcp22-hjmvw-worker_n2-standard-8_20260722_default/`
 
 If the directory already exists, a numeric suffix is appended (`_2`, `_3`, ...).
 
-## Slides
-
-A Marp-compatible slide deck with benchmark findings, architecture diagrams,
-and analysis is available at:
-
-```text
-test/e2e/extensions/warm-pool-benchmark-slides.md
-```
-
-Render with `marp warm-pool-benchmark-slides.md` or open in VS Code with the
-Marp extension.

@@ -3,23 +3,29 @@
 **Status**: Draft Proposal
 **Authors**: @vvoronko
 **Created**: 2026-07-14
-**Updated**: 2026-07-23
+**Updated**: 2026-07-25
 
 ## Summary
 
-This proposal introduces a mutating admission webhook that routes `SandboxClaim`
-resources to the appropriate `SandboxWarmPool` based on isolation-tier annotations.
-Instead of clients hardcoding a pool name, they declare the isolation level they need
-(`process` or `hardware`) and whether fallback across tiers is acceptable. The webhook
-rewrites `spec.warmPoolRef.name` at admission time, keeping the existing controller
-and CRD surface unchanged.
+This proposal introduces an optional mutating admission webhook that routes
+`SandboxClaim` resources to the appropriate `SandboxWarmPool` based on isolation-tier
+spec fields. Instead of clients hardcoding a pool name, they declare the isolation
+level they need (`process` or `hardware`) and whether fallback across tiers is
+acceptable. The webhook rewrites `spec.warmPoolRef.name` at admission time, keeping the
+existing controller and CRD surface unchanged.
+
+This is a **Kubernetes-native routing option** (Tier 3) for operators running multi-pool
+clusters without an upper-layer orchestrator like Agent Substrate. Deployments using
+Substrate or similar data-plane orchestrators resolve pool binding in their own fast
+path and are unaffected by this proposal.
 
 ## Motivation
 
 ### Warm claims are runtime-independent
 
-Benchmark data from PR #1262 (3 runtimes, 6 pool sizes, n2-standard-8 GCP workers)
-shows that **warm claim latency is identical across runtimes**:
+Benchmark data collected using the test harness from PR #1262 (3 runtimes, 6 pool
+sizes, n2-standard-8 GCP workers) shows that **warm claim latency is identical across
+runtimes**:
 
 | Runtime | Warm P50 | Warm P95 | Warm P99 | Calibration baseline |
 |---------|----------|----------|----------|---------------------|
@@ -68,31 +74,121 @@ This proposal standardizes option 3.
 
 ### Position in the AI agent stack
 
-agent-sandbox sits in the middle of the cloud-native AI agent stack. Above it, agent
-frameworks (LangChain, Claude Code, custom agents) create `SandboxClaim` resources.
-Below it, runtimes provide isolation boundaries, and inference schedulers like llm-d
-route LLM requests to vLLM workers based on KV-cache locality.
+agent-sandbox sits in the middle of the cloud-native AI agent stack:
 
-Our routing concern is orthogonal to inference routing: we route by **isolation tier**
-(process vs. hardware boundary), while llm-d routes by **inference efficiency** (cache
-hits, accelerator load). They compose at different layers without conflict.
+```text
+Agent frameworks (LangChain, Claude Code, custom agents)
+    ↓ SandboxClaim
+┌── Agent Substrate (optional) ──────────────────────────┐
+│   Actor packing, data-plane routing (atenet/Envoy),    │
+│   30x+ oversubscription, bypasses K8s hot path         │
+└── sets warmPoolRef directly ───────────────────────────┘
+    ↓ SandboxClaim (warmPoolRef resolved)
+agent-sandbox controller (warm pools, pod lifecycle)     ← THIS PROJECT
+    ↓ Pod with RuntimeClass
+OpenShell (seccomp, Landlock, eBPF policy enforcement)   ← app-layer, orthogonal
+    ↓ kernel boundary
+gVisor / Kata microVM / runc                             ← isolation runtime
+    ↓ inference calls
+llm-d (KV-cache-aware routing, prefill/decode split)     ← inference plane
+    ↓
+vLLM workers (GPU inference engine)
+```
 
-Application-layer policy engines like NVIDIA OpenShell enforce filesystem, network, and
-process restrictions inside the sandbox pod regardless of RuntimeClass. Our routing
-selects which pool the pod comes from; OpenShell governs what the pod can do once
-running. They stack independently.
+[Agent Substrate](https://github.com/agent-substrate/substrate) is a Google-led project
+that packs many actors onto fewer worker pods, achieving 30x+ oversubscription. It takes
+agent-sandbox's secure runtime and snapshotting capabilities and pairs them with a
+minimal control plane designed for ultra-scale. Substrate resolves pool binding in its
+own data plane and sets `warmPoolRef` directly — it does not need a Kubernetes webhook
+for routing.
+
+### Routing tiers
+
+Pool routing can happen at three levels, depending on the deployment's complexity:
+
+| Tier | Mechanism | When to use |
+|------|-----------|-------------|
+| **1. Explicit** | Client sets `spec.warmPoolRef` directly | Single-pool clusters, static environments |
+| **2. Data-plane** | Substrate (or similar orchestrator) resolves pool binding in its own fast path, sets `warmPoolRef` before submitting the claim | High-density, ultra-scale deployments with an L7 orchestrator |
+| **3. Control-plane** | Mutating webhook rewrites `warmPoolRef` at admission time based on `spec.isolation` | Multi-pool Kubernetes clusters without an upper-layer orchestrator |
+
+**This proposal implements Tier 3** — the Kubernetes-native option for operators who
+run mixed isolation environments (gVisor + kata pools) without Substrate or a custom
+orchestrator. Tier 1 and Tier 2 are unaffected: claims without `spec.isolation` pass
+through unchanged, and Substrate can continue setting `warmPoolRef` directly.
+
+The tiers are not mutually exclusive. An operator can run Substrate for high-density
+namespaces (Tier 2) while using the webhook for vanilla namespaces (Tier 3), with
+`namespaceSelector` controlling which namespaces opt into webhook routing.
+
+### Orthogonal concerns
+
+- **Inference routing**: llm-d routes by KV-cache locality and GPU load within the
+  inference plane. We route by isolation tier in the sandbox control plane. They compose
+  at different layers without conflict.
+- **Application-layer policy**: NVIDIA OpenShell enforces filesystem, network, and
+  process restrictions inside the sandbox pod regardless of RuntimeClass. Our routing
+  selects which pool the pod comes from; OpenShell governs what the pod can do once
+  running. They stack independently.
 
 ## Design
 
-### Annotations
+### Spec fields
 
-Two annotations on `SandboxClaim.metadata.annotations`, using the existing
-`agents.x-k8s.io/` prefix:
+Two optional fields on `SandboxClaim.spec`:
 
-| Annotation | Values | Default | Description |
-|------------|--------|---------|-------------|
-| `agents.x-k8s.io/isolation` | `process`, `hardware` | *(unset — no routing)* | Isolation tier requested. When absent, the claim passes through unchanged. |
-| `agents.x-k8s.io/overflow` | `allow`, `deny` | `allow` | Whether to fall back to another tier's pool when the preferred pool is exhausted |
+| Field | Type | Values | Default | Description |
+|-------|------|--------|---------|-------------|
+| `spec.isolation` | `*IsolationTier` (enum) | `process`, `hardware` | *(nil — no routing)* | Isolation tier requested. When nil, the claim passes through unchanged. |
+| `spec.overflow` | `*OverflowPolicy` (enum) | `allow`, `deny` | `allow` | Whether to fall back to a lower-isolation tier's pool when the preferred pool is exhausted |
+
+Both fields are optional and nil by default, so existing claims without them behave
+exactly as today — full backward compatibility. Because they are typed spec fields,
+values get OpenAPI validation (CEL enum constraint), appear in `kubectl explain
+sandboxclaim.spec`, and follow the standard Kubernetes versioning/deprecation lifecycle.
+
+**API changes required**: The following additions to `SandboxClaimSpec` in
+`extensions/api/v1beta1/sandboxclaim_types.go` are non-breaking — optional pointer
+fields with `omitempty` leave existing claims unchanged:
+
+```go
+// IsolationTier specifies the isolation boundary for the sandbox.
+// +kubebuilder:validation:Enum=process;hardware
+type IsolationTier string
+
+const (
+    IsolationTierProcess  IsolationTier = "process"
+    IsolationTierHardware IsolationTier = "hardware"
+)
+
+// OverflowPolicy specifies whether a claim may fall back to a lower-isolation tier.
+// +kubebuilder:validation:Enum=allow;deny
+type OverflowPolicy string
+
+const (
+    OverflowPolicyAllow OverflowPolicy = "allow"
+    OverflowPolicyDeny  OverflowPolicy = "deny"
+)
+```
+
+Added to `SandboxClaimSpec`:
+
+```go
+// isolation selects the isolation tier for pool routing.
+// When nil, the claim is not routed and warmPoolRef is used as-is.
+// +optional
+Isolation *IsolationTier `json:"isolation,omitempty"`
+
+// overflow controls whether the claim may fall back to a lower-isolation
+// tier's pool when the preferred tier is exhausted.
+// Defaults to "allow" when isolation is set.
+// +optional
+Overflow *OverflowPolicy `json:"overflow,omitempty"`
+```
+
+The v1alpha1 conversion webhook (`extensions/api/v1alpha1/sandboxclaim_conversion.go`)
+must be updated to round-trip these fields. Run `make manifests` to regenerate CRD
+schemas after modifying the types.
 
 **`isolation` values**:
 - `process` — OS-level isolation (gVisor, runc). Sufficient for single-tenant
@@ -101,11 +197,14 @@ Two annotations on `SandboxClaim.metadata.annotations`, using the existing
   environments processing untrusted input, or when compliance mandates a dedicated
   guest kernel per sandbox.
 
-**`overflow` semantics**:
-- `allow` (default) — When the preferred tier's pool is exhausted, route to the other
-  tier's pool. A gVisor sandbox in 0.32s is better than a cold kata start at 13s for
-  workloads where hardware isolation is defense-in-depth but not a compliance
-  requirement.
+**`overflow` semantics** (tier-down only):
+- `allow` (default) — When the preferred tier's pool is exhausted, fall back to a
+  lower-isolation tier. In practice this means `hardware` claims can overflow to
+  `process` pools (a gVisor sandbox in 0.32s is better than a cold kata start at 13s).
+  The reverse (`process` → `hardware`) is never attempted — it would spend scarce
+  kata capacity (250m CPU + 350Mi per slot) on workloads that did not request hardware
+  isolation, starving future `hardware`/`deny` claims. Process-tier pools already
+  have within-tier fallback (gVisor → runc) at no extra cost.
 - `deny` — Never fall back across isolation tiers. Accept a cold start within the same
   tier rather than weaken the isolation guarantee. Use this when hardware isolation is
   mandated by policy (multi-tenant untrusted code execution, regulatory requirements).
@@ -136,6 +235,13 @@ data:
 Pools are listed in preference order within each tier. The webhook tries them
 sequentially.
 
+**Namespace-scoped resolution**: Pool names in the ConfigMap are resolved within the
+claim's namespace (`req.Namespace`). Every routing-enabled namespace must provision
+pools with the names listed in the ConfigMap. If a required pool does not exist in the
+claim's namespace, the webhook rejects the claim with an explicit error naming the
+missing pool — no silent fallthrough, no degraded routing. This enforces a consistent
+naming convention across namespaces and makes misconfigurations immediately visible.
+
 ### Webhook flow
 
 ```text
@@ -144,12 +250,7 @@ SandboxClaim CREATE
     ▼
 Webhook intercepts
     │
-    ├── Has routing annotations? ──No──▶ Allow unchanged
-    │
-    ▼
-Parse and validate isolation tier (required when routing)
-    │
-    ├── Unknown tier value? ──Yes──▶ Reject (admission error)
+    ├── spec.isolation nil? ──Yes──▶ Allow unchanged
     │
     ▼
 Look up tier's pool list from ConfigMap
@@ -159,48 +260,42 @@ Look up tier's pool list from ConfigMap
     ▼
 For each pool in preference order:
     │
+    ├── Pool missing in namespace? ──Yes──▶ Reject (naming convention violated)
+    │
     ├── pool.status.readyReplicas > 0? ──Yes──▶ Mutate warmPoolRef → pool.name
     │                                            Return patched claim
     ▼
-All pools exhausted
+All pools exhausted (exist but empty)
     │
-    ├── overflow=allow? ──Yes──▶ Try other tier's pools (same loop)
+    ├── overflow=allow AND tier=hardware?
+    │       ──Yes──▶ Try process tier's pools (tier-down fallback)
     │
-    ├── overflow=deny?  ──Yes──▶ Route to first pool in own tier
+    ├── Otherwise ──────▶ Route to first pool in own tier
     │                            (cold start within correct isolation)
     ▼
 Return patched claim
 ```
 
-Claims without routing annotations pass through unchanged — full backward
+Claims without routing fields pass through unchanged — full backward
 compatibility.
 
 ### Webhook implementation (simplified)
 
 ```go
-var validTiers = map[string]bool{"process": true, "hardware": true}
-var validOverflow = map[string]bool{"allow": true, "deny": true}
-
 func (h *RoutingWebhook) Handle(ctx context.Context, req admission.Request) admission.Response {
     claim := &extensionsv1beta1.SandboxClaim{}
     if err := h.Decoder.Decode(req, claim); err != nil {
         return admission.Errored(http.StatusBadRequest, err)
     }
 
-    tier := claim.Annotations["agents.x-k8s.io/isolation"]
-    if tier == "" {
-        return admission.Allowed("no routing annotation")
+    if claim.Spec.Isolation == nil {
+        return admission.Allowed("no isolation tier requested")
     }
-    if !validTiers[tier] {
-        return admission.Denied(fmt.Sprintf("invalid isolation tier %q, must be process or hardware", tier))
-    }
+    tier := string(*claim.Spec.Isolation)
 
-    overflow := claim.Annotations["agents.x-k8s.io/overflow"]
-    if overflow == "" {
-        overflow = "allow"
-    }
-    if !validOverflow[overflow] {
-        return admission.Denied(fmt.Sprintf("invalid overflow value %q, must be allow or deny", overflow))
+    overflow := "allow"
+    if claim.Spec.Overflow != nil {
+        overflow = string(*claim.Spec.Overflow)
     }
 
     ns := req.Namespace
@@ -222,17 +317,24 @@ func (h *RoutingWebhook) selectPool(ctx context.Context, tier, overflow, ns stri
         return "", fmt.Errorf("no pools configured for tier %q", tier)
     }
 
-    if pool, found := h.firstHealthyPool(ctx, tierCfg.Pools, ns); found {
+    pool, err := h.firstHealthyPool(ctx, tierCfg.Pools, ns)
+    if err != nil {
+        return "", err
+    }
+    if pool != "" {
         return pool, nil
     }
 
-    if overflow == "allow" {
-        otherTier := "hardware"
-        if tier == "hardware" {
-            otherTier = "process"
-        }
-        if otherCfg, ok := cfg.Tiers[otherTier]; ok {
-            if pool, found := h.firstHealthyPool(ctx, otherCfg.Pools, ns); found {
+    // Overflow is tier-down only: hardware → process.
+    // process → hardware is never attempted to avoid starving
+    // scarce kata capacity with workloads that don't need it.
+    if overflow == "allow" && tier == "hardware" {
+        if processCfg, ok := cfg.Tiers["process"]; ok {
+            pool, err := h.firstHealthyPool(ctx, processCfg.Pools, ns)
+            if err != nil {
+                return "", err
+            }
+            if pool != "" {
                 return pool, nil
             }
         }
@@ -241,17 +343,20 @@ func (h *RoutingWebhook) selectPool(ctx context.Context, tier, overflow, ns stri
     return tierCfg.Pools[0].Name, nil
 }
 
-func (h *RoutingWebhook) firstHealthyPool(ctx context.Context, pools []PoolRef, ns string) (string, bool) {
+func (h *RoutingWebhook) firstHealthyPool(ctx context.Context, pools []PoolRef, ns string) (string, error) {
     for _, p := range pools {
         pool := &extensionsv1beta1.SandboxWarmPool{}
         if err := h.Client.Get(ctx, client.ObjectKey{Name: p.Name, Namespace: ns}, pool); err != nil {
-            continue
+            if apierrors.IsNotFound(err) {
+                return "", fmt.Errorf("pool %q not found in namespace %q — routing requires all configured pools to exist", p.Name, ns)
+            }
+            return "", fmt.Errorf("failed to check pool %q in namespace %q: %w", p.Name, ns, err)
         }
         if pool.Status.ReadyReplicas > 0 {
-            return p.Name, true
+            return p.Name, nil
         }
     }
-    return "", false
+    return "", nil
 }
 ```
 
@@ -285,25 +390,41 @@ webhooks:
 
 ### RBAC
 
+ClusterRole for cross-namespace pool lookups:
+
 ```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-routing-webhook
 rules:
   - apiGroups: ["extensions.agents.x-k8s.io"]
     resources: ["sandboxwarmpools"]
     verbs: ["get", "list", "watch"]
+```
+
+Namespace-scoped Role for the routing ConfigMap (webhook namespace only):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-routing-webhook-config
+  namespace: agent-sandbox-system
+rules:
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get"]
+    verbs: ["get", "watch"]
     resourceNames: ["sandbox-routing-config"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["list", "watch"]
 ```
 
 ## Evidence
 
-### Benchmark data (PR #1262)
+### Benchmark data
 
-Measured on GCP n2-standard-8 workers, 3-node cluster, pool sizes 4-24.
+Measured using the test harness from PR #1262 on GCP n2-standard-8 workers, 3-node
+cluster, pool sizes 4-24. PR #1262 provides the harness and CSV report generation;
+the numbers below are from a representative run.
 
 **Throughput ceiling** (burst recovery, pool=24, batch size=8):
 
@@ -333,10 +454,10 @@ Measured on GCP n2-standard-8 workers, 3-node cluster, pool sizes 4-24.
 
 | Scenario | isolation | overflow | Behavior |
 |----------|-----------|----------|----------|
-| Interactive coding agent, single-tenant | `hardware` | `allow` | Prefer kata pool; fall back to gVisor if exhausted (0.32s vs 13s wait) |
+| Interactive coding agent, single-tenant | `hardware` | `allow` | Prefer kata pool; fall back to gVisor/runc if exhausted (0.32s vs 13s wait) |
 | Multi-tenant untrusted code execution | `hardware` | `deny` | Kata pool only; accept cold start to maintain VM boundary |
-| Low-risk batch data processing | `process` | `allow` | gVisor pool; fall back to runc if needed |
-| Default (no annotations) | — | — | Existing warmPoolRef used unchanged |
+| Low-risk batch data processing | `process` | `allow` | gVisor pool; within-tier fallback to runc (never overflows to kata) |
+| Default (fields unset) | — | — | Existing warmPoolRef used unchanged |
 
 ## User experience
 
@@ -357,17 +478,19 @@ claim = SandboxClaim(spec={"warmPoolRef": {"name": pool}})
 ### After (this proposal)
 
 ```python
-# Application declares isolation intent
+# Application declares isolation intent; warmPoolRef is required by the CRD
+# but the webhook overwrites it with the selected pool before admission
 claim = SandboxClaim(
-    metadata={"annotations": {
-        "agents.x-k8s.io/isolation": "hardware",
-        "agents.x-k8s.io/overflow": "allow",
-    }},
-    spec={"warmPoolRef": {"name": "pool-default"}},
+    spec={
+        "isolation": "hardware",
+        "overflow": "allow",
+        "warmPoolRef": {"name": "placeholder"},
+    },
 )
 ```
 
-The webhook rewrites `warmPoolRef` before the claim reaches the controller.
+The webhook rewrites `warmPoolRef.name` before the claim reaches the controller.
+The placeholder value is never used.
 
 ## Alternatives considered
 
@@ -402,9 +525,9 @@ failure mode, and has no integration with kubectl workflows.
 2. **CREATE-only operations**: The webhook intercepts only `CREATE`, not `UPDATE`.
    This is correct because `spec.warmPoolRef` is effectively immutable after the
    claim controller adopts a sandbox — changing it post-adoption has no effect.
-   Annotation changes on existing claims do not re-route.
+   Changes to `spec.isolation` on existing claims do not re-route.
 
-3. **Annotation abuse**: Routing annotations are **advisory, not an authorization
+3. **Tier field abuse**: Routing fields are **advisory, not an authorization
    boundary**. Any user who can create a `SandboxClaim` in a routing-enabled
    namespace can request `isolation: hardware` and consume kata pool capacity.
    Mitigations: `namespaceSelector` limits which namespaces participate in routing,
@@ -429,7 +552,7 @@ Webhook emits Prometheus metrics:
 
 Extend the existing benchmark framework from PR #1262:
 
-1. **Unit tests**: annotation parsing, pool selection logic, overflow behavior,
+1. **Unit tests**: spec field handling, pool selection logic, overflow behavior,
    ConfigMap parsing
 2. **Integration tests**: end-to-end claim routing with multiple pools, pool
    exhaustion triggering overflow, webhook failure passthrough
@@ -443,7 +566,7 @@ Extend the existing benchmark framework from PR #1262:
 - **Autoprovisioning**: Controller that creates pools referenced in routing config
   if they don't exist
 - **Confidential Containers (Ring 3)**: A third isolation tier for silicon-level
-  memory protection, extending the `isolation` annotation with a `confidential` value
+  memory protection, extending `spec.isolation` with a `confidential` value
 - **llm-d integration**: End-to-end latency awareness combining sandbox claim routing
   with inference request routing for holistic SLA management
 - **Per-tier autoscaling**: HPA-style scaling of pool replicas based on claim rate
@@ -452,6 +575,7 @@ Extend the existing benchmark framework from PR #1262:
 ## References
 
 - [Kubernetes Admission Webhooks](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/)
-- [PR #1262: Runtime class benchmarks](https://github.com/kubernetes-sigs/agent-sandbox/pull/1262)
+- [PR #1262: Runtime class benchmark harness](https://github.com/kubernetes-sigs/agent-sandbox/pull/1262) — test framework and CSV report generation for the data cited above
+- [Agent Substrate](https://github.com/agent-substrate/substrate) — data-plane actor packing and routing for agent-sandbox at ultra-scale
 - [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) — application-layer policy enforcement for agent sandboxes
 - [llm-d](https://github.com/llm-d/llm-d) — CNCF Sandbox project for cache-aware LLM inference routing

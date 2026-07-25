@@ -1,0 +1,67 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# benchmarks-kops-gcp-warmpool checks the SandboxWarmPool controller's
+# fill-time invariants under adversarial settings (see README.md next to
+# this script, and the warmpool-overcreate / warmpool-unschedulable phases
+# in test/stress/warmpool.go):
+#
+#   * warmpool-overcreate: 20 pools x 25 replicas created in one burst must
+#     produce EXACTLY 500 distinct sandbox creates, and no pool's concurrent
+#     population may ever exceed its replica target.
+#   * warmpool-unschedulable: a pool whose pods can never schedule must be
+#     HELD (stable sandbox UIDs, zero delete/recreate churn) and must emit
+#     exactly one WarmPoolNotProgressing Warning event.
+#
+# This is a dedicated, on-demand scenario rather than phases appended to the
+# main benchmarks-kops-gcp run: it is a pass/fail correctness gate for the
+# warm-pool reconciler, not a performance measurement, and its unschedulable
+# leg deliberately idles the cluster for ~8 minutes -- dead time the
+# throughput scenarios should not pay on every run.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# 12 worker nodes give ~1200 pod slots: comfortable headroom for the
+# 500-sandbox overcreate target (the phase refuses to run when the target
+# does not fit spare capacity) while keeping the fill fast enough that the
+# whole scenario stays inside one job.
+export STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-12}"
+
+export STRESS_PHASES="${STRESS_PHASES:-warmpool-overcreate,warmpool-unschedulable}"
+
+# The unschedulable leg alone holds a quiet 8-minute window (the controller's
+# 5-minute readiness grace plus its jittered post-grace requeue, worst case
+# ~7m35s), and the overcreate leg pulls a multi-GB image on every node.
+export STRESS_TIMEOUT="${STRESS_TIMEOUT:-40m}"
+
+# A multi-GB, not-pre-pulled image stretches the not-yet-Ready window the
+# historical over-creation raced in (a fast image can mask a regressed
+# controller by simply winning the race): this is the same image the live
+# reproductions used. Swap in any slow-to-pull image via STRESS_EXTRA_ARGS.
+export STRESS_EXTRA_ARGS="${STRESS_EXTRA_ARGS:---wp-image=us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main}"
+
+# 1000 concurrent warm-pool workers is the adversarial setting the historical
+# over-creation reproduced under (~10x the create target): high worker
+# concurrency widens the window between a create being issued and the
+# informer cache observing it, which is exactly the race the expectations
+# gate closes. A correct controller must hold the invariants at ANY worker
+# count, so the scenario pins the worst one.
+export CONTROLLER_ARGS="${CONTROLLER_ARGS:---sandbox-warm-pool-concurrent-workers=1000}"
+
+exec "${REPO_ROOT}/test/benchmarks/scenarios/benchmarks-kops-gcp/run"

@@ -122,6 +122,11 @@ type PhaseSummary struct {
 	// per-10s-window create->Ready stats (arrival-time bucketed): the
 	// "latency holds over time" evidence. Set only for that phase.
 	SustainedWindows []WindowedLatency `json:"sustainedWindows,omitempty"`
+
+	// Warm-pool invariant phase reports (see warmpool.go). Set only for the
+	// warmpool-overcreate / warmpool-unschedulable phases respectively.
+	WarmPoolOvercreate    *WarmPoolOvercreateReport    `json:"warmPoolOvercreate,omitempty"`
+	WarmPoolUnschedulable *WarmPoolUnschedulableReport `json:"warmPoolUnschedulable,omitempty"`
 }
 
 // Summary is written to summary.json at the end of the test.
@@ -199,6 +204,29 @@ type Config struct {
 	// latency measurement.
 	SustainedLifecycleBudget time.Duration `json:"sustainedLifecycleBudgetNanos"`
 
+	// warmpool-overcreate parameters (see warmpool.go).
+	// WPPools x WPReplicas is the exact number of Sandboxes a correct
+	// controller creates; the phase asserts it.
+	WPPools    int `json:"wpPools"`
+	WPReplicas int `json:"wpReplicas"`
+	// WPImage is the warmpool-overcreate template image ("" = --image). A
+	// large, not-pre-pulled image stretches the not-yet-Ready window the
+	// pre-fix over-creation raced in, making the phase more adversarial.
+	WPImage string `json:"wpImage,omitempty"`
+	// WPReplacementTolerance caps legitimate replacements (create observed
+	// after a member's delete) tolerated across all pools.
+	WPReplacementTolerance int `json:"wpReplacementTolerance"`
+
+	// warmpool-unschedulable parameters (see warmpool.go).
+	WPUnschedReplicas int `json:"wpUnschedReplicas"`
+	// WPUnschedCPU is the per-container CPU request that makes the pool's
+	// pods robustly unschedulable.
+	WPUnschedCPU string `json:"wpUnschedCPU"`
+	// WPUnschedWatch is the quiet observation window measured from pool
+	// creation. Must exceed ~1.5x the controller's 5-minute readiness grace
+	// (the jittered post-grace requeue can land up to ~7m35s in).
+	WPUnschedWatch time.Duration `json:"wpUnschedWatchNanos"`
+
 	// ClientConnections shards the harness's own mutating requests across N
 	// HTTP/2 connections (1 = share the watches' single connection, the
 	// historical behavior). The apiserver caps ~100 concurrent streams per
@@ -250,7 +278,7 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Minute, "Timeout for the entire test run")
 	flag.DurationVar(&cfg.PerSandboxTimeout, "per-sandbox-timeout", 5*time.Minute, "Timeout for a single sandbox to become ready / be deleted")
 	flag.IntVar(&cfg.CreateConcurrency, "create-concurrency", 20, "Number of concurrent workers creating Sandboxes (fill and throughput phases)")
-	phasesFlag := flag.String("phases", "probe,throughput-mif:50", "Comma-separated phase names to run in order (fill, fill-pct:N, probe, claims-warm, claims-warm-sustained, throughput-mif:N); phases accept hyphen-separated key:value arguments, e.g. throughput-mif:400-label:hot")
+	phasesFlag := flag.String("phases", "probe,throughput-mif:50", "Comma-separated phase names to run in order (fill, fill-pct:N, probe, claims-warm, claims-warm-sustained, warmpool-overcreate, warmpool-unschedulable, throughput-mif:N); phases accept hyphen-separated key:value arguments, e.g. throughput-mif:400-label:hot")
 	flag.IntVar(&cfg.FillPerNode, "fill-per-node", 10, "Number of long-running background Sandboxes per worker node for the fill phase")
 	flag.IntVar(&cfg.ProbeCount, "probe-count", 20, "Number of latency probe Sandboxes for the probe phase")
 	flag.IntVar(&cfg.ProbeConcurrency, "probe-concurrency", 1, "Number of concurrent latency probes; keep low for clean latency numbers")
@@ -264,6 +292,13 @@ func run(ctx context.Context) error {
 	flag.IntVar(&cfg.SustainedNamespaces, "sustained-namespaces", 1, "Spread the sustained phase's pools and claims across N pre-created namespaces (1 = run in the test namespace)")
 	flag.DurationVar(&cfg.SustainedPoolHeadroom, "sustained-pool-headroom", 10*time.Second, "Warm pool sizing for the sustained phase: each namespace's pool has ceil(rate/namespaces * headroom-seconds) replicas; must cover the controller's worst-case refill latency")
 	flag.DurationVar(&cfg.SustainedLifecycleBudget, "sustained-lifecycle-budget", 5*time.Second, "Assumed per-claim ready+delete pipeline time (beyond --claim-dwell) used to size the sustained phase's pod-capacity estimate; raise it if the cluster's Ready/delete path is slower under load")
+	flag.IntVar(&cfg.WPPools, "wp-pools", 20, "Number of SandboxWarmPools created at once by the warmpool-overcreate phase (requires the extensions controller)")
+	flag.IntVar(&cfg.WPReplicas, "wp-replicas", 25, "Replicas per pool for the warmpool-overcreate phase; the phase asserts exactly wp-pools*wp-replicas distinct sandbox creates")
+	flag.StringVar(&cfg.WPImage, "wp-image", "", "Container image for the warmpool-overcreate template (default: the --image value). A multi-GB, not-pre-pulled image stretches the not-yet-Ready window the historical over-creation raced in")
+	flag.IntVar(&cfg.WPReplacementTolerance, "wp-replacement-tolerance", 2, "Maximum legitimate replacements (a create observed after a member's delete) tolerated across all warmpool-overcreate pools; replacements are reported separately from over-creates")
+	flag.IntVar(&cfg.WPUnschedReplicas, "wp-unsched-replicas", 3, "Replica count of the warmpool-unschedulable phase's single pool")
+	flag.StringVar(&cfg.WPUnschedCPU, "wp-unsched-cpu", "1000", "Per-container CPU request (kubernetes quantity) that makes the warmpool-unschedulable pods robustly unschedulable; 1000 cores exceeds any machine shape any cloud sells today")
+	flag.DurationVar(&cfg.WPUnschedWatch, "wp-unsched-watch", 8*time.Minute, "Quiet observation window of the warmpool-unschedulable phase, measured from pool creation; must exceed ~1.5x the controller's 5-minute readiness grace so the jittered WarmPoolNotProgressing event (latest ~7m35s) lands inside it")
 	flag.IntVar(&cfg.ClientConnections, "client-connections", 1, "Shard the harness's mutating API requests across N HTTP/2 connections; 1 = single connection shared with watches (historical behavior, subject to the apiserver's ~100-streams-per-connection cap)")
 	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
 	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
@@ -571,6 +606,7 @@ func run(ctx context.Context) error {
 	// Write outputs even if a phase failed: partial data is still useful.
 	summary := buildSummary(runID, testStartTime, cfg, clusterInfo, tracker, phaseResults, phases)
 	summary.APFVerification = apfVerification
+	test.attachWarmPoolReports(summary)
 	if err := writeOutputs(cfg.OutputDir, summary, tracker); err != nil {
 		if phaseErr == nil {
 			phaseErr = err
@@ -910,6 +946,34 @@ func printReport(summary *Summary, clusterInfo *ClusterInfo) {
 				}
 				fmt.Printf("    [%4.0fs-%4.0fs) arrivals=%-5d ready=%-5d %s\n",
 					w.StartOffsetSeconds, w.EndOffsetSeconds, w.Arrivals, w.Ready, lat)
+			}
+		case PhaseWarmPoolOvercreate:
+			// Invariant verdicts, not latency: the controller creates the
+			// sandboxes, the harness only observes (see warmpool.go).
+			if r := ps.WarmPoolOvercreate; r != nil {
+				fmt.Printf("  pools x replicas (target):       %d x %d = %d\n", r.Pools, r.ReplicasPerPool, r.TargetSandboxes)
+				fmt.Printf("  distinct creates (POST-equiv):   %d (want %d + replacements)\n", r.DistinctCreates, r.TargetSandboxes)
+				fmt.Printf("  replacements / over-creates:     %d / %d (want over-creates 0)\n", r.Replacements, r.OverCreates)
+				fmt.Printf("  peak live per pool / global:     %d (cap %d) / %d (cap %d)\n", r.MaxPoolPeakLive, r.ReplicasPerPool, r.PeakLiveTotal, r.TargetSandboxes)
+				if r.TimeToAllReadySeconds != nil {
+					fmt.Printf("  time until ALL pools Ready:      %.2fs\n", *r.TimeToAllReadySeconds)
+				} else {
+					fmt.Printf("  time until ALL pools Ready:      n/a (not all pools became Ready)\n")
+				}
+			} else {
+				fmt.Printf("  no report (phase aborted before observation)\n")
+			}
+		case PhaseWarmPoolUnschedulable:
+			if r := ps.WarmPoolUnschedulable; r != nil {
+				fmt.Printf("  replicas (cpu request %s):     %d, watched %.0fs\n", r.CPURequest, r.Replicas, r.WatchSeconds)
+				fmt.Printf("  distinct creates / deletes:      %d (want %d) / %d (want 0), UIDs stable: %v\n", r.DistinctCreates, r.Replicas, r.ObservedDeletes, r.UIDsStable)
+				if r.FirstEventOffsetSeconds != nil {
+					fmt.Printf("  NotProgressing Warning events:   %d (want exactly 1), first at +%.0fs\n", r.NotProgressingEvents, *r.FirstEventOffsetSeconds)
+				} else {
+					fmt.Printf("  NotProgressing Warning events:   %d (want exactly 1)\n", r.NotProgressingEvents)
+				}
+			} else {
+				fmt.Printf("  no report (phase aborted before observation)\n")
 			}
 		default:
 			fmt.Printf("  end-to-end ready latency:        %s\n", formatLatency(ps.Latency.EndToEndReady))

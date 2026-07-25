@@ -58,6 +58,14 @@ type stressTest struct {
 	// claims-warm burst (nil when --profile-controller is false or the
 	// phase does not run).
 	ctrlProfiler *controllerProfiler
+
+	// Warm-pool phase reports, keyed by phase number; attached to the
+	// summary after the phase loop (see attachWarmPoolReports). Guarded by
+	// wpMu (phases run sequentially, but reports are also written on the
+	// failure path while other goroutines may still be draining).
+	wpMu            sync.Mutex
+	wpOvercreate    map[PhaseNumber]*WarmPoolOvercreateReport
+	wpUnschedulable map[PhaseNumber]*WarmPoolUnschedulableReport
 }
 
 // buildSandboxObject returns a minimal long-running Sandbox.
@@ -597,19 +605,25 @@ func (s *stressTest) cleanupClaimsWarm(ctx context.Context, number PhaseNumber, 
 		log.Printf("[%s#%d] failed to delete template %s: %v", PhaseClaimsWarm, number, templateID.Name, err)
 	}
 
-	// Wait for the sandboxes owned by the pool or the claims to be deleted,
-	// so their pods stop occupying capacity that a later phase counts on.
-	// Best-effort: on timeout we log and move on.
+	s.waitOwnedSandboxesDrained(ctx, PhaseClaimsWarm, number)
+}
+
+// waitOwnedSandboxesDrained waits for the sandboxes owned by a
+// SandboxWarmPool or SandboxClaim in the test namespace to be deleted, so
+// their pods stop occupying capacity that a later phase counts on.
+// Best-effort: on timeout it logs and moves on (namespace deletion is the
+// backstop). Progress-stall detection mirrors the fill phase.
+func (s *stressTest) waitOwnedSandboxesDrained(ctx context.Context, phase PhaseName, number PhaseNumber) {
 	lastRemaining := -1
 	lastProgress := time.Now()
 	for {
 		remaining, err := s.countOwnedSandboxes(ctx)
 		if err != nil {
-			log.Printf("[%s#%d] failed to list sandboxes during cleanup: %v", PhaseClaimsWarm, number, err)
+			log.Printf("[%s#%d] failed to list sandboxes during cleanup: %v", phase, number, err)
 			return
 		}
 		if remaining == 0 {
-			log.Printf("[%s#%d] cleanup complete", PhaseClaimsWarm, number)
+			log.Printf("[%s#%d] cleanup complete", phase, number)
 			return
 		}
 		if remaining != lastRemaining {
@@ -617,7 +631,7 @@ func (s *stressTest) cleanupClaimsWarm(ctx context.Context, number PhaseNumber, 
 			lastProgress = time.Now()
 		}
 		if time.Since(lastProgress) > s.cfg.PerSandboxTimeout {
-			log.Printf("[%s#%d] WARNING: %d pool/claim-owned sandboxes still present after %v; later phases may see reduced spare capacity", PhaseClaimsWarm, number, remaining, s.cfg.PerSandboxTimeout)
+			log.Printf("[%s#%d] WARNING: %d pool/claim-owned sandboxes still present after %v; later phases may see reduced spare capacity", phase, number, remaining, s.cfg.PerSandboxTimeout)
 			return
 		}
 		select {

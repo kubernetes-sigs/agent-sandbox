@@ -87,7 +87,7 @@ func parsePhase(raw string) (Phase, error) {
 	// match the longest known kind first, then treat any remainder as
 	// arguments.
 	found := false
-	for _, k := range []PhaseName{PhaseClaimsWarmSustained, PhaseClaimsWarm, PhaseThroughput, PhaseProbe, PhaseFill} {
+	for _, k := range []PhaseName{PhaseClaimsWarmSustained, PhaseClaimsWarm, PhaseWarmPoolOvercreate, PhaseWarmPoolUnschedulable, PhaseThroughput, PhaseProbe, PhaseFill} {
 		if raw == string(k) {
 			kind, found = string(k), true
 			break
@@ -98,7 +98,7 @@ func parsePhase(raw string) (Phase, error) {
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("unknown phase %q (want fill, fill-pct:N, probe, claims-warm, claims-warm-sustained, or throughput-mif:N)", raw)
+		return nil, fmt.Errorf("unknown phase %q (want fill, fill-pct:N, probe, claims-warm, claims-warm-sustained, warmpool-overcreate, warmpool-unschedulable, or throughput-mif:N)", raw)
 	}
 
 	// Legacy spellings: bare "throughput" is mif 50 (renamed so the report
@@ -161,6 +161,10 @@ func parsePhase(raw string) (Phase, error) {
 		phase = &claimsWarmPhase{raw: PhaseName(raw)}
 	case string(PhaseClaimsWarmSustained):
 		phase = &claimsWarmSustainedPhase{raw: PhaseName(raw)}
+	case string(PhaseWarmPoolOvercreate):
+		phase = &warmPoolOvercreatePhase{raw: PhaseName(raw)}
+	case string(PhaseWarmPoolUnschedulable):
+		phase = &warmPoolUnschedulablePhase{raw: PhaseName(raw)}
 	}
 	for key := range args {
 		return nil, fmt.Errorf("phase %q: unknown argument %q", raw, key)

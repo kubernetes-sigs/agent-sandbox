@@ -136,7 +136,7 @@ echo "Using CNI: ${CNI}"
 # ~180 pods/s; the run also probes what saturates next (apiserver CPU is the
 # leading candidate at ~2x its current burn). 40x n2-standard-8 + the
 # n2-standard-16 control plane = 336 N2 vCPUs from the boskos project.
-STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-40}"
+STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-80}"
 echo "Using node count: ${STRESS_NODE_COUNT}"
 
 # Control-plane sizing: on n2-standard-8 the throughput phases pin
@@ -162,7 +162,7 @@ echo "Using node count: ${STRESS_NODE_COUNT}"
 # them. NOTE: c3/c4 machine families do not support pd-standard boot disks,
 # so the control-plane root volume is set to pd-ssd below alongside the
 # nodes'.
-STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-44}"
 echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
 
 echo "Creating kOps cluster configuration..."
@@ -236,8 +236,8 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # left KCM throttling client-side, so go to 500/500 to take the client
 # limiter out of the measurement entirely.
 kops edit cluster --name "${CLUSTER_NAME}" \
-  --set cluster.spec.kubeControllerManager.kubeAPIQPS=500 \
-  --set cluster.spec.kubeControllerManager.kubeAPIBurst=500
+  --set cluster.spec.kubeControllerManager.kubeAPIQPS=1000 \
+  --set cluster.spec.kubeControllerManager.kubeAPIBurst=1000
 
 # etcdClusters[].manager.listenMetricsURLs: have etcd serve its dedicated
 # plain-HTTP metrics listener. etcd's client port requires mTLS, so the
@@ -269,8 +269,8 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # --kube-api-qps/--kube-api-burst flags, which current kube-schedulers no
 # longer accept).
 kops edit cluster --name "${CLUSTER_NAME}" \
-  --set cluster.spec.kubeScheduler.qps=500 \
-  --set cluster.spec.kubeScheduler.burst=500
+  --set cluster.spec.kubeScheduler.qps=1000 \
+  --set cluster.spec.kubeScheduler.burst=1000
 
 # kubelet.kubeAPIQPS (default 50): the kubelets make multiple pod
 # status updates per pod.
@@ -346,6 +346,11 @@ kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
+# Hero run: 200 sandbox workers. Safe now that the generation predicate is
+# in the stack (status-write echoes no longer amplify reconciles); at
+# mif1200 the sandbox workqueue showed queueing with 100 workers.
+CONTROLLER_ARGS="${CONTROLLER_ARGS:---sandbox-concurrent-workers=200}"
+
 echo "Deploying to cluster..."
 dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
   ${CONTROLLER_ARGS:+--controller-args="${CONTROLLER_ARGS}"}
@@ -419,7 +424,7 @@ set +o errexit
 # load to find the first genuinely saturated component.
 # shellcheck disable=SC2086
 go run ./test/stress \
-  --phases="${STRESS_PHASES:-fill,probe,throughput-mif1200,throughput-mif800,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif1600,throughput-mif1200,throughput-mif800,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \

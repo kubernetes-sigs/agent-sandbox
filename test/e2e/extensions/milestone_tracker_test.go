@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,7 +51,8 @@ type claimMilestones struct {
 	serverPodReady     time.Time
 	serverSandboxReady time.Time
 
-	ready chan struct{}
+	ready   chan struct{}
+	deleted bool
 }
 
 type milestoneBreakdown struct {
@@ -70,9 +72,10 @@ type milestoneTracker struct {
 	ns        string
 	cancel    context.CancelFunc
 	started   chan struct{}
+	tb        testing.TB
 }
 
-func newMilestoneTracker(ctx context.Context, dynClient dynamic.Interface, ns string) *milestoneTracker {
+func newMilestoneTracker(ctx context.Context, tb testing.TB, dynClient dynamic.Interface, ns string) *milestoneTracker {
 	watchCtx, cancel := context.WithCancel(ctx)
 	t := &milestoneTracker{
 		records:   make(map[string]*claimMilestones),
@@ -80,6 +83,7 @@ func newMilestoneTracker(ctx context.Context, dynClient dynamic.Interface, ns st
 		ns:        ns,
 		cancel:    cancel,
 		started:   make(chan struct{}),
+		tb:        tb,
 	}
 	go t.watchClaims(watchCtx)
 	<-t.started
@@ -124,6 +128,12 @@ func (t *milestoneTracker) WaitReady(ctx context.Context, name string) error {
 	}
 	select {
 	case <-rec.ready:
+		t.mu.Lock()
+		wasDeleted := rec.deleted
+		t.mu.Unlock()
+		if wasDeleted {
+			return fmt.Errorf("claim %q was deleted before becoming Ready", name)
+		}
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("timed out waiting for claim %q to become ready: %w", name, ctx.Err())
@@ -133,32 +143,40 @@ func (t *milestoneTracker) WaitReady(ctx context.Context, name string) error {
 func (t *milestoneTracker) CollectBreakdown(ctx context.Context, cl *framework.ClusterClient, name string) (milestoneBreakdown, error) {
 	t.mu.Lock()
 	rec, ok := t.records[name]
-	t.mu.Unlock()
 	if !ok {
+		t.mu.Unlock()
 		return milestoneBreakdown{}, fmt.Errorf("claim %q not registered", name)
 	}
-	if rec.sandboxName == "" {
+	sandboxName := rec.sandboxName
+	t.mu.Unlock()
+
+	if sandboxName == "" {
 		return milestoneBreakdown{}, fmt.Errorf("claim %q has no bound sandbox", name)
 	}
 
-	sandboxID := types.NamespacedName{Name: rec.sandboxName, Namespace: t.ns}
+	sandboxID := types.NamespacedName{Name: sandboxName, Namespace: t.ns}
 	sandbox, err := cl.GetSandbox(ctx, sandboxID)
 	if err != nil {
 		return milestoneBreakdown{}, fmt.Errorf("get sandbox %s: %w", sandboxID, err)
 	}
-	rec.serverSandboxReady = conditionTransitionTime(sandbox, "Ready")
+	serverSandboxReady := conditionTransitionTime(sandbox, "Ready")
 
 	pod := &unstructured.Unstructured{}
 	pod.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Pod"})
-	podID := types.NamespacedName{Name: rec.sandboxName, Namespace: t.ns}
+	podID := types.NamespacedName{Name: sandboxName, Namespace: t.ns}
 	if err := cl.Get(ctx, podID, pod); err != nil {
 		return milestoneBreakdown{}, fmt.Errorf("get pod %s: %w", podID, err)
 	}
+
+	t.mu.Lock()
+	rec.serverSandboxReady = serverSandboxReady
 	rec.serverPodCreated = pod.GetCreationTimestamp().Time
 	rec.serverPodScheduled = conditionTransitionTime(pod, "PodScheduled")
 	rec.serverPodReady = conditionTransitionTime(pod, "Ready")
+	snapshot := *rec
+	t.mu.Unlock()
 
-	return computeBreakdown(rec), nil
+	return computeBreakdown(&snapshot), nil
 }
 
 func (t *milestoneTracker) GetMilestones(name string) (claimMilestones, bool) {
@@ -172,22 +190,52 @@ func (t *milestoneTracker) GetMilestones(name string) (claimMilestones, bool) {
 }
 
 func (t *milestoneTracker) watchClaims(ctx context.Context) {
-	watcher, err := t.dynClient.Resource(claimGVR).Namespace(t.ns).Watch(ctx, metav1.ListOptions{})
-	close(t.started)
-	if err != nil {
-		return
-	}
-	defer watcher.Stop()
+	var resourceVersion string
+	startedClosed := false
 
 	for {
+		opts := metav1.ListOptions{ResourceVersion: resourceVersion}
+		watcher, err := t.dynClient.Resource(claimGVR).Namespace(t.ns).Watch(ctx, opts)
+		if !startedClosed {
+			close(t.started)
+			startedClosed = true
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			t.tb.Logf("[milestone-tracker] watch error: %v, retrying in 1s", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+				continue
+			}
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				watcher.Stop()
+				return
+			case event, ok := <-watcher.ResultChan():
+				if !ok {
+					t.tb.Logf("[milestone-tracker] watch channel closed, reconnecting")
+					goto reconnect
+				}
+				if u, ok := event.Object.(*unstructured.Unstructured); ok {
+					resourceVersion = u.GetResourceVersion()
+				}
+				t.handleEvent(event)
+			}
+		}
+
+	reconnect:
+		watcher.Stop()
 		select {
 		case <-ctx.Done():
 			return
-		case event, ok := <-watcher.ResultChan():
-			if !ok {
-				return
-			}
-			t.handleEvent(event)
+		case <-time.After(time.Second):
 		}
 	}
 }
@@ -209,6 +257,7 @@ func (t *milestoneTracker) handleEvent(event watch.Event) {
 	}
 
 	if event.Type == watch.Deleted {
+		rec.deleted = true
 		select {
 		case <-rec.ready:
 		default:
@@ -243,14 +292,15 @@ func (t *milestoneTracker) handleEvent(event watch.Event) {
 }
 
 func computeBreakdown(rec *claimMilestones) milestoneBreakdown {
-	b := milestoneBreakdown{
-		EndToEndMs: msInterval(rec.createCalled, rec.claimReady),
+	var b milestoneBreakdown
+	if !rec.createCalled.IsZero() && !rec.claimReady.IsZero() {
+		b.EndToEndMs = msInterval(rec.createCalled, rec.claimReady)
 	}
 	if !rec.createCalled.IsZero() && !rec.createReturned.IsZero() {
 		b.CreateAckMs = msInterval(rec.createCalled, rec.createReturned)
 	}
-	if !rec.createReturned.IsZero() && !rec.claimReady.IsZero() {
-		b.AdoptionMs = msInterval(rec.createReturned, rec.claimReady)
+	if !rec.createReturned.IsZero() && !rec.adopted.IsZero() {
+		b.AdoptionMs = msInterval(rec.createReturned, rec.adopted)
 	}
 
 	b.IsWarm = !rec.serverPodCreated.IsZero() && !rec.createCalled.IsZero() &&

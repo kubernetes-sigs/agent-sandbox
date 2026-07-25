@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -54,6 +55,7 @@ type ClusterClient struct {
 	T
 	client        client.Client
 	dynamicClient dynamic.Interface
+	restConfig    *rest.Config
 	scheme        *runtime.Scheme
 	watchSet      *WatchSet
 }
@@ -687,48 +689,6 @@ func (cl *ClusterClient) ExecuteOnNode(ctx context.Context, nodeName string, com
 	}
 
 	return stdout.String(), stderr.String(), nil
-}
-
-// ClusterIdentity returns a short string identifying the cluster under test.
-// It checks SANDBOX_CLUSTER_ID first, then derives an identity from the common
-// prefix of worker node names, falling back to the single node name or "unknown".
-func (cl *ClusterClient) ClusterIdentity(ctx context.Context) string {
-	if id := os.Getenv("SANDBOX_CLUSTER_ID"); id != "" {
-		return id
-	}
-	workers, err := cl.WorkerNodes(ctx)
-	if err != nil || len(workers) == 0 {
-		return "unknown"
-	}
-	if len(workers) == 1 {
-		return workers[0].Name
-	}
-	names := make([]string, len(workers))
-	for i, w := range workers {
-		names[i] = w.Name
-	}
-	prefix := longestCommonPrefix(names)
-	prefix = strings.TrimRight(prefix, "-_.")
-	if prefix == "" {
-		return workers[0].Name
-	}
-	return prefix
-}
-
-func longestCommonPrefix(strs []string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	prefix := strs[0]
-	for _, s := range strs[1:] {
-		for i := range prefix {
-			if i >= len(s) || prefix[i] != s[i] {
-				prefix = prefix[:i]
-				break
-			}
-		}
-	}
-	return prefix
 }
 
 // IsKindCluster returns true if the test is running on a kind cluster.

@@ -30,9 +30,12 @@ behaviour across different container runtimes (runc, gVisor, kata).
 |----------|---------|-------------|
 | `SANDBOX_RUNTIME_CLASS` | *(required)* | RuntimeClass name: `default` (cluster default / runc), `gvisor`, `kata`, etc. Tests skip when unset. |
 | `SANDBOX_POOL_SIZES` | total worker CPUs | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to the cluster's total worker CPU count when unset. |
+| `SANDBOX_BATCH_CAP` | `10` | Maximum number of claims fired per batch in burst recovery. Lower values reduce controller serialization; higher values stress the reconcile loop. |
+| `SANDBOX_SETTLE_SEC` | `2` | Seconds to wait after pool fill before starting burst claims. Lets the controller work queue drain so fill-residue doesn't inflate batch 1 latencies. Set to `0` to measure raw post-fill behavior. |
 | `SANDBOX_REPORT_DIR` | `.` (cwd) | Base directory for CSV output. A subdirectory is auto-created per run. |
 | `SANDBOX_CLUSTER_ID` | *(auto-detected)* | Override cluster identity string in report paths |
-| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery tests. `0` uses a pause container. Not used by benchmarks. |
+| `SANDBOX_VERSION` | *(auto-detected)* | Override agent-sandbox version. Defaults to the controller deployment image tag. |
+| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
 
 ## Quick Start
@@ -91,17 +94,22 @@ SANDBOX_RUNTIME_CLASS=kata \
 load. The batch size is computed dynamically:
 
 ```text
-batchSize = min(max(4, poolSize / 2), 8)
+batchSize = min(max(4, poolSize / 2), batchCap)
 ```
+
+The batch cap defaults to 10 (`SANDBOX_BATCH_CAP`).
 
 - Pool 4 → batch 4
 - Pool 8 → batch 4
 - Pool 12 → batch 6
-- Pool 16 → batch 8 (cap)
-- Pool 24 → batch 8 (cap)
+- Pool 16 → batch 8
+- Pool 20 → batch 10 (cap)
+- Pool 32 → batch 10 (cap)
 
 Batches fire with a 100ms settle interval between them. The test stops when
-`ReadyReplicas ≤ 1` (pool depleted) or after `2 × poolSize` total claims.
+`ReadyReplicas ≤ 1` **and** at least `poolSize` claims have been issued
+(ensuring at least one full pass through the pool), or after `2 × poolSize`
+total claims — whichever comes first.
 
 ## Pool Reuse and Fill Measurement
 
@@ -125,7 +133,7 @@ that specific pool size. The warm/cold threshold is fixed at **1 second**.
 ### CSV columns
 
 ```text
-batch,claim,latency_sec,type,wall_offset_sec,ready_at_start
+batch,claim,latency_sec,type,wall_offset_sec,ready_at_start,create_ack_ms,adoption_ms,schedule_ms,runtime_ms,propagate_ms,e2e_ms,is_warm
 ```
 
 | Column | Description |
@@ -136,6 +144,13 @@ batch,claim,latency_sec,type,wall_offset_sec,ready_at_start
 | `type` | `warm` (< 1s) or `cold` (>= 1s) |
 | `wall_offset_sec` | Seconds since the test started |
 | `ready_at_start` | Pool ReadyReplicas when this batch fired |
+| `create_ack_ms` | API server round-trip: create call to return |
+| `adoption_ms` | Controller bind time: create returned to sandbox name set |
+| `schedule_ms` | Pod scheduling: pod created to PodScheduled condition |
+| `runtime_ms` | Container runtime: PodScheduled to PodReady |
+| `propagate_ms` | Status propagation: sandbox Ready to claim Ready |
+| `e2e_ms` | End-to-end: create call to claim Ready |
+| `is_warm` | Whether the pod existed before the claim (pre-warmed) |
 
 ### CSV header and footer
 
@@ -151,6 +166,7 @@ runtime class, pool fill time) and ends with summary stats:
 # grey_zone_claims,27
 # worst_start_sec,0.752
 # over_cold_claims,2
+# time_to_all_ready_sec,3.214
 # total_duration_sec,4.795
 # throughput_claims_per_sec,10.0
 ```
@@ -184,4 +200,30 @@ CSV files are written to an auto-constructed subdirectory:
 Example: `vvoron420gcp22-hjmvw-worker_n2-standard-8_20260722_default/`
 
 If the directory already exists, a numeric suffix is appended (`_2`, `_3`, ...).
+
+## Roadmap
+
+- **Split functional vs stress tests**: Separate `runtime_class_test.go` into
+  functional tests (CI-suitable gating) and stress/benchmarks (hardware-dependent,
+  CSV-producing). Enables a dedicated CI job for runtime-aware e2e validation
+  without benchmark noise.
+- **RuntimeClass auto-detection**: Query installed RuntimeClasses from the cluster
+  to drive multi-runtime test sweeps without manual `SANDBOX_RUNTIME_CLASS` env
+  var. Not all nodes support all runtimes (e.g., `kata-nvidia-gpu` requires
+  specific node capabilities).
+- **Virtualization topology reporting**: Detect whether worker nodes are bare-metal
+  with hardware virtualization or virtual with nested virtualization. Relevant for
+  kata cold start analysis — nested virt adds measurable overhead.
+- **CPU-relative benchmark pool sizes**: Default `SANDBOX_POOL_SIZES` to
+  `{cpuCapacity/2, cpuCapacity, cpuCapacity*2}` — half (comfortable headroom),
+  full (capacity cliff), and double (forced cold starts to measure the penalty).
+- **Multi-size lifecycle subtests**: Run `TestRuntimeClassLifecycle` at small (2)
+  and half-CPU pool sizes to validate the fill → claim → refill cycle under
+  moderate scheduling pressure in CI.
+- **Probe-based settle detection**: Replace the fixed `SANDBOX_SETTLE_SEC` delay
+  with a single probe claim after pool fill. If the probe latency falls within
+  the green threshold, the controller work queue is empirically drained and burst
+  can start immediately. If not, back off and retry. Eliminates both the risk of
+  starting too early (inflated baselines) and waiting too long (wasted time on
+  fast clusters).
 

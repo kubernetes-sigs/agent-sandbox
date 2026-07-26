@@ -321,6 +321,42 @@ if [[ "${CNI}" == "cilium" ]]; then
 fi
 
 echo "Applying cluster configuration..."
+# etcd backend quota + compaction: the default quota-backend-bytes (2GiB)
+# is a fixed ceiling that scales with nothing. Hero run at ~459 claims/s
+# sustained ~5k etcd writes/s; between compactions (apiserver default:
+# every 5min) that accrues 1.5-3GB of MVCC revision history, and when the
+# boltdb file hits the quota etcd raises the NOSPACE alarm and rejects ALL
+# writes cluster-wide ("mvcc: database space exceeded") until
+# compact+defrag+disarm - observed mid-sweep on the c3-standard-88 run.
+# 8GiB quota + 2-minute periodic auto-compaction gives ~10x headroom (the
+# same remedy as the #1240 benchmark rig). manager.env is a structured
+# list that `kops edit --set` cannot express, so patch the spec YAML and
+# replace it (same throwaway-venv pattern as the report step).
+python3 -m venv "${BINDIR}/specedit-venv"
+"${BINDIR}/specedit-venv/bin/pip" install --quiet 'pyyaml>=6,<7'
+kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster-spec.yaml"
+"${BINDIR}/specedit-venv/bin/python3" - "${WORKDIR}/cluster-spec.yaml" << 'PYEOF'
+import sys, yaml
+path = sys.argv[1]
+docs = list(yaml.safe_load_all(open(path)))
+env = [
+    {"name": "ETCD_QUOTA_BACKEND_BYTES", "value": "8589934592"},
+    {"name": "ETCD_AUTO_COMPACTION_MODE", "value": "periodic"},
+    {"name": "ETCD_AUTO_COMPACTION_RETENTION", "value": "2m"},
+]
+for doc in docs:
+    if not doc or doc.get("kind") != "Cluster":
+        continue
+    for ec in doc["spec"]["etcdClusters"]:
+        mgr = ec.setdefault("manager", {})
+        have = {e["name"] for e in mgr.get("env", [])}
+        mgr.setdefault("env", []).extend(e for e in env if e["name"] not in have)
+with open(path, "w") as f:
+    yaml.safe_dump_all(docs, f, default_flow_style=False)
+print("etcd quota/compaction env injected")
+PYEOF
+kops replace --name "${CLUSTER_NAME}" -f "${WORKDIR}/cluster-spec.yaml"
+
 kops update cluster --name "${CLUSTER_NAME}" --yes
 
 echo "Exporting kubeconfig..."

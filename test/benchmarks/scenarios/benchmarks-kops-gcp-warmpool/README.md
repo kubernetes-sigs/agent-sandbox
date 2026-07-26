@@ -72,7 +72,7 @@ Like the other kOps scenarios, this needs GCP credentials, a project with
 quota for the cluster above, and docker for the image push:
 
 ```sh
-gcloud auth login && gcloud config set project <project>
+gcloud auth login && gcloud config set project YOUR_PROJECT_ID
 test/benchmarks/scenarios/benchmarks-kops-gcp-warmpool/run
 ```
 
@@ -85,14 +85,14 @@ extensions enabled, runs the two phases, writes the usual stress artifacts
 
 The run exits 0 and the stress log contains both verdict lines:
 
-```
+```text
 [warmpool-overcreate#1] PASS: exactly 500 creates for 20 pools x 25 replicas (0 tolerated replacements), population never exceeded target
 [warmpool-unschedulable#2] PASS: 3 unschedulable sandboxes held with stable UIDs, exactly one WarmPoolNotProgressing event at +<300-455>s
 ```
 
 with a final report shaped like:
 
-```
+```text
 --- #1 warmpool-overcreate: 500 requested, ... ---
   pools x replicas (target):       20 x 25 = 500
   distinct creates (POST-equiv):   500 (want 500 + replacements)
@@ -113,7 +113,7 @@ controller without the expectations gate (anything before the issue-1215
 fix) that is the overcreate phase — so the **full-run FAIL output is the
 overcreate failure only**, exit non-zero with per-pool forensics:
 
-```
+```text
 warmpool-overcreate#1 phase: warm pool invariants violated: N sandbox creates
 beyond target without a preceding delete (over-creation); T distinct creates,
 want exactly 500 + replacements; R replacements exceed tolerance 2; peak

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,15 @@ func TestPoolAccountant(t *testing.T) {
 	if len(totals.worstPools) != 2 || !strings.Contains(totals.worstPools[0], "pool-a") {
 		t.Errorf("worstPools = %v, want both pools flagged", totals.worstPools)
 	}
+
+	// stop() is a hard boundary: an in-flight observer callback delivered
+	// after it must not mutate the accounting.
+	a.stop()
+	add("pool-b", "b5")
+	del("pool-a", "a1")
+	if after := a.totals(); !reflect.DeepEqual(after, totals) {
+		t.Errorf("totals changed after stop(): %+v -> %+v", totals, after)
+	}
 }
 
 func TestPoolAccountantCleanShape(t *testing.T) {
@@ -201,6 +211,13 @@ func TestWarmPoolEventCounter(t *testing.T) {
 	c.observe("events", watch.Added, poolEvent("ns", "pool", warmPoolNotProgressingReason, "Warning", "evt2", 0))
 	if n, _ := c.occurrences(); n != 4 {
 		t.Fatalf("occurrences after second event object = %d, want 4", n)
+	}
+
+	// stop() is a hard boundary: late in-flight callbacks are no-ops.
+	c.stop()
+	c.observe("events", watch.Added, poolEvent("ns", "pool", warmPoolNotProgressingReason, "Warning", "evt3", 0))
+	if n, _ := c.occurrences(); n != 4 {
+		t.Fatalf("occurrences after stop() = %d, want 4", n)
 	}
 }
 

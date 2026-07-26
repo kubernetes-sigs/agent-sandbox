@@ -19,8 +19,10 @@
 # in test/stress/warmpool.go):
 #
 #   * warmpool-overcreate: 20 pools x 25 replicas created in one burst must
-#     produce EXACTLY 500 distinct sandbox creates, and no pool's concurrent
-#     population may ever exceed its replica target.
+#     produce exactly the 500 target sandbox creates (plus separately
+#     tolerated post-delete replacements, capped by
+#     --wp-replacement-tolerance), and no pool's concurrent population may
+#     ever exceed its replica target.
 #   * warmpool-unschedulable: a pool whose pods can never schedule must be
 #     HELD (stable sandbox UIDs, zero delete/recreate churn) and must emit
 #     exactly one WarmPoolNotProgressing Warning event.

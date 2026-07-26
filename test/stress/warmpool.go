@@ -32,9 +32,12 @@ package main
 //     observed on the sandboxes watch is the result of exactly one successful
 //     POST, so this is the POST-equivalent count; failed POSTs never produce
 //     an object and are invisible here). Legitimate replacements — a create
-//     observed AFTER a delete of a prior member of the same pool — are
-//     counted and reported separately, tolerated up to
-//     --wp-replacement-tolerance in total.
+//     BEYOND the pool's replica target that is covered by a previously
+//     observed delete of a member of the same pool (creates that merely
+//     complete the initial fill after an early delete are part of the
+//     target, and the delete's credit carries forward) — are counted and
+//     reported separately, tolerated up to --wp-replacement-tolerance in
+//     total.
 //   - The concurrent live population never exceeds the target: per pool,
 //     peak live members <= replicas at all times (the fixed controller gates
 //     creates on the whole live population, terminating included).
@@ -105,9 +108,12 @@ type WarmPoolOvercreateReport struct {
 	// the watch: the POST-equivalent count (one successful create call per
 	// UID). Invariant: DistinctCreates == TargetSandboxes + Replacements.
 	DistinctCreates int `json:"distinctCreates"`
-	// Replacements are creates observed after a delete of a prior member of
-	// the same pool (legitimate: e.g. the stuck-sandbox GC replacing a
-	// genuinely wedged sandbox). Tolerated up to --wp-replacement-tolerance.
+	// Replacements are distinct creates BEYOND the pool's replica target
+	// that were covered by a previously observed delete of a member of the
+	// same pool (legitimate: e.g. the stuck-sandbox GC replacing a genuinely
+	// wedged sandbox). A create that merely completes the initial fill after
+	// an early delete counts toward the target instead, with the delete's
+	// credit carried forward. Tolerated up to --wp-replacement-tolerance.
 	Replacements int `json:"replacements"`
 	// OverCreates are creates beyond the pool's target that were NOT covered
 	// by a previously observed delete: the issue-1215 over-creation shape.
@@ -166,6 +172,11 @@ type poolAccountant struct {
 	// pools (exact: updated on every observed create/delete).
 	liveAll     int
 	peakLiveAll int
+	// stopped makes stop() a hard boundary: Tracker.HandleWatchEvent invokes
+	// a snapshot of the observer list outside the Tracker lock, so a removed
+	// observer can still see one in-flight callback — without the flag that
+	// callback could mutate the accounting after the phase computed totals().
+	stopped bool
 }
 
 type poolAccount struct {
@@ -225,6 +236,9 @@ func (a *poolAccountant) observe(resource string, eventType watch.EventType, u *
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.stopped {
+		return
+	}
 	acct, ok := a.pools[poolName]
 	if !ok {
 		return
@@ -267,6 +281,14 @@ func (a *poolAccountant) observe(resource string, eventType watch.EventType, u *
 	if a.liveAll > a.peakLiveAll {
 		a.peakLiveAll = a.liveAll
 	}
+}
+
+// stop freezes the accounting: any observer callback still in flight (see
+// the stopped field) becomes a no-op. Call before removing the observer.
+func (a *poolAccountant) stop() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stopped = true
 }
 
 // poolTotals aggregates the accountant's per-pool state.
@@ -321,6 +343,8 @@ type warmPoolEventCounter struct {
 	reason    string
 	firstSeen time.Time
 	counts    map[types.UID]int64
+	// stopped: same hard-boundary contract as poolAccountant.stopped.
+	stopped bool
 }
 
 func newWarmPoolEventCounter(namespace, pool, reason string) *warmPoolEventCounter {
@@ -355,12 +379,22 @@ func (c *warmPoolEventCounter) observe(resource string, eventType watch.EventTyp
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
 	if c.firstSeen.IsZero() {
 		c.firstSeen = time.Now()
 	}
 	if count > c.counts[u.GetUID()] {
 		c.counts[u.GetUID()] = count
 	}
+}
+
+// stop freezes the counter (see poolAccountant.stop).
+func (c *warmPoolEventCounter) stop() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopped = true
 }
 
 // occurrences returns the deduplication-aware event count and the time the
@@ -426,6 +460,10 @@ func (s *stressTest) runWarmPoolOvercreatePhase(ctx context.Context, number Phas
 	observing := true
 	stopObserving := func() {
 		if observing {
+			// Freeze the accounting BEFORE removing the observer: removal
+			// only stops future snapshots, an in-flight callback could still
+			// fire (see poolAccountant.stopped).
+			acct.stop()
 			removeObserver()
 			observing = false
 		}
@@ -453,7 +491,7 @@ func (s *stressTest) runWarmPoolOvercreatePhase(ctx context.Context, number Phas
 
 	// Pool provisioning is part of the observation (the over-creation race
 	// lives in the fill), but readiness itself is just the phase's endpoint.
-	readyErr := s.waitAllWarmPoolsReady(ctx, PhaseWarmPoolOvercreate, number, replicas, pools)
+	readyErr := s.waitAllWarmPoolsReady(ctx, PhaseWarmPoolOvercreate, number, replicas, poolNames)
 	var timeToAllReady *float64
 	if readyErr == nil {
 		d := time.Since(start).Seconds()
@@ -522,9 +560,16 @@ func (s *stressTest) runWarmPoolOvercreatePhase(ctx context.Context, number Phas
 }
 
 // waitAllWarmPoolsReady polls the phase's pools until every one reports
-// readyReplicas >= want. Progress-stall detection mirrors the fill phase
-// (total ready count must advance within PerSandboxTimeout).
-func (s *stressTest) waitAllWarmPoolsReady(ctx context.Context, phase PhaseName, number PhaseNumber, want, pools int) error {
+// readyReplicas >= want. Only the named pools count: the namespace may still
+// hold a lingering pool from an earlier phase (cleanup drains are
+// best-effort), which must neither satisfy nor stall this gate.
+// Progress-stall detection mirrors the fill phase (total ready count must
+// advance within PerSandboxTimeout).
+func (s *stressTest) waitAllWarmPoolsReady(ctx context.Context, phase PhaseName, number PhaseNumber, want int, poolNames []string) error {
+	wanted := make(map[string]struct{}, len(poolNames))
+	for _, name := range poolNames {
+		wanted[name] = struct{}{}
+	}
 	lastReadySum := int64(-1)
 	lastProgress := time.Now()
 	for {
@@ -535,13 +580,16 @@ func (s *stressTest) waitAllWarmPoolsReady(ctx context.Context, phase PhaseName,
 		readyPools := 0
 		readySum := int64(0)
 		for i := range list.Items {
+			if _, ok := wanted[list.Items[i].GetName()]; !ok {
+				continue
+			}
 			ready, _, _ := unstructured.NestedInt64(list.Items[i].Object, "status", "readyReplicas")
 			readySum += ready
 			if ready >= int64(want) {
 				readyPools++
 			}
 		}
-		if readyPools >= pools {
+		if readyPools >= len(poolNames) {
 			return nil
 		}
 		if readySum != lastReadySum {
@@ -549,7 +597,7 @@ func (s *stressTest) waitAllWarmPoolsReady(ctx context.Context, phase PhaseName,
 			lastProgress = time.Now()
 		}
 		if time.Since(lastProgress) > s.cfg.PerSandboxTimeout {
-			return fmt.Errorf("[%s#%d] pools stalled: %d/%d pools Ready (%d total ready replicas) with no progress for %v", phase, number, readyPools, pools, readySum, s.cfg.PerSandboxTimeout)
+			return fmt.Errorf("[%s#%d] pools stalled: %d/%d pools Ready (%d total ready replicas) with no progress for %v", phase, number, readyPools, len(poolNames), readySum, s.cfg.PerSandboxTimeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -579,6 +627,10 @@ func (s *stressTest) runWarmPoolUnschedulablePhase(ctx context.Context, number P
 	observing := true
 	stopObserving := func() {
 		if observing {
+			// Freeze before removal so an in-flight snapshot callback cannot
+			// mutate the verdict inputs (see poolAccountant.stopped).
+			acct.stop()
+			events.stop()
 			removeAcct()
 			removeEvents()
 			observing = false

@@ -645,18 +645,17 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 		}
 	}
 
-	// 2. Ready latency (observability annotation → Ready.LastTransitionTime).
-	// Use the same Ready instant as creation latency so reconcile processing
-	// after the condition transition is not included. metav1.Time is
-	// second-precision, so when the observability annotation is stamped in the
-	// same reconcile the truncated Ready instant can land slightly before the
-	// nano-precision stamp; treat that as zero rather than skipping.
+	// 2. Ready latency (observability annotation → now).
+	// Use wall-clock now for the end timestamp so the controller-stamped start
+	// time retains millisecond precision. This intentionally includes the small
+	// amount of reconcile processing between the Ready transition and metric
+	// observation, rather than falling back to second-granularity condition time.
 	if observedTimeStr := sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation]; observedTimeStr != "" {
 		observedTime, parseErr := time.Parse(time.RFC3339Nano, observedTimeStr)
 		if parseErr != nil {
 			logger.Error(parseErr, "Failed to parse sandbox observability annotation, skipping ready latency metric", "value", observedTimeStr)
-		} else if !newReady.LastTransitionTime.IsZero() {
-			latency := max(newReady.LastTransitionTime.Sub(observedTime), time.Duration(0))
+		} else {
+			latency := time.Since(observedTime)
 			asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
 		}
 	}

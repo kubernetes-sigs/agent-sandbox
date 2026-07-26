@@ -110,7 +110,7 @@ var (
 	SandboxReadyLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "agent_sandbox_ready_latency_ms",
-			Help:    "Latency from controller first observed Sandbox to Ready state in milliseconds.",
+			Help:    "Controller-observed latency from first Sandbox observation to Ready in milliseconds; includes reconcile processing time and depends on controller wall-clock timestamps.",
 			Buckets: sandboxLatencyBuckets,
 		},
 		[]string{"namespace", "launch_type", "sandbox_template", "owned_by"},

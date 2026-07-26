@@ -25,7 +25,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -4357,6 +4359,57 @@ func TestRecordSandboxCreationMetrics(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRecordSandboxCreationMetrics_ReadyLatencyUsesObservationTime(t *testing.T) {
+	asmetrics.SandboxCreationLatency.Reset()
+	asmetrics.SandboxReadyLatency.Reset()
+
+	observedTime := time.Now().Add(-350 * time.Millisecond).UTC()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "sandbox-ready-latency-precision",
+			Namespace:         "default",
+			UID:               sandboxUID,
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-10 * time.Second)),
+			Annotations: map[string]string{
+				asmetrics.SandboxObservabilityAnnotation: observedTime.Format(time.RFC3339Nano),
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(observedTime.Add(-5 * time.Second)),
+				},
+			},
+		},
+	}
+
+	r := &SandboxReconciler{
+		Client:        newFakeClient(sandbox),
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+
+	err := r.recordSandboxCreationMetrics(t.Context(), sandbox, &sandboxv1beta1.SandboxStatus{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxReadyLatency), "should record one ready latency sample")
+
+	observer, err := asmetrics.SandboxReadyLatency.GetMetricWithLabelValues("default", asmetrics.LaunchTypeCold, "unknown", asmetrics.OwnedByNone)
+	require.NoError(t, err)
+
+	metric, ok := observer.(prometheus.Metric)
+	require.True(t, ok, "ready latency observer should expose prometheus metric data")
+
+	var histogram dto.Metric
+	require.NoError(t, metric.Write(&histogram))
+	recordedMs := histogram.GetHistogram().GetSampleSum()
+
+	assert.Greater(t, recordedMs, float64(100), "ready latency should follow observation time, not stale Ready condition time")
+	assert.Less(t, recordedMs, float64(5000), "ready latency sample should stay near the recent observation window")
 }
 
 func TestRecordSandboxCreationMetrics_AlreadyReady(t *testing.T) {

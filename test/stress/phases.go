@@ -39,7 +39,10 @@ type stressTest struct {
 	// are sharded over N dedicated connections so create bursts neither
 	// queue on the ~100-stream per-connection cap nor congest the watches
 	// (see clientconns.go).
-	mutateClient  dynamic.Interface
+	mutateClient dynamic.Interface
+	// nsClient creates/deletes the extra namespaces of the multi-namespace
+	// sustained phase (cluster-scoped).
+	nsClient      dynamic.ResourceInterface
 	sandboxClient dynamic.ResourceInterface
 	// Extensions clients (extensions.agents.x-k8s.io/v1beta1), used by the
 	// claims-warm phases. The extensions controller must be deployed

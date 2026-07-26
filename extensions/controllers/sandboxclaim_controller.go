@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
@@ -53,6 +53,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
@@ -510,6 +511,10 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 	patch := client.MergeFrom(oldClaim)
 
 	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		if k8errors.IsNotFound(err) {
+			// Claim was deleted mid-reconcile
+			return nil
+		}
 		logger.Error(err, "Failed to patch sandboxclaim status")
 		return err
 	}
@@ -1485,7 +1490,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 			}
 
 			controllerRef := metav1.GetControllerOf(sandbox)
-			if controllerRef != nil && controllerRef.Kind == "SandboxWarmPool" {
+			if utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 				// Still in warm pool. Try to complete adoption!
 				logger.Info("Sandbox found in claim metadata still in warm pool, trying to complete adoption", "sandbox", sbName, "claim", claim.Name)
 				if err := verifySandboxCandidate(sandbox, claim); err != nil {
@@ -1727,6 +1732,48 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 	return requests
 }
 
+// sandboxStatusRelevantChange reports whether a Sandbox update changed a field
+// the SandboxClaim reconciler actually consumes: the Ready condition, the
+// Finished condition, PodIPs (mirrored into claim.Status.SandboxStatus), or the
+// DeletionTimestamp (the claim must react when its adopted Sandbox starts
+// terminating). Only these two conditions are compared — by type, not the whole
+// slice — so churn on conditions the claim does not read (e.g. Suspended) does
+// not trigger a needless claim reconcile.
+//
+// Each condition is compared in full (Status, Reason, Message, ...), NOT just
+// its Status. This matters for expiry: expiry has no condition type of its own —
+// hasSandboxExpiredCondition reads the Ready condition's Reason ==
+// SandboxReasonExpired — so expiry propagates to claims only because we DeepEqual
+// the entire Ready condition. Narrowing this to a Status-only compare would
+// silently stop expiry from reaching claims.
+//
+// Invariant: this predicate deliberately drops all metadata- and spec-only
+// updates on owned Sandboxes (labels, annotations, generation). Nothing in the
+// bound path consumes those today, so this is safe — but any future logic that
+// reconciles Sandbox *metadata* through this Owns watch (e.g. the
+// adoption-hardening direction in #1229) will not fire until this predicate is
+// widened to admit the relevant metadata change.
+func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
+	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
+		return true
+	}
+	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {
+		return true
+	}
+	for _, condType := range []string{
+		string(v1beta1.SandboxConditionReady),
+		string(v1beta1.SandboxConditionFinished),
+	} {
+		if !equality.Semantic.DeepEqual(
+			meta.FindStatusCondition(oldSb.Status.Conditions, condType),
+			meta.FindStatusCondition(newSb.Status.Conditions, condType),
+		) {
+			return true
+		}
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
 	r.MaxConcurrentReconciles = concurrentWorkers
@@ -1744,9 +1791,20 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 		return err
 	}
 
+	sandboxOwnsPredicate := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldSb, ok1 := e.ObjectOld.(*v1beta1.Sandbox)
+			newSb, ok2 := e.ObjectNew.(*v1beta1.Sandbox)
+			if !ok1 || !ok2 {
+				return true
+			}
+			return sandboxStatusRelevantChange(oldSb, newSb)
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1beta1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
-		Owns(&v1beta1.Sandbox{}).
+		Owns(&v1beta1.Sandbox{}, builder.WithPredicates(sandboxOwnsPredicate)).
 		Watches(&v1beta1.Sandbox{}, &sandboxEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(&extensionsv1beta1.SandboxWarmPool{}, &warmPoolEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(
@@ -1782,7 +1840,8 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 		// Verify this policy was actually created by this controller
 		// before deleting it. We check if the SandboxClaim is the controller.
 		controllerRef := metav1.GetControllerOf(existingNP)
-		isControlledByClaim := controllerRef != nil && controllerRef.UID == claim.UID && controllerRef.Kind == "SandboxClaim"
+		isControlledByClaim := utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind) &&
+			controllerRef.UID == claim.UID
 
 		if !isControlledByClaim {
 			// A user manually created a policy with our reserved name. We should not delete it, but log a warning so it can be resolved.
@@ -2029,11 +2088,7 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 	// written and are not rewritten by storage migration, so warm sandboxes
 	// created by a pre-v1beta1 pool controller still carry the v1alpha1
 	// group version after an upgrade. Match on group+kind, not version.
-	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
-	if err != nil {
-		return fmt.Errorf("parsing owner reference apiVersion %q of sandbox %s/%s: %w", controllerRef.APIVersion, candidate.Namespace, candidate.Name, err)
-	}
-	if refGV.Group != extensionsv1beta1.GroupVersion.Group || controllerRef.Kind != "SandboxWarmPool" {
+	if !utils.MatchesGroupKind(controllerRef, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil
@@ -2088,11 +2143,11 @@ func (h *warmPoolEventHandler) Delete(ctx context.Context, e event.DeleteEvent, 
 }
 
 func getWarmPoolName(obj metav1.Object) string {
-	if ctrl := metav1.GetControllerOf(obj); ctrl != nil && ctrl.Kind == "SandboxWarmPool" {
+	if ctrl := metav1.GetControllerOf(obj); utils.MatchesGroupKind(ctrl, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 		return ctrl.Name
 	}
 	for _, ref := range obj.GetOwnerReferences() {
-		if ref.Kind == "SandboxWarmPool" {
+		if utils.MatchesGroupKind(&ref, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
 			return ref.Name
 		}
 	}

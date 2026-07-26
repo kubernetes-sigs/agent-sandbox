@@ -255,6 +255,199 @@ func TestClient_DeleteSandbox_Tracked(t *testing.T) {
 	}
 }
 
+// TestClient_CreateSandbox_RedundantHandleKeepsSharedClaim guards the registry
+// re-check branch in CreateSandbox. The registry key is the server-assigned
+// (GenerateName) claim name, so a hit under our key means a concurrent
+// GetSandbox already attached to the very claim we just created and registered a
+// ready handle first. In that case CreateSandbox must tear down only its
+// redundant transport (Disconnect) and NOT delete the shared claim — otherwise
+// it deletes the sandbox out from under the tracked handle it returns.
+func TestClient_CreateSandbox_RedundantHandleKeepsSharedClaim(t *testing.T) {
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+
+	opts := Options{
+		WarmPoolName:        "test-warmpool",
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		Quiet:               true,
+	}
+	opts.setDefaults()
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	// Resolve the sandbox name from the claim status (claim name == sandbox name).
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+
+	// Wire create (GenerateName -> deterministic name) and a ready sandbox on
+	// list/watch so CreateSandbox's Open() succeeds.
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("placeholder"))
+
+	// Fail loudly if the shared claim is ever deleted: the old Close()-based
+	// path in this branch would issue a delete here.
+	var deleteCalled bool
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		deleteCalled = true
+		return true, nil, nil
+	})
+
+	c, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// setupWatchWithReactor assigns "<GenerateName>test12345" to created claims,
+	// so the key CreateSandbox computes is known ahead of time. Pre-seed a ready
+	// handle under it to force the re-check branch to fire deterministically.
+	const claimName = "sandbox-claim-test12345"
+	tracked := &Sandbox{log: logr.Discard()}
+	tracked.connector = &connector{}
+	tracked.connector.baseURL = "http://fake" // makes IsReady() true
+	key := Key{Namespace: "default", ClaimName: claimName}
+	c.mu.Lock()
+	c.registry[key] = tracked
+	c.mu.Unlock()
+
+	got, err := c.CreateSandbox(context.Background(), "test-warmpool", "default")
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+
+	if got != tracked {
+		t.Error("expected the already-tracked handle to be returned, not the redundant one")
+	}
+	if deleteCalled {
+		t.Error("shared claim was deleted; redundant handle must be Disconnect()ed, not Close()d")
+	}
+	if !tracked.IsReady() {
+		t.Error("tracked handle should remain ready after the redundant handle is torn down")
+	}
+
+	// The registry must still hold the tracked handle under the shared key.
+	c.mu.Lock()
+	stillTracked := c.registry[key]
+	c.mu.Unlock()
+	if stillTracked != tracked {
+		t.Error("expected tracked handle to remain registered under the shared key")
+	}
+}
+
+// TestClient_GetSandbox_AdoptsRacingHandleKeepsSharedClaim guards the registry
+// re-check branch in GetSandbox — the symmetric counterpart to the CreateSandbox
+// branch. While GetSandbox is resolving+attaching, a concurrent
+// GetSandbox/CreateSandbox for the same key can install a ready handle first. In
+// that case GetSandbox must return the already-tracked handle and tear down only
+// its own redundant transport (Disconnect), never deleting the shared claim.
+//
+// The race is forced deterministically: a "get sandboxclaims" reactor installs a
+// ready tracked handle during resolveSandboxName (before this GetSandbox finishes
+// attaching), so by the time it reaches trackOrAdoptRace the adopt branch is
+// guaranteed to fire.
+func TestClient_GetSandbox_AdoptsRacingHandleKeepsSharedClaim(t *testing.T) {
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+
+	opts := Options{
+		WarmPoolName:        "test-warmpool",
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		Quiet:               true,
+	}
+	opts.setDefaults()
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	c, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const claimName = "shared-claim"
+	key := Key{Namespace: "default", ClaimName: claimName}
+
+	// The handle a concurrent caller registers first. GetSandbox must return
+	// exactly this handle and leave it registered.
+	tracked := &Sandbox{log: logr.Discard()}
+	tracked.connector = &connector{}
+	tracked.connector.baseURL = "http://fake" // makes IsReady() true
+
+	// Reactor for every "get sandboxclaims" (verifyClaimExists +
+	// resolveSandboxName). On the resolveSandboxName call — the second get — it
+	// installs the ready tracked handle under key, simulating a concurrent caller
+	// that wins the race while this GetSandbox is still attaching.
+	var getCalls int
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		getCalls++
+		if getCalls == 2 {
+			c.mu.Lock()
+			c.registry[key] = tracked
+			c.mu.Unlock()
+		}
+		ga := action.(ktesting.GetAction)
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+
+	// Reconnect path: verifySandboxAlive gets a ready sandbox so the redundant
+	// handle this GetSandbox builds actually opens — proving adoption happens
+	// because a ready handle already exists, not because our own attach failed.
+	agentsCS.PrependReactor("get", "sandboxes", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, readySandbox(ga.GetName()), nil
+	})
+
+	// Fail loudly if the shared claim is ever deleted: the buggy Close()-based
+	// path in this branch would issue a delete here.
+	var deleteCalled bool
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		deleteCalled = true
+		return true, nil, nil
+	})
+
+	got, err := c.GetSandbox(context.Background(), claimName, "default")
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+
+	if got != tracked {
+		t.Error("expected the already-tracked handle to be returned, not the redundant one")
+	}
+	if deleteCalled {
+		t.Error("shared claim was deleted; redundant handle must be Disconnect()ed, not Close()d")
+	}
+	if !tracked.IsReady() {
+		t.Error("tracked handle should remain ready after the redundant handle is torn down")
+	}
+
+	// The registry must still hold the tracked handle under the shared key.
+	c.mu.Lock()
+	stillTracked := c.registry[key]
+	c.mu.Unlock()
+	if stillTracked != tracked {
+		t.Error("expected tracked handle to remain registered under the shared key")
+	}
+}
+
 func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	c, _ := newTestClient(t)
 

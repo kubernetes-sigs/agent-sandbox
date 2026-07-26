@@ -31,6 +31,34 @@
     </div>
 </div>
 
+{% if limiter_regime_ops %}
+<div class="card">
+    <div class="card-title">Limiter Regime by Component</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        A client-go rate limiter hurts in two ways with opposite statistical signatures.
+        <strong>Queueing</strong>: sustained demand above the QPS limit builds a backlog — waits
+        grow into the tail and every percentile alarm fires. <strong>Pacing</strong>: demand sits
+        <em>at</em> the limit, so the token bucket meters each request by up to one token interval
+        (uniform wait between 0 and 1/QPS) — the mean is half the interval and <em>no request ever
+        exceeds it</em>, so tail-based checks read it as healthy while 100% of requests pay the tax
+        and serialized callers (e.g. the kubelet status manager's one-at-a-time GET+PATCH loop)
+        lose throughput proportionally. The uniform shape makes the mean a limit estimator:
+        implied per-instance QPS &asymp; 1 / (2 &times; mean wait) — compare it to the measured
+        request rate to see how hard the limiter is engaged. Rows are split by verb because one
+        process can host several limiters behind this single metric (the kubelet's main API client
+        vs its event client): a load-invariant wait confined to one verb is a deliberately
+        configured choke (e.g. <code>eventQPS</code>), while a wait spanning all verbs is the
+        shared main limiter. A <em>bursty</em> verdict means waits appear despite sustained-rate
+        headroom (measured rate well under the implied limit): demand spikes are draining the
+        bucket faster than tokens refill — the cure is more burst, not more QPS (where the
+        component exposes a burst knob; the kubelet via kOps does not).
+    </div>
+    <div class="table-container">
+        <table id="limiter-regime-table"></table>
+    </div>
+</div>
+{% endif %}
+
 <div class="card">
     <div class="card-title">Client-side API Throttling by Phase</div>
     <div class="card-desc" style="margin-bottom: 8px;">
@@ -71,6 +99,25 @@
 </div>
 
 <script>
+    const limiterRegime = {{ limiter_regime_ops | tojson }};
+    const verdictBadge = v =>
+        v === 'queueing' ? badge('danger', 'QUEUEING')
+        : v === 'pacing' ? badge('warning', 'PACING AT LIMIT')
+        : v === 'bursty' ? badge('info', 'BURSTY')
+        : badge('success', 'OK');
+    if (limiterRegime.length) {
+        renderTable('#limiter-regime-table', [
+            {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+            {key: 'source', label: 'Component', render: v => `<code>${escapeHtml(v)}</code>`},
+            {key: 'verb', label: 'Verb', render: v => `<code>${escapeHtml(v)}</code>`},
+            {key: 'instances', label: 'Instances'},
+            {key: 'rate_per_instance', label: 'Req/s per Instance', render: v => v.toFixed(1)},
+            {key: 'mean_wait_ms', label: 'Mean Wait', render: v => v.toFixed(1) + 'ms'},
+            {key: 'implied_qps', label: 'Implied QPS Limit', render: v => v == null ? '—' : '~' + v.toFixed(0) + '/s'},
+            {key: 'verdict', label: 'Verdict', render: verdictBadge}
+        ], limiterRegime);
+    }
+
     const clientThrottle = {{ client_ratelimit_ops | tojson }};
     const waitBadge = v =>
         v > 1000 ? badge('danger', (v / 1000).toFixed(2) + 's')

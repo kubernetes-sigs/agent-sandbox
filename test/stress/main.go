@@ -44,6 +44,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -109,6 +110,11 @@ type PhaseSummary struct {
 	// Per-worker-node rates, alongside the raw aggregates above.
 	CreateThroughputPerNode *PerNodeRates `json:"createThroughputPerNode,omitempty"`
 	ReadyThroughputPerNode  *PerNodeRates `json:"readyThroughputPerNode,omitempty"`
+
+	// SustainedWindows holds the claims-warm-sustained phase's rolling
+	// per-10s-window create->Ready stats (arrival-time bucketed): the
+	// "latency holds over time" evidence. Set only for that phase.
+	SustainedWindows []WindowedLatency `json:"sustainedWindows,omitempty"`
 }
 
 // Summary is written to summary.json at the end of the test.
@@ -162,6 +168,31 @@ type Config struct {
 	// and up to ~2x transiently while the pool replenishes claimed sandboxes.
 	ClaimsWarmCount int `json:"claimsWarmCount"`
 
+	// claims-warm-sustained parameters (see sustained.go for the full model).
+	// SustainedRate is the target claim arrival rate in claims/s (Poisson).
+	SustainedRate float64 `json:"sustainedRate"`
+	// SustainedSeconds is the duration of the arrival window in seconds.
+	SustainedSeconds float64 `json:"sustainedSeconds"`
+	// ClaimDwell is how long each sustained claim is held after Ready before
+	// it is deleted (steady-state churn realism: adoption + refill + teardown
+	// all run concurrently).
+	ClaimDwell time.Duration `json:"claimDwellNanos"`
+	// SustainedNamespaces spreads the sustained phase's pools and claims
+	// round-robin across N pre-created namespaces (shard testing).
+	SustainedNamespaces int `json:"sustainedNamespaces"`
+	// SustainedPoolHeadroom sizes each namespace's warm pool:
+	// replicas = ceil(rate/namespaces * headroom-seconds). It must cover the
+	// controller's worst-case refill latency (any replenishment delay + cold
+	// launch p99), or the pool runs dry and claims cold-start.
+	SustainedPoolHeadroom time.Duration `json:"sustainedPoolHeadroomNanos"`
+	// SustainedLifecycleBudget is the assumed per-claim ready+delete pipeline
+	// time (everything outside the dwell) used when estimating the phase's
+	// peak concurrent pods in checkClusterCapacity. If the cluster's
+	// Ready/delete path is slower than this under load, raise it so the
+	// capacity check demands enough headroom to keep queueing out of the
+	// latency measurement.
+	SustainedLifecycleBudget time.Duration `json:"sustainedLifecycleBudgetNanos"`
+
 	// ClientConnections shards the harness's own mutating requests across N
 	// HTTP/2 connections (1 = share the watches' single connection, the
 	// historical behavior). The apiserver caps ~100 concurrent streams per
@@ -213,7 +244,7 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Minute, "Timeout for the entire test run")
 	flag.DurationVar(&cfg.PerSandboxTimeout, "per-sandbox-timeout", 5*time.Minute, "Timeout for a single sandbox to become ready / be deleted")
 	flag.IntVar(&cfg.CreateConcurrency, "create-concurrency", 20, "Number of concurrent workers creating Sandboxes (fill and throughput phases)")
-	phasesFlag := flag.String("phases", "probe,throughput-mif50", "Comma-separated phase names to run in order (fill, probe, claims-warm, throughput-mifN). Structured forms like throughput{maxInFlight:N} may be added later")
+	phasesFlag := flag.String("phases", "probe,throughput-mif50", "Comma-separated phase names to run in order (fill, probe, claims-warm, claims-warm-sustained, throughput-mifN). Structured forms like throughput{maxInFlight:N} may be added later")
 	flag.IntVar(&cfg.FillPerNode, "fill-per-node", 10, "Number of long-running background Sandboxes per worker node for the fill phase")
 	flag.IntVar(&cfg.ProbeCount, "probe-count", 20, "Number of latency probe Sandboxes for the probe phase")
 	flag.IntVar(&cfg.ProbeConcurrency, "probe-concurrency", 1, "Number of concurrent latency probes; keep low for clean latency numbers")
@@ -221,6 +252,12 @@ func run(ctx context.Context) error {
 	flag.IntVar(&cfg.ThroughputCount, "throughput-count", 200, "Number of Sandboxes to churn per throughput phase (before --throughput-min-seconds)")
 	flag.Float64Var(&cfg.ThroughputMinSeconds, "throughput-min-seconds", 45, "Minimum duration of each throughput phase; levels churn beyond -throughput-count until this much time has elapsed (0 = count-based only)")
 	flag.IntVar(&cfg.ClaimsWarmCount, "claims-warm-count", 300, "Warm pool size and number of simultaneous SandboxClaims for the claims-warm phase (requires the extensions controller)")
+	flag.Float64Var(&cfg.SustainedRate, "sustained-rate", 300, "Target SandboxClaim arrival rate in claims/s (Poisson-jittered) for the claims-warm-sustained phase (requires the extensions controller)")
+	flag.Float64Var(&cfg.SustainedSeconds, "sustained-seconds", 60, "Duration of the claims-warm-sustained arrival window in seconds")
+	flag.DurationVar(&cfg.ClaimDwell, "claim-dwell", 5*time.Second, "How long each sustained claim is held after Ready before deletion")
+	flag.IntVar(&cfg.SustainedNamespaces, "sustained-namespaces", 1, "Spread the sustained phase's pools and claims across N pre-created namespaces (1 = run in the test namespace)")
+	flag.DurationVar(&cfg.SustainedPoolHeadroom, "sustained-pool-headroom", 10*time.Second, "Warm pool sizing for the sustained phase: each namespace's pool has ceil(rate/namespaces * headroom-seconds) replicas; must cover the controller's worst-case refill latency")
+	flag.DurationVar(&cfg.SustainedLifecycleBudget, "sustained-lifecycle-budget", 5*time.Second, "Assumed per-claim ready+delete pipeline time (beyond --claim-dwell) used to size the sustained phase's pod-capacity estimate; raise it if the cluster's Ready/delete path is slower under load")
 	flag.IntVar(&cfg.ClientConnections, "client-connections", 1, "Shard the harness's mutating API requests across N HTTP/2 connections; 1 = single connection shared with watches (historical behavior, subject to the apiserver's ~100-streams-per-connection cap)")
 	flag.BoolVar(&cfg.CollectMetrics, "collect-metrics", true, "Whether to scrape Prometheus metrics from the control plane, the sandbox controller, and kubelets to metrics.jsonl.gz")
 	flag.DurationVar(&cfg.MetricsInterval, "metrics-interval", 15*time.Second, "Interval between Prometheus metrics scrapes")
@@ -246,6 +283,9 @@ func run(ctx context.Context) error {
 	}
 	if cfg.ClientConnections < 1 {
 		return fmt.Errorf("--client-connections must be >= 1, got %d", cfg.ClientConnections)
+	}
+	if cfg.ClaimDwell < 0 {
+		return fmt.Errorf("--claim-dwell must be >= 0, got %v", cfg.ClaimDwell)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
@@ -479,6 +519,7 @@ func run(ctx context.Context) error {
 		profiler:       profiler,
 		ctrlProfiler:   ctrlProfiler,
 		mutateClient:   mutateClient,
+		nsClient:       mutateClient.Resource(gvrNamespaces),
 		sandboxClient:  mutateClient.Resource(gvrSandboxes).Namespace(cfg.Namespace),
 		templateClient: mutateClient.Resource(gvrSandboxTemplates).Namespace(cfg.Namespace),
 		warmPoolClient: mutateClient.Resource(gvrSandboxWarmPools).Namespace(cfg.Namespace),
@@ -594,10 +635,33 @@ func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 			runs = append(runs, phaseRun{number, PhaseClaimsWarm, func(ctx context.Context) error {
 				return test.runClaimsWarmPhase(ctx, number)
 			}})
+		case raw == string(PhaseClaimsWarmSustained):
+			// Finite checks: flag.Float64Var accepts "NaN" and "+Inf" (NaN
+			// even passes a <= 0 test), and non-finite values would flow
+			// into pool sizing and the capacity estimate where float->int
+			// conversion is implementation-defined.
+			if test.cfg.SustainedRate <= 0 || math.IsNaN(test.cfg.SustainedRate) || math.IsInf(test.cfg.SustainedRate, 0) {
+				return nil, fmt.Errorf("phase %q requires a finite --sustained-rate > 0", raw)
+			}
+			if test.cfg.SustainedSeconds <= 0 || math.IsNaN(test.cfg.SustainedSeconds) || math.IsInf(test.cfg.SustainedSeconds, 0) {
+				return nil, fmt.Errorf("phase %q requires a finite --sustained-seconds > 0", raw)
+			}
+			if test.cfg.SustainedNamespaces < 1 {
+				return nil, fmt.Errorf("phase %q requires --sustained-namespaces >= 1", raw)
+			}
+			if test.cfg.SustainedPoolHeadroom <= 0 {
+				return nil, fmt.Errorf("phase %q requires --sustained-pool-headroom > 0", raw)
+			}
+			if test.cfg.SustainedLifecycleBudget <= 0 {
+				return nil, fmt.Errorf("phase %q requires --sustained-lifecycle-budget > 0", raw)
+			}
+			runs = append(runs, phaseRun{number, PhaseClaimsWarmSustained, func(ctx context.Context) error {
+				return test.runClaimsWarmSustainedPhase(ctx, number)
+			}})
 		default:
 			maxInFlight, ok := throughputMaxInFlight(raw)
 			if !ok {
-				return nil, fmt.Errorf("unknown phase %q (want fill, probe, claims-warm, or throughput-mifN)", raw)
+				return nil, fmt.Errorf("unknown phase %q (want fill, probe, claims-warm, claims-warm-sustained, or throughput-mifN)", raw)
 			}
 			if test.cfg.ThroughputCount <= 0 {
 				return nil, fmt.Errorf("phase %q requires --throughput-count > 0", raw)
@@ -624,9 +688,12 @@ func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
 }
 
 // hasClaimsPhase reports whether any phase needs the SandboxClaim machinery
-// (claim watch, extensions CRDs, controller profiler).
+// (claim watch, extensions CRDs, controller profiler). The claim watch is
+// cluster-wide, so it also covers the sustained phase's extra <ns>-s1..sN
+// shard namespaces.
 func hasClaimsPhase(phases []string) bool {
-	return slices.Contains(phases, string(PhaseClaimsWarm))
+	return slices.Contains(phases, string(PhaseClaimsWarm)) ||
+		slices.Contains(phases, string(PhaseClaimsWarmSustained))
 }
 
 // throughputMaxInFlight parses throughput / throughput-mifN phase names.
@@ -656,7 +723,9 @@ func throughputMaxInFlight(name string) (int, bool) {
 // of that the warm pool controller replenishes claimed sandboxes, so the
 // phase can transiently reach ~2x its count — that overshoot is warned about
 // rather than required, because replenishment pods only queue (they do not
-// delay the claims being measured) and cleanup removes them.
+// delay the claims being measured) and cleanup removes them. The
+// claims-warm-sustained budget covers its warm pools (kept full by refill)
+// plus the adopted-but-not-yet-deleted sandboxes.
 func checkClusterCapacity(cfg Config, info *ClusterInfo) error {
 	extra := 0
 	if slices.Contains(cfg.Phases, string(PhaseProbe)) && cfg.ProbeConcurrency > extra {
@@ -665,6 +734,18 @@ func checkClusterCapacity(cfg Config, info *ClusterInfo) error {
 	claimsWarm := slices.Contains(cfg.Phases, string(PhaseClaimsWarm))
 	if claimsWarm && cfg.ClaimsWarmCount > extra {
 		extra = cfg.ClaimsWarmCount
+	}
+	if slices.Contains(cfg.Phases, string(PhaseClaimsWarmSustained)) {
+		// Steady state: the pools stay full (refill replaces adopted
+		// sandboxes) while adopted sandboxes live for roughly the ready
+		// latency + dwell + deletion pipeline before their pods go away;
+		// --sustained-lifecycle-budget bounds the pipeline part on top of
+		// the dwell.
+		poolTotal := sustainedPoolReplicasPerNamespace(cfg) * cfg.SustainedNamespaces
+		inFlight := int(math.Ceil(cfg.SustainedRate * (cfg.ClaimDwell.Seconds() + cfg.SustainedLifecycleBudget.Seconds())))
+		if n := poolTotal + inFlight; n > extra {
+			extra = n
+		}
 	}
 	for _, name := range cfg.Phases {
 		if maxInFlight, ok := throughputMaxInFlight(name); ok && maxInFlight > extra {
@@ -772,6 +853,9 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 			return cfg.ProbeCount
 		case PhaseClaimsWarm:
 			return cfg.ClaimsWarmCount
+		case PhaseClaimsWarmSustained:
+			// Expected arrivals; the Poisson process varies the actual count.
+			return sustainedExpectedClaims(cfg)
 		default:
 			// Throughput phases (one per throughput-mifN entry).
 			return cfg.ThroughputCount
@@ -824,6 +908,9 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 		}
 		ps.CreateThroughput = computeThroughputStats(createTimes)
 		ps.ReadyThroughput = computeThroughputStats(readyTimes)
+		if result.name == PhaseClaimsWarmSustained {
+			ps.SustainedWindows = computeWindowedLatencies(phaseRecords, sustainedWindow)
+		}
 		if clusterInfo != nil {
 			ps.CreateThroughputPerNode = ps.CreateThroughput.perNode(clusterInfo.Nodes)
 			ps.ReadyThroughputPerNode = ps.ReadyThroughput.perNode(clusterInfo.Nodes)
@@ -977,6 +1064,31 @@ func printReport(summary *Summary, clusterInfo *ClusterInfo) {
 				fmt.Printf("  time until ALL claims Ready:     n/a (not all claims became Ready)\n")
 			}
 			fmt.Printf("  claim ready throughput:          %s\n", formatThroughput(ps.ReadyThroughput))
+		case PhaseClaimsWarmSustained:
+			// Like claims-warm, only claim-level intervals are meaningful; the
+			// headline evidence is the per-window trend, not one aggregate.
+			cfg := summary.Config
+			fmt.Printf("  target arrivals:                 %.1f/s (Poisson) for %.0fs across %d namespace(s); pool %d/ns (headroom %s), dwell %s\n",
+				cfg.SustainedRate, cfg.SustainedSeconds, cfg.SustainedNamespaces,
+				sustainedPoolReplicasPerNamespace(cfg), cfg.SustainedPoolHeadroom, cfg.ClaimDwell)
+			fmt.Printf("  claim create throughput:         %s\n", formatThroughput(ps.CreateThroughput))
+			fmt.Printf("  claim create ack (apiserver):    %s\n", formatLatency(ps.Latency.CreateAck))
+			fmt.Printf("  claim create -> claim Ready:     %s\n", formatLatency(ps.Latency.EndToEndReady))
+			fmt.Printf("  claim ready throughput:          %s\n", formatThroughput(ps.ReadyThroughput))
+			fmt.Printf("  rolling %.0fs windows by arrival time (create -> Ready):\n", sustainedWindow.Seconds())
+			for _, w := range ps.SustainedWindows {
+				if w.Arrivals == 0 {
+					fmt.Printf("    [%4.0fs-%4.0fs) arrivals=0\n", w.StartOffsetSeconds, w.EndOffsetSeconds)
+					continue
+				}
+				lat := "no readies"
+				if w.Latency != nil {
+					lat = fmt.Sprintf("p50=%-8s p90=%-8s p99=%-8s max=%s",
+						formatMs(w.Latency.P50Ms), formatMs(w.Latency.P90Ms), formatMs(w.Latency.P99Ms), formatMs(w.Latency.MaxMs))
+				}
+				fmt.Printf("    [%4.0fs-%4.0fs) arrivals=%-5d ready=%-5d %s\n",
+					w.StartOffsetSeconds, w.EndOffsetSeconds, w.Arrivals, w.Ready, lat)
+			}
 		default:
 			fmt.Printf("  end-to-end ready latency:        %s\n", formatLatency(ps.Latency.EndToEndReady))
 			fmt.Printf("  create throughput:               %s\n", formatThroughput(ps.CreateThroughput))

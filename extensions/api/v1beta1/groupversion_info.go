@@ -23,6 +23,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+const (
+	SandboxClaimKind    = "SandboxClaim"
+	SandboxTemplateKind = "SandboxTemplate"
+	SandboxWarmPoolKind = "SandboxWarmPool"
+)
+
 var (
 	// GroupVersion is group version used to register these objects.
 	GroupVersion = schema.GroupVersion{Group: "extensions.agents.x-k8s.io", Version: "v1beta1"}

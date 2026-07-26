@@ -180,6 +180,113 @@ func TestComputeLatencyStatsPercentiles(t *testing.T) {
 	}
 }
 
+func TestComputeWindowedLatencies(t *testing.T) {
+	base := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	window := 10 * time.Second
+
+	records := []SandboxRecord{
+		// Window 0 ([0s,10s)): two arrivals, both ready, 100ms and 300ms.
+		rec(base, 0, 100*time.Millisecond),
+		rec(base, 9*time.Second, 9*time.Second+300*time.Millisecond),
+		// Window 1 ([10s,20s)): one arrival, never ready.
+		rec(base, 12*time.Second, -1),
+		// Window 2 ([20s,30s)): empty (no arrivals) — must be retained.
+		// Window 3 ([30s,40s)): one arrival, ready AFTER the window ends
+		// (2s latency); it still counts in its ARRIVAL window.
+		rec(base, 39*time.Second, 41*time.Second),
+		// A record without CreateCalled must be skipped entirely.
+		rec(base, -1, 5*time.Second),
+	}
+
+	windows := computeWindowedLatencies(records, window)
+	if len(windows) != 4 {
+		t.Fatalf("got %d windows, want 4: %+v", len(windows), windows)
+	}
+
+	w0 := windows[0]
+	if w0.StartOffsetSeconds != 0 || w0.EndOffsetSeconds != 10 {
+		t.Errorf("window 0 bounds = [%v,%v), want [0,10)", w0.StartOffsetSeconds, w0.EndOffsetSeconds)
+	}
+	if w0.Arrivals != 2 || w0.Ready != 2 {
+		t.Errorf("window 0 arrivals/ready = %d/%d, want 2/2", w0.Arrivals, w0.Ready)
+	}
+	if w0.Latency == nil || w0.Latency.Count != 2 {
+		t.Fatalf("window 0 latency = %+v, want count 2", w0.Latency)
+	}
+	if got, want := w0.Latency.MinMs, 100.0; math.Abs(got-want) > 1e-6 {
+		t.Errorf("window 0 MinMs = %v, want %v", got, want)
+	}
+	if got, want := w0.Latency.MaxMs, 300.0; math.Abs(got-want) > 1e-6 {
+		t.Errorf("window 0 MaxMs = %v, want %v", got, want)
+	}
+
+	w1 := windows[1]
+	if w1.Arrivals != 1 || w1.Ready != 0 || w1.Latency != nil {
+		t.Errorf("window 1 = %+v, want arrivals=1 ready=0 latency=nil", w1)
+	}
+
+	w2 := windows[2]
+	if w2.Arrivals != 0 || w2.Ready != 0 || w2.Latency != nil {
+		t.Errorf("window 2 = %+v, want empty interior window retained", w2)
+	}
+
+	w3 := windows[3]
+	if w3.Arrivals != 1 || w3.Ready != 1 {
+		t.Errorf("window 3 arrivals/ready = %d/%d, want 1/1", w3.Arrivals, w3.Ready)
+	}
+	if w3.Latency == nil || math.Abs(w3.Latency.P50Ms-2000.0) > 1e-6 {
+		t.Errorf("window 3 latency = %+v, want p50 2000ms (bucketed by arrival, not readiness)", w3.Latency)
+	}
+}
+
+// TestComputeWindowedLatenciesShowsDegradation is the phase's reason to
+// exist: a workload whose latency worsens over time must produce
+// monotonically increasing window percentiles rather than one flat aggregate.
+func TestComputeWindowedLatenciesShowsDegradation(t *testing.T) {
+	base := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	window := 10 * time.Second
+
+	// 3 windows x 100 arrivals; latency = 100ms in window 0, 200ms in 1, 400ms in 2.
+	var records []SandboxRecord
+	for w := range 3 {
+		latency := time.Duration(100*(1<<w)) * time.Millisecond
+		for i := range 100 {
+			offset := time.Duration(w)*window + time.Duration(i)*window/100
+			records = append(records, rec(base, offset, offset+latency))
+		}
+	}
+
+	windows := computeWindowedLatencies(records, window)
+	if len(windows) != 3 {
+		t.Fatalf("got %d windows, want 3", len(windows))
+	}
+	for w, wantMs := range []float64{100, 200, 400} {
+		got := windows[w]
+		if got.Arrivals != 100 || got.Ready != 100 || got.Latency == nil {
+			t.Fatalf("window %d = %+v, want 100 arrivals/ready with latency", w, got)
+		}
+		for name, ms := range map[string]float64{"p50": got.Latency.P50Ms, "p90": got.Latency.P90Ms, "p99": got.Latency.P99Ms} {
+			if math.Abs(ms-wantMs) > 1e-6 {
+				t.Errorf("window %d %s = %vms, want %vms", w, name, ms, wantMs)
+			}
+		}
+	}
+}
+
+func TestComputeWindowedLatenciesEdgeCases(t *testing.T) {
+	base := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	if got := computeWindowedLatencies(nil, 10*time.Second); got != nil {
+		t.Errorf("no records: got %+v, want nil", got)
+	}
+	if got := computeWindowedLatencies([]SandboxRecord{rec(base, 0, time.Second)}, 0); got != nil {
+		t.Errorf("zero window: got %+v, want nil", got)
+	}
+	// Only records without CreateCalled -> no windows.
+	if got := computeWindowedLatencies([]SandboxRecord{rec(base, -1, time.Second)}, 10*time.Second); got != nil {
+		t.Errorf("no create timestamps: got %+v, want nil", got)
+	}
+}
+
 func fmtPtr(f *float64) any {
 	if f == nil {
 		return "<nil>"

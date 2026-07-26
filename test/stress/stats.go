@@ -152,6 +152,75 @@ func computeTimeToAllReady(records []SandboxRecord) *float64 {
 	return &seconds
 }
 
+// WindowedLatency aggregates create->Ready latency over one fixed window of
+// ARRIVALS: records are bucketed by CreateCalled, so each window reflects the
+// experience of the claims that arrived during it. In a sustained-rate phase,
+// latency degradation over time shows up as later windows getting slower.
+type WindowedLatency struct {
+	// StartOffsetSeconds/EndOffsetSeconds bound the window [start, end)
+	// relative to the earliest CreateCalled among the records.
+	StartOffsetSeconds float64 `json:"startOffsetSeconds"`
+	EndOffsetSeconds   float64 `json:"endOffsetSeconds"`
+	// Arrivals counts records whose CreateCalled fell in this window;
+	// Ready counts how many of those were observed Ready (ever, not
+	// necessarily within the window).
+	Arrivals int `json:"arrivals"`
+	Ready    int `json:"ready"`
+	// Latency summarizes create->Ready for the Ready arrivals; nil when none.
+	Latency *LatencyStats `json:"latency,omitempty"`
+}
+
+// computeWindowedLatencies buckets records into contiguous windows of the
+// given size by CreateCalled and summarizes create->Ready latency per window.
+// Records without a CreateCalled are skipped; empty interior windows are
+// retained (Arrivals=0) so the timeline stays contiguous.
+func computeWindowedLatencies(records []SandboxRecord, window time.Duration) []WindowedLatency {
+	if window <= 0 {
+		return nil
+	}
+	var base, last time.Time
+	for i := range records {
+		t := records[i].CreateCalled
+		if t.IsZero() {
+			continue
+		}
+		if base.IsZero() || t.Before(base) {
+			base = t
+		}
+		if t.After(last) {
+			last = t
+		}
+	}
+	if base.IsZero() {
+		return nil
+	}
+
+	numWindows := int(last.Sub(base)/window) + 1
+	out := make([]WindowedLatency, numWindows)
+	durations := make([][]time.Duration, numWindows)
+	for i := range out {
+		out[i].StartOffsetSeconds = (time.Duration(i) * window).Seconds()
+		out[i].EndOffsetSeconds = (time.Duration(i+1) * window).Seconds()
+	}
+	for i := range records {
+		rec := &records[i]
+		if rec.CreateCalled.IsZero() {
+			continue
+		}
+		idx := int(rec.CreateCalled.Sub(base) / window)
+		out[idx].Arrivals++
+		if rec.SandboxReady.IsZero() {
+			continue
+		}
+		out[idx].Ready++
+		durations[idx] = append(durations[idx], rec.SandboxReady.Sub(rec.CreateCalled))
+	}
+	for i := range out {
+		out[i].Latency = computeLatencyStats(durations[i])
+	}
+	return out
+}
+
 // ThroughputStats summarizes the rate at which a set of events occurred.
 type ThroughputStats struct {
 	Count           int     `json:"count"`

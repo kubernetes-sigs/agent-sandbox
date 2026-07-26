@@ -54,8 +54,9 @@ spectrum the project claims to support."
   directly on Compute Engine instances, giving full control over instance
   configuration.
 
-² GCE n2/n2d instances support nested virtualization natively — it is a
-  per-instance metadata flag, not a hardware change. Currently not enabled.
+² GCE n2 instances (Intel) support nested virtualization natively — it
+  is a per-instance metadata flag, not a hardware change. Currently not
+  enabled. Note: n2d (AMD) does not support nested virtualization.
 
 ## What This Proposal Does NOT Claim
 
@@ -80,9 +81,12 @@ Each step is independently valuable and can be adopted without the others.
 
 ### Step 1 — gVisor on KIND (mild timing diversity)
 
-**No infrastructure changes required.** The project already has a working
-`kind-config.yaml` with gVisor containerd patches
-(`examples/openclaw-gvisor-sandbox/kind-config.yaml`).
+**No new cluster infrastructure required.** The project already has a
+working `kind-config.yaml` with gVisor containerd patches
+(`examples/openclaw-gvisor-sandbox/kind-config.yaml`). The CI node image
+must have `runsc` and `containerd-shim-runsc-v1` installed (or a
+download step in the job), and a `gvisor` RuntimeClass (`handler: runsc`)
+must be registered before tests run.
 
 **What changes:**
 
@@ -240,8 +244,7 @@ that look harmless on runc reveal their real cost.
 ```yaml
 name: pull-agent-sandbox-e2e-gvisor
 cluster: eks-prow-build-cluster
-always_run: false
-run_if_changed: '^(extensions/|test/e2e/|examples/.*gvisor)'
+always_run: true
 decorate: true
 spec:
   containers:
@@ -327,5 +330,5 @@ pool sizes for trend detection.
 - [kata-deploy](https://github.com/kata-containers/kata-containers/tree/main/tools/packaging/kata-deploy) —
   upstream DaemonSet for kata installation on containerd clusters
 - [agent-sandbox Prow jobs](https://github.com/kubernetes/test-infra/tree/master/config/jobs/kubernetes-sigs/agent-sandbox)
-- [Runtime class test README](../test/e2e/extensions/) — env var reference
-  and benchmark configuration
+- [RuntimeClass-aware test harness (PR #1262)](https://github.com/kubernetes-sigs/agent-sandbox/pull/1262) —
+  env var reference and benchmark configuration

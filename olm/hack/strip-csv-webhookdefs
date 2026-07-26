@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Strip a YAML key and its children from a file.
+
+Used to remove keys that operator-sdk auto-generates or that conflict
+with the controller's runtime management.  Examples:
+
+  hack/strip-csv-webhookdefs csv.yaml webhookdefinitions
+      Removes spec.webhookdefinitions from a CSV.
+
+  hack/strip-csv-webhookdefs crd.yaml clientConfig
+      Removes spec.conversion.webhook.clientConfig from a CRD,
+      keeping strategy: Webhook and conversionReviewVersions.
+"""
+
+import sys
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(f"usage: {sys.argv[0]} <yaml-path> <key>", file=sys.stderr)
+        sys.exit(1)
+
+    path = sys.argv[1]
+    key = sys.argv[2]
+    suffix = key + ":"
+
+    with open(path) as f:
+        lines = f.readlines()
+
+    result = []
+    skip = False
+    indent = 0
+    seen_deeper = False
+    for line in lines:
+        stripped = line.rstrip()
+        if not skip and stripped.lstrip() == suffix:
+            indent = len(stripped) - len(stripped.lstrip())
+            skip = True
+            seen_deeper = False
+            continue
+        if skip:
+            if not stripped:
+                continue
+            line_indent = len(stripped) - len(stripped.lstrip())
+            if line_indent > indent:
+                seen_deeper = True
+                continue
+            if line_indent < indent:
+                skip = False
+            else:
+                content = stripped[line_indent:]
+                if content and content[0].isalpha():
+                    skip = False
+                elif content and content[0] == "-":
+                    seen_deeper = False
+                    continue
+                else:
+                    skip = False
+        result.append(line)
+
+    with open(path, "w") as f:
+        f.writelines(result)
+
+
+if __name__ == "__main__":
+    main()

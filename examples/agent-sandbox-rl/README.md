@@ -481,7 +481,7 @@ the controller Deployment's container args, namespace `agent-sandbox-system`):
 |---|---:|---:|---|
 | `--kube-api-qps` | `-1` | **`-1`** (leave) | `-1` disables client-side rate limiting entirely — already optimal. |
 | `--kube-api-burst` | `10` | n/a | **Moot while `qps=-1`** (burst is only consulted when QPS > 0). Only raise if you set a positive QPS. |
-| `--sandbox-concurrent-workers` | `1` | **`1000`** | Sandbox reconciles (claim binding → Ready) are the main serializer; match your peak concurrent sandboxes. |
+| `--sandbox-concurrent-workers` | `100` | **`1000`** | Sandbox reconciles (claim binding → Ready) are the main serializer; match your peak concurrent sandboxes. |
 | `--sandbox-claim-concurrent-workers` | `50` | **`1000`** | Concurrent `SandboxClaim` reconciles; match peak in-flight claims. |
 | `--sandbox-warm-pool-concurrent-workers` | `1` | **`1000`** | Parallel warm-pool reconciles (one per image pool); raise so many pools warm at once. |
 | `--sandbox-template-concurrent-workers` | `1` | **`1000`** | Parallel template reconciles. |

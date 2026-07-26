@@ -86,6 +86,65 @@ function renderTable(selector, columns, rows) {
     table.replaceChildren(thead, tbody);
 }
 
+// ---- Section navigation ----
+//
+// Pages are a stack of cards, and anything below the first screenful is
+// easy to miss (the etcd disk-latency table shipped effectively invisible).
+// Build a sticky in-page nav from the card titles: one link per card, with
+// the section currently in view highlighted. Runs automatically on every
+// page with more than one card; no per-page wiring.
+function buildSectionNav() {
+    const main = document.querySelector('.main-content');
+    if (!main) return;
+    // Sections are titled cards; KPI stat tiles (cards with a .card-value)
+    // are not sections, so they don't get nav entries.
+    const cards = [...main.querySelectorAll('.card')]
+        .filter(c => c.querySelector('.card-title') && !c.querySelector('.card-value'));
+    if (cards.length < 2) return;
+
+    const nav = document.createElement('nav');
+    nav.className = 'section-nav';
+    const seen = new Map();
+    const links = cards.map(card => {
+        // Card titles may carry badges (live stats); the nav wants only the
+        // title text.
+        const titleEl = card.querySelector('.card-title').cloneNode(true);
+        titleEl.querySelectorAll('.badge').forEach(badge => badge.remove());
+        const title = titleEl.textContent.trim().replace(/\s+/g, ' ');
+        if (!card.id) {
+            let id = 'section-' + title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+            const n = seen.get(id) || 0;
+            seen.set(id, n + 1);
+            card.id = n ? `${id}-${n + 1}` : id;
+        }
+        const link = document.createElement('a');
+        link.href = '#' + card.id;
+        link.textContent = title;
+        nav.appendChild(link);
+        return { link, card };
+    });
+    const header = main.querySelector('.header');
+    if (header) {
+        header.insertAdjacentElement('afterend', nav);
+    } else {
+        main.prepend(nav);
+    }
+
+    // Scrollspy: the active section is the last card whose top has scrolled
+    // past the sticky nav.
+    const update = () => {
+        const threshold = nav.getBoundingClientRect().bottom + 24;
+        let active = links[0];
+        for (const l of links) {
+            if (l.card.getBoundingClientRect().top <= threshold) active = l;
+        }
+        links.forEach(l => l.link.classList.toggle('active', l === active));
+    };
+    document.addEventListener('scroll', update, { passive: true });
+    update();
+}
+document.addEventListener('DOMContentLoaded', buildSectionNav);
+
 // ---- Chart helpers ----
 
 const CHART_COLORS = [

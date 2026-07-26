@@ -20,18 +20,18 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,16 +45,55 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const (
 	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	// SandboxNameHashLabel is the tracking label the controller stamps on
+	// every Pod and Service it creates or adopts. Exported so the manager
+	// setup (cmd/agent-sandbox-controller) can scope the Pod/Service informer
+	// caches to labeled objects (--cache-label-selectors).
+	SandboxNameHashLabel = sandboxLabel
 	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
 	// value on Pods, so per-reconcile pod lookups are O(1).
 	podSandboxNameHashIndex     = ".metadata.labels[" + sandboxLabel + "]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )
+
+// PodCacheTransform is a client-go informer transform for the manager's Pod
+// cache. It strips fields the controllers never read, before the object is
+// stored, so cache memory and per-event JSON decode garbage stay O(what we
+// use) instead of O(pod spec):
+//
+//   - metadata.managedFields: written via server-side apply by the kubelet on
+//     every status update and never read by any controller here.
+//   - metadata.finalizers: never read on Pods by any controller in this repo
+//     (the sandboxes/finalizers RBAC is for the Sandbox CR itself, not Pods).
+//     Stripping is safe and saves a trivial amount of memory.
+//   - spec: the only spec field any controller reads is spec.nodeName
+//     (propagated to Sandbox status), so it is the only field preserved. The
+//     pod spec the controller WRITES is built from the Sandbox's PodTemplate
+//     (reconcilePod's create path), never from the cached pod, and every pod write in this
+//     repo is a metadata-only merge patch diffed against the same transformed
+//     cache object — stripped fields appear on neither side of the diff, so
+//     they can never leak into (or be deleted by) a patch. See
+//     TestPodCacheTransformMergePatchUnaffected.
+//
+// metadata (labels/annotations/ownerRefs) and status are kept in full.
+// Non-pod inputs (e.g. cache.DeletedFinalStateUnknown tombstones) pass
+// through unchanged.
+func PodCacheTransform(obj any) (any, error) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return obj, nil
+	}
+	pod.ManagedFields = nil
+	pod.Finalizers = nil
+	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName}
+	return pod, nil
+}
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
 type resourceOwnership int
@@ -249,7 +288,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
-		sandbox.Status.LabelSelector = fmt.Sprintf("%s=%s", sandboxLabel, NameHash(sandbox.Name))
+		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
 		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 		sandbox.Status.NodeName = pod.Spec.NodeName
 	}
@@ -449,17 +488,59 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) error {
 	logger := log.FromContext(ctx)
 
-	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
+	if apiequality.Semantic.DeepEqual(oldStatus, &sandbox.Status) {
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, sandbox); err != nil {
-		logger.Error(err, "Failed to update sandbox status")
+	// Pod scheduling produces a status change containing nothing but the
+	// node name (the pod is bound seconds before it runs, so nodeName lands
+	// in its own reconcile, then podIPs and Ready land together shortly
+	// after). While the sandbox is still transitioning, don't spend an API
+	// request on the node name alone: it rides along with the next status
+	// write instead, normally the Ready transition. Once the sandbox is
+	// Ready the deferral no longer applies -- a node change on a Ready
+	// sandbox should be impossible, but if it happens, write it through
+	// rather than leave a Ready sandbox with a wrong or missing node name.
+	if nodeNameOnlyChange(oldStatus, &sandbox.Status) &&
+		!meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
+		return nil
+	}
+
+	// Merge-patch (no resourceVersion precondition) the status subresource.
+	// Two deliberate trade-offs now that the optimistic lock is gone:
+	//   1. A JSON merge patch replaces the whole status.conditions array whenever
+	//      any condition differs from base. That is safe only while this
+	//      controller is the SOLE writer of Sandbox status -- true today, since
+	//      reconciles are workqueue-serialized per object. If a second status
+	//      writer is ever added, switch to MergeFromWithOptimisticLock or SSA.
+	//   2. The old Update's 409 doubled as a stale-informer-cache guard: a
+	//      reconcile computed from a stale read used to fail and re-run with
+	//      fresh data. The patch instead writes through. Status is derived from
+	//      pod state, so it self-heals on the next watch event and converges.
+	base := sandbox.DeepCopy()
+	base.Status = *oldStatus
+	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
+		if k8serrors.IsNotFound(err) {
+			// Sandbox was deleted mid-reconcile
+			return nil
+		}
+		logger.Error(err, "Failed to patch sandbox status")
 		return err
 	}
 
 	// Surface error
 	return nil
+}
+
+// nodeNameOnlyChange reports whether the node assignment is the only
+// difference between the two statuses.
+func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool {
+	if oldStatus.NodeName == newStatus.NodeName {
+		return false
+	}
+	scratch := newStatus.DeepCopy()
+	scratch.NodeName = oldStatus.NodeName
+	return apiequality.Semantic.DeepEqual(oldStatus, scratch)
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.
@@ -472,7 +553,18 @@ func GetNumericHash(input string) uint32 {
 // NameHash generates an FNV-1a hash from a string and returns
 // it as a fixed-length hexadecimal string.
 func NameHash(objectName string) string {
-	return fmt.Sprintf("%08x", GetNumericHash(objectName))
+	h := GetNumericHash(objectName)
+	const hex = "0123456789abcdef"
+	var buf [8]byte
+	buf[0] = hex[(h>>28)&0xf]
+	buf[1] = hex[(h>>24)&0xf]
+	buf[2] = hex[(h>>20)&0xf]
+	buf[3] = hex[(h>>16)&0xf]
+	buf[4] = hex[(h>>12)&0xf]
+	buf[5] = hex[(h>>8)&0xf]
+	buf[6] = hex[(h>>4)&0xf]
+	buf[7] = hex[h&0xf]
+	return string(buf[:])
 }
 
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix
@@ -488,6 +580,45 @@ func hasSystemReservedPrefix(key string) bool {
 // label) and hijack another Sandbox's network traffic.
 func isSystemLabel(key string) bool {
 	return hasSystemReservedPrefix(key)
+}
+
+// extensionPodLabelKeys must stay in sync with computeExtensionPodLabels so reconcile
+// removes stale extension labels when they are no longer expected on the Pod.
+var extensionPodLabelKeys = []string{
+	sandboxv1beta1.SandboxWarmPoolLabel,
+	sandboxv1beta1.SandboxTemplateRefHashLabel,
+}
+
+// computeExtensionPodLabels returns extension-owned labels that should be propagated
+// from a Sandbox CR to its Pod. Labels are only returned when the Sandbox is owned
+// by an extensions controller (SandboxClaim or SandboxWarmPool).
+func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]string {
+	ref := metav1.GetControllerOf(sandbox)
+	if ref == nil {
+		return nil
+	}
+	g, k := utils.GetGroupKind(ref)
+	if g != extensionsv1beta1.GroupVersion.Group {
+		return nil
+	}
+
+	var labels map[string]string
+
+	if k == extensionsv1beta1.SandboxWarmPoolKind {
+		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
+			if labels == nil {
+				labels = make(map[string]string, 2)
+			}
+			labels[sandboxv1beta1.SandboxWarmPoolLabel] = val
+		}
+	}
+	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok && val != "" {
+		if labels == nil {
+			labels = make(map[string]string, 2)
+		}
+		labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
+	}
+	return labels
 }
 
 // isSystemAnnotation reports whether an annotation key is reserved for the sandbox
@@ -510,9 +641,107 @@ func isControllerManagedPodAnnotation(key string) bool {
 	}
 }
 
+func servicePortsForSandbox(sandbox *sandboxv1beta1.Sandbox) []corev1.ServicePort {
+	type servicePortKey struct {
+		port     int32
+		protocol corev1.Protocol
+	}
+
+	explicitNamesByPort := map[servicePortKey]string{}
+	reservedNames := map[string]struct{}{}
+	addContainerPorts := func(container corev1.Container) {
+		for _, containerPort := range container.Ports {
+			if containerPort.ContainerPort == 0 {
+				continue
+			}
+			protocol := containerPort.Protocol
+			if protocol == "" {
+				protocol = corev1.ProtocolTCP
+			}
+			key := servicePortKey{
+				port:     containerPort.ContainerPort,
+				protocol: protocol,
+			}
+			if _, ok := explicitNamesByPort[key]; !ok {
+				explicitNamesByPort[key] = ""
+			}
+			// Deduplicate Service ports by (port, protocol). Preserve the first
+			// explicit container port name for each Service port. If another
+			// Service port reuses that explicit name, the first one keeps it,
+			// matching apiserver named-port lookup behavior.
+			if containerPort.Name == "" || explicitNamesByPort[key] != "" {
+				continue
+			}
+			if _, reserved := reservedNames[containerPort.Name]; reserved {
+				continue
+			}
+			explicitNamesByPort[key] = containerPort.Name
+			reservedNames[containerPort.Name] = struct{}{}
+		}
+	}
+	for _, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		addContainerPorts(container)
+	}
+	for _, container := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			addContainerPorts(container)
+		}
+	}
+	if len(explicitNamesByPort) == 0 {
+		return nil
+	}
+
+	keys := make([]servicePortKey, 0, len(explicitNamesByPort))
+	for key := range explicitNamesByPort {
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(a, b servicePortKey) int {
+		if a.port < b.port {
+			return -1
+		}
+		if a.port > b.port {
+			return 1
+		}
+		return strings.Compare(string(a.protocol), string(b.protocol))
+	})
+
+	servicePorts := make([]corev1.ServicePort, 0, len(keys))
+	for _, key := range keys {
+		name := explicitNamesByPort[key]
+		if name == "" {
+			// Unnamed Service ports use a generated name. If the generated name
+			// conflicts with a reserved explicit name, change the generated name
+			// to preserve the user provided names for ports.
+			name = generatedServicePortName(key.port, key.protocol, reservedNames)
+		}
+		reservedNames[name] = struct{}{}
+		servicePorts = append(servicePorts, corev1.ServicePort{
+			Name:       name,
+			Protocol:   key.protocol,
+			Port:       key.port,
+			TargetPort: intstr.FromInt32(key.port),
+		})
+	}
+	return servicePorts
+}
+
+func generatedServicePortName(port int32, protocol corev1.Protocol, reservedNames map[string]struct{}) string {
+	baseName := fmt.Sprintf("p-%d-%s", port, strings.ToLower(string(protocol)))
+	if _, reserved := reservedNames[baseName]; !reserved {
+		return baseName
+	}
+	for suffix := 2; ; suffix++ {
+		name := fmt.Sprintf("%s-%d", baseName, suffix)
+		if _, reserved := reservedNames[name]; !reserved {
+			return name
+		}
+	}
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
 	logger := log.FromContext(ctx)
 	desired := sandbox.Spec.Service
+	desiredPorts := servicePortsForSandbox(sandbox)
 
 	service := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
@@ -536,6 +765,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 					Selector: map[string]string{
 						sandboxLabel: nameHash,
 					},
+					Ports: desiredPorts,
 				},
 			}
 			service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
@@ -616,6 +846,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		service.Spec.Selector = map[string]string{
 			sandboxLabel: nameHash,
 		}
+		service.Spec.Ports = desiredPorts
 
 		if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 			return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
@@ -638,8 +869,12 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			service.Labels[sandboxLabel] = nameHash
 			needsUpdate = true
 		}
-		if !reflect.DeepEqual(service.Spec.Selector, desiredSelector) {
+		if !apiequality.Semantic.DeepEqual(service.Spec.Selector, desiredSelector) {
 			service.Spec.Selector = desiredSelector
+			needsUpdate = true
+		}
+		if desired != nil && *desired && !servicePortsEqual(service.Spec.Ports, desiredPorts) {
+			service.Spec.Ports = desiredPorts
 			needsUpdate = true
 		}
 
@@ -653,6 +888,21 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 	r.setServiceStatus(sandbox, service)
 	return service, nil
+}
+
+func servicePortsEqual(a, b []corev1.ServicePort) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name ||
+			a[i].Protocol != b[i].Protocol ||
+			a[i].Port != b[i].Port ||
+			a[i].TargetPort != b[i].TargetPort {
+			return false
+		}
+	}
+	return true
 }
 
 // clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
@@ -911,20 +1161,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Propagate extension-owned labels from the Sandbox CR to the Pod, provided the Sandbox is
 	// owned by an extensions controller (SandboxClaim or SandboxWarmPool).
-	if ref := metav1.GetControllerOf(sandbox); ref != nil {
-		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group {
-			// The warm pool label is required by the capacity buffer to identify warm pool pods.
-			if gvk.Kind == "SandboxWarmPool" {
-				if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok {
-					podLabels[sandboxv1beta1.SandboxWarmPoolLabel] = val
-				}
-			}
-			if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok {
-				podLabels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
-			}
-		}
-	}
+	maps.Copy(podLabels, computeExtensionPodLabels(sandbox))
 
 	// Propagate the created-by label from the Sandbox CR labels to the Pod if present,
 	// normalizing it to a known allow-list to prevent invalid values or high cardinality.
@@ -1061,36 +1298,15 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		}
 	}
 	// Reconcile extension-owned labels based on Sandbox ownership.
-	var expectedWarmPoolHash string
-	var expectedTemplateRefHash string
-	if ref := metav1.GetControllerOf(sandbox); ref != nil {
-		gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-		if gvk.Group == extensionsv1beta1.GroupVersion.Group {
-			if gvk.Kind == "SandboxWarmPool" {
-				expectedWarmPoolHash = sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]
+	extensionLabels := computeExtensionPodLabels(sandbox)
+	for _, key := range extensionPodLabelKeys {
+		if val, ok := extensionLabels[key]; ok {
+			if pod.Labels[key] != val {
+				pod.Labels[key] = val
+				updated = true
 			}
-			expectedTemplateRefHash = sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]
-		}
-	}
-	if expectedWarmPoolHash != "" {
-		if pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] != expectedWarmPoolHash {
-			pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel] = expectedWarmPoolHash
-			updated = true
-		}
-	} else {
-		if _, exists := pod.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; exists {
-			delete(pod.Labels, sandboxv1beta1.SandboxWarmPoolLabel)
-			updated = true
-		}
-	}
-	if expectedTemplateRefHash != "" {
-		if pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] != expectedTemplateRefHash {
-			pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = expectedTemplateRefHash
-			updated = true
-		}
-	} else {
-		if _, exists := pod.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; exists {
-			delete(pod.Labels, sandboxv1beta1.SandboxTemplateRefHashLabel)
+		} else if _, exists := pod.Labels[key]; exists {
+			delete(pod.Labels, key)
 			updated = true
 		}
 	}

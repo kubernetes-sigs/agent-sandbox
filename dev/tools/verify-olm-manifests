@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+# keep in sync with dev/tools/sync-olm-manifests (copy-k8s-config in olm/Makefile)
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd "${ROOT}"
+
+TMP_DIR=$(mktemp -d)
+exitHandler() (
+  rm -rf "${TMP_DIR}"
+)
+trap exitHandler EXIT
+
+echo "Checking OLM manifests are up to date..."
+cp -a olm/config/. "${TMP_DIR}/"
+make -C olm copy-k8s-config CONFIG_DIR="${TMP_DIR}"
+
+if ! diff -rq "${TMP_DIR}" olm/config > /dev/null; then
+  echo "OLM manifests not up to date. Did you run 'make fix-go-generate' or 'make fix-olm-manifests'?"
+  while IFS= read -r line; do
+    case "${line}" in
+    "Files ${TMP_DIR}/"*)
+      rel="${line#Files ${TMP_DIR}/}"
+      rel="${rel%% and *}"
+      echo "  olm/config/${rel}"
+      ;;
+    "Only in ${TMP_DIR}/"*)
+      dir_and_file="${line#Only in ${TMP_DIR}/}"
+      dir="${dir_and_file%%:*}"
+      file="${dir_and_file#*: }"
+      echo "  olm/config/${dir}/${file} (missing)"
+      ;;
+    "Only in olm/config/"*)
+      dir_and_file="${line#Only in olm/config/}"
+      dir="${dir_and_file%%:*}"
+      file="${dir_and_file#*: }"
+      echo "  olm/config/${dir}/${file} (extra)"
+      ;;
+    *)
+      echo "  ${line}"
+      ;;
+    esac
+  done < <(diff -rq "${TMP_DIR}" olm/config || true)
+  exit 1
+fi

@@ -37,6 +37,27 @@
     </div>
 </div>
 
+<div class="card">
+    <div class="card-title">etcd Disk Latency by Phase (server-side)</div>
+    {% if etcd_disk %}
+    <div class="card-desc">
+        The request latencies above are the apiserver's client-side view and cannot separate disk
+        from CPU. These are etcd's own numbers: WAL fsync is the disk wait on every write, backend
+        commit is the periodic boltdb flush. If client latency rises while fsync stays flat, the
+        control plane is CPU-starved, not I/O-bound. etcd's guidance: fsync p99 under 10ms.
+    </div>
+    <div class="table-container">
+        <table id="etcd-disk-table"></table>
+    </div>
+    {% else %}
+    <div class="card-desc">
+        No etcd server-side metrics in this run. They are captured when etcd serves its plain-HTTP
+        metrics listener (<code>etcdClusters[].manager.listenMetricsURLs</code> on kOps); older runs
+        predate this.
+    </div>
+    {% endif %}
+</div>
+
 <script>
     const etcdOps = {{ etcd_ops | tojson }};
     renderTable('#etcd-ops-table', [
@@ -47,6 +68,23 @@
         {key: 'avg_latency_ms', label: 'Average Latency', render: v =>
             badge(v > 20 ? 'danger' : v > 5 ? 'warning' : 'success', v.toFixed(2) + 'ms')}
     ], etcdOps);
+
+    const etcdDisk = {{ etcd_disk | tojson }};
+    if (etcdDisk.length) {
+        renderTable('#etcd-disk-table', [
+            {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+            {key: 'source', label: 'Cluster', render: v => `<code>${escapeHtml(v)}</code>`},
+            {key: 'fsync_n', label: 'WAL fsyncs'},
+            {key: 'fsync_avg_ms', label: 'fsync avg', render: v =>
+                badge(v > 10 ? 'danger' : v > 2 ? 'warning' : 'success', v.toFixed(2) + 'ms')},
+            {key: 'fsync_p99_ms', label: 'fsync p99', render: v =>
+                badge(v > 100 ? 'danger' : v > 10 ? 'warning' : 'success', v.toFixed(1) + 'ms')},
+            {key: 'commit_avg_ms', label: 'backend commit avg', render: v =>
+                badge(v > 25 ? 'danger' : v > 5 ? 'warning' : 'success', v.toFixed(2) + 'ms')},
+            {key: 'commit_p99_ms', label: 'backend commit p99', render: v =>
+                badge(v > 250 ? 'danger' : v > 25 ? 'warning' : 'success', v.toFixed(1) + 'ms')}
+        ], etcdDisk);
+    }
 
     const chartData = {{ chart_data | tojson }};
     const phases = {{ phases | tojson }};

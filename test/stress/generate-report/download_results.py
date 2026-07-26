@@ -15,6 +15,7 @@
 
 import argparse
 import json
+import re
 import ssl
 import sys
 import urllib.request
@@ -139,8 +140,12 @@ def main():
         else:
             phases = [p.get("name", "") if isinstance(p, dict) else str(p) for p in raw_phases]
         for phase in [p for p in phases if p]:
-            out_file_path = output_dir / f"pprof-apiserver-{phase}.pprof"
-            for candidate in (f"pprof-apiserver-{phase}.pprof", f"pprof-apiserver-{phase}.pb"):
+            # Mirror the stress tool's fileSafePhase (pprof.go): phase names
+            # may contain ':' (throughput-mif:600), which is flattened to '-'
+            # in artifact filenames.
+            safe = re.sub(r'[^A-Za-z0-9._-]', '-', phase)
+            out_file_path = output_dir / f"pprof-apiserver-{safe}.pprof"
+            for candidate in (f"pprof-apiserver-{safe}.pprof", f"pprof-apiserver-{safe}.pb"):
                 if download_file(f"{base_url}/{candidate}", out_file_path):
                     downloaded += 1
                     break

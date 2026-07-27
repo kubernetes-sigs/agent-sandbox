@@ -223,6 +223,11 @@ func (t *milestoneTracker) watchClaims(ctx context.Context) {
 					t.tb.Logf("[milestone-tracker] watch channel closed, reconnecting")
 					goto reconnect
 				}
+				if event.Type == watch.Error {
+					t.tb.Logf("[milestone-tracker] watch error event (possible 410 Gone), resetting resourceVersion")
+					resourceVersion = ""
+					goto reconnect
+				}
 				if u, ok := event.Object.(*unstructured.Unstructured); ok {
 					resourceVersion = u.GetResourceVersion()
 				}

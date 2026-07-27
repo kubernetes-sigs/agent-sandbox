@@ -158,6 +158,15 @@ func TestRuntimeClassLifecycle(t *testing.T) {
 	t.Logf("Waiting for claim-1 to be ready...")
 	tc.MustWaitForObject(claim1, predicates.ReadyConditionIsTrue)
 
+	t.Logf("Waiting for pool to observe consumed sandbox...")
+	require.Eventually(t, func() bool {
+		pool := &extensionsv1beta1.SandboxWarmPool{}
+		if err := tc.Get(t.Context(), warmPoolID, pool); err != nil {
+			return false
+		}
+		return pool.Status.ReadyReplicas < replicas
+	}, framework.DefaultTimeout, time.Second, "pool should observe consumed sandbox")
+
 	t.Logf("Waiting for pool to refill to %d replicas...", replicas)
 	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), warmPoolID))
 

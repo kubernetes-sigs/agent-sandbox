@@ -143,7 +143,7 @@ that specific pool size. The warm/cold threshold is fixed at **1 second**.
 ### CSV columns
 
 ```text
-batch,claim,latency_sec,type,wall_offset_sec,ready_at_start,create_ack_ms,adoption_ms,schedule_ms,runtime_ms,propagate_ms,e2e_ms,is_warm
+batch,claim,latency_sec,under_1s,wall_offset_sec,ready_at_start,create_ack_ms,adoption_ms,schedule_ms,runtime_ms,propagate_ms,e2e_ms,is_warm
 ```
 
 | Column | Description |
@@ -151,7 +151,7 @@ batch,claim,latency_sec,type,wall_offset_sec,ready_at_start,create_ack_ms,adopti
 | `batch` | Batch number (1-based) |
 | `claim` | Claim index within the batch |
 | `latency_sec` | Time from claim creation to Ready condition |
-| `type` | `warm` (< 1s) or `cold` (>= 1s) |
+| `under_1s` | Whether latency is under the 1s warm/cold threshold |
 | `wall_offset_sec` | Seconds since the test started |
 | `ready_at_start` | Pool ReadyReplicas when this batch fired |
 | `create_ack_ms` | API server round-trip: create call to return |
@@ -190,8 +190,8 @@ Footer summary:
 ```text
 # total_batches,6
 # total_claims,48
-# warm_claims,48
-# cold_claims,0
+# under_1s_claims,48
+# over_1s_claims,0
 # green_claims,21
 # grey_zone_claims,27
 # worst_start_sec,0.752

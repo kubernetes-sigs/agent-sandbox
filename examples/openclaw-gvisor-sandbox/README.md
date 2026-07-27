@@ -275,6 +275,42 @@ envFrom:
 See [OpenClaw provider docs](https://docs.openclaw.ai/providers) for
 the env-var name per provider.
 
+## Auto-Suspension & Traffic-Triggered Resume
+
+You can run OpenClaw with **Auto-Suspension and Traffic-Triggered Resume** enabled using `openclaw-sandbox-auto-suspension.yaml`. This automatically suspends OpenClaw after periods of idleness to save compute resources while preserving agent workspace memories, and wakes it up transparently when incoming traffic arrives.
+
+### 1. Deploy OpenClaw with Auto-Suspension
+
+Ensure your cluster has the auto-suspension overlay installed (`kubectl apply -f k8s/auto-suspension.yaml`), then apply the manifest:
+
+```bash
+sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" examples/openclaw-sandbox/openclaw-sandbox-auto-suspension.yaml | kubectl apply -f -
+```
+
+### 2. How OpenClaw Idles Out
+
+When no HTTP traffic arrives for 30 minutes (`.spec.inactivityDuration: 30m`):
+- `.spec.operatingMode` automatically transitions to `Suspended` and the Pod is garbage-collected.
+- The `workspaces-pvc` Persistent Volume Claim mounted at `/home/node/.openclaw/workspace` remains **100% intact**, preserving all agent workspace files, configurations, and conversation history.
+
+### 3. Waking OpenClaw Up via Envoy Gateway (`X-Sandbox-Port: 18789`)
+
+Because OpenClaw listens on container port `18789` (rather than the default `8888`), include the `X-Sandbox-Port: 18789` header when sending traffic through Envoy Gateway (`:8000`):
+
+```bash
+curl -i \
+  -H "X-Sandbox-ID: openclaw-auto-suspension" \
+  -H "X-Sandbox-Namespace: default" \
+  -H "X-Sandbox-Port: 18789" \
+  http://localhost:8000/
+```
+
+When this request arrives for a suspended OpenClaw sandbox:
+1. Envoy Gateway (`ext_proc`) calls `sandbox-router:9002`, which signals `POST /v1/sandboxes/resume` to the controller (`:8090`).
+2. The controller thaws `.spec.operatingMode` to `Running` and creates a new Pod.
+3. `ext_proc` holds the HTTP request open until the Pod IP is registered and container port `18789` is accepting TCP connections.
+4. Envoy proxies the request directly to OpenClaw—returning a successful HTTP response on the very first request with zero connection drops.
+
 ## Persistence model
 
 PVCs are named `<vctName>-<sandboxName>` and owned by the `Sandbox` CR. So:

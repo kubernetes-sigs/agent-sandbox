@@ -14,9 +14,11 @@ Sandbox `v0.5.0rc1` (v1beta1).
   label) and, if it exceeds `min(expected × overcommit_factor, max_live_sandboxes)`,
   **tears the fleet down and raises `FleetOvercommitError`**. Keys off *intent*, so it
   catches accidental over-creation (runaway / orphaned driver / warm-pool #1215)
-  regardless of source — in-SDK, unlike an external watchdog that goes blind when the
-  apiserver 429s. Wired into `run()`. Config: `overcommit_factor` (1.5),
-  `max_live_sandboxes` (None), `breaker_poll_s` (5.0).
+  regardless of source, and being in-SDK it acts in-process (aborts the run + tears
+  down) rather than needing an external watchdog. It samples via the apiserver, so on a
+  list error it fails **open** (under-counts, not a false trip) — it is not a substitute
+  for control-plane back-pressure during sustained 429s. Wired into `run()`. Config:
+  `overcommit_factor` (1.5), `max_live_sandboxes` (None), `breaker_poll_s` (5.0).
 - **Best-effort teardown + label reaper** (`fleet.py`, `reaper.py`, `constants.py`):
   every created resource is stamped with a per-run label (`RUN_ID_LABEL` = `fleet.run_id`);
   `setup()` installs `atexit` + SIGINT/SIGTERM handlers that tear down on **graceful**

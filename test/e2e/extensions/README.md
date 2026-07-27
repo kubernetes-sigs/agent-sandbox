@@ -122,7 +122,17 @@ that are reused across all pool sizes. The flow:
 2. **Scale to 0**: pool is drained, calibration claim deleted.
 3. **Per pool size**: scale pool to target replicas, measure **fill time**
    (time for `ReadyReplicas` to reach target), run burst claims, scale back
-   to 0. A 2-second cooldown separates iterations.
+   to 0. Between iterations, the test polls until all pods in the namespace
+   (including Terminating) are fully gone — this ensures the next pool size
+   starts with all CPU capacity available, which is critical for kata where
+   pod termination can take 5-10 seconds per VM.
+
+VM runtimes skip pool sizes that exceed **300%** of worker CPU capacity.
+Overprovisioning works well for kata — scheduler queues VMs while the
+pool maintains a larger buffer of pre-warmed slots. Empirically, warm
+ratio and throughput both improve past 100% CPU (e.g., pool-28 on a
+3×8 vCPU cluster yields 89% warm at 3.3 claims/s vs 65% at 2.3 for
+pool-16).
 
 Fill time accounts for the controller's `slowStartBatch` exponential ramp
 (1, 2, 4, 8… concurrent creates) and is used to derive claim timeouts for
@@ -146,16 +156,36 @@ batch,claim,latency_sec,type,wall_offset_sec,ready_at_start,create_ack_ms,adopti
 | `ready_at_start` | Pool ReadyReplicas when this batch fired |
 | `create_ack_ms` | API server round-trip: create call to return |
 | `adoption_ms` | Controller bind time: create returned to sandbox name set |
-| `schedule_ms` | Pod scheduling: pod created to PodScheduled condition |
-| `runtime_ms` | Container runtime: PodScheduled to PodReady |
+| `schedule_ms` | Pod scheduling: pod created to PodScheduled (warm: during pool fill; cold: during claim) |
+| `runtime_ms` | Container runtime: PodScheduled to PodReady (warm: VM boot / container start during pool fill; cold: during claim) |
 | `propagate_ms` | Status propagation: sandbox Ready to claim Ready |
 | `e2e_ms` | End-to-end: create call to claim Ready |
 | `is_warm` | Whether the pod existed before the claim (pre-warmed) |
 
 ### CSV header and footer
 
-The file starts with `# key,value` metadata lines (cluster ID, instance type,
-runtime class, pool fill time) and ends with summary stats:
+The file starts with `# key,value` metadata lines and ends with summary stats.
+
+Header metadata:
+
+```text
+# cluster_id,my-cluster-abcde
+# worker_count,3
+# total_cpu_capacity,24
+# instance_type,n2-standard-8
+# runtime_class,kata
+# pool_size,8
+# workload_sec,0
+# warm_baseline_sec,0.350
+# warm_cold_threshold_sec,1.000
+# pool_fill_sec,12.500
+# batch_size,4
+# max_claims,16
+# settle_sec,2
+# inter_batch_settle_ms,100
+```
+
+Footer summary:
 
 ```text
 # total_batches,6
@@ -177,13 +207,13 @@ Claims are classified into quality zones based on latency:
 
 | Zone | Range | Meaning |
 |------|-------|---------|
-| **Green** | ≤ warm_baseline × 1.2 | Optimal — indistinguishable from a single warm claim |
-| **Grey** | warm_baseline × 1.2 … 1s | Elevated latency from reconciler serialization, still warm |
-| **Cold** | > 1s | Cold start territory — pool was exhausted |
+| **Green** | ≤ 500ms | Invisible to the caller — warm pool delivered its promise |
+| **Grey** | 500ms … 1s | Contention-degraded but still faster than cold start |
+| **Cold** | > 1s | Warm pool failed to mask the cold start |
 | **Over-cold** | > pool fill time | Worse than the measured pool fill time |
 
-The grey zone is caused by controller work-queue serialization (~160ms cycle),
-etcd write contention, and watch event coalescing — it is runtime-independent.
+The grey zone is dominated by API server round-trip (~170ms) and controller
+adoption overhead (~100-250ms) — it is runtime-independent.
 
 ## Report Directory Structure
 
@@ -211,9 +241,6 @@ If the directory already exists, a numeric suffix is appended (`_2`, `_3`, ...).
   to drive multi-runtime test sweeps without manual `SANDBOX_RUNTIME_CLASS` env
   var. Not all nodes support all runtimes (e.g., `kata-nvidia-gpu` requires
   specific node capabilities).
-- **Virtualization topology reporting**: Detect whether worker nodes are bare-metal
-  with hardware virtualization or virtual with nested virtualization. Relevant for
-  kata cold start analysis — nested virt adds measurable overhead.
 - **CPU-relative benchmark pool sizes**: Default `SANDBOX_POOL_SIZES` to
   `{cpuCapacity/2, cpuCapacity, cpuCapacity*2}` — half (comfortable headroom),
   full (capacity cliff), and double (forced cold starts to measure the penalty).
@@ -222,8 +249,39 @@ If the directory already exists, a numeric suffix is appended (`_2`, `_3`, ...).
   moderate scheduling pressure in CI.
 - **Probe-based settle detection**: Replace the fixed `SANDBOX_SETTLE_SEC` delay
   with a single probe claim after pool fill. If the probe latency falls within
-  the green threshold, the controller work queue is empirically drained and burst
+  the green threshold (500ms), the controller work queue is empirically drained and burst
   can start immediately. If not, back off and retry. Eliminates both the risk of
   starting too early (inflated baselines) and waiting too long (wasted time on
   fast clusters).
+- **Per-pool controller log capture**: Restart the controller pod before each
+  pool size iteration and collect its log after the iteration completes. Save
+  the log alongside the CSV in the results directory (e.g.,
+  `controller_gvisor_pool24.log`). Enables "under the hood" analysis of
+  reconcile throughput, batch sizes, etcd conflicts, and refill patterns per
+  pool size without manually correlating timestamps in a single merged log.
+- **Per-pool metrics capture**: Scrape the controller's Prometheus endpoint
+  (`/metrics` on port 8080) before and after each pool iteration. Save the
+  delta as `metrics_<runtime>_pool<N>.prom` in the results directory. Key
+  metrics to capture, in priority order:
+  1. **Controller**: `controller_runtime_reconcile_total` (by result),
+     `controller_runtime_reconcile_time_seconds` (reconcile duration histogram),
+     `workqueue_depth` and `workqueue_unfinished_work_seconds` (worker
+     saturation — if queue depth stays >0 during burst, workers are the
+     ceiling).
+  2. **API server**: `apiserver_request_duration_seconds` filtered to
+     `resource=sandboxes,sandboxclaims,pods` (request latency),
+     `apiserver_current_inflight_requests` (throttling).
+  3. **etcd**: `etcd_request_duration_seconds` for `type=put` (raw write
+     latency), `etcd_disk_wal_fsync_duration_seconds` (disk bottleneck).
+  4. **Kubelet**: `kubelet_pod_start_duration_seconds` (node-side pod startup,
+     most useful for kata VM boot breakdown).
+- **Kata VM boot tracing**: Enable kata's built-in Jaeger tracing by setting
+  `enable_tracing = true` and `jaeger_endpoint` in
+  `/etc/kata-containers/configuration.toml` before the test run. This exposes
+  microsecond-level spans for the full VM boot sequence: firmware load →
+  kernel boot → kata-agent start → rootfs mount → container exec. CRI-O logs
+  only show shim fork + network setup (~400ms); the remaining ~8s of kata cold
+  start is invisible without tracing. Alternatively, scrape the per-sandbox
+  shim-monitor.sock metrics endpoint while VMs are still running to capture
+  boot timing without Jaeger infrastructure.
 

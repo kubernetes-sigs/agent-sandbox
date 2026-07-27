@@ -306,13 +306,11 @@ func computeBreakdown(rec *claimMilestones) milestoneBreakdown {
 	b.IsWarm = !rec.serverPodCreated.IsZero() && !rec.createCalled.IsZero() &&
 		rec.serverPodCreated.Before(rec.createCalled)
 
-	if !b.IsWarm {
-		if !rec.serverPodCreated.IsZero() && !rec.serverPodScheduled.IsZero() {
-			b.ScheduleMs = msInterval(rec.serverPodCreated, rec.serverPodScheduled)
-		}
-		if !rec.serverPodScheduled.IsZero() && !rec.serverPodReady.IsZero() {
-			b.RuntimeMs = msInterval(rec.serverPodScheduled, rec.serverPodReady)
-		}
+	if !rec.serverPodCreated.IsZero() && !rec.serverPodScheduled.IsZero() {
+		b.ScheduleMs = msInterval(rec.serverPodCreated, rec.serverPodScheduled)
+	}
+	if !rec.serverPodScheduled.IsZero() && !rec.serverPodReady.IsZero() {
+		b.RuntimeMs = msInterval(rec.serverPodScheduled, rec.serverPodReady)
 	}
 
 	if !rec.serverSandboxReady.IsZero() && !rec.claimReady.IsZero() {

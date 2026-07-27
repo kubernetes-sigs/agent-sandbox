@@ -432,13 +432,11 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		t.Fatalf("cannot determine pool sizes: %v", err)
 	}
 
-	for i, poolSize := range poolSizes {
-		if i > 0 {
-			time.Sleep(2 * time.Second)
-		}
-
-		if isVMRuntime(runtimeClass) && int64(poolSize) > cpus {
-			t.Logf("[skip] pool size %d exceeds worker CPU capacity (%d vCPUs)", poolSize, cpus)
+	for _, poolSize := range poolSizes {
+		// Allow up to 300% CPU overprovisioning for VM runtimes — scheduler
+		// queues excess VMs while the larger pool improves warm hit ratio.
+		if isVMRuntime(runtimeClass) && int64(poolSize) > cpus*3 {
+			t.Logf("[skip] pool size %d exceeds 300%% of worker CPU capacity (%d vCPUs)", poolSize, cpus)
 			continue
 		}
 
@@ -478,6 +476,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			defer cw.Flush()
 
 			_ = cw.Write([]string{"# cluster_id", cluster.Identity})
+			_ = cw.Write([]string{"# worker_count", strconv.Itoa(len(cluster.Workers))})
+			_ = cw.Write([]string{"# total_cpu_capacity", strconv.FormatInt(cpus, 10)})
 			_ = cw.Write([]string{"# instance_type", instanceType})
 			_ = cw.Write([]string{"# runtime_class", runtimeClass})
 			_ = cw.Write([]string{"# pool_size", strconv.Itoa(poolSize)})
@@ -633,7 +633,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			greyZoneCount := 0
 			overColdCount := 0
 			var worstStart time.Duration
-			greenThreshold := time.Duration(float64(warmBaseline) * 1.2)
+			greenThreshold := 500 * time.Millisecond
 			for _, r := range allRecords {
 				createTime := testStart.Add(r.wallOffset - r.latency)
 				readyTime := testStart.Add(r.wallOffset)
@@ -667,8 +667,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("=======================================================================")
 			t.Logf("  Total batches:       %d (batch_size=%d)", batchNum, batchSize)
 			t.Logf("  Total claims:        %d (%d under1s, %d over1s)", totalClaims, under1sCount, totalClaims-under1sCount)
-			t.Logf("  Green (<=warm):      %d", greenCount)
-			t.Logf("  Grey (warm..1s):     %d", greyZoneCount)
+			t.Logf("  Green (<=500ms):     %d", greenCount)
+			t.Logf("  Grey (500ms..1s):    %d", greyZoneCount)
 			t.Logf("  Worst start:         %.3fs", worstStart.Seconds())
 			t.Logf("  Over cold start:     %d (>%.3fs)", overColdCount, poolFillTime.Seconds())
 			t.Logf("  Time to all ready:   %.3fs", timeToAllReadySec)
@@ -691,13 +691,24 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
 		})
 
-		// Scale pool to 0 and wait for all sandboxes to terminate before next iteration
+		// Scale pool to 0 and wait for all pods (including Terminating) to be gone
 		framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
 			p.Spec.Replicas = &zeroReplicas
 		})
 		drainCtx, drainCancel := context.WithTimeout(t.Context(), fillTimeout)
 		require.NoError(t, tc0.WaitForWarmPoolReady(drainCtx, poolID))
 		drainCancel()
+
+		// Wait for all pods (including Terminating) to be fully gone before
+		// scaling to the next pool size. This ensures CPU capacity is restored,
+		// which is critical for kata where VM termination takes 5-10s per pod.
+		podDrainTimeout := time.Duration(poolSize)*10*time.Second + 30*time.Second
+		podDrainCtx, podDrainCancel := context.WithTimeout(t.Context(), podDrainTimeout)
+		t.Logf("[drain] waiting for all pods in %s to terminate (timeout %s)", ns.Name, podDrainTimeout)
+		if err := waitForNoPods(podDrainCtx, tc0.ClusterClient, ns.Name); err != nil {
+			t.Logf("[drain] WARNING: %v — proceeding anyway", err)
+		}
+		podDrainCancel()
 	}
 }
 
@@ -777,6 +788,33 @@ func benchBatchCap() int {
 		}
 	}
 	return 10
+}
+
+// waitForNoPods polls until no pods remain in the namespace, including those
+// in Terminating phase. Returns nil when the namespace is empty, or an error
+// if the context expires with pods still present.
+func waitForNoPods(ctx context.Context, cl *framework.ClusterClient, namespace string) error {
+	for {
+		var podList corev1.PodList
+		if err := cl.List(ctx, &podList, client.InNamespace(namespace)); err != nil {
+			return fmt.Errorf("listing pods in %s: %w", namespace, err)
+		}
+		if len(podList.Items) == 0 {
+			return nil
+		}
+		terminating := 0
+		for i := range podList.Items {
+			if podList.Items[i].DeletionTimestamp != nil {
+				terminating++
+			}
+		}
+		cl.Logf("[drain] %d pods remaining (%d terminating) in %s", len(podList.Items), terminating, namespace)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%d pods still in %s after timeout (%d terminating)", len(podList.Items), namespace, terminating)
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func benchPoolSizes(cpuCapacity int64) ([]int, error) {

@@ -26,9 +26,11 @@ import (
 
 // NetworkPolicyManagement defines whether the controller automatically generates
 // and manages a shared NetworkPolicy for this template.
+// +kubebuilder:validation:Enum=Managed;Unmanaged
 type NetworkPolicyManagement string
 
 // EnvVarsInjectionPolicy defines whether a SandboxClaim is allowed to inject or override environment variables.
+// +kubebuilder:validation:Enum=Allowed;Overrides;Disallowed
 type EnvVarsInjectionPolicy string
 
 const (
@@ -116,7 +118,6 @@ type SandboxTemplateSpec struct {
 
 	// networkPolicyManagement defines whether the controller manages the NetworkPolicy.
 	// Valid values are "Managed" (default) or "Unmanaged".
-	// +kubebuilder:validation:Enum=Managed;Unmanaged
 	// +kubebuilder:default=Managed
 	// +optional
 	NetworkPolicyManagement NetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
@@ -134,7 +135,6 @@ type SandboxTemplateSpec struct {
 	// (Allowed or Overrides) only takes effect on a per-claim basis: any claim that actually
 	// sets spec.env is forced to cold-start a fresh Sandbox and cannot adopt a warm pool
 	// Sandbox. Claims that set no environment variables still use the warm pool normally.
-	// +kubebuilder:validation:Enum=Allowed;Overrides;Disallowed
 	// +kubebuilder:default=Disallowed
 	// +optional
 	EnvVarsInjectionPolicy EnvVarsInjectionPolicy `json:"envVarsInjectionPolicy,omitempty"`

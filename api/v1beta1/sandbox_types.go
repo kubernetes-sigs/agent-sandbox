@@ -22,6 +22,8 @@ import (
 
 // ConditionType is a type of condition for a resource.
 //
+// +kubebuilder:validation:Enum=Suspended;Ready;Finished
+//
 // Terminology: a Sandbox has two distinct notions that are easy to confuse.
 //   - "running" is a desired state expressed by the user via spec.operatingMode
 //     (see SandboxOperatingModeRunning). It says the controller should create and
@@ -213,6 +215,8 @@ type PersistentVolumeClaimTemplate struct {
 }
 
 // SandboxOperatingMode defines the desired operational state of the Sandbox.
+// +kubebuilder:validation:Enum=Running;Suspended
+//
 // It expresses intent ("running" vs. "suspended"), not observed status; whether the
 // Sandbox has actually reached that state is reported by conditions (see
 // SandboxConditionReady and SandboxConditionSuspended).
@@ -292,7 +296,6 @@ type SandboxSpec struct {
 	// actually up (see SandboxConditionReady).
 	// Defaults to Running if not specified.
 	// +kubebuilder:default=Running
-	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
 }

@@ -173,6 +173,11 @@ class Resources:
     if not stale:
       return
     try:
+      # patch_namespaced_custom_object sends a JSON Merge Patch (RFC 7386;
+      # the client's only content-type for CRD patch is merge-patch+json), which
+      # merges nested objects — so this UPSERTS the managed label keys and leaves
+      # any pre-existing/operator labels on the template + podTemplate intact. It
+      # does not replace the label maps.
       self.custom_api.patch_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,

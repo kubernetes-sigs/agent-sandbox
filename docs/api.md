@@ -248,8 +248,10 @@ _Appears in:_
 
 
 IdleLifecyclePolicy defines an idle-based lifecycle for Sandboxes.
-When configured, the controller automatically suspends idle sandboxes
-and optionally deletes them after a retention period.
+When configured, the controller tracks activity and transitions idle sandboxes:
+a Running sandbox is either Suspended (default) or Deleted when its active TTL
+expires, and a Suspended sandbox is either Deleted (default) or Retained as
+expired when its suspended TTL expires.
 
 
 
@@ -258,9 +260,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `activeTTLSeconds` _integer_ | activeTTLSeconds defines how long (in seconds) a Running sandbox can<br />remain without activity before the activeExpirationPolicy applies. |  | Minimum: 0 <br /> |
+| `activeTTLSeconds` _integer_ | activeTTLSeconds defines how long (in seconds) a Running sandbox can<br />remain without activity before the activeExpirationPolicy applies. |  | Minimum: 1 <br />Required: \{\} <br /> |
 | `activeExpirationPolicy` _[IdleExpirationPolicy](#idleexpirationpolicy)_ | activeExpirationPolicy defines the action when the active TTL expires. | Suspend | Enum: [Suspend Delete] <br />Optional: \{\} <br /> |
-| `suspendedTTLSeconds` _integer_ | suspendedTTLSeconds defines how long (in seconds) a Suspended sandbox<br />remains before the suspendedExpirationPolicy applies.<br />If unset, the sandbox remains suspended indefinitely until manually resumed. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `suspendedTTLSeconds` _integer_ | suspendedTTLSeconds defines how long (in seconds) a Suspended sandbox<br />remains before the suspendedExpirationPolicy applies.<br />If unset, the sandbox remains suspended indefinitely until manually resumed. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `suspendedExpirationPolicy` _[SuspendedExpirationPolicy](#suspendedexpirationpolicy)_ | suspendedExpirationPolicy defines the action when the suspended TTL expires. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 
 
@@ -416,7 +418,7 @@ _Appears in:_
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
-| `idleLifecycle` _[IdleLifecyclePolicy](#idlelifecyclepolicy)_ | idleLifecycle defines an idle-based lifecycle policy. When set, the<br />controller tracks activity and transitions the sandbox through<br />Running -> Suspended -> Deleted based on the configured TTLs. |  | Optional: \{\} <br /> |
+| `idleLifecycle` _[IdleLifecyclePolicy](#idlelifecyclepolicy)_ | idleLifecycle defines an idle-based lifecycle policy. When set, the<br />controller tracks activity and transitions idle sandboxes:<br />Running -> Suspended or Deleted, then Suspended -> Deleted or Retained. |  | Optional: \{\} <br /> |
 
 
 #### SandboxStatus

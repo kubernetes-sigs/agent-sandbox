@@ -261,11 +261,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		case idleActionSuspend:
 			logger.Info("Idle TTL expired, suspending sandbox")
 			// Persist status first so lastActivityTime and conditions from
-			// reconcileChildResources are not lost.
+			// reconcileChildResources are not lost. If this fails (e.g. 409
+			// conflict from a concurrent lastActivityTime update), abort the
+			// suspend and requeue so we re-evaluate against fresh data.
 			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
-				err = errors.Join(err, statusUpdateErr)
+				return ctrl.Result{}, errors.Join(err, statusUpdateErr)
 			}
-			oldStatus = sandbox.Status.DeepCopy()
 			patch := client.MergeFrom(sandbox.DeepCopy())
 			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
 			if sandbox.Annotations == nil {
@@ -278,13 +279,27 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, err
 		case idleActionDelete:
 			logger.Info("Idle TTL expired, deleting sandbox")
-			if delErr := r.Delete(ctx, sandbox); delErr != nil && !k8serrors.IsNotFound(delErr) {
+			deleteOpts := &client.DeleteOptions{
+				Preconditions: &metav1.Preconditions{
+					UID:             &sandbox.UID,
+					ResourceVersion: &sandbox.ResourceVersion,
+				},
+			}
+			if delErr := r.Delete(ctx, sandbox, deleteOpts); delErr != nil && !k8serrors.IsNotFound(delErr) {
 				return ctrl.Result{}, delErr
 			}
 			sandboxDeleted = true
 		case idleActionRetain:
 			logger.Info("Suspended TTL expired, retaining sandbox")
 			setSandboxExpiredCondition(sandbox)
+			retainPatch := client.MergeFrom(sandbox.DeepCopy())
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = make(map[string]string)
+			}
+			sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation] = "true"
+			if patchErr := r.Patch(ctx, sandbox, retainPatch); patchErr != nil {
+				err = errors.Join(err, patchErr)
+			}
 		case idleActionNone:
 			if idleRequeue > 0 {
 				result.RequeueAfter = idleRequeue
@@ -378,7 +393,9 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	if sandbox.Spec.IdleLifecycle != nil && wasSuspended && !hasSuspended {
 		now := metav1.Now()
 		sandbox.Status.LastActivityTime = &now
-		delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
+		if err := r.clearIdleAnnotations(ctx, sandbox); err != nil {
+			allErrors = errors.Join(allErrors, err)
+		}
 	}
 
 	return allErrors
@@ -441,7 +458,9 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 
 	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
 	if isSuspended {
-		if sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation] == "true" {
+		if sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation] == "true" {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonExpired
+		} else if sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation] == "true" {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonIdleSuspended
 		} else {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
@@ -977,6 +996,22 @@ func servicePortsEqual(a, b []corev1.ServicePort) bool {
 		}
 	}
 	return true
+}
+
+// clearIdleAnnotations removes idle-lifecycle annotations from the sandbox on resume.
+func (r *SandboxReconciler) clearIdleAnnotations(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
+	_, hasSuspended := sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation]
+	_, hasExpired := sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation]
+	if !hasSuspended && !hasExpired {
+		return nil
+	}
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleExpiredAnnotation)
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return fmt.Errorf("failed to clear idle annotations: %w", err)
+	}
+	return nil
 }
 
 // clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
@@ -1641,6 +1676,10 @@ func checkIdleLifecycle(sandbox *sandboxv1beta1.Sandbox, now time.Time) (idleAct
 	}
 
 	if sandboxMarkedExpired(sandbox) {
+		return idleActionNone, 0
+	}
+
+	if sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation] == "true" {
 		return idleActionNone, 0
 	}
 

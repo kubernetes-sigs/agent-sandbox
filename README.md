@@ -180,6 +180,10 @@ We aim for the Sandbox to be vendor-neutral, supporting various runtimes. Key ch
 
 The current Roadmap can be found at [roadmap.md](roadmap.md).
 
+## Security
+
+For information on the security model, trust boundaries, and mitigations of Agent Sandbox, please refer to the [Threat Model](docs/security/threat_model.md).
+
 ## Community, Discussion, Contribution, and Support
 
 This is a community-driven effort, and we welcome collaboration!

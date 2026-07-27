@@ -171,20 +171,19 @@ class AsyncK8sHelper:
         """
         await self._ensure_initialized()
 
-        goal = "claim readiness" if require_ready else "sandbox name"
-        # Keep the legacy resolve-path message byte-identical to the original
-        # two-watch implementation (callers/tests may match on it).
+        wait_target = "claim readiness" if require_ready else "sandbox name"
+        # Existing tests assert on the exact resolve-path message.
         deleted_msg = (f"SandboxClaim '{claim_name}' was deleted while waiting for claim readiness"
                        if require_ready else
                        f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
         deadline = time.monotonic() + timeout
         rv = resource_version or "0"
-        logger.info(f"Watching claim '{claim_name}' for {goal} (from resourceVersion={rv})...")
+        logger.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
-                    f"Could not resolve {goal} from claim "
+                    f"Could not resolve {wait_target} from claim "
                     f"'{claim_name}' within {timeout} seconds."
                 )
             w = watch.Watch()

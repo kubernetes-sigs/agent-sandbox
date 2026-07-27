@@ -451,8 +451,7 @@ class AsyncSandboxClient(Generic[T]):
 
     @async_trace_span("wait_for_sandbox_ready")
     async def _wait_for_sandbox_ready(self, sandbox_id: str, namespace: str, timeout: int):
-        """Retained for API compatibility; ``create_sandbox`` now uses the
-        single-watch ``_wait_for_claim_ready`` path instead."""
+        """Waits for the Sandbox custom resource to have a 'Ready' status."""
         await self.k8s_helper.wait_for_sandbox_ready(sandbox_id, namespace, timeout)
 
     @async_trace_span("delete_claim")

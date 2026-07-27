@@ -127,14 +127,16 @@ trap cleanup EXIT
 CNI="${CNI:-cilium}"
 echo "Using CNI: ${CNI}"
 
-# Cluster-scale experiment: 20 worker nodes instead of 3. Per-node launch
-# throughput is wall-limited at ~5 pods/s (node I/O; see the Node Kernel
-# report page), so cluster throughput scales with node count -- this run
-# pushes ~100 pods/s through the control plane to find the cluster-scale
-# bottlenecks (apiserver CPU hit 4.5-5.5 cores at ~87/s in the 1122-era
-# runs; the sandbox controller workqueue and KCM client QPS are the other
-# candidates).
-STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
+# Cluster-scale experiment: 40 worker nodes. At 20 nodes the cluster walls
+# at ~90 pods/s = ~4.5 creates/s/node, and the wall is node-local (kindnet
+# run 2080606920242106368: containerd run_podsandbox mean ~130ms -> 1.0-1.2s
+# under load, iowait 2.1-2.5 cores/node, node CPU under half busy) while the
+# control plane has headroom (apiserver 9.7 of 16 cores, etcd fsync 1.5ms,
+# KCM/scheduler idle). If the per-node wall holds, 40 nodes should approach
+# ~180 pods/s; the run also probes what saturates next (apiserver CPU is the
+# leading candidate at ~2x its current burn). 40x n2-standard-8 + the
+# n2-standard-16 control plane = 336 N2 vCPUs from the boskos project.
+STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-80}"
 echo "Using node count: ${STRESS_NODE_COUNT}"
 
 # Control-plane sizing: on n2-standard-8 the throughput phases pin
@@ -160,7 +162,16 @@ echo "Using node count: ${STRESS_NODE_COUNT}"
 # them. NOTE: c3/c4 machine families do not support pd-standard boot disks,
 # so the control-plane root volume is set to pd-ssd below alongside the
 # nodes'.
-STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
+# c3-standard-88: at mif1600 on c3-standard-44 (run 2081142826250276864)
+# the control-plane NODE ran 86% busy - apiserver 29 cores + etcd 4.9 +
+# KCM/scheduler 2.4 + node overhead - and at that utilization run-queue
+# delay taxes every latency-sensitive thread: etcd round trips doubled
+# (5.9ms -> 11ms) with etcd's own CPU modest, apiserver latency rose to
+# 18ms, and the kubelet status lane (whose service time IS that latency)
+# queued 1.1s. Note the per-process view misleads here: the apiserver
+# alone showed 15 "idle" cores while the box was nearly full. 88 vCPUs
+# targets ~45% node utilization at the same load.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-88}"
 echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
 
 echo "Creating kOps cluster configuration..."
@@ -234,8 +245,8 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # left KCM throttling client-side, so go to 500/500 to take the client
 # limiter out of the measurement entirely.
 kops edit cluster --name "${CLUSTER_NAME}" \
-  --set cluster.spec.kubeControllerManager.kubeAPIQPS=500 \
-  --set cluster.spec.kubeControllerManager.kubeAPIBurst=500
+  --set cluster.spec.kubeControllerManager.kubeAPIQPS=1000 \
+  --set cluster.spec.kubeControllerManager.kubeAPIBurst=1000
 
 # etcdClusters[].manager.listenMetricsURLs: have etcd serve its dedicated
 # plain-HTTP metrics listener. etcd's client port requires mTLS, so the
@@ -267,8 +278,37 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # --kube-api-qps/--kube-api-burst flags, which current kube-schedulers no
 # longer accept).
 kops edit cluster --name "${CLUSTER_NAME}" \
-  --set cluster.spec.kubeScheduler.qps=500 \
-  --set cluster.spec.kubeScheduler.burst=500
+  --set cluster.spec.kubeScheduler.qps=1000 \
+  --set cluster.spec.kubeScheduler.burst=1000
+
+# kubelet.kubeAPIQPS (default 50): the kubelets make multiple pod
+# status updates per pod.
+# Each kubelet status-manager sync is a GET plus a PATCH through one serialized loop,
+# so this becomes a bottleneck when churning more than 5 pods / second / node.
+#
+# kubelet.eventQPS/eventBurst: kubelet event emission has its own limiter,
+# not covered by kubeAPIQPS.
+# Note this is different from other rate limits: we drop extra events.
+# A diagnostics trade-off that is acceptable here, needs more careful
+# evaluation before using in production clusters.
+# kubeAPIServer.maxRequestsInflight/maxMutatingRequestsInflight (defaults
+# 400/200): APF's total seat budget is derived from these two flags and
+# scales with NOTHING else - not CPU, not node count. Hero run
+# 2081124465281863680 (80 nodes, c3-standard-44): the system priority
+# level (kubelet traffic) queued 53ms mean at 1,663 req/s while the
+# apiserver sat at 35% CPU - pods PATCH 54ms / DELETE 45ms / GET 30ms are
+# the kubelet verbs wearing that APF wait, and throughput regressed below
+# the 40-node run's because twice the kubelets contended for the same 600
+# seats. 1600/800 scales the pool ~2.7x to match the 2x box and 4x nodes;
+# the system level's nominal share grows proportionally.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubeAPIServer.maxRequestsInflight=1600 \
+  --set cluster.spec.kubeAPIServer.maxMutatingRequestsInflight=800
+
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubelet.kubeAPIQPS=500 \
+  --set cluster.spec.kubelet.eventQPS=5 \
+  --set cluster.spec.kubelet.eventBurst=50
 
 # kubelet.kubeAPIQPS (default 50): the kubelets make multiple pod
 # status updates per pod.
@@ -296,6 +336,42 @@ if [[ "${CNI}" == "cilium" ]]; then
 fi
 
 echo "Applying cluster configuration..."
+# etcd backend quota + compaction: the default quota-backend-bytes (2GiB)
+# is a fixed ceiling that scales with nothing. Hero run at ~459 claims/s
+# sustained ~5k etcd writes/s; between compactions (apiserver default:
+# every 5min) that accrues 1.5-3GB of MVCC revision history, and when the
+# boltdb file hits the quota etcd raises the NOSPACE alarm and rejects ALL
+# writes cluster-wide ("mvcc: database space exceeded") until
+# compact+defrag+disarm - observed mid-sweep on the c3-standard-88 run.
+# 8GiB quota + 2-minute periodic auto-compaction gives ~10x headroom (the
+# same remedy as the #1240 benchmark rig). manager.env is a structured
+# list that `kops edit --set` cannot express, so patch the spec YAML and
+# replace it (same throwaway-venv pattern as the report step).
+python3 -m venv "${BINDIR}/specedit-venv"
+"${BINDIR}/specedit-venv/bin/pip" install --quiet 'pyyaml>=6,<7'
+kops get cluster --name "${CLUSTER_NAME}" -o yaml > "${WORKDIR}/cluster-spec.yaml"
+"${BINDIR}/specedit-venv/bin/python3" - "${WORKDIR}/cluster-spec.yaml" << 'PYEOF'
+import sys, yaml
+path = sys.argv[1]
+docs = list(yaml.safe_load_all(open(path)))
+env = [
+    {"name": "ETCD_QUOTA_BACKEND_BYTES", "value": "8589934592"},
+    {"name": "ETCD_AUTO_COMPACTION_MODE", "value": "periodic"},
+    {"name": "ETCD_AUTO_COMPACTION_RETENTION", "value": "2m"},
+]
+for doc in docs:
+    if not doc or doc.get("kind") != "Cluster":
+        continue
+    for ec in doc["spec"]["etcdClusters"]:
+        mgr = ec.setdefault("manager", {})
+        have = {e["name"] for e in mgr.get("env", [])}
+        mgr.setdefault("env", []).extend(e for e in env if e["name"] not in have)
+with open(path, "w") as f:
+    yaml.safe_dump_all(docs, f, default_flow_style=False)
+print("etcd quota/compaction env injected")
+PYEOF
+kops replace --name "${CLUSTER_NAME}" -f "${WORKDIR}/cluster-spec.yaml"
+
 kops update cluster --name "${CLUSTER_NAME}" --yes
 
 echo "Exporting kubeconfig..."
@@ -344,6 +420,11 @@ kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
+# Hero run: 200 sandbox workers. Safe now that the generation predicate is
+# in the stack (status-write echoes no longer amplify reconciles); at
+# mif1200 the sandbox workqueue showed queueing with 100 workers.
+CONTROLLER_ARGS="${CONTROLLER_ARGS:---sandbox-concurrent-workers=200}"
+
 echo "Deploying to cluster..."
 dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
   ${CONTROLLER_ARGS:+--controller-args="${CONTROLLER_ARGS}"}
@@ -407,9 +488,17 @@ set +o errexit
 # STRESS_EXTRA_ARGS appends verbatim extra flags (word-split on purpose) so
 # scenarios can pass tool flags without this script growing an env knob for
 # each one (e.g. --client-connections=4 in benchmarks-kops-gcp-claims).
+# The mif sweep tops out at 1200: run 2081094034931060736 (40 nodes, full
+# tuning stack) showed NO component saturated at mif600 - apiserver at
+# 14.8/22 cores, status lane at 477ms p50, 409s at 2 - while measured
+# throughput matched slots/cycle exactly at every level (600/2.52s =
+# 238/s). The offered load, not the cluster, was the ceiling: mif is the
+# stress client's closed-loop concurrency, and each slot's cycle has a
+# ~1.8s floor (mostly the delete/recycle half). 800/1200 raise the offered
+# load to find the first genuinely saturated component.
 # shellcheck disable=SC2086
 go run ./test/stress \
-  --phases="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif1600,throughput-mif1200,throughput-mif800,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \

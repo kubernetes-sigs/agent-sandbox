@@ -37,6 +37,8 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 # replenishment without the pool provisioning step dominating the job's
 # wall-clock the way the 20-node churn scenario's sizing would suggest.
 export STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-6}"
+# 6 nodes do not need the hero-run control plane; keep the smaller box.
+export STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
 
 # claims-warm only: pool provisioning is setup (untimed), the burst is the
 # measurement. Sharding the harness's creates over 4 HTTP/2 connections keeps

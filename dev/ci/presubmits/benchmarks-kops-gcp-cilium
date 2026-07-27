@@ -22,4 +22,14 @@ set -o pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 export CNI=cilium
+
+# Cost control: the cilium leg exists to isolate CNI costs, which shows at
+# any scale - it does not need the kindnet hero-run cluster (80 nodes,
+# c3-standard-44). 10 nodes on the small control plane, with the sweep
+# capped at mif600 (10 nodes = ~1,100 pod capacity; mif1200+ would
+# oversubscribe it).
+export STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-10}"
+export STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
+export STRESS_PHASES="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}"
+
 exec "${REPO_ROOT}/test/benchmarks/scenarios/benchmarks-kops-gcp/run"

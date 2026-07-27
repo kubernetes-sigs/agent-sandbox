@@ -111,6 +111,7 @@ chmod +x deploy_cluster.sh
 Apply host CPU isolation and system log rate limiting:
 
 ```bash
+export KUBECONFIG="$(git rev-parse --show-toplevel)/bin/KUBECONFIG"
 kubectl apply -f ../../node-tuner-daemonset.yaml
 kubectl rollout status daemonset/node-tuner-ds -n kube-system
 ```

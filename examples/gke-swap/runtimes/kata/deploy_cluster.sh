@@ -42,7 +42,7 @@ gcloud container node-pools create baseline-pool \
     --disk-size 250 \
     --image-type ubuntu_containerd \
     --enable-nested-virtualization \
-    --node-labels sandbox.gke.io/kata=true
+    --node-labels agent-sandbox.dev/kata=true
 
 echo "Creating lssd-swap node pool (with dedicated LSSD swap, Ubuntu, Nested Virtualization enabled)..."
 gcloud container node-pools create lssd-swap-pool \
@@ -54,7 +54,7 @@ gcloud container node-pools create lssd-swap-pool \
     --disk-size 250 \
     --image-type ubuntu_containerd \
     --enable-nested-virtualization \
-    --node-labels sandbox.gke.io/kata=true \
+    --node-labels agent-sandbox.dev/kata=true \
     --system-config-from-file "${DIR}/../../swap-dedicated-lssd.yaml"
 
 echo "Fetching cluster credentials..."
@@ -81,7 +81,7 @@ handler: kata-qemu
 scheduling:
   nodeSelector:
     kubernetes.io/os: linux
-    sandbox.gke.io/kata: "true"
+    agent-sandbox.dev/kata: "true"
 EOF
 
 cat <<EOF | kubectl apply -f -
@@ -93,7 +93,7 @@ handler: kata-clh
 scheduling:
   nodeSelector:
     kubernetes.io/os: linux
-    sandbox.gke.io/kata: "true"
+    agent-sandbox.dev/kata: "true"
 EOF
 
 echo "Cluster deployed successfully."

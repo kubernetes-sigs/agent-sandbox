@@ -209,9 +209,11 @@ type Config struct {
 	// controller creates; the phase asserts it.
 	WPPools    int `json:"wpPools"`
 	WPReplicas int `json:"wpReplicas"`
-	// WPImage is the warmpool-overcreate template image ("" = --image). A
-	// large, not-pre-pulled image stretches the not-yet-Ready window the
-	// pre-fix over-creation raced in, making the phase more adversarial.
+	// WPImage is the warmpool-overcreate template image ("" = --image).
+	// Measured on a pre-fix controller, the standard small image trips the
+	// over-creation asserts hardest (fast readiness transitions drive more
+	// reconciles/sec against the stale cache); the override exists for
+	// probing slow-pull shapes.
 	WPImage string `json:"wpImage,omitempty"`
 	// WPReplacementTolerance caps legitimate replacements (create observed
 	// after a member's delete) tolerated across all pools.
@@ -294,7 +296,7 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.SustainedLifecycleBudget, "sustained-lifecycle-budget", 5*time.Second, "Assumed per-claim ready+delete pipeline time (beyond --claim-dwell) used to size the sustained phase's pod-capacity estimate; raise it if the cluster's Ready/delete path is slower under load")
 	flag.IntVar(&cfg.WPPools, "wp-pools", 20, "Number of SandboxWarmPools created at once by the warmpool-overcreate phase (requires the extensions controller)")
 	flag.IntVar(&cfg.WPReplicas, "wp-replicas", 25, "Replicas per pool for the warmpool-overcreate phase; the phase asserts exactly wp-pools*wp-replicas distinct sandbox creates")
-	flag.StringVar(&cfg.WPImage, "wp-image", "", "Container image for the warmpool-overcreate template (default: the --image value). A multi-GB, not-pre-pulled image stretches the not-yet-Ready window the historical over-creation raced in")
+	flag.StringVar(&cfg.WPImage, "wp-image", "", "Container image for the warmpool-overcreate template (default: the --image value, which also trips pre-fix over-creation hardest -- fast readiness means more reconciles against the stale cache); override to probe slow-pull shapes")
 	flag.IntVar(&cfg.WPReplacementTolerance, "wp-replacement-tolerance", 2, "Maximum legitimate replacements (a create observed after a member's delete) tolerated across all warmpool-overcreate pools; replacements are reported separately from over-creates")
 	flag.IntVar(&cfg.WPUnschedReplicas, "wp-unsched-replicas", 3, "Replica count of the warmpool-unschedulable phase's single pool")
 	flag.StringVar(&cfg.WPUnschedCPU, "wp-unsched-cpu", "1000", "Per-container CPU request (kubernetes quantity) that makes the warmpool-unschedulable pods robustly unschedulable; 1000 cores exceeds any machine shape any cloud sells today")

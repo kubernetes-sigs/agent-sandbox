@@ -49,14 +49,19 @@ export STRESS_PHASES="${STRESS_PHASES:-warmpool-overcreate,warmpool-unschedulabl
 
 # The unschedulable leg alone holds a quiet 8-minute window (the controller's
 # 5-minute readiness grace plus its jittered post-grace requeue, worst case
-# ~7m35s), and the overcreate leg pulls a multi-GB image on every node.
+# ~7m35s).
 export STRESS_TIMEOUT="${STRESS_TIMEOUT:-40m}"
 
-# A multi-GB, not-pre-pulled image stretches the not-yet-Ready window the
-# historical over-creation raced in (a fast image can mask a regressed
-# controller by simply winning the race): this is the same image the live
-# reproductions used. Swap in any slow-to-pull image via STRESS_EXTRA_ARGS.
-export STRESS_EXTRA_ARGS="${STRESS_EXTRA_ARGS:---wp-image=us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main}"
+# The overcreate template uses the stress tool's standard small image (the
+# --image default). Measured on a pre-fix controller at this exact shape
+# (20x25, workers=1000), the small image trips the asserts HARDER than a
+# multi-GB one -- 6.1x the create target vs 3.1x -- because fast readiness
+# transitions drive more status-update reconciles per second against the
+# stale cache, and the quick create->Ready->excess-delete cycle adds delete
+# churn a slow pull never reaches. It also keeps nodes free of a multi-GB
+# image and makes the failing leg ~7 minutes. --wp-image (via
+# STRESS_EXTRA_ARGS) remains the escape hatch for probing slow-pull shapes.
+export STRESS_EXTRA_ARGS="${STRESS_EXTRA_ARGS:-}"
 
 # 1000 concurrent warm-pool workers is the adversarial setting the historical
 # over-creation reproduced under (~10x the create target): high worker

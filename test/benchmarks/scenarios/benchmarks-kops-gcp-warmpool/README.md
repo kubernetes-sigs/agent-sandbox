@@ -59,7 +59,7 @@ rationale) with:
 | Worker nodes | 12 x `n2-standard-8` (`STRESS_NODE_COUNT`) | ~1200 pod slots: headroom for the 500-sandbox target without a long fill |
 | Control plane | 1 x `c3-standard-22` (base scenario default) | keeps the control plane out of the way of the invariant measurement |
 | Controller | `--sandbox-warm-pool-concurrent-workers=1000` (`CONTROLLER_ARGS`) | the adversarial worker count the over-creation reproduced under; widens the create/observe race the expectations gate must close |
-| Template image | multi-GB `python-runtime-sandbox:latest-main`, not pre-pulled (`--wp-image` via `STRESS_EXTRA_ARGS`) | stretches the not-yet-Ready window so a regressed controller cannot win the race by luck; same image as the live reproductions |
+| Template image | the standard small test image (the stress tool's `--image` default) | measured to trip pre-fix asserts HARDER than a multi-GB image at this shape (6.1x the create target vs 3.1x — see the FAIL section): fast readiness transitions drive more status-update reconciles/sec against the stale cache, and the quick create->Ready->excess-delete cycle adds delete churn a slow pull never reaches. Also keeps nodes free of a multi-GB image; `--wp-image` (via `STRESS_EXTRA_ARGS`) remains the escape hatch for slow-pull shapes |
 | Phases | `warmpool-overcreate,warmpool-unschedulable` (`STRESS_PHASES`) | over-creation gate first, then the quiet unschedulable window |
 
 The invariants are node-shape-independent — pass/fail depends only on
@@ -121,9 +121,22 @@ concurrent population exceeded target in M pool(s): max P > 25 replicas
 (worst pools: p1-wp-pool-...(creates=... over=... peak=...), ...)
 ```
 
-(a live pre-fix run measured 1,535 distinct creates for the 500 target with
-every pool exceeding its population cap, worst peak 75 vs 25; the original
-issue logs showed up to ~10x). The unschedulable phase's failure signature
+Live pre-fix measurements at this exact shape (20x25, workers=1000):
+
+* **small image (the scenario default): 3,070 distinct creates for the 500
+  target (6.1x)** — 1,312 over-creates, 1,258 replacements, worst pool peak
+  117 vs 25, global peak 1,796 vs 500, 2,570 deletes during the fill;
+  failing leg wall time ~7 minutes.
+* multi-GB not-pre-pulled image (supplementary, via `--wp-image`): 1,535
+  distinct creates (3.1x), every pool over its cap, worst peak 75 vs 25.
+* The original issue logs showed up to ~10x at larger scale.
+
+PASS-direction evidence with the same small image: the fixed controller
+produced exactly-600-for-600 in the single-pool gate-cost run, alongside
+the two-direction 20x25 validation (PASS leg on the fixed controller, FAIL
+legs above).
+
+The unschedulable phase's failure signature
 on pre-fix controllers — delete/recreate churn, unstable member UIDs, and
 zero `WarmPoolNotProgressing` events within the window — never gets a
 chance to print in a full run; exercise it standalone with
@@ -134,8 +147,9 @@ chance to print in a full run; exercise it standalone with
 One ephemeral 12-node cluster (12 x n2-standard-8 + 1 x c3-standard-22,
 pd-ssd roots) for **~35-45 minutes** end to end: ~10 min cluster bring-up,
 a few minutes of image push/deploy and the e2e benchmark suite the base
-wrapper runs, ~5-10 min for the overcreate fill (multi-GB pulls) plus
-settle and drain, a fixed 8-minute unschedulable window, and teardown.
+wrapper runs, a fast overcreate fill (small image; the failing leg on a
+pre-fix controller completes in ~7 min) plus settle and drain, a fixed
+8-minute unschedulable window, and teardown.
 
 ## Why optional / manual
 

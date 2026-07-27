@@ -125,6 +125,7 @@ def check_install_manifest_drift(
     """
     globbed = {os.path.relpath(f, k8s_dir) for f in all_yaml_files}
     globbed.discard("extensions.controller.yaml")
+    globbed.discard("auto-suspension.yaml")
     listed = _kustomization_resource_paths(kustomization_path)
 
     missing = globbed - listed
@@ -165,18 +166,25 @@ def main():
         if os.path.basename(f) not in ("kustomization.yaml", "kustomization.yml")
     ]
     image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}"
+    router_image_url = f"registry.k8s.io/agent-sandbox/sandbox-router:{args.tag}"
 
     def replace_image(text):
         """Replace the ko:// image placeholder with the published controller image."""
-        return re.sub(
+        text = re.sub(
             r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
             image_url,
             text,
         )
+        text = re.sub(
+            r"ko://sigs.k8s.io/agent-sandbox/sandbox-router/cmd.*",
+            router_image_url,
+            text,
+        )
+        return text
 
     # --- Generate sandbox.yaml (core only) ---
     print("INFO: Preparing core sandbox.yaml")
-    core_files = [f for f in all_yaml_files if "extensions" not in os.path.basename(f)]
+    core_files = [f for f in all_yaml_files if "extensions" not in os.path.basename(f) and "auto-suspension" not in os.path.basename(f)]
     with open("release_assets/sandbox.yaml", "w") as outfile:
         for fname in sorted(core_files):
             with open(fname) as infile:
@@ -193,6 +201,24 @@ def main():
     with open("release_assets/sandbox.yaml", "w") as file:
         file.write(filedata)
     print("INFO: Successfully created release_assets/sandbox.yaml")
+
+    # --- Generate auto-suspension.yaml ---
+    print("INFO: Preparing auto-suspension.yaml")
+    auto_suspension_files = [f for f in all_yaml_files if "auto-suspension" in os.path.basename(f)]
+    with open("release_assets/auto-suspension.yaml", "w") as outfile:
+        for fname in sorted(auto_suspension_files):
+            with open(fname) as infile:
+                outfile.write(infile.read())
+                outfile.write("---\n")
+
+    with open("release_assets/auto-suspension.yaml", "r") as file:
+        filedata = file.read()
+
+    filedata = replace_image(filedata)
+
+    with open("release_assets/auto-suspension.yaml", "w") as file:
+        file.write(filedata)
+    print("INFO: Successfully created release_assets/auto-suspension.yaml")
 
     # --- Generate extensions.yaml ---
     print("INFO: Preparing extensions.yaml")

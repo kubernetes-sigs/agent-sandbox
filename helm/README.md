@@ -101,6 +101,7 @@ The following table lists the configurable parameters and their defaults.
 | `controller.pprofMutexProfileFraction` | Mutex contention sampling rate when pprof debug is enabled | `10` |
 | `controller.extraArgs` | Additional flags not listed above (e.g. zap logging flags) | `[]` |
 | `controller.extensions` | Enable extensions controller (WarmPool, Template, Claim) | `false` |
+| `controller.enableAutoSuspension` | Enable auto-suspension and traffic-triggered resume reconciler | `true` |
 | `resources` | CPU/memory resource requests and limits | `{}` |
 | `nodeSelector` | Node selector for the controller pod | `{}` |
 | `tolerations` | Tolerations for the controller pod | `[]` |

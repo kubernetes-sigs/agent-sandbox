@@ -41,6 +41,9 @@ spec:
         - name: webhook
           containerPort: 9443
           protocol: TCP
+        - name: suspension
+          containerPort: 8090
+          protocol: TCP
 
         livenessProbe:
           httpGet:

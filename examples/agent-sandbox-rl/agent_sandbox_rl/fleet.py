@@ -142,6 +142,8 @@ class SandboxFleet:
     self._warmed: dict[str, int] = {}        # image -> replicas currently warmed
     self._ondemand: set[tuple[str, str]] = set()   # (cluster, image) pools made via acquire()
     self._lock = threading.Lock()            # guards bookkeeping under parallel run
+    self._guard_active = False                # re-entrancy flag for overcommit_guard
+    self._guard_lock = threading.Lock()      # guards _guard_active
     self._obs = Observer(self.config.observability)
     self.report = None                       # set by run()/the Observer
     if self.config.observability.enable_tracing:
@@ -204,6 +206,20 @@ class SandboxFleet:
     if ceiling is None:
       yield
       return
+    # Re-entrancy: `run(recycle=True)` opens this guard around the strategy/executor,
+    # and the recycle executor opens it again — nesting on the same fleet. Run only
+    # the outer monitor: a second thread would double the pod-list load per poll (a
+    # full filtered list under a selector) and race into teardown on a trip. Direct
+    # executor callers (no surrounding run) still get their own guard.
+    with self._guard_lock:
+      if self._guard_active:
+        reentrant = True
+      else:
+        self._guard_active = True
+        reentrant = False
+    if reentrant:
+      yield
+      return
     stop = threading.Event()
     tripped = {"n": 0}
 
@@ -238,6 +254,8 @@ class SandboxFleet:
     finally:
       stop.set()
       th.join(timeout=2)
+      with self._guard_lock:
+        self._guard_active = False
     if tripped["n"]:
       raise FleetOvercommitError(
           f"live sandboxes {tripped['n']} exceeded ceiling {ceiling} (expected "
@@ -633,15 +651,23 @@ class SandboxFleet:
     self._warm_entry(entry, wait, replicas_override=replicas_override)
 
   def unwarm_image(self, image: str) -> None:
-    """Tear down one image's pool + template."""
+    """Tear down one image's pool + template. **Idempotent**: a no-op if the image
+    isn't currently warmed. Two callers can legitimately unwarm the same image —
+    `scale_on_hold` recycling drops a held sandbox's pool, and a windowed strategy
+    sweeps its window at the end — so releasing capacity / counting `warm_remove`
+    must happen exactly once. (`release_replicas` is not idempotent: a second call
+    would double-decrement `active_replicas`, freeing capacity that isn't free and
+    over-admitting later windows.)"""
     entry = (self.plan_ or self.plan()).for_image(image)
     if entry is None:
-      return
+      return                                   # locate the pool before mutating state
+    with self._lock:
+      if image not in self._warmed:
+        return                                 # already unwarmed — don't double-release
+      reps = self._warmed.pop(image)
     c = self.registry.get(entry.cluster)
     c.resources.delete_warmpool(entry.pool)
     c.resources.delete_template(entry.template)
-    with self._lock:
-      reps = self._warmed.pop(image, entry.replicas)
     c.release_replicas(reps)
     self._obs.warm_remove(entry.cluster, reps)
 

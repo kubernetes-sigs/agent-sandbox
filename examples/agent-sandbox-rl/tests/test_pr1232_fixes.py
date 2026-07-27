@@ -21,6 +21,7 @@
 """
 
 import re
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -100,14 +101,27 @@ def test_count_pods_small_set_single_page():
   assert r.count_pods() == 1
 
 
-def test_count_pods_fallback_full_list_when_no_hint():
+def test_count_pods_paginates_when_no_hint():
+  # remainingItemCount is nil for selector queries (the breaker's case), so beyond
+  # one page count_pods must PAGE (bounded chunks), never pull one unpaged full list.
   r = _res()
-  page = MagicMock(items=[object()])
-  page.metadata.remaining_item_count = None
-  page.metadata._continue = "tok"               # more pages, but server gave no count hint
-  full = MagicMock(items=[object(), object(), object()])
-  r.core_api.list_namespaced_pod.side_effect = [page, full]
-  assert r.count_pods() == 3
+  p0 = MagicMock(items=[object()])              # limit=1 probe
+  p0.metadata.remaining_item_count = None
+  p0.metadata._continue = "tok1"               # more pages, no count hint
+  p1 = MagicMock(items=[object(), object()])
+  p1.metadata.remaining_item_count = None
+  p1.metadata._continue = "tok2"
+  p2 = MagicMock(items=[object()])
+  p2.metadata.remaining_item_count = None
+  p2.metadata._continue = None                 # last page
+  r.core_api.list_namespaced_pod.side_effect = [p0, p1, p2]
+  assert r.count_pods(label_selector="run=x") == 4      # 1 + 2 + 1
+  calls = r.core_api.list_namespaced_pod.call_args_list
+  assert len(calls) == 3
+  assert all("limit" in c.kwargs for c in calls)        # never an unpaged full list
+  assert calls[1].kwargs["_continue"] == "tok1" and calls[1].kwargs["limit"] == 500
+  assert calls[2].kwargs["_continue"] == "tok2"
+  assert all(c.kwargs["label_selector"] == "run=x" for c in calls)
 
 
 def test_live_owned_count_counts_pods_by_run_id(make_cluster):
@@ -210,3 +224,43 @@ def test_session_run_timeout_closes_session(monkeypatch):
   with pytest.raises(TimeoutError):
     s.run("sleep 999", timeout=0.05)
   assert not s.is_open                            # timed-out session is dropped, not reused
+
+
+# --- review round 4: overcommit_guard re-entrancy ------------------------- #
+def test_overcommit_guard_is_reentrant(make_cluster):
+  # run(recycle=True) opens the guard, then the recycle executor opens it again on
+  # the same fleet. Only the OUTER monitor should run — a second breaker thread would
+  # double the pod-list load per poll and both would race into teardown on a trip.
+  c = make_cluster("solo")
+  c.resources.count_pods.return_value = 0
+  f = SandboxFleet(FleetConfig(max_live_sandboxes=10),
+                   registry=ClusterRegistry([c]))
+  n = lambda: sum(1 for t in threading.enumerate() if t.name == "asrl-breaker")
+  assert n() == 0
+  with f.overcommit_guard(expected=5):
+    assert n() == 1 and f._guard_active
+    with f.overcommit_guard(expected=5):          # nested (executor inside run)
+      assert n() == 1                              # inner reused the outer — no 2nd thread
+    assert f._guard_active                          # inner exit didn't clear the outer flag
+  assert not f._guard_active                         # outer exit clears it
+  assert n() == 0                                    # monitor stopped
+
+
+# --- review round 4: unwarm_image idempotency ----------------------------- #
+def test_unwarm_image_idempotent_preserves_capacity(make_cluster):
+  # Two callers legitimately unwarm the same image (scale_on_hold + a windowed
+  # strategy's window-end sweep). The 2nd call must NOT release replicas again —
+  # pre-fix it defaulted reps to entry.replicas and double-decremented active_replicas,
+  # clamping at 0 and freeing OTHER images' still-reserved capacity.
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(max_concurrent=8), registry=ClusterRegistry([c]))
+  f.load_tasks(["i1", "i2"])
+  f.warm_image("i1", replicas_override=3)
+  f.warm_image("i2", replicas_override=3)
+  assert c.active_replicas == 6
+  f.unwarm_image("i1")
+  assert c.active_replicas == 3 and "i1" not in f._warmed
+  f.unwarm_image("i1")                              # double unwarm — must be a no-op
+  assert c.active_replicas == 3                     # i2's reservation preserved (not phantom-freed)
+  assert c.resources.delete_warmpool.call_count == 1
+  assert c.resources.delete_template.call_count == 1

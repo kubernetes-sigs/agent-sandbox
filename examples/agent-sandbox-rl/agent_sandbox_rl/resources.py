@@ -359,19 +359,29 @@ class Resources:
     polls this repeatedly and the target scale is tens of thousands of pods.
 
     Uses a ``limit=1`` list + ``metadata.remainingItemCount`` (a server-provided
-    hint) to get the total cheaply; falls back to a full list only when the server
-    omits the hint yet more pages exist."""
+    hint) to get the total cheaply. That hint is only populated for **selector-less**
+    lists — the apiserver deliberately returns nil for any label/field predicate
+    (``PrepareContinueToken``) — and the breaker always polls with a run-id selector,
+    so beyond one page we page through in bounded chunks counting ``len(items)`` only
+    (never transferring the whole list in a single response)."""
     kwargs = {"label_selector": label_selector} if label_selector else {}
     resp = self.core_api.list_namespaced_pod(namespace=self.namespace, limit=1, **kwargs)
     meta = resp.metadata
     remaining = getattr(meta, "remaining_item_count", None)
     if remaining is not None:
-      return len(resp.items) + remaining
-    if not getattr(meta, "_continue", None):
+      return len(resp.items) + remaining     # selector-less fast path
+    cont = getattr(meta, "_continue", None)
+    if not cont:
       return len(resp.items)                 # single page holds the whole set
-    # more pages exist but no count hint: fall back to a full (unpaged) list.
-    resp = self.core_api.list_namespaced_pod(namespace=self.namespace, **kwargs)
-    return len(resp.items)
+    # Selector query with >1 page (no count hint): paginate. Bounds per-request
+    # payload + client memory at scale instead of one giant filtered list.
+    total = len(resp.items)
+    while cont:
+      resp = self.core_api.list_namespaced_pod(
+          namespace=self.namespace, limit=500, _continue=cont, **kwargs)
+      total += len(resp.items)
+      cont = getattr(resp.metadata, "_continue", None)
+    return total
 
   def delete_claim(self, name: str) -> None:
     self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim")

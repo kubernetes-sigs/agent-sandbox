@@ -37,6 +37,9 @@ spec:
             type: object
           spec:
             properties:
+              inactivityDuration:
+                format: duration
+                type: string
               operatingMode:
                 default: Running
                 enum:
@@ -4004,6 +4007,9 @@ spec:
                   - type
                   type: object
                 type: array
+              lastActivityTime:
+                format: date-time
+                type: string
               nodeName:
                 type: string
               podIPs:

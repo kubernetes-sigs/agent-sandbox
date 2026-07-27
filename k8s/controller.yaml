@@ -113,6 +113,8 @@ spec:
         image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # placeholder value, replaced by deployment scripts
         args:
         - --leader-elect=true
+        - --enable-auto-suspension=true
+        - --suspension-server-bind-address=:8090
         ports:
         - name: metrics
           containerPort: 8080
@@ -122,6 +124,9 @@ spec:
           protocol: TCP
         - name: webhook
           containerPort: 9443
+          protocol: TCP
+        - name: suspension
+          containerPort: 8090
           protocol: TCP
 
 ---

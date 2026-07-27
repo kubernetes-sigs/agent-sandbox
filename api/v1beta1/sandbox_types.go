@@ -245,6 +245,11 @@ type Lifecycle struct {
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
+
+	// inactivityDuration is the duration of inactivity after which the sandbox is automatically suspended.
+	// +kubebuilder:validation:Format=duration
+	// +optional
+	InactivityDuration *metav1.Duration `json:"inactivityDuration,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.
@@ -274,6 +279,10 @@ type SandboxStatus struct {
 	// nodeName is the name of the node where the underlying pod is scheduled.
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
+
+	// lastActivityTime is the timestamp of the last observed network activity on the sandbox.
+	// +optional
+	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
 }
 
 // +genclient

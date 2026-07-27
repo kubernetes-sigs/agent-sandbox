@@ -1,0 +1,145 @@
+---
+# 1. sandbox-router gRPC ext_proc Deployment & Service
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: sandbox-router
+  namespace: agent-sandbox-system
+  labels:
+    app: sandbox-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      serviceAccountName: agent-sandbox-controller
+      containers:
+      - name: sandbox-router
+        image: ko://sigs.k8s.io/agent-sandbox/sandbox-router/cmd # placeholder value, replaced by release script
+        args:
+        - --ext-proc-bind-address=:9002
+        - --http-bind-address=:8080
+        - --suspension-manager-url=http://agent-sandbox-controller.agent-sandbox-system.svc.cluster.local:8090
+        - --activity-flush-interval=10s
+        - --cache-enabled=true
+        ports:
+        - name: ext-proc
+          containerPort: 9002
+          protocol: TCP
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: sandbox-router
+  namespace: agent-sandbox-system
+  labels:
+    app: sandbox-router
+spec:
+  selector:
+    app: sandbox-router
+  ports:
+  - name: ext-proc
+    port: 9002
+    targetPort: 9002
+    protocol: TCP
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+
+---
+
+# 2. Envoy Gateway GatewayClass, Gateway & EnvoyExtensionPolicy
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg-sandbox-gateway-class
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: sandbox-gateway
+  namespace: agent-sandbox-system
+spec:
+  gatewayClassName: eg-sandbox-gateway-class
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: All
+
+---
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: sandbox-ext-proc-policy
+  namespace: agent-sandbox-system
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: sandbox-gateway
+  extProc:
+  - backendRefs:
+    - group: ""
+      kind: Service
+      name: sandbox-router
+      port: 9002
+    messageTimeout: 180s
+    failOpen: false
+    processingMode:
+      request: {}
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sandbox-route
+  namespace: agent-sandbox-system
+spec:
+  parentRefs:
+  - name: sandbox-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: sandbox-router
+      port: 8080
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+spec:
+  selector:
+    app: agent-sandbox-controller
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+  - name: suspension
+    port: 8090
+    targetPort: 8090

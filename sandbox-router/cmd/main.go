@@ -24,16 +24,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	"google.golang.org/grpc"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -235,6 +238,36 @@ func run(cfg *config.Config, log logr.Logger) error {
 		proxyOpts.Cache = podCache
 	}
 	handler := proxy.NewHandler(proxyOpts)
+
+	// --- Envoy ext_proc gRPC Server (optional) ----------------------------
+	if cfg.ExtProcAddr != "" {
+		extProcServer := proxy.NewExtProcServer(proxy.ExtProcOptions{
+			Config:               cfg,
+			SuspensionManagerURL: cfg.SuspensionManagerURL,
+			Cache:                proxyOpts.Cache,
+			Logger:               log.WithName("ext_proc"),
+		})
+		lis, err := net.Listen("tcp", cfg.ExtProcAddr)
+		if err != nil {
+			return fmt.Errorf("ext_proc listen: %w", err)
+		}
+		grpcServer := grpc.NewServer()
+		extproc.RegisterExternalProcessorServer(grpcServer, extProcServer)
+
+		go func() {
+			log.Info("starting ext_proc gRPC listener", "addr", cfg.ExtProcAddr)
+			if err := grpcServer.Serve(lis); err != nil && !errors.Is(err, net.ErrClosed) {
+				log.Error(err, "ext_proc gRPC server error")
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			grpcServer.GracefulStop()
+		}()
+		if cfg.SuspensionManagerURL != "" {
+			go extProcServer.StartActivityFlusher(ctx, cfg.ActivityFlushInterval)
+		}
+	}
 
 	// Top-level mux: /healthz reuses the probes implementation so the
 	// Python router's contract (200 OK with {"status":"ok"}) is preserved.

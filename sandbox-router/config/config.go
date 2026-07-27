@@ -177,14 +177,15 @@ type Config struct {
 	// match. Empty disables the audience check.
 	AuthzTokenReviewAudiences []string
 
-	// AuthzScopedTokenSecretFile is the path to a file holding the
-	// shared HMAC-SHA256 secret used to verify scoped tokens (see
-	// authz.ScopedTokenAuthorizer). Required when AuthzMode is
-	// scoped-token. The router never generates this secret — whoever
-	// mints tokens (typically the Sandbox controller) and the router
-	// must share it out-of-band, e.g. the same K8s Secret mounted into
-	// both.
-	AuthzScopedTokenSecretFile string
+	// ExtProcAddr is the address for the Envoy ext_proc gRPC listener.
+	// Empty disables ext_proc gRPC.
+	ExtProcAddr string
+	// SuspensionManagerURL is the endpoint URL of the sandbox suspension manager.
+	// Used for auto-resume signaling and activity timestamp flushing.
+	SuspensionManagerURL string
+	// ActivityFlushInterval is the interval at which accumulated activity timestamps
+	// are flushed to the suspension manager. Defaults to 60s.
+	ActivityFlushInterval time.Duration
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -195,6 +196,8 @@ func Defaults() Config {
 		HTTPSAddr:                 "",
 		MetricsAddr:               ":9090",
 		ProbeAddr:                 ":8081",
+		ExtProcAddr:               "",
+		ActivityFlushInterval:     60 * time.Second,
 		MTLSMode:                  MTLSOff,
 		ClusterDomain:             "cluster.local",
 		ProxyTimeout:              180 * time.Second,

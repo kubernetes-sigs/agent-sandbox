@@ -191,10 +191,10 @@ class Sandbox:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 
-        This method is idempotent. Calling ``terminate()`` repeatedly after a
-        successful deletion is a safe no-op. If the remote infrastructure has
-        already been removed, subsequent calls will handle the API 404 gracefully
-        rather than raising an error.
+        This method is idempotent. After a successful delete, ``claim_name`` is
+        cleared so later calls are a local no-op and do not issue another DELETE.
+        If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
+        404 as success rather than raising.
         """
         # Close the client side connection and trace manager lifecycle
         self.close_connection()
@@ -205,7 +205,7 @@ class Sandbox:
 
         self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
-        # Clear after successful delete so a retry does not 404.
+        # Clear only after success so a failed delete can be retried.
         self.claim_name = None
 
  

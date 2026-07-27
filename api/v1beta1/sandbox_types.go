@@ -127,6 +127,10 @@ const (
 	// SandboxIdleSuspendedAnnotation is set by the controller when a sandbox is auto-suspended due to idle timeout.
 	// Cleared on resume. Used to distinguish idle-triggered suspensions from user-initiated ones.
 	SandboxIdleSuspendedAnnotation = "agents.x-k8s.io/idle-suspended"
+	// SandboxIdleExpiredAnnotation is set by the controller when a suspended sandbox's idle TTL
+	// expires with Retain policy. Prevents the retain action from re-firing on subsequent reconciles.
+	// Cleared on resume.
+	SandboxIdleExpiredAnnotation = "agents.x-k8s.io/idle-expired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
@@ -305,8 +309,8 @@ type SandboxSpec struct {
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
 
 	// idleLifecycle defines an idle-based lifecycle policy. When set, the
-	// controller tracks activity and transitions the sandbox through
-	// Running -> Suspended -> Deleted based on the configured TTLs.
+	// controller tracks activity and transitions idle sandboxes:
+	// Running -> Suspended or Deleted, then Suspended -> Deleted or Retained.
 	// +optional
 	IdleLifecycle *IdleLifecyclePolicy `json:"idleLifecycle,omitempty"`
 }
@@ -370,12 +374,15 @@ const (
 )
 
 // IdleLifecyclePolicy defines an idle-based lifecycle for Sandboxes.
-// When configured, the controller automatically suspends idle sandboxes
-// and optionally deletes them after a retention period.
+// When configured, the controller tracks activity and transitions idle sandboxes:
+// a Running sandbox is either Suspended (default) or Deleted when its active TTL
+// expires, and a Suspended sandbox is either Deleted (default) or Retained as
+// expired when its suspended TTL expires.
 type IdleLifecyclePolicy struct {
 	// activeTTLSeconds defines how long (in seconds) a Running sandbox can
 	// remain without activity before the activeExpirationPolicy applies.
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
+	// +required
 	ActiveTTLSeconds int32 `json:"activeTTLSeconds"`
 
 	// activeExpirationPolicy defines the action when the active TTL expires.
@@ -386,7 +393,7 @@ type IdleLifecyclePolicy struct {
 	// suspendedTTLSeconds defines how long (in seconds) a Suspended sandbox
 	// remains before the suspendedExpirationPolicy applies.
 	// If unset, the sandbox remains suspended indefinitely until manually resumed.
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	SuspendedTTLSeconds *int32 `json:"suspendedTTLSeconds,omitempty"`
 

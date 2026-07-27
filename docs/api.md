@@ -346,7 +346,8 @@ _Underlying type:_ _string_
 
 SandboxOperatingMode defines the desired operational state of the Sandbox.
 
-
+_Validation:_
+- Enum: [Running Suspended]
 
 _Appears in:_
 - [SandboxSpec](#sandboxspec)
@@ -457,7 +458,8 @@ _Underlying type:_ _string_
 
 EnvVarsInjectionPolicy defines whether a SandboxClaim is allowed to inject or override environment variables.
 
-
+_Validation:_
+- Enum: [Allowed Overrides Disallowed]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -494,7 +496,8 @@ _Underlying type:_ _string_
 NetworkPolicyManagement defines whether the controller automatically generates
 and manages a shared NetworkPolicy for this template.
 
-
+_Validation:_
+- Enum: [Managed Unmanaged]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -825,7 +828,8 @@ _Underlying type:_ _string_
 
 EnvVarsInjectionPolicy defines whether a SandboxClaim is allowed to inject or override environment variables.
 
-
+_Validation:_
+- Enum: [Allowed Overrides Disallowed]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -862,7 +866,8 @@ _Underlying type:_ _string_
 NetworkPolicyManagement defines whether the controller automatically generates
 and manages a shared NetworkPolicy for this template.
 
-
+_Validation:_
+- Enum: [Managed Unmanaged]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -1156,7 +1161,8 @@ _Underlying type:_ _string_
 
 VolumeClaimTemplatesPolicy defines whether a SandboxClaim is allowed to inject or override volume claim templates.
 
-
+_Validation:_
+- Enum: [Disallowed Allowed Overrides]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)

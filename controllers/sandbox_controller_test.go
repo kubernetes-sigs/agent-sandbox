@@ -5672,6 +5672,32 @@ func TestCheckIdleLifecycle(t *testing.T) {
 			},
 			wantAction: idleActionNone,
 		},
+		{
+			name: "idle-expired annotation skips idle check (Retain terminal)",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						sandboxv1beta1.SandboxIdleExpiredAnnotation: "true",
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+					IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+						ActiveTTLSeconds:          600,
+						SuspendedTTLSeconds:       &suspendedTTL,
+						SuspendedExpirationPolicy: &retainPolicy,
+					},
+				},
+				Status: sandboxv1beta1.SandboxStatus{
+					Conditions: []metav1.Condition{{
+						Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: suspendedTime,
+					}},
+				},
+			},
+			wantAction: idleActionNone,
+		},
 	}
 
 	for _, tc := range testCases {

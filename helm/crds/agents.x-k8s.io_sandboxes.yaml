@@ -48,7 +48,7 @@ spec:
                     type: string
                   activeTTLSeconds:
                     format: int32
-                    minimum: 0
+                    minimum: 1
                     type: integer
                   suspendedExpirationPolicy:
                     default: Delete
@@ -58,7 +58,7 @@ spec:
                     type: string
                   suspendedTTLSeconds:
                     format: int32
-                    minimum: 0
+                    minimum: 1
                     type: integer
                 required:
                 - activeTTLSeconds

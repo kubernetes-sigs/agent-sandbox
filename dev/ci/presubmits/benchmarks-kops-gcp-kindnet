@@ -22,4 +22,18 @@ set -o pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 export CNI=kindnet
+
+# Transport-contention experiment: 100 sandbox workers keep the controller's
+# in-flight API demand just under the apiserver's 100-stream per-connection
+# HTTP/2 cap (measured: ~75 busy workers, 87-99 in-flight at mif600). 200
+# workers push demand past the cap, so the rest_client_transport_* metrics
+# should show conn-wait queueing and dial churn if the shared connection is
+# the next bottleneck. The stream cap only binds when concurrency meets
+# inflated RTTs, so this experiment deliberately stays on the stock 8-core
+# control plane, where the apiserver saturates and slows (a 16-core run
+# measured single-digit-ms server latency and ~9 in-flight — nowhere near
+# the cap). The periodic job stays at the default 100 workers as the
+# baseline.
+export CONTROLLER_ARGS="--sandbox-concurrent-workers=200${CONTROLLER_ARGS:+ ${CONTROLLER_ARGS}}"
+
 exec "${REPO_ROOT}/test/benchmarks/scenarios/benchmarks-kops-gcp/run"

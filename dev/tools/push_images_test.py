@@ -101,6 +101,22 @@ class BuildxDockerfileArgTest(unittest.TestCase):
 class ControllerOnlySelectionTest(unittest.TestCase):
     """The controller-only mode must not build other discovered images."""
 
+    def test_controller_only_rejects_non_controller_image_request(self):
+        args = argparse.Namespace(
+            controller_only=True,
+            image_tag="testtag",
+            images=["sandbox-router-go"],
+        )
+
+        with (
+            mock.patch.object(push_images.os, "walk", return_value=[]),
+            self.assertRaisesRegex(
+                SystemExit,
+                "--controller-only cannot request non-controller image",
+            ),
+        ):
+            push_images.main(args)
+
     def test_controller_only_builds_only_controller_image(self):
         args = argparse.Namespace(
             controller_only=True,

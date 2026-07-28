@@ -111,6 +111,16 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag)
 
 def main(args):
     """Builds and pushes all discovered Docker images."""
+    if args.controller_only:
+        non_controller_images = (
+            set(args.images) - {"agent-sandbox-controller"}
+        )
+        if non_controller_images:
+            sys.exit(
+                "ERROR: --controller-only cannot request non-controller "
+                f"image(s) via --images: {sorted(non_controller_images)}"
+            )
+
     image_tag = args.image_tag or utils.get_image_tag()
     excluded_dirs = {"bin", "dev", "docs", "k8s", "site",
                      "temp", "tests", "tmp", ".venv"}

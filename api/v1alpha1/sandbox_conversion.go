@@ -30,9 +30,11 @@ const v1beta1SandboxStateAnnotation = "api.agents.x-k8s.io/v1beta1-sandbox-state
 // v1beta1SandboxStash holds v1beta1-only fields that have no v1alpha1
 // representation, preserved across v1beta1 -> v1alpha1 -> v1beta1 round-trips.
 type v1beta1SandboxStash struct {
-	// IdleLifecycle is the idle lifecycle policy from v1beta1.
+	// idleLifecycle is the idle lifecycle policy from v1beta1.
+	// +optional
 	IdleLifecycle *v1beta1.IdleLifecyclePolicy `json:"idleLifecycle,omitempty"`
-	// LastActivityTime is the last activity timestamp from v1beta1 status.
+	// lastActivityTime is the last activity timestamp from v1beta1 status.
+	// +optional
 	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
 }
 

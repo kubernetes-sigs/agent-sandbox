@@ -81,7 +81,7 @@ func TestScopedToken_RejectsWrongSecret(t *testing.T) {
 
 func TestScopedToken_RejectsExpiredToken(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := MintScopedToken(secret, "ns", "box", time.Millisecond)
+	tok, err := MintScopedToken(secret, "ns", "box", time.Second)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -137,22 +137,64 @@ func TestScopedToken_RejectsRoutingOverrides(t *testing.T) {
 	}
 }
 
+// decodeScopedClaims returns the claims carried by a minted token, so a
+// test can pin the clock to the token's own encoded expiry instead of
+// recomputing it (which races the second boundary MintScopedToken
+// truncates to).
+func decodeScopedClaims(t *testing.T, token string) scopedClaims {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected version.payload.signature, got %q", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims scopedClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("unmarshal claims: %v", err)
+	}
+	return claims
+}
+
 // exp is exclusive: the token is already invalid at the exp second, not
 // only after it.
 func TestScopedToken_RejectsTokenAtExactExpiry(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	minted := time.Now()
 	tok, err := MintScopedToken(secret, "ns", "box", time.Minute)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
+	exp := time.Unix(decodeScopedClaims(t, tok).Exp, 0)
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{
 		Secret: secret,
-		Clock:  func() time.Time { return minted.Add(time.Minute) },
+		Clock:  func() time.Time { return exp },
 	})
 	err = auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box")
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated at exact expiry, got %v", err)
+	}
+}
+
+// The shortest accepted ttl must still produce a usable token: exp has
+// one-second resolution, so a token minted for one second has to be
+// valid at mint time rather than truncating into the past.
+func TestScopedToken_ShortestTTLIsNotBornExpired(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box", time.Second)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	// Verify at the token's own mint second: whatever fraction of the
+	// second minting landed on, exp is the next second at the earliest.
+	minted := time.Unix(decodeScopedClaims(t, tok).Exp-1, 0)
+	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{
+		Secret: secret,
+		Clock:  func() time.Time { return minted },
+	})
+	if err := auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box"); err != nil {
+		t.Fatalf("expected allow for a 1s token at mint time, got %v", err)
 	}
 }
 
@@ -273,6 +315,9 @@ func TestMintScopedToken_RequiresFields(t *testing.T) {
 		{"empty namespace", []byte("0123456789abcdef0123456789abcdef"), "", "box", time.Minute},
 		{"empty name", []byte("0123456789abcdef0123456789abcdef"), "ns", "", time.Minute},
 		{"non-positive ttl", []byte("0123456789abcdef0123456789abcdef"), "ns", "box", 0},
+		// exp has one-second resolution: a sub-second ttl would
+		// truncate to a token that is already expired at mint time.
+		{"sub-second ttl", []byte("0123456789abcdef0123456789abcdef"), "ns", "box", time.Millisecond},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

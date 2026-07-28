@@ -105,7 +105,9 @@ type scopedClaims struct {
 // MintScopedToken produces a token bound to (namespace, name), signed
 // with secret and valid until ttl elapses. The wire format is
 // version.payload.signature (see scopedTokenVersion); the signature is
-// domain-separated (see scopedTokenMACContext).
+// domain-separated (see scopedTokenMACContext). Expiry has one-second
+// resolution, so ttl must be at least one second and is truncated to
+// whole seconds.
 //
 // This lives in the router's package for now so the pattern can be
 // exercised end-to-end (tests, examples) without a second component.
@@ -121,8 +123,14 @@ func MintScopedToken(secret []byte, namespace, name string, ttl time.Duration) (
 	if namespace == "" || name == "" {
 		return "", errors.New("scopedtoken: namespace and name are required")
 	}
-	if ttl <= 0 {
-		return "", fmt.Errorf("scopedtoken: ttl must be positive, got %s", ttl)
+	// Exp is stored at one-second resolution, so a sub-second ttl would
+	// truncate to a token already expired at mint time (exp is
+	// exclusive). Reject what the format cannot represent rather than
+	// handing back a dead token; a ttl that isn't a whole number of
+	// seconds is truncated, so the effective lifetime can be up to one
+	// second shorter than asked for.
+	if ttl < time.Second {
+		return "", fmt.Errorf("scopedtoken: ttl must be at least %s (exp has one-second resolution), got %s", time.Second, ttl)
 	}
 	claims := scopedClaims{Namespace: namespace, Name: name, Exp: time.Now().Add(ttl).Unix()}
 	payload, err := json.Marshal(claims)

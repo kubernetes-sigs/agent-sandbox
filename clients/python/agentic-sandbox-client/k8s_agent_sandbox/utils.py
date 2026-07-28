@@ -18,6 +18,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 import ipaddress
 
+from .models import SandboxClaimEnvVar
+
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
     """Construct a SandboxClaim lifecycle spec dict from a TTL in seconds.
@@ -146,3 +148,14 @@ def is_valid_gateway_hostname(s: str) -> bool:
             return False
     last = s[-1]
     return last != '-' and last != '.'
+
+
+def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[SandboxClaimEnvVar]:
+    """Construct SandboxClaim env spec entries from a mapping of names to values."""
+    if not env:
+        return []
+
+    return [
+        SandboxClaimEnvVar(name=name, value=value)
+        for name, value in env.items()
+    ]

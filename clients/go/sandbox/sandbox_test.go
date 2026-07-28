@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1378,6 +1379,42 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 
 	if capturedWarmPool != opts.WarmPoolName {
 		t.Errorf("expected warm pool name %q, got %q", opts.WarmPoolName, capturedWarmPool)
+	}
+}
+
+func TestOpen_CreateClaimSendsEnv(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.Env = []extv1beta1.EnvVar{
+		{Name: "FOO", Value: "bar"},
+		{Name: "DEBUG", Value: "true"},
+	}
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+
+	var capturedEnv []extv1beta1.EnvVar
+	fakeWatcher := watch.NewFake()
+
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ca := action.(ktesting.CreateAction)
+		claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim)
+		if ok {
+			if claim.Name == "" && claim.GenerateName != "" {
+				claim.Name = claim.GenerateName + "test12345"
+			}
+			capturedEnv = claim.Spec.Env
+			go fakeWatcher.Add(readySandbox(claim.Name))
+		}
+		return false, nil, nil
+	})
+
+	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(fakeWatcher, nil))
+
+	if err := c.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer c.Close(context.Background())
+
+	if !reflect.DeepEqual(capturedEnv, opts.Env) {
+		t.Errorf("expected env %+v, got %+v", opts.Env, capturedEnv)
 	}
 }
 

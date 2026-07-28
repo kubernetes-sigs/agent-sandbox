@@ -152,6 +152,20 @@ finally:
     sandbox.terminate()
 ```
 
+You can pass per-claim environment variables when creating a sandbox:
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    env={"FOO": "bar"},
+)
+```
+
+Setting `env` populates `SandboxClaim.spec.env`, which forces a cold start
+from the warm pool template instead of adopting a pre-warmed pod. This may
+increase startup latency.
+
 ### 3. In-Cluster Mode (Direct Pod Connection)
 
 Use this when the client runs **inside the cluster** (for example, another pod in the same cluster).

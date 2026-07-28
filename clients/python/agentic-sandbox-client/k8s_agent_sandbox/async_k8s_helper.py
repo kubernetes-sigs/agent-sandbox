@@ -33,7 +33,12 @@ from .constants import (
     CREATED_BY_LABEL,
 )
 from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
-from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
+from .utils import (
+    construct_sandbox_claim_env_spec,
+    is_valid_gateway_hostname,
+    is_valid_ip,
+    select_pod_ip,
+)
 
 
 class AsyncK8sHelper:
@@ -69,6 +74,7 @@ class AsyncK8sHelper:
         lifecycle: dict | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_metadata: dict | None = None,
+        env: dict[str, str] | None = None,
     ):
         """Creates a SandboxClaim custom resource.
 
@@ -100,6 +106,12 @@ class AsyncK8sHelper:
             spec["volumeClaimTemplates"] = volume_claim_templates
         if pod_metadata:
             spec["additionalPodMetadata"] = pod_metadata
+        env_spec = construct_sandbox_claim_env_spec(env)
+        if env_spec:
+            spec["env"] = [
+                env_var.model_dump(by_alias=True, exclude_none=True)
+                for env_var in env_spec
+            ]
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",

@@ -9,6 +9,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
 - [**composing-sandbox-nw-policies**](./composing-sandbox-nw-policies): An example of composing network policies for sandboxes.
 - [**containarium-ssh-sandbox**](./containarium-ssh-sandbox): An example of running Containarium's agent-box runtime in a Sandbox, reached over SSH with an in-container MCP server (no kube-apiserver token held by the agent).
+- [**envd-sandbox**](./envd-sandbox): An example of running E2B's envd daemon as the container entrypoint, providing an E2B-compatible REST and gRPC API for filesystem, process execution, and metrics.
 - [**firecracker-sandbox**](./firecracker-sandbox): An example of running a sandbox on Kata Containers with the Firecracker VMM (`kata-fc`) plus an envd-compatible runtime that matches the E2B data-plane contract.
 - [**gemini-cu-sandbox**](./gemini-cu-sandbox): An example of a Python runtime sandbox for Gemini Computer Use Agent.
 - [**gke-swap**](./gke-swap): Demonstrates how to configure GKE node memory swap with dedicated Local SSDs to drastically increase Chrome pod density from 120 to 200 pods per node.

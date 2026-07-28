@@ -125,7 +125,7 @@ func TestSuspensionReconcilerInitializesLastActivityTime(t *testing.T) {
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "old-sandbox", Namespace: "default"}}
 	res, err := reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.True(t, res.RequeueAfter > 0)
+	assert.Positive(t, res.RequeueAfter)
 
 	var updated agentsv1beta1.Sandbox
 	err = client.Get(context.Background(), req.NamespacedName, &updated)

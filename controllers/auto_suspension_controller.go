@@ -1,4 +1,3 @@
-
 // Copyright 2026 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -106,8 +105,8 @@ func (r *SandboxAutoSuspensionReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 func getInactivityDuration(sandbox *agentsv1beta1.Sandbox) time.Duration {
-	if sandbox.Spec.Lifecycle.AutoSuspend != nil && sandbox.Spec.Lifecycle.AutoSuspend.InactivityDuration != nil {
-		return sandbox.Spec.Lifecycle.AutoSuspend.InactivityDuration.Duration
+	if sandbox.Spec.AutoSuspend != nil && sandbox.Spec.AutoSuspend.InactivityDuration != nil {
+		return sandbox.Spec.AutoSuspend.InactivityDuration.Duration
 	}
 	return 0
 }
@@ -255,10 +254,7 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 		key   string
 		tsStr string
 	}
-	capacity := len(timestamps)
-	if capacity > maxActivityEntries {
-		capacity = maxActivityEntries
-	}
+	capacity := min(len(timestamps), maxActivityEntries)
 	items := make(chan activityItem, capacity)
 	count := 0
 	for k, v := range timestamps {
@@ -277,16 +273,11 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 		wg     sync.WaitGroup
 	)
 
-	workerCount := maxActivityWorkers
-	if len(timestamps) < workerCount {
-		workerCount = len(timestamps)
-	}
+	workerCount := min(len(timestamps), maxActivityWorkers)
 
 	ctx := r.Context()
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workerCount {
+		wg.Go(func() {
 			for item := range items {
 				if ctx.Err() != nil {
 					return
@@ -352,7 +343,7 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 					errsMu.Unlock()
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

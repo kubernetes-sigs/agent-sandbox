@@ -281,10 +281,11 @@ You can run OpenClaw with **Auto-Suspension and Traffic-Triggered Resume** enabl
 
 ### 1. Deploy OpenClaw with Auto-Suspension
 
-Ensure your cluster has the auto-suspension overlay installed (`kubectl apply -f k8s/auto-suspension.yaml`), then apply the manifest:
+Ensure your cluster has the auto-suspension overlay installed (`kubectl apply -f ../../k8s/auto-suspension.yaml` from this directory, or `kubectl apply -f k8s/auto-suspension.yaml` from the repository root), then generate a token and apply the manifest:
 
 ```bash
-sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" examples/openclaw-gvisor-sandbox/openclaw-sandbox-auto-suspension.yaml | kubectl apply -f -
+TOKEN="${TOKEN:-$(openssl rand -hex 32)}"
+sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-sandbox-auto-suspension.yaml | kubectl apply -f -
 ```
 
 ### 2. How OpenClaw Idles Out

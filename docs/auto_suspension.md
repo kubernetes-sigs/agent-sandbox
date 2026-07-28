@@ -180,7 +180,7 @@ EOF
 
 ### 2. Verify Idle Suspension
 
-Wait approximately 15 seconds without sending traffic to the sandbox, then inspect its status:
+Wait at least 65 seconds (1 minute inactivity duration plus reconciliation margin) without sending traffic to the sandbox, then inspect its status:
 
 ```bash
 kubectl get sandbox demo-sandbox
@@ -190,7 +190,7 @@ kubectl get sandbox demo-sandbox
 
 ```text
 NAME           READY   REASON             AGE
-demo-sandbox   False   SandboxSuspended   20s
+demo-sandbox   False   SandboxSuspended   70s
 ```
 
 You can confirm that the underlying Pod has been garbage-collected:

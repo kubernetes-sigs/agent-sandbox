@@ -166,7 +166,7 @@ def main():
         if os.path.basename(f) not in ("kustomization.yaml", "kustomization.yml")
     ]
     image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}"
-    router_image_url = f"registry.k8s.io/agent-sandbox/sandbox-router:{args.tag}"
+    router_image_url = f"registry.k8s.io/agent-sandbox/sandbox-router-go:{args.tag}"
 
     def replace_image(text):
         """Replace the ko:// image placeholder with the published controller image."""
@@ -278,10 +278,17 @@ def main():
         print(f"INFO: Publishing draft release {tag} to GitHub...")
         core_path = "release_assets/sandbox.yaml"
         extensions_path = "release_assets/extensions.yaml"
+        auto_suspension_path = "release_assets/auto-suspension.yaml"
         all_in_one_path = "release_assets/sandbox-with-extensions.yaml"
 
         if not all(
-            os.path.exists(p) for p in (core_path, extensions_path, all_in_one_path)
+            os.path.exists(p)
+            for p in (
+                core_path,
+                extensions_path,
+                auto_suspension_path,
+                all_in_one_path,
+            )
         ):
             print("❌ Release assets missing. Cannot publish.")
             sys.exit(1)
@@ -301,6 +308,7 @@ def main():
                 "gh", "release", "upload", tag,
                 core_path,
                 extensions_path,
+                auto_suspension_path,
                 all_in_one_path,
                 "--clobber",
                 "--repo", "kubernetes-sigs/agent-sandbox",
@@ -329,6 +337,7 @@ def main():
                 "gh", "release", "create", tag,
                 core_path,
                 extensions_path,
+                auto_suspension_path,
                 all_in_one_path,
             ]
 

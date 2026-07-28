@@ -32,7 +32,7 @@ controller:
   leaderElect: true
   # leaderElectionNamespace: ""
   extensions: false
-  enableAutoSuspension: true
+  enableAutoSuspendAndResume: false
   # suspensionServerBindAddress: ":8090"
   # enableTracing: false
   # enablePprof: false

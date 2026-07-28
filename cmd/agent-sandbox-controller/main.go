@@ -115,8 +115,8 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	var suspensionServerAddr string
 	flag.StringVar(&suspensionServerAddr, "suspension-server-bind-address", ":8090", "The address the sandbox suspension REST server binds to (empty disables).")
-	var enableAutoSuspension bool
-	flag.BoolVar(&enableAutoSuspension, "enable-auto-suspension", true, "Enable auto-suspension reconciler and REST server for idle sandboxes.")
+	var enableAutoSuspendAndResume bool
+	flag.BoolVar(&enableAutoSuspendAndResume, "enable-auto-suspend-and-resume", false, "Enable auto-suspension reconciler and traffic-triggered resume REST server for idle sandboxes.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -488,7 +488,9 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
 			os.Exit(1)
 		}
-	if enableAutoSuspension {
+	}
+
+	if enableAutoSuspendAndResume {
 		if err = (&controllers.SandboxAutoSuspensionReconciler{
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),
@@ -503,18 +505,15 @@ func main() {
 				Addr:              suspensionServerAddr,
 				Handler:           suspensionSrv.Handler(),
 				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      15 * time.Second,
+				IdleTimeout:       60 * time.Second,
 			}
 			if err := mgr.Add(httpRunnable(srv, suspensionServerAddr, setupLog)); err != nil {
 				setupLog.Error(err, "unable to add suspension server runnable")
 				os.Exit(1)
 			}
 		}
-	}
-
-	if err = ctrl.NewWebhookManagedBy(mgr, &sandboxv1beta1.Sandbox{}).
-		Complete(); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
-		os.Exit(1)
 	}
 
 	if extensions {

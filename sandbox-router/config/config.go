@@ -186,6 +186,9 @@ type Config struct {
 	// ActivityFlushInterval is the interval at which accumulated activity timestamps
 	// are flushed to the suspension manager. Defaults to 60s.
 	ActivityFlushInterval time.Duration
+	// DefaultResumeTimeout is the maximum duration to wait for a suspended sandbox
+	// to become ready after a traffic-triggered resume. Defaults to 60s.
+	DefaultResumeTimeout time.Duration
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -198,6 +201,7 @@ func Defaults() Config {
 		ProbeAddr:                 ":8081",
 		ExtProcAddr:               "",
 		ActivityFlushInterval:     60 * time.Second,
+		DefaultResumeTimeout:      60 * time.Second,
 		MTLSMode:                  MTLSOff,
 		ClusterDomain:             "cluster.local",
 		ProxyTimeout:              180 * time.Second,

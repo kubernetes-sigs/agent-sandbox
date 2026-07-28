@@ -1,4 +1,22 @@
 ---
+# ==============================================================================
+# Auto-Suspension & Traffic-Triggered Resume Data-Plane Overlay
+# ==============================================================================
+#
+# IMPORTANT: To enable the control-plane reconciler and the :8090 REST server
+# in the core controller, ensure you start agent-sandbox-controller with:
+#   --enable-auto-suspend-and-resume=true
+#
+# - In Helm: set controller.enableAutoSuspendAndResume=true in values.yaml
+# - In deploy-kind: run `AUTO_SUSPENSION=true make deploy-kind` (injects flag automatically)
+# - In static manifests: run the following command to enable the flag on the controller:
+#   kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system \
+#     --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--enable-auto-suspend-and-resume=true"}]'
+# SECURITY NOTE: In v1beta1, port :8090 on the controller is unauthenticated.
+# A Kubernetes NetworkPolicy is automatically included at the bottom of this file
+# (#6) that restricts ingress to port :8090 exclusively to sandbox-router pods.
+# See docs/auto_suspension.md#security--access-control-8090-rest-api for details.
+# ==============================================================================
 # 1. sandbox-router gRPC ext_proc Deployment & Service
 kind: Deployment
 apiVersion: apps/v1
@@ -18,9 +36,21 @@ spec:
         app: sandbox-router
     spec:
       serviceAccountName: agent-sandbox-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: sandbox-router
         image: ko://sigs.k8s.io/agent-sandbox/sandbox-router/cmd # placeholder value, replaced by release script
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         args:
         - --ext-proc-bind-address=:9002
         - --http-bind-address=:8080
@@ -143,3 +173,32 @@ spec:
   - name: suspension
     port: 8090
     targetPort: 8090
+
+---
+# ==============================================================================
+# 6. NetworkPolicy isolating :8090 REST server on agent-sandbox-controller
+# ==============================================================================
+# Restricts incoming traffic to the unauthenticated /v1/sandboxes/resume and
+# /v1/sandboxes/activity REST server (:8090) exclusively to sandbox-router pods.
+# ==============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sandbox-router-to-controller-suspension-api
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: sandbox-router
+    ports:
+    - protocol: TCP
+      port: 8090

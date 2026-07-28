@@ -23,7 +23,6 @@ spec:
         args:
         - "--leader-elect=true"
         - "--extensions"
-        - "--enable-auto-suspension=true"
         - "--suspension-server-bind-address=:8090"
         ports:
         - name: metrics

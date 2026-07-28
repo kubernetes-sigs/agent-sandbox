@@ -11,8 +11,8 @@
 {{- if hasKey .Values.controller "extensions" }}
 - --extensions={{ .Values.controller.extensions }}
 {{- end }}
-{{- if .Values.controller.enableAutoSuspension }}
-- --enable-auto-suspension={{ .Values.controller.enableAutoSuspension }}
+{{- if .Values.controller.enableAutoSuspendAndResume }}
+- --enable-auto-suspend-and-resume={{ .Values.controller.enableAutoSuspendAndResume }}
 {{- end }}
 {{- if .Values.controller.suspensionServerBindAddress }}
 - --suspension-server-bind-address={{ .Values.controller.suspensionServerBindAddress }}

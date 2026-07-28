@@ -256,13 +256,14 @@ func run(cfg *config.Config, log logr.Logger) error {
 
 		go func() {
 			log.Info("starting ext_proc gRPC listener", "addr", cfg.ExtProcAddr)
-			if err := grpcServer.Serve(lis); err != nil && !errors.Is(err, net.ErrClosed) {
+			if err := grpcServer.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) && !errors.Is(err, net.ErrClosed) {
 				log.Error(err, "ext_proc gRPC server error")
 			}
 		}()
 		go func() {
 			<-ctx.Done()
 			grpcServer.GracefulStop()
+			_ = lis.Close()
 		}()
 		if cfg.SuspensionManagerURL != "" {
 			go extProcServer.StartActivityFlusher(ctx, cfg.ActivityFlushInterval)

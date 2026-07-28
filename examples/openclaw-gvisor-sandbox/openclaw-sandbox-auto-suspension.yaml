@@ -9,7 +9,8 @@ spec:
   # When openclaw-auto-suspension remains idle for 30 minutes without incoming HTTP traffic,
   # the controller transitions operatingMode to Suspended and deletes the Pod.
   # The workspaces-pvc persistent volume and OpenClaw identity remain intact.
-  inactivityDuration: 1m
+  autoSuspend:
+    inactivityDuration: 30m
   podTemplate:
     metadata:
       labels:

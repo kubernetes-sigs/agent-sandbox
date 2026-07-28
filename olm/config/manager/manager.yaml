@@ -24,6 +24,7 @@ spec:
       - args:
         - --leader-elect=true
         - --extensions
+        - --suspension-server-bind-address=:8090
         image: controller:latest
         name: agent-sandbox-controller
         ports:
@@ -35,6 +36,9 @@ spec:
           protocol: TCP
         - containerPort: 9443
           name: webhook
+          protocol: TCP
+        - containerPort: 8090
+          name: suspension
           protocol: TCP
         volumeMounts:
         - mountPath: /etc/sandbox-config

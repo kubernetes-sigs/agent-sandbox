@@ -62,12 +62,13 @@ run_test "init" bash -c "
 # 3. File upload + download round-trip
 run_test "files" bash -c "
   echo -n 'hi from envd-sandbox' > /tmp/envd-test-hello.txt
-  curl -s --connect-timeout 5 --max-time 10 -X POST '${BASE_URL}/files' \
+  trap 'rm -f /tmp/envd-test-hello.txt' EXIT
+  code=\$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST '${BASE_URL}/files' \
     -F 'path=hello.txt' \
-    -F 'file=@/tmp/envd-test-hello.txt' > /dev/null
+    -F 'file=@/tmp/envd-test-hello.txt')
+  [[ \"\$code\" == '200' ]] || { echo \"upload: expected 200, got \$code\"; exit 1; }
   content=\$(curl -s --connect-timeout 5 --max-time 10 '${BASE_URL}/files?path=hello.txt')
   [[ \"\$content\" == 'hi from envd-sandbox' ]] || { echo \"content mismatch: \$content\"; exit 1; }
-  rm -f /tmp/envd-test-hello.txt
   echo 'round-trip ok'
 "
 

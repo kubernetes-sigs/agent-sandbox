@@ -79,9 +79,12 @@ func main() {
 			return "204 No Content", nil
 		}},
 		{"init", func() (string, error) {
-			body, _ := json.Marshal(map[string]any{
+			body, err := json.Marshal(map[string]any{
 				"envVars": map[string]string{"HELLO": "envd"},
 			})
+			if err != nil {
+				return "", fmt.Errorf("POST /init marshal: %w", err)
+			}
 			resp, err := client.Post(baseURL+"/init", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return "", fmt.Errorf("POST /init: %w", err)
@@ -97,10 +100,19 @@ func main() {
 		{"files", func() (string, error) {
 			var buf bytes.Buffer
 			w := multipart.NewWriter(&buf)
-			_ = w.WriteField("path", "hello.txt")
-			fw, _ := w.CreateFormFile("file", "hello.txt")
-			_, _ = fw.Write([]byte("hi from envd-sandbox"))
-			_ = w.Close()
+			if err := w.WriteField("path", "hello.txt"); err != nil {
+				return "", fmt.Errorf("POST /files write path field: %w", err)
+			}
+			fw, err := w.CreateFormFile("file", "hello.txt")
+			if err != nil {
+				return "", fmt.Errorf("POST /files create form file: %w", err)
+			}
+			if _, err := fw.Write([]byte("hi from envd-sandbox")); err != nil {
+				return "", fmt.Errorf("POST /files write file content: %w", err)
+			}
+			if err := w.Close(); err != nil {
+				return "", fmt.Errorf("POST /files close multipart: %w", err)
+			}
 
 			resp, err := client.Post(baseURL+"/files", w.FormDataContentType(), &buf)
 			if err != nil {
@@ -117,7 +129,13 @@ func main() {
 				return "", fmt.Errorf("GET /files download: %w", err)
 			}
 			defer resp2.Body.Close()
-			content, _ := io.ReadAll(resp2.Body)
+			if resp2.StatusCode != 200 {
+				return "", fmt.Errorf("download: expected 200, got %d", resp2.StatusCode)
+			}
+			content, err := io.ReadAll(resp2.Body)
+			if err != nil {
+				return "", fmt.Errorf("GET /files read body: %w", err)
+			}
 			if string(content) != "hi from envd-sandbox" {
 				return "", fmt.Errorf("content mismatch: %q", string(content))
 			}

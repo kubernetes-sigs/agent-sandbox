@@ -21,7 +21,6 @@ import (
 )
 
 // ConditionType is a type of condition for a resource.
-// +kubebuilder:validation:Enum=Suspended;Ready;Finished
 type ConditionType string
 
 func (c ConditionType) String() string { return string(c) }

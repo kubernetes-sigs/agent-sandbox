@@ -18,12 +18,21 @@ import (
 	"encoding/json"
 	"fmt"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 const v1alpha1SandboxStateAnnotation = "api.agents.x-k8s.io/v1alpha1-sandbox-state"
+const v1beta1SandboxStateAnnotation = "api.agents.x-k8s.io/v1beta1-sandbox-state"
+
+// v1beta1SandboxStash holds v1beta1-only fields that have no v1alpha1
+// representation, preserved across v1beta1 -> v1alpha1 -> v1beta1 round-trips.
+type v1beta1SandboxStash struct {
+	IdleLifecycle    *v1beta1.IdleLifecyclePolicy `json:"idleLifecycle,omitempty"`
+	LastActivityTime *metav1.Time                  `json:"lastActivityTime,omitempty"`
+}
 
 // ConvertTo converts this Sandbox to the Hub version (v1beta1).
 func (s *Sandbox) ConvertTo(dstRaw conversion.Hub) error {
@@ -42,6 +51,21 @@ func (s *Sandbox) ConvertTo(dstRaw conversion.Hub) error {
 		return err
 	}
 
+	// Restore v1beta1-only fields from stash if present
+	if stashJSON, ok := s.Annotations[v1beta1SandboxStateAnnotation]; ok {
+		var stash v1beta1SandboxStash
+		if err := json.Unmarshal([]byte(stashJSON), &stash); err != nil {
+			return fmt.Errorf("failed to unmarshal v1beta1 Sandbox stash: %w", err)
+		}
+		if dst.Spec.IdleLifecycle == nil {
+			dst.Spec.IdleLifecycle = stash.IdleLifecycle
+		}
+		if dst.Status.LastActivityTime == nil {
+			dst.Status.LastActivityTime = stash.LastActivityTime
+		}
+		delete(dst.Annotations, v1beta1SandboxStateAnnotation)
+	}
+
 	// Preserve the original v1alpha1 object state for lossless round-tripping
 	if dst.Annotations == nil {
 		dst.Annotations = make(map[string]string)
@@ -49,6 +73,7 @@ func (s *Sandbox) ConvertTo(dstRaw conversion.Hub) error {
 	sCopy := s.DeepCopy()
 	if sCopy.Annotations != nil {
 		delete(sCopy.Annotations, v1alpha1SandboxStateAnnotation)
+		delete(sCopy.Annotations, v1beta1SandboxStateAnnotation)
 	}
 	stateJSON, err := json.Marshal(sCopy)
 	if err != nil {
@@ -82,6 +107,22 @@ func (s *Sandbox) ConvertFrom(srcRaw conversion.Hub) error {
 		s.Status.Replicas = 0
 	} else {
 		s.Status.Replicas = 1
+	}
+
+	// Stash v1beta1-only fields so they survive a v1beta1 -> v1alpha1 -> v1beta1 round-trip
+	stash := v1beta1SandboxStash{
+		IdleLifecycle:    src.Spec.IdleLifecycle,
+		LastActivityTime: src.Status.LastActivityTime,
+	}
+	if stash.IdleLifecycle != nil || stash.LastActivityTime != nil {
+		stashJSON, err := json.Marshal(stash)
+		if err != nil {
+			return fmt.Errorf("failed to marshal v1beta1 Sandbox stash: %w", err)
+		}
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		s.Annotations[v1beta1SandboxStateAnnotation] = string(stashJSON)
 	}
 
 	// Restore original v1alpha1 state if present to ensure lossless conversion

@@ -261,13 +261,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		case idleActionSuspend:
 			logger.Info("Idle TTL expired, suspending sandbox")
 			// Persist status first so lastActivityTime and conditions from
-			// reconcileChildResources are not lost. If this fails (e.g. 409
-			// conflict from a concurrent lastActivityTime update), abort the
-			// suspend and requeue so we re-evaluate against fresh data.
+			// reconcileChildResources are not lost.
 			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 				return ctrl.Result{}, errors.Join(err, statusUpdateErr)
 			}
-			patch := client.MergeFrom(sandbox.DeepCopy())
+			// Use optimistic lock: if the router/SDK bumped lastActivityTime
+			// (or anything else changed) since the status write, the patch
+			// fails and we requeue to re-evaluate against fresh activity data.
+			patch := client.MergeFromWithOptions(sandbox.DeepCopy(), client.MergeFromWithOptimisticLock{})
 			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
 			if sandbox.Annotations == nil {
 				sandbox.Annotations = make(map[string]string)
@@ -291,7 +292,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			sandboxDeleted = true
 		case idleActionRetain:
 			logger.Info("Suspended TTL expired, retaining sandbox")
-			setSandboxExpiredCondition(sandbox)
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:    string(sandboxv1beta1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  sandboxv1beta1.SandboxReasonIdleRetained,
+				Message: "Sandbox suspended TTL expired, retained",
+			})
 			retainPatch := client.MergeFrom(sandbox.DeepCopy())
 			if sandbox.Annotations == nil {
 				sandbox.Annotations = make(map[string]string)
@@ -386,16 +392,19 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.LastActivityTime = &now
 	}
 
-	// Reset lastActivityTime on resume from suspension.
-	// Detected by: the sandbox WAS suspended (condition was True at start of
-	// reconcile) but is no longer (condition was just removed because
-	// operatingMode returned to Running).
-	if sandbox.Spec.IdleLifecycle != nil && wasSuspended && !hasSuspended {
-		now := metav1.Now()
-		sandbox.Status.LastActivityTime = &now
+	// State-based: clear idle annotations whenever Running. This retries
+	// automatically on the next reconcile if the patch fails, unlike the
+	// edge-triggered approach which would miss the retry window.
+	if sandbox.Spec.IdleLifecycle != nil && sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeRunning {
 		if err := r.clearIdleAnnotations(ctx, sandbox); err != nil {
 			allErrors = errors.Join(allErrors, err)
 		}
+	}
+
+	// Edge-triggered: reset lastActivityTime on resume transition.
+	if sandbox.Spec.IdleLifecycle != nil && wasSuspended && !hasSuspended {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
 	}
 
 	return allErrors
@@ -459,7 +468,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
 	if isSuspended {
 		if sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation] == "true" {
-			readyCondition.Reason = sandboxv1beta1.SandboxReasonExpired
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonIdleRetained
 		} else if sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation] == "true" {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonIdleSuspended
 		} else {

@@ -136,12 +136,16 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 			if err != nil {
 				hostOnly = host
 			}
-			parts := strings.Split(hostOnly, ".")
-			if sandboxID == "" && len(parts) > 0 && parts[0] != "" {
-				sandboxID = parts[0]
-			}
-			if sandboxNamespace == "" && len(parts) > 1 && parts[1] != "" {
-				sandboxNamespace = parts[1]
+			hostOnly = strings.TrimSuffix(strings.ToLower(hostOnly), ".")
+			if strings.HasSuffix(hostOnly, ".sandbox.local") {
+				trimmed := strings.TrimSuffix(hostOnly, ".sandbox.local")
+				parts := strings.Split(trimmed, ".")
+				if sandboxID == "" && len(parts) > 0 && parts[0] != "" {
+					sandboxID = parts[0]
+				}
+				if sandboxNamespace == "" && len(parts) > 1 && parts[1] != "" {
+					sandboxNamespace = parts[1]
+				}
 			}
 		}
 	}
@@ -374,7 +378,7 @@ func (s *ExtProcServer) flushActivityTimestamps(ctx context.Context) {
 	s.activityTimestamps = make(map[string]time.Time)
 	s.mu.Unlock()
 
-	url := strings.TrimRight(s.suspensionManagerURL, "/") + "/v1/activity"
+	url := strings.TrimRight(s.suspensionManagerURL, "/") + "/v1/sandboxes/activity"
 	batch := make(map[string]string)
 	for k, v := range snapshot {
 		batch[k] = v.Format(time.RFC3339)

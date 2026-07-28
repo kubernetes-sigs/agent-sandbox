@@ -135,7 +135,6 @@ func NewSuspensionServer(c client.Client, logger logr.Logger) *SuspensionServer 
 func (s *SuspensionServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/sandboxes/resume", s.handleResume)
-	mux.HandleFunc("/v1/resume", s.handleResume)
 	mux.HandleFunc("/v1/sandboxes/activity", s.handleActivity)
 	return mux
 }

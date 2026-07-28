@@ -15,6 +15,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # Restrict unauthenticated suspension API (:8090) exclusively to sandbox-router pods
     - from:
       - podSelector:
           matchLabels:

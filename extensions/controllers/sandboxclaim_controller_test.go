@@ -6047,8 +6047,8 @@ func newOptimisticLockTestObjects() (*extensionsv1beta1.SandboxClaim, *extension
 				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxClaim",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
 				Name:       "test-claim",
 				UID:        "claim-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -6298,8 +6298,8 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-				Kind:       "SandboxWarmPool",
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 				Name:       "test-pool",
 				UID:        "warmpool-uid-123",
 				Controller: ptr.To(true), // nolint:modernize
@@ -6420,13 +6420,8 @@ func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {
 }
 
 // TestSandboxClaimAdoptionCompletionConflictDoesNotSwitchCandidates pins the
-// fix for the sustained-load amplification defect: once the adoption
-// annotation is committed for a candidate, a 409 on the (optimistically
-// locked) adoption patch must be resolved against a fresh read of THAT
-// candidate — never by popping the next candidate and overwriting the
-// committed assignment in the same pass (the measured assignment-flip storm:
-// stale candidate views under load flipped one claim through up to 8
-// sandboxes, orphaning each previous one).
+// no-flip invariant: a 409 on the adoption patch is resolved on the SAME
+// candidate, never by switching to the next one mid-pass.
 func TestSandboxClaimAdoptionCompletionConflictDoesNotSwitchCandidates(t *testing.T) {
 	scheme := newScheme(t)
 	_, template, warmPool, _ := newOptimisticLockTestObjects()
@@ -6507,11 +6502,9 @@ func TestSandboxClaimAdoptionCompletionConflictDoesNotSwitchCandidates(t *testin
 	require.Equal(t, 2, patchAttempts["pool-sb-1"], "exactly one doomed patch plus one fresh-base re-patch")
 }
 
-// TestSandboxClaimStaleAdoptionRepatchIdempotentWithoutWrite verifies that a
-// pass whose CACHED view of the assigned sandbox predates the completed
-// adoption performs no further sandbox write: the doomed re-patch is rejected
-// by the optimistic lock, the fresh read shows the linkage already true, and
-// the pass finalizes status from the authoritative object.
+// TestSandboxClaimStaleAdoptionRepatchIdempotentWithoutWrite verifies a stale
+// pass costs one doomed re-patch, zero effective writes: the fresh read shows
+// the linkage already true and status finalizes from it.
 func TestSandboxClaimStaleAdoptionRepatchIdempotentWithoutWrite(t *testing.T) {
 	scheme := newScheme(t)
 	claim, template, warmPool, adopted := newOptimisticLockTestObjects()
@@ -6592,12 +6585,10 @@ func TestSandboxClaimStaleAdoptionRepatchIdempotentWithoutWrite(t *testing.T) {
 	require.Equal(t, adopted.Name, updatedClaim.Status.SandboxStatus.Name, "status must finalize from the authoritative sandbox")
 }
 
-// TestSandboxClaimAssignedSandboxDeletedTerminalCleanup verifies that a
-// stale-view pass whose assigned sandbox is already deleted on the server is
-// TERMINAL: exactly one doomed write, authoritative cleanup of the dead
-// reference (the annotation, or the deprecated label on legacy claims), a
-// benign AdoptionConflict, and no in-pass rebinding to another candidate —
-// with the next (converged) pass re-adopting cleanly.
+// TestSandboxClaimAssignedSandboxDeletedTerminalCleanup verifies a deleted
+// assigned sandbox is terminal: one doomed write, authoritative cleanup of
+// the reference (annotation or deprecated label), benign AdoptionConflict,
+// no in-pass rebinding; the next pass re-adopts cleanly.
 func TestSandboxClaimAssignedSandboxDeletedTerminalCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -6706,13 +6697,9 @@ func TestSandboxClaimAssignedSandboxDeletedTerminalCleanup(t *testing.T) {
 }
 
 // TestSandboxClaimAdoptionCompletionExhaustedContentionKeepsReference covers
-// the exhausted-contention tail of resolveAdoptionCompletion: when the
-// assigned sandbox stays pool-owned and adoptable but every fresh-base
-// adoption patch keeps conflicting, the pass ends with the benign
-// AdoptionConflict and the committed reference is KEPT (the sandbox is still
-// ours to finish; the next event-driven or rate-limited pass completes it).
-// It also pins the surfaced condition message: the raw apiserver conflict
-// text must be trimmed from what kubectl describe shows.
+// the exhausted-contention tail: persistent 409s end the pass with a benign
+// AdoptionConflict, the committed reference KEPT, and the raw apiserver
+// conflict text trimmed from the surfaced condition message.
 func TestSandboxClaimAdoptionCompletionExhaustedContentionKeepsReference(t *testing.T) {
 	scheme := newScheme(t)
 	_, template, warmPool, _ := newOptimisticLockTestObjects()
@@ -6786,13 +6773,11 @@ func TestSandboxClaimAdoptionCompletionExhaustedContentionKeepsReference(t *test
 	require.Contains(t, readyCond.Message, "conflicting concurrent write")
 }
 
-// TestSandboxClaimAdoptionCleanupFailureSurfacesJoinedError covers the
-// cleanup-failure branch of resolveAdoptionCompletion: the assigned sandbox is
-// gone on the server AND clearing the dead reference fails too. The pass must
-// surface a benign AdoptionConflict (so the workqueue paces the retry), keep
-// the reference for the next pass to clean, and carry both failures in the
-// error.
-func TestSandboxClaimAdoptionCleanupFailureSurfacesJoinedError(t *testing.T) {
+// TestSandboxClaimAdoptionCleanupFailureKeepsReferenceAndRetries covers the
+// cleanup-failure branch: sandbox gone AND reference cleanup failing must
+// surface a stable, terse AdoptionConflict (internals go to logs only), keep
+// the reference, and complete cleanup on a healed pass.
+func TestSandboxClaimAdoptionCleanupFailureKeepsReferenceAndRetries(t *testing.T) {
 	scheme := newScheme(t)
 	_, template, warmPool, _ := newOptimisticLockTestObjects()
 
@@ -6847,11 +6832,18 @@ func TestSandboxClaimAdoptionCleanupFailureSurfacesJoinedError(t *testing.T) {
 	if err == nil || !errors.Is(err, errAdoptionConflict) {
 		t.Fatalf("expected a benign adoption conflict carrying the cleanup failure, got: %v", err)
 	}
-	require.Contains(t, err.Error(), "reference cleanup failed", "the cleanup failure must be carried in the surfaced error")
-	require.Contains(t, err.Error(), "etcd hiccup", "the underlying cleanup error must not be swallowed")
+	require.Contains(t, err.Error(), "reference cleanup failed", "the cleanup failure must be named in the surfaced error")
+	require.NotContains(t, err.Error(), "etcd hiccup", "internal cleanup error text belongs in logs, not the surfaced error")
 
 	after := &extensionsv1beta1.SandboxClaim{}
 	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, after))
+	readyCond := meta.FindStatusCondition(after.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond)
+	require.Equal(t, "AdoptionConflict", readyCond.Reason)
+	require.NotContains(t, readyCond.Message, "etcd hiccup",
+		"internal cleanup error text must never reach the condition message")
+	require.NotContains(t, readyCond.Message, "Internal error occurred",
+		"apiserver internal-error boilerplate must never reach the condition message")
 	require.Equal(t, "ghost-sb", after.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation],
 		"the reference stays for the next pass to clean when cleanup itself failed")
 
@@ -6863,4 +6855,107 @@ func TestSandboxClaimAdoptionCleanupFailureSurfacesJoinedError(t *testing.T) {
 	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, after))
 	require.NotContains(t, after.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation,
 		"the healed pass must clean the dead reference")
+}
+
+// TestSandboxClaimAdoptionAnnotationAndCompletionConflictsResolvedSamePass
+// covers the two conflict mechanisms composing in ONE reconcile pass: the
+// annotation write 409s and is retried in-pass on a fresh base, then the
+// completion patch 409s and is resolved on the same candidate — the pass
+// still finishes the adoption with no error and no requeue.
+func TestSandboxClaimAdoptionAnnotationAndCompletionConflictsResolvedSamePass(t *testing.T) {
+	scheme := newScheme(t)
+	_, template, warmPool, _ := newOptimisticLockTestObjects()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid-123"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
+	}
+	candidate := newPoolCandidateSandbox("pool-sb-1")
+
+	claimConflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"},
+		claim.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+	sandboxConflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+		candidate.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, candidate).
+		WithStatusSubresource(claim).
+		Build()
+
+	// First annotation Update 409s (stale claim base), then the first
+	// adoption patch 409s (concurrent candidate write): both in one pass.
+	claimConflictOnce := true
+	sandboxConflictOnce := true
+	claimUpdates := 0
+	sandboxPatches := 0
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+				claimUpdates++
+				if claimConflictOnce {
+					claimConflictOnce = false
+					return claimConflict
+				}
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && sb.Name == "pool-sb-1" {
+				sandboxPatches++
+				if sandboxConflictOnce {
+					sandboxConflictOnce = false
+					return sandboxConflict
+				}
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	warmSandboxQueue.Add(
+		queue.GetNamespacedWarmPoolName("default", "test-pool"),
+		queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"},
+	)
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        rawClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: warmSandboxQueue,
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected both conflicts resolved in the same pass, got error: %v", err)
+	}
+	if !res.IsZero() {
+		t.Fatalf("expected no requeue, got %+v", res)
+	}
+	if claimUpdates < 2 {
+		t.Errorf("expected the annotation write to be retried in-pass (>=2 claim updates), got %d", claimUpdates)
+	}
+	if sandboxPatches != 2 {
+		t.Errorf("expected exactly one doomed adoption patch plus one fresh-base re-patch, got %d", sandboxPatches)
+	}
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, "pool-sb-1", updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+	require.Equal(t, "pool-sb-1", updatedClaim.Status.SandboxStatus.Name, "the pass must finalize the binding despite both conflicts")
+
+	adopted := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, rawClient.Get(context.Background(), types.NamespacedName{Name: "pool-sb-1", Namespace: "default"}, adopted))
+	adoptedRef := metav1.GetControllerOf(adopted)
+	require.NotNil(t, adoptedRef)
+	require.Equal(t, types.UID("claim-uid-123"), adoptedRef.UID)
 }

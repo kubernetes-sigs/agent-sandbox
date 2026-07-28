@@ -181,7 +181,7 @@ toc-verify:
 
 .PHONY: fix-olm-manifests
 fix-olm-manifests:
-	./dev/tools/sync-olm-manifests
+	./dev/tools/fix-olm-manifests
 
 .PHONY: verify-olm
 verify-olm:

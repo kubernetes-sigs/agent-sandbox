@@ -18,7 +18,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-# keep in sync with dev/tools/sync-olm-manifests (copy-k8s-config in olm/Makefile)
+# keep in sync with dev/tools/fix-olm-manifests (copy-k8s-config in olm/Makefile)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "${ROOT}"
 

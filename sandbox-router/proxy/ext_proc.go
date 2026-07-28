@@ -137,8 +137,8 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 				hostOnly = host
 			}
 			hostOnly = strings.TrimSuffix(strings.ToLower(hostOnly), ".")
-			if strings.HasSuffix(hostOnly, ".sandbox.local") {
-				trimmed := strings.TrimSuffix(hostOnly, ".sandbox.local")
+			if before, ok := strings.CutSuffix(hostOnly, ".sandbox.local"); ok {
+				trimmed := before
 				parts := strings.Split(trimmed, ".")
 				if sandboxID == "" && len(parts) > 0 && parts[0] != "" {
 					sandboxID = parts[0]
@@ -178,7 +178,7 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 								Code: typev3.StatusCode_GatewayTimeout,
 							},
 							Details: "sandbox_resume_failed",
-							Body:    []byte(fmt.Sprintf("failed to resume sandbox %s/%s: %v\n", sandboxNamespace, sandboxID, err)),
+							Body:    fmt.Appendf(nil, "failed to resume sandbox %s/%s: %v\n", sandboxNamespace, sandboxID, err),
 						},
 					},
 				}
@@ -352,16 +352,6 @@ func (s *ExtProcServer) StartActivityFlusher(ctx context.Context, interval time.
 			return
 		case <-ticker.C:
 			s.flushActivityTimestamps(ctx)
-		}
-	}
-}
-
-func (s *ExtProcServer) mergeActivitySnapshot(snapshot map[string]time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k, ts := range snapshot {
-		if existing, ok := s.activityTimestamps[k]; !ok || ts.After(existing) {
-			s.activityTimestamps[k] = ts
 		}
 	}
 }

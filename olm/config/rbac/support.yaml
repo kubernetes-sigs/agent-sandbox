@@ -89,3 +89,25 @@ spec:
     targetPort: 9443
   selector:
     app: agent-sandbox-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app: agent-sandbox-controller
+  name: allow-controller-system-traffic
+  namespace: agent-sandbox-system
+spec:
+  ingress:
+  - ports:
+    - port: 9443
+      protocol: TCP
+    - port: 8080
+      protocol: TCP
+    - port: 8081
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes:
+  - Ingress

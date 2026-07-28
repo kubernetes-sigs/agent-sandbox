@@ -86,8 +86,8 @@ func ParseSandboxHeaders(h http.Header, opts ParseOptions) (Target, *Error) {
 				hostOnly = host
 			}
 			hostOnly = strings.TrimSuffix(strings.ToLower(hostOnly), ".")
-			if strings.HasSuffix(hostOnly, ".sandbox.local") {
-				trimmed := strings.TrimSuffix(hostOnly, ".sandbox.local")
+			if before, ok := strings.CutSuffix(hostOnly, ".sandbox.local"); ok {
+				trimmed := before
 				parts := strings.Split(trimmed, ".")
 				if id == "" && len(parts) > 0 && parts[0] != "" {
 					id = parts[0]

@@ -579,5 +579,21 @@ class TestK8sHelperWaitForGatewayIP(unittest.TestCase):
         self.assertEqual(ip, "192.168.1.1")
 
 
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperApiClientInjection(unittest.TestCase):
+
+    def test_injected_api_client_used_and_no_config_loaded(
+        self, mock_config, mock_custom_cls, mock_core_cls
+    ):
+        sentinel = MagicMock(name="ApiClient")
+        K8sHelper(api_client=sentinel)
+        mock_custom_cls.assert_called_once_with(sentinel)
+        mock_core_cls.assert_called_once_with(sentinel)
+        mock_config.load_incluster_config.assert_not_called()
+        mock_config.load_kube_config.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

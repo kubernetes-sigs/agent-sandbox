@@ -15,6 +15,8 @@
 package main
 
 import (
+	"time"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -23,6 +25,8 @@ import (
 // buildManagerOptions constructs the controller manager options used by
 // main(). The webhook server option is applied separately in main() when the
 // webhook subsystem is enabled.
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
 func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Options, probeAddr string, enableLeaderElection bool, leaderElectionNamespace string) ctrl.Options {
 	return ctrl.Options{
 		Scheme:                  scheme,
@@ -41,6 +45,7 @@ func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Optio
 		// manager stops; mgr.Start is the last explicit statement in main(),
 		// and any deferred shutdown work (e.g. tracing cleanup) must stay
 		// bounded so the process still exits promptly.
+		GracefulShutdownTimeout:       durationPtr(5 * time.Second),
 		LeaderElectionReleaseOnCancel: true,
 	}
 }

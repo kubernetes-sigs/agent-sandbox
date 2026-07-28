@@ -20,6 +20,7 @@ import os
 import sys
 import unittest
 from importlib.machinery import SourceFileLoader
+from unittest import mock
 
 # The push-images tool is an extensionless script, so load it via importlib
 # rather than a normal import (same pattern as release_test.py). The tools dir
@@ -95,6 +96,46 @@ class BuildxDockerfileArgTest(unittest.TestCase):
             os.path.join("sandbox-router", "Dockerfile"),
         )
         self.assertEqual(captured["cwd"], ".")
+
+
+class ControllerOnlySelectionTest(unittest.TestCase):
+    """The controller-only mode must not build other discovered images."""
+
+    def test_controller_only_builds_only_controller_image(self):
+        args = argparse.Namespace(
+            controller_only=True,
+            image_tag="testtag",
+            images=[],
+        )
+        discovered_dockerfiles = [
+            (".", ["sandbox-router"], ["Dockerfile"]),
+            (os.path.join(".", "sandbox-router"), [], ["Dockerfile"]),
+        ]
+
+        with (
+            mock.patch.object(
+                push_images.os,
+                "walk",
+                return_value=discovered_dockerfiles,
+            ),
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+            ),
+            mock.patch.object(
+                push_images,
+                "build_and_push_image",
+            ) as build_image,
+        ):
+            push_images.main(args)
+
+        build_image.assert_called_once_with(
+            args,
+            "agent-sandbox-controller",
+            ".",
+            os.path.join(".", "Dockerfile"),
+            "testtag",
+        )
 
 
 if __name__ == "__main__":

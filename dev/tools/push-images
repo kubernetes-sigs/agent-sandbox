@@ -116,7 +116,9 @@ def main(args):
                      "temp", "tests", "tmp", ".venv"}
 
     if args.controller_only:
-        # TODO: Implement an explicit inclusion strategy for controller only Dockerfile.
+        # Avoid walking the largest image-only subtrees. The explicit image
+        # selection below enforces controller-only mode for Dockerfiles in
+        # every other directory.
         excluded_dirs.update({"examples", "clients"})
 
     built = set()
@@ -144,6 +146,9 @@ def main(args):
             if root == go_router_dir:
                 context_dir = "."
                 service_name = "sandbox-router-go"
+
+            if args.controller_only and service_name != "agent-sandbox-controller":
+                continue
 
             if args.images and service_name not in args.images:
                 continue

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -287,10 +288,11 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
 	workloadSec := benchWorkloadSec()
+	longevity := benchLongevity()
 
 	reportDir := os.Getenv("SANDBOX_REPORT_DIR")
 	if reportDir == "" {
-		reportDir = "."
+		reportDir = "artifacts"
 	}
 
 	tc0 := framework.NewTestContext(t)
@@ -321,6 +323,20 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	cpus := cluster.TotalCPUCapacity
 	if isVMRuntime(runtimeClass) && cpus == 0 {
 		t.Skip("skipping VM runtime burst test: no worker CPU capacity reported")
+	}
+
+	if longevity > 0 && os.Getenv("SANDBOX_WORKLOAD_SEC") == "" {
+		longevityPool := int(cpus)
+		if v := os.Getenv("SANDBOX_POOL_SIZES"); v != "" {
+			for s := range strings.SplitSeq(v, ",") {
+				if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
+					longevityPool = n
+					break
+				}
+			}
+		}
+		workloadSec = max(5, longevityPool/2)
+		t.Logf("[longevity] workload overridden to %ds (pool/2)", workloadSec)
 	}
 
 	fillTimeout := 5 * time.Minute
@@ -383,18 +399,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	drainCancel()
 
 	batchCap := benchBatchCap()
-	longevity := benchLongevity()
 	calcBatchSize := func(poolSize int) int {
 		return min(max(4, poolSize/2), batchCap)
-	}
-
-	type claimRecord struct {
-		batch        int
-		claimIndex   int
-		latency      time.Duration
-		wallOffset   time.Duration
-		readyAtStart int32
-		breakdown    milestoneBreakdown
 	}
 
 	isUnder1s := func(d time.Duration) bool {
@@ -406,6 +412,9 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot determine pool sizes: %v", err)
 	}
+	if longevity > 0 && os.Getenv("SANDBOX_POOL_SIZES") == "" {
+		poolSizes = []int{int(cpus)}
+	}
 
 	for _, poolSize := range poolSizes {
 		// Allow up to 300% CPU overprovisioning for VM runtimes — scheduler
@@ -414,11 +423,16 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("[skip] pool size %d exceeds 300%% of worker CPU capacity (%d vCPUs)", poolSize, cpus)
 			continue
 		}
+		if longevity > 0 && poolSize < 20 {
+			t.Logf("[skip] longevity mode requires pool size ≥ 20 (got %d)", poolSize)
+			continue
+		}
 
 		poolFillTime := baselinePoolFill(t, tc0, pool, poolID, int32(poolSize), fillTimeout)
 
 		t.Run(fmt.Sprintf("pool-%d", poolSize), func(t *testing.T) {
 			tc := framework.NewTestContext(t)
+			poolStart := time.Now()
 
 			if settleDur > 0 {
 				t.Logf("[settle] waiting %s for controller work queue to drain after fill", settleDur)
@@ -429,9 +443,24 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			defer tracker.Stop()
 
 			claimTimeout := poolFillTime + 30*time.Second
+			greenThreshold := 500 * time.Millisecond
 			t.Logf("[setup] Pool-%d filled in %.3fs", poolSize, poolFillTime.Seconds())
 
 			batchSize := calcBatchSize(poolSize)
+			if longevity > 0 && coldBaseline > 0 {
+				batchSize = max(4, int(float64(poolSize)*0.5/coldBaseline.Seconds()))
+				if os.Getenv("SANDBOX_BATCH_CAP") != "" {
+					batchSize = min(batchSize, batchCap)
+				}
+			}
+
+			interBatchDelay := 100 * time.Millisecond
+			if longevity > 0 && coldBaseline > 0 {
+				interBatchDelay = time.Duration(coldBaseline.Seconds() * float64(batchSize) / float64(poolSize) * float64(time.Second))
+				if interBatchDelay < 50*time.Millisecond {
+					interBatchDelay = 50 * time.Millisecond
+				}
+			}
 
 			// --- CSV setup ---
 			csvPath := filepath.Join(reportDir, fmt.Sprintf("burst_recovery_%s_pool%d.csv", runtimeClass, poolSize))
@@ -460,11 +489,27 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
 			}
 			_ = cw.Write([]string{"# settle_sec", strconv.Itoa(int(settleDur.Seconds()))})
-			_ = cw.Write([]string{"# inter_batch_settle_ms", "100"})
-			_ = cw.Write([]string{"batch", "claim", "latency_sec", "under_1s", "wall_offset_sec", "ready_at_start",
+			_ = cw.Write([]string{"# inter_batch_delay_ms", strconv.Itoa(int(interBatchDelay.Milliseconds()))})
+			_ = cw.Write([]string{"batch", "claim", "batch_size", "latency_sec", "timestamp", "wall_offset_sec", "ready_at_start",
 				"create_ack_ms", "adoption_ms", "schedule_ms", "runtime_ms", "propagate_ms", "e2e_ms", "is_warm"})
+			cw.Flush()
 
 			var allRecords []claimRecord
+
+			var summCw *csv.Writer
+			if longevity > 0 {
+				summPath := filepath.Join(reportDir, fmt.Sprintf("burst_summary_%s_pool%d.csv", runtimeClass, poolSize))
+				sf, serr := os.Create(summPath)
+				require.NoError(t, serr, "failed to create summary CSV")
+				defer sf.Close()
+				summCw = csv.NewWriter(sf)
+				defer summCw.Flush()
+				_ = summCw.Write([]string{"wall_min", "batch_from", "batch_to", "batch_size", "direction",
+					"claims", "ready_avg", "latency_avg_sec", "latency_p50_sec", "latency_p95_sec",
+					"best_sec", "worst_sec", "green", "grey", "over_1s", "warm_ratio", "throughput_per_sec"})
+				summCw.Flush()
+				t.Logf("[csv] summary: %s", summPath)
+			}
 
 			fireBatch := func(batchNum, count int, readyAtStart int32, testStart time.Time) []claimRecord {
 				records := make([]claimRecord, count)
@@ -507,6 +552,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 						records[idx] = claimRecord{
 							batch:        batchNum,
 							claimIndex:   idx + 1,
+							createTime:   createStart,
 							latency:      time.Since(createStart),
 							wallOffset:   time.Since(testStart),
 							readyAtStart: readyAtStart,
@@ -532,10 +578,10 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("  cold=%.3fs  warm=%.3fs  fill=%.3fs  threshold=%.3fs",
 				coldBaseline.Seconds(), warmBaseline.Seconds(), poolFillTime.Seconds(), warmColdThreshold.Seconds())
 			if longevity > 0 {
-				t.Logf("  batchSize=%d  longevity=%s  adaptive=%v  settle=%s",
-					batchSize, longevity, adaptiveBatch, settleDur)
+				t.Logf("  batchSize=%d  longevity=%s  adaptive=%v  settle=%s  delay=%s",
+					batchSize, longevity, adaptiveBatch, settleDur, interBatchDelay)
 			} else {
-				t.Logf("  batchSize=%d  maxClaims=%d  settle=%s  inter_batch=100ms", batchSize, maxClaims, settleDur)
+				t.Logf("  batchSize=%d  maxClaims=%d  settle=%s  inter_batch=%s", batchSize, maxClaims, settleDur, interBatchDelay)
 			}
 			t.Logf("=======================================================================")
 
@@ -545,6 +591,12 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			batchNum := 0
 			minBatch, maxBatch := batchSize, batchSize
 			deadline := time.Time{}
+			const summaryInterval = 10
+			var windowRecords []claimRecord
+			windowBatchFrom := 1
+			windowStartBatchSize := batchSize
+			var windowReadySum float64
+			var windowBatchCount int
 			if longevity > 0 {
 				deadline = testStart.Add(longevity)
 			}
@@ -559,26 +611,26 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				batchNum++
 
 				if batchNum > 1 {
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(interBatchDelay)
 				}
 
 				var poolStatus extensionsv1beta1.SandboxWarmPool
 				require.NoError(t, tc.Get(t.Context(), poolID, &poolStatus))
 				readyBefore := poolStatus.Status.ReadyReplicas
 
-				if readyBefore <= 1 && totalClaims > poolSize && deadline.IsZero() {
+				if readyBefore <= 1 && totalClaims >= poolSize && deadline.IsZero() {
 					t.Logf("[drain] pool depleted (ready=%d) after %d batches, %d claims",
 						readyBefore, batchNum-1, totalClaims)
 					break
 				}
 
 				if adaptiveBatch {
-					if readyBefore <= 1 && batchSize > 1 {
+					if readyBefore < int32(poolSize/2) && batchSize > 1 {
 						batchSize--
-						t.Logf("[adapt] batch_size %d→%d (pool depleted)", batchSize+1, batchSize)
-					} else if readyBefore > int32(poolSize/2) && batchSize < initialBatchSize {
+						t.Logf("[adapt] batch_size→%d (ready %d < pool/2)", batchSize, readyBefore)
+					} else if readyBefore > int32(poolSize)-int32(batchSize) && batchSize < initialBatchSize {
 						batchSize++
-						t.Logf("[adapt] batch_size %d→%d (pool >50%%)", batchSize-1, batchSize)
+						t.Logf("[adapt] batch_size→%d (ready %d > pool-batch)", batchSize, readyBefore)
 					}
 					minBatch = min(minBatch, batchSize)
 					maxBatch = max(maxBatch, batchSize)
@@ -599,40 +651,69 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				records := fireBatch(batchNum, count, readyBefore, testStart)
 				allRecords = append(allRecords, records...)
 				totalClaims += count
+
+				for _, r := range records {
+					bd := r.breakdown
+					_ = cw.Write([]string{
+						strconv.Itoa(r.batch),
+						strconv.Itoa(r.claimIndex),
+						strconv.Itoa(batchSize),
+						fmt.Sprintf("%.3f", r.latency.Seconds()),
+						r.createTime.UTC().Format("2006-01-02T15:04:05.000Z"),
+						fmt.Sprintf("%.3f", r.wallOffset.Seconds()),
+						strconv.Itoa(int(r.readyAtStart)),
+						fmt.Sprintf("%.1f", bd.CreateAckMs),
+						fmt.Sprintf("%.1f", bd.AdoptionMs),
+						fmt.Sprintf("%.1f", bd.ScheduleMs),
+						fmt.Sprintf("%.1f", bd.RuntimeMs),
+						fmt.Sprintf("%.1f", bd.PropagateMs),
+						fmt.Sprintf("%.1f", bd.EndToEndMs),
+						strconv.FormatBool(bd.IsWarm),
+					})
+				}
+				cw.Flush()
+
+				if summCw != nil {
+					windowRecords = append(windowRecords, records...)
+					windowReadySum += float64(readyBefore)
+					windowBatchCount++
+					if batchNum%summaryInterval == 0 || !shouldContinue() {
+						emitBatchSummary(summCw, windowRecords, windowBatchFrom, batchNum,
+							batchSize, windowStartBatchSize, testStart, greenThreshold, warmColdThreshold,
+							windowReadySum, windowBatchCount)
+						summCw.Flush()
+						windowRecords = nil
+						windowBatchFrom = batchNum + 1
+						windowStartBatchSize = batchSize
+						windowReadySum = 0
+						windowBatchCount = 0
+					}
+				}
 			}
 
-			// --- Data table ---
-			t.Logf("-----------------------------------------------------------------------")
-			t.Logf("%-6s %-6s %-12s %-8s %-14s %-6s  %-10s %-10s %-10s %-10s %-10s %-10s %-6s",
-				"BATCH", "CLAIM", "LATENCY(s)", "UNDER1S", "WALL_OFF(s)", "READY",
-				"ACK_MS", "ADOPT_MS", "SCHED_MS", "RUNTIME_MS", "PROP_MS", "E2E_MS", "WARM")
-			for _, r := range allRecords {
-				under1s := isUnder1s(r.latency)
-				bd := r.breakdown
-				t.Logf("%-6d %-6d %-12.3f %-8v %-14.3f %-6d  %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-6v",
-					r.batch, r.claimIndex,
-					r.latency.Seconds(),
-					under1s,
-					r.wallOffset.Seconds(),
-					r.readyAtStart,
-					bd.CreateAckMs, bd.AdoptionMs, bd.ScheduleMs,
-					bd.RuntimeMs, bd.PropagateMs, bd.EndToEndMs, bd.IsWarm)
+			if summCw != nil && len(windowRecords) > 0 {
+				emitBatchSummary(summCw, windowRecords, windowBatchFrom, batchNum,
+					batchSize, windowStartBatchSize, testStart, greenThreshold, warmColdThreshold,
+					windowReadySum, windowBatchCount)
+				summCw.Flush()
+			}
 
-				_ = cw.Write([]string{
-					strconv.Itoa(r.batch),
-					strconv.Itoa(r.claimIndex),
-					fmt.Sprintf("%.3f", r.latency.Seconds()),
-					strconv.FormatBool(under1s),
-					fmt.Sprintf("%.3f", r.wallOffset.Seconds()),
-					strconv.Itoa(int(r.readyAtStart)),
-					fmt.Sprintf("%.1f", bd.CreateAckMs),
-					fmt.Sprintf("%.1f", bd.AdoptionMs),
-					fmt.Sprintf("%.1f", bd.ScheduleMs),
-					fmt.Sprintf("%.1f", bd.RuntimeMs),
-					fmt.Sprintf("%.1f", bd.PropagateMs),
-					fmt.Sprintf("%.1f", bd.EndToEndMs),
-					strconv.FormatBool(bd.IsWarm),
-				})
+			if longevity == 0 {
+				t.Logf("-----------------------------------------------------------------------")
+				t.Logf("%-6s %-6s %-12s %-24s %-14s %-6s  %-10s %-10s %-10s %-10s %-10s %-10s %-6s",
+					"BATCH", "CLAIM", "LATENCY(s)", "TIMESTAMP", "WALL_OFF(s)", "READY",
+					"ACK_MS", "ADOPT_MS", "SCHED_MS", "RUNTIME_MS", "PROP_MS", "E2E_MS", "WARM")
+				for _, r := range allRecords {
+					bd := r.breakdown
+					t.Logf("%-6d %-6d %-12.3f %-24s %-14.3f %-6d  %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-6v",
+						r.batch, r.claimIndex,
+						r.latency.Seconds(),
+						r.createTime.UTC().Format("2006-01-02T15:04:05.000Z"),
+						r.wallOffset.Seconds(),
+						r.readyAtStart,
+						bd.CreateAckMs, bd.AdoptionMs, bd.ScheduleMs,
+						bd.RuntimeMs, bd.PropagateMs, bd.EndToEndMs, bd.IsWarm)
+				}
 			}
 
 			// --- Summary ---
@@ -643,7 +724,6 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			greyZoneCount := 0
 			overColdCount := 0
 			var worstStart time.Duration
-			greenThreshold := 500 * time.Millisecond
 			for _, r := range allRecords {
 				createTime := testStart.Add(r.wallOffset - r.latency)
 				readyTime := testStart.Add(r.wallOffset)
@@ -710,6 +790,14 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# total_duration_sec", fmt.Sprintf("%.3f", totalDuration.Seconds())})
 			_ = cw.Write([]string{"# time_to_all_ready_sec", fmt.Sprintf("%.3f", timeToAllReadySec)})
 			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
+
+			if longevity == 0 || t.Failed() || os.Getenv("SANDBOX_DEBUG") != "" {
+				label := fmt.Sprintf("pool%d", poolSize)
+				if longevity > 0 {
+					label = fmt.Sprintf("longevity-pool%d", poolSize)
+				}
+				tc.DumpControllerLogsSince(poolStart, label)
+			}
 		})
 
 		// Scale pool to 0 and wait for all pods (including Terminating) to be gone
@@ -904,6 +992,95 @@ func waitForNoPods(ctx context.Context, cl *framework.ClusterClient, namespace s
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+type claimRecord struct {
+	batch        int
+	claimIndex   int
+	createTime   time.Time
+	latency      time.Duration
+	wallOffset   time.Duration
+	readyAtStart int32
+	breakdown    milestoneBreakdown
+}
+
+func emitBatchSummary(cw *csv.Writer, records []claimRecord, batchFrom, batchTo int,
+	batchSize, startBatchSize int, testStart time.Time,
+	greenThreshold, warmColdThreshold time.Duration,
+	readySum float64, batchCount int) {
+	if len(records) == 0 {
+		return
+	}
+	wallMin := time.Since(testStart).Minutes()
+	direction := "="
+	if batchSize > startBatchSize {
+		direction = "+"
+	} else if batchSize < startBatchSize {
+		direction = "-"
+	}
+	readyAvg := readySum / float64(max(1, batchCount))
+	latencies := make([]float64, len(records))
+	var latencySum float64
+	best := records[0].latency.Seconds()
+	worst := 0.0
+	green, grey, over1s, warm := 0, 0, 0, 0
+	for i, r := range records {
+		s := r.latency.Seconds()
+		latencies[i] = s
+		latencySum += s
+		if s < best {
+			best = s
+		}
+		if s > worst {
+			worst = s
+		}
+		if r.latency <= greenThreshold {
+			green++
+		} else if r.latency <= warmColdThreshold {
+			grey++
+		} else {
+			over1s++
+		}
+		if r.breakdown.IsWarm {
+			warm++
+		}
+	}
+	sort.Float64s(latencies)
+	avg := latencySum / float64(len(latencies))
+	p50 := latencies[len(latencies)/2]
+	p95Idx := int(float64(len(latencies)) * 0.95)
+	if p95Idx >= len(latencies) {
+		p95Idx = len(latencies) - 1
+	}
+	p95 := latencies[p95Idx]
+	warmRatio := float64(warm) / float64(len(records))
+	var throughput float64
+	if len(records) > 1 {
+		first := records[0].wallOffset - records[0].latency
+		last := records[len(records)-1].wallOffset
+		if dur := last - first; dur > 0 {
+			throughput = float64(len(records)) / dur.Seconds()
+		}
+	}
+	_ = cw.Write([]string{
+		fmt.Sprintf("%.1f", wallMin),
+		strconv.Itoa(batchFrom),
+		strconv.Itoa(batchTo),
+		strconv.Itoa(batchSize),
+		direction,
+		strconv.Itoa(len(records)),
+		fmt.Sprintf("%.1f", readyAvg),
+		fmt.Sprintf("%.3f", avg),
+		fmt.Sprintf("%.3f", p50),
+		fmt.Sprintf("%.3f", p95),
+		fmt.Sprintf("%.3f", best),
+		fmt.Sprintf("%.3f", worst),
+		strconv.Itoa(green),
+		strconv.Itoa(grey),
+		strconv.Itoa(over1s),
+		fmt.Sprintf("%.2f", warmRatio),
+		fmt.Sprintf("%.1f", throughput),
+	})
 }
 
 func benchPoolSizes(cpuCapacity int64) ([]int, error) {

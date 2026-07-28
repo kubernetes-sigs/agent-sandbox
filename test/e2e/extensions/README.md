@@ -32,10 +32,12 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_POOL_SIZES` | total worker CPUs | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to the cluster's total worker CPU count when unset. |
 | `SANDBOX_BATCH_CAP` | `10` | Maximum number of claims fired per batch in burst recovery. Lower values reduce controller serialization; higher values stress the reconcile loop. |
 | `SANDBOX_SETTLE_SEC` | `2` | Seconds to wait after pool fill before starting burst claims. Lets the controller work queue drain so fill-residue doesn't inflate batch 1 latencies. Set to `0` to measure raw post-fill behavior. |
-| `SANDBOX_REPORT_DIR` | `.` (cwd) | Base directory for CSV output. A subdirectory is auto-created per run. |
+| `SANDBOX_LONGEVITY` | *(unset)* | Go duration (e.g. `2h`, `30m`) to run burst recovery in longevity mode: continuous batches with adaptive sizing until the deadline. |
+| `SANDBOX_DEBUG` | *(unset)* | Set to any non-empty value to dump scoped controller logs after each pool iteration even on success. |
+| `SANDBOX_REPORT_DIR` | `artifacts` | Base directory for CSV output and controller logs. A subdirectory is auto-created per run. |
 | `SANDBOX_CLUSTER_ID` | *(auto-detected)* | Override cluster identity string in report paths |
 | `SANDBOX_VERSION` | *(auto-detected)* | Override agent-sandbox version. Defaults to the controller deployment image tag. |
-| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. |
+| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. Longevity mode overrides this to `max(5, poolSize/2)` unless explicitly set. |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
 
 ## Quick Start
@@ -86,6 +88,19 @@ The test auto-detects cluster CPU capacity and skips pool sizes that exceed it.
 SANDBOX_RUNTIME_CLASS=kata \
   SANDBOX_POOL_SIZES=4,6,8,12,16 \
   go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 60m
+
+# Longevity soak test — 2 hours of sustained batch claims against a single pool
+SANDBOX_RUNTIME_CLASS=kata-clh \
+  SANDBOX_POOL_SIZES=35 \
+  SANDBOX_LONGEVITY=2h \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 3h
+
+# Quick debug run with controller log dump on success
+SANDBOX_RUNTIME_CLASS=kata-clh \
+  SANDBOX_POOL_SIZES=35 \
+  SANDBOX_LONGEVITY=5m \
+  SANDBOX_DEBUG=true \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 10m
 ```
 
 ## Batch Sizing
@@ -106,8 +121,28 @@ The batch cap defaults to 10 (`SANDBOX_BATCH_CAP`).
 - Pool 20 → batch 10 (cap)
 - Pool 32 → batch 10 (cap)
 
-Batches fire with a 100ms settle interval between them. The test stops when
-`ReadyReplicas ≤ 1` **and** at least `poolSize` claims have been issued
+In longevity mode (`SANDBOX_LONGEVITY`), the initial batch size is computed
+from the cold start baseline to avoid depleting the pool:
+
+```text
+batchSize = max(4, int(0.5 × poolSize / coldStartSec))
+```
+
+The `0.5` safety factor ensures roughly 2× more refill capacity than drain
+rate. Adaptive sizing then adjusts ±1 per batch: decrease when
+`ready < poolSize/2`, increase when `ready > poolSize - batchSize`.
+
+The inter-batch delay is also computed from the cold start baseline:
+
+```text
+delay = coldStartSec × batchSize / poolSize   (floor 50ms)
+```
+
+This is static (computed once) to avoid fighting with adaptive batch sizing.
+For runc this yields ~50ms, for kata ~500ms.
+
+In regular (non-longevity) mode, the delay defaults to 100ms. The test stops
+when `ReadyReplicas ≤ 1` **and** at least `poolSize` claims have been issued
 (ensuring at least one full pass through the pool), or after `2 × poolSize`
 total claims — whichever comes first.
 
@@ -143,15 +178,16 @@ that specific pool size. The warm/cold threshold is fixed at **1 second**.
 ### CSV columns
 
 ```text
-batch,claim,latency_sec,under_1s,wall_offset_sec,ready_at_start,create_ack_ms,adoption_ms,schedule_ms,runtime_ms,propagate_ms,e2e_ms,is_warm
+batch,claim,batch_size,latency_sec,timestamp,wall_offset_sec,ready_at_start,create_ack_ms,adoption_ms,schedule_ms,runtime_ms,propagate_ms,e2e_ms,is_warm
 ```
 
 | Column | Description |
 |--------|-------------|
 | `batch` | Batch number (1-based) |
 | `claim` | Claim index within the batch |
+| `batch_size` | Batch size used for this batch (may vary with adaptive sizing) |
 | `latency_sec` | Time from claim creation to Ready condition |
-| `under_1s` | Whether latency is under the 1s warm/cold threshold |
+| `timestamp` | Claim creation time in RFC3339 UTC (matches controller log format for cross-referencing) |
 | `wall_offset_sec` | Seconds since the test started |
 | `ready_at_start` | Pool ReadyReplicas when this batch fired |
 | `create_ack_ms` | API server round-trip: create call to return |
@@ -182,7 +218,7 @@ Header metadata:
 # batch_size,4
 # max_claims,16
 # settle_sec,2
-# inter_batch_settle_ms,100
+# inter_batch_delay_ms,100
 ```
 
 Footer summary:
@@ -231,6 +267,53 @@ Example: `vvoron420gcp22-hjmvw-worker_n2-standard-8_20260722_default/`
 
 If the directory already exists, a numeric suffix is appended (`_2`, `_3`, ...).
 
+## Longevity Mode
+
+Set `SANDBOX_LONGEVITY` to a Go duration (e.g. `2h`, `30m`) to run
+`TestRuntimeClassBurstRecovery` as a sustained soak test. Batches fire
+continuously until the deadline with adaptive batch sizing that self-tunes
+to the controller's refill rate.
+
+Key differences from regular burst mode:
+
+- **Heuristic initial batch**: `max(4, int(0.5 × poolSize / coldStartSec))`
+  instead of `min(max(4, poolSize/2), batchCap)`. The cold start baseline
+  drives the initial estimate so the pool isn't depleted immediately.
+- **Adaptive sizing**: batch size decreases by 1 when `ready < poolSize/2`
+  (pool under pressure) and increases by 1 when `ready > poolSize - batchSize`
+  (pool recovered). The wide steady zone prevents oscillation.
+- **Static inter-batch delay**: `coldStartSec × batchSize / poolSize` (floor
+  50ms), computed once from the cold start baseline. Avoids fighting with
+  the adaptive batch size.
+- **Workload override**: unless `SANDBOX_WORKLOAD_SEC` is explicitly set,
+  longevity mode reduces workload duration to `max(5, poolSize/2)` seconds
+  to prevent pod accumulation during long runs.
+- **Minimum pool size**: longevity mode skips pool sizes below 20 — smaller
+  pools deplete too fast for meaningful adaptive tuning.
+- **Summary CSV**: a `burst_summary_<runtime>_pool<N>.csv` is written every
+  10 batches with aggregated p50/p95 latencies, throughput, warm ratio, and
+  batch size direction for live monitoring.
+
+## Controller Log Capture
+
+After each pool size iteration, scoped controller logs are captured using
+Kubernetes `SinceTime` filtering — only logs from the pool's test period are
+fetched, not the entire pod lifetime.
+
+- **Regular burst**: controller logs are dumped unconditionally after each
+  pool iteration (the scoped period is short, so the cost is negligible).
+- **Longevity mode**: controller logs are dumped only on test failure or when
+  `SANDBOX_DEBUG` is set to any non-empty value.
+
+Logs are saved as `controller-pool<N>-<podname>.log` (or
+`controller-longevity-pool<N>-<podname>.log`) in the test artifacts directory.
+The last 42 lines are also printed to test output. Claim timestamps in the CSV
+use the same RFC3339 UTC format as the controller logs, enabling direct
+cross-referencing between claim records and controller reconcile activity.
+
+On test failure, the framework's built-in `afterEach` hook additionally dumps
+the full (unscoped) controller log as a fallback.
+
 ## Roadmap
 
 - **Split functional vs stress tests**: Separate `runtime_class_test.go` into
@@ -253,12 +336,6 @@ If the directory already exists, a numeric suffix is appended (`_2`, `_3`, ...).
   can start immediately. If not, back off and retry. Eliminates both the risk of
   starting too early (inflated baselines) and waiting too long (wasted time on
   fast clusters).
-- **Per-pool controller log capture**: Restart the controller pod before each
-  pool size iteration and collect its log after the iteration completes. Save
-  the log alongside the CSV in the results directory (e.g.,
-  `controller_gvisor_pool24.log`). Enables "under the hood" analysis of
-  reconcile throughput, batch sizes, etcd conflicts, and refill patterns per
-  pool size without manually correlating timestamps in a single merged log.
 - **Per-pool metrics capture**: Scrape the controller's Prometheus endpoint
   (`/metrics` on port 8080) before and after each pool iteration. Save the
   delta as `metrics_<runtime>_pool<N>.prom` in the results directory. Key

@@ -80,12 +80,18 @@ def _build_tests() -> Tuple[str, List[Callable[[], str]]]:
             timeout=5,
         )
         # envd returns 204 No Content on success in --isnotfc mode.
-        assert r.status_code == 204, r.status_code
+        if r.status_code != 204:
+            raise AssertionError(f"POST /init: expected 204, got {r.status_code}")
         # Verify the environment variable was set via /envs endpoint.
         r = requests.get(f"{base_url}/envs", timeout=5)
-        assert r.status_code == 200, r.status_code
+        if r.status_code != 200:
+            raise AssertionError(f"GET /envs: expected 200, got {r.status_code}")
         envs = r.json()
-        assert envs.get("HELLO") == "envd", envs
+        if envs.get("HELLO") != "envd":
+            raise AssertionError(
+                f"GET /envs: HELLO key missing or incorrect; "
+                f"present keys: {sorted(envs.keys())}"
+            )
         return "init ok"
 
     def _files() -> str:

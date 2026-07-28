@@ -217,24 +217,8 @@ func TestRuntimeClassStartupComparison(t *testing.T) {
 		},
 	}
 
-	// --- Cold start: create Sandbox directly, measure time to Ready ---
-	t.Logf("Measuring cold start (runtimeClass=%s)...", runtimeClass)
-	coldSandbox := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cold-sandbox",
-			Namespace: ns.Name,
-		},
-	}
-	coldSandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+	coldDuration := baselineColdStart(t, tc, ns.Name, podSpec)
 
-	coldStart := time.Now()
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), coldSandbox))
-	tc.MustWaitForObject(coldSandbox, predicates.ReadyConditionIsTrue)
-	coldDuration := time.Since(coldStart)
-	t.Logf("Cold start ready in %s", coldDuration)
-
-	// --- Warm pool setup ---
-	t.Logf("Setting up warm pool...")
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "bench-template",
@@ -259,26 +243,9 @@ func TestRuntimeClassStartupComparison(t *testing.T) {
 
 	warmPoolID := types.NamespacedName{Name: warmPool.Name, Namespace: ns.Name}
 	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), warmPoolID))
-	t.Logf("Warm pool ready, measuring claim...")
 
-	// --- Warm claim: measure time from claim creation to Ready ---
-	claim := &extensionsv1beta1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "bench-claim",
-			Namespace: ns.Name,
-		},
-		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
-		},
-	}
+	claimDuration, _ := baselineWarmClaim(t, tc, ns.Name, warmPool.Name)
 
-	claimStart := time.Now()
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
-	tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
-	claimDuration := time.Since(claimStart)
-	t.Logf("Warm claim ready in %s", claimDuration)
-
-	// --- Report comparison ---
 	t.Logf("=== Startup Comparison (runtimeClass=%s) ===", runtimeClass)
 	t.Logf("  Cold start:  %s", coldDuration)
 	t.Logf("  Warm claim:  %s", claimDuration)
@@ -291,11 +258,19 @@ func TestRuntimeClassStartupComparison(t *testing.T) {
 // TestRuntimeClassBurstRecovery measures how a warm pool behaves under
 // sustained batch load that exceeds pool refill capacity. A single pool is
 // reused across all pool sizes — scaled from 0 to the target between subtests.
-// Each subtest measures its own fill time, then fires claims in dynamically
-// sized batches (min(max(4, poolSize/2), batchCap)) with 100ms settle between
-// batches, stopping when ReadyReplicas ≤ 1 and at least poolSize claims have
-// been issued, or after 2×poolSize total claims — whichever comes first.
-// The batch cap defaults to 10 and can be overridden via SANDBOX_BATCH_CAP.
+//
+// Before entering the subtest loop the test measures three baselines:
+// cold start (single bare sandbox), pool fill, and warm claim latency.
+//
+// Each subtest fires claims in dynamically sized batches with 100ms settle
+// between batches, stopping when ReadyReplicas ≤ 1 and at least poolSize
+// claims have been issued, or after 2×poolSize total claims.
+//
+// Set SANDBOX_LONGEVITY to a Go duration (e.g. "2h", "30m") to run in
+// longevity mode: batches fire continuously until the deadline with adaptive
+// batch sizing — batch size decreases on pool depletion and increases when
+// ready replicas recover above 50%. Use a single pool size and set -timeout
+// accordingly. Set SANDBOX_BATCH_CAP to disable adaptive sizing.
 //
 // Per-claim data is written to a CSV file for analysis. Set SANDBOX_REPORT_DIR
 // to control output location (default: current directory).
@@ -303,6 +278,7 @@ func TestRuntimeClassStartupComparison(t *testing.T) {
 // Run with:
 //
 //	SANDBOX_RUNTIME_CLASS=default SANDBOX_POOL_SIZES=4,6,8 go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 30m
+//	SANDBOX_RUNTIME_CLASS=kata-clh SANDBOX_POOL_SIZES=4 SANDBOX_LONGEVITY=2h go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 3h
 func TestRuntimeClassBurstRecovery(t *testing.T) {
 	runtimeClass := os.Getenv("SANDBOX_RUNTIME_CLASS")
 	if runtimeClass == "" {
@@ -362,17 +338,14 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: workloadPodSpec(rcPtr, workloadSec)}
 	require.NoError(t, tc0.CreateWithCleanup(t.Context(), template))
 
-	calibReplicas := int32(4)
-	if isVMRuntime(runtimeClass) && int64(calibReplicas) > cpus {
-		calibReplicas = int32(cpus)
-	}
+	zeroReplicas := int32(0)
 	pool := &extensionsv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "burst-pool",
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas:    &calibReplicas,
+			Replicas:    &zeroReplicas,
 			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
 		},
 	}
@@ -381,35 +354,27 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 	settleDur := benchSettleDuration()
 
-	t.Logf("[calibrate] Filling pool-%d to measure warm baseline...", calibReplicas)
-	calibCtx, calibCancel := context.WithTimeout(t.Context(), fillTimeout)
-	defer calibCancel()
-	require.NoError(t, tc0.WaitForWarmPoolReady(calibCtx, poolID))
+	// --- Baselines ---
+	coldBaseline := baselineColdStart(t, tc0, ns.Name, workloadPodSpec(rcPtr, workloadSec))
+
+	calibReplicas := int32(4)
+	if isVMRuntime(runtimeClass) && int64(calibReplicas) > cpus {
+		calibReplicas = int32(cpus)
+	}
+	baselinePoolFill(t, tc0, pool, poolID, calibReplicas, fillTimeout)
 
 	if settleDur > 0 {
 		t.Logf("[settle] waiting %s for controller to drain after calibration fill", settleDur)
 		time.Sleep(settleDur)
 	}
 
-	calibClaim := &extensionsv1beta1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "calib-warm",
-			Namespace: ns.Name,
-		},
-		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
-		},
-	}
-	calibStart := time.Now()
-	require.NoError(t, tc0.CreateWithCleanup(t.Context(), calibClaim))
-	require.NoError(t, tc0.WaitForObject(calibCtx, calibClaim, predicates.ReadyConditionIsTrue))
-	warmBaseline := time.Since(calibStart)
+	warmBaseline, calibClaim := baselineWarmClaim(t, tc0, ns.Name, pool.Name)
 	warmColdThreshold := time.Second
-	t.Logf("[calibrate] warm=%.3fs, threshold=%.3fs", warmBaseline.Seconds(), warmColdThreshold.Seconds())
+	t.Logf("[baseline] cold=%.3fs warm=%.3fs threshold=%.3fs",
+		coldBaseline.Seconds(), warmBaseline.Seconds(), warmColdThreshold.Seconds())
 
 	// Scale to 0 before entering subtest loop
 	require.NoError(t, tc0.Delete(t.Context(), calibClaim))
-	zeroReplicas := int32(0)
 	framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
 		p.Spec.Replicas = &zeroReplicas
 	})
@@ -418,6 +383,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	drainCancel()
 
 	batchCap := benchBatchCap()
+	longevity := benchLongevity()
 	calcBatchSize := func(poolSize int) int {
 		return min(max(4, poolSize/2), batchCap)
 	}
@@ -449,16 +415,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			continue
 		}
 
-		// Scale pool to target and measure fill time
-		targetReplicas := int32(poolSize)
-		framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
-			p.Spec.Replicas = &targetReplicas
-		})
-		fillStart := time.Now()
-		fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
-		require.NoError(t, tc0.WaitForWarmPoolReady(fillCtx, poolID))
-		fillCancel()
-		poolFillTime := time.Since(fillStart)
+		poolFillTime := baselinePoolFill(t, tc0, pool, poolID, int32(poolSize), fillTimeout)
 
 		t.Run(fmt.Sprintf("pool-%d", poolSize), func(t *testing.T) {
 			tc := framework.NewTestContext(t)
@@ -491,11 +448,17 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# runtime_class", runtimeClass})
 			_ = cw.Write([]string{"# pool_size", strconv.Itoa(poolSize)})
 			_ = cw.Write([]string{"# workload_sec", strconv.Itoa(workloadSec)})
+			_ = cw.Write([]string{"# cold_baseline_sec", fmt.Sprintf("%.3f", coldBaseline.Seconds())})
 			_ = cw.Write([]string{"# warm_baseline_sec", fmt.Sprintf("%.3f", warmBaseline.Seconds())})
 			_ = cw.Write([]string{"# warm_cold_threshold_sec", fmt.Sprintf("%.3f", warmColdThreshold.Seconds())})
 			_ = cw.Write([]string{"# pool_fill_sec", fmt.Sprintf("%.3f", poolFillTime.Seconds())})
 			_ = cw.Write([]string{"# batch_size", strconv.Itoa(batchSize)})
-			_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
+			if longevity > 0 {
+				_ = cw.Write([]string{"# longevity", longevity.String()})
+				_ = cw.Write([]string{"# max_claims", "unlimited"})
+			} else {
+				_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
+			}
 			_ = cw.Write([]string{"# settle_sec", strconv.Itoa(int(settleDur.Seconds()))})
 			_ = cw.Write([]string{"# inter_batch_settle_ms", "100"})
 			_ = cw.Write([]string{"batch", "claim", "latency_sec", "under_1s", "wall_offset_sec", "ready_at_start",
@@ -560,21 +523,39 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			}
 
 			maxClaims := poolSize * 2
+			initialBatchSize := batchSize
+			adaptiveBatch := longevity > 0 && os.Getenv("SANDBOX_BATCH_CAP") == ""
 
 			// --- Header ---
 			t.Logf("=======================================================================")
 			t.Logf("  Burst Recovery: runtime=%s pool=%d workload=%ds", runtimeClass, poolSize, workloadSec)
-			t.Logf("  warm=%.3fs  fill=%.3fs  threshold=%.3fs",
-				warmBaseline.Seconds(), poolFillTime.Seconds(), warmColdThreshold.Seconds())
-			t.Logf("  batchSize=%d  maxClaims=%d  settle=%s  inter_batch=100ms", batchSize, maxClaims, settleDur)
+			t.Logf("  cold=%.3fs  warm=%.3fs  fill=%.3fs  threshold=%.3fs",
+				coldBaseline.Seconds(), warmBaseline.Seconds(), poolFillTime.Seconds(), warmColdThreshold.Seconds())
+			if longevity > 0 {
+				t.Logf("  batchSize=%d  longevity=%s  adaptive=%v  settle=%s",
+					batchSize, longevity, adaptiveBatch, settleDur)
+			} else {
+				t.Logf("  batchSize=%d  maxClaims=%d  settle=%s  inter_batch=100ms", batchSize, maxClaims, settleDur)
+			}
 			t.Logf("=======================================================================")
 
 			// --- Batched drain loop ---
 			testStart := time.Now()
 			totalClaims := 0
 			batchNum := 0
+			minBatch, maxBatch := batchSize, batchSize
+			deadline := time.Time{}
+			if longevity > 0 {
+				deadline = testStart.Add(longevity)
+			}
+			shouldContinue := func() bool {
+				if !deadline.IsZero() {
+					return time.Now().Before(deadline)
+				}
+				return totalClaims < maxClaims
+			}
 
-			for totalClaims < maxClaims {
+			for shouldContinue() {
 				batchNum++
 
 				if batchNum > 1 {
@@ -585,15 +566,35 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				require.NoError(t, tc.Get(t.Context(), poolID, &poolStatus))
 				readyBefore := poolStatus.Status.ReadyReplicas
 
-				if readyBefore <= 1 && totalClaims > poolSize {
+				if readyBefore <= 1 && totalClaims > poolSize && deadline.IsZero() {
 					t.Logf("[drain] pool depleted (ready=%d) after %d batches, %d claims",
 						readyBefore, batchNum-1, totalClaims)
 					break
 				}
 
-				count := min(batchSize, maxClaims-totalClaims)
-				t.Logf("[batch %d] firing %d claims (ready=%d/%d, total=%d/%d)",
-					batchNum, count, readyBefore, poolSize, totalClaims, maxClaims)
+				if adaptiveBatch {
+					if readyBefore <= 1 && batchSize > 1 {
+						batchSize--
+						t.Logf("[adapt] batch_size %d→%d (pool depleted)", batchSize+1, batchSize)
+					} else if readyBefore > int32(poolSize/2) && batchSize < initialBatchSize {
+						batchSize++
+						t.Logf("[adapt] batch_size %d→%d (pool >50%%)", batchSize-1, batchSize)
+					}
+					minBatch = min(minBatch, batchSize)
+					maxBatch = max(maxBatch, batchSize)
+				}
+
+				count := batchSize
+				if deadline.IsZero() {
+					count = min(batchSize, maxClaims-totalClaims)
+				}
+				if !deadline.IsZero() {
+					t.Logf("[batch %d] firing %d claims (ready=%d/%d, total=%d, remaining=%s)",
+						batchNum, count, readyBefore, poolSize, totalClaims, time.Until(deadline).Truncate(time.Second))
+				} else {
+					t.Logf("[batch %d] firing %d claims (ready=%d/%d, total=%d/%d)",
+						batchNum, count, readyBefore, poolSize, totalClaims, maxClaims)
+				}
 
 				records := fireBatch(batchNum, count, readyBefore, testStart)
 				allRecords = append(allRecords, records...)
@@ -675,6 +676,12 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 			t.Logf("=======================================================================")
 			t.Logf("  Total batches:       %d (batch_size=%d)", batchNum, batchSize)
+			if adaptiveBatch {
+				t.Logf("  Adaptive batch:      %d → [%d, %d]", initialBatchSize, minBatch, maxBatch)
+			}
+			if longevity > 0 {
+				t.Logf("  Longevity:           %s", longevity)
+			}
 			t.Logf("  Total claims:        %d (%d under1s, %d over1s)", totalClaims, under1sCount, totalClaims-under1sCount)
 			t.Logf("  Green (<=500ms):     %d", greenCount)
 			t.Logf("  Grey (500ms..1s):    %d", greyZoneCount)
@@ -688,6 +695,11 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 			_ = cw.Write([]string{})
 			_ = cw.Write([]string{"# total_batches", strconv.Itoa(batchNum)})
+			if adaptiveBatch {
+				_ = cw.Write([]string{"# adaptive_batch", "true"})
+				_ = cw.Write([]string{"# min_batch_size", strconv.Itoa(minBatch)})
+				_ = cw.Write([]string{"# max_batch_size", strconv.Itoa(maxBatch)})
+			}
 			_ = cw.Write([]string{"# total_claims", strconv.Itoa(totalClaims)})
 			_ = cw.Write([]string{"# under_1s_claims", strconv.Itoa(under1sCount)})
 			_ = cw.Write([]string{"# over_1s_claims", strconv.Itoa(totalClaims - under1sCount)})
@@ -797,6 +809,74 @@ func benchBatchCap() int {
 		}
 	}
 	return 10
+}
+
+func benchLongevity() time.Duration {
+	if v := os.Getenv("SANDBOX_LONGEVITY"); v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// Baseline measurements
+// ---------------------------------------------------------------------------
+
+func baselineColdStart(t *testing.T, tc *framework.TestContext, ns string, podSpec corev1.PodSpec) time.Duration {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("cold-baseline-%d", time.Now().UnixNano()),
+			Namespace: ns,
+		},
+	}
+	sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+
+	t.Logf("[baseline] measuring cold start...")
+	start := time.Now()
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))
+	tc.MustWaitForObject(sandbox, predicates.ReadyConditionIsTrue)
+	d := time.Since(start)
+
+	require.NoError(t, tc.Delete(t.Context(), sandbox))
+	t.Logf("[baseline] cold start: %.3fs", d.Seconds())
+	return d
+}
+
+func baselineWarmClaim(t *testing.T, tc *framework.TestContext, ns, poolName string) (time.Duration, *extensionsv1beta1.SandboxClaim) {
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("warm-baseline-%d", time.Now().UnixNano()),
+			Namespace: ns,
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: poolName},
+		},
+	}
+
+	t.Logf("[baseline] measuring warm claim...")
+	start := time.Now()
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
+	tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
+	d := time.Since(start)
+	t.Logf("[baseline] warm claim: %.3fs", d.Seconds())
+	return d, claim
+}
+
+func baselinePoolFill(t *testing.T, tc *framework.TestContext, pool *extensionsv1beta1.SandboxWarmPool, poolID types.NamespacedName, replicas int32, timeout time.Duration) time.Duration {
+	framework.MustUpdateObject(tc.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+		p.Spec.Replicas = &replicas
+	})
+
+	t.Logf("[baseline] filling pool to %d replicas...", replicas)
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
+	require.NoError(t, tc.WaitForWarmPoolReady(ctx, poolID))
+	d := time.Since(start)
+	t.Logf("[baseline] pool-%d filled in %.3fs", replicas, d.Seconds())
+	return d
 }
 
 // waitForNoPods polls until no pods remain in the namespace, including those

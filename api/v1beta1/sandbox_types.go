@@ -123,6 +123,10 @@ const (
 	SandboxReasonExpired = "SandboxExpired"
 	// SandboxReasonIdleSuspended indicates the Sandbox was auto-suspended due to idle timeout.
 	SandboxReasonIdleSuspended = "IdleSuspended"
+	// SandboxReasonIdleRetained indicates the Sandbox's suspended TTL expired with Retain policy.
+	// Unlike SandboxReasonExpired, this does not route through handleSandboxExpiry,
+	// so the sandbox can be resumed by setting operatingMode back to Running.
+	SandboxReasonIdleRetained = "IdleRetained"
 
 	// SandboxIdleSuspendedAnnotation is set by the controller when a sandbox is auto-suspended due to idle timeout.
 	// Cleared on resume. Used to distinguish idle-triggered suspensions from user-initiated ones.

@@ -163,6 +163,32 @@ func (s *ReadyReplicasPredicate) Matches(obj client.Object) (bool, error) {
 	return false, nil
 }
 
+// MinReadyReplicasPredicate checks if ReadyReplicas >= MinReady.
+// Returns an error if MinReady exceeds spec.replicas — the caller must pass a valid count.
+type MinReadyReplicasPredicate struct {
+	MinReady int
+}
+
+func (s *MinReadyReplicasPredicate) String() string {
+	return fmt.Sprintf("MinReadyReplicasPredicate(ReadyReplicas >= %d)", s.MinReady)
+}
+
+func (s *MinReadyReplicasPredicate) Matches(obj client.Object) (bool, error) {
+	u, err := asUnstructured(obj)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert to unstructured: %w", err)
+	}
+
+	var status objectWithStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+	}
+	if s.MinReady > status.Spec.Replicas {
+		return false, fmt.Errorf("minReady %d exceeds spec.replicas %d", s.MinReady, status.Spec.Replicas)
+	}
+	return status.Status.ReadyReplicas >= s.MinReady, nil
+}
+
 // ObservedGenerationMatchesGeneration checks if the given object's ObservedGeneration matches its Generation.
 var ObservedGenerationMatchesGeneration = &ObservedGenerationMatchesGenerationPredicate{}
 

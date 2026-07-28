@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -325,25 +325,19 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		t.Skip("skipping VM runtime burst test: no worker CPU capacity reported")
 	}
 
-	if longevity > 0 && os.Getenv("SANDBOX_WORKLOAD_SEC") == "" {
-		longevityPool := int(cpus)
-		if v := os.Getenv("SANDBOX_POOL_SIZES"); v != "" {
-			for s := range strings.SplitSeq(v, ",") {
-				if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
-					longevityPool = n
-					break
-				}
-			}
-		}
-		workloadSec = max(5, longevityPool/2)
-		t.Logf("[longevity] workload overridden to %ds (pool/2)", workloadSec)
-	}
-
 	fillTimeout := 5 * time.Minute
 
 	ns := &corev1.Namespace{}
 	ns.Name = fmt.Sprintf("burst-%d", time.Now().UnixNano())
 	require.NoError(t, tc0.CreateWithCleanup(t.Context(), ns))
+
+	// Measure cold start before template creation so longevity can derive workload duration.
+	coldBaseline := baselineColdStart(t, tc0, ns.Name, workloadPodSpec(rcPtr, workloadSec))
+
+	if longevity > 0 && os.Getenv("SANDBOX_WORKLOAD_SEC") == "" {
+		workloadSec = max(10, int(coldBaseline.Seconds()*5))
+		t.Logf("[longevity] workload overridden to %ds (coldStart×5)", workloadSec)
+	}
 
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -369,9 +363,6 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	poolID := types.NamespacedName{Name: pool.Name, Namespace: ns.Name}
 
 	settleDur := benchSettleDuration()
-
-	// --- Baselines ---
-	coldBaseline := baselineColdStart(t, tc0, ns.Name, workloadPodSpec(rcPtr, workloadSec))
 
 	calibReplicas := int32(4)
 	if isVMRuntime(runtimeClass) && int64(calibReplicas) > cpus {
@@ -428,13 +419,37 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			continue
 		}
 
-		poolFillTime := baselinePoolFill(t, tc0, pool, poolID, int32(poolSize), fillTimeout)
+		preBatchSize := calcBatchSize(poolSize)
+		if longevity > 0 && coldBaseline > 0 {
+			preBatchSize = max(4, int(float64(poolSize)*0.5/coldBaseline.Seconds()))
+			if os.Getenv("SANDBOX_BATCH_CAP") != "" {
+				preBatchSize = min(preBatchSize, batchCap)
+			}
+		}
+
+		var poolFillTime time.Duration
+		if longevity > 0 {
+			minReady := int32(min(2*preBatchSize, poolSize))
+			framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+				r := int32(poolSize)
+				p.Spec.Replicas = &r
+			})
+			t.Logf("[longevity] scaling pool to %d, waiting for %d ready replicas...", poolSize, minReady)
+			start := time.Now()
+			fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
+			require.NoError(t, tc0.WaitForWarmPoolMinReady(fillCtx, poolID, minReady))
+			fillCancel()
+			poolFillTime = time.Since(start)
+			t.Logf("[longevity] pool has %d+ ready in %.3fs (fill continues in background)", minReady, poolFillTime.Seconds())
+		} else {
+			poolFillTime = baselinePoolFill(t, tc0, pool, poolID, int32(poolSize), fillTimeout)
+		}
 
 		t.Run(fmt.Sprintf("pool-%d", poolSize), func(t *testing.T) {
 			tc := framework.NewTestContext(t)
 			poolStart := time.Now()
 
-			if settleDur > 0 {
+			if settleDur > 0 && longevity == 0 {
 				t.Logf("[settle] waiting %s for controller work queue to drain after fill", settleDur)
 				time.Sleep(settleDur)
 			}
@@ -456,10 +471,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 			interBatchDelay := 100 * time.Millisecond
 			if longevity > 0 && coldBaseline > 0 {
-				interBatchDelay = time.Duration(coldBaseline.Seconds() * float64(batchSize) / float64(poolSize) * float64(time.Second))
-				if interBatchDelay < 50*time.Millisecond {
-					interBatchDelay = 50 * time.Millisecond
-				}
+				interBatchDelay = max(50*time.Millisecond,
+					coldBaseline*time.Duration(batchSize)/time.Duration(poolSize))
 			}
 
 			// --- CSV setup ---
@@ -1045,7 +1058,7 @@ func emitBatchSummary(cw *csv.Writer, records []claimRecord, batchFrom, batchTo 
 			warm++
 		}
 	}
-	sort.Float64s(latencies)
+	slices.Sort(latencies)
 	avg := latencySum / float64(len(latencies))
 	p50 := latencies[len(latencies)/2]
 	p95Idx := int(float64(len(latencies)) * 0.95)

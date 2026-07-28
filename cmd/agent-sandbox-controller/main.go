@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -34,7 +35,9 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -47,6 +50,7 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -188,9 +192,22 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// Apply ConfigMap overrides: keys in /etc/sandbox-config override
-	// flag values (ConfigMap wins over CLI flags).
-	if overrides, err := internalconfig.ApplyConfigMap(internalconfig.DefaultConfigDir, flag.CommandLine); err != nil {
+	// Resolve the controller namespace early: needed to fetch the
+	// ConfigMap from the API and to scope the informer cache.
+	controllerNamespace := leaderElectionNamespace
+	if controllerNamespace == "" {
+		if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+			controllerNamespace = ns
+		} else {
+			controllerNamespace = "agent-sandbox-system"
+		}
+	}
+
+	// Apply ConfigMap overrides from the API server. Reading via API
+	// (rather than the mounted volume) avoids a race where the watcher
+	// restarts the process before the kubelet has synced the volume.
+	configMapData := fetchConfigMapData(controllerNamespace)
+	if overrides, err := internalconfig.ApplyConfigMapData(configMapData, flag.CommandLine); err != nil {
 		setupLog.Error(err, "failed to parse controller config from ConfigMap")
 		os.Exit(1)
 	} else if len(overrides) > 0 {
@@ -276,7 +293,7 @@ func main() {
 		}
 	}
 
-	ctx := ctrl.SetupSignalHandler()
+	signalCtx := ctrl.SetupSignalHandler()
 
 	// Initialize Tracing Provider
 	var instrumenter = asmetrics.NewNoOp()
@@ -284,7 +301,7 @@ func main() {
 		var cleanup func()
 		var err error
 		// Use a timeout context for initialization to prevent blocking
-		initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		initCtx, cancel := context.WithTimeout(signalCtx, 10*time.Second)
 		defer cancel()
 
 		instrumenter, cleanup, err = asmetrics.SetupOTel(initCtx, "agent-sandbox-controller")
@@ -391,14 +408,14 @@ func main() {
 
 			// Generate or load self-signed TLS certificates for the webhook server
 			setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
-			caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
+			caPEM, err := generateWebhookCerts(signalCtx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
 			if err != nil {
 				setupLog.Error(err, "unable to prepare webhook certificates")
 				os.Exit(1)
 			}
 
 			setupLog.Info("Patching CRDs with generated CA bundle")
-			if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
+			if err := patchCRDs(signalCtx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
 				setupLog.Error(err, "failed to patch CRDs with CA bundle")
 				os.Exit(1)
 			}
@@ -434,13 +451,20 @@ func main() {
 		}
 	}
 
+	ctx, shutdown := context.WithCancel(signalCtx)
+
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
-	// managedFields stripping, the Pod spec diet, and (optionally) the
-	// tracking-label scoping; see buildCacheOptions for the rationale.
 	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)
 	if err != nil {
 		setupLog.Error(err, "unable to build cache options")
 		os.Exit(1)
+	}
+	// Scope the ConfigMap informer to the controller namespace so we need
+	// only a namespace-scoped Role (get/list/watch) instead of a ClusterRole.
+	cacheOpts.ByObject[&corev1.ConfigMap{}] = cache.ByObject{
+		Namespaces: map[string]cache.Config{
+			controllerNamespace: {},
+		},
 	}
 	mgrOpts.Cache = cacheOpts
 	if cacheLabelSelectors {
@@ -483,6 +507,17 @@ func main() {
 	if sandboxWriteBehindWindow > 0 {
 		setupLog.Info("Sandbox controller write deferral enabled (--sandbox-write-behind-window)",
 			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
+	}
+
+	configWatcher := &internalconfig.ConfigMapWatcher{
+		Client:      mgr.GetClient(),
+		Namespace:   controllerNamespace,
+		StartupHash: internalconfig.HashConfigMapData(configMapData),
+		Shutdown:    shutdown,
+	}
+	if err = configWatcher.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ConfigMapWatcher")
+		os.Exit(1)
 	}
 
 	if err = (&controllers.SandboxReconciler{
@@ -609,8 +644,51 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctx); err != nil {
+	err = mgr.Start(ctx)
+
+	if ctx.Err() != nil && signalCtx.Err() == nil {
+		// Config reload: re-exec the process to pick up new values.
+		// syscall.Exec replaces the process image in-place (same PID),
+		// so kubelet does not see a container restart and applies no
+		// backoff. The manager has already shut down gracefully above
+		// (leader lease released, ports closed).
+		setupLog.Info("re-execing for config reload")
+		binary, execErr := os.Executable()
+		if execErr != nil {
+			setupLog.Error(execErr, "unable to determine executable path for re-exec")
+			os.Exit(1)
+		}
+		if execErr = syscall.Exec(binary, os.Args, os.Environ()); execErr != nil {
+			setupLog.Error(execErr, "re-exec failed")
+			os.Exit(1)
+		}
+	}
+	if err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// fetchConfigMapData reads the agent-sandbox-config ConfigMap from the
+// API server. Returns nil if the ConfigMap doesn't exist or the API is
+// unreachable (the controller will start with compiled defaults).
+func fetchConfigMapData(namespace string) map[string]string {
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		setupLog.Error(err, "unable to get kubeconfig for ConfigMap fetch")
+		return nil
+	}
+	c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		setupLog.Error(err, "unable to create client for ConfigMap fetch")
+		return nil
+	}
+	var cm corev1.ConfigMap
+	if err := c.Get(context.Background(), client.ObjectKey{Name: "agent-sandbox-config", Namespace: namespace}, &cm); err != nil {
+		if !apierrors.IsNotFound(err) {
+			setupLog.Error(err, "unable to fetch agent-sandbox-config ConfigMap, starting with defaults")
+		}
+		return nil
+	}
+	return cm.Data
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -139,7 +140,11 @@ func (s *SuspensionServer) Handler() http.Handler {
 	return mux
 }
 
-const maxPayloadBytes = 1 << 20 // 1 MB
+const (
+	maxPayloadBytes    = 1 << 20 // 1 MB
+	maxActivityEntries = 500     // Maximum number of timestamp entries allowed in one request
+	maxActivityWorkers = 5       // Bounded concurrency for processing activity timestamp patches
+)
 
 type resumeRequest struct {
 	Name      string `json:"name"`
@@ -247,60 +252,112 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var errs []string
+	type activityItem struct {
+		key   string
+		tsStr string
+	}
+	capacity := len(timestamps)
+	if capacity > maxActivityEntries {
+		capacity = maxActivityEntries
+	}
+	items := make(chan activityItem, capacity)
+	count := 0
+	for k, v := range timestamps {
+		if count >= maxActivityEntries {
+			s.log.V(4).Info("capping activity timestamp processing at maxActivityEntries", "total", len(timestamps), "limit", maxActivityEntries)
+			break
+		}
+		items <- activityItem{key: k, tsStr: v}
+		count++
+	}
+	close(items)
+
+	var (
+		errs   []string
+		errsMu sync.Mutex
+		wg     sync.WaitGroup
+	)
+
+	workerCount := maxActivityWorkers
+	if len(timestamps) < workerCount {
+		workerCount = len(timestamps)
+	}
+
 	ctx := r.Context()
-	for key, tsStr := range timestamps {
-		parts := strings.Split(key, "/")
-		if len(parts) != 2 {
-			errs = append(errs, fmt.Sprintf("invalid sandbox key format: %s", key))
-			continue
-		}
-		ns, name := parts[0], parts[1]
-		if !validDNSLabel(ns) || !validDNSLabel(name) {
-			errs = append(errs, fmt.Sprintf("invalid sandbox namespace or name format: %s", key))
-			continue
-		}
-
-		parsedTime, err := time.Parse(time.RFC3339, tsStr)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("invalid RFC3339 timestamp for %s: %v", key, err))
-			continue
-		}
-
-		var sandbox agentsv1beta1.Sandbox
-		nsName := types.NamespacedName{Name: name, Namespace: ns}
-		if err := s.Get(ctx, nsName, &sandbox); err != nil {
-			errs = append(errs, fmt.Sprintf("failed to get sandbox %s: %v", nsName, err))
-			continue
-		}
-
-		duration := getInactivityDuration(&sandbox)
-		threshold := 60 * time.Second
-		if duration > 0 {
-			threshold = duration / 10
-			if threshold < 5*time.Second {
-				threshold = 0
-			}
-		}
-
-		if sandbox.Status.LastActivityTime == nil || parsedTime.Sub(sandbox.Status.LastActivityTime.Time) > threshold {
-			var patchErr error
-			for i := 0; i < 3; i++ {
-				statusPatch := client.MergeFrom(sandbox.DeepCopy())
-				sandbox.Status.LastActivityTime = &metav1.Time{Time: parsedTime}
-				if patchErr = s.Status().Patch(ctx, &sandbox, statusPatch); patchErr == nil {
-					break
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range items {
+				if ctx.Err() != nil {
+					return
 				}
-				time.Sleep(50 * time.Millisecond)
-				if err := s.Get(ctx, nsName, &sandbox); err != nil {
-					break
+				parts := strings.Split(item.key, "/")
+				if len(parts) != 2 {
+					errsMu.Lock()
+					errs = append(errs, fmt.Sprintf("invalid sandbox key format: %s", item.key))
+					errsMu.Unlock()
+					continue
+				}
+				ns, name := parts[0], parts[1]
+				if !validDNSLabel(ns) || !validDNSLabel(name) {
+					errsMu.Lock()
+					errs = append(errs, fmt.Sprintf("invalid sandbox namespace or name format: %s", item.key))
+					errsMu.Unlock()
+					continue
+				}
+
+				parsedTime, err := time.Parse(time.RFC3339, item.tsStr)
+				if err != nil {
+					errsMu.Lock()
+					errs = append(errs, fmt.Sprintf("invalid RFC3339 timestamp for %s: %v", item.key, err))
+					errsMu.Unlock()
+					continue
+				}
+
+				nsName := types.NamespacedName{Name: name, Namespace: ns}
+				err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					var sandbox agentsv1beta1.Sandbox
+					if getErr := s.Get(ctx, nsName, &sandbox); getErr != nil {
+						return getErr
+					}
+
+					duration := getInactivityDuration(&sandbox)
+					threshold := 60 * time.Second
+					if duration > 0 {
+						threshold = duration / 10
+						if threshold < 5*time.Second {
+							threshold = 0
+						}
+					}
+
+					if sandbox.Status.LastActivityTime != nil && parsedTime.Sub(sandbox.Status.LastActivityTime.Time) <= threshold {
+						return nil
+					}
+
+					statusPatch := client.MergeFrom(sandbox.DeepCopy())
+					sandbox.Status.LastActivityTime = &metav1.Time{Time: parsedTime}
+					return s.Status().Patch(ctx, &sandbox, statusPatch)
+				})
+
+				if err != nil && ctx.Err() == nil {
+					s.log.Error(err, "failed updating lastActivityTime status via patch", "sandbox", nsName)
+					errsMu.Lock()
+					errs = append(errs, fmt.Sprintf("failed updating status for %s: %v", nsName, err))
+					errsMu.Unlock()
 				}
 			}
-			if patchErr != nil {
-				s.log.Error(patchErr, "failed updating lastActivityTime status via patch", "sandbox", nsName)
-				errs = append(errs, fmt.Sprintf("failed updating status for %s: %v", nsName, patchErr))
-			}
-		}
+		}()
+	}
+
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		http.Error(w, "request timed out or canceled", http.StatusRequestTimeout)
+		return
 	}
 
 	if len(errs) > 0 {

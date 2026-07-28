@@ -29,6 +29,7 @@ import (
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	"golang.org/x/sync/singleflight"
 
@@ -85,14 +86,14 @@ func (s *ExtProcServer) Process(stream extproc.ExternalProcessor_ProcessServer) 
 			return nil
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("ext_proc: error receiving stream request: %w", err)
 		}
 
 		switch v := req.Request.(type) {
 		case *extproc.ProcessingRequest_RequestHeaders:
 			resp := s.handleRequestHeaders(ctx, v.RequestHeaders)
 			if err := stream.Send(resp); err != nil {
-				return err
+				return fmt.Errorf("ext_proc: error sending request headers response: %w", err)
 			}
 		default:
 			resp := &extproc.ProcessingResponse{
@@ -101,7 +102,7 @@ func (s *ExtProcServer) Process(stream extproc.ExternalProcessor_ProcessServer) 
 				},
 			}
 			if err := stream.Send(resp); err != nil {
-				return err
+				return fmt.Errorf("ext_proc: error sending default pass-through response: %w", err)
 			}
 		}
 	}
@@ -162,11 +163,21 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 				}
 			}
 			if err := s.ensureSandboxRunning(ctx, sandboxNamespace, sandboxID, port); err != nil {
-				s.log.Info("ext_proc: auto-resume notification failed",
+				s.log.Error(err, "ext_proc: auto-resume notification or readiness check failed",
 					"sandbox", sandboxID,
 					"namespace", sandboxNamespace,
-					"error", err.Error(),
 				)
+				return &extproc.ProcessingResponse{
+					Response: &extproc.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extproc.ImmediateResponse{
+							Status: &typev3.HttpStatus{
+								Code: typev3.StatusCode_GatewayTimeout,
+							},
+							Details: "sandbox_resume_failed",
+							Body:    []byte(fmt.Sprintf("failed to resume sandbox %s/%s: %v\n", sandboxNamespace, sandboxID, err)),
+						},
+					},
+				}
 			}
 		}
 	}
@@ -288,12 +299,14 @@ func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, nam
 				GetByName(namespace, name string) (cache.Entry, bool)
 			}); ok {
 				deadline := time.Now().Add(timeout)
+				ready := false
 				for time.Now().Before(deadline) {
 					if entry, ok := getter.GetByName(namespace, name); ok && entry.PodIP != "" {
 						targetAddr := net.JoinHostPort(entry.PodIP, strconv.Itoa(port))
 						conn, err := net.DialTimeout("tcp", targetAddr, 200*time.Millisecond)
 						if err == nil {
 							conn.Close()
+							ready = true
 							break
 						}
 					}
@@ -302,6 +315,9 @@ func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, nam
 						return nil, ctx.Err()
 					case <-time.After(100 * time.Millisecond):
 					}
+				}
+				if !ready {
+					return nil, fmt.Errorf("timeout (%s) waiting for resumed sandbox %s/%s to become reachable on port %d", timeout, namespace, name, port)
 				}
 			}
 		}
@@ -346,6 +362,8 @@ func (s *ExtProcServer) mergeActivitySnapshot(snapshot map[string]time.Time) {
 	}
 }
 
+const maxActivityBatchSize = 500
+
 func (s *ExtProcServer) flushActivityTimestamps(ctx context.Context) {
 	s.mu.Lock()
 	if len(s.activityTimestamps) == 0 {
@@ -357,22 +375,31 @@ func (s *ExtProcServer) flushActivityTimestamps(ctx context.Context) {
 	s.mu.Unlock()
 
 	url := strings.TrimRight(s.suspensionManagerURL, "/") + "/v1/activity"
-	payload := make(map[string]string)
+	batch := make(map[string]string)
 	for k, v := range snapshot {
-		payload[k] = v.Format(time.RFC3339)
+		batch[k] = v.Format(time.RFC3339)
+		if len(batch) >= maxActivityBatchSize {
+			s.sendActivityBatch(ctx, url, batch, snapshot)
+			batch = make(map[string]string)
+		}
 	}
+	if len(batch) > 0 {
+		s.sendActivityBatch(ctx, url, batch, snapshot)
+	}
+}
 
-	data, err := json.Marshal(payload)
+func (s *ExtProcServer) sendActivityBatch(ctx context.Context, url string, batch map[string]string, fullSnapshot map[string]time.Time) {
+	data, err := json.Marshal(batch)
 	if err != nil {
 		s.log.Error(err, "ext_proc: failed to marshal activity flush payload")
-		s.mergeActivitySnapshot(snapshot)
+		s.mergeActivityBatch(batch, fullSnapshot)
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		s.log.Error(err, "ext_proc: failed creating activity flush request")
-		s.mergeActivitySnapshot(snapshot)
+		s.mergeActivityBatch(batch, fullSnapshot)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -380,13 +407,24 @@ func (s *ExtProcServer) flushActivityTimestamps(ctx context.Context) {
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		s.log.Error(err, "ext_proc: failed flushing activity timestamps")
-		s.mergeActivitySnapshot(snapshot)
+		s.mergeActivityBatch(batch, fullSnapshot)
 		return
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		s.log.Error(fmt.Errorf("status %d", resp.StatusCode), "ext_proc: activity flush returned non-200")
-		s.mergeActivitySnapshot(snapshot)
-		return
+		s.mergeActivityBatch(batch, fullSnapshot)
+	}
+}
+
+func (s *ExtProcServer) mergeActivityBatch(failedBatch map[string]string, fullSnapshot map[string]time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range failedBatch {
+		ts := fullSnapshot[k]
+		if existing, ok := s.activityTimestamps[k]; !ok || ts.After(existing) {
+			s.activityTimestamps[k] = ts
+		}
 	}
 }

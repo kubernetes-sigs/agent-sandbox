@@ -72,6 +72,17 @@ var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 // ErrWarmPoolNotFound is a sentinel error indicating a SandboxWarmPool was not found.
 var ErrWarmPoolNotFound = errors.New("SandboxWarmPool not found")
 
+// errAdoptionConflict classifies expected contention on the optimistically
+// locked adoption writes: the in-pass annotation retry could not resolve its
+// 409 (e.g. the fresh read shows a different sandbox already assigned), or a
+// committed adoption could not be completed (the assigned sandbox was
+// deleted, was won by another owner, or its adoption patch kept
+// conflicting). It is contention, not a claim failure: the Ready condition
+// surfaces it with a benign AdoptionConflict reason instead of a generic
+// ReconcilerError, and the next pass re-enters or finishes the adoption from
+// the converged view.
+var errAdoptionConflict = errors.New("adoption write conflict")
+
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}
 
@@ -140,9 +151,10 @@ func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTi
 type SandboxClaimReconciler struct {
 	client.Client
 	// APIReader reads directly from the API server, bypassing the informer
-	// cache. Used only to re-read a claim after an optimistic-lock conflict,
-	// where the cache is stale by definition. Falls back to Client when unset
-	// (e.g. in unit tests with a fake client).
+	// cache. Used only to re-read a claim, or its assigned sandbox, after an
+	// optimistic-lock conflict or a suspect 404, where the cache is stale by
+	// definition. Falls back to Client when unset (e.g. in unit tests with a
+	// fake client).
 	APIReader               client.Reader
 	Scheme                  *runtime.Scheme
 	WarmSandboxQueue        queue.SandboxQueue
@@ -623,6 +635,28 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				ObservedGeneration: claim.Generation,
 			}
 		}
+		if errors.Is(err, errAdoptionConflict) {
+			// Expected contention on the optimistically locked adoption write,
+			// not a claim failure: the next pass re-enters or completes the
+			// adoption from the converged view. The error text carries the
+			// per-case detail (concurrent update, sandbox deleted, or won by
+			// another owner), so surface it instead of asserting one cause —
+			// but trim the raw apiserver conflict text from the tail: that
+			// low-level detail belongs in logs, not in the condition users
+			// read via kubectl describe.
+			msg := err.Error()
+			var apiErr *k8errors.StatusError
+			if errors.As(err, &apiErr) && strings.HasSuffix(msg, apiErr.Error()) {
+				msg = strings.TrimSuffix(strings.TrimSuffix(msg, apiErr.Error()), ": ") + " (conflicting concurrent write)"
+			}
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "AdoptionConflict",
+				Message:            fmt.Sprintf("%s; the next pass retries from a converged view", msg),
+				ObservedGeneration: claim.Generation,
+			}
+		}
 		if errors.Is(err, ErrInvalidMetadata) {
 			reason = "InvalidMetadata"
 			return metav1.Condition{
@@ -940,25 +974,46 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				// the pass — this resolves in single-digit milliseconds and
 				// keeps the popped candidate from being burned on a doomed pass.
 				if retryErr := r.retryAdoptionAnnotation(ctx, claim, adopted.Name); retryErr != nil {
-					// Retries exhausted (persistent contention) or the fresh
-					// read showed the assignment moved: fail the pass and let
-					// the per-item failure backoff pace further retries.
 					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+					if k8errors.IsConflict(retryErr) {
+						// Retries exhausted on persistent contention: surface it
+						// with the benign AdoptionConflict condition reason and
+						// let the per-item failure backoff pace further retries.
+						return false, fmt.Errorf("%w: claim %s: %w", errAdoptionConflict, claim.Name, retryErr)
+					}
 					return false, retryErr
 				}
 			}
 
 			// Call helper to complete adoption (patch sandbox)
 			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
-				if k8errors.IsNotFound(err) {
-					return false, nil
+				if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
+					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+					logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
+					return false, err
 				}
-				r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
-				if k8errors.IsConflict(err) {
-					return false, nil
+				// A 404/409 here only proves the CANDIDATE's cache view was
+				// stale (deleted, already adopted, or concurrently written —
+				// freshly refilled pool sandboxes are actively written by the
+				// sandbox and warm-pool controllers). The adoption annotation
+				// is already committed on the claim, so this pass must NOT
+				// move on to another candidate: overwriting the committed
+				// assignment orphans the recorded sandbox and, under sustained
+				// load, cascades into assignment-flip storms, burned
+				// candidates, duplicate binds and cold-create status
+				// overwrites. Resolve the committed assignment against
+				// authoritative reads instead.
+				resolved, resolveErr := r.resolveAdoptionCompletion(ctx, claim, adopted.Name)
+				if resolveErr != nil {
+					// Terminal for this pass: the dead reference was cleaned up
+					// (deleted/stolen sandbox) or contention persists, and the
+					// retry is paced by the workqueue's per-item rate limiter.
+					// The candidate key is deliberately NOT re-queued: a
+					// still-adoptable sandbox re-enters the warm queue via its
+					// own watch events.
+					return false, resolveErr
 				}
-				logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
-				return false, err
+				resolved.DeepCopyInto(adopted)
 			}
 
 			logger.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
@@ -1085,7 +1140,14 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		}
 	}
 
-	if err := r.Patch(ctx, adopted, client.MergeFrom(originalAdopted)); err != nil {
+	// Optimistic lock: the ownership transfer must only apply to the exact
+	// revision this pass computed it from. Without it, a patch built from a
+	// stale cache base can silently re-transfer a sandbox that another claim
+	// (or an earlier pass) already adopted. With it, any concurrent write —
+	// including the sandbox controller's own status/annotation writes on a
+	// freshly refilled candidate — surfaces as a 409 that the callers resolve
+	// against a fresh authoritative read (resolveAdoptionCompletion).
+	if err := r.Patch(ctx, adopted, client.MergeFromWithOptions(originalAdopted, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 
@@ -1145,13 +1207,13 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) error {
 	return r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
 		if fresh.UID != claim.UID {
-			return false, fmt.Errorf("claim %s was deleted and recreated during adoption", claim.Name)
+			return false, fmt.Errorf("%w: claim %s was deleted and recreated during adoption", errAdoptionConflict, claim.Name)
 		}
 		if assigned := fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]; assigned != "" && assigned != sandboxName {
 			// A different sandbox is already recorded on the authoritative
 			// object; do not overwrite it. The annotation-recovery path of the
 			// next pass completes that adoption instead.
-			return false, fmt.Errorf("claim %s already assigned sandbox %s, not overwriting", claim.Name, assigned)
+			return false, fmt.Errorf("%w: claim %s already assigned sandbox %s", errAdoptionConflict, claim.Name, assigned)
 		}
 		if fresh.Annotations == nil {
 			fresh.Annotations = make(map[string]string)
@@ -1159,6 +1221,117 @@ func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, cl
 		fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = sandboxName
 		return true, nil
 	})
+}
+
+// resolveAdoptionCompletion resolves a completeAdoption failure (404, or 409
+// on the optimistically locked adoption patch) against authoritative reads.
+// It is called only AFTER the adoption annotation has been committed on the
+// claim, and it upholds one invariant: a committed assignment is never
+// abandoned for another candidate inside the same pass. A stale cache view of
+// the assigned sandbox must degrade to (in order):
+//
+//   - no write at all, when the fresh object shows the adoption already
+//     completed (an earlier pass's patch landed);
+//   - one re-patch on the fresh base, when the sandbox is genuinely still
+//     pool-owned and adoptable (the 409 came from a concurrent benign write,
+//     e.g. the sandbox controller's status transition on a fresh candidate);
+//   - authoritative cleanup of the dead reference plus a benign
+//     errAdoptionConflict, when the sandbox is deleted or was won by another
+//     owner. The next pass then re-enters adoption cleanly, paced by the
+//     workqueue's per-item rate limiter.
+//
+// Nothing here retries a write against a deleted object, requeues on a fixed
+// delay, or records any in-memory state.
+func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) (*v1beta1.Sandbox, error) {
+	logger := log.FromContext(ctx)
+	reader := r.authoritativeReader()
+	key := client.ObjectKey{Namespace: claim.Namespace, Name: sandboxName}
+	var resolved *v1beta1.Sandbox
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &v1beta1.Sandbox{}
+		if err := reader.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		if metav1.IsControlledBy(fresh, claim) {
+			// The adoption is already complete on the server; this pass has
+			// nothing left to write for it.
+			resolved = fresh
+			return nil
+		}
+		if !utils.MatchesGroupKind(metav1.GetControllerOf(fresh), extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxWarmPoolKind) {
+			return fmt.Errorf("%w: sandbox %s is no longer pool-owned and not controlled by claim %s", errAdoptionConflict, sandboxName, claim.Name)
+		}
+		if err := verifySandboxCandidate(fresh, claim); err != nil {
+			return fmt.Errorf("%w: sandbox %s is no longer adoptable by claim %s: %s", errAdoptionConflict, sandboxName, claim.Name, err.Error())
+		}
+		// Still pool-owned and adoptable on the authoritative object:
+		// re-apply the adoption patch on the fresh base. A further 409 re-runs
+		// this closure with another fresh read.
+		if err := r.completeAdoption(ctx, claim, fresh); err != nil {
+			return err
+		}
+		resolved = fresh
+		return nil
+	})
+	if err == nil {
+		return resolved, nil
+	}
+	if k8errors.IsNotFound(err) || errors.Is(err, errAdoptionConflict) {
+		// The assigned sandbox is deleted or lost for good. Clear the
+		// committed reference on a fresh claim base so the next pass re-enters
+		// adoption cleanly instead of re-resolving a dead assignment.
+		logger.V(4).Info("Assigned sandbox unrecoverable; clearing reference", "sandbox", sandboxName, "claim", claim.Name, "reason", err.Error())
+		if cleanupErr := r.removeAssignedSandboxReference(ctx, claim, sandboxName); cleanupErr != nil {
+			return nil, fmt.Errorf("%w: sandbox %s unrecoverable and reference cleanup failed: %w", errAdoptionConflict, sandboxName, errors.Join(err, cleanupErr))
+		}
+		if errors.Is(err, errAdoptionConflict) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: sandbox %s deleted before adoption completed", errAdoptionConflict, sandboxName)
+	}
+	if k8errors.IsConflict(err) {
+		// Retries exhausted on persistent contention: keep the committed
+		// reference (the sandbox is still adoptable and assigned to us) and
+		// let the next event-driven or rate-limited pass finish it.
+		return nil, fmt.Errorf("%w: completing adoption of %s for claim %s: %w", errAdoptionConflict, sandboxName, claim.Name, err)
+	}
+	return nil, err
+}
+
+// removeAssignedSandboxReference clears the assigned-sandbox reference — the
+// annotation and, for legacy claims, the deprecated label — on a fresh claim
+// base via updateClaimOnFreshBase, guarded so it only removes the exact
+// reference it was asked to clean (a concurrent pass may already have moved
+// it). Both fields must be covered: getOrCreateSandbox still accepts the
+// deprecated label as the assigned reference, so clearing only the annotation
+// would leave a label-based claim re-deriving the same dead sandbox name on
+// subsequent stale passes until the informer converges.
+func (r *SandboxClaimReconciler) removeAssignedSandboxReference(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) error {
+	// A deleted or recreated claim means there is nothing left to clean: it
+	// must not surface as an error, and a recreated claim (different UID)
+	// must not be copied back over this pass's object.
+	errClaimGone := errors.New("claim gone")
+	err := r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
+		if fresh.UID != claim.UID {
+			return false, errClaimGone
+		}
+		annotationMatches := fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] == sandboxName
+		labelMatches := fresh.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] == sandboxName
+		if !annotationMatches && !labelMatches {
+			return false, nil
+		}
+		if annotationMatches {
+			delete(fresh.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+		}
+		if labelMatches {
+			delete(fresh.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
+		}
+		return true, nil
+	})
+	if k8errors.IsNotFound(err) || errors.Is(err, errClaimGone) {
+		return nil
+	}
+	return err
 }
 
 // isSandboxReady checks if a sandbox has Ready=True condition.
@@ -1658,27 +1831,38 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 					}
 				} else {
 					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
-						if k8errors.IsNotFound(err) || k8errors.IsConflict(err) {
-							logger.V(4).Info("Failed to complete adoption (conflict/notfound), falling through", "sandbox", sbName, "claim", claim.Name)
-						} else {
+						if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
 							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
-					} else {
-						if fromLabel {
-							if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
-								logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
-							} else {
-								logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
-							}
+						// A 404/409 here only proves the cached sandbox view is
+						// stale (deleted, already adopted, or concurrently
+						// written). Do NOT fall through to adopt a different
+						// candidate while the claim still references this one —
+						// overwriting the recorded assignment cascades under
+						// load. Resolve authoritatively instead: accept an
+						// already-completed adoption without a write, re-patch
+						// on a fresh base, or clean the dead reference and end
+						// the pass with the benign AdoptionConflict.
+						resolved, resolveErr := r.resolveAdoptionCompletion(ctx, claim, sbName)
+						if resolveErr != nil {
+							return nil, resolveErr
 						}
-						// completeAdoption wrote the API server's response back into
-						// `sandbox`, so returning it finalizes the claim status in this same
-						// pass. No requeue for cache lag: a stale pass just re-sends the
-						// idempotent patch, and the Owns(&Sandbox{}) watch drives convergence
-						// once the cache catches up (#1107).
-						logger.V(4).Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
-						return sandbox, nil
+						sandbox = resolved
 					}
+					if fromLabel {
+						if err := r.migrateLegacyAssignedSandboxLabel(ctx, claim, sbName); err != nil {
+							logger.Error(err, "Failed to migrate legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
+						} else {
+							logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
+						}
+					}
+					// completeAdoption (or its fresh-base resolution) wrote the API
+					// server's response back into `sandbox`, so returning it finalizes
+					// the claim status in this same pass. No requeue for cache lag:
+					// the Owns(&Sandbox{}) watch drives convergence once the cache
+					// catches up (#1107).
+					logger.V(4).Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
+					return sandbox, nil
 				}
 			}
 			logger.V(4).Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)

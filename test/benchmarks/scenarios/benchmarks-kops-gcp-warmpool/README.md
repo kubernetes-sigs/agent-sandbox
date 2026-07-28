@@ -62,9 +62,21 @@ rationale) with:
 | Template image | the standard small test image (the stress tool's `--image` default) | measured to trip pre-fix asserts HARDER than a multi-GB image at this shape (6.1x the create target vs 3.1x — see the FAIL section): fast readiness transitions drive more status-update reconciles/sec against the stale cache, and the quick create->Ready->excess-delete cycle adds delete churn a slow pull never reaches. Also keeps nodes free of a multi-GB image; `--wp-image` (via `STRESS_EXTRA_ARGS`) remains the escape hatch for slow-pull shapes |
 | Phases | `warmpool-overcreate,warmpool-unschedulable` (`STRESS_PHASES`) | over-creation gate first, then the quiet unschedulable window |
 
-The invariants are node-shape-independent — pass/fail depends only on
-controller behavior, not node throughput (the live validation ran on
-`e2-standard-8` workers with identical verdicts).
+Two distinct properties here, easy to conflate:
+
+* The **invariants** are node-shape-independent: creates == target, peaks
+  <= caps, and the unschedulable hold define correct controller behavior
+  on any cluster, and a correct controller passes them on any shape (the
+  live validations ran on `e2-standard-8` workers with the same PASS
+  verdicts as the documented shape).
+* The **FAIL-direction sensitivity** is not: how hard a broken controller
+  trips the asserts scales with readiness speed and cluster shape. Fast
+  readiness (small image, quick nodes) amplifies the stale-cache race —
+  6.1x the create target vs the multi-GB image's 3.1x on the same pre-fix
+  controller — so a marginal regression could in principle trip loudly on
+  a fast shape and quietly (or not at all) on a slow one. That is why the
+  scenario pins the amplifying defaults (small image, workers=1000) and
+  documents this cluster shape: use them for comparable magnitudes.
 
 ## Running it
 

@@ -345,6 +345,7 @@ _Appears in:_
 _Underlying type:_ _string_
 
 SandboxOperatingMode defines the desired operational state of the Sandbox.
+
 It expresses intent ("running" vs. "suspended"), not observed status; whether the
 Sandbox has actually reached that state is reported by conditions (see
 SandboxConditionReady and SandboxConditionSuspended).

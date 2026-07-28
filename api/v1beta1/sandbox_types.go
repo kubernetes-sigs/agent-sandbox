@@ -22,8 +22,6 @@ import (
 
 // ConditionType is a type of condition for a resource.
 //
-// +kubebuilder:validation:Enum=Suspended;Ready;Finished
-//
 // Terminology: a Sandbox has two distinct notions that are easy to confuse.
 //   - "running" is a desired state expressed by the user via spec.operatingMode
 //     (see SandboxOperatingModeRunning). It says the controller should create and

@@ -113,7 +113,6 @@ spec:
         image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # placeholder value, replaced by deployment scripts
         args:
         - --leader-elect=true
-        - --enable-auto-suspension=true
         - --suspension-server-bind-address=:8090
         ports:
         - name: metrics

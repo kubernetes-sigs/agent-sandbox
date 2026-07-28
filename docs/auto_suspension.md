@@ -8,7 +8,7 @@ Agent Sandbox provides **Auto-Suspension and Traffic-Triggered Resume**:
 * **Traffic-Triggered Resume**: When new HTTP requests arrive for a suspended sandbox, Envoy Gateway intercepts the request stream via the **Sandbox Router** (`ext_proc`). The router signals the control plane to thaw the sandbox (`.spec.operatingMode: Running`), waits for the new Pod to become ready, and transparently proxies the request without dropping client connections.
 
 > [!NOTE]
-> **Opt-In Feature**: Auto-Suspension and Traffic-Triggered Resume is an **opt-in feature** that is disabled by default (`--enable-auto-suspension=false`). Enabling traffic-triggered resume requires Kubernetes Gateway API (`v1.2.0+`) and Envoy Gateway (`v1.2.0+`). See [Installation & Prerequisites](#installation--prerequisites) below for setup instructions.
+> **Controller-Level Opt-In & Network Security (Admin Guardrail)**: Auto-Suspension is disabled by default (`--enable-auto-suspend-and-resume=false`; `controller.enableAutoSuspendAndResume: false` in Helm). To use it, administrators explicitly enable the flag on the controller (which is protected out-of-the-box by a bundled Kubernetes `NetworkPolicy` isolating ingress to port `:8090` exclusively to `sandbox-router` pods). See [Security & Access Control (:8090 REST API)](#security--access-control-8090-rest-api) below for setup instructions.
 
 ### Architecture & Request Flow
 
@@ -87,32 +87,35 @@ You can install the controller and auto-suspension components using either stati
 
 ##### Option A: Installation via `kubectl` (Static Manifests)
 
-Apply the core CRDs and controller, followed by the auto-suspension overlay ([k8s/auto-suspension.yaml](file:///k8s/auto-suspension.yaml)):
+Apply the core CRDs and controller, enable the auto-suspension flag on the controller, and apply the auto-suspension overlay ([k8s/auto-suspension.yaml](../k8s/auto-suspension.yaml)):
 
 ```bash
 # 1. Apply core Sandbox CRDs and controller
-kubectl apply -f k8s/crds/
-kubectl apply -f k8s/controller.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/controller.yaml
 
-# 2. Apply the Traffic-Triggered Resume Gateway overlay (sandbox-router deployment & ext_proc policy)
-kubectl apply -f k8s/auto-suspension.yaml
+# 2. Enable the auto-suspension flag on the controller (admin guardrail)
+kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system \
+  --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--enable-auto-suspend-and-resume=true"}]'
+
+# 3. Apply the auto-suspension router & Envoy Gateway overlay
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/auto-suspension.yaml
 ```
 
 ##### Option B: Installation via Helm Chart (`helm`)
 
-The Agent Sandbox Helm chart enables the auto-suspension controller by default (`controller.enableAutoSuspension: true`).
+The Agent Sandbox Helm chart disables auto-suspension by default (`controller.enableAutoSuspendAndResume: false`). To deploy with auto-suspension enabled:
 
 1. Install the Agent Sandbox chart using `helm`:
    ```bash
-   helm install agent-sandbox ./helm/ \
+   helm upgrade --install agent-sandbox oci://registry.k8s.io/agent-sandbox/charts/agent-sandbox \
      --namespace agent-sandbox-system \
      --create-namespace \
-     --set image.tag=<version>
+     --set controller.enableAutoSuspendAndResume=true
    ```
 
-2. Apply the auto-suspension Gateway overlay ([k8s/auto-suspension.yaml](file:///k8s/auto-suspension.yaml)) to deploy the `sandbox-router` and Envoy `ext_proc` extension policy:
+2. Apply the auto-suspension Gateway overlay ([k8s/auto-suspension.yaml](../k8s/auto-suspension.yaml)) to deploy the `sandbox-router` and Envoy `ext_proc` extension policy:
    ```bash
-   kubectl apply -f k8s/auto-suspension.yaml
+   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/auto-suspension.yaml
    ```
 
 ##### Option C: Local Development with Kind
@@ -125,11 +128,7 @@ AUTO_SUSPENSION=true make deploy-kind
 
 ## Configuring Auto-Suspension on a Sandbox
 
-You can enable auto-suspension on any `Sandbox` using either the **CRD Lifecycle Specification** or an **Annotation**.
-
-### Option 1: CRD Lifecycle Specification (Recommended)
-
-Set `.spec.inactivityDuration` to the desired idle duration (e.g., `5m`, `300s`, `1h`):
+You can enable auto-suspension on any `Sandbox` by setting `.spec.autoSuspend.inactivityDuration` to the desired idle duration (e.g., `5m`, `300s`, `1h`):
 
 ```yaml
 apiVersion: agents.x-k8s.io/v1beta1
@@ -139,31 +138,8 @@ metadata:
   namespace: default
 spec:
   operatingMode: Running
-  inactivityDuration: 5m
-  podTemplate:
-    spec:
-      containers:
-      - name: web
-        image: python:3.10-alpine
-        command: ["python3", "-m", "http.server", "8888"]
-        ports:
-        - containerPort: 8888
-```
-
-### Option 2: Annotation
-
-Alternatively, you can specify the idle timeout in seconds using the `agents.x-k8s.io/idle-timeout-seconds` annotation:
-
-```yaml
-apiVersion: agents.x-k8s.io/v1beta1
-kind: Sandbox
-metadata:
-  name: demo-sandbox
-  namespace: default
-  annotations:
-    agents.x-k8s.io/idle-timeout-seconds: "300"
-spec:
-  operatingMode: Running
+  autoSuspend:
+    inactivityDuration: 5m
   podTemplate:
     spec:
       containers:
@@ -178,7 +154,7 @@ spec:
 
 ### 1. Apply a Sandbox with an Idle Timeout
 
-Create a test sandbox configured to suspend after 10 seconds of inactivity:
+Create a test sandbox configured to suspend after 1 minute of inactivity:
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -187,10 +163,10 @@ kind: Sandbox
 metadata:
   name: demo-sandbox
   namespace: default
-  annotations:
-    agents.x-k8s.io/idle-timeout-seconds: "10"
 spec:
   operatingMode: Running
+  autoSuspend:
+    inactivityDuration: 1m
   podTemplate:
     spec:
       containers:
@@ -269,7 +245,7 @@ Opting into Auto-Suspension and Traffic-Triggered Resume introduces tradeoffs be
 
 * **70% – 90% Compute Cost Reduction**: Keeping pods continuously running during idle agent reasoning gaps or user think-time inflates CPU and GPU costs. Suspending idle pods frees cluster nodes for scaling down or running other workloads.
 * **Control Plane Resource Overhead**:
-  * **`sandbox-router` Deployment**: Runs as a lightweight Go gRPC service (`replicas: 1` by default in [k8s/auto-suspension.yaml](file:///k8s/auto-suspension.yaml#L11), but can be scaled horizontally for high availability), consuming roughly **10m CPU** and **32Mi memory** per replica.
+  * **`sandbox-router` Deployment**: Runs as a lightweight Go gRPC service (`replicas: 1` by default in [k8s/auto-suspension.yaml](../k8s/auto-suspension.yaml), but can be scaled horizontally for high availability), consuming roughly **10m CPU** and **32Mi memory** per replica.
   * **Envoy Gateway**: Requires a running Gateway proxy (typically **100m CPU** and **128Mi memory** per replica).
   * **Net Cost Impact**: For clusters running multiple sandboxes, the infrastructure savings from suspending even 2–3 idle CPU/GPU pods vastly outweigh the fixed compute cost of the `sandbox-router` and Envoy Gateway.
 * **Persistent Storage Costs**: When a sandbox is suspended (`.spec.operatingMode: Suspended`), its underlying Kubernetes PersistentVolumeClaims (PVCs) remain bound to preserve state and workspace files. Storage costs for attached volumes continue to accrue while suspended.
@@ -282,15 +258,49 @@ Opting into Auto-Suspension and Traffic-Triggered Resume introduces tradeoffs be
 * **Long-Running Autonomous Jobs**: For agent runtimes executing long autonomous loops (such as OpenClaw running a 30-minute agent task) without incoming HTTP requests, set `inactivityDuration` longer than the maximum expected job duration (e.g., `2h`), **OR** configure the agent runtime to send periodic heartbeat POST requests to the controller's `/v1/sandboxes/activity` endpoint while busy.
 * **Explicit Target Port (`X-Sandbox-Port`)**: If your runtime listens on a non-default port (such as OpenClaw on port `18789`), always include the `X-Sandbox-Port: <port>` header in client requests so `ext_proc` verifies TCP readiness on the correct container port before unpausing Envoy.
 * **Cluster-Wide vs. Namespace-Scoped Routers**: We recommend a single shared `sandbox-router` (`--cache-namespace=""`, default). For multi-tenant isolation, scope a dedicated router to a single namespace (`--cache-namespace=<tenant-ns>`) via a Kustomize patch or container arg override, and replace the `ClusterRoleBinding` with a namespace-scoped `RoleBinding`.
-* **Production High Availability (`replicas: 2+`)**: [k8s/auto-suspension.yaml](file:///k8s/auto-suspension.yaml) defaults to `1` replica for local development. In production, scale `sandbox-router` to **`2+` replicas** (`kubectl scale -n agent-sandbox-system deployment/sandbox-router --replicas=2` or via Kustomize `replicas:` override) for stateless active-active high availability.
+* **Production High Availability (`replicas: 2+`)**: [k8s/auto-suspension.yaml](../k8s/auto-suspension.yaml) defaults to `1` replica for local development. In production, scale `sandbox-router` to **`2+` replicas** (`kubectl scale -n agent-sandbox-system deployment/sandbox-router --replicas=2` or via Kustomize `replicas:` override) for stateless active-active high availability.
 
 ### Limitations & Known Considerations
 * **L7 Header-Only Activity Tracking vs. Open Streams**: Currently, `ext_proc` calls `RecordActivity` only when `handleRequestHeaders` is invoked at the start of an HTTP request. Long-lived open connections (such as WebSockets, Server-Sent Events, or streaming LLM token responses) or long-running offline agent loops that do not emit incoming HTTP request headers will count toward the idle timer.
   * *Recommendation*: Set `inactivityDuration` longer than the maximum expected open stream or task duration, or configure agent workloads to send periodic heartbeats to `POST /v1/sandboxes/activity`.
-* **15-Second Request Hold Timeout vs. Large Container Images**: When a suspended sandbox resumes, `ext_proc` holds the client HTTP request open for a maximum deadline of **15 seconds** while waiting for the Pod IP and target TCP port readiness.
-  * *Recommendation*: If an agent workload uses a large container image (e.g., multi-gigabyte AI or GPU images) on a node where the image is not pre-cached, pulling the image over the network can exceed 15 seconds, causing the initial HTTP request to time out (`502 Bad Gateway`) even though the Pod will eventually start successfully. Use lightweight base images (Alpine/Distroless) or Kubernetes image caching (e.g., `kube-cached-image` or pre-warmed node pools) for large runtime images.
+* **Configurable Resume Timeout for Kata VMs & Large Container Images**: When a suspended sandbox resumes, `sandbox-router` holds the client HTTP request open for a default deadline of **60 seconds** while waiting for the Pod IP and target TCP port readiness.
+  * **Kata & VM Workloads**: Kata workloads run inside lightweight virtual machines and require VM boot, `kata-agent` initialization, and VM network namespace setup on top of container start. To allow extra time for VM boot on cold nodes or large uncached images, configure the `--default-resume-timeout` flag on the `sandbox-router` deployment (e.g., `--default-resume-timeout=120s`, default is `60s`).
 * **Pod Startup Latency on Resume**: First-request latency after auto-resume depends on your Kubernetes cluster's Pod scheduling speed and image pulling time. Using pre-cached images or smaller runtime base images minimizes cold-start wake-up latency.
 * **Gateway API Dependency**: Traffic-triggered resume requires an Envoy Gateway `v1.2.0+` deployment with `ext_proc` gRPC support. Direct ClusterIP or node-port traffic that bypasses Envoy Gateway will not trigger auto-resume for suspended sandboxes.
+
+## Security & Access Control (`:8090` REST API)
+
+In `v1beta1`, the auto-suspension REST server (`/v1/sandboxes/resume` and `/v1/sandboxes/activity` on port `8090`) does not perform native authentication or authorization.
+
+To prevent unauthorized workloads from reaching the controller and modifying Sandbox operating modes or activity timestamps:
+
+1. **Secure by Default**: The `--enable-auto-suspend-and-resume` flag on `agent-sandbox-controller` defaults to `false` (and `controller.enableAutoSuspendAndResume: false` in Helm). When disabled, the `:8090` HTTP server is never started.
+2. **NetworkPolicy Isolation Included Out-of-the-Box**: When deploying Auto-Suspension using `auto-suspension.yaml`, a Kubernetes `NetworkPolicy` is **automatically included** that restricts ingress to port `8090` exclusively from `sandbox-router` pods:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sandbox-router-to-controller-suspension-api
+  namespace: agent-sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: sandbox-router
+    ports:
+    - protocol: TCP
+      port: 8090
+```
+
+> [!IMPORTANT]
+> This `NetworkPolicy` is bundled as part of [k8s/auto-suspension.yaml](../k8s/auto-suspension.yaml) so your cluster is protected out-of-the-box. A future release will add native `TokenReview` / caller authentication to port `:8090`.
 
 ## Routing Header Reference
 
@@ -322,3 +332,7 @@ Check `agent-sandbox-controller` logs to confirm it received the `POST /v1/sandb
 ```bash
 kubectl logs -n agent-sandbox-system deployment/agent-sandbox-controller --tail=20
 ```
+
+## Runnable Examples
+
+* **OpenClaw AI Agent Gateway (`gVisor`/standard runtime)**: See [examples/openclaw-gvisor-sandbox/openclaw-sandbox-auto-suspension.yaml](../examples/openclaw-gvisor-sandbox/openclaw-sandbox-auto-suspension.yaml) and [examples/openclaw-gvisor-sandbox/README.md](../examples/openclaw-gvisor-sandbox/README.md) for a full example of idling out and traffic-resuming an AI agent gateway.

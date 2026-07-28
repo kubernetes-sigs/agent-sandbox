@@ -120,7 +120,7 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 		}
 	}
 
-	s.log.Info("ext_proc received headers detail", "headers", headerMap)
+	s.log.V(4).Info("ext_proc received headers detail", "headers", headerMap)
 
 	sandboxID := headerMap["x-sandbox-id"]
 	sandboxNamespace := headerMap["x-sandbox-namespace"]
@@ -149,13 +149,19 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 		sandboxNamespace = "default"
 	}
 
-	s.log.Info("ext_proc received headers", "sandboxID", sandboxID, "sandboxNamespace", sandboxNamespace, "headerCount", len(headerMap))
+	s.log.V(4).Info("ext_proc received headers", "sandboxID", sandboxID, "sandboxNamespace", sandboxNamespace, "headerCount", len(headerMap))
 
 	if sandboxID != "" {
 		s.RecordActivity(sandboxNamespace + "/" + sandboxID)
 
 		if s.suspensionManagerURL != "" {
-			if err := s.ensureSandboxRunning(ctx, sandboxNamespace, sandboxID); err != nil {
+			port := DefaultSandboxPort
+			if rawPort := headerMap["x-sandbox-port"]; rawPort != "" {
+				if p, err := strconv.Atoi(rawPort); err == nil && p > 0 && p <= 65535 {
+					port = p
+				}
+			}
+			if err := s.ensureSandboxRunning(ctx, sandboxNamespace, sandboxID, port); err != nil {
 				s.log.Info("ext_proc: auto-resume notification failed",
 					"sandbox", sandboxID,
 					"namespace", sandboxNamespace,
@@ -170,7 +176,7 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 		if getter, ok := s.cache.(interface {
 			GetByName(namespace, name string) (cache.Entry, bool)
 		}); ok {
-			if entry, ok := getter.GetByName(sandboxNamespace, sandboxID); ok {
+			if entry, ok := getter.GetByName(sandboxNamespace, sandboxID); ok && entry.PodIP != "" {
 				podIP = entry.PodIP
 			}
 		}
@@ -231,12 +237,12 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 	}
 }
 
-func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, name string) error {
+func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, name string, port int) error {
 	if s.cache != nil {
 		if getter, ok := s.cache.(interface {
 			GetByName(namespace, name string) (cache.Entry, bool)
 		}); ok {
-			if _, ok := getter.GetByName(namespace, name); ok {
+			if entry, ok := getter.GetByName(namespace, name); ok && entry.PodIP != "" {
 				return nil
 			}
 		}
@@ -270,16 +276,21 @@ func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, nam
 			return nil, fmt.Errorf("resume API returned status code: %d", resp.StatusCode)
 		}
 
-		// Wait up to 15 seconds for the Pod to become active in the informer cache
+		timeout := 60 * time.Second
+		if s.cfg != nil && s.cfg.DefaultResumeTimeout > 0 {
+			timeout = s.cfg.DefaultResumeTimeout
+		}
+
+		// Wait up to timeout for the Pod to become active in the informer cache
 		// AND for its target port to be reachable!
 		if s.cache != nil {
 			if getter, ok := s.cache.(interface {
 				GetByName(namespace, name string) (cache.Entry, bool)
 			}); ok {
-				deadline := time.Now().Add(15 * time.Second)
+				deadline := time.Now().Add(timeout)
 				for time.Now().Before(deadline) {
 					if entry, ok := getter.GetByName(namespace, name); ok && entry.PodIP != "" {
-						targetAddr := net.JoinHostPort(entry.PodIP, strconv.Itoa(DefaultSandboxPort))
+						targetAddr := net.JoinHostPort(entry.PodIP, strconv.Itoa(port))
 						conn, err := net.DialTimeout("tcp", targetAddr, 200*time.Millisecond)
 						if err == nil {
 							conn.Close()
@@ -325,6 +336,16 @@ func (s *ExtProcServer) StartActivityFlusher(ctx context.Context, interval time.
 	}
 }
 
+func (s *ExtProcServer) mergeActivitySnapshot(snapshot map[string]time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, ts := range snapshot {
+		if existing, ok := s.activityTimestamps[k]; !ok || ts.After(existing) {
+			s.activityTimestamps[k] = ts
+		}
+	}
+}
+
 func (s *ExtProcServer) flushActivityTimestamps(ctx context.Context) {
 	s.mu.Lock()
 	if len(s.activityTimestamps) == 0 {
@@ -344,12 +365,14 @@ func (s *ExtProcServer) flushActivityTimestamps(ctx context.Context) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		s.log.Error(err, "ext_proc: failed to marshal activity flush payload")
+		s.mergeActivitySnapshot(snapshot)
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		s.log.Error(err, "ext_proc: failed creating activity flush request")
+		s.mergeActivitySnapshot(snapshot)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -357,7 +380,13 @@ func (s *ExtProcServer) flushActivityTimestamps(ctx context.Context) {
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		s.log.Error(err, "ext_proc: failed flushing activity timestamps")
+		s.mergeActivitySnapshot(snapshot)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.log.Error(fmt.Errorf("status %d", resp.StatusCode), "ext_proc: activity flush returned non-200")
+		s.mergeActivitySnapshot(snapshot)
+		return
+	}
 }

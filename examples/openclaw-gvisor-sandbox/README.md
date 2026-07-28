@@ -284,12 +284,12 @@ You can run OpenClaw with **Auto-Suspension and Traffic-Triggered Resume** enabl
 Ensure your cluster has the auto-suspension overlay installed (`kubectl apply -f k8s/auto-suspension.yaml`), then apply the manifest:
 
 ```bash
-sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" examples/openclaw-sandbox/openclaw-sandbox-auto-suspension.yaml | kubectl apply -f -
+sed "s/dummy-token-for-sandbox/$OPENCLAW_GATEWAY_TOKEN/g" examples/openclaw-gvisor-sandbox/openclaw-sandbox-auto-suspension.yaml | kubectl apply -f -
 ```
 
 ### 2. How OpenClaw Idles Out
 
-When no HTTP traffic arrives for 30 minutes (`.spec.inactivityDuration: 30m`):
+When no HTTP traffic arrives for 30 minutes (`.spec.autoSuspend.inactivityDuration: 30m`):
 - `.spec.operatingMode` automatically transitions to `Suspended` and the Pod is garbage-collected.
 - The `workspaces-pvc` Persistent Volume Claim mounted at `/home/node/.openclaw/workspace` remains **100% intact**, preserving all agent workspace files, configurations, and conversation history.
 

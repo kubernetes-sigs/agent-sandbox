@@ -37,9 +37,12 @@ spec:
             type: object
           spec:
             properties:
-              inactivityDuration:
-                format: duration
-                type: string
+              autoSuspend:
+                properties:
+                  inactivityDuration:
+                    format: duration
+                    type: string
+                type: object
               operatingMode:
                 default: Running
                 enum:

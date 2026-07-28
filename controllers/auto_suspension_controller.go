@@ -1,3 +1,4 @@
+
 // Copyright 2026 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,9 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,11 +41,6 @@ type SandboxAutoSuspensionReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
-
-const (
-	// IdleTimeoutAnnotation is the annotation used to specify idle timeout duration (e.g., "30").
-	IdleTimeoutAnnotation = "agents.x-k8s.io/idle-timeout-seconds"
-)
 
 // +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
@@ -73,9 +68,10 @@ func (r *SandboxAutoSuspensionReconciler) Reconcile(ctx context.Context, req ctr
 
 	lastActivity := sandbox.Status.LastActivityTime
 	if lastActivity == nil {
-		now := sandbox.CreationTimestamp
+		now := metav1.Now()
+		patch := client.MergeFrom(sandbox.DeepCopy())
 		sandbox.Status.LastActivityTime = &now
-		if err := r.Status().Update(ctx, &sandbox); err != nil {
+		if err := r.Status().Patch(ctx, &sandbox, patch); err != nil {
 			return ctrl.Result{}, err
 		}
 		lastActivity = &now
@@ -88,9 +84,13 @@ func (r *SandboxAutoSuspensionReconciler) Reconcile(ctx context.Context, req ctr
 			"elapsed", elapsed,
 			"inactivityDuration", inactivityDuration,
 		)
-		patch := client.MergeFrom(sandbox.DeepCopy())
+		patch := client.MergeFromWithOptions(sandbox.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		sandbox.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeSuspended
 		if err := r.Patch(ctx, &sandbox, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				logger.V(4).Info("conflict patching operatingMode to Suspended; requeuing to re-evaluate lastActivityTime", "sandbox", req.NamespacedName)
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("failed patching sandbox to suspended: %w", err)
 		}
 		return ctrl.Result{}, nil
@@ -105,13 +105,8 @@ func (r *SandboxAutoSuspensionReconciler) Reconcile(ctx context.Context, req ctr
 }
 
 func getInactivityDuration(sandbox *agentsv1beta1.Sandbox) time.Duration {
-	if sandbox.Spec.Lifecycle.InactivityDuration != nil {
-		return sandbox.Spec.Lifecycle.InactivityDuration.Duration
-	}
-	if ann, ok := sandbox.Annotations[IdleTimeoutAnnotation]; ok {
-		if secs, err := strconv.Atoi(ann); err == nil && secs > 0 {
-			return time.Duration(secs) * time.Second
-		}
+	if sandbox.Spec.Lifecycle.AutoSuspend != nil && sandbox.Spec.Lifecycle.AutoSuspend.InactivityDuration != nil {
+		return sandbox.Spec.Lifecycle.AutoSuspend.InactivityDuration.Duration
 	}
 	return 0
 }
@@ -140,9 +135,11 @@ func (s *SuspensionServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/sandboxes/resume", s.handleResume)
 	mux.HandleFunc("/v1/resume", s.handleResume)
-	mux.HandleFunc("/v1/activity", s.handleActivity)
+	mux.HandleFunc("/v1/sandboxes/activity", s.handleActivity)
 	return mux
 }
+
+const maxPayloadBytes = 1 << 20 // 1 MB
 
 type resumeRequest struct {
 	Name      string `json:"name"`
@@ -155,23 +152,22 @@ func (s *SuspensionServer) handleResume(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed reading body", http.StatusBadRequest)
-		return
-	}
-
+	r.Body = http.MaxBytesReader(w, r.Body, maxPayloadBytes)
 	var req resumeRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json payload", http.StatusBadRequest)
 		return
 	}
-	if req.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if req.Name == "" || !validDNSLabel(req.Name) {
+		http.Error(w, "invalid or missing sandbox name format", http.StatusBadRequest)
 		return
 	}
 	if req.Namespace == "" {
 		req.Namespace = "default"
+	}
+	if !validDNSLabel(req.Namespace) {
+		http.Error(w, "invalid sandbox namespace format", http.StatusBadRequest)
+		return
 	}
 
 	ctx := r.Context()
@@ -189,20 +185,39 @@ func (s *SuspensionServer) handleResume(w http.ResponseWriter, r *http.Request) 
 	if sandbox.Spec.OperatingMode != agentsv1beta1.SandboxOperatingModeRunning {
 		// 1. Update Status.LastActivityTime FIRST so that when Spec.OperatingMode
 		// transitions to Running, the reconciler sees the fresh timestamp and does not
-		// instantly re-suspend due to old elapsed inactivity.
-		statusPatch := client.MergeFrom(sandbox.DeepCopy())
-		now := metav1.Now()
-		sandbox.Status.LastActivityTime = &now
-		if err := s.Status().Patch(ctx, &sandbox, statusPatch); err != nil {
+		// instantly re-suspend due to old elapsed inactivity. Retry on conflict so we
+		// don't abort due to concurrent updates.
+		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			var latest agentsv1beta1.Sandbox
+			if err := s.Get(ctx, nsName, &latest); err != nil {
+				return err
+			}
+			statusPatch := client.MergeFrom(latest.DeepCopy())
+			now := metav1.Now()
+			latest.Status.LastActivityTime = &now
+			return s.Status().Patch(ctx, &latest, statusPatch)
+		})
+		if err != nil {
 			s.log.Error(err, "failed updating lastActivityTime on resume", "sandbox", nsName)
 			http.Error(w, "failed updating lastActivityTime: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// 2. Patch Spec.OperatingMode to Running.
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		sandbox.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeRunning
-		if err := s.Patch(ctx, &sandbox, patch); err != nil {
+		// 2. Patch Spec.OperatingMode to Running, retrying on conflict so we never
+		// leave the Sandbox in Suspended with a fresh LastActivityTime.
+		err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+			var latest agentsv1beta1.Sandbox
+			if err := s.Get(ctx, nsName, &latest); err != nil {
+				return err
+			}
+			if latest.Spec.OperatingMode == agentsv1beta1.SandboxOperatingModeRunning {
+				return nil
+			}
+			patch := client.MergeFrom(latest.DeepCopy())
+			latest.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeRunning
+			return s.Patch(ctx, &latest, patch)
+		})
+		if err != nil {
 			s.log.Error(err, "failed patching sandbox operatingMode to Running", "sandbox", nsName)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -225,34 +240,37 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed reading body", http.StatusBadRequest)
-		return
-	}
-
+	r.Body = http.MaxBytesReader(w, r.Body, maxPayloadBytes)
 	var timestamps map[string]string
-	if err := json.Unmarshal(body, &timestamps); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&timestamps); err != nil {
 		http.Error(w, "invalid json payload", http.StatusBadRequest)
 		return
 	}
 
+	var errs []string
 	ctx := r.Context()
 	for key, tsStr := range timestamps {
 		parts := strings.Split(key, "/")
 		if len(parts) != 2 {
+			errs = append(errs, fmt.Sprintf("invalid sandbox key format: %s", key))
 			continue
 		}
 		ns, name := parts[0], parts[1]
+		if !validDNSLabel(ns) || !validDNSLabel(name) {
+			errs = append(errs, fmt.Sprintf("invalid sandbox namespace or name format: %s", key))
+			continue
+		}
 
 		parsedTime, err := time.Parse(time.RFC3339, tsStr)
 		if err != nil {
+			errs = append(errs, fmt.Sprintf("invalid RFC3339 timestamp for %s: %v", key, err))
 			continue
 		}
 
 		var sandbox agentsv1beta1.Sandbox
 		nsName := types.NamespacedName{Name: name, Namespace: ns}
 		if err := s.Get(ctx, nsName, &sandbox); err != nil {
+			errs = append(errs, fmt.Sprintf("failed to get sandbox %s: %v", nsName, err))
 			continue
 		}
 
@@ -266,13 +284,52 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 		}
 
 		if sandbox.Status.LastActivityTime == nil || parsedTime.Sub(sandbox.Status.LastActivityTime.Time) > threshold {
-			statusPatch := client.MergeFrom(sandbox.DeepCopy())
-			sandbox.Status.LastActivityTime = &metav1.Time{Time: parsedTime}
-			if err := s.Status().Patch(ctx, &sandbox, statusPatch); err != nil {
-				s.log.Error(err, "failed updating lastActivityTime status via patch", "sandbox", nsName)
+			var patchErr error
+			for i := 0; i < 3; i++ {
+				statusPatch := client.MergeFrom(sandbox.DeepCopy())
+				sandbox.Status.LastActivityTime = &metav1.Time{Time: parsedTime}
+				if patchErr = s.Status().Patch(ctx, &sandbox, statusPatch); patchErr == nil {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+				if err := s.Get(ctx, nsName, &sandbox); err != nil {
+					break
+				}
+			}
+			if patchErr != nil {
+				s.log.Error(patchErr, "failed updating lastActivityTime status via patch", "sandbox", nsName)
+				errs = append(errs, fmt.Sprintf("failed updating status for %s: %v", nsName, patchErr))
 			}
 		}
 	}
 
+	if len(errs) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"errors": errs})
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
+}
+
+// validDNSLabel reports whether s is a syntactically valid DNS-1123 label (RFC 1123).
+func validDNSLabel(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z':
+		case c == '-':
+			if i == 0 || i == len(s)-1 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }

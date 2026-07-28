@@ -205,7 +205,11 @@ def process_manifests(all_docs, args):
             continue
 
         find_and_replace_images(doc, image_prefix, image_tag)
-        append_controller_flags(doc, getattr(args, "controller_args", ""))
+        extra_flags = getattr(args, "controller_args", "") or ""
+        if getattr(args, "auto_suspension", False):
+            if "--enable-auto-suspend-and-resume" not in extra_flags:
+                extra_flags = (extra_flags + " --enable-auto-suspend-and-resume=true").strip()
+        append_controller_flags(doc, extra_flags)
 
         if kind in ["CustomResourceDefinition", "Namespace"]:
             prereq_docs.append(doc)

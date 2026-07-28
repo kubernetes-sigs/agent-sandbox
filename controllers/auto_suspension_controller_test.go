@@ -51,12 +51,14 @@ func TestSuspensionReconcilerAutoSuspend(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "idle-sandbox",
 			Namespace: "default",
-			Annotations: map[string]string{
-				IdleTimeoutAnnotation: "30",
-			},
 		},
 		Spec: agentsv1beta1.SandboxSpec{
 			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: agentsv1beta1.Lifecycle{
+				AutoSuspend: &agentsv1beta1.AutoSuspendPolicy{
+					InactivityDuration: &metav1.Duration{Duration: 30 * time.Second},
+				},
+			},
 			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
 				PodTemplate: agentsv1beta1.PodTemplate{
 					Spec: corev1.PodSpec{
@@ -85,6 +87,52 @@ func TestSuspensionReconcilerAutoSuspend(t *testing.T) {
 	err = client.Get(context.Background(), req.NamespacedName, &updated)
 	require.NoError(t, err)
 	assert.Equal(t, agentsv1beta1.SandboxOperatingModeSuspended, updated.Spec.OperatingMode)
+}
+
+func TestSuspensionReconcilerInitializesLastActivityTime(t *testing.T) {
+	scheme := setupScheme(t)
+
+	oldCreateTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	sandbox := &agentsv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "old-sandbox",
+			Namespace:         "default",
+			CreationTimestamp: oldCreateTime,
+		},
+		Spec: agentsv1beta1.SandboxSpec{
+			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: agentsv1beta1.Lifecycle{
+				AutoSuspend: &agentsv1beta1.AutoSuspendPolicy{
+					InactivityDuration: &metav1.Duration{Duration: 30 * time.Minute},
+				},
+			},
+			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
+				PodTemplate: agentsv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
+	reconciler := &SandboxAutoSuspensionReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "old-sandbox", Namespace: "default"}}
+	res, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, res.RequeueAfter > 0)
+
+	var updated agentsv1beta1.Sandbox
+	err = client.Get(context.Background(), req.NamespacedName, &updated)
+	require.NoError(t, err)
+	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+	assert.NotNil(t, updated.Status.LastActivityTime)
+	assert.True(t, updated.Status.LastActivityTime.Time.After(oldCreateTime.Time))
 }
 
 func TestSuspensionServerResumeHandler(t *testing.T) {
@@ -158,7 +206,7 @@ func TestSuspensionServerActivityHandler(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/activity", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes/activity", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)
@@ -169,4 +217,22 @@ func TestSuspensionServerActivityHandler(t *testing.T) {
 	err := client.Get(context.Background(), types.NamespacedName{Name: "active-sandbox", Namespace: "default"}, &updated)
 	require.NoError(t, err)
 	assert.NotNil(t, updated.Status.LastActivityTime)
+}
+
+func TestSuspensionServerActivityHandlerErrors(t *testing.T) {
+	scheme := setupScheme(t)
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	srv := NewSuspensionServer(client, logr.Discard())
+
+	payload := map[string]string{
+		"default/nonexistent-sandbox": time.Now().Format(time.RFC3339),
+		"invalid-format-key":          time.Now().Format(time.RFC3339),
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes/activity", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }

@@ -69,6 +69,8 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Endpoint URL of the sandbox suspension manager daemon for resume signaling and activity flushing.")
 	fs.DurationVar(&c.ActivityFlushInterval, "activity-flush-interval", c.ActivityFlushInterval,
 		"Interval at which activity timestamps are flushed to suspension manager.")
+	fs.DurationVar(&c.DefaultResumeTimeout, "default-resume-timeout", c.DefaultResumeTimeout,
+		"Default maximum duration to wait for a suspended sandbox to become ready after a traffic-triggered resume.")
 
 	fs.StringVar(&c.TLSCertFile, "tls-cert-file", c.TLSCertFile,
 		"Path to the PEM-encoded server certificate.")

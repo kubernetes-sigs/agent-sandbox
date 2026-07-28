@@ -314,6 +314,9 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 					errsMu.Unlock()
 					continue
 				}
+				if now := time.Now(); parsedTime.After(now) {
+					parsedTime = now
+				}
 
 				nsName := types.NamespacedName{Name: name, Namespace: ns}
 				err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {

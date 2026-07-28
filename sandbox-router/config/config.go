@@ -269,6 +269,12 @@ func (c *Config) Validate() error {
 	if c.UpstreamRetryMaxDelay < 0 {
 		return fmt.Errorf("--upstream-retry-max-delay must be non-negative, got %s", c.UpstreamRetryMaxDelay)
 	}
+	if c.ActivityFlushInterval <= 0 {
+		return fmt.Errorf("--activity-flush-interval must be positive, got %s", c.ActivityFlushInterval)
+	}
+	if c.DefaultResumeTimeout <= 0 {
+		return fmt.Errorf("--default-resume-timeout must be positive, got %s", c.DefaultResumeTimeout)
+	}
 
 	switch c.AuthzMode {
 	case AuthzAllowAll, AuthzTokenReview, AuthzScopedToken:

@@ -87,6 +87,10 @@ spec:
     port: 8080
     targetPort: metrics
     protocol: TCP
+  - name: suspension
+    port: 8090
+    targetPort: suspension
+    protocol: TCP
 
 ---
 

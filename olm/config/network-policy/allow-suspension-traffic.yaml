@@ -1,0 +1,24 @@
+# This NetworkPolicy allows ingress traffic on port 8090 (suspension server)
+# exclusively from sandbox-router pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app: agent-sandbox-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-suspension-traffic
+  namespace: agent-sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            app: sandbox-router
+      ports:
+        - port: 8090
+          protocol: TCP

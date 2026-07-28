@@ -16,11 +16,8 @@ package main
 
 import (
 	"context"
-<<<<<<< HEAD
 	"crypto/tls"
-=======
 	"errors"
->>>>>>> dae423f (feat(controller): add auto-suspension reconciler and idle timeout support)
 	"flag"
 	"fmt"
 	"math"

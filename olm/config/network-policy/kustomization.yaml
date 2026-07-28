@@ -1,2 +1,3 @@
 resources:
 - allow-metrics-traffic.yaml
+- allow-suspension-traffic.yaml

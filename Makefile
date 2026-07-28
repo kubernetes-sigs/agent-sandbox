@@ -5,6 +5,10 @@ all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify ve
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: fix-api-docs
+fix-api-docs:
+	dev/tools/fix-api-docs
+
 .PHONY: install-gen-tools
 install-gen-tools:
 	dev/tools/fix-go-generate --install-only

@@ -236,3 +236,46 @@ func TestSuspensionServerActivityHandlerErrors(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+func TestSuspensionServerActivityHandlerClampsFutureTimestamp(t *testing.T) {
+	scheme := setupScheme(t)
+
+	sandbox := &agentsv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "future-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1beta1.SandboxSpec{
+			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
+				PodTemplate: agentsv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
+	srv := NewSuspensionServer(client, logr.Discard())
+
+	futureStr := "2099-01-01T00:00:00Z"
+	payload := map[string]string{
+		"default/future-sandbox": futureStr,
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes/activity", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var updated agentsv1beta1.Sandbox
+	err := client.Get(context.Background(), types.NamespacedName{Name: "future-sandbox", Namespace: "default"}, &updated)
+	require.NoError(t, err)
+	assert.NotNil(t, updated.Status.LastActivityTime)
+	assert.True(t, updated.Status.LastActivityTime.Time.Before(time.Now().Add(time.Second)), "timestamp should be clamped to current time, not year 2099")
+}

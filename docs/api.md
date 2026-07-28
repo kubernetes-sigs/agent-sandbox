@@ -205,6 +205,23 @@ Package v1beta1 contains API Schema definitions for the agents v1beta1 API group
 
 
 
+#### AutoSuspendPolicy
+
+
+
+AutoSuspendPolicy defines the automatic suspension configuration for a Sandbox.
+
+
+
+_Appears in:_
+- [Lifecycle](#lifecycle)
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `inactivityDuration` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta)_ | inactivityDuration is the duration of inactivity after which the sandbox is automatically suspended. |  | Format: duration <br />Optional: \{\} <br /> |
+
+
 
 
 #### EmbeddedObjectMetadata
@@ -240,6 +257,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `autoSuspend` _[AutoSuspendPolicy](#autosuspendpolicy)_ | autoSuspend specifies the automatic suspension policy for the Sandbox.<br />If present, the Sandbox will be automatically suspended after the configured inactivityDuration. |  | Optional: \{\} <br /> |
 
 
 #### PersistentVolumeClaimTemplate
@@ -376,6 +394,7 @@ _Appears in:_
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for the Sandbox workload.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `autoSuspend` _[AutoSuspendPolicy](#autosuspendpolicy)_ | autoSuspend specifies the automatic suspension policy for the Sandbox.<br />If present, the Sandbox will be automatically suspended after the configured inactivityDuration. |  | Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
 
 
@@ -398,6 +417,7 @@ _Appears in:_
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters. |  | Optional: \{\} <br /> |
 | `nodeName` _string_ | nodeName is the name of the node where the underlying pod is scheduled. |  | Optional: \{\} <br /> |
+| `lastActivityTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | lastActivityTime is the timestamp of the last observed network activity on the sandbox. |  | Optional: \{\} <br /> |
 
 
 #### ShutdownPolicy

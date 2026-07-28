@@ -207,6 +207,16 @@ def process_manifests(all_docs, args):
         find_and_replace_images(doc, image_prefix, image_tag)
         extra_flags = getattr(args, "controller_args", "") or ""
         if getattr(args, "auto_suspension", False):
+            tokens = extra_flags.split()
+            for i, token in enumerate(tokens):
+                if token.startswith("--enable-auto-suspend-and-resume="):
+                    val = token.split("=", 1)[1].lower()
+                    if val in ("false", "0", "f", "no"):
+                        raise ValueError("--auto-suspension requires --enable-auto-suspend-and-resume=true, but --enable-auto-suspend-and-resume=false was explicitly passed in --controller-args.")
+                elif token == "--enable-auto-suspend-and-resume" and i + 1 < len(tokens):
+                    val = tokens[i+1].lower()
+                    if val in ("false", "0", "f", "no"):
+                        raise ValueError("--auto-suspension requires --enable-auto-suspend-and-resume=true, but --enable-auto-suspend-and-resume false was explicitly passed in --controller-args.")
             if "--enable-auto-suspend-and-resume" not in extra_flags:
                 extra_flags = (extra_flags + " --enable-auto-suspend-and-resume=true").strip()
         append_controller_flags(doc, extra_flags)

@@ -69,6 +69,10 @@ spec:
     port: 8080
     protocol: TCP
     targetPort: metrics
+  - name: suspension
+    port: 8090
+    protocol: TCP
+    targetPort: suspension
   selector:
     app: agent-sandbox-controller
 ---

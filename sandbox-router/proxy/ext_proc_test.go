@@ -84,7 +84,7 @@ func TestExtProcHandleRequestHeaders(t *testing.T) {
 func TestExtProcActivityFlushing(t *testing.T) {
 	var activityCalls atomic.Int32
 	mockSuspensionManager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/activity" {
+		if r.URL.Path == "/v1/sandboxes/activity" {
 			activityCalls.Add(1)
 			assert.Equal(t, http.MethodPost, r.Method)
 			body, err := io.ReadAll(r.Body)

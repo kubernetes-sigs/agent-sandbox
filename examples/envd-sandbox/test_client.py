@@ -76,11 +76,16 @@ def _build_tests() -> Tuple[str, List[Callable[[], str]]]:
     def _init() -> str:
         r = requests.post(
             f"{base_url}/init",
-            json={"envs": {"HELLO": "envd"}},
+            json={"envVars": {"HELLO": "envd"}},
             timeout=5,
         )
         # envd returns 204 No Content on success in --isnotfc mode.
         assert r.status_code == 204, r.status_code
+        # Verify the environment variable was set via /envs endpoint.
+        r = requests.get(f"{base_url}/envs", timeout=5)
+        assert r.status_code == 200, r.status_code
+        envs = r.json()
+        assert envs.get("HELLO") == "envd", envs
         return "init ok"
 
     def _files() -> str:

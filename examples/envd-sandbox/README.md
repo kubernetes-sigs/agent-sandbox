@@ -145,7 +145,7 @@ The included `sandbox-envd.yaml` applies a **default-deny ingress NetworkPolicy*
   ```bash
   docker build --build-arg ENVD_VERSION=<commit-or-tag> -t ${IMAGE} .
   ```
-- **Token authentication**: For authenticated access, set the `E2B_ACCESS_TOKEN` environment variable in the sandbox spec and send the `X-Access-Token` header in requests.
+- **Token authentication**: To enable authenticated access, send an initial `POST /init` request with an `accessToken` field to bootstrap the daemon's token. Subsequent requests must include the `X-Access-Token` header. Do **not** set `E2B_ACCESS_TOKEN` as an environment variable — the token is configured via the `/init` bootstrap flow.
 - **Least-privilege user**: envd runs as root because file paths resolve relative to the user's home directory. If your use case allows it, create a non-root user and set `USER` in the Dockerfile.
 - **Ephemeral storage**: envd writes to the container's rootfs; pod restart wipes all state.
 

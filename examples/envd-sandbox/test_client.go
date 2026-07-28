@@ -80,7 +80,7 @@ func main() {
 		}},
 		{"init", func() (string, error) {
 			body, _ := json.Marshal(map[string]any{
-				"envs": map[string]string{"HELLO": "envd"},
+				"envVars": map[string]string{"HELLO": "envd"},
 			})
 			resp, err := client.Post(baseURL+"/init", "application/json", bytes.NewReader(body))
 			if err != nil {

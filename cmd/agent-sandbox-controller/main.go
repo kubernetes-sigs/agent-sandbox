@@ -40,6 +40,7 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
+	internalconfig "sigs.k8s.io/agent-sandbox/internal/config"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -158,6 +159,17 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Apply ConfigMap overrides: keys in /etc/sandbox-config override
+	// flag values (ConfigMap wins over CLI flags).
+	if overrides, err := internalconfig.ApplyConfigMap(internalconfig.DefaultConfigDir, flag.CommandLine); err != nil {
+		setupLog.Error(err, "failed to parse controller config from ConfigMap")
+		os.Exit(1)
+	} else if len(overrides) > 0 {
+		for _, o := range overrides {
+			setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)
+		}
+	}
 
 	if strings.TrimSpace(webhookCertName) == "" {
 		setupLog.Error(nil, "--webhook-cert-name cannot be empty")

@@ -425,7 +425,18 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 // checkExpiration calculates if the claim is expired and how much time is left.
 func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
 	if claim.Spec.Lifecycle == nil {
-		return false, 0
+		if claim.Spec.WarmPoolRef.Name == "" {
+			return false, 0
+		}
+		// Warm-pool claims without an explicit lifecycle default to
+		// immediate deletion after the workload finishes. Without this,
+		// finished claims accumulate indefinitely — leaking VMs, pod IPs,
+		// and auto-refreshing SA tokens. See #1306.
+		ttl := int32(0)
+		claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
+			ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
+			TTLSecondsAfterFinished: &ttl,
+		}
 	}
 
 	finishedCondition := lifecycle.FinishedCondition(claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))

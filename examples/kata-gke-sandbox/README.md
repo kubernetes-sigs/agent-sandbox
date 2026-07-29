@@ -108,6 +108,19 @@ kubectl exec -it $POD_NAME -- uname -r
 
 ## Step 5: Using Auto-Suspension & Traffic-Triggered Resume with Kata
 
+> [!IMPORTANT]
+> **Explicitly Enable Auto-Suspension on the Controller**:
+> Auto-Suspension is disabled by default in Agent Sandbox (`controller.enableAutoSuspendAndResume: false`). Before using any auto-suspension manifest, you **must explicitly enable the flag on the controller and deploy the router overlay**:
+> ```sh
+> # Using Helm:
+> helm upgrade --install agent-sandbox ../../helm \
+>   --namespace agent-sandbox-system \
+>   --set controller.enableAutoSuspendAndResume=true
+> 
+> # Apply the Auto-Suspension Gateway & Router overlay:
+> kubectl apply -f ../../k8s/auto-suspension.yaml
+> ```
+
 You can combine Kata VM isolation with **Auto-Suspension and Traffic-Triggered Resume** so that inactive Kata microVMs automatically scale to zero Pods when idle, freeing up hardware virtualization resources while preserving the Sandbox identity and storage.
 
 1.  Ensure you have deployed the Auto-Suspension router overlay in your cluster:

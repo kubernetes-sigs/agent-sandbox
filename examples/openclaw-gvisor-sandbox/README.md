@@ -277,6 +277,19 @@ the env-var name per provider.
 
 ## Auto-Suspension & Traffic-Triggered Resume
 
+> [!IMPORTANT]
+> **Explicitly Enable Auto-Suspension on the Controller**:
+> Auto-Suspension is disabled by default in Agent Sandbox (`controller.enableAutoSuspendAndResume: false`). Before using any auto-suspension manifest, you **must explicitly enable the flag on the controller and deploy the router overlay**:
+> ```sh
+> # Using Helm:
+> helm upgrade --install agent-sandbox ./helm \
+>   --namespace agent-sandbox-system \
+>   --set controller.enableAutoSuspendAndResume=true
+> 
+> # Apply the Auto-Suspension Gateway & Router overlay:
+> kubectl apply -f k8s/auto-suspension.yaml
+> ```
+
 You can run OpenClaw with **Auto-Suspension and Traffic-Triggered Resume** enabled using `openclaw-sandbox-auto-suspension.yaml`. This automatically suspends OpenClaw after periods of idleness to save compute resources while preserving agent workspace memories, and wakes it up transparently when incoming traffic arrives.
 
 ### 1. Deploy OpenClaw with Auto-Suspension

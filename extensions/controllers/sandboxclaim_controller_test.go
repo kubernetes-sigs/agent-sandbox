@@ -1794,6 +1794,10 @@ func TestSandboxClaimWarmPoolDefaultLifecycle(t *testing.T) {
 			} else {
 				require.NoError(t, getErr,
 					"expected claim to still exist")
+				if tc.lifecycle == nil {
+					require.Nil(t, updatedClaim.Spec.Lifecycle,
+						"in-memory lifecycle injection must not be persisted to the API server")
+				}
 			}
 		})
 	}

@@ -39,6 +39,8 @@ const (
 	SandboxReasonSuspendedPodNotOwned = "PodNotOwned"
 	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is running.
 	SandboxReasonNotSuspended = "NotSuspended"
+	// SandboxReasonSuspendedPodStateUnknown indicates the Suspended condition is Unknown because reconciling the Pod failed, so its state cannot be determined.
+	SandboxReasonSuspendedPodStateUnknown = "PodStateUnknown"
 
 	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"

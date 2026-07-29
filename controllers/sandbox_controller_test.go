@@ -91,6 +91,7 @@ func TestComputeConditions(t *testing.T) {
 		err                error
 		svc                *corev1.Service
 		pod                *corev1.Pod
+		podErr             error
 		expectedConditions []metav1.Condition
 	}{
 		{
@@ -213,6 +214,35 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
+			name:    "6c. Suspended - owned pod present but delete failed stays terminating (not Unknown)",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeSuspended),
+			svc:     &corev1.Service{},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox-pod",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: sandboxv1beta1.GroupVersion.String(),
+							Kind:       "Sandbox",
+							Name:       "test-sandbox",
+							UID:        "test-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			// reconcilePod returns the still-present pod alongside the delete error, so
+			// we know the pod exists and must not report it as terminated/unknown.
+			podErr: errors.New("failed to delete pod: boom"),
+			err:    errors.New("failed to delete pod: boom"),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is suspending"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: failed to delete pod: boom"},
+			},
+		},
+		{
 			name:    "7. Fully suspended - Pod deleted",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeSuspended),
 			svc:     &corev1.Service{},
@@ -220,6 +250,19 @@ func TestComputeConditions(t *testing.T) {
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been terminated. Sandbox is suspended"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
+			},
+		},
+		{
+			name:    "7b. Suspended - pod reconcile failed reports Unknown",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeSuspended),
+			svc:     &corev1.Service{},
+			pod:     nil,
+			// reconcilePod failed, so a nil pod does not prove the pod is gone.
+			podErr: errors.New("pod get failed"),
+			err:    errors.New("pod get failed"),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "Unknown", ObservedGeneration: gen, Reason: "PodStateUnknown", Message: "Pod state is unknown. Sandbox suspension cannot be confirmed"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: pod get failed"},
 			},
 		},
 		{
@@ -283,7 +326,7 @@ func TestComputeConditions(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			conditions := r.computeConditions(tc.sandbox, tc.err, tc.svc, tc.pod)
+			conditions := r.computeConditions(tc.sandbox, tc.err, tc.svc, tc.pod, tc.podErr)
 			opts := []cmp.Option{
 				cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
 			}

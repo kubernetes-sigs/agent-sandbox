@@ -298,3 +298,15 @@ def test_on_signal_default_unwinds(make_cluster):
   f._prev_handlers = {_signal.SIGTERM: _signal.SIG_DFL}
   with pytest.raises(SystemExit):                     # SIG_DFL falls through to the unwind
     f._on_signal(_signal.SIGTERM, None)
+
+
+# --- review round 5: live_owned_count fails open but logs ----------------- #
+def test_live_owned_count_fails_open_and_logs(make_cluster, caplog):
+  import logging
+  good = make_cluster("good"); good.resources.count_pods.return_value = 5
+  bad = make_cluster("bad"); bad.resources.count_pods.side_effect = RuntimeError("429")
+  f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([good, bad]))
+  with caplog.at_level(logging.WARNING):
+    n = f.live_owned_count()
+  assert n == 5                                        # fails open: good cluster counted, no raise
+  assert "under-counts" in caplog.text and "bad" in caplog.text   # but the blind poll is surfaced

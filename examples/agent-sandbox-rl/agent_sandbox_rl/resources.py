@@ -162,7 +162,12 @@ class Resources:
     """Patch a pre-existing template's metadata + pod-template labels up to this
     run's labels when they differ, so a reused/leftover template doesn't attribute
     this run's pods to a stale run-id (breaker/reaper correctness, #1215). Only
-    patches on mismatch; failures warn (the safeguards degrade, not the run)."""
+    patches on mismatch; failures warn (the safeguards degrade, not the run).
+
+    Two concurrent runs sharing an image (same deterministic template name) take
+    turns re-labeling this template — pod attribution between their breakers/reapers
+    is last-writer-wins. Both directions are safe: a breaker under-counts and fails
+    open, and a per-run reap misses the other run's pods rather than deleting them."""
     desired_meta = dict(self.labels)
     desired_pod = {**self.labels, "sandbox": template_name}
     cur_meta = ((existing.get("metadata") or {}).get("labels")) or {}

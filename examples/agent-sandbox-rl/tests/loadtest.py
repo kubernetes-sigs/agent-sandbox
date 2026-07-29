@@ -369,7 +369,7 @@ def _run_reuse(args, tasks):
             fleet.report = report
             t0 = time.monotonic()
             res = reuse_git_restore_sandbox(
-                fleet, tasks, probe, args.max_concurrent, reset=reset,
+                fleet, fleet.tasks, probe, args.max_concurrent, reset=reset,
                 max_reuses=args.max_reuses, reset_timeout=args.reset_timeout,
                 use_session=args.use_session)
             report.total_s = time.monotonic() - t0

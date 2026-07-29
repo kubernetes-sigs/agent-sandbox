@@ -182,8 +182,11 @@ class SandboxFleet:
     for c in self.registry:
       try:
         n += c.resources.count_pods(label_selector=sel)
-      except Exception:  # noqa: BLE001 — a transient list error must not crash the breaker
-        pass
+      except Exception as e:  # noqa: BLE001 — a transient list error must not crash the breaker
+        # Fail open (don't crash the poll) but surface it: the breaker under-counts
+        # this poll, so operators can see when it's blind (e.g. apiserver 429s).
+        logger.warning("live_owned_count: pod count failed on cluster %s (%s); "
+                       "breaker under-counts this poll", c.name, e)
     return n
 
   @contextlib.contextmanager

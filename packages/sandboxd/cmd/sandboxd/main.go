@@ -123,7 +123,7 @@ func run(cfg *config, log logr.Logger) error {
 		Log:               log.WithName("rest"),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("build server: %w", err)
 	}
 
 	grpcLis, err := net.Listen("tcp", cfg.grpcAddr)

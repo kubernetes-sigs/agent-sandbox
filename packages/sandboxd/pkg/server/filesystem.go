@@ -82,6 +82,7 @@ var sensitiveEnvMarkers = []string{"TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", 
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
 type RESTServer struct {
 	rootDir           string
+	resolvedRoot      string
 	metadataEnvPrefix string
 	startTime         time.Time
 	ready             atomic.Bool
@@ -91,18 +92,21 @@ type RESTServer struct {
 	environ func() []string
 }
 
-// NewRESTServer builds a RESTServer rooted at rootDir. Only environment
-// variables carrying metadataEnvPrefix are exposed on /v1/metadata.
-// The server starts ready; SetReady(false) flips /v1/health to 503.
+// NewRESTServer builds a RESTServer rooted at rootDir. rootDir must be
+// non-empty. Only environment variables carrying metadataEnvPrefix are exposed
+// on /v1/metadata. The server starts ready; SetReady(false) flips /v1/health
+// to 503.
 func NewRESTServer(rootDir, metadataEnvPrefix string, log logr.Logger) *RESTServer {
-	if rootDir == "" {
-		rootDir = "/"
-	}
 	if metadataEnvPrefix == "" {
 		metadataEnvPrefix = "SANDBOX_"
 	}
+	resolvedRoot, err := pathutil.SanitizePath(rootDir, ".")
+	if err != nil {
+		resolvedRoot, _ = filepath.Abs(filepath.Clean(rootDir))
+	}
 	s := &RESTServer{
 		rootDir:           rootDir,
+		resolvedRoot:      resolvedRoot,
 		metadataEnvPrefix: metadataEnvPrefix,
 		startTime:         time.Now(),
 		log:               log,
@@ -213,9 +217,13 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 			continue // entry vanished between ReadDir and Info
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			// The wire format only knows file|directory: resolve the link
-			// target's type. Broken links are omitted from the listing.
-			info, err = os.Stat(filepath.Join(target, entry.Name()))
+			// Resolve the link's type through SanitizePath so links escaping
+			// the sandbox root are omitted from the listing. Broken links are also omitted.
+			resolved, sanErr := pathutil.SanitizePath(s.rootDir, filepath.Join(r.PathValue("path"), entry.Name()))
+			if sanErr != nil {
+				continue
+			}
+			info, err = os.Stat(resolved)
 			if err != nil {
 				continue
 			}
@@ -377,11 +385,10 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		recursive = parsed
 	}
 
-	cleanRoot, _ := filepath.Abs(filepath.Clean(s.rootDir))
-	if target == cleanRoot {
+	if target == s.resolvedRoot {
 		if !recursive {
 			s.writeError(w, http.StatusConflict, "CONFLICT",
-				"directory is not empty; pass recursive=true to remove it")
+				"cannot delete the sandbox root; pass recursive=true to clear its contents")
 			return
 		}
 		// For the sandbox root directory itself, clear its contents rather

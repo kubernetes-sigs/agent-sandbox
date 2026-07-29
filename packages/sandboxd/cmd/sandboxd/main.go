@@ -39,6 +39,7 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -61,9 +62,9 @@ func main() {
 	zapOpts := zap.Options{Development: false}
 
 	flag.StringVar(&cfg.grpcAddr, "grpc-addr", "127.0.0.1:9090",
-		"Listen address for the gRPC ProcessService. Must stay on localhost per KEP-539.2.")
+		"Listen address for the gRPC ProcessService. Must be a loopback IP per KEP-539.2.")
 	flag.StringVar(&cfg.restAddr, "rest-addr", "127.0.0.1:8080",
-		"Listen address for the Filesystem & Runtime REST API. Must stay on localhost per KEP-539.2.")
+		"Listen address for the Filesystem & Runtime REST API. Must be a loopback IP per KEP-539.2.")
 	flag.StringVar(&cfg.rootDir, "root-dir", "/workspace",
 		"Sandbox root directory that file operations and working directories are confined to.")
 	flag.StringVar(&cfg.metadataEnvPrefix, "metadata-env-prefix", "SANDBOX_",
@@ -88,9 +89,27 @@ func main() {
 	}
 }
 
+func ensureLoopback(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("listen address %q must be a loopback IP per KEP-539.2 (e.g. 127.0.0.1:9090)", addr)
+	}
+	return nil
+}
+
 func run(cfg *config, log logr.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if err := ensureLoopback(cfg.grpcAddr); err != nil {
+		return err
+	}
+	if err := ensureLoopback(cfg.restAddr); err != nil {
+		return err
+	}
 
 	if info, err := os.Stat(cfg.rootDir); err != nil {
 		return fmt.Errorf("root dir %q: %w", cfg.rootDir, err)
@@ -98,11 +117,14 @@ func run(cfg *config, log logr.Logger) error {
 		return fmt.Errorf("root dir %q is not a directory", cfg.rootDir)
 	}
 
-	srv := server.New(server.Options{
+	srv, err := server.New(server.Options{
 		RootDir:           cfg.rootDir,
 		MetadataEnvPrefix: cfg.metadataEnvPrefix,
 		Log:               log.WithName("rest"),
 	})
+	if err != nil {
+		return err
+	}
 
 	grpcLis, err := net.Listen("tcp", cfg.grpcAddr)
 	if err != nil {
@@ -116,9 +138,14 @@ func run(cfg *config, log logr.Logger) error {
 
 	grpcServer := grpc.NewServer()
 	srv.RegisterGRPC(grpcServer)
+	reflection.Register(grpcServer)
 	httpServer := &http.Server{
 		Handler:           srv.RESTHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// No ReadTimeout/WriteTimeout: they bound entire body transfers and
+		// would abort large file PUT/GET streams (KEP-539.2 chose REST for
+		// exactly those). Loopback-only binding limits exposure.
+		IdleTimeout: 60 * time.Second,
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -148,7 +175,19 @@ func run(cfg *config, log logr.Logger) error {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			log.Error(err, "rest server shutdown")
 		}
-		grpcServer.GracefulStop()
+
+		grpcStopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(grpcStopped)
+		}()
+		select {
+		case <-grpcStopped:
+		case <-shutdownCtx.Done():
+			log.Info("grpc graceful stop exceeded shutdown-timeout; forcing stop")
+			grpcServer.Stop()
+			<-grpcStopped
+		}
 		return nil
 	})
 

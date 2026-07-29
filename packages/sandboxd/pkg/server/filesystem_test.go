@@ -283,6 +283,39 @@ func TestDeleteNonEmptyDirectoryConflict(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 }
 
+func TestDeleteRootDirectoryEmptiesContents(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+
+	// Non-recursive DELETE /v1/files/ must fail with 409 CONFLICT.
+	rec := doRequest(handler, http.MethodDelete, "/v1/files/", nil, nil)
+	require.Equal(t, http.StatusConflict, rec.Code)
+
+	// Recursive DELETE /v1/files/?recursive=true clears contents but leaves root intact.
+	rec = doRequest(handler, http.MethodDelete, "/v1/files/?recursive=true", nil, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestDirectoryListingOmitsEscapingSymlinks(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "escaping_link")))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "normal.txt"), []byte("normal"), 0o644))
+
+	rec := doRequest(handler, http.MethodGet, "/v1/files/", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var listing DirectoryListing
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+	require.Len(t, listing.Entries, 1)
+	require.Equal(t, "normal.txt", listing.Entries[0].Name)
+}
+
 func TestDeleteInvalidRecursiveRejected(t *testing.T) {
 	_, handler, root := newRESTFixture(t)
 	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))

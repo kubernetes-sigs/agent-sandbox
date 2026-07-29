@@ -38,7 +38,8 @@ import (
 // PUT → Execute → GET → DELETE round trip across both protocols.
 func TestSandboxdIntegration(t *testing.T) {
 	root := t.TempDir()
-	srv := New(Options{RootDir: root, MetadataEnvPrefix: "SANDBOX_", Log: logr.Discard()})
+	srv, err := New(Options{RootDir: root, MetadataEnvPrefix: "SANDBOX_", Log: logr.Discard()})
+	require.NoError(t, err)
 
 	// gRPC ProcessService on an ephemeral localhost port.
 	grpcLis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -150,7 +151,8 @@ func TestSandboxdIntegration(t *testing.T) {
 // SIGTERMs managed processes so their Start streams end.
 func TestShutdownProcessesTerminatesChildren(t *testing.T) {
 	root := t.TempDir()
-	srv := New(Options{RootDir: root, MetadataEnvPrefix: "SANDBOX_", Log: logr.Discard()})
+	srv, err := New(Options{RootDir: root, MetadataEnvPrefix: "SANDBOX_", Log: logr.Discard()})
+	require.NoError(t, err)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -195,4 +197,9 @@ func TestShutdownProcessesTerminatesChildren(t *testing.T) {
 	require.NoError(t, conn.Close())
 	grpcServer.GracefulStop()
 	_ = lis.Close()
+}
+
+func TestNewServerEmptyRootDirError(t *testing.T) {
+	_, err := New(Options{})
+	require.Error(t, err)
 }

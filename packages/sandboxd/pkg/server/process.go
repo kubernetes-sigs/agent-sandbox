@@ -40,8 +40,8 @@ import (
 // permission denied) into appropriate gRPC status codes (NOT_FOUND,
 // PERMISSION_DENIED) instead of generic INTERNAL error codes.
 func mapCommandError(err error, defaultCode codes.Code, msg string) error {
-	if errors.Is(err, exec.ErrNotFound) {
-		return status.Errorf(codes.NotFound, "%s: command not found: %v", msg, err)
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+		return status.Errorf(codes.NotFound, "%s: command or path not found: %v", msg, err)
 	}
 	if errors.Is(err, fs.ErrPermission) {
 		return status.Errorf(codes.PermissionDenied, "%s: permission denied: %v", msg, err)
@@ -54,8 +54,12 @@ const (
 	streamChunkSize = 4096
 	// executeWaitDelay bounds how long Execute waits for the command's I/O
 	// pipes to drain after the process itself has exited (e.g. when a
-	// grandchild inherited stdout and keeps it open).
+	// grandchild inherited stdout and keeps it open). Also bounds Wait in
+	// Start for unkillable processes.
 	executeWaitDelay = 10 * time.Second
+	// pipeDrainGrace bounds how long Start waits for non-PTY stdout/stderr
+	// pipe readers to reach EOF after cmd.Wait has reaped the child process.
+	pipeDrainGrace = 5 * time.Second
 )
 
 // ProcessServer implements the ProcessService gRPC API defined in
@@ -66,13 +70,10 @@ type ProcessServer struct {
 	registry *processmanager.ProcessRegistry
 }
 
-// NewProcessServer builds a ProcessServer rooted at rootDir. A nil registry
-// gets a fresh one, but callers normally share the daemon-wide registry so
-// shutdown can signal every child.
+// NewProcessServer builds a ProcessServer rooted at rootDir. rootDir must be
+// non-empty. A nil registry gets a fresh one, but callers normally share the
+// daemon-wide registry so shutdown can signal every child.
 func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry) *ProcessServer {
-	if rootDir == "" {
-		rootDir = "/"
-	}
 	if registry == nil {
 		registry = processmanager.NewProcessRegistry()
 	}
@@ -132,8 +133,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	cmd.WaitDelay = executeWaitDelay
 
 	var ptyFile *os.File
-	var stdoutPipe, stderrPipe io.ReadCloser
-	var stdinPipe io.WriteCloser
+	var stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW *os.File
 
 	usePTY := req.GetPty() != nil
 	if usePTY {
@@ -151,23 +151,30 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// Put the child in its own process group so SendSignal reaches the
 		// whole tree and shutdown sweeps don't leak grandchildren.
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		stdoutPipe, err = cmd.StdoutPipe()
+		stdoutR, stdoutW, err = os.Pipe()
 		if err != nil {
-			return status.Errorf(codes.Internal, "failed to get stdout pipe: %v", err)
+			return status.Errorf(codes.Internal, "failed to create stdout pipe: %v", err)
 		}
-		stderrPipe, err = cmd.StderrPipe()
+		stderrR, stderrW, err = os.Pipe()
 		if err != nil {
-			return status.Errorf(codes.Internal, "failed to get stderr pipe: %v", err)
+			closeAll(stdoutR, stdoutW)
+			return status.Errorf(codes.Internal, "failed to create stderr pipe: %v", err)
 		}
-		stdinPipe, err = cmd.StdinPipe()
+		stdinR, stdinW, err = os.Pipe()
 		if err != nil {
-			return status.Errorf(codes.Internal, "failed to get stdin pipe: %v", err)
+			closeAll(stdoutR, stdoutW, stderrR, stderrW)
+			return status.Errorf(codes.Internal, "failed to create stdin pipe: %v", err)
 		}
-		proc.Stdin = stdinPipe
+
+		cmd.Stdout, cmd.Stderr, cmd.Stdin = stdoutW, stderrW, stdinR
+		proc.Stdin = stdinW
 
 		if err := cmd.Start(); err != nil {
+			closeAll(stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW)
 			return mapCommandError(err, codes.Internal, "failed to start command")
 		}
+		// Process owns its write end copies; close ours so readers get EOF.
+		closeAll(stdoutW, stderrW, stdinR)
 	}
 
 	// Register BEFORE sending InitEvent so a client that calls WriteStdin /
@@ -190,6 +197,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		},
 	}); err != nil {
 		_ = proc.Signal(syscall.SIGKILL)
+		closeAll(stdoutR, stderrR, stdinW)
 		go func() {
 			_ = cmd.Wait()
 			_ = proc.ClosePTY()
@@ -241,12 +249,22 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		streamWg.Wait()
 	} else {
 		streamWg.Add(2)
-		go streamOutput(stdoutPipe, false)
-		go streamOutput(stderrPipe, true)
-		// For exec-managed pipes all reads must complete BEFORE cmd.Wait,
-		// which closes them and would drop tail output.
-		streamWg.Wait()
+		go streamOutput(stdoutR, false)
+		go streamOutput(stderrR, true)
+
 		waitErr = cmd.Wait()
+
+		readersDone := make(chan struct{})
+		go func() {
+			streamWg.Wait()
+			close(readersDone)
+		}()
+		select {
+		case <-readersDone:
+		case <-time.After(pipeDrainGrace):
+			closeAll(stdoutR, stderrR)
+			<-readersDone
+		}
 	}
 
 	exitCode := int32(0)
@@ -367,4 +385,12 @@ func (s *ProcessServer) ResizeTTY(_ context.Context, req *processv1.ResizeTTYReq
 	}
 
 	return &processv1.ResizeTTYResponse{}, nil
+}
+
+func closeAll(files ...*os.File) {
+	for _, f := range files {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
 }

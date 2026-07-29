@@ -76,7 +76,7 @@ default) via symlink-aware sanitization; traversal attempts return
 
 `sandboxd` runs as a sidecar next to your (unmodified) workload container.
 The two share the workspace volume; the workload reaches `sandboxd` over pod
-loopback.
+loopback (enforced by `sandboxd` listening strictly on `127.0.0.1`).
 
 ```yaml
 apiVersion: extensions.agents.x-k8s.io/v1beta1
@@ -86,6 +86,8 @@ metadata:
 spec:
   podTemplate:
     spec:
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: sandboxd
           image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main

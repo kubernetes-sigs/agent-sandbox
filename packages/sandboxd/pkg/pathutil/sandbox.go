@@ -35,11 +35,11 @@ var ErrPathEscapes = errors.New("path escapes sandbox root")
 // resolved target path lies within the sandbox root directory.
 //
 // For paths that do not exist yet (e.g. the target of a write), symlinks are
-// evaluated on the closest existing parent directory instead, so new files
+// evaluated on the nearest existing ancestor directory instead, so new files
 // cannot be smuggled outside the root through a symlinked parent.
 func SanitizePath(rootDir, userPath string) (string, error) {
 	if rootDir == "" {
-		rootDir = "/"
+		return "", errors.New("sandbox rootDir is required and cannot be empty")
 	}
 	cleanRoot, err := filepath.Abs(filepath.Clean(rootDir))
 	if err != nil {
@@ -53,25 +53,38 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 
 	// Join root with user path directly to preserve relative ".." components
 	// so they are neutralized by Clean before symlink evaluation. Trim
-	// cleanRoot prefix if user supplied a full absolute path under cleanRoot.
+	// cleanRoot prefix with separator boundary if user supplied a full
+	// absolute path under cleanRoot.
 	userPathClean := filepath.Clean(userPath)
-	if strings.HasPrefix(userPathClean, cleanRoot) {
-		userPathClean = strings.TrimPrefix(userPathClean, cleanRoot)
+	if userPathClean == cleanRoot {
+		userPathClean = "."
+	} else if after, found := strings.CutPrefix(userPathClean, cleanRoot+string(os.PathSeparator)); found {
+		userPathClean = after
 	}
 	joined := filepath.Clean(filepath.Join(cleanRoot, userPathClean))
 
 	// Resolve symlinks. If the joined path doesn't exist yet (e.g. Write or
-	// MkdirAll targets), resolve symlinks on the existing parent directory
-	// instead.
+	// MkdirAll targets), walk up to the nearest existing ancestor to resolve
+	// symlinks, re-attaching the not-yet-existing suffix lexically.
 	resolved, err := filepath.EvalSymlinks(joined)
 	if err != nil {
 		if os.IsNotExist(err) {
-			parent := filepath.Dir(joined)
-			resolvedParent, parentErr := filepath.EvalSymlinks(parent)
-			if parentErr == nil {
-				resolved = filepath.Join(resolvedParent, filepath.Base(joined))
-			} else {
-				resolved = joined
+			ancestor := joined
+			var suffix []string
+			for {
+				suffix = append([]string{filepath.Base(ancestor)}, suffix...)
+				ancestor = filepath.Dir(ancestor)
+				resolvedAncestor, aErr := filepath.EvalSymlinks(ancestor)
+				if aErr == nil {
+					resolved = filepath.Join(append([]string{resolvedAncestor}, suffix...)...)
+					break
+				}
+				if !os.IsNotExist(aErr) {
+					return "", fmt.Errorf("failed to evaluate symlinks: %w", aErr)
+				}
+				if ancestor == filepath.Dir(ancestor) {
+					return "", fmt.Errorf("access denied: path %q: %w", userPath, ErrPathEscapes)
+				}
 			}
 		} else {
 			return "", fmt.Errorf("failed to evaluate symlinks: %w", err)

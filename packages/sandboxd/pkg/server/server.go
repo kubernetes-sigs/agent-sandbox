@@ -19,6 +19,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"syscall"
 	"time"
@@ -37,7 +38,8 @@ const processShutdownGrace = 2 * time.Second
 // Options configures a sandboxd Server.
 type Options struct {
 	// RootDir is the sandbox root all file operations and working
-	// directories are confined to. Defaults to "/" when empty.
+	// directories are confined to. Required: New returns an error when
+	// empty rather than defaulting to "/", which would disable confinement.
 	RootDir string
 	// MetadataEnvPrefix selects which environment variables are exposed on
 	// GET /v1/metadata.
@@ -54,17 +56,16 @@ type Server struct {
 }
 
 // New assembles a Server from opts.
-func New(opts Options) *Server {
-	rootDir := opts.RootDir
-	if rootDir == "" {
-		rootDir = "/"
+func New(opts Options) (*Server, error) {
+	if opts.RootDir == "" {
+		return nil, errors.New("RootDir is required: refusing to default to \"/\", which would disable sandbox confinement")
 	}
 	registry := processmanager.NewProcessRegistry()
 	return &Server{
 		registry:      registry,
-		processServer: NewProcessServer(rootDir, registry),
-		restServer:    NewRESTServer(rootDir, opts.MetadataEnvPrefix, opts.Log),
-	}
+		processServer: NewProcessServer(opts.RootDir, registry),
+		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
+	}, nil
 }
 
 // RegisterGRPC attaches the ProcessService to grpcServer.

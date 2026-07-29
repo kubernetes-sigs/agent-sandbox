@@ -74,6 +74,20 @@ func TestSanitizePathAbsolutePathConfined(t *testing.T) {
 	require.Equal(t, filepath.Join(resolvedRoot, "f.txt"), gotFull)
 }
 
+func TestSanitizePathSiblingPrefixAbsolute(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+
+	// An absolute path sharing a prefix with root (/workspace-evil/f.txt)
+	// must be treated as relative under root without string-mangling the prefix.
+	got, err := SanitizePath(root, "/workspace-evil/f.txt")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedRoot, "workspace-evil", "f.txt"), got)
+}
+
 func TestSanitizePathSymlinkEscapeRejected(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "root")
@@ -88,6 +102,10 @@ func TestSanitizePathSymlinkEscapeRejected(t *testing.T) {
 
 	// Writing a new file through an escaping symlinked parent must also fail.
 	_, err = SanitizePath(root, "link/newfile.txt")
+	require.ErrorIs(t, err, ErrPathEscapes)
+
+	// Multi-level write through escaping symlink must also fail even when intermediate subdirs don't exist.
+	_, err = SanitizePath(root, "link/subdir/newfile.txt")
 	require.ErrorIs(t, err, ErrPathEscapes)
 }
 

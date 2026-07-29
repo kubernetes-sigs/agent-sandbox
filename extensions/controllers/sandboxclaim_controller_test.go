@@ -6421,7 +6421,8 @@ func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {
 
 // TestSandboxClaimAdoptionCompletionConflictDoesNotSwitchCandidates pins the
 // no-flip invariant: a 409 on the adoption patch is resolved on the SAME
-// candidate, never by switching to the next one mid-pass.
+// candidate, never by switching to the next one mid-pass (measured: stale
+// candidate views flipped one claim through 8 sandboxes under load).
 func TestSandboxClaimAdoptionCompletionConflictDoesNotSwitchCandidates(t *testing.T) {
 	scheme := newScheme(t)
 	_, template, warmPool, _ := newOptimisticLockTestObjects()
@@ -7048,10 +7049,21 @@ func TestSandboxClaimAdoptionResolveCancellationPropagates(t *testing.T) {
 		WithStatusSubresource(claim).
 		Build()
 
-	// Every adoption patch is interrupted, as during controller shutdown.
+	// First adoption patch 409s so the pass enters authoritative resolution;
+	// the resolution's own re-patch is then interrupted, as during shutdown.
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+		assigned.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+	patches := 0
 	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && sb.Name == "pool-sb-1" {
+				patches++
+				if patches == 1 {
+					return conflict
+				}
 				return fmt.Errorf("client rate limiter wait: %w", context.Canceled)
 			}
 			return c.Patch(ctx, obj, patch, opts...)
@@ -7076,8 +7088,79 @@ func TestSandboxClaimAdoptionResolveCancellationPropagates(t *testing.T) {
 		t.Fatalf("cancellation must not be classified as a benign adoption conflict, got: %v", err)
 	}
 
+	require.GreaterOrEqual(t, patches, 2, "the pass must enter resolution (doomed patch) and be canceled on the re-patch")
+
 	// The committed reference must be untouched for the next process to finish.
 	after := &extensionsv1beta1.SandboxClaim{}
 	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, after))
 	require.Equal(t, "pool-sb-1", after.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+}
+
+// TestSandboxClaimAdoptionResolveConflictThenCancellationPropagates pins the
+// conflict-then-cancel ordering: a conflict inside the resolution retry makes
+// client-go report the conflict as the loop error, which must not mask the
+// later cancellation as a benign AdoptionConflict.
+func TestSandboxClaimAdoptionResolveConflictThenCancellationPropagates(t *testing.T) {
+	scheme := newScheme(t)
+	_, template, warmPool, _ := newOptimisticLockTestObjects()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "pool-sb-1",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
+	}
+	assigned := newPoolCandidateSandbox("pool-sb-1")
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+		assigned.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, assigned).
+		WithStatusSubresource(claim).
+		Build()
+
+	// Patch 1 (outer completeAdoption) and patch 2 (resolution attempt 1)
+	// conflict; patch 3 (resolution attempt 2) is interrupted.
+	patches := 0
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && sb.Name == "pool-sb-1" {
+				patches++
+				if patches <= 2 {
+					return conflict
+				}
+				return fmt.Errorf("client rate limiter wait: %w", context.Canceled)
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        rawClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected the cancellation to propagate past the earlier conflict, got: %v", err)
+	}
+	if errors.Is(err, errAdoptionConflict) {
+		t.Fatalf("a cancellation after a conflict must not be masked as a benign adoption conflict, got: %v", err)
+	}
+	require.Equal(t, 3, patches, "two conflicted patches then the interrupted one")
 }

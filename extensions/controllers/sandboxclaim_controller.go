@@ -1169,16 +1169,22 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 		fresh.DeepCopyInto(claim)
 		return nil
 	}
-	// client-go's retry helpers map an interrupted attempt (an error wrapping
-	// context.Canceled/DeadlineExceeded) to the last conflict error — nil when
-	// the first attempt is interrupted — which would report a canceled write
-	// as success. Keep the attempt's own error authoritative.
+	return retryOnConflictKeepingAttemptErr(attempt)
+}
+
+// retryOnConflictKeepingAttemptErr runs fn under RetryOnConflict but keeps the
+// last attempt's own error authoritative: client-go maps an interrupted
+// attempt (an error wrapping context.Canceled/DeadlineExceeded) to the last
+// conflict — nil when the first attempt is interrupted — which would report a
+// canceled write as success, or mask a cancellation that followed an earlier
+// conflict as contention.
+func retryOnConflictKeepingAttemptErr(fn func() error) error {
 	var attemptErr error
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		attemptErr = attempt()
+		attemptErr = fn()
 		return attemptErr
 	})
-	if err == nil && attemptErr != nil {
+	if errors.Is(attemptErr, context.Canceled) || errors.Is(attemptErr, context.DeadlineExceeded) || (err == nil && attemptErr != nil) {
 		return attemptErr
 	}
 	return err
@@ -1244,17 +1250,9 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 		resolved = fresh
 		return nil
 	}
-	// Same interrupted-attempt guard as updateClaimOnFreshBase: without it a
-	// canceled attempt reports success with resolved == nil, and callers
-	// would dereference nil.
-	var attemptErr error
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		attemptErr = attempt()
-		return attemptErr
-	})
-	if err == nil && attemptErr != nil {
-		err = attemptErr
-	}
+	// Without the attempt-error guard a canceled attempt reports success
+	// with resolved == nil, and callers would dereference nil.
+	err := retryOnConflictKeepingAttemptErr(attempt)
 	if err == nil {
 		return resolved, nil
 	}
@@ -1269,9 +1267,13 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 				return nil, fmt.Errorf("cleaning up unrecoverable sandbox reference %s: %w", sandboxName, cleanupErr)
 			}
 			// Full chain to logs only; the returned (and surfaced) message
-			// stays stable and terse.
+			// stays stable and terse, keeping the deleted-vs-won distinction.
 			logger.Error(errors.Join(err, cleanupErr), "Assigned sandbox unrecoverable and reference cleanup failed; retrying next pass", "sandbox", sandboxName, "claim", claim.Name)
-			return nil, fmt.Errorf("%w: sandbox %s unrecoverable and reference cleanup failed", errAdoptionConflict, sandboxName)
+			reason := "lost to another owner"
+			if k8errors.IsNotFound(err) {
+				reason = "deleted"
+			}
+			return nil, fmt.Errorf("%w: sandbox %s %s and reference cleanup failed", errAdoptionConflict, sandboxName, reason)
 		}
 		if errors.Is(err, errAdoptionConflict) {
 			return nil, err

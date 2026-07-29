@@ -523,11 +523,17 @@ async def reuse_git_restore_sandbox_async(afleet, tasks, process_fn, concurrency
             await afleet.release(handle)
           except Exception:  # noqa: BLE001
             logger.warning("release failed during group cleanup", exc_info=True)
-        if scale_on_hold and recyclable:          # shard done: active−1 (+ held−1 if it
-          async with locks[img]:                  # was holding) leaves desired unchanged
-            if holding:                           # → no dangling warm at end of run
+        # Decrement active UNCONDITIONALLY (every shard counted itself in `active`
+        # up front). A shard that died before its first prime (recyclable still
+        # None, e.g. acquire raised) must still drop out, or recyclable siblings
+        # compute desired = active − held with the dead shard still counted and
+        # leave a dangling warm replica. Only the held−1 / rescale are gated on
+        # scale_on_hold + recyclable (they only ran on that path).
+        async with locks[img]:
+          active[img] -= 1
+          if scale_on_hold and recyclable:        # active−1 (+ held−1 if holding)
+            if holding:                           # → desired unchanged, no dangling warm
               held[img] -= 1
-            active[img] -= 1
             await _rescale(img)
 
   # Circuit breaker (#1) around the whole fan-out — the sync guard's monitor thread

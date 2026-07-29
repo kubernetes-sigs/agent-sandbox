@@ -282,15 +282,19 @@ class SandboxFleet:
     # Instead unwind (raise), which releases any held lock, and let the atexit hook
     # (_safe_teardown, registered in _install_teardown_hooks) run teardown outside
     # the signal context.
+    prev = self._prev_handlers.get(signum)
+    if prev == signal.SIG_IGN:
+      logger.debug("signal %d ignored (previous handler was SIG_IGN)", signum)
+      return                                   # honor an explicit ignore — don't turn it into an abort
     logger.warning("signal %d → aborting fleet run %s (teardown via atexit)",
                    signum, self.run_id)
-    prev = self._prev_handlers.get(signum)
-    if callable(prev) and prev not in (signal.SIG_DFL, signal.SIG_IGN):
-      prev(signum, frame)
-    elif signum == signal.SIGINT:
+    if callable(prev) and prev != signal.SIG_DFL:
+      prev(signum, frame)                      # chain to a custom handler first
+    # Always unwind after chaining (a prior callable that returns normally must not
+    # silently resume the run when we've logged "aborting"); SIG_DFL falls through here too.
+    if signum == signal.SIGINT:
       raise KeyboardInterrupt
-    else:
-      raise SystemExit(128 + signum)
+    raise SystemExit(128 + signum)
 
   def _safe_teardown(self) -> None:
     if self._torndown:

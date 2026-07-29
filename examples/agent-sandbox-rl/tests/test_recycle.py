@@ -397,6 +397,39 @@ async def test_reuse_async_sharded_runs_k_sandboxes_per_image(make_cluster, monk
   af.close()
 
 
+async def test_reuse_async_shard_death_before_prime_no_dangling_warm(make_cluster, monkeypatch):
+  # A shard that dies BEFORE its first prime (recyclable still None, e.g. acquire raised)
+  # must still drop out of `active`; otherwise recyclable sibling shards compute
+  # desired = active − held with the dead shard still counted and leave a dangling warm
+  # replica (desired never reaches 0).
+  import unittest.mock as m
+  from agent_sandbox_rl import AsyncSandboxFleet
+  from agent_sandbox_rl.recycle import reuse_git_restore_sandbox_async
+  _patch_clean_exec(monkeypatch)
+  c = make_cluster("solo")
+  af = AsyncSandboxFleet(FleetConfig(max_concurrent=4, max_warmpool_size=2),
+                         registry=ClusterRegistry([c]))
+  af.load_tasks(["img"] * 4)                          # 1 image → 2 shards of 2 tasks
+  await af.setup()
+  spr = m.MagicMock(wraps=af._fleet.set_pool_replicas)
+  monkeypatch.setattr(af._fleet, "set_pool_replicas", spr)
+  real_acquire = af.acquire
+  calls = {"n": 0}
+  async def flaky(task):
+    calls["n"] += 1
+    if calls["n"] == 1:                               # first shard dies before prime
+      raise RuntimeError("acquire boom")
+    return await real_acquire(task)
+  monkeypatch.setattr(af, "acquire", flaky)
+  await reuse_git_restore_sandbox_async(
+      af, af.tasks, lambda t, h: 1, concurrency=4,
+      use_session=False, scale_on_hold=True, shards_per_image=2)
+  # post-fix: the dead shard still decremented `active`, so desired drains to 0 (no leftover warm)
+  assert any(call.args[1] == 0 for call in spr.call_args_list), spr.call_args_list
+  await af.teardown()
+  af.close()
+
+
 def test_reuse_guarded_by_circuit_breaker(make_cluster, monkeypatch):
   # the recycle path must be guarded too (that's where over-creation bit us)
   import time

@@ -264,3 +264,37 @@ def test_unwarm_image_idempotent_preserves_capacity(make_cluster):
   assert c.active_replicas == 3                     # i2's reservation preserved (not phantom-freed)
   assert c.resources.delete_warmpool.call_count == 1
   assert c.resources.delete_template.call_count == 1
+
+
+# --- review round 5: _on_signal honors SIG_IGN + always unwinds ----------- #
+import signal as _signal
+
+
+def _fleet_no_hooks(make_cluster):
+  # constructing a fleet does NOT install real signal handlers (that's setup()),
+  # so we can drive _on_signal directly with a hand-set _prev_handlers map.
+  return SandboxFleet(FleetConfig(), registry=ClusterRegistry([make_cluster("solo")]))
+
+
+def test_on_signal_honors_sig_ign(make_cluster):
+  f = _fleet_no_hooks(make_cluster)
+  f._prev_handlers = {_signal.SIGINT: _signal.SIG_IGN}
+  assert f._on_signal(_signal.SIGINT, None) is None   # SIG_IGN → do NOT turn ignore into abort
+
+
+def test_on_signal_chains_prev_then_unwinds(make_cluster):
+  f = _fleet_no_hooks(make_cluster)
+  seen = {"n": 0}
+  def prev(signum, frame):
+    seen["n"] += 1                                    # a custom handler that returns normally
+  f._prev_handlers = {_signal.SIGINT: prev}
+  with pytest.raises(KeyboardInterrupt):              # must still unwind so atexit teardown runs
+    f._on_signal(_signal.SIGINT, None)
+  assert seen["n"] == 1                               # prior handler was invoked (chained)
+
+
+def test_on_signal_default_unwinds(make_cluster):
+  f = _fleet_no_hooks(make_cluster)
+  f._prev_handlers = {_signal.SIGTERM: _signal.SIG_DFL}
+  with pytest.raises(SystemExit):                     # SIG_DFL falls through to the unwind
+    f._on_signal(_signal.SIGTERM, None)

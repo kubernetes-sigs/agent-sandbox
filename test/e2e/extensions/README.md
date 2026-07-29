@@ -37,7 +37,8 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_REPORT_DIR` | `artifacts` | Base directory for CSV output and controller logs. A subdirectory is auto-created per run. |
 | `SANDBOX_CLUSTER_ID` | *(auto-detected)* | Override cluster identity string in report paths |
 | `SANDBOX_VERSION` | *(auto-detected)* | Override agent-sandbox version. Defaults to the controller deployment image tag. |
-| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. Longevity mode overrides this to `max(5, poolSize/2)` unless explicitly set. |
+| `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. Longevity mode overrides this to `max(10, coldStart×5)` unless explicitly set — derived from cold start calibration so pods survive pool fill time. |
+| `SANDBOX_TTL` | `0` | TTL in seconds for claim auto-cleanup after workload finishes. All claims use `ShutdownPolicy: Delete` with this TTL. Set higher to simulate Retain-like behavior where claims linger before deletion. |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
 
 ## Quick Start
@@ -125,10 +126,10 @@ In longevity mode (`SANDBOX_LONGEVITY`), the initial batch size is computed
 from the cold start baseline to avoid depleting the pool:
 
 ```text
-batchSize = max(4, int(0.5 × poolSize / coldStartSec))
+batchSize = max(4, int(0.3 × poolSize / coldStartSec))
 ```
 
-The `0.5` safety factor ensures roughly 2× more refill capacity than drain
+The `0.3` safety factor ensures roughly 3× more refill capacity than drain
 rate. Adaptive sizing then adjusts ±1 per batch: decrease when
 `ready < poolSize/2`, increase when `ready > poolSize - batchSize`.
 
@@ -276,7 +277,7 @@ to the controller's refill rate.
 
 Key differences from regular burst mode:
 
-- **Heuristic initial batch**: `max(4, int(0.5 × poolSize / coldStartSec))`
+- **Heuristic initial batch**: `max(4, int(0.3 × poolSize / coldStartSec))`
   instead of `min(max(4, poolSize/2), batchCap)`. The cold start baseline
   drives the initial estimate so the pool isn't depleted immediately.
 - **Adaptive sizing**: batch size decreases by 1 when `ready < poolSize/2`
@@ -286,8 +287,14 @@ Key differences from regular burst mode:
   50ms), computed once from the cold start baseline. Avoids fighting with
   the adaptive batch size.
 - **Workload override**: unless `SANDBOX_WORKLOAD_SEC` is explicitly set,
-  longevity mode reduces workload duration to `max(5, poolSize/2)` seconds
-  to prevent pod accumulation during long runs.
+  longevity mode sets workload duration to `max(10, coldStart×5)` seconds —
+  derived from cold start calibration so pods survive one full pool fill
+  cycle.
+- **Claim auto-cleanup**: all claims (burst, baseline, lifecycle, benchmarks)
+  use `ShutdownPolicy: Delete` with `TTLSecondsAfterFinished: 0` by default
+  (configurable via `SANDBOX_TTL`). The controller deletes claims after the
+  workload exits — no client-side GC needed. This prevents defer cleanup
+  storms at test end (a 2-minute run produces 800+ claims).
 - **Minimum pool size**: longevity mode skips pool sizes below 20 — smaller
   pools deplete too fast for meaningful adaptive tuning.
 - **Summary CSV**: a `burst_summary_<runtime>_pool<N>.csv` is written every
@@ -362,3 +369,11 @@ the full (unscoped) controller log as a fallback.
   shim-monitor.sock metrics endpoint while VMs are still running to capture
   boot timing without Jaeger infrastructure.
 
+## Design Decisions
+
+All claims use `ShutdownPolicy: Delete` with `TTLSecondsAfterFinished: 0`
+(configurable via `SANDBOX_TTL`) to prevent zombie claim/sandbox/pod
+accumulation. Without this, the API default (`Retain` or no lifecycle at all)
+leaves finished claims and their underlying VMs alive indefinitely — a
+resource leak and security gap documented in
+[#1306](https://github.com/kubernetes-sigs/agent-sandbox/issues/1306).

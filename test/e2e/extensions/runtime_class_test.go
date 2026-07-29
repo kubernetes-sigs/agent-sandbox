@@ -153,6 +153,7 @@ func TestRuntimeClassLifecycle(t *testing.T) {
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle:   claimLifecycle,
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim1))
@@ -179,6 +180,7 @@ func TestRuntimeClassLifecycle(t *testing.T) {
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			Lifecycle:   claimLifecycle,
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim2))
@@ -421,7 +423,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 		preBatchSize := calcBatchSize(poolSize)
 		if longevity > 0 && coldBaseline > 0 {
-			preBatchSize = max(4, int(float64(poolSize)*0.5/coldBaseline.Seconds()))
+			preBatchSize = max(4, int(float64(poolSize)*0.3/coldBaseline.Seconds()))
 			if os.Getenv("SANDBOX_BATCH_CAP") != "" {
 				preBatchSize = min(preBatchSize, batchCap)
 			}
@@ -463,7 +465,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 			batchSize := calcBatchSize(poolSize)
 			if longevity > 0 && coldBaseline > 0 {
-				batchSize = max(4, int(float64(poolSize)*0.5/coldBaseline.Seconds()))
+				batchSize = max(4, int(float64(poolSize)*0.3/coldBaseline.Seconds()))
 				if os.Getenv("SANDBOX_BATCH_CAP") != "" {
 					batchSize = min(batchSize, batchCap)
 				}
@@ -546,6 +548,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 								WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
 							},
 						}
+						claim.Spec.Lifecycle = claimLifecycle
 						tracker.Register(claimName)
 						createStart := time.Now()
 						tracker.MarkCreateCalled(claimName, createStart)
@@ -921,6 +924,20 @@ func benchLongevity() time.Duration {
 	return 0
 }
 
+var claimTTL = func() int32 {
+	if v := os.Getenv("SANDBOX_TTL"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			return int32(n)
+		}
+	}
+	return 0
+}()
+
+var claimLifecycle = &extensionsv1beta1.Lifecycle{
+	ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
+	TTLSecondsAfterFinished: &claimTTL,
+}
+
 // ---------------------------------------------------------------------------
 // Baseline measurements
 // ---------------------------------------------------------------------------
@@ -953,6 +970,7 @@ func baselineWarmClaim(t *testing.T, tc *framework.TestContext, ns, poolName str
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: poolName},
+			Lifecycle:   claimLifecycle,
 		},
 	}
 
@@ -1282,6 +1300,7 @@ func BenchmarkRuntimeClassWarmClaim(b *testing.B) {
 						},
 						Spec: extensionsv1beta1.SandboxClaimSpec{
 							WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+							Lifecycle:   claimLifecycle,
 						},
 					}
 

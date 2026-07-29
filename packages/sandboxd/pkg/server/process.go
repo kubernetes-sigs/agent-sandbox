@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"sync"
@@ -34,6 +35,19 @@ import (
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
+
+// mapCommandError converts command execution errors (e.g. missing binary or
+// permission denied) into appropriate gRPC status codes (NOT_FOUND,
+// PERMISSION_DENIED) instead of generic INTERNAL error codes.
+func mapCommandError(err error, defaultCode codes.Code, msg string) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return status.Errorf(codes.NotFound, "%s: command not found: %v", msg, err)
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return status.Errorf(codes.PermissionDenied, "%s: permission denied: %v", msg, err)
+	}
+	return status.Errorf(defaultCode, "%s: %v", msg, err)
+}
 
 const (
 	// streamChunkSize is the read buffer size for stdout/stderr streaming.
@@ -115,6 +129,8 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		Done: make(chan struct{}),
 	}
 
+	cmd.WaitDelay = executeWaitDelay
+
 	var ptyFile *os.File
 	var stdoutPipe, stderrPipe io.ReadCloser
 	var stdinPipe io.WriteCloser
@@ -127,7 +143,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// EPERM (setpgid is illegal on a session leader).
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
-			return status.Errorf(codes.Internal, "failed to start command with PTY: %v", err)
+			return mapCommandError(err, codes.Internal, "failed to start command with PTY")
 		}
 		proc.PTY = ptyFile
 		proc.Stdin = ptyFile
@@ -150,7 +166,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		proc.Stdin = stdinPipe
 
 		if err := cmd.Start(); err != nil {
-			return status.Errorf(codes.Internal, "failed to start command: %v", err)
+			return mapCommandError(err, codes.Internal, "failed to start command")
 		}
 	}
 
@@ -173,6 +189,11 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 			Init: &processv1.InitEvent{ProcessId: pid},
 		},
 	}); err != nil {
+		_ = proc.Signal(syscall.SIGKILL)
+		go func() {
+			_ = cmd.Wait()
+			_ = proc.ClosePTY()
+		}()
 		return status.Errorf(codes.Internal, "failed to send InitEvent: %v", err)
 	}
 
@@ -271,7 +292,7 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 		if errors.As(runErr, &exitErr) {
 			exitCode = int32(exitErr.ExitCode())
 		} else {
-			return nil, status.Errorf(codes.Internal, "failed to execute command: %v", runErr)
+			return nil, mapCommandError(runErr, codes.Internal, "failed to execute command")
 		}
 	}
 

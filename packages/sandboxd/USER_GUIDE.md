@@ -79,7 +79,7 @@ The two share the workspace volume; the workload reaches `sandboxd` over pod
 loopback.
 
 ```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: sandboxd-template

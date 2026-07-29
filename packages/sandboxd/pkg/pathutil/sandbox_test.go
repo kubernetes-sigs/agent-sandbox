@@ -67,6 +67,11 @@ func TestSanitizePathAbsolutePathConfined(t *testing.T) {
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(resolvedRoot, "f.txt"), got)
+
+	// Full absolute path starting with root is also confined cleanly.
+	gotFull, err := SanitizePath(root, filepath.Join(root, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedRoot, "f.txt"), gotFull)
 }
 
 func TestSanitizePathSymlinkEscapeRejected(t *testing.T) {

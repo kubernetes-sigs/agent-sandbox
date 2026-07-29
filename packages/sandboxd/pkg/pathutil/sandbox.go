@@ -52,8 +52,13 @@ func SanitizePath(rootDir, userPath string) (string, error) {
 	}
 
 	// Join root with user path directly to preserve relative ".." components
-	// so they are neutralized by Clean before symlink evaluation.
-	joined := filepath.Clean(filepath.Join(cleanRoot, userPath))
+	// so they are neutralized by Clean before symlink evaluation. Trim
+	// cleanRoot prefix if user supplied a full absolute path under cleanRoot.
+	userPathClean := filepath.Clean(userPath)
+	if strings.HasPrefix(userPathClean, cleanRoot) {
+		userPathClean = strings.TrimPrefix(userPathClean, cleanRoot)
+	}
+	joined := filepath.Clean(filepath.Join(cleanRoot, userPathClean))
 
 	// Resolve symlinks. If the joined path doesn't exist yet (e.g. Write or
 	// MkdirAll targets), resolve symlinks on the existing parent directory

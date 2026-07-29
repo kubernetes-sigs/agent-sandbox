@@ -98,6 +98,9 @@ func NewRESTServer(rootDir, metadataEnvPrefix string, log logr.Logger) *RESTServ
 	if rootDir == "" {
 		rootDir = "/"
 	}
+	if metadataEnvPrefix == "" {
+		metadataEnvPrefix = "SANDBOX_"
+	}
 	s := &RESTServer{
 		rootDir:           rootDir,
 		metadataEnvPrefix: metadataEnvPrefix,
@@ -175,7 +178,7 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if info.IsDir() {
-		s.serveDirectoryListing(w, target)
+		s.serveDirectoryListing(w, r, target)
 		return
 	}
 
@@ -196,7 +199,7 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
-func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, target string) {
+func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Request, target string) {
 	dirEntries, err := os.ReadDir(target) // sorted by name
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
@@ -230,7 +233,11 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, target string)
 		})
 	}
 
-	s.writeJSON(w, http.StatusOK, DirectoryListing{Path: target, Entries: entries})
+	relPath := r.PathValue("path")
+	if !strings.HasPrefix(relPath, "/") {
+		relPath = "/" + relPath
+	}
+	s.writeJSON(w, http.StatusOK, DirectoryListing{Path: relPath, Entries: entries})
 }
 
 func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +375,30 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		recursive = parsed
+	}
+
+	cleanRoot, _ := filepath.Abs(filepath.Clean(s.rootDir))
+	if target == cleanRoot {
+		if !recursive {
+			s.writeError(w, http.StatusConflict, "CONFLICT",
+				"directory is not empty; pass recursive=true to remove it")
+			return
+		}
+		// For the sandbox root directory itself, clear its contents rather
+		// than deleting the volume mount entity.
+		dirEntries, err := os.ReadDir(target)
+		if err != nil {
+			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			return
+		}
+		for _, entry := range dirEntries {
+			if err := os.RemoveAll(filepath.Join(target, entry.Name())); err != nil {
+				s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
 	var removeErr error

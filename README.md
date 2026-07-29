@@ -16,6 +16,9 @@
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
 
+> [!NOTE]
+> **Scope:** Agent Sandbox is a *sandbox orchestrator*. It delegates low-level container isolation to secure "Sandbox Runtimes" (like gVisor or Kata Containers) by managing Pods configured to use these runtimes (via `RuntimeClass`).
+
 ## Overview
 
 ### Core: Sandbox

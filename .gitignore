@@ -40,3 +40,7 @@ hermes-sandbox-knowledge.md
 .claude
 .vscode
 .agents/skills/**/workspace/
+
+# KWOK simulated cluster test output
+.build-kwok/
+kwok-cl2-report/

@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Periodic variant of the cilium benchmark: same test, run on a schedule
-# against main so we get a continuous performance baseline.
+# Daily cilium benchmark against main: the continuous performance baseline,
+# on 20 nodes with a single control plane.
 
 set -o errexit
 set -o nounset
@@ -22,4 +22,8 @@ set -o pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
-exec "${REPO_ROOT}/dev/ci/presubmits/benchmarks-kops-gcp-cilium"
+export CNI=cilium
+export STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
+export STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
+
+exec "${REPO_ROOT}/test/benchmarks/scenarios/benchmarks-kops-gcp/run"

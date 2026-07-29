@@ -41,7 +41,7 @@ package main
 //
 // Cluster capacity: peak concurrent pods ~= pool total (kept full by refill)
 // + rate x (ready-latency + dwell + deletion pipeline) adopted-but-not-yet-
-// deleted sandboxes; checkClusterCapacity budgets this.
+// deleted sandboxes; resolvePhases budgets this.
 //
 // --sustained-namespaces=N pre-creates N namespaces (<run-ns>-s1..sN), each
 // with its own template + pool, and spreads arrivals round-robin across them.

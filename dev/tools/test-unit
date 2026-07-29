@@ -50,6 +50,14 @@ PYTHON_TEST_SUITES = [
             (os.path.join("examples", "agent-sandbox-rl"), "[test]"),
         ],
     },
+    {
+        "name": "integrations-mcp-server",
+        "dir": os.path.join("clients", "integrations", "mcp-server"),
+        "editable_installs": [
+            (os.path.join("clients", "integrations", "mcp-server"), "[test]"),
+        ],
+
+    }
 ]
 
 

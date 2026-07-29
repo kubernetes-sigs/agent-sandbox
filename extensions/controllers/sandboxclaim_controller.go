@@ -423,6 +423,9 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
+// For warm-pool claims with nil Lifecycle, it injects an in-memory default
+// (Delete + TTL=0) so the expiration reconciler can clean up finished claims.
+// The injection is never persisted — the reconciler re-derives it each cycle.
 func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
 	if claim.Spec.Lifecycle == nil {
 		if claim.Spec.WarmPoolRef.Name == "" {

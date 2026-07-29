@@ -1706,6 +1706,7 @@ func TestSandboxClaimWarmPoolDefaultLifecycle(t *testing.T) {
 
 	testCases := []struct {
 		name               string
+		slug               string
 		lifecycle          *extensionsv1beta1.Lifecycle
 		warmPoolRef        string
 		finished           bool
@@ -1713,18 +1714,21 @@ func TestSandboxClaimWarmPoolDefaultLifecycle(t *testing.T) {
 	}{
 		{
 			name:               "warm pool claim with nil lifecycle is deleted after finish",
+			slug:               "warm-nil-finished",
 			warmPoolRef:        "default-lifecycle-pool",
 			finished:           true,
 			expectClaimDeleted: true,
 		},
 		{
 			name:               "warm pool claim with nil lifecycle stays active before finish",
+			slug:               "warm-nil-active",
 			warmPoolRef:        "default-lifecycle-pool",
 			finished:           false,
 			expectClaimDeleted: false,
 		},
 		{
 			name: "warm pool claim with explicit Retain is not overridden",
+			slug: "warm-retain",
 			lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
 			},
@@ -1734,6 +1738,7 @@ func TestSandboxClaimWarmPoolDefaultLifecycle(t *testing.T) {
 		},
 		{
 			name:               "non-warm-pool claim with nil lifecycle stays immortal",
+			slug:               "no-pool-nil",
 			warmPoolRef:        "",
 			finished:           true,
 			expectClaimDeleted: false,
@@ -1743,7 +1748,7 @@ func TestSandboxClaimWarmPoolDefaultLifecycle(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			claim := &extensionsv1beta1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: "default", UID: types.UID(tc.name)},
+				ObjectMeta: metav1.ObjectMeta{Name: tc.slug, Namespace: "default", UID: types.UID(tc.slug)},
 				Spec: extensionsv1beta1.SandboxClaimSpec{
 					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: tc.warmPoolRef},
 					Lifecycle:   tc.lifecycle,

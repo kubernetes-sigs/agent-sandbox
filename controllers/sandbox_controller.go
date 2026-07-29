@@ -83,6 +83,15 @@ func checkOwnership(obj client.Object, sandbox *sandboxv1beta1.Sandbox) (resourc
 	return resourceOwnedByOther, controllerRef
 }
 
+// isOwnedBySandbox reports whether pod is non-nil and owned by the given Sandbox.
+func isOwnedBySandbox(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
+	if pod == nil {
+		return false
+	}
+	ownership, _ := checkOwnership(pod, sandbox)
+	return ownership == resourceOwnedBySandbox
+}
+
 // resolvePodName returns the name of the pod associated with the given Sandbox.
 // If the sandbox has adopted a warm pool pod, the pod name is tracked in the
 // agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
@@ -245,13 +254,19 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// Reconcile Pod
 	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, podErr)
+
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
 		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
-		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
-		sandbox.Status.NodeName = pod.Spec.NodeName
+		if isOwnedBySandbox(pod, sandbox) {
+			sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
+			sandbox.Status.NodeName = pod.Spec.NodeName
+		} else {
+			sandbox.Status.PodIPs = nil
+			sandbox.Status.NodeName = ""
+		}
 	}
 
 	// Reconcile Service
@@ -318,8 +333,7 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 		return suspended
 	}
 
-	ownership, _ := checkOwnership(pod, sandbox)
-	if ownership != resourceOwnedBySandbox {
+	if !isOwnedBySandbox(pod, sandbox) {
 		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodNotOwned
 		suspended.Message = "Refused to delete pod because it is not owned by this sandbox"
 		return suspended
@@ -425,7 +439,8 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 }
 
 func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
-	if pod == nil {
+	// Only a Pod this Sandbox owns may drive its Finished condition
+	if !isOwnedBySandbox(pod, sandbox) {
 		return nil
 	}
 

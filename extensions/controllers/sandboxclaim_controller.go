@@ -1152,7 +1152,7 @@ func (r *SandboxClaimReconciler) authoritativeReader() client.Reader {
 func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, mutate func(fresh *extensionsv1beta1.SandboxClaim) (bool, error)) error {
 	reader := r.authoritativeReader()
 	key := client.ObjectKeyFromObject(claim)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	attempt := func() error {
 		fresh := &extensionsv1beta1.SandboxClaim{}
 		if err := reader.Get(ctx, key, fresh); err != nil {
 			return err
@@ -1168,7 +1168,20 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 		}
 		fresh.DeepCopyInto(claim)
 		return nil
+	}
+	// client-go's retry helpers map an interrupted attempt (an error wrapping
+	// context.Canceled/DeadlineExceeded) to the last conflict error — nil when
+	// the first attempt is interrupted — which would report a canceled write
+	// as success. Keep the attempt's own error authoritative.
+	var attemptErr error
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		attemptErr = attempt()
+		return attemptErr
 	})
+	if err == nil && attemptErr != nil {
+		return attemptErr
+	}
+	return err
 }
 
 // retryAdoptionAnnotation retries the optimistically locked claim update that
@@ -1207,7 +1220,7 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 	reader := r.authoritativeReader()
 	key := client.ObjectKey{Namespace: claim.Namespace, Name: sandboxName}
 	var resolved *v1beta1.Sandbox
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	attempt := func() error {
 		fresh := &v1beta1.Sandbox{}
 		if err := reader.Get(ctx, key, fresh); err != nil {
 			return err
@@ -1230,7 +1243,18 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 		}
 		resolved = fresh
 		return nil
+	}
+	// Same interrupted-attempt guard as updateClaimOnFreshBase: without it a
+	// canceled attempt reports success with resolved == nil, and callers
+	// would dereference nil.
+	var attemptErr error
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		attemptErr = attempt()
+		return attemptErr
 	})
+	if err == nil && attemptErr != nil {
+		err = attemptErr
+	}
 	if err == nil {
 		return resolved, nil
 	}
@@ -1239,6 +1263,11 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 		// pass re-enters adoption cleanly.
 		logger.V(4).Info("Assigned sandbox unrecoverable; clearing reference", "sandbox", sandboxName, "claim", claim.Name, "reason", err.Error())
 		if cleanupErr := r.removeAssignedSandboxReference(ctx, claim, sandboxName); cleanupErr != nil {
+			// Cancellation/timeout is shutdown, not contention: propagate it
+			// instead of classifying it as a benign adoption conflict.
+			if errors.Is(cleanupErr, context.Canceled) || errors.Is(cleanupErr, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("cleaning up unrecoverable sandbox reference %s: %w", sandboxName, cleanupErr)
+			}
 			// Full chain to logs only; the returned (and surfaced) message
 			// stays stable and terse.
 			logger.Error(errors.Join(err, cleanupErr), "Assigned sandbox unrecoverable and reference cleanup failed; retrying next pass", "sandbox", sandboxName, "claim", claim.Name)

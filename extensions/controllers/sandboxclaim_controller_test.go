@@ -6959,3 +6959,125 @@ func TestSandboxClaimAdoptionAnnotationAndCompletionConflictsResolvedSamePass(t 
 	require.NotNil(t, adoptedRef)
 	require.Equal(t, types.UID("claim-uid-123"), adoptedRef.UID)
 }
+
+// TestSandboxClaimAdoptionCleanupCancellationPropagates verifies a canceled
+// cleanup write is propagated as cancellation, not classified as a benign
+// adoption conflict.
+func TestSandboxClaimAdoptionCleanupCancellationPropagates(t *testing.T) {
+	scheme := newScheme(t)
+	_, template, warmPool, _ := newOptimisticLockTestObjects()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "ghost-sb",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
+	}
+	ghost := newPoolCandidateSandbox("ghost-sb")
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == "ghost-sb" {
+				ghost.DeepCopyInto(sb)
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+				return fmt.Errorf("client rate limiter wait: %w", context.Canceled)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        rawClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected the cancellation to propagate, got: %v", err)
+	}
+	if errors.Is(err, errAdoptionConflict) {
+		t.Fatalf("cancellation must not be classified as a benign adoption conflict, got: %v", err)
+	}
+}
+
+// TestSandboxClaimAdoptionResolveCancellationPropagates verifies a canceled
+// completion patch during authoritative resolution propagates as
+// cancellation — client-go's retry maps interrupted attempts to nil, which
+// without the guard reported success with a nil resolved sandbox (panic).
+func TestSandboxClaimAdoptionResolveCancellationPropagates(t *testing.T) {
+	scheme := newScheme(t)
+	_, template, warmPool, _ := newOptimisticLockTestObjects()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "pool-sb-1",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
+	}
+	assigned := newPoolCandidateSandbox("pool-sb-1")
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, assigned).
+		WithStatusSubresource(claim).
+		Build()
+
+	// Every adoption patch is interrupted, as during controller shutdown.
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && sb.Name == "pool-sb-1" {
+				return fmt.Errorf("client rate limiter wait: %w", context.Canceled)
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        rawClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"}}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected the cancellation to propagate (not success or panic), got: %v", err)
+	}
+	if errors.Is(err, errAdoptionConflict) {
+		t.Fatalf("cancellation must not be classified as a benign adoption conflict, got: %v", err)
+	}
+
+	// The committed reference must be untouched for the next process to finish.
+	after := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, after))
+	require.Equal(t, "pool-sb-1", after.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+}

@@ -203,6 +203,31 @@ Deriving a user-facing state from the API (as the platform's gateway does):
 | Suspended | `Suspended=True` | Suspended |
 | Suspended | not yet | Suspending |
 
+### Standalone Simple Sandbox with Native Auto-Suspension
+
+> [!IMPORTANT]
+> **Explicitly Enable Auto-Suspension on the Controller**:
+> Auto-Suspension is disabled by default in Agent Sandbox (`controller.enableAutoSuspendAndResume: false`). Before using any auto-suspension manifest, you **must explicitly enable the flag on the controller and deploy the router overlay**:
+> ```sh
+> # Using Helm:
+> helm upgrade --install agent-sandbox ../../helm \
+>   --namespace agent-sandbox-system \
+>   --set controller.enableAutoSuspendAndResume=true
+> 
+> # Apply the Auto-Suspension Gateway & Router overlay:
+> kubectl apply -f ../../k8s/auto-suspension.yaml
+> ```
+
+If you prefer to test Auto-Suspension and Traffic-Triggered Resume on a simple standalone `Sandbox` (without deploying the full multi-tenant WarmPool/Claim platform pattern), you can deploy `05-simple-sandbox-auto-suspension.yaml`:
+
+```sh
+kubectl apply -f 05-simple-sandbox-auto-suspension.yaml
+```
+
+This manifest creates a simple Hermes Agent `Sandbox` (`hermes-simple-auto-suspension`) configured with:
+- **`spec.autoSuspend.inactivityDuration: 10m`**: When idle for 10 minutes, the controller automatically patches `.spec.operatingMode = "Suspended"` and deletes the Pod (saving compute cost), while preserving the 1Gi `/opt/data` PVC in Kubernetes.
+- **Traffic-Triggered Resume**: When an HTTP request carrying `X-Sandbox-ID: hermes-simple-auto-suspension` reaches `sandbox-router`, the router transparently wakes the sandbox back to `Running`, boots a fresh pod with the PVC re-attached, and proxies the request without dropping the connection.
+
 ## 6. Policy enforcement: rejection beats silent cold starts
 
 A claim that injects env (or volumeClaimTemplates) forces a cold start that

@@ -1,0 +1,60 @@
+# A simple, standalone Hermes Agent Sandbox with native Auto-Suspension.
+# Demonstrates idle scale-to-zero and persistent memory without requiring
+# the multi-tenant SandboxTemplate / SandboxWarmPool platform pattern.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: hermes-simple-auto-suspension
+  namespace: hermes-demo
+spec:
+  operatingMode: Running
+  # Automatically scale Pod to 0 after 10 minutes of inactivity
+  autoSuspend:
+    inactivityDuration: 10m
+  podTemplate:
+    spec:
+      containers:
+        - name: hermes
+          image: nousresearch/hermes-agent:v2026.7.7.2
+          imagePullPolicy: IfNotPresent
+          args: ["sleep", "infinity"]
+          ports:
+            - name: dashboard
+              containerPort: 9119
+            - name: openai-api
+              containerPort: 8642
+          envFrom:
+            - secretRef:
+                name: hermes-provider-keys
+          env:
+            - name: HERMES_DASHBOARD
+              value: "1"
+            - name: HERMES_DASHBOARD_HOST
+              value: "0.0.0.0"
+            - name: HERMES_DASHBOARD_BASIC_AUTH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: dashboard-username
+            - name: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: dashboard-password
+            - name: HERMES_DASHBOARD_BASIC_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-platform-secrets
+                  key: dashboard-session-secret
+          volumeMounts:
+            - name: data
+              mountPath: /opt/data
+  # Persistent Memory: the user's data survives across suspend/resume cycles
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

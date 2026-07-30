@@ -58,6 +58,52 @@ func TestHashData_DifferentData(t *testing.T) {
 	}
 }
 
+func TestHashData_IgnoresDocKeys(t *testing.T) {
+	withDoc := map[string]string{
+		"_readme":                    "docs only",
+		".comment":                   "also ignored",
+		"sandbox-concurrent-workers": "100",
+	}
+	withoutDoc := map[string]string{
+		"sandbox-concurrent-workers": "100",
+	}
+	if hashData(withDoc) != hashData(withoutDoc) {
+		t.Error("doc/comment keys must not affect hashData")
+	}
+	if hashData(map[string]string{"_readme": "only docs"}) != "empty" {
+		t.Error("data with only ignored keys should hash as empty")
+	}
+}
+
+func TestHashData_IgnoresNonTunableFlags(t *testing.T) {
+	withZap := map[string]string{
+		"zap-log-level":              "debug",
+		"sandbox-concurrent-workers": "100",
+	}
+	withoutZap := map[string]string{
+		"sandbox-concurrent-workers": "100",
+	}
+	if hashData(withZap) != hashData(withoutZap) {
+		t.Error("non-tunable flags must not affect hashData")
+	}
+	if hashData(map[string]string{"zap-log-level": "debug", "leader-elect": "false"}) != "empty" {
+		t.Error("data with only non-tunable keys should hash as empty")
+	}
+}
+
+func TestHashData_IncludesUnknownKeys(t *testing.T) {
+	// Unknown mounted keys (e.g. allowed-label-domains) are not flag overrides
+	// but still affect runtime behavior via other readers — hashing must include them.
+	base := map[string]string{"sandbox-concurrent-workers": "100"}
+	withUnknown := map[string]string{
+		"sandbox-concurrent-workers": "100",
+		"allowed-label-domains":      "example.com",
+	}
+	if hashData(base) == hashData(withUnknown) {
+		t.Error("unknown ConfigMap keys must affect hashData")
+	}
+}
+
 func TestWatcher_NoChange(t *testing.T) {
 	data := map[string]string{"sandbox-concurrent-workers": "100"}
 	cm := &corev1.ConfigMap{
@@ -66,10 +112,12 @@ func TestWatcher_NoChange(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(cm).Build()
 
+	var shutdownCalled bool
 	w := &MapWatcher{
 		Client:      c,
 		Namespace:   "test-ns",
 		StartupHash: hashData(data),
+		Shutdown:    func() { shutdownCalled = true },
 	}
 
 	// Should not exit (same hash)
@@ -79,15 +127,20 @@ func TestWatcher_NoChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if shutdownCalled {
+		t.Error("Shutdown must not be called when ConfigMap is unchanged")
+	}
 }
 
 func TestWatcher_IgnoresWrongName(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 
+	var shutdownCalled bool
 	w := &MapWatcher{
 		Client:      c,
 		Namespace:   "test-ns",
 		StartupHash: "empty",
+		Shutdown:    func() { shutdownCalled = true },
 	}
 
 	_, err := w.Reconcile(context.Background(), ctrl.Request{
@@ -96,15 +149,20 @@ func TestWatcher_IgnoresWrongName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if shutdownCalled {
+		t.Error("Shutdown must not be called for unrelated ConfigMaps")
+	}
 }
 
 func TestWatcher_NotFoundMatchesEmpty(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 
+	var shutdownCalled bool
 	w := &MapWatcher{
 		Client:      c,
 		Namespace:   "test-ns",
 		StartupHash: "empty",
+		Shutdown:    func() { shutdownCalled = true },
 	}
 
 	// ConfigMap doesn't exist and startup was also empty — no exit
@@ -113,5 +171,126 @@ func TestWatcher_NotFoundMatchesEmpty(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if shutdownCalled {
+		t.Error("Shutdown must not be called when missing ConfigMap matches empty startup")
+	}
+}
+
+func TestWatcher_ChangeTriggersShutdown(t *testing.T) {
+	startup := map[string]string{"sandbox-concurrent-workers": "100"}
+	updated := map[string]string{"sandbox-concurrent-workers": "200"}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: configMapName, Namespace: "test-ns"},
+		Data:       updated,
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(cm).Build()
+
+	var shutdownCalled bool
+	w := &MapWatcher{
+		Client:      c,
+		Namespace:   "test-ns",
+		StartupHash: hashData(startup),
+		Shutdown:    func() { shutdownCalled = true },
+	}
+
+	_, err := w.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: configMapName, Namespace: "test-ns"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !shutdownCalled {
+		t.Error("Shutdown must be called when ConfigMap data changes")
+	}
+}
+
+func TestWatcher_DeleteTriggersShutdown(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+
+	var shutdownCalled bool
+	w := &MapWatcher{
+		Client:      c,
+		Namespace:   "test-ns",
+		StartupHash: hashData(map[string]string{"sandbox-concurrent-workers": "100"}),
+		Shutdown:    func() { shutdownCalled = true },
+	}
+
+	_, err := w.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: configMapName, Namespace: "test-ns"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !shutdownCalled {
+		t.Error("Shutdown must be called when a previously present ConfigMap is deleted")
+	}
+}
+
+func TestWatcher_DocKeyOnlyChangeDoesNotShutdown(t *testing.T) {
+	startup := map[string]string{
+		"_readme":                    "old docs",
+		"sandbox-concurrent-workers": "100",
+	}
+	updated := map[string]string{
+		"_readme":                    "new docs",
+		"sandbox-concurrent-workers": "100",
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: configMapName, Namespace: "test-ns"},
+		Data:       updated,
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(cm).Build()
+
+	var shutdownCalled bool
+	w := &MapWatcher{
+		Client:      c,
+		Namespace:   "test-ns",
+		StartupHash: hashData(startup),
+		Shutdown:    func() { shutdownCalled = true },
+	}
+
+	_, err := w.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: configMapName, Namespace: "test-ns"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if shutdownCalled {
+		t.Error("Shutdown must not be called when only ignored doc keys change")
+	}
+}
+
+func TestWatcher_NonTunableOnlyChangeDoesNotShutdown(t *testing.T) {
+	startup := map[string]string{
+		"zap-log-level":              "info",
+		"sandbox-concurrent-workers": "100",
+	}
+	updated := map[string]string{
+		"zap-log-level":              "debug",
+		"sandbox-concurrent-workers": "100",
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: configMapName, Namespace: "test-ns"},
+		Data:       updated,
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(cm).Build()
+
+	var shutdownCalled bool
+	w := &MapWatcher{
+		Client:      c,
+		Namespace:   "test-ns",
+		StartupHash: hashData(startup),
+		Shutdown:    func() { shutdownCalled = true },
+	}
+
+	_, err := w.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: configMapName, Namespace: "test-ns"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if shutdownCalled {
+		t.Error("Shutdown must not be called when only non-tunable flags change")
 	}
 }

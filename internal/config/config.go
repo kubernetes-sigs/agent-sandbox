@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package config reads controller tuning knobs from a mounted ConfigMap
-// directory and applies them as flag overrides. The ConfigMap is expected
-// to be mounted at a well-known path (default /etc/sandbox-config) and
-// each key is a file whose contents hold the value.
+// Package config applies controller tuning knobs from the
+// agent-sandbox-config ConfigMap as flag overrides.
+//
+// At startup the controller fetches the ConfigMap from the API server
+// (see fetchConfigMapData in cmd/agent-sandbox-controller) and passes its
+// data map to ApplyConfigMapData. Reading via the API avoids a race where
+// a ConfigMap watcher would restart the process before a volume mount had
+// synced. A MapWatcher then cancels the manager context when the
+// ConfigMap changes so main can re-exec and re-apply.
 //
 // Resolution order: ConfigMap value > CLI flag > compiled default.
-// Changes to the ConfigMap require a controller restart to take effect.
 package config
 
 import (
@@ -30,6 +34,10 @@ import (
 
 // NonTunableFlags is the set of structural/identity flags that must NOT
 // be overridden via the ConfigMap. Everything else is tunable.
+//
+// Zap flags are denylisted because ctrl.SetLogger runs before
+// ApplyConfigMapData; ConfigMap-supplied zap values would never reach the
+// process logger (including after re-exec).
 var NonTunableFlags = map[string]bool{
 	"version":                   true,
 	"webhook-port":              true,
@@ -50,6 +58,18 @@ var NonTunableFlags = map[string]bool{
 	"enable-pprof":              true,
 	"enable-pprof-debug":        true,
 	"cache-label-selectors":     true,
+	"zap-devel":                 true,
+	"zap-encoder":               true,
+	"zap-log-level":             true,
+	"zap-stacktrace-level":      true,
+	"zap-time-encoding":         true,
+}
+
+// IsIgnoredConfigKey reports whether a ConfigMap key is documentation-only
+// (underscore or dot prefix) and should be skipped for both flag overrides
+// and change-detection hashing.
+func IsIgnoredConfigKey(name string) bool {
+	return strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".")
 }
 
 // ApplyConfigMapData applies overrides from a ConfigMap data map to the
@@ -69,7 +89,7 @@ func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Ove
 
 	var errs []error
 	for _, name := range keys {
-		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+		if IsIgnoredConfigKey(name) {
 			continue
 		}
 		if NonTunableFlags[name] {

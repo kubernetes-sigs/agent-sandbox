@@ -88,15 +88,22 @@ func HashConfigMapData(data map[string]string) string {
 }
 
 func hashData(data map[string]string) string {
-	if len(data) == 0 {
-		return "empty"
-	}
-	h := sha256.New()
+	// Skip keys that cannot change effective runtime config via ApplyConfigMapData
+	// (doc keys and NonTunableFlags) so editing them does not trigger a reload.
+	// Unknown keys (e.g. allowed-label-domains) are still hashed — other readers
+	// may consume them even when they are not flag overrides.
 	keys := make([]string, 0, len(data))
 	for k := range data {
+		if IsIgnoredConfigKey(k) || NonTunableFlags[k] {
+			continue
+		}
 		keys = append(keys, k)
 	}
+	if len(keys) == 0 {
+		return "empty"
+	}
 	slices.Sort(keys)
+	h := sha256.New()
 	for _, k := range keys {
 		fmt.Fprintf(h, "%s=%s\n", k, data[k])
 	}

@@ -261,3 +261,33 @@ func TestApplyConfigMapData_UnderscorePrefixSkipped(t *testing.T) {
 		t.Errorf("workers = %d, want 200", workers)
 	}
 }
+
+func TestApplyConfigMapData_ZapFlagsNonTunable(t *testing.T) {
+	for _, name := range []string{
+		"zap-devel",
+		"zap-encoder",
+		"zap-log-level",
+		"zap-stacktrace-level",
+		"zap-time-encoding",
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := map[string]string{name: "debug"}
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			var value string
+			fs.StringVar(&value, name, "info", "")
+			_ = fs.Parse([]string{})
+
+			applied, err := ApplyConfigMapData(data, fs)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(applied) != 0 {
+				t.Errorf("expected no overrides for %s, got %v", name, applied)
+			}
+			if value != "info" {
+				t.Errorf("%s = %q, want info (zap flags are non-tunable)", name, value)
+			}
+		})
+	}
+}

@@ -254,19 +254,19 @@ func main() {
 
 	// Initialize Tracing Provider
 	var instrumenter = asmetrics.NewNoOp()
+	var tracingCleanup func()
 	if enableTracing {
-		var cleanup func()
 		var err error
 		// Use a timeout context for initialization to prevent blocking
 		initCtx, cancel := context.WithTimeout(signalCtx, 10*time.Second)
 		defer cancel()
 
-		instrumenter, cleanup, err = asmetrics.SetupOTel(initCtx, "agent-sandbox-controller")
+		instrumenter, tracingCleanup, err = asmetrics.SetupOTel(initCtx, "agent-sandbox-controller")
 		if err != nil {
 			setupLog.Error(err, "unable to initialize tracing")
 			os.Exit(1)
 		}
-		defer cleanup()
+		defer tracingCleanup()
 	}
 
 	// Importing net/http/pprof registers handlers on the global DefaultServeMux.
@@ -566,7 +566,19 @@ func main() {
 	err = mgr.Start(ctx)
 
 	if ctx.Err() != nil && signalCtx.Err() == nil {
-		// Config reload: re-exec the process to pick up new values.
+		// Config reload: re-exec only after a clean manager shutdown.
+		// If GracefulShutdownTimeout expires, mgr.Start returns an error
+		// and we must not re-exec on top of an incomplete shutdown.
+		if err != nil {
+			setupLog.Error(err, "problem running manager during config reload")
+			os.Exit(1)
+		}
+		// syscall.Exec replaces the process image and never returns on
+		// success, so deferred cleanup (e.g. tracing flush) would be
+		// skipped — run it explicitly first.
+		if tracingCleanup != nil {
+			tracingCleanup()
+		}
 		// syscall.Exec replaces the process image in-place (same PID),
 		// so kubelet does not see a container restart and applies no
 		// backoff. The manager has already shut down gracefully above
@@ -597,13 +609,19 @@ func fetchConfigMapData(namespace string) map[string]string {
 		setupLog.Error(err, "unable to get kubeconfig for ConfigMap fetch")
 		return nil
 	}
+	// Bound client construction (RESTMapper discovery) and the Get so a
+	// slow/unreachable API server cannot hang startup indefinitely.
+	cfg.Timeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	c, err := client.New(cfg, client.Options{})
 	if err != nil {
 		setupLog.Error(err, "unable to create client for ConfigMap fetch")
 		return nil
 	}
 	var cm corev1.ConfigMap
-	if err := c.Get(context.Background(), client.ObjectKey{Name: "agent-sandbox-config", Namespace: namespace}, &cm); err != nil {
+	if err := c.Get(ctx, client.ObjectKey{Name: "agent-sandbox-config", Namespace: namespace}, &cm); err != nil {
 		if !apierrors.IsNotFound(err) {
 			setupLog.Error(err, "unable to fetch agent-sandbox-config ConfigMap, starting with defaults")
 		}

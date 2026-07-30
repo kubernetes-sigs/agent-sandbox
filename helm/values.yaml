@@ -86,7 +86,9 @@ containerSecurityContext: null
 # controllerConfig populates the agent-sandbox-config ConfigMap.
 # Keys that match tunable flag names override the compiled defaults.
 # ConfigMap values take precedence over CLI flags passed to the controller.
-# Changes trigger a rolling restart via the checksum/config annotation.
+# Helm value changes update the checksum/config annotation and roll the
+# Deployment. Live edits to the ConfigMap (outside Helm) are picked up by
+# the controller watcher instead — they do not refresh this annotation.
 controllerConfig: {}
   # sandbox-concurrent-workers: "200"
   # sandbox-warm-pool-max-batch-size: "500"

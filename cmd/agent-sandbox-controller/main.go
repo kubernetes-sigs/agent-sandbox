@@ -16,13 +16,11 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -32,7 +30,6 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
@@ -42,11 +39,9 @@ import (
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -76,24 +71,8 @@ func main() {
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
-	var webhookPort int
-	var webhookCertDir string
-	var webhookCertName string
-	var webhookKeyName string
-	var webhookServiceName string
-	var webhookNamespace string
-	var manageWebhookCerts bool
-	var enableWebhook bool
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
-	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
-	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "The directory that contains the certificates.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", defaultWebhookCertName, "The filename of the webhook serving certificate within --webhook-cert-dir. Only used when --manage-webhook-certs=false.")
-	flag.StringVar(&webhookKeyName, "webhook-key-name", defaultWebhookKeyName, "The filename of the webhook private key within --webhook-cert-dir. Only used when --manage-webhook-certs=false.")
-	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
-	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
-	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Manage webhook serving certs and patch CRD conversion caBundles on startup. Set to false when certs and CRD/webhook configuration are managed externally by a certificate provisioner.")
-	flag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable webhook server and webhook registrations.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -143,15 +122,6 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	if strings.TrimSpace(webhookCertName) == "" {
-		setupLog.Error(nil, "--webhook-cert-name cannot be empty")
-		os.Exit(1)
-	}
-	if strings.TrimSpace(webhookKeyName) == "" {
-		setupLog.Error(nil, "--webhook-key-name cannot be empty")
-		os.Exit(1)
-	}
-
 	setupLog.Info("Concurrency settings",
 		"sandbox", sandboxConcurrentWorkers,
 		"sandboxClaim", sandboxClaimConcurrentWorkers,
@@ -192,15 +162,6 @@ func main() {
 		setupLog.V(1).Info("leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty; attempting auto-detection")
 	}
 
-	if !enableWebhook {
-		setupLog.Info("webhook subsystem disabled (--enable-webhook=false); " +
-			"installed CRDs must use conversion.strategy=None — the stock CRDs in k8s/crds " +
-			"and helm/crds use Webhook conversion and API version conversion will fail without the webhook server")
-		if manageWebhookCerts {
-			setupLog.Info("--manage-webhook-certs has no effect when --enable-webhook=false")
-		}
-	}
-
 	ctx := ctrl.SetupSignalHandler()
 
 	// Initialize Tracing Provider
@@ -225,7 +186,6 @@ func main() {
 	http.DefaultServeMux = http.NewServeMux()
 
 	scheme := controllers.Scheme
-	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	if extensions {
 		utilruntime.Must(extensionsv1beta1.AddToScheme(scheme))
 	}
@@ -271,60 +231,6 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
-	if enableWebhook {
-		if manageWebhookCerts {
-			// Create a temporary client to patch the CRDs and access Secrets
-			tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
-			if err != nil {
-				setupLog.Error(err, "unable to create temporary client")
-				os.Exit(1)
-			}
-
-			// Generate or load self-signed TLS certificates for the webhook server
-			setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
-			caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
-			if err != nil {
-				setupLog.Error(err, "unable to prepare webhook certificates")
-				os.Exit(1)
-			}
-
-			setupLog.Info("Patching CRDs with generated CA bundle")
-			if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
-				setupLog.Error(err, "failed to patch CRDs with CA bundle")
-				os.Exit(1)
-			}
-
-			// Ensure server looks for tls.crt and tls.key generated by generateWebhookCerts
-			if webhookCertName != defaultWebhookCertName || webhookKeyName != defaultWebhookKeyName {
-				setupLog.Info("Warning: --webhook-cert-name and --webhook-key-name are ignored when --manage-webhook-certs=true; using generated tls.crt/tls.key",
-					"certName", webhookCertName, "keyName", webhookKeyName)
-			}
-			webhookCertName = defaultWebhookCertName
-			webhookKeyName = defaultWebhookKeyName
-		} else {
-			setupLog.Info("Webhook cert management and CRD conversion caBundle patching disabled; expecting existing cert files in certDir and CRDs patched externally",
-				"certDir", webhookCertDir,
-				"certName", webhookCertName,
-				"keyName", webhookKeyName,
-				"serviceName", webhookServiceName,
-				"namespace", webhookNamespace,
-			)
-
-			resolvedCertName, resolvedKeyName, err := resolveWebhookCertFiles(webhookCertDir, webhookCertName, webhookKeyName)
-			if err != nil {
-				setupLog.Error(err, "required webhook cert/key file missing",
-					"hint", "with --manage-webhook-certs=false the serving certificate and key (tls.crt/tls.key or a combined cert.pem) must be pre-provisioned in certDir by a certificate provisioner")
-				os.Exit(1)
-			}
-			if resolvedCertName != webhookCertName || resolvedKeyName != webhookKeyName {
-				setupLog.Info("Found single-file webhook certificate and key (combined cert+key PEM)",
-					"path", filepath.Join(webhookCertDir, resolvedCertName))
-			}
-			webhookCertName = resolvedCertName
-			webhookKeyName = resolvedKeyName
-		}
-	}
-
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
 	// managedFields stripping, the Pod spec diet, and (optionally) the
 	// tracking-label scoping; see buildCacheOptions for the rationale.
@@ -337,19 +243,6 @@ func main() {
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
 			"label", controllers.SandboxNameHashLabel)
-	}
-	if enableWebhook {
-		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
-			Port:     webhookPort,
-			CertDir:  webhookCertDir,
-			CertName: webhookCertName,
-			KeyName:  webhookKeyName,
-			TLSOpts: []func(*tls.Config){
-				func(cfg *tls.Config) {
-					cfg.ClientAuth = tls.NoClientCert
-				},
-			},
-		})
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOpts)

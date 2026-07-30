@@ -1,0 +1,1033 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package extensions
+
+import (
+	"context"
+	"encoding/csv"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
+	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+func isVMRuntime(runtimeClass string) bool {
+	return strings.HasPrefix(runtimeClass, "kata")
+}
+
+func runtimeClassPtrFromEnv(value string) *string {
+	if value == "default" {
+		return nil
+	}
+	return &value
+}
+
+// TestRuntimeClassLifecycle validates the full SandboxTemplate → WarmPool →
+// SandboxClaim → refill cycle with a caller-specified RuntimeClassName.
+//
+// Set SANDBOX_RUNTIME_CLASS to the desired RuntimeClass name (e.g. gvisor,
+// kata-qemu, kata-clh). Use "default" for the cluster's default runtime
+// (leaves RuntimeClassName unset). The test is skipped when the variable is
+// unset, so existing CI is unaffected.
+func TestRuntimeClassLifecycle(t *testing.T) {
+	runtimeClass := os.Getenv("SANDBOX_RUNTIME_CLASS")
+	if runtimeClass == "" {
+		t.Skip("SANDBOX_RUNTIME_CLASS not set — skipping runtime class lifecycle test")
+	}
+
+	tc := framework.NewTestContext(t)
+
+	cluster, err := tc.ClusterInfo(t.Context())
+	require.NoError(t, err)
+
+	replicas := int32(2)
+	if isVMRuntime(runtimeClass) && cluster.TotalCPUCapacity < int64(replicas) {
+		replicas = int32(cluster.TotalCPUCapacity)
+	}
+	if replicas < 1 {
+		t.Skip("not enough CPU capacity for warm pool replicas")
+	}
+	t.Logf("[config] runtimeClass=%s replicas=%d k8s=%s provider=%s cpus=%d",
+		runtimeClass, replicas, cluster.KubernetesVersion, cluster.Provider, cluster.TotalCPUCapacity)
+
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("runtime-class-%d", time.Now().UnixNano())
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+	// SandboxTemplate with the requested RuntimeClassName.
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "runtime-template",
+			Namespace: ns.Name,
+		},
+	}
+	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
+		Spec: corev1.PodSpec{
+			RuntimeClassName: rcPtr,
+			Containers: []corev1.Container{
+				{
+					Name:            "pause",
+					Image:           "registry.k8s.io/pause:3.10",
+					ImagePullPolicy: corev1.PullIfNotPresent,
+				},
+			},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "runtime-warmpool",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
+	warmPoolID := types.NamespacedName{Name: warmPool.Name, Namespace: ns.Name}
+	t.Logf("Waiting for WarmPool to reach %d ready replicas (runtimeClass=%s)...", replicas, runtimeClass)
+	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), warmPoolID))
+
+	// Verify pool sandboxes carry the RuntimeClassName.
+	sandboxList := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, tc.List(t.Context(), sandboxList, client.InNamespace(ns.Name)))
+	var poolSandboxes []sandboxv1beta1.Sandbox
+	for i := range sandboxList.Items {
+		sb := &sandboxList.Items[i]
+		if sb.DeletionTimestamp.IsZero() && metav1.IsControlledBy(sb, warmPool) {
+			poolSandboxes = append(poolSandboxes, *sb)
+		}
+	}
+	require.Len(t, poolSandboxes, int(replicas), "expected %d pool sandboxes", replicas)
+
+	for i := range poolSandboxes {
+		sb := &poolSandboxes[i]
+		require.Equal(t, rcPtr, sb.Spec.PodTemplate.Spec.RuntimeClassName,
+			"Sandbox %s RuntimeClassName should match requested value", sb.Name)
+
+		pod := &corev1.Pod{}
+		pod.Name = sb.Name
+		pod.Namespace = ns.Name
+		tc.MustWaitForObject(pod, predicates.ReadyConditionIsTrue)
+		require.Equal(t, rcPtr, pod.Spec.RuntimeClassName,
+			"Pod %s RuntimeClassName should match requested value", pod.Name)
+	}
+
+	// --- Claim 1: consume a sandbox, verify pool refills ---
+	claim1 := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "runtime-claim-1",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim1))
+	t.Logf("Waiting for claim-1 to be ready...")
+	tc.MustWaitForObject(claim1, predicates.ReadyConditionIsTrue)
+
+	t.Logf("Waiting for pool to observe consumed sandbox...")
+	require.Eventually(t, func() bool {
+		pool := &extensionsv1beta1.SandboxWarmPool{}
+		if err := tc.Get(t.Context(), warmPoolID, pool); err != nil {
+			return false
+		}
+		return pool.Status.ReadyReplicas < replicas
+	}, framework.DefaultTimeout, time.Second, "pool should observe consumed sandbox")
+
+	t.Logf("Waiting for pool to refill to %d replicas...", replicas)
+	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), warmPoolID))
+
+	// --- Claim 2: verify the refilled pool serves another claim ---
+	claim2 := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "runtime-claim-2",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim2))
+	t.Logf("Waiting for claim-2 to be ready...")
+	tc.MustWaitForObject(claim2, predicates.ReadyConditionIsTrue)
+
+	t.Logf("RuntimeClass %q lifecycle test passed: pool fill → claim → refill → claim", runtimeClass)
+}
+
+// TestRuntimeClassStartupComparison measures the difference between creating a
+// sandbox from scratch (cold start) and claiming one from a pre-warmed pool.
+// Both use the RuntimeClassName from the SANDBOX_RUNTIME_CLASS env var.
+//
+// Run with:
+//
+//	SANDBOX_RUNTIME_CLASS=gvisor go test ./test/e2e/extensions/... -run TestRuntimeClassStartupComparison -v -timeout 5m
+func TestRuntimeClassStartupComparison(t *testing.T) {
+	runtimeClass := os.Getenv("SANDBOX_RUNTIME_CLASS")
+	if runtimeClass == "" {
+		t.Skip("SANDBOX_RUNTIME_CLASS not set — skipping startup comparison test")
+	}
+
+	tc := framework.NewTestContext(t)
+
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("runtime-bench-%d", time.Now().UnixNano())
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+	podSpec := corev1.PodSpec{
+		RuntimeClassName: runtimeClassPtrFromEnv(runtimeClass),
+		Containers: []corev1.Container{
+			{
+				Name:            "pause",
+				Image:           "registry.k8s.io/pause:3.10",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+			},
+		},
+	}
+
+	// --- Cold start: create Sandbox directly, measure time to Ready ---
+	t.Logf("Measuring cold start (runtimeClass=%s)...", runtimeClass)
+	coldSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cold-sandbox",
+			Namespace: ns.Name,
+		},
+	}
+	coldSandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+
+	coldStart := time.Now()
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), coldSandbox))
+	tc.MustWaitForObject(coldSandbox, predicates.ReadyConditionIsTrue)
+	coldDuration := time.Since(coldStart)
+	t.Logf("Cold start ready in %s", coldDuration)
+
+	// --- Warm pool setup ---
+	t.Logf("Setting up warm pool...")
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bench-template",
+			Namespace: ns.Name,
+		},
+	}
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
+
+	replicas := int32(1)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bench-warmpool",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
+
+	warmPoolID := types.NamespacedName{Name: warmPool.Name, Namespace: ns.Name}
+	require.NoError(t, tc.WaitForWarmPoolReady(t.Context(), warmPoolID))
+	t.Logf("Warm pool ready, measuring claim...")
+
+	// --- Warm claim: measure time from claim creation to Ready ---
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bench-claim",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+		},
+	}
+
+	claimStart := time.Now()
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
+	tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
+	claimDuration := time.Since(claimStart)
+	t.Logf("Warm claim ready in %s", claimDuration)
+
+	// --- Report comparison ---
+	t.Logf("=== Startup Comparison (runtimeClass=%s) ===", runtimeClass)
+	t.Logf("  Cold start:  %s", coldDuration)
+	t.Logf("  Warm claim:  %s", claimDuration)
+	if claimDuration > 0 {
+		speedup := float64(coldDuration) / float64(claimDuration)
+		t.Logf("  Speedup:     %.1fx", speedup)
+	}
+}
+
+// TestRuntimeClassBurstRecovery measures how a warm pool behaves under
+// sustained batch load that exceeds pool refill capacity. A single pool is
+// reused across all pool sizes — scaled from 0 to the target between subtests.
+// Each subtest measures its own fill time, then fires claims in dynamically
+// sized batches (min(max(4, poolSize/2), batchCap)) with 100ms settle between
+// batches, stopping when ReadyReplicas ≤ 1 and at least poolSize claims have
+// been issued, or after 2×poolSize total claims — whichever comes first.
+// The batch cap defaults to 10 and can be overridden via SANDBOX_BATCH_CAP.
+//
+// Per-claim data is written to a CSV file for analysis. Set SANDBOX_REPORT_DIR
+// to control output location (default: current directory).
+//
+// Run with:
+//
+//	SANDBOX_RUNTIME_CLASS=default SANDBOX_POOL_SIZES=4,6,8 go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 30m
+func TestRuntimeClassBurstRecovery(t *testing.T) {
+	runtimeClass := os.Getenv("SANDBOX_RUNTIME_CLASS")
+	if runtimeClass == "" {
+		t.Skip("SANDBOX_RUNTIME_CLASS not set — skipping burst recovery test")
+	}
+
+	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
+	workloadSec := benchWorkloadSec()
+
+	reportDir := os.Getenv("SANDBOX_REPORT_DIR")
+	if reportDir == "" {
+		reportDir = "."
+	}
+
+	tc0 := framework.NewTestContext(t)
+	cluster, err := tc0.ClusterInfo(t.Context())
+	require.NoError(t, err)
+	instanceType := "unknown"
+	if len(cluster.Workers) > 0 && cluster.Workers[0].InstanceType != "" {
+		instanceType = cluster.Workers[0].InstanceType
+	}
+	dateStr := time.Now().Format("20060102")
+	subDir := fmt.Sprintf("%s_%s_%s_%s", cluster.Identity, instanceType, dateStr, runtimeClass)
+	reportDir = filepath.Join(reportDir, subDir)
+	if _, err := os.Stat(reportDir); err == nil {
+		for i := 2; ; i++ {
+			candidate := fmt.Sprintf("%s_%d", reportDir, i)
+			if _, err := os.Stat(candidate); os.IsNotExist(err) {
+				reportDir = candidate
+				break
+			}
+		}
+	}
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatalf("cannot create report dir %s: %v", reportDir, err)
+	}
+	t.Logf("[config] cluster=%s instanceType=%s reportDir=%s", cluster.Identity, instanceType, reportDir)
+
+	// --- Shared resources: one namespace, template, pool reused across subtests ---
+	cpus := cluster.TotalCPUCapacity
+	if isVMRuntime(runtimeClass) && cpus == 0 {
+		t.Skip("skipping VM runtime burst test: no worker CPU capacity reported")
+	}
+
+	fillTimeout := 5 * time.Minute
+
+	ns := &corev1.Namespace{}
+	ns.Name = fmt.Sprintf("burst-%d", time.Now().UnixNano())
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), ns))
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "burst-template",
+			Namespace: ns.Name,
+		},
+	}
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: workloadPodSpec(rcPtr, workloadSec)}
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), template))
+
+	calibReplicas := int32(4)
+	if isVMRuntime(runtimeClass) && int64(calibReplicas) > cpus {
+		calibReplicas = int32(cpus)
+	}
+	pool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "burst-pool",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &calibReplicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), pool))
+	poolID := types.NamespacedName{Name: pool.Name, Namespace: ns.Name}
+
+	settleDur := benchSettleDuration()
+
+	t.Logf("[calibrate] Filling pool-%d to measure warm baseline...", calibReplicas)
+	calibCtx, calibCancel := context.WithTimeout(t.Context(), fillTimeout)
+	defer calibCancel()
+	require.NoError(t, tc0.WaitForWarmPoolReady(calibCtx, poolID))
+
+	if settleDur > 0 {
+		t.Logf("[settle] waiting %s for controller to drain after calibration fill", settleDur)
+		time.Sleep(settleDur)
+	}
+
+	calibClaim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "calib-warm",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
+		},
+	}
+	calibStart := time.Now()
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), calibClaim))
+	require.NoError(t, tc0.WaitForObject(calibCtx, calibClaim, predicates.ReadyConditionIsTrue))
+	warmBaseline := time.Since(calibStart)
+	warmColdThreshold := time.Second
+	t.Logf("[calibrate] warm=%.3fs, threshold=%.3fs", warmBaseline.Seconds(), warmColdThreshold.Seconds())
+
+	// Scale to 0 before entering subtest loop
+	require.NoError(t, tc0.Delete(t.Context(), calibClaim))
+	zeroReplicas := int32(0)
+	framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+		p.Spec.Replicas = &zeroReplicas
+	})
+	drainCtx, drainCancel := context.WithTimeout(t.Context(), fillTimeout)
+	require.NoError(t, tc0.WaitForWarmPoolReady(drainCtx, poolID))
+	drainCancel()
+
+	batchCap := benchBatchCap()
+	calcBatchSize := func(poolSize int) int {
+		return min(max(4, poolSize/2), batchCap)
+	}
+
+	type claimRecord struct {
+		batch        int
+		claimIndex   int
+		latency      time.Duration
+		wallOffset   time.Duration
+		readyAtStart int32
+		breakdown    milestoneBreakdown
+	}
+
+	isUnder1s := func(d time.Duration) bool {
+		return d < warmColdThreshold
+	}
+
+	var globalClaimCounter atomic.Int64
+	poolSizes, err := benchPoolSizes(cpus)
+	if err != nil {
+		t.Fatalf("cannot determine pool sizes: %v", err)
+	}
+
+	for _, poolSize := range poolSizes {
+		// Allow up to 300% CPU overprovisioning for VM runtimes — scheduler
+		// queues excess VMs while the larger pool improves warm hit ratio.
+		if isVMRuntime(runtimeClass) && int64(poolSize) > cpus*3 {
+			t.Logf("[skip] pool size %d exceeds 300%% of worker CPU capacity (%d vCPUs)", poolSize, cpus)
+			continue
+		}
+
+		// Scale pool to target and measure fill time
+		targetReplicas := int32(poolSize)
+		framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+			p.Spec.Replicas = &targetReplicas
+		})
+		fillStart := time.Now()
+		fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
+		require.NoError(t, tc0.WaitForWarmPoolReady(fillCtx, poolID))
+		fillCancel()
+		poolFillTime := time.Since(fillStart)
+
+		t.Run(fmt.Sprintf("pool-%d", poolSize), func(t *testing.T) {
+			tc := framework.NewTestContext(t)
+
+			if settleDur > 0 {
+				t.Logf("[settle] waiting %s for controller work queue to drain after fill", settleDur)
+				time.Sleep(settleDur)
+			}
+
+			tracker := newMilestoneTracker(t.Context(), t, tc.DynamicClient(), ns.Name)
+			defer tracker.Stop()
+
+			claimTimeout := poolFillTime + 30*time.Second
+			t.Logf("[setup] Pool-%d filled in %.3fs", poolSize, poolFillTime.Seconds())
+
+			batchSize := calcBatchSize(poolSize)
+
+			// --- CSV setup ---
+			csvPath := filepath.Join(reportDir, fmt.Sprintf("burst_recovery_%s_pool%d.csv", runtimeClass, poolSize))
+			csvFile, err := os.Create(csvPath)
+			require.NoError(t, err, "failed to create CSV report")
+			defer csvFile.Close()
+			cw := csv.NewWriter(csvFile)
+			defer cw.Flush()
+
+			_ = cw.Write([]string{"# cluster_id", cluster.Identity})
+			_ = cw.Write([]string{"# worker_count", strconv.Itoa(len(cluster.Workers))})
+			_ = cw.Write([]string{"# total_cpu_capacity", strconv.FormatInt(cpus, 10)})
+			_ = cw.Write([]string{"# instance_type", instanceType})
+			_ = cw.Write([]string{"# runtime_class", runtimeClass})
+			_ = cw.Write([]string{"# pool_size", strconv.Itoa(poolSize)})
+			_ = cw.Write([]string{"# workload_sec", strconv.Itoa(workloadSec)})
+			_ = cw.Write([]string{"# warm_baseline_sec", fmt.Sprintf("%.3f", warmBaseline.Seconds())})
+			_ = cw.Write([]string{"# warm_cold_threshold_sec", fmt.Sprintf("%.3f", warmColdThreshold.Seconds())})
+			_ = cw.Write([]string{"# pool_fill_sec", fmt.Sprintf("%.3f", poolFillTime.Seconds())})
+			_ = cw.Write([]string{"# batch_size", strconv.Itoa(batchSize)})
+			_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
+			_ = cw.Write([]string{"# settle_sec", strconv.Itoa(int(settleDur.Seconds()))})
+			_ = cw.Write([]string{"# inter_batch_settle_ms", "100"})
+			_ = cw.Write([]string{"batch", "claim", "latency_sec", "under_1s", "wall_offset_sec", "ready_at_start",
+				"create_ack_ms", "adoption_ms", "schedule_ms", "runtime_ms", "propagate_ms", "e2e_ms", "is_warm"})
+
+			var allRecords []claimRecord
+
+			fireBatch := func(batchNum, count int, readyAtStart int32, testStart time.Time) []claimRecord {
+				records := make([]claimRecord, count)
+				errs := make([]error, count)
+
+				claimCtx, claimCancel := context.WithTimeout(t.Context(), claimTimeout)
+				defer claimCancel()
+
+				var wg sync.WaitGroup
+				for i := range count {
+					wg.Add(1)
+					go func(idx int) {
+						defer wg.Done()
+						claimName := fmt.Sprintf("claim-%d-%d", poolSize, globalClaimCounter.Add(1))
+						claim := &extensionsv1beta1.SandboxClaim{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      claimName,
+								Namespace: ns.Name,
+							},
+							Spec: extensionsv1beta1.SandboxClaimSpec{
+								WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
+							},
+						}
+						tracker.Register(claimName)
+						createStart := time.Now()
+						tracker.MarkCreateCalled(claimName, createStart)
+						if err := tc.CreateWithCleanup(claimCtx, claim); err != nil {
+							errs[idx] = err
+							return
+						}
+						tracker.MarkCreateReturned(claimName, time.Now())
+						if err := tracker.WaitReady(claimCtx, claimName); err != nil {
+							errs[idx] = err
+							return
+						}
+						bd, bdErr := tracker.CollectBreakdown(claimCtx, tc.ClusterClient, claimName)
+						if bdErr != nil {
+							t.Logf("[breakdown] claim %s: %v", claimName, bdErr)
+						}
+						records[idx] = claimRecord{
+							batch:        batchNum,
+							claimIndex:   idx + 1,
+							latency:      time.Since(createStart),
+							wallOffset:   time.Since(testStart),
+							readyAtStart: readyAtStart,
+							breakdown:    bd,
+						}
+					}(i)
+				}
+				wg.Wait()
+
+				for i, e := range errs {
+					require.NoError(t, e, "batch %d claim %d failed", batchNum, i+1)
+				}
+				return records
+			}
+
+			maxClaims := poolSize * 2
+
+			// --- Header ---
+			t.Logf("=======================================================================")
+			t.Logf("  Burst Recovery: runtime=%s pool=%d workload=%ds", runtimeClass, poolSize, workloadSec)
+			t.Logf("  warm=%.3fs  fill=%.3fs  threshold=%.3fs",
+				warmBaseline.Seconds(), poolFillTime.Seconds(), warmColdThreshold.Seconds())
+			t.Logf("  batchSize=%d  maxClaims=%d  settle=%s  inter_batch=100ms", batchSize, maxClaims, settleDur)
+			t.Logf("=======================================================================")
+
+			// --- Batched drain loop ---
+			testStart := time.Now()
+			totalClaims := 0
+			batchNum := 0
+
+			for totalClaims < maxClaims {
+				batchNum++
+
+				if batchNum > 1 {
+					time.Sleep(100 * time.Millisecond)
+				}
+
+				var poolStatus extensionsv1beta1.SandboxWarmPool
+				require.NoError(t, tc.Get(t.Context(), poolID, &poolStatus))
+				readyBefore := poolStatus.Status.ReadyReplicas
+
+				if readyBefore <= 1 && totalClaims > poolSize {
+					t.Logf("[drain] pool depleted (ready=%d) after %d batches, %d claims",
+						readyBefore, batchNum-1, totalClaims)
+					break
+				}
+
+				count := min(batchSize, maxClaims-totalClaims)
+				t.Logf("[batch %d] firing %d claims (ready=%d/%d, total=%d/%d)",
+					batchNum, count, readyBefore, poolSize, totalClaims, maxClaims)
+
+				records := fireBatch(batchNum, count, readyBefore, testStart)
+				allRecords = append(allRecords, records...)
+				totalClaims += count
+			}
+
+			// --- Data table ---
+			t.Logf("-----------------------------------------------------------------------")
+			t.Logf("%-6s %-6s %-12s %-8s %-14s %-6s  %-10s %-10s %-10s %-10s %-10s %-10s %-6s",
+				"BATCH", "CLAIM", "LATENCY(s)", "UNDER1S", "WALL_OFF(s)", "READY",
+				"ACK_MS", "ADOPT_MS", "SCHED_MS", "RUNTIME_MS", "PROP_MS", "E2E_MS", "WARM")
+			for _, r := range allRecords {
+				under1s := isUnder1s(r.latency)
+				bd := r.breakdown
+				t.Logf("%-6d %-6d %-12.3f %-8v %-14.3f %-6d  %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-10.1f %-6v",
+					r.batch, r.claimIndex,
+					r.latency.Seconds(),
+					under1s,
+					r.wallOffset.Seconds(),
+					r.readyAtStart,
+					bd.CreateAckMs, bd.AdoptionMs, bd.ScheduleMs,
+					bd.RuntimeMs, bd.PropagateMs, bd.EndToEndMs, bd.IsWarm)
+
+				_ = cw.Write([]string{
+					strconv.Itoa(r.batch),
+					strconv.Itoa(r.claimIndex),
+					fmt.Sprintf("%.3f", r.latency.Seconds()),
+					strconv.FormatBool(under1s),
+					fmt.Sprintf("%.3f", r.wallOffset.Seconds()),
+					strconv.Itoa(int(r.readyAtStart)),
+					fmt.Sprintf("%.1f", bd.CreateAckMs),
+					fmt.Sprintf("%.1f", bd.AdoptionMs),
+					fmt.Sprintf("%.1f", bd.ScheduleMs),
+					fmt.Sprintf("%.1f", bd.RuntimeMs),
+					fmt.Sprintf("%.1f", bd.PropagateMs),
+					fmt.Sprintf("%.1f", bd.EndToEndMs),
+					strconv.FormatBool(bd.IsWarm),
+				})
+			}
+
+			// --- Summary ---
+			totalDuration := time.Since(testStart)
+			var firstCreate, lastReady time.Time
+			under1sCount := 0
+			greenCount := 0
+			greyZoneCount := 0
+			overColdCount := 0
+			var worstStart time.Duration
+			greenThreshold := 500 * time.Millisecond
+			for _, r := range allRecords {
+				createTime := testStart.Add(r.wallOffset - r.latency)
+				readyTime := testStart.Add(r.wallOffset)
+				if firstCreate.IsZero() || createTime.Before(firstCreate) {
+					firstCreate = createTime
+				}
+				if readyTime.After(lastReady) {
+					lastReady = readyTime
+				}
+				if isUnder1s(r.latency) {
+					under1sCount++
+				}
+				if r.latency <= greenThreshold {
+					greenCount++
+				}
+				if r.latency > greenThreshold && r.latency <= warmColdThreshold {
+					greyZoneCount++
+				}
+				if r.latency > poolFillTime {
+					overColdCount++
+				}
+				if r.latency > worstStart {
+					worstStart = r.latency
+				}
+			}
+			var timeToAllReadySec float64
+			if !firstCreate.IsZero() && !lastReady.IsZero() {
+				timeToAllReadySec = lastReady.Sub(firstCreate).Seconds()
+			}
+
+			t.Logf("=======================================================================")
+			t.Logf("  Total batches:       %d (batch_size=%d)", batchNum, batchSize)
+			t.Logf("  Total claims:        %d (%d under1s, %d over1s)", totalClaims, under1sCount, totalClaims-under1sCount)
+			t.Logf("  Green (<=500ms):     %d", greenCount)
+			t.Logf("  Grey (500ms..1s):    %d", greyZoneCount)
+			t.Logf("  Worst start:         %.3fs", worstStart.Seconds())
+			t.Logf("  Over cold start:     %d (>%.3fs)", overColdCount, poolFillTime.Seconds())
+			t.Logf("  Time to all ready:   %.3fs", timeToAllReadySec)
+			t.Logf("  Total duration(sec): %.3f", totalDuration.Seconds())
+			t.Logf("  Throughput:          %.1f claims/sec", float64(totalClaims)/totalDuration.Seconds())
+			t.Logf("  CSV report:          %s", csvPath)
+			t.Logf("=======================================================================")
+
+			_ = cw.Write([]string{})
+			_ = cw.Write([]string{"# total_batches", strconv.Itoa(batchNum)})
+			_ = cw.Write([]string{"# total_claims", strconv.Itoa(totalClaims)})
+			_ = cw.Write([]string{"# under_1s_claims", strconv.Itoa(under1sCount)})
+			_ = cw.Write([]string{"# over_1s_claims", strconv.Itoa(totalClaims - under1sCount)})
+			_ = cw.Write([]string{"# green_claims", strconv.Itoa(greenCount)})
+			_ = cw.Write([]string{"# grey_zone_claims", strconv.Itoa(greyZoneCount)})
+			_ = cw.Write([]string{"# worst_start_sec", fmt.Sprintf("%.3f", worstStart.Seconds())})
+			_ = cw.Write([]string{"# over_cold_claims", strconv.Itoa(overColdCount)})
+			_ = cw.Write([]string{"# total_duration_sec", fmt.Sprintf("%.3f", totalDuration.Seconds())})
+			_ = cw.Write([]string{"# time_to_all_ready_sec", fmt.Sprintf("%.3f", timeToAllReadySec)})
+			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
+		})
+
+		// Scale pool to 0 and wait for all pods (including Terminating) to be gone
+		framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
+			p.Spec.Replicas = &zeroReplicas
+		})
+		drainCtx, drainCancel := context.WithTimeout(t.Context(), fillTimeout)
+		require.NoError(t, tc0.WaitForWarmPoolReady(drainCtx, poolID))
+		drainCancel()
+
+		// Wait for all pods (including Terminating) to be fully gone before
+		// scaling to the next pool size. This ensures CPU capacity is restored,
+		// which is critical for kata where VM termination takes 5-10s per pod.
+		podDrainTimeout := time.Duration(poolSize)*10*time.Second + 30*time.Second
+		podDrainCtx, podDrainCancel := context.WithTimeout(t.Context(), podDrainTimeout)
+		t.Logf("[drain] waiting for all pods in %s to terminate (timeout %s)", ns.Name, podDrainTimeout)
+		if err := waitForNoPods(podDrainCtx, tc0.ClusterClient, ns.Name); err != nil {
+			t.Logf("[drain] WARNING: %v — proceeding anyway", err)
+		}
+		podDrainCancel()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Parameterized benchmarks
+// ---------------------------------------------------------------------------
+
+var benchSandboxCounter atomic.Int64
+
+func runtimeClassPodSpec(rcPtr *string, image string) corev1.PodSpec {
+	return corev1.PodSpec{
+		RuntimeClassName: rcPtr,
+		Containers: []corev1.Container{
+			{
+				Name:            "bench",
+				Image:           image,
+				ImagePullPolicy: corev1.PullIfNotPresent,
+			},
+		},
+	}
+}
+
+func benchImages() []string {
+	if v := os.Getenv("SANDBOX_IMAGES"); v != "" {
+		var images []string
+		for s := range strings.SplitSeq(v, ",") {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				images = append(images, trimmed)
+			}
+		}
+		if len(images) > 0 {
+			return images
+		}
+	}
+	return []string{"registry.k8s.io/pause:3.10"}
+}
+
+func benchWorkloadSec() int {
+	if v := os.Getenv("SANDBOX_WORKLOAD_SEC"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 30
+}
+
+func workloadPodSpec(rcPtr *string, workloadSec int) corev1.PodSpec {
+	container := corev1.Container{
+		Name:            "workload",
+		ImagePullPolicy: corev1.PullIfNotPresent,
+	}
+	if workloadSec == 0 {
+		container.Image = "registry.k8s.io/pause:3.10"
+	} else {
+		container.Image = "busybox:1.36"
+		container.Command = []string{"sleep", strconv.Itoa(workloadSec)}
+	}
+	return corev1.PodSpec{
+		RuntimeClassName: rcPtr,
+		Containers:       []corev1.Container{container},
+	}
+}
+
+func benchSettleDuration() time.Duration {
+	if v := os.Getenv("SANDBOX_SETTLE_SEC"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 2 * time.Second
+}
+
+func benchBatchCap() int {
+	if v := os.Getenv("SANDBOX_BATCH_CAP"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return 10
+}
+
+// waitForNoPods polls until no pods remain in the namespace, including those
+// in Terminating phase. Returns nil when the namespace is empty, or an error
+// if the context expires with pods still present.
+func waitForNoPods(ctx context.Context, cl *framework.ClusterClient, namespace string) error {
+	for {
+		var podList corev1.PodList
+		if err := cl.List(ctx, &podList, client.InNamespace(namespace)); err != nil {
+			return fmt.Errorf("listing pods in %s: %w", namespace, err)
+		}
+		if len(podList.Items) == 0 {
+			return nil
+		}
+		terminating := 0
+		for i := range podList.Items {
+			if podList.Items[i].DeletionTimestamp != nil {
+				terminating++
+			}
+		}
+		cl.Logf("[drain] %d pods remaining (%d terminating) in %s", len(podList.Items), terminating, namespace)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%d pods still in %s after timeout (%d terminating)", len(podList.Items), namespace, terminating)
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func benchPoolSizes(cpuCapacity int64) ([]int, error) {
+	if v := os.Getenv("SANDBOX_POOL_SIZES"); v != "" {
+		var sizes []int
+		for s := range strings.SplitSeq(v, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(s))
+			if err != nil {
+				return nil, fmt.Errorf("invalid SANDBOX_POOL_SIZES value %q: %w", s, err)
+			}
+			if n <= 0 {
+				return nil, fmt.Errorf("invalid SANDBOX_POOL_SIZES value %q: must be positive", s)
+			}
+			sizes = append(sizes, n)
+		}
+		return sizes, nil
+	}
+	if cpuCapacity > 0 {
+		half := max(int(cpuCapacity/2), 1)
+		full := int(cpuCapacity)
+		double := full * 2
+		return []int{half, full, double}, nil
+	}
+	return nil, fmt.Errorf("cluster reported 0 worker CPU capacity — cannot derive pool sizes")
+}
+
+func shortImageName(image string) string {
+	if i := strings.LastIndex(image, "/"); i >= 0 {
+		return image[i+1:]
+	}
+	return image
+}
+
+func logBenchHeader(b *testing.B, benchType string, runtimeClass string, poolSizes []int) {
+	images := benchImages()
+	b.Logf("=======================================================================")
+	b.Logf("  Benchmark: %s", benchType)
+	b.Logf("  SANDBOX_RUNTIME_CLASS = %s", runtimeClass)
+	b.Logf("  SANDBOX_IMAGES        = %s", strings.Join(images, ", "))
+	if len(poolSizes) > 0 {
+		sizeStrs := make([]string, len(poolSizes))
+		for i, s := range poolSizes {
+			sizeStrs[i] = strconv.Itoa(s)
+		}
+		b.Logf("  SANDBOX_POOL_SIZES    = %s", strings.Join(sizeStrs, ", "))
+	}
+	b.Logf("=======================================================================")
+}
+
+// BenchmarkRuntimeClassColdStart measures cold sandbox creation latency per
+// image. Each b.Loop() iteration creates a Sandbox directly and waits for Ready.
+//
+// Run with:
+//
+//	SANDBOX_RUNTIME_CLASS=default go test -v -run=^$ -bench=BenchmarkRuntimeClassColdStart -benchtime=5x ./test/e2e/extensions/... -timeout 10m
+func BenchmarkRuntimeClassColdStart(b *testing.B) {
+	runtimeClass := os.Getenv("SANDBOX_RUNTIME_CLASS")
+	if runtimeClass == "" {
+		b.Skip("SANDBOX_RUNTIME_CLASS not set")
+	}
+
+	logBenchHeader(b, "ColdStart", runtimeClass, nil)
+	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
+
+	for _, image := range benchImages() {
+		b.Run(shortImageName(image), func(b *testing.B) {
+			podSpec := runtimeClassPodSpec(rcPtr, image)
+
+			var total time.Duration
+			var worst time.Duration
+			for b.Loop() {
+				tc := framework.NewTestContext(b)
+
+				ns := &corev1.Namespace{}
+				ns.Name = fmt.Sprintf("bench-cold-%d", time.Now().UnixNano())
+				tc.MustCreateWithCleanup(ns)
+
+				sandbox := &sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      fmt.Sprintf("cold-%d", benchSandboxCounter.Add(1)),
+						Namespace: ns.Name,
+					},
+				}
+				sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+
+				startTime := time.Now()
+				tc.MustCreateWithCleanup(sandbox)
+				tc.MustWaitForObject(sandbox, predicates.ReadyConditionIsTrue)
+
+				d := time.Since(startTime)
+				total += d
+				if d > worst {
+					worst = d
+				}
+			}
+			b.ReportMetric(total.Seconds()/float64(b.N), "sandbox-ready-sec/op")
+			b.ReportMetric(worst.Seconds(), "worst-sec")
+		})
+	}
+}
+
+// BenchmarkRuntimeClassWarmClaim measures warm pool claim latency across
+// image × pool-size combinations. The template and pool are created once per
+// sub-benchmark; each b.Loop() iteration claims a sandbox from the pool.
+//
+// Pool size must be >= benchtime count — if claims exhaust the pool the
+// controller falls back to cold start, skewing the measurement.
+//
+// Run with:
+//
+//	SANDBOX_RUNTIME_CLASS=default go test -v -run=^$ -bench=BenchmarkRuntimeClassWarmClaim -benchtime=3x ./test/e2e/extensions/... -timeout 10m
+func BenchmarkRuntimeClassWarmClaim(b *testing.B) {
+	runtimeClass := os.Getenv("SANDBOX_RUNTIME_CLASS")
+	if runtimeClass == "" {
+		b.Skip("SANDBOX_RUNTIME_CLASS not set")
+	}
+
+	tc0 := framework.NewTestContext(b)
+	cluster, err := tc0.ClusterInfo(b.Context())
+	if err != nil {
+		b.Fatalf("failed to detect cluster info: %v", err)
+	}
+	poolSizes, err := benchPoolSizes(cluster.TotalCPUCapacity)
+	if err != nil {
+		b.Fatalf("cannot determine pool sizes: %v", err)
+	}
+	logBenchHeader(b, "WarmClaim", runtimeClass, poolSizes)
+	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
+
+	for _, image := range benchImages() {
+		for _, poolSize := range poolSizes {
+			name := fmt.Sprintf("%s/pool-%d", shortImageName(image), poolSize)
+
+			b.Run(name, func(b *testing.B) {
+				tc := framework.NewTestContext(b)
+
+				if isVMRuntime(runtimeClass) && int64(poolSize) > cluster.TotalCPUCapacity {
+					b.Skipf("pool size %d exceeds worker CPU capacity (%d vCPUs) — not practical for VM runtime %q",
+						poolSize, cluster.TotalCPUCapacity, runtimeClass)
+				}
+
+				ns := &corev1.Namespace{}
+				ns.Name = fmt.Sprintf("bench-warm-%d", time.Now().UnixNano())
+				tc.MustCreateWithCleanup(ns)
+
+				podSpec := runtimeClassPodSpec(rcPtr, image)
+
+				template := &extensionsv1beta1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "bench-template",
+						Namespace: ns.Name,
+					},
+				}
+				template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+				tc.MustCreateWithCleanup(template)
+
+				replicas := int32(poolSize)
+				warmPool := &extensionsv1beta1.SandboxWarmPool{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "bench-warmpool",
+						Namespace: ns.Name,
+					},
+					Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+						Replicas:    &replicas,
+						TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+					},
+				}
+				tc.MustCreateWithCleanup(warmPool)
+
+				warmPoolID := types.NamespacedName{Name: warmPool.Name, Namespace: ns.Name}
+				if err := tc.WaitForWarmPoolReady(b.Context(), warmPoolID); err != nil {
+					b.Fatalf("WarmPool failed to become ready: %v", err)
+				}
+				b.Logf("WarmPool ready with %d replicas", poolSize)
+
+				b.ResetTimer()
+				var total time.Duration
+				var worst time.Duration
+				for b.Loop() {
+					claimName := fmt.Sprintf("claim-%d", benchSandboxCounter.Add(1))
+
+					claim := &extensionsv1beta1.SandboxClaim{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      claimName,
+							Namespace: ns.Name,
+						},
+						Spec: extensionsv1beta1.SandboxClaimSpec{
+							WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+						},
+					}
+
+					startTime := time.Now()
+					tc.MustCreateWithCleanup(claim)
+					tc.MustWaitForObject(claim, predicates.ReadyConditionIsTrue)
+
+					d := time.Since(startTime)
+					total += d
+					if d > worst {
+						worst = d
+					}
+				}
+				b.ReportMetric(total.Seconds()/float64(b.N), "claim-ready-sec/op")
+				b.ReportMetric(worst.Seconds(), "worst-sec")
+			})
+		}
+	}
+}

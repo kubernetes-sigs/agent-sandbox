@@ -17,11 +17,15 @@
 // It runs an ordered list of phases (--phases), for example:
 //
 //   - fill: long-running background sandboxes so later phases measure a cluster at scale
+//   - fill-pct:N: like fill, but tops the cluster up to N% total worker pod
+//     utilization (counting pre-existing pods and earlier fills), so later
+//     phases measure a cluster running near capacity
 //   - probe: low-concurrency launches measuring clean per-sandbox launch latency
-//   - throughput-mifN: closed-loop churn capped at N in-flight, measuring sustained ready/sec
+//   - throughput-mif:N: closed-loop churn capped at N in-flight, measuring sustained ready/sec
 //
-// Phase names are plain strings today (throughput encodes max-in-flight in the name).
-// A more structured form (e.g. throughput{maxInFlight:200}) may be added later.
+// A phase name is a kind plus optional hyphen-separated key:value arguments;
+// every kind accepts label:<x> (e.g. throughput-mif:400-label:hot) so a run
+// that repeats a kind keeps distinct phase names in reports. See parsePhase.
 //
 // Outputs (in --output-dir):
 //
@@ -44,7 +48,6 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -87,13 +90,17 @@ type ClusterInfo struct {
 // PhaseSummary holds the aggregate results for one phase.
 type PhaseSummary struct {
 	// Number is the 1-based index of this entry in Summary.Phases / Config.Phases.
-	Number          PhaseNumber `json:"phaseNumber"`
-	Name            string      `json:"name"`
-	Requested       int         `json:"requested"`
-	Created         int         `json:"created"`
-	Ready           int         `json:"ready"`
-	Failed          int         `json:"failed"`
-	DurationSeconds float64     `json:"durationSeconds"`
+	Number PhaseNumber `json:"phaseNumber"`
+	Name   string      `json:"name"`
+	// Kind is the phase's base kind (fill, probe, throughput, ...): Name
+	// carries the phase's arguments (probe-label:x), so consumers picking
+	// kind-specific output must use Kind, not Name.
+	Kind            PhaseName `json:"kind,omitempty"`
+	Requested       int       `json:"requested"`
+	Created         int       `json:"created"`
+	Ready           int       `json:"ready"`
+	Failed          int       `json:"failed"`
+	DurationSeconds float64   `json:"durationSeconds"`
 	// StartOffsetSeconds is the phase's start relative to Summary.StartTime.
 	StartOffsetSeconds float64 `json:"startOffsetSeconds"`
 
@@ -145,11 +152,10 @@ type Config struct {
 	// Phases is the ordered list of phase names to run (see package comment).
 	Phases []string `json:"phases"`
 
-	// FillCount is the resolved fill phase size (FillPerNode * worker-node
-	// count), recorded here so it lands in summary.json.
-	FillCount int `json:"fillCount"`
-	// FillPerNode sizes the fill phase relative to the cluster: fill creates
-	// FillPerNode * worker-node-count sandboxes.
+	// FillPerNode sizes the plain fill phase relative to the cluster: fill
+	// creates FillPerNode * worker-node-count sandboxes. (fill-pct:N phases
+	// size themselves from pod capacity instead; each phase's resolved size
+	// is recorded in its summary.json entry as "requested".)
 	FillPerNode int `json:"fillPerNode"`
 
 	ProbeCount       int           `json:"probeCount"`
@@ -187,7 +193,7 @@ type Config struct {
 	SustainedPoolHeadroom time.Duration `json:"sustainedPoolHeadroomNanos"`
 	// SustainedLifecycleBudget is the assumed per-claim ready+delete pipeline
 	// time (everything outside the dwell) used when estimating the phase's
-	// peak concurrent pods in checkClusterCapacity. If the cluster's
+	// peak concurrent pods in resolvePhases. If the cluster's
 	// Ready/delete path is slower than this under load, raise it so the
 	// capacity check demands enough headroom to keep queueing out of the
 	// latency measurement.
@@ -244,7 +250,7 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&cfg.Timeout, "timeout", 30*time.Minute, "Timeout for the entire test run")
 	flag.DurationVar(&cfg.PerSandboxTimeout, "per-sandbox-timeout", 5*time.Minute, "Timeout for a single sandbox to become ready / be deleted")
 	flag.IntVar(&cfg.CreateConcurrency, "create-concurrency", 20, "Number of concurrent workers creating Sandboxes (fill and throughput phases)")
-	phasesFlag := flag.String("phases", "probe,throughput-mif50", "Comma-separated phase names to run in order (fill, probe, claims-warm, claims-warm-sustained, throughput-mifN). Structured forms like throughput{maxInFlight:N} may be added later")
+	phasesFlag := flag.String("phases", "probe,throughput-mif:50", "Comma-separated phase names to run in order (fill, fill-pct:N, probe, claims-warm, claims-warm-sustained, throughput-mif:N); phases accept hyphen-separated key:value arguments, e.g. throughput-mif:400-label:hot")
 	flag.IntVar(&cfg.FillPerNode, "fill-per-node", 10, "Number of long-running background Sandboxes per worker node for the fill phase")
 	flag.IntVar(&cfg.ProbeCount, "probe-count", 20, "Number of latency probe Sandboxes for the probe phase")
 	flag.IntVar(&cfg.ProbeConcurrency, "probe-concurrency", 1, "Number of concurrent latency probes; keep low for clean latency numbers")
@@ -274,6 +280,12 @@ func run(ctx context.Context) error {
 	}
 	if len(cfg.Phases) == 0 {
 		return fmt.Errorf("--phases must list at least one phase")
+	}
+	// Parse the phase list and validate each phase's flag-derived
+	// configuration up front, before any cluster interaction.
+	phases, err := parsePhases(cfg.Phases, cfg)
+	if err != nil {
+		return err
 	}
 	if cfg.Timeout <= 0 || cfg.PerSandboxTimeout <= 0 {
 		return fmt.Errorf("timeouts must be > 0: timeout=%v per-sandbox-timeout=%v", cfg.Timeout, cfg.PerSandboxTimeout)
@@ -340,7 +352,7 @@ func run(ctx context.Context) error {
 	// for claims-warm (all claims fire at once, not concurrency-capped).
 	// Warn instead of failing: a run may deliberately probe that shape.
 	burstWidth := cfg.CreateConcurrency
-	if hasClaimsPhase(cfg.Phases) && cfg.ClaimsWarmCount > burstWidth {
+	if hasClaimsPhase(phases) && cfg.ClaimsWarmCount > burstWidth {
 		burstWidth = cfg.ClaimsWarmCount
 	}
 	if minConns := (burstWidth + 99) / 100; cfg.ClientConnections < minConns {
@@ -354,12 +366,11 @@ func run(ctx context.Context) error {
 	}
 	log.Printf("Cluster: kubernetes %s, %d worker nodes, pod capacity %d, %d pre-existing worker pods",
 		clusterInfo.KubernetesVersion, clusterInfo.Nodes, clusterInfo.PodCapacity, clusterInfo.PreexistingPods)
-	if slices.Contains(cfg.Phases, string(PhaseFill)) {
-		cfg.FillCount = cfg.FillPerNode * clusterInfo.Nodes
-		log.Printf("Fill phase: %d sandboxes (%d per worker node * %d nodes)", cfg.FillCount, cfg.FillPerNode, clusterInfo.Nodes)
-	}
-	if err := checkClusterCapacity(cfg, clusterInfo); err != nil {
+	if err := resolvePhases(phases, cfg, clusterInfo); err != nil {
 		return err
+	}
+	for i, p := range phases {
+		log.Printf("Phase #%d %s", i+1, p.Description())
 	}
 
 	// Create namespace
@@ -394,7 +405,7 @@ func run(ctx context.Context) error {
 	// classify into the exempt priority level before any latency-bearing
 	// phase runs; the verdict is logged and recorded in summary.json.
 	var apfVerification *APFVerification
-	if hasClaimsPhase(cfg.Phases) {
+	if hasClaimsPhase(phases) {
 		apfVerification = verifyClaimPostPriorityLevel(ctx, restConfig, cfg.Namespace)
 		logAPFVerification(apfVerification)
 	}
@@ -421,7 +432,7 @@ func run(ctx context.Context) error {
 	// Only watch SandboxClaims when a claims phase runs: the extensions
 	// CRDs may not be installed otherwise, and a missing CRD would make the
 	// watcher retry-loop for the whole run.
-	if hasClaimsPhase(cfg.Phases) {
+	if hasClaimsPhase(phases) {
 		gvrList = append(gvrList, gvrSandboxClaims)
 	}
 
@@ -503,7 +514,7 @@ func run(ctx context.Context) error {
 	// CPU/heap-profile the sandbox controller during the claims phases
 	// (the controller is the suspected bottleneck of the adoption path).
 	var ctrlProfiler *controllerProfiler
-	if cfg.ProfileController && hasClaimsPhase(cfg.Phases) {
+	if cfg.ProfileController && hasClaimsPhase(phases) {
 		ctrlProfiler, err = newControllerProfiler(restConfig, cfg.OutputDir)
 		if err != nil {
 			return fmt.Errorf("failed to build controller profiler: %w", err)
@@ -526,24 +537,20 @@ func run(ctx context.Context) error {
 		claimClient:    mutateClient.Resource(gvrSandboxClaims).Namespace(cfg.Namespace),
 	}
 
-	phaseRuns, err := buildPhaseRuns(test)
-	if err != nil {
-		return err
-	}
-
-	phaseResults := make([]phaseResult, 0, len(phaseRuns))
+	phaseResults := make([]phaseResult, 0, len(phases))
 	var phaseErr error
-	for _, phase := range phaseRuns {
+	for i, phase := range phases {
+		number := PhaseNumber(i + 1)
 		result := phaseResult{
-			number: phase.number,
-			name:   phase.name,
+			number: number,
+			name:   phase.Name(),
 			offset: time.Since(testStartTime),
 		}
 		start := time.Now()
-		if err := phase.fn(ctx); err != nil {
+		if err := phase.Run(ctx, test, number); err != nil {
 			result.duration = time.Since(start)
 			phaseResults = append(phaseResults, result)
-			phaseErr = fmt.Errorf("%s#%d phase: %w", phase.name, phase.number, err)
+			phaseErr = fmt.Errorf("%s#%d phase: %w", phase.Name(), number, err)
 			log.Printf("aborting after error: %v", phaseErr)
 			break
 		}
@@ -562,7 +569,7 @@ func run(ctx context.Context) error {
 	}
 
 	// Write outputs even if a phase failed: partial data is still useful.
-	summary := buildSummary(runID, testStartTime, cfg, clusterInfo, tracker, phaseResults)
+	summary := buildSummary(runID, testStartTime, cfg, clusterInfo, tracker, phaseResults, phases)
 	summary.APFVerification = apfVerification
 	if err := writeOutputs(cfg.OutputDir, summary, tracker); err != nil {
 		if phaseErr == nil {
@@ -585,192 +592,12 @@ func run(ctx context.Context) error {
 	return waitErr
 }
 
-type phaseRun struct {
-	number PhaseNumber // 1-based index into Config.Phases
-	name   Phase
-	fn     func(context.Context) error
-}
-
 // phaseResult records wall-clock timing for one completed (or aborted) phase.
 type phaseResult struct {
 	number   PhaseNumber
-	name     Phase
+	name     PhaseName
 	offset   time.Duration // start relative to the test start
 	duration time.Duration
-}
-
-// buildPhaseRuns turns Config.Phases into concrete runners.
-// Recognized names today: fill, probe, throughput-mifN (N > 0).
-// Bare "throughput" is accepted as an alias for throughput-mif50.
-// Duplicate names are allowed; each entry gets a distinct PhaseNumber.
-func buildPhaseRuns(test *stressTest) ([]phaseRun, error) {
-	var runs []phaseRun
-	for i, raw := range test.cfg.Phases {
-		number := PhaseNumber(i + 1)
-		switch {
-		case raw == string(PhaseFill):
-			if test.cfg.FillCount <= 0 {
-				return nil, fmt.Errorf("phase %q requires --fill-per-node > 0", raw)
-			}
-			if test.cfg.CreateConcurrency <= 0 {
-				return nil, fmt.Errorf("--create-concurrency must be > 0 for phase %q", raw)
-			}
-			runs = append(runs, phaseRun{number, PhaseFill, func(ctx context.Context) error {
-				return test.runFillPhase(ctx, number)
-			}})
-		case raw == string(PhaseProbe):
-			if test.cfg.ProbeCount <= 0 {
-				return nil, fmt.Errorf("phase %q requires --probe-count > 0", raw)
-			}
-			if test.cfg.ProbeConcurrency <= 0 {
-				return nil, fmt.Errorf("--probe-concurrency must be > 0 for phase %q", raw)
-			}
-			runs = append(runs, phaseRun{number, PhaseProbe, func(ctx context.Context) error {
-				return test.runProbePhase(ctx, number)
-			}})
-		case raw == string(PhaseClaimsWarm):
-			if test.cfg.ClaimsWarmCount <= 0 {
-				return nil, fmt.Errorf("phase %q requires --claims-warm-count > 0", raw)
-			}
-			runs = append(runs, phaseRun{number, PhaseClaimsWarm, func(ctx context.Context) error {
-				return test.runClaimsWarmPhase(ctx, number)
-			}})
-		case raw == string(PhaseClaimsWarmSustained):
-			// Finite checks: flag.Float64Var accepts "NaN" and "+Inf" (NaN
-			// even passes a <= 0 test), and non-finite values would flow
-			// into pool sizing and the capacity estimate where float->int
-			// conversion is implementation-defined.
-			if test.cfg.SustainedRate <= 0 || math.IsNaN(test.cfg.SustainedRate) || math.IsInf(test.cfg.SustainedRate, 0) {
-				return nil, fmt.Errorf("phase %q requires a finite --sustained-rate > 0", raw)
-			}
-			if test.cfg.SustainedSeconds <= 0 || math.IsNaN(test.cfg.SustainedSeconds) || math.IsInf(test.cfg.SustainedSeconds, 0) {
-				return nil, fmt.Errorf("phase %q requires a finite --sustained-seconds > 0", raw)
-			}
-			if test.cfg.SustainedNamespaces < 1 {
-				return nil, fmt.Errorf("phase %q requires --sustained-namespaces >= 1", raw)
-			}
-			if test.cfg.SustainedPoolHeadroom <= 0 {
-				return nil, fmt.Errorf("phase %q requires --sustained-pool-headroom > 0", raw)
-			}
-			if test.cfg.SustainedLifecycleBudget <= 0 {
-				return nil, fmt.Errorf("phase %q requires --sustained-lifecycle-budget > 0", raw)
-			}
-			runs = append(runs, phaseRun{number, PhaseClaimsWarmSustained, func(ctx context.Context) error {
-				return test.runClaimsWarmSustainedPhase(ctx, number)
-			}})
-		default:
-			maxInFlight, ok := throughputMaxInFlight(raw)
-			if !ok {
-				return nil, fmt.Errorf("unknown phase %q (want fill, probe, claims-warm, claims-warm-sustained, or throughput-mifN)", raw)
-			}
-			if test.cfg.ThroughputCount <= 0 {
-				return nil, fmt.Errorf("phase %q requires --throughput-count > 0", raw)
-			}
-			if test.cfg.CreateConcurrency <= 0 {
-				return nil, fmt.Errorf("--create-concurrency must be > 0 for phase %q", raw)
-			}
-			name := Phase(raw)
-			if raw == string(PhaseThroughput) {
-				name = Phase(fmt.Sprintf("%s-mif%d", PhaseThroughput, maxInFlight))
-			}
-			mif := maxInFlight
-			runs = append(runs, phaseRun{number, name, func(ctx context.Context) error {
-				if test.profiler != nil {
-					// 5s in to skip the slot-fill burst; levels last >=45s
-					// (ThroughputMinSeconds), so the 20s window lands inside.
-					go test.profiler.CaptureCPUProfile(ctx, name, 5*time.Second, 20*time.Second)
-				}
-				return test.runThroughputLevel(ctx, name, number, mif)
-			}})
-		}
-	}
-	return runs, nil
-}
-
-// hasClaimsPhase reports whether any phase needs the SandboxClaim machinery
-// (claim watch, extensions CRDs, controller profiler). The claim watch is
-// cluster-wide, so it also covers the sustained phase's extra <ns>-s1..sN
-// shard namespaces.
-func hasClaimsPhase(phases []string) bool {
-	return slices.Contains(phases, string(PhaseClaimsWarm)) ||
-		slices.Contains(phases, string(PhaseClaimsWarmSustained))
-}
-
-// throughputMaxInFlight parses throughput / throughput-mifN phase names.
-func throughputMaxInFlight(name string) (int, bool) {
-	if name == string(PhaseThroughput) {
-		return 50, true
-	}
-	suffix, ok := strings.CutPrefix(name, string(PhaseThroughput)+"-mif")
-	if !ok || suffix == "" {
-		return 0, false
-	}
-	n, err := strconv.Atoi(suffix)
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	return n, true
-}
-
-// checkClusterCapacity returns an error when the test configuration would
-// exceed spare cluster pod capacity: in that case latency and throughput
-// results would measure queueing for capacity rather than the sandbox launch
-// pipeline, so the run would not test what it claims to test.
-//
-// Phases run sequentially, so peak concurrent test pods is fill plus the
-// largest of the probe/claims-warm/throughput in-flight caps (fill sandboxes
-// stay up). The claims-warm pool needs its full replica count in pods; on top
-// of that the warm pool controller replenishes claimed sandboxes, so the
-// phase can transiently reach ~2x its count — that overshoot is warned about
-// rather than required, because replenishment pods only queue (they do not
-// delay the claims being measured) and cleanup removes them. The
-// claims-warm-sustained budget covers its warm pools (kept full by refill)
-// plus the adopted-but-not-yet-deleted sandboxes.
-func checkClusterCapacity(cfg Config, info *ClusterInfo) error {
-	extra := 0
-	if slices.Contains(cfg.Phases, string(PhaseProbe)) && cfg.ProbeConcurrency > extra {
-		extra = cfg.ProbeConcurrency
-	}
-	claimsWarm := slices.Contains(cfg.Phases, string(PhaseClaimsWarm))
-	if claimsWarm && cfg.ClaimsWarmCount > extra {
-		extra = cfg.ClaimsWarmCount
-	}
-	if slices.Contains(cfg.Phases, string(PhaseClaimsWarmSustained)) {
-		// Steady state: the pools stay full (refill replaces adopted
-		// sandboxes) while adopted sandboxes live for roughly the ready
-		// latency + dwell + deletion pipeline before their pods go away;
-		// --sustained-lifecycle-budget bounds the pipeline part on top of
-		// the dwell.
-		poolTotal := sustainedPoolReplicasPerNamespace(cfg) * cfg.SustainedNamespaces
-		inFlight := int(math.Ceil(cfg.SustainedRate * (cfg.ClaimDwell.Seconds() + cfg.SustainedLifecycleBudget.Seconds())))
-		if n := poolTotal + inFlight; n > extra {
-			extra = n
-		}
-	}
-	for _, name := range cfg.Phases {
-		if maxInFlight, ok := throughputMaxInFlight(name); ok && maxInFlight > extra {
-			extra = maxInFlight
-		}
-	}
-	needed := 0
-	if slices.Contains(cfg.Phases, string(PhaseFill)) {
-		needed += cfg.FillCount
-	}
-	needed += extra
-	spare := info.PodCapacity - info.PreexistingPods
-	if needed == 0 {
-		return nil
-	}
-	switch {
-	case needed > spare:
-		return fmt.Errorf("test needs up to %d concurrent pods but the cluster only has %d spare pod slots; results would measure capacity queueing, not launch performance. Reduce --fill-per-node / --claims-warm-count / throughput-mifN or add nodes", needed, spare)
-	case spare > 0 && needed > spare*9/10:
-		log.Printf("WARNING: test needs up to %d concurrent pods, over 90%% of the %d spare pod slots; scheduling may interfere with measurements.", needed, spare)
-	}
-	if claimsWarm && 2*cfg.ClaimsWarmCount > spare {
-		log.Printf("WARNING: claims-warm pool replenishment can transiently need up to %d pods (2x --claims-warm-count) but only %d spare pod slots exist; replenishment pods will queue on capacity. Add nodes or reduce --claims-warm-count.", 2*cfg.ClaimsWarmCount, spare)
-	}
-	return nil
 }
 
 // inspectCluster records the apiserver version and counts worker-node pod
@@ -842,24 +669,14 @@ func isControlPlaneNode(u *unstructured.Unstructured) bool {
 }
 
 func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *ClusterInfo, tracker *Tracker,
-	phaseResults []phaseResult) *Summary {
+	phaseResults []phaseResult, phases []Phase) *Summary {
 	records := tracker.Records()
 
-	requested := func(phase Phase) int {
-		switch phase {
-		case PhaseFill:
-			return cfg.FillCount
-		case PhaseProbe:
-			return cfg.ProbeCount
-		case PhaseClaimsWarm:
-			return cfg.ClaimsWarmCount
-		case PhaseClaimsWarmSustained:
-			// Expected arrivals; the Poisson process varies the actual count.
-			return sustainedExpectedClaims(cfg)
-		default:
-			// Throughput phases (one per throughput-mifN entry).
-			return cfg.ThroughputCount
+	requested := func(number PhaseNumber) int {
+		if i := int(number) - 1; i >= 0 && i < len(phases) {
+			return phases[i].Requested()
 		}
+		return 0
 	}
 
 	summary := &Summary{
@@ -881,10 +698,15 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 		// Throughput levels overshoot the configured count when
 		// -throughput-min-seconds keeps them churning; every record was a
 		// real request.
-		req := max(requested(result.name), len(phaseRecords))
+		req := max(requested(result.number), len(phaseRecords))
+		var kind PhaseName
+		if i := int(result.number) - 1; i >= 0 && i < len(phases) {
+			kind = phases[i].Kind()
+		}
 		ps := &PhaseSummary{
 			Number:                result.number,
 			Name:                  string(result.name),
+			Kind:                  kind,
 			Requested:             req,
 			DurationSeconds:       result.duration.Seconds(),
 			StartOffsetSeconds:    result.offset.Seconds(),
@@ -908,7 +730,7 @@ func buildSummary(runID string, startTime time.Time, cfg Config, clusterInfo *Cl
 		}
 		ps.CreateThroughput = computeThroughputStats(createTimes)
 		ps.ReadyThroughput = computeThroughputStats(readyTimes)
-		if result.name == PhaseClaimsWarmSustained {
+		if kind == PhaseClaimsWarmSustained {
 			ps.SustainedWindows = computeWindowedLatencies(phaseRecords, sustainedWindow)
 		}
 		if clusterInfo != nil {
@@ -1047,7 +869,7 @@ func printReport(summary *Summary, clusterInfo *ClusterInfo) {
 		fmt.Printf("\n--- #%d %s: %d requested, %d created, %d ready, %d failed (%.1fs) ---\n",
 			ps.Number, ps.Name, ps.Requested, ps.Created, ps.Ready, ps.Failed, ps.DurationSeconds)
 
-		switch Phase(ps.Name) {
+		switch ps.Kind {
 		case PhaseProbe:
 			fmt.Println("  Launch latency breakdown:")
 			printBreakdown(ps.Latency)

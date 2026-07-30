@@ -378,16 +378,28 @@ echo "Benchmark completed successfully."
 
 # Run the stress test.
 #
-# Phases are a comma-separated list of names (see test/stress/main.go):
-#   fill              long-running background sandboxes (scale)
+# Phases are a comma-separated list of names (see test/stress/phase.go):
+#   fill              long-running background sandboxes (fill-per-node * nodes)
+#   fill-pct:N        top the cluster up to N% total worker pod utilization
 #   probe             low-concurrency launch latency
-#   throughput-mifN   closed-loop churn capped at N in-flight
+#   throughput-mif:N  closed-loop churn capped at N in flight (add label:<x>
+#                     to repeat a level under a distinct report name)
 #   claims-warm       SandboxClaim burst against a provisioned warm pool
 #
-# Keep fill (fill-per-node * nodes) + max(mifN) below spare pod capacity
-# (roughly 3 * 110 minus system pods on the default cluster); the test
-# refuses to run if they don't fit.
-# Defaults below are sized for the default 3-node cluster.
+# What the default list below does, on the default 20-node cluster
+# (2,200 pod slots):
+#   1. fill: 10 sandboxes per node = 200 pods, ~10% utilization.
+#   2. probe, then the descending mif sweep: launch latency and throughput
+#      on that mostly-empty cluster.
+#   3. fill-pct:80: top the cluster up to 80% utilization (~1,760 pods).
+#   4. throughput-mif:400-label:pct80: run mif400 again at density. 400 in
+#      flight is ~18% of the cluster, so this level peaks at ~98%
+#      utilization - it fits, and the tool's capacity preflight (which
+#      walks the phases in order, so it knows mif400 fits before the 80%
+#      fill and only barely after it) warns above 90% but allows it.
+# Comparing the two mif400 legs separates the launch pipeline's own cost
+# from the cost of resident-pod scale (kubelet status load, watch fanout,
+# etcd working set).
 STRESS_OUTPUT_DIR="${ARTIFACTS:-.}/stress-test/"
 mkdir -p "${STRESS_OUTPUT_DIR}"
 
@@ -409,7 +421,7 @@ set +o errexit
 # each one (e.g. --client-connections=4 in benchmarks-kops-gcp-claims).
 # shellcheck disable=SC2086
 go run ./test/stress \
-  --phases="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif:600,throughput-mif:400,throughput-mif:200,throughput-mif:100,throughput-mif:50,fill-pct:80,throughput-mif:400-label:pct80}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \

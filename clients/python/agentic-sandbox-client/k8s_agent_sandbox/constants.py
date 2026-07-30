@@ -37,3 +37,17 @@ PODSNAPSHOT_PLURAL = "podsnapshots"
 PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
 PODSNAPSHOTMANUALTRIGGER_API_KIND = "PodSnapshotManualTrigger"
 PODSNAPSHOT_API_KIND = "PodSnapshot"
+
+# SandboxClaim Ready=False reasons the claim controller will not recover from
+# on its own (see computeReadyCondition in
+# extensions/controllers/sandboxclaim_controller.go). Watch-based ready-waits
+# fail fast on these instead of burning the full timeout. Transient reasons
+# (AdoptionPending, SandboxMissing, SandboxNotReady, ReconcilerError) are
+# intentionally absent: the controller retries those.
+TERMINAL_CLAIM_READY_REASONS = frozenset({
+    "InvalidMetadata",
+    "EnvVarsInjectionRejected",
+    "VolumeClaimTemplatesError",
+    "ClaimExpired",     # extensions ClaimExpiredReason
+    "SandboxExpired",   # core SandboxReasonExpired, forwarded to the claim
+})

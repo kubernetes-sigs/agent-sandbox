@@ -122,6 +122,15 @@ func checkOwnership(obj client.Object, sandbox *sandboxv1beta1.Sandbox) (resourc
 	return resourceOwnedByOther, controllerRef
 }
 
+// isOwnedBySandbox reports whether pod is non-nil and owned by the given Sandbox.
+func isOwnedBySandbox(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
+	if pod == nil {
+		return false
+	}
+	ownership, _ := checkOwnership(pod, sandbox)
+	return ownership == resourceOwnedBySandbox
+}
+
 // resolvePodName returns the name of the pod associated with the given Sandbox.
 // If the sandbox has adopted a warm pool pod, the pod name is tracked in the
 // agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
@@ -177,6 +186,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;update;patch,resourceNames=sandboxes.agents.x-k8s.io;sandboxclaims.extensions.agents.x-k8s.io;sandboxtemplates.extensions.agents.x-k8s.io;sandboxwarmpools.extensions.agents.x-k8s.io
@@ -282,15 +292,21 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 
 	// Reconcile Pod
-	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
-	allErrors = errors.Join(allErrors, err)
+	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash)
+	allErrors = errors.Join(allErrors, podErr)
+
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
 		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
-		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
-		sandbox.Status.NodeName = pod.Spec.NodeName
+		if isOwnedBySandbox(pod, sandbox) {
+			sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
+			sandbox.Status.NodeName = pod.Spec.NodeName
+		} else {
+			sandbox.Status.PodIPs = nil
+			sandbox.Status.NodeName = ""
+		}
 	}
 
 	// Reconcile Service
@@ -298,7 +314,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 
 	// compute and set overall conditions
-	conditions := r.computeConditions(sandbox, allErrors, svc, pod)
+	conditions := r.computeConditions(sandbox, allErrors, svc, pod, podErr)
 	hasFinished := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
@@ -314,12 +330,10 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	return allErrors
 }
 
-func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) []metav1.Condition {
+func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod, podErr error) []metav1.Condition {
 	var conditions []metav1.Condition
 
-	if suspended := r.computeSuspendedCondition(sandbox, pod); suspended != nil {
-		conditions = append(conditions, *suspended)
-	}
+	conditions = append(conditions, r.computeSuspendedCondition(sandbox, pod, podErr))
 
 	if finished := r.computeFinishedCondition(sandbox, pod); finished != nil {
 		conditions = append(conditions, *finished)
@@ -330,28 +344,44 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 	return conditions
 }
 
-func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
-	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
-	if !isSuspended {
-		return nil
-	}
-
+func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	// Initialize the Suspended condition which tracks only the suspension state, persisting once set.
 	suspended := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
-	}
-	if pod == nil {
-		// Mark Suspended condition as True
-		suspended.Status = metav1.ConditionTrue
-		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
-		suspended.Message = "Pod has been terminated. Sandbox is not operational."
-	} else {
-		suspended.Status = metav1.ConditionFalse
-		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodNotTerminated
-		suspended.Message = "Pod has not been terminated. Sandbox is operational."
+		Status:             metav1.ConditionFalse,
+		Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
+		Message:            "Sandbox is not suspended",
 	}
 
-	return &suspended
+	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		return suspended
+	}
+
+	if pod == nil && podErr != nil {
+		suspended.Status = metav1.ConditionUnknown
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown
+		suspended.Message = "Pod state is unknown. Sandbox suspension cannot be confirmed"
+		return suspended
+	}
+
+	if pod == nil {
+		// Stable State: Fully Suspended
+		suspended.Status = metav1.ConditionTrue
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
+		suspended.Message = "Pod has been terminated. Sandbox is suspended"
+		return suspended
+	}
+
+	if !isOwnedBySandbox(pod, sandbox) {
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodNotOwned
+		suspended.Message = "Refused to delete pod because it is not owned by this sandbox"
+		return suspended
+	}
+
+	suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
+	suspended.Message = "Pod is terminating. Sandbox is suspending"
+	return suspended
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
@@ -449,7 +479,8 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 }
 
 func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
-	if pod == nil {
+	// Only a Pod this Sandbox owns may drive its Finished condition
+	if !isOwnedBySandbox(pod, sandbox) {
 		return nil
 	}
 
@@ -986,11 +1017,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				if pod.DeletionTimestamp.IsZero() {
 					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
-						return nil, fmt.Errorf("failed to delete pod: %w", err)
+						return pod, fmt.Errorf("failed to delete pod: %w", err)
 					}
 				} else {
 					logger.V(4).Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
+				// Return the deleting pod to track the transient suspending phase until garbage collection completes.
+				return pod, nil
 			case resourceUnowned:
 				logger.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
@@ -1003,10 +1036,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		// Remove the pod name annotation from the sandbox if it exists
 		if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-			return nil, err
+			return pod, err
 		}
 
-		return nil, nil
+		return pod, nil
 	}
 
 	ensurePodNameAnnotation := func(podName string) error {

@@ -34,6 +34,7 @@ import (
 	"github.com/felixge/fgprof"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
@@ -69,6 +70,8 @@ func main() {
 	var pprofMutexProfileFraction int
 	var kubeAPIQPS float64
 	var kubeAPIBurst int
+	var apiConnections int
+	var separateWatchConnection bool
 	var sandboxConcurrentWorkers int
 	var sandboxClaimConcurrentWorkers int
 	var sandboxWarmPoolConcurrentWorkers int
@@ -85,6 +88,8 @@ func main() {
 	var webhookNamespace string
 	var manageWebhookCerts bool
 	var enableWebhook bool
+	var disableClaimEvents bool
+	var disableClaimObservabilityAnnotations bool
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
@@ -117,6 +122,19 @@ func main() {
 			"<=0 disables; 1 samples all events; N>1 samples ~1/N events (e.g. 10 ~= 1/10, 100 ~= 1/100).")
 	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", -1.0, "Client-side QPS limit for the Kubernetes API client (default: -1, no client-side rate limiting)")
 	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10, "The maximum burst for client-side throttling of the Kubernetes API client.")
+	flag.IntVar(&apiConnections, "api-connections", 1,
+		"Number of independent HTTP/2 connections to the API server for non-watch traffic (writes, uncached reads, events, leader election). "+
+			"The kube-apiserver caps concurrent in-flight requests per HTTP/2 connection (SETTINGS_MAX_CONCURRENT_STREAMS; 100 by default, "+
+			"configurable server-side via --http2-max-streams-per-connection), "+
+			"so a single connection bounds effective concurrency at the advertised limit regardless of worker count or QPS settings. "+
+			"Values > 1 shard requests round-robin across that many dedicated connections, each dialed on first use (~N x per-connection limit ceiling). "+
+			"Default 1 preserves the existing single-connection client.")
+	flag.BoolVar(&separateWatchConnection, "separate-watch-connection", false,
+		"Give the manager's informer cache (list/watch streams) a dedicated HTTP/2 connection to the API server. "+
+			"Watch events arrive on existing long-lived streams, so this isolates their frames from TCP/connection-level queuing behind "+
+			"bursts of request traffic on a shared connection (HTTP/2 stream prioritization does not help in practice). "+
+			"The per-connection cap on concurrent request streams is addressed separately by --api-connections. "+
+			"Default false preserves the existing shared-connection behavior.")
 	flag.IntVar(&sandboxConcurrentWorkers, "sandbox-concurrent-workers", 100, "Max concurrent reconciles for the Sandbox controller")
 	flag.IntVar(&sandboxClaimConcurrentWorkers, "sandbox-claim-concurrent-workers", 50, "Max concurrent reconciles for the SandboxClaim controller")
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
@@ -131,6 +149,15 @@ func main() {
 			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
 			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
 			"this flag is enabled.")
+	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
+		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
+			"reducing API server writes during large claim bursts. Default false (events enabled).")
+	flag.BoolVar(&disableClaimObservabilityAnnotations, "disable-claim-observability-annotations", false,
+		"Skip persisting the SandboxClaim observability annotations (controller first-observed timestamp, trace context), "+
+			"removing one API write per claim. The values are still stamped on the in-memory object, so startup-latency "+
+			"metrics and trace propagation to the Sandbox keep working within the controller process. Costs the on-object "+
+			"debugging breadcrumbs and, after a controller restart, the startup-latency metric for claims first observed "+
+			"by the previous process. Default false (annotations persisted).")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -179,6 +206,10 @@ func main() {
 
 	if kubeAPIBurst <= 0 {
 		setupLog.Error(nil, "kube-api-burst must be greater than 0")
+		os.Exit(1)
+	}
+	if apiConnections < 1 {
+		setupLog.Error(nil, "api-connections must be greater than or equal to 1")
 		os.Exit(1)
 	}
 	// Warning if the total number of workers exceeds the kube API burst limit
@@ -273,6 +304,28 @@ func main() {
 	restConfig.QPS = float32(kubeAPIQPS)
 	restConfig.Burst = kubeAPIBurst
 
+	// Optional API transport tuning (see transport.go). Order matters: the
+	// dedicated watch client must be built before configureAPIConnections
+	// installs its sharding WrapTransport on restConfig.
+	var watchHTTPClient *http.Client
+	if separateWatchConnection {
+		var err error
+		watchHTTPClient, err = newIsolatedHTTPClient(restConfig)
+		if err != nil {
+			setupLog.Error(err, "unable to build dedicated watch connection client")
+			os.Exit(1)
+		}
+		setupLog.Info("informer cache list/watch traffic separated onto a dedicated HTTP/2 connection (--separate-watch-connection)")
+	}
+	if err := configureAPIConnections(restConfig, apiConnections); err != nil {
+		setupLog.Error(err, "unable to configure API connections")
+		os.Exit(1)
+	}
+	if apiConnections > 1 {
+		setupLog.Info("API transport sharding enabled: non-watch API traffic distributed round-robin across independent HTTP/2 connections",
+			"connections", apiConnections)
+	}
+
 	if enableWebhook {
 		if manageWebhookCerts {
 			// Create a temporary client to patch the CRDs and access Secrets
@@ -340,6 +393,12 @@ func main() {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
 			"label", controllers.SandboxNameHashLabel)
 	}
+	if watchHTTPClient != nil {
+		// The manager cache builds its list/watch REST clients from this
+		// http.Client (RESTClientForConfigAndClient), bypassing restConfig's
+		// WrapTransport, so watch streams stay off the write connections.
+		mgrOpts.Cache.HTTPClient = watchHTTPClient
+	}
 	if enableWebhook {
 		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
 			Port:     webhookPort,
@@ -403,13 +462,28 @@ func main() {
 			os.Exit(1)
 		}
 
+		// Every Eventf site in the claim controller is nil-guarded on the
+		// recorder, so a nil recorder cleanly disables event emission.
+		var claimRecorder events.EventRecorder
+		if disableClaimEvents {
+			setupLog.Info("SandboxClaim controller event emission disabled (--disable-claim-events)")
+		} else {
+			claimRecorder = mgr.GetEventRecorder("sandboxclaim-controller")
+		}
+
+		if disableClaimObservabilityAnnotations {
+			setupLog.Info("SandboxClaim observability annotation persistence disabled (--disable-claim-observability-annotations)")
+		}
+
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
-			Client:              mgr.GetClient(),
-			Scheme:              mgr.GetScheme(),
-			WarmSandboxQueue:    warmSandboxQueue,
-			Recorder:            mgr.GetEventRecorder("sandboxclaim-controller"),
-			Tracer:              instrumenter,
-			AllowedLabelDomains: allowedDomains,
+			Client:                          mgr.GetClient(),
+			APIReader:                       mgr.GetAPIReader(),
+			Scheme:                          mgr.GetScheme(),
+			WarmSandboxQueue:                warmSandboxQueue,
+			Recorder:                        claimRecorder,
+			Tracer:                          instrumenter,
+			AllowedLabelDomains:             allowedDomains,
+			DisableObservabilityAnnotations: disableClaimObservabilityAnnotations,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)

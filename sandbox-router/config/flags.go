@@ -113,8 +113,10 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"Auto-enabled when either env var is set; pass --enable-otel-metrics=false "+
 			"to override.")
 	stringEnumVar(fs, (*string)(&c.AuthzMode), "authz-mode", string(c.AuthzMode),
-		"Per-request authorization strategy: allow-all (default, no auth) "+
-			"or tokenreview (validate Bearer tokens via the K8s TokenReview API). "+
+		"Per-request authorization strategy: allow-all (default, no auth), "+
+			"tokenreview (validate Bearer tokens via the K8s TokenReview API), "+
+			"or scoped-token (validate a per-sandbox signed token minted "+
+			"out-of-band; see --authz-scoped-token-secret-file). "+
 			"tokenreview requires either in-cluster config or --kubeconfig.")
 	fs.DurationVar(&c.AuthzTokenReviewTTL, "authz-tokenreview-ttl", c.AuthzTokenReviewTTL,
 		"How long a TokenReview decision is cached. Shorter values catch "+
@@ -129,6 +131,10 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Comma-separated audience values to verify against the token's aud claim. "+
 			"Empty disables the audience check. Required when authenticating "+
 			"projected ServiceAccount tokens minted with --audience.")
+	fs.StringVar(&c.AuthzScopedTokenSecretFile, "authz-scoped-token-secret-file", c.AuthzScopedTokenSecretFile,
+		"Path to a file holding the shared HMAC-SHA256 secret used to verify "+
+			"scoped tokens (see authz.MintScopedToken). Required when "+
+			"--authz-mode=scoped-token; must match whatever mints the tokens.")
 
 	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
 		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+

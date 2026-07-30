@@ -14,6 +14,12 @@
 # limitations under the License.
 
 # Runs the kOps GCP benchmark + stress test with cilium as the CNI.
+#
+# This job exists to catch cilium-specific regressions: the endpoint-create
+# API rate limit, the agent's client-go budgets, and datapath/endpoint
+# regeneration latency. Those are per-node effects that show up at any
+# cluster size, so this presubmit runs a deliberately small cluster;
+# cluster-scale throughput baselines live in the daily periodics.
 
 set -o errexit
 set -o nounset
@@ -22,4 +28,13 @@ set -o pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 export CNI=cilium
+
+# 3 workers + 1 small control plane. The mif sweep is capped to fit
+# 3 * 110 pod slots, and still ends with the fill-pct:80 / mif50 pair so
+# the near-capacity path is exercised under cilium too (~95% of slots;
+# the stress tool logs a warning at that density but runs).
+export STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-3}"
+export STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-8}"
+export STRESS_PHASES="${STRESS_PHASES:-fill,probe,throughput-mif:200,throughput-mif:100,throughput-mif:50,fill-pct:80,throughput-mif:50-label:pct80}"
+
 exec "${REPO_ROOT}/test/benchmarks/scenarios/benchmarks-kops-gcp/run"

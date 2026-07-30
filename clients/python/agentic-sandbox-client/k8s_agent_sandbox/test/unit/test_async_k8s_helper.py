@@ -19,6 +19,8 @@ import pytest
 
 pytest.importorskip("kubernetes_asyncio")
 
+from kubernetes_asyncio import client
+
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 from k8s_agent_sandbox.exceptions import SandboxMetadataError, SandboxTemplateNotFoundError
 
@@ -167,6 +169,136 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
             await self.helper.resolve_sandbox_name("test-claim", "default", timeout=5)
 
         self.assertIn("SandboxClaim 'test-claim' was deleted while resolving sandbox name", str(context.exception))
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_wait_for_claim_ready_single_event(self, mock_watch_class):
+        """Warm-pool fast path: name + Ready arrive in one claim status update."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "sandbox": {"name": "warm-sandbox-1", "podIPs": ["10.0.0.5"]},
+                },
+            },
+        }
+
+        async def mock_stream(*args, **kwargs):
+            yield mock_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        name = await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertEqual(name, "warm-sandbox-1")
+        self.assertEqual(mock_watch_class.call_count, 1)
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_wait_for_claim_ready_name_before_ready(self, mock_watch_class):
+        """Cold-start path: the name lands first, Ready arrives on a later event."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        name_only_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "False", "reason": "SandboxNotReady"}],
+                    "sandbox": {"name": "cold-sandbox-1"},
+                },
+            },
+        }
+        ready_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "sandbox": {"name": "cold-sandbox-1", "podIPs": ["10.0.0.9"]},
+                },
+            },
+        }
+
+        async def mock_stream(*args, **kwargs):
+            yield name_only_event
+            yield ready_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        name = await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertEqual(name, "cold-sandbox-1")
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_watch_resource_version_passthrough(self, mock_watch_class):
+        """The ready-wait watch starts from the supplied resourceVersion
+        ("0" by default) so it never forces a quorum etcd read."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim", "resourceVersion": "7"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "sandbox": {"name": "warm-sandbox-1"},
+                },
+            },
+        }
+
+        seen_kwargs = {}
+
+        async def mock_stream(*args, **kwargs):
+            seen_kwargs.update(kwargs)
+            yield mock_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        name = await self.helper.wait_for_claim_ready(
+            "test-claim", "default", timeout=5, resource_version="12345")
+        self.assertEqual(name, "warm-sandbox-1")
+        self.assertEqual(seen_kwargs["resource_version"], "12345")
+
+        seen_kwargs.clear()
+        name = await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+        self.assertEqual(seen_kwargs["resource_version"], "0")
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_watch_410_gone_restarts_from_zero(self, mock_watch_class):
+        """A compacted-away resourceVersion (410 Gone) restarts the watch
+        from "0" instead of failing the wait."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        mock_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim", "resourceVersion": "7"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "sandbox": {"name": "warm-sandbox-1"},
+                },
+            },
+        }
+
+        stream_rvs = []
+
+        async def mock_stream(*args, **kwargs):
+            stream_rvs.append(kwargs.get("resource_version"))
+            if len(stream_rvs) == 1:
+                raise client.ApiException(status=410)
+            yield mock_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        name = await self.helper.wait_for_claim_ready(
+            "test-claim", "default", timeout=5, resource_version="12345")
+        self.assertEqual(name, "warm-sandbox-1")
+        self.assertEqual(stream_rvs, ["12345", "0"])
 
 
 class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):

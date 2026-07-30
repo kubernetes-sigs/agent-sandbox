@@ -18,7 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"sort"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -31,19 +31,19 @@ import (
 
 const configMapName = "agent-sandbox-config"
 
-// ConfigMapWatcher watches the agent-sandbox-config ConfigMap and
+// MapWatcher watches the agent-sandbox-config ConfigMap and
 // cancels the manager context when its content changes. After the
 // manager shuts down gracefully (releasing the leader lease), main()
 // re-execs the process in-place (same PID) so kubelet sees no
 // container restart and applies no backoff.
-type ConfigMapWatcher struct {
+type MapWatcher struct {
 	client.Client
 	Namespace   string
 	StartupHash string
 	Shutdown    context.CancelFunc
 }
 
-func (w *ConfigMapWatcher) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (w *MapWatcher) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	if req.Name != configMapName || req.Namespace != w.Namespace {
@@ -72,7 +72,7 @@ func (w *ConfigMapWatcher) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
-func (w *ConfigMapWatcher) SetupWithManager(mgr ctrl.Manager) error {
+func (w *MapWatcher) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.ConfigMap{}).
 		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
@@ -96,7 +96,7 @@ func hashData(data map[string]string) string {
 	for k := range data {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	for _, k := range keys {
 		fmt.Fprintf(h, "%s=%s\n", k, data[k])
 	}

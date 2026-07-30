@@ -446,7 +446,7 @@ func main() {
 	// Register the custom Sandbox metric collector globally.
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
-	configWatcher := &internalconfig.ConfigMapWatcher{
+	configWatcher := &internalconfig.MapWatcher{
 		Client:      mgr.GetClient(),
 		Namespace:   controllerNamespace,
 		StartupHash: internalconfig.HashConfigMapData(configMapData),

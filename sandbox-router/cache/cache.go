@@ -102,16 +102,12 @@ type Cache struct {
 
 	mu      sync.RWMutex
 	entries map[types.UID]Entry
-<<<<<<< HEAD
 	// byName is a secondary index over entries keyed "namespace/name",
 	// maintained under mu in lock-step with entries. SDK traffic carries
 	// only X-Sandbox-Id (no UID), and warm-pool sandboxes have no
 	// per-sandbox Service, so without a name-keyed lookup those requests
 	// fall through to a DNS form that can never resolve (issue #883).
 	byName map[string]types.UID
-=======
-	byName  map[string]types.UID
->>>>>>> 7cf902b (review: Address coderabbit, nitfridman and aditya's comments.)
 }
 
 // Options configure the cache. Namespace is empty for cluster-wide
@@ -205,7 +201,6 @@ func (c *Cache) Get(uid types.UID) (Entry, bool) {
 	return e, ok
 }
 
-<<<<<<< HEAD
 // GetByName looks up the cached entry by sandbox namespace and name
 // (== Pod name). Resolution path for callers that send only
 // X-Sandbox-Id / X-Sandbox-Namespace; see byName.
@@ -213,14 +208,6 @@ func (c *Cache) GetByName(namespace, name string) (Entry, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	uid, ok := c.byName[nameKey(namespace, name)]
-=======
-// GetByName looks up the cached entry for a given namespace and sandbox name
-// using an O(1) secondary index.
-func (c *Cache) GetByName(namespace, name string) (Entry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	uid, ok := c.byName[namespace+"/"+name]
->>>>>>> 7cf902b (review: Address coderabbit, nitfridman and aditya's comments.)
 	if !ok {
 		return Entry{}, false
 	}
@@ -296,10 +283,9 @@ func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 	c.mu.Lock()
 	prev, existed := c.entries[uid]
 	if existed {
-		delete(c.byName, prev.Namespace+"/"+prev.SandboxName)
+		delete(c.byName, nameKey(prev.Namespace, prev.SandboxName))
 	}
 	c.entries[uid] = e
-<<<<<<< HEAD
 	// Drop a stale name key only when it still points at this UID, so a
 	// newer Pod that already claimed the name is never clobbered. This
 	// also unindexes an entry whose update flipped indexName to false.
@@ -313,9 +299,6 @@ func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 		// cases where delete-then-add ordering isn't contractual).
 		c.byName[nameKey(e.Namespace, e.SandboxName)] = uid
 	}
-=======
-	c.byName[e.Namespace+"/"+e.SandboxName] = uid
->>>>>>> 7cf902b (review: Address coderabbit, nitfridman and aditya's comments.)
 	c.mu.Unlock()
 	if !existed {
 		c.log.V(1).Info("cache add", "uid", uid, "pod", e.SandboxName, "ip", e.PodIP, "ns", e.Namespace)
@@ -326,15 +309,7 @@ func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 
 func (c *Cache) remove(uid types.UID) {
 	c.mu.Lock()
-<<<<<<< HEAD
 	existed := c.removeLocked(uid)
-=======
-	prev, existed := c.entries[uid]
-	if existed {
-		delete(c.byName, prev.Namespace+"/"+prev.SandboxName)
-	}
-	delete(c.entries, uid)
->>>>>>> 7cf902b (review: Address coderabbit, nitfridman and aditya's comments.)
 	c.mu.Unlock()
 	if existed {
 		c.log.V(1).Info("cache remove", "uid", uid)
@@ -366,15 +341,7 @@ func (c *Cache) removeLocked(uid types.UID) bool {
 // Safe to call for an unknown UID — the operation is a no-op.
 func (c *Cache) Invalidate(uid types.UID) bool {
 	c.mu.Lock()
-<<<<<<< HEAD
 	existed := c.removeLocked(uid)
-=======
-	prev, existed := c.entries[uid]
-	if existed {
-		delete(c.byName, prev.Namespace+"/"+prev.SandboxName)
-	}
-	delete(c.entries, uid)
->>>>>>> 7cf902b (review: Address coderabbit, nitfridman and aditya's comments.)
 	c.mu.Unlock()
 	if existed {
 		c.log.V(1).Info("cache invalidated by caller", "uid", uid)

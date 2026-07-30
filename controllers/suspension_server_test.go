@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func setupScheme(t *testing.T) *runtime.Scheme {
@@ -72,7 +73,12 @@ func TestSandboxReconcilerAutoSuspend(t *testing.T) {
 		},
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(sandbox).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
+		WithObjects(sandbox).
+		Build()
 	reconciler := &SandboxReconciler{
 		Client:            client,
 		Scheme:            scheme,
@@ -121,7 +127,12 @@ func TestSandboxReconcilerInitializesLastActivityTime(t *testing.T) {
 		},
 	}
 
-	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(sandbox).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
+		WithObjects(sandbox).
+		Build()
 	reconciler := &SandboxReconciler{
 		Client:            client,
 		Scheme:            scheme,
@@ -181,7 +192,8 @@ func TestSuspensionServerResumeHandler(t *testing.T) {
 	var updated agentsv1beta1.Sandbox
 	err := client.Get(context.Background(), types.NamespacedName{Name: "suspended-sandbox", Namespace: "default"}, &updated)
 	require.NoError(t, err)
-	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+	assert.Equal(t, agentsv1beta1.SandboxOperatingModeSuspended, updated.Spec.OperatingMode)
+	assert.NotNil(t, updated.Status.LastActivityTime)
 }
 
 func TestSuspensionServerActivityHandler(t *testing.T) {

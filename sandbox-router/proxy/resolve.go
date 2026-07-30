@@ -101,7 +101,7 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 		}); ok {
 			if e, ok := getter.GetByName(t.Namespace, t.ID); ok && e.PodIP != "" {
 				host = e.PodIP
-				src = SourceCache
+				src = SourceCacheName
 			}
 		}
 	}

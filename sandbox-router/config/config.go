@@ -176,6 +176,9 @@ type Config struct {
 	// Projected ServiceAccount tokens carry an aud claim that must
 	// match. Empty disables the audience check.
 	AuthzTokenReviewAudiences []string
+	// AuthzScopedTokenSecretFile is the path to a 32-byte secret key file used
+	// for verifying scoped authorization tokens.
+	AuthzScopedTokenSecretFile string
 
 	// ExtProcAddr is the address for the Envoy ext_proc gRPC listener.
 	// Empty disables ext_proc gRPC.

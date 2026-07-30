@@ -234,7 +234,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Check Expiration
 	// We calculate this upfront to decide the flow.
-	claimExpired, timeLeft := r.checkExpiration(claim)
+	claimExpired, timeLeft, effectiveLifecycle := r.checkExpiration(claim)
 	if claimExpired && !hasClaimExpiredCondition(claim.Status.Conditions) {
 		meta.SetStatusCondition(&claim.Status.Conditions, r.computeReadyCondition(claim, nil, nil, true))
 		if _, updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
@@ -251,11 +251,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
 	// Continuing would try to update the status of a deleted object, causing a crash/error.
-	if claimExpired && claim.Spec.Lifecycle != nil &&
-		(claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDelete ||
-			claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDeleteForeground) {
+	if claimExpired && effectiveLifecycle != nil &&
+		(effectiveLifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDelete ||
+			effectiveLifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDeleteForeground) {
 
-		policy := claim.Spec.Lifecycle.ShutdownPolicy
+		policy := effectiveLifecycle.ShutdownPolicy
 		logger.Info("Deleting Claim because time has expired", "shutdownPolicy", policy, "claim", claim.Name)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1beta1.ClaimExpiredReason, "Deleting", fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
@@ -287,7 +287,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Update Status & Events
 	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
-	postExpiration, postTimeLeft := r.checkExpiration(claim)
+	postExpiration, postTimeLeft, _ := r.checkExpiration(claim)
 	if postExpiration && !hasClaimExpiredCondition(claim.Status.Conditions) {
 		meta.SetStatusCondition(&claim.Status.Conditions, r.computeReadyCondition(claim, sandbox, reconcileErr, true))
 		if _, updateErr := r.updateStatus(ctx, originalClaimStatus, claim); updateErr != nil {
@@ -423,27 +423,26 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
-// For warm-pool claims with nil Lifecycle, it injects an in-memory default
-// (Delete + TTL=0) so the expiration reconciler can clean up finished claims.
-// The injection is never persisted — the reconciler re-derives it each cycle.
-func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
-	if claim.Spec.Lifecycle == nil {
+// It returns the effective lifecycle used for the calculation: for warm-pool
+// claims with nil Lifecycle it defaults to Delete + TTL=0 so finished claims
+// are cleaned up. The default is never written back to claim.Spec — callers
+// must use the returned lifecycle for policy decisions. See #1306.
+func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration, *extensionsv1beta1.Lifecycle) {
+	lc := claim.Spec.Lifecycle
+	if lc == nil {
 		if claim.Spec.WarmPoolRef.Name == "" {
-			return false, 0
+			return false, 0, nil
 		}
-		// Warm-pool claims without an explicit lifecycle default to
-		// immediate deletion after the workload finishes. Without this,
-		// finished claims accumulate indefinitely — leaking VMs, pod IPs,
-		// and auto-refreshing SA tokens. See #1306.
 		ttl := int32(0)
-		claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
+		lc = &extensionsv1beta1.Lifecycle{
 			ShutdownPolicy:          extensionsv1beta1.ShutdownPolicyDelete,
 			TTLSecondsAfterFinished: &ttl,
 		}
 	}
 
 	finishedCondition := lifecycle.FinishedCondition(claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
-	return lifecycle.TimeLeft(time.Now(), claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
+	expired, timeLeft := lifecycle.TimeLeft(time.Now(), lc.ShutdownTime, lc.TTLSecondsAfterFinished, finishedCondition)
+	return expired, timeLeft, lc
 }
 
 // reconcileActive handles the creation and updates of running sandboxes.

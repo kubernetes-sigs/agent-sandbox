@@ -1801,7 +1801,18 @@ func TestSandboxClaimWarmPoolDefaultLifecycle(t *testing.T) {
 					"expected claim to still exist")
 				if tc.lifecycle == nil {
 					require.Nil(t, updatedClaim.Spec.Lifecycle,
-						"in-memory lifecycle injection must not be persisted to the API server")
+						"effective lifecycle default must not be persisted to claim.Spec")
+				} else {
+					require.Equal(t, tc.lifecycle.ShutdownPolicy, updatedClaim.Spec.Lifecycle.ShutdownPolicy,
+						"explicit lifecycle policy must be preserved after reconciliation")
+				}
+				if !tc.finished {
+					expiredCond := meta.FindStatusCondition(updatedClaim.Status.Conditions,
+						string(sandboxv1beta1.SandboxConditionReady))
+					if expiredCond != nil {
+						require.NotEqual(t, extensionsv1beta1.ClaimExpiredReason, expiredCond.Reason,
+							"active claim must not be marked expired")
+					}
 				}
 			}
 		})

@@ -509,7 +509,7 @@ func main() {
 			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
 	}
 
-	configWatcher := &internalconfig.ConfigMapWatcher{
+	configWatcher := &internalconfig.MapWatcher{
 		Client:      mgr.GetClient(),
 		Namespace:   controllerNamespace,
 		StartupHash: internalconfig.HashConfigMapData(configMapData),

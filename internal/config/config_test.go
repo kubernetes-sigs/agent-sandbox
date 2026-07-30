@@ -194,9 +194,9 @@ func TestApplyConfigMapData_FloatFlag(t *testing.T) {
 
 func TestApplyConfigMapData_MultipleOverrides(t *testing.T) {
 	data := map[string]string{
-		"sandbox-concurrent-workers":        "200",
-		"sandbox-warm-pool-max-batch-size":  "500",
-		"enable-warm-pool-eviction":         "false",
+		"sandbox-concurrent-workers":       "200",
+		"sandbox-warm-pool-max-batch-size": "500",
+		"enable-warm-pool-eviction":        "false",
 	}
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)

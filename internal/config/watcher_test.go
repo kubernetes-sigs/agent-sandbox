@@ -66,7 +66,7 @@ func TestWatcher_NoChange(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(cm).Build()
 
-	w := &ConfigMapWatcher{
+	w := &MapWatcher{
 		Client:      c,
 		Namespace:   "test-ns",
 		StartupHash: hashData(data),
@@ -84,7 +84,7 @@ func TestWatcher_NoChange(t *testing.T) {
 func TestWatcher_IgnoresWrongName(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 
-	w := &ConfigMapWatcher{
+	w := &MapWatcher{
 		Client:      c,
 		Namespace:   "test-ns",
 		StartupHash: "empty",
@@ -101,7 +101,7 @@ func TestWatcher_IgnoresWrongName(t *testing.T) {
 func TestWatcher_NotFoundMatchesEmpty(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 
-	w := &ConfigMapWatcher{
+	w := &MapWatcher{
 		Client:      c,
 		Namespace:   "test-ns",
 		StartupHash: "empty",

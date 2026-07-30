@@ -24,32 +24,32 @@ package config
 import (
 	"flag"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
 // NonTunableFlags is the set of structural/identity flags that must NOT
 // be overridden via the ConfigMap. Everything else is tunable.
 var NonTunableFlags = map[string]bool{
-	"version":                  true,
-	"webhook-port":             true,
-	"webhook-cert-dir":         true,
-	"webhook-cert-name":        true,
-	"webhook-key-name":         true,
-	"webhook-service-name":     true,
-	"webhook-namespace":        true,
-	"manage-webhook-certs":     true,
-	"enable-webhook":           true,
-	"cluster-domain":           true,
-	"metrics-bind-address":     true,
+	"version":                   true,
+	"webhook-port":              true,
+	"webhook-cert-dir":          true,
+	"webhook-cert-name":         true,
+	"webhook-key-name":          true,
+	"webhook-service-name":      true,
+	"webhook-namespace":         true,
+	"manage-webhook-certs":      true,
+	"enable-webhook":            true,
+	"cluster-domain":            true,
+	"metrics-bind-address":      true,
 	"health-probe-bind-address": true,
-	"leader-elect":             true,
+	"leader-elect":              true,
 	"leader-election-namespace": true,
-	"extensions":               true,
-	"enable-tracing":           true,
-	"enable-pprof":             true,
-	"enable-pprof-debug":       true,
-	"cache-label-selectors":    true,
+	"extensions":                true,
+	"enable-tracing":            true,
+	"enable-pprof":              true,
+	"enable-pprof-debug":        true,
+	"cache-label-selectors":     true,
 }
 
 // ApplyConfigMapData applies overrides from a ConfigMap data map to the
@@ -65,7 +65,7 @@ func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Ove
 	for k := range data {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var errs []error
 	for _, name := range keys {
@@ -102,4 +102,3 @@ type Override struct {
 	Key   string
 	Value string
 }
-

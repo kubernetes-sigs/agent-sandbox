@@ -106,17 +106,49 @@ func BenchmarkResolveDNSFallback(b *testing.B) {
 	}
 }
 
+// TestDNSStubAnswersLoopback exercises the stub through a real
+// net.Resolver: A questions must yield 127.0.0.1 and AAAA questions ::1,
+// so the benchmark's DNS-path measurement rests on a responder that is
+// itself verified under plain `go test`.
+func TestDNSStubAnswersLoopback(t *testing.T) {
+	stubAddr := startDNSStub(t)
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", stubAddr)
+		},
+	}
+	ctx := context.Background()
+
+	v4, err := resolver.LookupIP(ctx, "ip4", "id.ns.svc.cluster.local.")
+	if err != nil || len(v4) == 0 {
+		t.Fatalf("A lookup: addrs=%v err=%v", v4, err)
+	}
+	if !v4[0].Equal(net.IPv4(127, 0, 0, 1)) {
+		t.Errorf("A lookup: got %v want 127.0.0.1", v4[0])
+	}
+
+	v6, err := resolver.LookupIP(ctx, "ip6", "id.ns.svc.cluster.local.")
+	if err != nil || len(v6) == 0 {
+		t.Fatalf("AAAA lookup: addrs=%v err=%v", v6, err)
+	}
+	if !v6[0].Equal(net.IPv6loopback) {
+		t.Errorf("AAAA lookup: got %v want ::1", v6[0])
+	}
+}
+
 // startDNSStub runs a minimal UDP DNS server on 127.0.0.1:0 that answers
 // every A/AAAA question immediately with a loopback address, and returns
 // its address. It exists so BenchmarkResolveDNSFallback measures the
 // resolver code path without depending on (or perturbing) real DNS.
-func startDNSStub(b *testing.B) string {
-	b.Helper()
+func startDNSStub(tb testing.TB) string {
+	tb.Helper()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		b.Fatalf("listen udp: %v", err)
+		tb.Fatalf("listen udp: %v", err)
 	}
-	b.Cleanup(func() { _ = pc.Close() })
+	tb.Cleanup(func() { _ = pc.Close() })
 
 	go func() {
 		buf := make([]byte, 512)

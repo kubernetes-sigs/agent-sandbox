@@ -56,12 +56,14 @@ spec:
           storage: 1Gi
 ---
 # Headless Service so the router can resolve box-a by its
-# (namespace, name) DNS name — box-a.default.svc.cluster.local. In
-# scoped-token mode this is the ONLY routing path the router accepts:
-# it rejects the X-Sandbox-UID cache fast-path and X-Sandbox-Pod-IP
-# override, because those could send a valid box-a token to a different
-# pod. Routing strictly by (namespace, name) keeps the dial target equal
-# to what the token authorizes.
+# (namespace, name) DNS name — box-a.default.svc.cluster.local.
+# Scoped-token mode rejects the X-Sandbox-UID cache fast-path and the
+# X-Sandbox-Pod-IP override, because either could send a valid box-a
+# token to a different pod; only resolution keyed on (namespace, name)
+# survives, which keeps the dial target equal to what the token
+# authorizes. The router prefers its cache's (namespace, name) index —
+# same key, same guarantee — and falls back to this DNS name when the
+# cache is disabled or hasn't seen the pod yet.
 apiVersion: v1
 kind: Service
 metadata:

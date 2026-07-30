@@ -50,15 +50,22 @@ Scoped-token mode also rejects the `X-Sandbox-UID` and `X-Sandbox-Pod-IP`
 routing headers, because each would let the proxy pick a dial target
 *other* than the `(namespace, name)` the token authorizes (a UID→IP cache
 lookup, or a raw IP) while `X-Sandbox-ID` still names the authorized box.
-So the router resolves purely by DNS name — which is why each sandbox
-here ships a headless `Service`. Routing by `(namespace, name)` keeps the
-pod actually reached equal to the one the token is scoped to.
+What's left is resolution keyed on `(namespace, name)` — exactly the
+identity the token authorizes — so the pod actually reached always equals
+the one the token is scoped to.
+
+Two paths satisfy that key, and the router tries them in order: the
+cache's `(namespace, name)` secondary index (`--cache-enabled=true`, the
+default; added in #1239), then the `<name>.<namespace>.svc` DNS form.
+Each sandbox here still ships a headless `Service` so the DNS fallback
+works on a router deployed without the informer cache — with the cache
+enabled it simply never gets used.
 
 ## Files
 
 | File | Role |
 |---|---|
-| [`sandbox.yaml`](sandbox.yaml) | `Sandbox` named `box-a` plus a headless `Service` (same name) so the router resolves it by `box-a.default.svc.cluster.local`. `automountServiceAccountToken: false` — the pod has no K8s credential to begin with. Runs the MCP server on port 8000, non-root, dropped caps, `RuntimeDefault` seccomp. |
+| [`sandbox.yaml`](sandbox.yaml) | `Sandbox` named `box-a` plus a headless `Service` (same name) so the router's DNS fallback resolves it as `box-a.default.svc.cluster.local`. `automountServiceAccountToken: false` — the pod has no K8s credential to begin with. Runs the MCP server on port 8000, non-root, dropped caps, `RuntimeDefault` seccomp. |
 | [`sandbox-box-b.yaml`](sandbox-box-b.yaml) | Identical second `Sandbox` + `Service`, `box-b` — the target for the negative (scoping) test. |
 | [`Dockerfile`](Dockerfile) | `python:3.11-slim` + `pip install mcp` + `mcp_server.py`. Runs continuously (unlike `mcp-server-sandbox`'s per-`kubectl-exec` process). |
 | [`mcp_server.py`](mcp_server.py) | MCP server over the `streamable-http` transport. Same `list_blobs` / `write_random_blob` / `read_blob` tools as `mcp-server-sandbox`, forked as a starting point. |
@@ -112,9 +119,10 @@ the router deployment, and the shared secret).
 - **Secret rotation.** One static HMAC secret, matching how `sandbox-router`
   started with a single TLS cert before hot-reload was added. Multi-key
   verification during rotation is a follow-up.
-- **A published router image with this authorizer.** Until the
-  `scoped-token` authorizer lands upstream, `run-test-kind.sh` builds
-  `sandbox-router` from source.
+- **A published router image with this authorizer.** The `scoped-token`
+  authorizer is on `main` (#1243) but not in any released
+  `sandbox-router-go` image yet, so `run-test-kind.sh` builds one from
+  source. Once a release carries it, the build step can be dropped.
 
 ## References
 

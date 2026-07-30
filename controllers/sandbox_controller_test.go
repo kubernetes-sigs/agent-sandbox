@@ -4716,19 +4716,19 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
 }
 
-func TestSandboxReconcilerAutoSuspendOptionB(t *testing.T) {
+func TestSandboxReconcilerAutoSuspendSpecImmutability(t *testing.T) {
 	pastTime := metav1.NewTime(time.Now().Add(-15 * time.Minute))
 	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "idle-sandbox-opt-b",
+			Name:      "idle-sandbox",
 			Namespace: "default",
 			UID:       sandboxUID,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 			Lifecycle: sandboxv1beta1.Lifecycle{
-				AutoSuspend: &sandboxv1beta1.AutoSuspendPolicy{
-					InactivityDuration: &metav1.Duration{Duration: 10 * time.Minute},
+				AutoSuspension: &sandboxv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: new(int32(600)),
 				},
 			},
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -4752,7 +4752,7 @@ func TestSandboxReconcilerAutoSuspendOptionB(t *testing.T) {
 		EnableAutoSuspend: true,
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "idle-sandbox-opt-b", Namespace: "default"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "idle-sandbox", Namespace: "default"}}
 	res, err := r.Reconcile(t.Context(), req)
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, res)
@@ -4760,7 +4760,7 @@ func TestSandboxReconcilerAutoSuspendOptionB(t *testing.T) {
 	var updated sandboxv1beta1.Sandbox
 	require.NoError(t, client.Get(t.Context(), req.NamespacedName, &updated))
 
-	// Option B invariant: Spec.OperatingMode must remain Running (user intent preserved)
+	// Spec.OperatingMode must remain Running (user intent preserved)
 	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
 
 	// Status condition reflects Suspended = True and Ready = False
@@ -4785,8 +4785,8 @@ func TestSandboxReconcilerAutoSuspendRequeue(t *testing.T) {
 		Spec: sandboxv1beta1.SandboxSpec{
 			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 			Lifecycle: sandboxv1beta1.Lifecycle{
-				AutoSuspend: &sandboxv1beta1.AutoSuspendPolicy{
-					InactivityDuration: &metav1.Duration{Duration: 10 * time.Minute},
+				AutoSuspension: &sandboxv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: new(int32(600)),
 				},
 			},
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{

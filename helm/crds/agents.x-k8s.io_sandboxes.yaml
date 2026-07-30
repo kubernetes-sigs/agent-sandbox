@@ -37,11 +37,12 @@ spec:
             type: object
           spec:
             properties:
-              autoSuspend:
+              autoSuspension:
                 properties:
-                  inactivityDuration:
-                    format: duration
-                    type: string
+                  inactivityTimeoutSeconds:
+                    format: int32
+                    minimum: 60
+                    type: integer
                 type: object
               operatingMode:
                 default: Running

@@ -157,8 +157,6 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 	s.log.V(4).Info("ext_proc received headers", "sandboxID", sandboxID, "sandboxNamespace", sandboxNamespace, "headerCount", len(headerMap))
 
 	if sandboxID != "" {
-		s.RecordActivity(sandboxNamespace + "/" + sandboxID)
-
 		if s.suspensionManagerURL != "" {
 			port := DefaultSandboxPort
 			if rawPort := headerMap["x-sandbox-port"]; rawPort != "" {
@@ -184,6 +182,8 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 				}
 			}
 		}
+
+		s.RecordActivity(sandboxNamespace + "/" + sandboxID)
 	}
 
 	var podIP string

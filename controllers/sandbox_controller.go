@@ -219,9 +219,10 @@ func (r *SandboxReconciler) shouldSuspend(sandbox *sandboxv1beta1.Sandbox) (bool
 	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
 		return true, 0
 	}
-	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspend != nil && sandbox.Spec.AutoSuspend.InactivityDuration != nil {
-		inactivityDuration := sandbox.Spec.AutoSuspend.InactivityDuration.Duration
-		if inactivityDuration > 0 {
+	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspension != nil && sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds != nil {
+		timeoutSec := *sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds
+		if timeoutSec > 0 {
+			inactivityDuration := time.Duration(timeoutSec) * time.Second
 			lastActivity := sandbox.Status.LastActivityTime
 			if lastActivity == nil {
 				return false, inactivityDuration
@@ -311,7 +312,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	sandboxDeleted := false
 	result := ctrl.Result{}
 
-	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspend != nil && sandbox.Spec.AutoSuspend.InactivityDuration != nil && sandbox.Spec.AutoSuspend.InactivityDuration.Duration > 0 && sandbox.Status.LastActivityTime == nil {
+	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspension != nil && sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds != nil && *sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds > 0 && sandbox.Status.LastActivityTime == nil {
 		now := metav1.Now()
 		sandbox.Status.LastActivityTime = &now
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {

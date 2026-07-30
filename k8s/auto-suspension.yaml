@@ -3,15 +3,9 @@
 # Auto-Suspension & Traffic-Triggered Resume Data-Plane Overlay
 # ==============================================================================
 #
-# IMPORTANT: To enable the control-plane reconciler and the :8090 REST server
-# in the core controller, ensure you start agent-sandbox-controller with:
-#   --enable-auto-suspend-and-resume=true
-#
 # - In Helm: set controller.enableAutoSuspendAndResume=true in values.yaml
 # - In deploy-kind: run `AUTO_SUSPENSION=true make deploy-kind` (injects flag automatically)
-# - In static manifests: run the following command to enable the flag on the controller:
-#   kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system \
-#     --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--enable-auto-suspend-and-resume=true"}]'
+# - In static manifests: run `kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--enable-auto-suspend-and-resume=true"}]'`
 # SECURITY NOTE: In v1beta1, port :8090 on the controller is unauthenticated.
 # A Kubernetes NetworkPolicy is automatically included at the bottom of this file
 # (#6) that restricts ingress to port :8090 exclusively to sandbox-router pods.
@@ -197,6 +191,8 @@ spec:
       port: 8080
 
 ---
+
+# 5. Expose suspension server port :8090 on agent-sandbox-controller Service
 
 apiVersion: v1
 kind: Service

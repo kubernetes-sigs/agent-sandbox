@@ -5,8 +5,8 @@ metadata:
   namespace: default
 spec:
   operatingMode: Running
-  autoSuspend:
-    inactivityDuration: 10m
+  autoSuspension:
+    inactivityTimeoutSeconds: 600
   podTemplate:
     spec:
       runtimeClassName: kata-qemu

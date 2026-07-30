@@ -205,11 +205,11 @@ Package v1beta1 contains API Schema definitions for the agents v1beta1 API group
 
 
 
-#### AutoSuspendPolicy
+#### AutoSuspensionPolicy
 
 
 
-AutoSuspendPolicy defines the automatic suspension configuration for a Sandbox.
+AutoSuspensionPolicy defines the automatic suspension configuration for a Sandbox.
 
 
 
@@ -219,7 +219,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `inactivityDuration` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#duration-v1-meta)_ | inactivityDuration is the duration of inactivity after which the sandbox is automatically suspended. |  | Format: duration <br />Optional: \{\} <br /> |
+| `inactivityTimeoutSeconds` _integer_ | inactivityTimeoutSeconds is the duration of inactivity in seconds after which the sandbox is automatically suspended.<br />Minimum value is 60 seconds (1 minute) to prevent rapid suspend/resume thrashing. |  | Minimum: 60 <br />Optional: \{\} <br /> |
 
 
 
@@ -257,7 +257,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `autoSuspend` _[AutoSuspendPolicy](#autosuspendpolicy)_ | autoSuspend specifies the automatic suspension policy for the Sandbox.<br />If present, the Sandbox will be automatically suspended after the configured inactivityDuration. |  | Optional: \{\} <br /> |
+| `autoSuspension` _[AutoSuspensionPolicy](#autosuspensionpolicy)_ | autoSuspension specifies the automatic suspension policy for the Sandbox.<br />If present, the Sandbox will be automatically suspended after the configured inactivityTimeoutSeconds. |  | Optional: \{\} <br /> |
 
 
 #### PersistentVolumeClaimTemplate
@@ -394,7 +394,7 @@ _Appears in:_
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for the Sandbox workload.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `autoSuspend` _[AutoSuspendPolicy](#autosuspendpolicy)_ | autoSuspend specifies the automatic suspension policy for the Sandbox.<br />If present, the Sandbox will be automatically suspended after the configured inactivityDuration. |  | Optional: \{\} <br /> |
+| `autoSuspension` _[AutoSuspensionPolicy](#autosuspensionpolicy)_ | autoSuspension specifies the automatic suspension policy for the Sandbox.<br />If present, the Sandbox will be automatically suspended after the configured inactivityTimeoutSeconds. |  | Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
 
 

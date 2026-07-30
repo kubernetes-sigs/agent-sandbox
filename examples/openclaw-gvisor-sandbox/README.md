@@ -303,7 +303,7 @@ sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-sandbox-auto-suspension.yaml
 
 ### 2. How OpenClaw Idles Out
 
-When no HTTP traffic arrives for 30 minutes (`.spec.autoSuspend.inactivityDuration: 30m`):
+When no HTTP traffic arrives for 30 minutes (`.spec.autoSuspension.inactivityTimeoutSeconds: 1800`):
 - `.spec.operatingMode` automatically transitions to `Suspended` and the Pod is garbage-collected.
 - The `workspaces-pvc` Persistent Volume Claim mounted at `/home/node/.openclaw/workspace` remains **100% intact**, preserving all agent workspace files, configurations, and conversation history.
 

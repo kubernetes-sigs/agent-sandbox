@@ -56,8 +56,8 @@ func TestSandboxReconcilerAutoSuspend(t *testing.T) {
 		Spec: agentsv1beta1.SandboxSpec{
 			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
 			Lifecycle: agentsv1beta1.Lifecycle{
-				AutoSuspend: &agentsv1beta1.AutoSuspendPolicy{
-					InactivityDuration: &metav1.Duration{Duration: 30 * time.Second},
+				AutoSuspension: &agentsv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: new(int32(30)),
 				},
 			},
 			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
@@ -94,7 +94,7 @@ func TestSandboxReconcilerAutoSuspend(t *testing.T) {
 	var updated agentsv1beta1.Sandbox
 	err = client.Get(context.Background(), req.NamespacedName, &updated)
 	require.NoError(t, err)
-	// Under Option B, Spec.OperatingMode stays Running, but status condition is Suspended
+	// Spec.OperatingMode stays Running, but status condition is Suspended
 	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
 	shouldSuspend, _ := reconciler.shouldSuspend(&updated)
 	assert.True(t, shouldSuspend)
@@ -113,8 +113,8 @@ func TestSandboxReconcilerInitializesLastActivityTime(t *testing.T) {
 		Spec: agentsv1beta1.SandboxSpec{
 			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
 			Lifecycle: agentsv1beta1.Lifecycle{
-				AutoSuspend: &agentsv1beta1.AutoSuspendPolicy{
-					InactivityDuration: &metav1.Duration{Duration: 30 * time.Minute},
+				AutoSuspension: &agentsv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: new(int32(1800)),
 				},
 			},
 			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{

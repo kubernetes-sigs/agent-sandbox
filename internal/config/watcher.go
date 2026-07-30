@@ -59,7 +59,7 @@ func (w *MapWatcher) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			}
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("reading %s ConfigMap: %w", configMapName, err)
 	}
 
 	currentHash := hashData(cm.Data)
@@ -73,12 +73,15 @@ func (w *MapWatcher) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 }
 
 func (w *MapWatcher) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.ConfigMap{}).
 		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 			return obj.GetName() == configMapName && obj.GetNamespace() == w.Namespace
 		})).
-		Complete(w)
+		Complete(w); err != nil {
+		return fmt.Errorf("registering ConfigMap watcher controller: %w", err)
+	}
+	return nil
 }
 
 // HashConfigMapData computes a deterministic hash of ConfigMap data for
@@ -88,15 +91,22 @@ func HashConfigMapData(data map[string]string) string {
 }
 
 func hashData(data map[string]string) string {
-	if len(data) == 0 {
-		return "empty"
-	}
-	h := sha256.New()
+	// Skip keys that cannot change effective runtime config via ApplyConfigMapData
+	// (doc keys and NonTunableFlags) so editing them does not trigger a reload.
+	// Unknown keys (e.g. allowed-label-domains) are still hashed — other readers
+	// may consume them even when they are not flag overrides.
 	keys := make([]string, 0, len(data))
 	for k := range data {
+		if IsIgnoredConfigKey(k) || NonTunableFlags[k] {
+			continue
+		}
 		keys = append(keys, k)
 	}
+	if len(keys) == 0 {
+		return "empty"
+	}
 	slices.Sort(keys)
+	h := sha256.New()
 	for _, k := range keys {
 		fmt.Fprintf(h, "%s=%s\n", k, data[k])
 	}

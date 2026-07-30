@@ -4,8 +4,11 @@ In agentic AI workflows and interactive development environments, sandboxes ofte
 
 Agent Sandbox provides **Auto-Suspension and Traffic-Triggered Resume**:
 
-* **Auto-Suspension**: When a sandbox remains inactive for a configured duration (`inactivityDuration`), the control plane automatically transitions its `.spec.operatingMode` to `Suspended`. The underlying Kubernetes Pod is deleted while the `Sandbox` resource, its stable identity, and any persistent volumes remain intact.
-* **Traffic-Triggered Resume**: When new HTTP requests arrive for a suspended sandbox, Envoy Gateway intercepts the request stream via the **Sandbox Router** (`ext_proc`). The router signals the control plane to thaw the sandbox (`.spec.operatingMode: Running`), waits for the new Pod to become ready, and transparently proxies the request without dropping client connections.
+* **Auto-Suspension**: When a sandbox remains inactive for a configured duration (`inactivityDuration`), the control plane automatically terminates its underlying Kubernetes Pod while preserving user intent (`.spec.operatingMode` remains `Running`). Sandbox suspension is indicated via status conditions:
+  - **`Ready` Condition**: Transitioned to `Status: "False"` with Reason **`SandboxSuspended`** (indicating the sandbox is not ready due to idle suspension).
+  - **`Suspended` Condition**: Transitioned to `Status: "True"` with Reason `PodTerminated`.
+  The `Sandbox` resource, its stable identity, and any persistent volumes remain intact.
+* **Traffic-Triggered Resume**: When new HTTP requests arrive for a suspended sandbox, Envoy Gateway intercepts the request stream via the **Sandbox Router** (`ext_proc`). The router signals the control plane (`POST /v1/sandboxes/resume`) to update `status.lastActivityTime` to `now()`, which prompts the controller to dynamically provision a fresh Pod, wait for it to become ready, and transparently proxy the request without dropping client connections.
 
 > [!NOTE]
 > **Controller-Level Opt-In & Network Security (Admin Guardrail)**: Auto-Suspension is disabled by default (`--enable-auto-suspend-and-resume=false`; `controller.enableAutoSuspendAndResume: false` in Helm). To use it, administrators explicitly enable the flag on the controller (which is protected out-of-the-box by a bundled Kubernetes `NetworkPolicy` isolating ingress to port `:8090` exclusively to `sandbox-router` pods). See [Security & Access Control (:8090 REST API)](#security--access-control-8090-rest-api) below for setup instructions.
@@ -23,7 +26,7 @@ flowchart TB
     Client -->|HTTP Request| EG
     EG -->|"1. gRPC ext_proc (check status)"| SR
     SR -->|"2. POST /v1/sandboxes/resume"| CTRL
-    CTRL -->|"3. creates Pod (operatingMode: Running)"| POD
+    CTRL -->|"3. creates Pod (lastActivityTime updated)"| POD
     EG -->|"4. forward HTTP request (:8080)"| SR
     SR -->|"5. proxy HTTP request to container"| POD
 
@@ -48,13 +51,14 @@ sequenceDiagram
 
     Note over CTRL,POD: 1. Auto-Suspension on Idle
     CTRL->>CTRL: inactivityDuration timer expires
-    CTRL->>POD: Delete Pod (operatingMode: Suspended)
+    CTRL->>POD: Delete Pod (status condition Ready: False, Reason: SandboxSuspended)
 
     Note over Client,POD: 2. Traffic-Triggered Resume
     Client->>EG: HTTP Request (X-Sandbox-ID header)
     EG->>SR: gRPC ext_proc check
     SR->>CTRL: POST /v1/sandboxes/resume
-    CTRL->>POD: Create Pod (operatingMode: Running)
+    CTRL->>CTRL: Update status.lastActivityTime = now()
+    CTRL->>POD: Create Pod (dynamic reconciliation)
     POD-->>SR: Pod Ready and IP registered in cache
     SR-->>EG: ext_proc allow / unpause stream
     EG->>SR: Forward HTTP Request (:8080)
@@ -216,7 +220,7 @@ curl -i -H "X-Sandbox-ID: demo-sandbox" -H "X-Sandbox-Namespace: default" http:/
 **What Happens Behind the Scenes:**
 1. Envoy Gateway intercepts the request and calls the `sandbox-router` `ext_proc` service (`:9002`).
 2. Recognizing that `demo-sandbox` is suspended, the router issues a `POST /v1/sandboxes/resume` request to the controller (`:8090`).
-3. The controller patches `.spec.operatingMode` back to `Running` and resets `status.lastActivityTime` to the current timestamp.
+3. The controller updates `status.lastActivityTime` to the current timestamp, which prompts the reconciler to provision a fresh Pod while `.spec.operatingMode` remains `Running`.
 4. Once the new Pod starts and registers its IP in the router's informer cache, `ext_proc` unpauses the request pipeline and proxies the request to the container.
 
 **Expected Output:**
@@ -248,7 +252,7 @@ Opting into Auto-Suspension and Traffic-Triggered Resume introduces tradeoffs be
   * **`sandbox-router` Deployment**: Runs as a lightweight Go gRPC service (`replicas: 1` by default in [k8s/auto-suspension.yaml](../k8s/auto-suspension.yaml), but can be scaled horizontally for high availability), consuming roughly **10m CPU** and **32Mi memory** per replica.
   * **Envoy Gateway**: Requires a running Gateway proxy (typically **100m CPU** and **128Mi memory** per replica).
   * **Net Cost Impact**: For clusters running multiple sandboxes, the infrastructure savings from suspending even 2–3 idle CPU/GPU pods vastly outweigh the fixed compute cost of the `sandbox-router` and Envoy Gateway.
-* **Persistent Storage Costs**: When a sandbox is suspended (`.spec.operatingMode: Suspended`), its underlying Kubernetes PersistentVolumeClaims (PVCs) remain bound to preserve state and workspace files. Storage costs for attached volumes continue to accrue while suspended.
+* **Persistent Storage Costs**: When a sandbox is suspended (`status.conditions[Suspended] = True`), its underlying Kubernetes PersistentVolumeClaims (PVCs) remain bound to preserve state and workspace files. Storage costs for attached volumes continue to accrue while suspended.
 
 ## Recommendations, Best Practices & Limitations
 
@@ -299,8 +303,11 @@ spec:
       port: 8090
 ```
 
-> [!IMPORTANT]
-> This `NetworkPolicy` is bundled as part of [k8s/auto-suspension.yaml](../k8s/auto-suspension.yaml) so your cluster is protected out-of-the-box. A future release will add native `TokenReview` / caller authentication to port `:8090`.
+> [!WARNING]
+> **CNI NetworkPolicy Enforcement & Security Posture**:
+> The `:8090` REST API (`/v1/sandboxes/resume` and `/v1/sandboxes/activity`) relies on Kubernetes `NetworkPolicy` enforcement to restrict ingress to `sandbox-router` pods. If your Kubernetes cluster CNI does not support or enforce `NetworkPolicy` (e.g., basic Flannel or cloud clusters with NetworkPolicy enforcement disabled), any pod on the cluster network can call port `:8090` and control sandbox states.
+> 
+> Native Kubernetes `TokenReview` or mTLS client certificate authentication will be added to port `:8090` in a follow-up release. On clusters without active CNI `NetworkPolicy` enforcement, ensure port `:8090` is isolated using CNI-native policies (e.g., Cilium or Calico) or service mesh authorization rules.
 
 ## Routing Header Reference
 

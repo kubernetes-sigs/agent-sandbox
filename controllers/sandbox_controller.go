@@ -212,6 +212,28 @@ type SandboxReconciler struct {
 	// for why this one piece of in-memory state is unavoidable and why
 	// losing it is harmless.
 	deferralClock deferredWriteClock
+	EnableAutoSuspend bool
+}
+
+func (r *SandboxReconciler) shouldSuspend(sandbox *sandboxv1beta1.Sandbox) (bool, time.Duration) {
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		return true, 0
+	}
+	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspend != nil && sandbox.Spec.AutoSuspend.InactivityDuration != nil {
+		inactivityDuration := sandbox.Spec.AutoSuspend.InactivityDuration.Duration
+		if inactivityDuration > 0 {
+			lastActivity := sandbox.Status.LastActivityTime
+			if lastActivity == nil {
+				return false, inactivityDuration
+			}
+			elapsed := time.Since(lastActivity.Time)
+			if elapsed >= inactivityDuration {
+				return true, 0
+			}
+			return false, inactivityDuration - elapsed
+		}
+	}
+	return false, 0
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -248,15 +270,18 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Start Tracing Span
-	initialAttrs := map[string]string{
-		"sandbox.name":      sandbox.Name,
-		"sandbox.namespace": sandbox.Namespace,
+	if r.Tracer != nil {
+		initialAttrs := map[string]string{
+			"sandbox.name":      sandbox.Name,
+			"sandbox.namespace": sandbox.Namespace,
+		}
+		if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
+			initialAttrs[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
+		}
+		var end func()
+		ctx, end = r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
+		defer end()
 	}
-	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
-		initialAttrs[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
-	}
-	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
-	defer end()
 
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.DeletionTimestamp.IsZero() {
@@ -266,16 +291,18 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
-	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+	if r.Tracer != nil {
+		tc := r.Tracer.GetTraceContext(ctx)
+		if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+			patch := client.MergeFrom(sandbox.DeepCopy())
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = make(map[string]string)
+			}
+			sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 
-		if err := r.Patch(ctx, sandbox, patch); err != nil {
-			return ctrl.Result{}, err
+			if err := r.Patch(ctx, sandbox, patch); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -283,6 +310,15 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var err error
 	sandboxDeleted := false
 	result := ctrl.Result{}
+
+	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspend != nil && sandbox.Spec.AutoSuspend.InactivityDuration != nil && sandbox.Spec.AutoSuspend.InactivityDuration.Duration > 0 && sandbox.Status.LastActivityTime == nil {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
+		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+			return ctrl.Result{}, statusUpdateErr
+		}
+		oldStatus = sandbox.Status.DeepCopy()
+	}
 
 	expired, _ := checkSandboxExpiry(sandbox, time.Now())
 	if expired {
@@ -329,6 +365,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				// Nothing pending (no drift, or the due write flushed):
 				// drop the deferral clock entry for this request.
 				r.deferralClock.clear(req.NamespacedName)
+			}
+		_, requeueAfterSuspend := r.shouldSuspend(sandbox)
+		if requeueAfterSuspend > 0 {
+			if result.RequeueAfter == 0 || requeueAfterSuspend < result.RequeueAfter {
+				result.RequeueAfter = requeueAfterSuspend
 			}
 		}
 	}
@@ -408,7 +449,6 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 }
 
 func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
-	// Initialize the Suspended condition which tracks only the suspension state, persisting once set.
 	suspended := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
@@ -417,7 +457,8 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 		Message:            "Sandbox is not suspended",
 	}
 
-	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+	shouldSuspend, _ := r.shouldSuspend(sandbox)
+	if !shouldSuspend {
 		return suspended
 	}
 
@@ -462,8 +503,8 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		return readyCondition
 	}
 
-	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
-	if isSuspended {
+	shouldSuspend, _ := r.shouldSuspend(sandbox)
+	if shouldSuspend {
 		readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
 		if pod != nil {
 			readyCondition.Message = "Sandbox is suspending"
@@ -1072,13 +1113,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+	shouldSuspend, _ := r.shouldSuspend(sandbox)
+	if shouldSuspend {
 		if pod != nil {
 			ownership, controllerRef := checkOwnership(pod, sandbox)
 			switch ownership {
 			case resourceOwnedBySandbox:
 				if pod.DeletionTimestamp.IsZero() {
-					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					logger.Info("Deleting Pod because Sandbox should be suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
 						return pod, fmt.Errorf("failed to delete pod: %w", err)
 					}

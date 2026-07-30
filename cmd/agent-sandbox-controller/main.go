@@ -473,7 +473,11 @@ func main() {
 		Scheme:            mgr.GetScheme(),
 		Tracer:            instrumenter,
 		ClusterDomain:     clusterDomain,
+<<<<<<< HEAD
 		WriteBehindWindow: sandboxWriteBehindWindow,
+=======
+		EnableAutoSuspend: enableAutoSuspendAndResume,
+>>>>>>> d6f6e74 (Address Janet's comments.)
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
@@ -488,14 +492,6 @@ func main() {
 	}
 
 	if enableAutoSuspendAndResume {
-		if err = (&controllers.SandboxAutoSuspensionReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "SandboxAutoSuspension")
-			os.Exit(1)
-		}
-
 		if suspensionServerAddr != "" {
 			suspensionSrv := controllers.NewSuspensionServer(mgr.GetClient(), mgr.GetLogger().WithName("suspension-server"))
 			srv := &http.Server{

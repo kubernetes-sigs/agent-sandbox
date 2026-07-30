@@ -43,7 +43,7 @@ func setupScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func TestSuspensionReconcilerAutoSuspend(t *testing.T) {
+func TestSandboxReconcilerAutoSuspend(t *testing.T) {
 	scheme := setupScheme(t)
 
 	pastTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
@@ -73,9 +73,11 @@ func TestSuspensionReconcilerAutoSuspend(t *testing.T) {
 	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
-	reconciler := &SandboxAutoSuspensionReconciler{
-		Client: client,
-		Scheme: scheme,
+	reconciler := &SandboxReconciler{
+		Client:            client,
+		Scheme:            scheme,
+		Tracer:            asmetrics.NewNoOp(),
+		EnableAutoSuspend: true,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "idle-sandbox", Namespace: "default"}}
@@ -86,10 +88,13 @@ func TestSuspensionReconcilerAutoSuspend(t *testing.T) {
 	var updated agentsv1beta1.Sandbox
 	err = client.Get(context.Background(), req.NamespacedName, &updated)
 	require.NoError(t, err)
-	assert.Equal(t, agentsv1beta1.SandboxOperatingModeSuspended, updated.Spec.OperatingMode)
+	// Under Option B, Spec.OperatingMode stays Running, but status condition is Suspended
+	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+	shouldSuspend, _ := reconciler.shouldSuspend(&updated)
+	assert.True(t, shouldSuspend)
 }
 
-func TestSuspensionReconcilerInitializesLastActivityTime(t *testing.T) {
+func TestSandboxReconcilerInitializesLastActivityTime(t *testing.T) {
 	scheme := setupScheme(t)
 
 	oldCreateTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
@@ -117,9 +122,11 @@ func TestSuspensionReconcilerInitializesLastActivityTime(t *testing.T) {
 	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
-	reconciler := &SandboxAutoSuspensionReconciler{
-		Client: client,
-		Scheme: scheme,
+	reconciler := &SandboxReconciler{
+		Client:            client,
+		Scheme:            scheme,
+		Tracer:            asmetrics.NewNoOp(),
+		EnableAutoSuspend: true,
 	}
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "old-sandbox", Namespace: "default"}}
@@ -219,7 +226,7 @@ func TestSuspensionServerActivityHandler(t *testing.T) {
 	assert.NotNil(t, updated.Status.LastActivityTime)
 }
 
-func TestSuspensionServerActivityHandlerErrors(t *testing.T) {
+func TestSuspensionServerActivityHandlerIgnoresNotFoundAndInvalidKeys(t *testing.T) {
 	scheme := setupScheme(t)
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 	srv := NewSuspensionServer(client, logr.Discard())
@@ -234,7 +241,7 @@ func TestSuspensionServerActivityHandlerErrors(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestSuspensionServerActivityHandlerClampsFutureTimestamp(t *testing.T) {

@@ -225,8 +225,8 @@ kubectl apply -f 05-simple-sandbox-auto-suspension.yaml
 ```
 
 This manifest creates a simple Hermes Agent `Sandbox` (`hermes-simple-auto-suspension`) configured with:
-- **`spec.autoSuspend.inactivityDuration: 10m`**: When idle for 10 minutes, the controller automatically patches `.spec.operatingMode = "Suspended"` and deletes the Pod (saving compute cost), while preserving the 1Gi `/opt/data` PVC in Kubernetes.
-- **Traffic-Triggered Resume**: When an HTTP request carrying `X-Sandbox-ID: hermes-simple-auto-suspension` reaches `sandbox-router`, the router transparently wakes the sandbox back to `Running`, boots a fresh pod with the PVC re-attached, and proxies the request without dropping the connection.
+- **`spec.autoSuspension.inactivityTimeoutSeconds: 600`**: When idle for 600 seconds (10 minutes), the controller automatically terminates the Pod (saving compute cost) while `.spec.operatingMode` remains `Running`, preserving the 1Gi `/opt/data` PVC in Kubernetes.
+- **Traffic-Triggered Resume**: When an HTTP request carrying `X-Sandbox-ID: hermes-simple-auto-suspension` reaches `sandbox-router`, the router transparently wakes the sandbox, boots a fresh pod with the PVC re-attached, and proxies the request without dropping the connection.
 
 ## 6. Policy enforcement: rejection beats silent cold starts
 

@@ -41,9 +41,11 @@ spec:
         - name: webhook
           containerPort: 9443
           protocol: TCP
+        {{- if .Values.controller.enableAutoSuspendAndResume }}
         - name: suspension
           containerPort: 8090
           protocol: TCP
+        {{- end }}
 
         livenessProbe:
           httpGet:

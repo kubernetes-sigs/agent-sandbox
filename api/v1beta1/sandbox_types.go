@@ -233,12 +233,13 @@ const (
 	ShutdownPolicyRetain ShutdownPolicy = "Retain"
 )
 
-// AutoSuspendPolicy defines the automatic suspension configuration for a Sandbox.
-type AutoSuspendPolicy struct {
-	// inactivityDuration is the duration of inactivity after which the sandbox is automatically suspended.
-	// +kubebuilder:validation:Format=duration
+// AutoSuspensionPolicy defines the automatic suspension configuration for a Sandbox.
+type AutoSuspensionPolicy struct {
+	// inactivityTimeoutSeconds is the duration of inactivity in seconds after which the sandbox is automatically suspended.
+	// Minimum value is 60 seconds (1 minute) to prevent rapid suspend/resume thrashing.
+	// +kubebuilder:validation:Minimum=60
 	// +optional
-	InactivityDuration *metav1.Duration `json:"inactivityDuration,omitempty"`
+	InactivityTimeoutSeconds *int32 `json:"inactivityTimeoutSeconds,omitempty"`
 }
 
 // Lifecycle defines the lifecycle management for the Sandbox.
@@ -254,10 +255,10 @@ type Lifecycle struct {
 	// +optional
 	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 
-	// autoSuspend specifies the automatic suspension policy for the Sandbox.
-	// If present, the Sandbox will be automatically suspended after the configured inactivityDuration.
+	// autoSuspension specifies the automatic suspension policy for the Sandbox.
+	// If present, the Sandbox will be automatically suspended after the configured inactivityTimeoutSeconds.
 	// +optional
-	AutoSuspend *AutoSuspendPolicy `json:"autoSuspend,omitempty"`
+	AutoSuspension *AutoSuspensionPolicy `json:"autoSuspension,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.

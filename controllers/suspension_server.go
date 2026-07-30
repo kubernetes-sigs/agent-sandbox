@@ -33,8 +33,8 @@ import (
 )
 
 func getInactivityDuration(sandbox *agentsv1beta1.Sandbox) time.Duration {
-	if sandbox.Spec.AutoSuspend != nil && sandbox.Spec.AutoSuspend.InactivityDuration != nil {
-		return sandbox.Spec.AutoSuspend.InactivityDuration.Duration
+	if sandbox.Spec.AutoSuspension != nil && sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds != nil {
+		return time.Duration(*sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds) * time.Second
 	}
 	return 0
 }

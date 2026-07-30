@@ -8,9 +8,9 @@ metadata:
   namespace: hermes-demo
 spec:
   operatingMode: Running
-  # Automatically scale Pod to 0 after 10 minutes of inactivity
-  autoSuspend:
-    inactivityDuration: 10m
+  # Automatically scale Pod to 0 after 600 seconds (10 minutes) of inactivity
+  autoSuspension:
+    inactivityTimeoutSeconds: 600
   podTemplate:
     spec:
       containers:

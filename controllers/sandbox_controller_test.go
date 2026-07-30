@@ -4715,3 +4715,111 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
 }
+
+func TestSandboxReconcilerAutoSuspendOptionB(t *testing.T) {
+	pastTime := metav1.NewTime(time.Now().Add(-15 * time.Minute))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "idle-sandbox-opt-b",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				AutoSuspend: &sandboxv1beta1.AutoSuspendPolicy{
+					InactivityDuration: &metav1.Duration{Duration: 10 * time.Minute},
+				},
+			},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			LastActivityTime: &pastTime,
+		},
+	}
+
+	client := newFakeClient(sandbox)
+	r := &SandboxReconciler{
+		Client:            client,
+		Scheme:            Scheme,
+		Tracer:            asmetrics.NewNoOp(),
+		EnableAutoSuspend: true,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "idle-sandbox-opt-b", Namespace: "default"}}
+	res, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	var updated sandboxv1beta1.Sandbox
+	require.NoError(t, client.Get(t.Context(), req.NamespacedName, &updated))
+
+	// Option B invariant: Spec.OperatingMode must remain Running (user intent preserved)
+	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+
+	// Status condition reflects Suspended = True and Ready = False
+	suspendedCond := meta.FindStatusCondition(updated.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	require.NotNil(t, suspendedCond)
+	assert.Equal(t, metav1.ConditionTrue, suspendedCond.Status)
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonSuspended, readyCond.Reason)
+}
+
+func TestSandboxReconcilerAutoSuspendRequeue(t *testing.T) {
+	pastTime := metav1.NewTime(time.Now().Add(-3 * time.Minute))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "active-sandbox-requeue",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				AutoSuspend: &sandboxv1beta1.AutoSuspendPolicy{
+					InactivityDuration: &metav1.Duration{Duration: 10 * time.Minute},
+				},
+			},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			LastActivityTime: &pastTime,
+		},
+	}
+
+	client := newFakeClient(sandbox)
+	r := &SandboxReconciler{
+		Client:            client,
+		Scheme:            Scheme,
+		Tracer:            asmetrics.NewNoOp(),
+		EnableAutoSuspend: true,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "active-sandbox-requeue", Namespace: "default"}}
+	res, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	// Expect RequeueAfter around 7 minutes (approx 420s)
+	assert.Positive(t, res.RequeueAfter)
+	assert.LessOrEqual(t, res.RequeueAfter, 7*time.Minute)
+	assert.GreaterOrEqual(t, res.RequeueAfter, 6*time.Minute)
+
+	var updated sandboxv1beta1.Sandbox
+	require.NoError(t, client.Get(t.Context(), req.NamespacedName, &updated))
+	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+}

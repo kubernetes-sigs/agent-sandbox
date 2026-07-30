@@ -430,10 +430,11 @@ func main() {
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
 	if err = (&controllers.SandboxReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Tracer:        instrumenter,
-		ClusterDomain: clusterDomain,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Tracer:            instrumenter,
+		ClusterDomain:     clusterDomain,
+		EnableAutoSuspend: enableAutoSuspendAndResume,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
@@ -448,14 +449,6 @@ func main() {
 	}
 
 	if enableAutoSuspendAndResume {
-		if err = (&controllers.SandboxAutoSuspensionReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-		}).SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create controller", "controller", "SandboxAutoSuspension")
-			os.Exit(1)
-		}
-
 		if suspensionServerAddr != "" {
 			suspensionSrv := controllers.NewSuspensionServer(mgr.GetClient(), mgr.GetLogger().WithName("suspension-server"))
 			srv := &http.Server{

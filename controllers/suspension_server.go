@@ -15,7 +15,6 @@
 package controllers
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,96 +25,18 @@ import (
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
-
-// SandboxAutoSuspensionReconciler reconciles Sandbox objects to enforce auto-suspension rules based on last activity.
-type SandboxAutoSuspensionReconciler struct {
-	client.Client
-	Scheme *runtime.Scheme
-}
-
-// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
-
-// Reconcile evaluates sandbox idleness against inactivityDuration / idle-timeout annotation and patches operatingMode to Suspended.
-func (r *SandboxAutoSuspensionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	var sandbox agentsv1beta1.Sandbox
-	if err := r.Get(ctx, req.NamespacedName, &sandbox); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, err
-	}
-
-	if sandbox.Spec.OperatingMode == agentsv1beta1.SandboxOperatingModeSuspended {
-		return ctrl.Result{}, nil
-	}
-
-	inactivityDuration := getInactivityDuration(&sandbox)
-	if inactivityDuration <= 0 {
-		return ctrl.Result{}, nil
-	}
-
-	lastActivity := sandbox.Status.LastActivityTime
-	if lastActivity == nil {
-		now := metav1.Now()
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		sandbox.Status.LastActivityTime = &now
-		if err := r.Status().Patch(ctx, &sandbox, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-		lastActivity = &now
-	}
-
-	elapsed := time.Since(lastActivity.Time)
-	if elapsed >= inactivityDuration {
-		logger.Info("auto-suspending sandbox due to idleness",
-			"sandbox", req.NamespacedName,
-			"elapsed", elapsed,
-			"inactivityDuration", inactivityDuration,
-		)
-		patch := client.MergeFromWithOptions(sandbox.DeepCopy(), client.MergeFromWithOptimisticLock{})
-		sandbox.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeSuspended
-		if err := r.Patch(ctx, &sandbox, patch); err != nil {
-			if apierrors.IsConflict(err) {
-				logger.V(4).Info("conflict patching operatingMode to Suspended; requeuing to re-evaluate lastActivityTime", "sandbox", req.NamespacedName)
-				return ctrl.Result{Requeue: true}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("failed patching sandbox to suspended: %w", err)
-		}
-		return ctrl.Result{}, nil
-	}
-
-	remaining := inactivityDuration - elapsed
-	logger.V(4).Info("sandbox active; requeuing for idle evaluation",
-		"sandbox", req.NamespacedName,
-		"remaining", remaining,
-	)
-	return ctrl.Result{RequeueAfter: remaining}, nil
-}
 
 func getInactivityDuration(sandbox *agentsv1beta1.Sandbox) time.Duration {
 	if sandbox.Spec.AutoSuspend != nil && sandbox.Spec.AutoSuspend.InactivityDuration != nil {
 		return sandbox.Spec.AutoSuspend.InactivityDuration.Duration
 	}
 	return 0
-}
-
-func (r *SandboxAutoSuspensionReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1beta1.Sandbox{}).
-		Named("sandbox-auto-suspension").
-		Complete(r)
 }
 
 // SuspensionServer provides HTTP endpoints for auto-resume signaling and activity timestamp updates.
@@ -185,55 +106,32 @@ func (s *SuspensionServer) handleResume(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if sandbox.Spec.OperatingMode != agentsv1beta1.SandboxOperatingModeRunning {
-		// 1. Update Status.LastActivityTime FIRST so that when Spec.OperatingMode
-		// transitions to Running, the reconciler sees the fresh timestamp and does not
-		// instantly re-suspend due to old elapsed inactivity. Retry on conflict so we
-		// don't abort due to concurrent updates.
-		err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			var latest agentsv1beta1.Sandbox
-			if err := s.Get(ctx, nsName, &latest); err != nil {
-				return err
-			}
-			statusPatch := client.MergeFrom(latest.DeepCopy())
-			now := metav1.Now()
-			latest.Status.LastActivityTime = &now
-			return s.Status().Patch(ctx, &latest, statusPatch)
-		})
-		if err != nil {
-			s.log.Error(err, "failed updating lastActivityTime on resume", "sandbox", nsName)
-			http.Error(w, "failed updating lastActivityTime: "+err.Error(), http.StatusInternalServerError)
-			return
+	// Update Status.LastActivityTime on resume so the reconciler sees the fresh timestamp
+	// and does not evaluate the sandbox as idle.
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		var latest agentsv1beta1.Sandbox
+		if err := s.Get(ctx, nsName, &latest); err != nil {
+			return err
 		}
-
-		// 2. Patch Spec.OperatingMode to Running, retrying on conflict so we never
-		// leave the Sandbox in Suspended with a fresh LastActivityTime.
-		err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			var latest agentsv1beta1.Sandbox
-			if err := s.Get(ctx, nsName, &latest); err != nil {
-				return err
-			}
-			if latest.Spec.OperatingMode == agentsv1beta1.SandboxOperatingModeRunning {
-				return nil
-			}
-			patch := client.MergeFrom(latest.DeepCopy())
-			latest.Spec.OperatingMode = agentsv1beta1.SandboxOperatingModeRunning
-			return s.Patch(ctx, &latest, patch)
-		})
-		if err != nil {
-			s.log.Error(err, "failed patching sandbox operatingMode to Running", "sandbox", nsName)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.log.Info("resumed sandbox via API request and reset lastActivityTime", "sandbox", nsName)
+		statusPatch := client.MergeFrom(latest.DeepCopy())
+		now := metav1.Now()
+		latest.Status.LastActivityTime = &now
+		return s.Status().Patch(ctx, &latest, statusPatch)
+	})
+	if err != nil {
+		s.log.Error(err, "failed updating lastActivityTime on resume", "sandbox", nsName)
+		http.Error(w, "failed updating lastActivityTime: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
+
+	s.log.Info("resumed sandbox via API request and reset lastActivityTime", "sandbox", nsName)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"status":  "resuming",
 		"sandbox": req.Name,
-		"message": "Sandbox operatingMode patched to Running successfully",
+		"message": "Sandbox lastActivityTime updated and resumed successfully",
 	})
 }
 
@@ -284,24 +182,18 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 				}
 				parts := strings.Split(item.key, "/")
 				if len(parts) != 2 {
-					errsMu.Lock()
-					errs = append(errs, fmt.Sprintf("invalid sandbox key format: %s", item.key))
-					errsMu.Unlock()
+					s.log.V(4).Info("skipping activity update: invalid sandbox key format", "key", item.key)
 					continue
 				}
 				ns, name := parts[0], parts[1]
 				if !validDNSLabel(ns) || !validDNSLabel(name) {
-					errsMu.Lock()
-					errs = append(errs, fmt.Sprintf("invalid sandbox namespace or name format: %s", item.key))
-					errsMu.Unlock()
+					s.log.V(4).Info("skipping activity update: invalid sandbox namespace or name format", "key", item.key)
 					continue
 				}
 
 				parsedTime, err := time.Parse(time.RFC3339, item.tsStr)
 				if err != nil {
-					errsMu.Lock()
-					errs = append(errs, fmt.Sprintf("invalid RFC3339 timestamp for %s: %v", item.key, err))
-					errsMu.Unlock()
+					s.log.V(4).Info("skipping activity update: invalid RFC3339 timestamp", "key", item.key, "error", err)
 					continue
 				}
 				if now := time.Now(); parsedTime.After(now) {
@@ -315,6 +207,10 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 					}
 					var sandbox agentsv1beta1.Sandbox
 					if getErr := s.Get(ctx, nsName, &sandbox); getErr != nil {
+						if apierrors.IsNotFound(getErr) {
+							s.log.V(4).Info("ignoring activity update for deleted sandbox", "sandbox", nsName)
+							return nil
+						}
 						return getErr
 					}
 

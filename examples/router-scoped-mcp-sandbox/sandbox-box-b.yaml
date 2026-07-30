@@ -62,3 +62,27 @@ spec:
   - name: mcp
     port: 8000
     targetPort: mcp
+---
+# Router-only ingress, same as box-a's — see sandbox.yaml for why the
+# token boundary depends on it. Note this also stops box-a's pod from
+# reaching box-b's MCP port directly: the 403 the scoping test asserts
+# is the router refusing to proxy, and this keeps that from being
+# routable around at the network layer either.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: box-b-router-only
+spec:
+  podSelector:
+    matchLabels:
+      router-scoped-mcp/sandbox: box-b
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: sandbox-router
+          app.kubernetes.io/component: sandbox-router
+    ports:
+    - protocol: TCP
+      port: 8000

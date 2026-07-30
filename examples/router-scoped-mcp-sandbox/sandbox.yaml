@@ -76,3 +76,41 @@ spec:
   - name: mcp
     port: 8000
     targetPort: mcp
+---
+# The MCP server itself has no authentication: the scoped token is
+# checked by sandbox-router, not by mcp_server.py. So the token boundary
+# only holds as long as the router is the only way to reach port 8000 —
+# otherwise any pod in the cluster dials the Pod IP directly and gets
+# unauthenticated read/write on this sandbox's PVC.
+#
+# This policy makes the router the sole ingress path. It is what lets
+# the example claim a credential boundary rather than just a
+# credential-checking proxy in front of an open port.
+#
+# Enforcement is the CNI's job, and kind's default kindnetd does not
+# enforce NetworkPolicy in every version — run-test-kind.sh therefore
+# applies this but does not assert it. On a cluster with an enforcing
+# CNI (Calico, Cilium, kindnet with its NetworkPolicy support enabled),
+# a direct dial to port 8000 from any non-router pod times out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: box-a-router-only
+spec:
+  podSelector:
+    matchLabels:
+      router-scoped-mcp/sandbox: box-a
+  policyTypes: ["Ingress"]
+  ingress:
+  # Matches the pod labels sandbox-router/deploy/deployment.yaml stamps
+  # on the router pods. Both boxes and the router live in `default`
+  # here, so a podSelector alone is the whole rule; across namespaces
+  # this needs a namespaceSelector for the router's namespace too.
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: sandbox-router
+          app.kubernetes.io/component: sandbox-router
+    ports:
+    - protocol: TCP
+      port: 8000

@@ -61,12 +61,28 @@ Each sandbox here still ships a headless `Service` so the DNS fallback
 works on a router deployed without the informer cache — with the cache
 enabled it simply never gets used.
 
+### The router has to be the only way in
+
+`mcp_server.py` authenticates nothing. The scoped token is checked by
+the router, so the boundary this example is about holds only while the
+router is the sole path to port 8000 — otherwise any pod in the cluster
+dials the Pod IP directly and gets unauthenticated read/write on the
+sandbox's PVC, token or no token. Each box therefore ships a
+`NetworkPolicy` admitting ingress on 8000 only from pods carrying
+`sandbox-router`'s labels.
+
+Enforcement is the CNI's, not the API server's: kind's default kindnetd
+does not enforce `NetworkPolicy` in every version, so `run-test-kind.sh`
+applies these policies but does not assert them. On a cluster with an
+enforcing CNI (Calico, Cilium, or kindnet with its `NetworkPolicy`
+support enabled), a direct dial to 8000 from a non-router pod times out.
+
 ## Files
 
 | File | Role |
 |---|---|
-| [`sandbox.yaml`](sandbox.yaml) | `Sandbox` named `box-a` plus a headless `Service` (same name) so the router's DNS fallback resolves it as `box-a.default.svc.cluster.local`. `automountServiceAccountToken: false` — the pod has no K8s credential to begin with. Runs the MCP server on port 8000, non-root, dropped caps, `RuntimeDefault` seccomp. |
-| [`sandbox-box-b.yaml`](sandbox-box-b.yaml) | Identical second `Sandbox` + `Service`, `box-b` — the target for the negative (scoping) test. |
+| [`sandbox.yaml`](sandbox.yaml) | `Sandbox` named `box-a`, a headless `Service` (same name) so the router's DNS fallback resolves it as `box-a.default.svc.cluster.local`, and a `NetworkPolicy` making the router the only thing that can reach port 8000. `automountServiceAccountToken: false` — the pod has no K8s credential to begin with. Runs the MCP server on port 8000, non-root, dropped caps, `RuntimeDefault` seccomp. |
+| [`sandbox-box-b.yaml`](sandbox-box-b.yaml) | Identical second `Sandbox` + `Service` + `NetworkPolicy`, `box-b` — the target for the negative (scoping) test. |
 | [`Dockerfile`](Dockerfile) | `python:3.11-slim` + `pip install mcp` + `mcp_server.py`. Runs continuously (unlike `mcp-server-sandbox`'s per-`kubectl-exec` process). |
 | [`mcp_server.py`](mcp_server.py) | MCP server over the `streamable-http` transport. Same `list_blobs` / `write_random_blob` / `read_blob` tools as `mcp-server-sandbox`, forked as a starting point. |
 | [`client.py`](client.py) | Host-side MCP client. Talks to the router over plain HTTP with the `X-Sandbox-*` routing headers plus `Authorization: Bearer <token>` — no `kubectl`, no `ssh`, anywhere in this file. The negative tests assert the exact status code (403 wrong sandbox, 401 forged/expired), not just "some failure". |

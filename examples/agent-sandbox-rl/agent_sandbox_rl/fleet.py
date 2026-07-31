@@ -672,28 +672,32 @@ class SandboxFleet:
       return
     with ThreadPoolExecutor(max_workers=workers) as ex:
       futures = [ex.submit(self._unwarm_entry, e) for e in entries]
+      err = None
       for f in as_completed(futures):
         try:
           f.result()
-        except Exception:  # noqa: BLE001
-          pass
+        except BaseException as exc:  # noqa: BLE001 — surface first
+          logger.exception("Failed to unwarm entry: %s", exc)
+          err = err or exc
+      if err is not None:
+        raise err
 
   def _unwarm_entry(self, entry) -> None:
     """Tear down a single plan entry's warm pool and template, releasing replicas."""
+    with self._lock:
+      if entry.image not in self._warmed:
+        return                                 # already unwarmed — don't double-release
+      reps = self._warmed.pop(entry.image)
     c = self.registry.get(entry.cluster)
     try:
       c.resources.delete_warmpool(entry.pool)
-    except Exception:  # noqa: BLE001
-      pass
-    try:
       c.resources.delete_template(entry.template)
-    except Exception:  # noqa: BLE001
-      pass
-    with self._lock:
-      reps = self._warmed.pop(entry.image, 0)
-    if reps:
-      c.release_replicas(reps)
-      self._obs.warm_remove(entry.cluster, reps)
+    except BaseException:
+      with self._lock:
+        self._warmed[entry.image] = reps
+      raise
+    c.release_replicas(reps)
+    self._obs.warm_remove(entry.cluster, reps)
 
   def unwarm_image(self, image: str) -> None:
     """Tear down one image's pool + template. **Idempotent**: a no-op if the image
@@ -706,15 +710,7 @@ class SandboxFleet:
     entry = (self.plan_ or self.plan()).for_image(image)
     if entry is None:
       return                                   # locate the pool before mutating state
-    with self._lock:
-      if image not in self._warmed:
-        return                                 # already unwarmed — don't double-release
-      reps = self._warmed.pop(image)
-    c = self.registry.get(entry.cluster)
-    c.resources.delete_warmpool(entry.pool)
-    c.resources.delete_template(entry.template)
-    c.release_replicas(reps)
-    self._obs.warm_remove(entry.cluster, reps)
+    self._unwarm_entry(entry)
 
   def set_pool_replicas(self, image: str, replicas: int) -> None:
     """Patch an image's warm pool to ``replicas`` (scale up or down) without

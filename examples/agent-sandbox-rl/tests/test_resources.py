@@ -97,6 +97,35 @@ def test_colocate_composes_with_extra_pod_spec_affinity():
   assert "podAffinity" in aff                  # colocation NOT clobbered
 
 
+def test_extra_pod_spec_empty_containers_preserves_base():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": []}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 1
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+
+
+def test_extra_pod_spec_merges_primary_container_and_appends_sidecars():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [
+      {"env": [{"name": "KEY", "value": "VAL"}]},
+      {"name": "sidecar", "image": "sidecar:v1"},
+  ]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 2
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+  assert pod["containers"][0]["env"] == [{"name": "KEY", "value": "VAL"}]
+  assert pod["containers"][1]["name"] == "sidecar"
+  assert pod["containers"][1]["image"] == "sidecar:v1"
+
+
 def test_ensure_template_noop_when_present():
   r = _resources()
   r.custom_api.get_namespaced_custom_object.return_value = {"metadata": {"name": TNAME}}

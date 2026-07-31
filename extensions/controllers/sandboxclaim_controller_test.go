@@ -1243,6 +1243,12 @@ func TestSandboxClaimReconcileRequeuesForActiveTTL(t *testing.T) {
 	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
 	require.NoError(t, err)
 	require.InDelta(t, 30*time.Second, result.RequeueAfter, float64(time.Second))
+
+	fetched := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched))
+	require.NotNil(t, fetched.Spec.Lifecycle)
+	require.Equal(t, extensionsv1beta1.ShutdownPolicyDelete, fetched.Spec.Lifecycle.ShutdownPolicy)
+	require.Equal(t, createdAt.Add(time.Duration(ttl)*time.Second), fetched.Spec.Lifecycle.ShutdownTime.Time)
 }
 
 func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
@@ -1266,7 +1272,91 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 	fetched := &extensionsv1beta1.SandboxClaim{}
 	err = client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched)
 	require.True(t, k8errors.IsNotFound(err))
-	require.Equal(t, "Normal "+extensionsv1beta1.ClaimExpiredReason+" Deleting Claim because ttlSecondsAfterCreated expired", <-fakeRecorder.Events)
+	require.Equal(t, "Normal "+extensionsv1beta1.ClaimExpiredReason+" Deleting Claim (ShutdownPolicy=Delete)", <-fakeRecorder.Events)
+}
+
+func TestSandboxClaimInitializeLifecycleFromTTL(t *testing.T) {
+	ttl := int32(60)
+	createdAt := metav1.NewTime(time.Now().Add(-30 * time.Second).Truncate(time.Second))
+	explicitShutdownTime := metav1.NewTime(createdAt.Add(2 * time.Hour))
+
+	testCases := []struct {
+		name               string
+		lifecycle          *extensionsv1beta1.Lifecycle
+		wantPolicy         extensionsv1beta1.ShutdownPolicy
+		wantShutdownTime   metav1.Time
+		wantInitialPatches int
+	}{
+		{
+			name:               "creates lifecycle with delete policy",
+			wantPolicy:         extensionsv1beta1.ShutdownPolicyDelete,
+			wantShutdownTime:   metav1.NewTime(createdAt.Add(time.Duration(ttl) * time.Second)),
+			wantInitialPatches: 1,
+		},
+		{
+			name: "preserves existing lifecycle policy",
+			lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
+			},
+			wantPolicy:         extensionsv1beta1.ShutdownPolicyRetain,
+			wantShutdownTime:   metav1.NewTime(createdAt.Add(time.Duration(ttl) * time.Second)),
+			wantInitialPatches: 1,
+		},
+		{
+			name: "preserves explicit shutdown time",
+			lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDeleteForeground,
+				ShutdownTime:   &explicitShutdownTime,
+			},
+			wantPolicy:         extensionsv1beta1.ShutdownPolicyDeleteForeground,
+			wantShutdownTime:   explicitShutdownTime,
+			wantInitialPatches: 0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := newScheme(t)
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "ttl-lifecycle-claim",
+					Namespace:         "default",
+					CreationTimestamp: createdAt,
+				},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					TTLSecondsAfterCreated: &ttl,
+					Lifecycle:              tc.lifecycle,
+				},
+			}
+
+			patches := 0
+			rawClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+			fakeClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok {
+						patches++
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			reconciler := &SandboxClaimReconciler{Client: fakeClient}
+
+			current := &extensionsv1beta1.SandboxClaim{}
+			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(claim), current))
+			require.NoError(t, reconciler.initializeLifecycleFromTTL(context.Background(), current))
+			require.Equal(t, tc.wantInitialPatches, patches)
+
+			persisted := &extensionsv1beta1.SandboxClaim{}
+			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(claim), persisted))
+			require.NotNil(t, persisted.Spec.Lifecycle)
+			require.Equal(t, tc.wantPolicy, persisted.Spec.Lifecycle.ShutdownPolicy)
+			require.NotNil(t, persisted.Spec.Lifecycle.ShutdownTime)
+			require.Equal(t, tc.wantShutdownTime, *persisted.Spec.Lifecycle.ShutdownTime)
+
+			require.NoError(t, reconciler.initializeLifecycleFromTTL(context.Background(), current))
+			require.Equal(t, tc.wantInitialPatches, patches)
+		})
+	}
 }
 
 // TestSandboxClaimCleanupPolicy verifies that the Claim deletes itself

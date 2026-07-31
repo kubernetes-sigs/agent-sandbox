@@ -219,24 +219,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	claimTTLExpired, claimTTLTimeLeft := lifecycle.TimeLeftAfterCreated(time.Now(), claim.CreationTimestamp, claim.Spec.TTLSecondsAfterCreated)
-	if claimTTLExpired {
-		logger.Info("Deleting SandboxClaim because ttlSecondsAfterCreated expired", "claim", claim.Name)
-		if r.Recorder != nil {
-			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1beta1.ClaimExpiredReason, "TTLExpired", "Deleting Claim because ttlSecondsAfterCreated expired")
-		}
-		if err := r.Delete(ctx, claim, client.Preconditions{UID: &claim.UID}); err != nil && !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-	if claimTTLTimeLeft > 0 {
-		defer func() {
-			if reconcileErr == nil && (result.RequeueAfter == 0 || claimTTLTimeLeft < result.RequeueAfter) {
-				result.RequeueAfter = claimTTLTimeLeft
-				logger.V(2).Info("Requeueing SandboxClaim for ttlSecondsAfterCreated", "claim", claim.Name, "requeueAfter", result.RequeueAfter)
-			}
-		}()
+	if err := r.initializeLifecycleFromTTL(ctx, claim); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Initialize trace ID and observation time for active resources missing them.
@@ -388,6 +372,27 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	errs := errors.Join(reconcileErr, metricsErr)
 	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
 	return result, errs
+}
+
+// initializeLifecycleFromTTL derives a lifecycle shutdown time for age-based TTL claims.
+func (r *SandboxClaimReconciler) initializeLifecycleFromTTL(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	if claim.Spec.TTLSecondsAfterCreated == nil || claim.CreationTimestamp.IsZero() ||
+		(claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownTime != nil) {
+		return nil
+	}
+
+	patch := client.MergeFrom(claim.DeepCopy())
+	shutdownTime := metav1.NewTime(claim.CreationTimestamp.Add(time.Duration(*claim.Spec.TTLSecondsAfterCreated) * time.Second))
+	if claim.Spec.Lifecycle == nil {
+		claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
+			ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
+			ShutdownTime:   &shutdownTime,
+		}
+	} else {
+		claim.Spec.Lifecycle.ShutdownTime = &shutdownTime
+	}
+
+	return r.Patch(ctx, claim, patch)
 }
 
 // initializeAnnotations initializes trace ID and observation time for active resources missing them.

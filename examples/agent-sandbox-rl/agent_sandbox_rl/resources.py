@@ -33,6 +33,17 @@ from .config import TemplateSpec
 logger = logging.getLogger("agent_sandbox_rl.resources")
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+  """Recursively merge override dictionary into base dictionary."""
+  merged = dict(base)
+  for key, value in override.items():
+    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+      merged[key] = _deep_merge(merged[key], value)
+    else:
+      merged[key] = value
+  return merged
+
+
 class Resources:
   """Template + warm-pool lifecycle for a single cluster/namespace."""
 
@@ -134,6 +145,15 @@ class Resources:
       if "affinity" in extra and "affinity" in pod_spec:
         merged_affinity = {**pod_spec["affinity"], **extra["affinity"]}
         extra = {**extra, "affinity": merged_affinity}
+      if "containers" in extra and "containers" in pod_spec and len(extra["containers"]) > 0:
+        orig_c = dict(pod_spec["containers"][0])
+        extra_c = dict(extra["containers"][0])
+        merged_c = _deep_merge(orig_c, extra_c)
+        # Keep original image if extra_c did not specify image
+        if "image" not in extra_c and "image" in orig_c:
+          merged_c["image"] = orig_c["image"]
+        pod_spec["containers"] = [merged_c, *extra["containers"][1:]]
+        extra = {k: v for k, v in extra.items() if k != "containers"}
       pod_spec.update(extra)
 
     return {

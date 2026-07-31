@@ -1248,7 +1248,7 @@ func TestSandboxClaimReconcileRequeuesForActiveTTL(t *testing.T) {
 	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched))
 	require.NotNil(t, fetched.Spec.Lifecycle)
 	require.Equal(t, extensionsv1beta1.ShutdownPolicyDelete, fetched.Spec.Lifecycle.ShutdownPolicy)
-	require.Equal(t, createdAt.Add(time.Duration(ttl)*time.Second), fetched.Spec.Lifecycle.ShutdownTime.Time)
+	require.True(t, createdAt.Add(time.Duration(ttl)*time.Second).Equal(fetched.Spec.Lifecycle.ShutdownTime.Time))
 }
 
 func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
@@ -1269,7 +1269,7 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
 	require.NoError(t, err)
 	require.Equal(t, immediateRequeueDelay, result.RequeueAfter)
-	require.Equal(t, "Normal "+extensionsv1beta1.ClaimExpiredReason+" ClaimExpired Claim expired", <-fakeRecorder.Events)
+	require.Equal(t, "Normal "+extensionsv1beta1.ClaimExpiredReason+" Claim expired", <-fakeRecorder.Events)
 
 	result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
 	require.NoError(t, err)

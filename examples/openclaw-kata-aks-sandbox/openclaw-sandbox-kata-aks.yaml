@@ -22,7 +22,7 @@ spec:
         # The gateway rewrites its config on startup, so copy the read-only
         # ConfigMap into a writable volume first.
         - name: init-config
-          image: ghcr.io/openclaw/openclaw:2026.3.23
+          image: ghcr.io/openclaw/openclaw:2026.3.28
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -38,7 +38,7 @@ spec:
               mountPath: /etc/openclaw
       containers:
         - name: openclaw
-          image: ghcr.io/openclaw/openclaw:2026.3.23
+          image: ghcr.io/openclaw/openclaw:2026.3.28
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

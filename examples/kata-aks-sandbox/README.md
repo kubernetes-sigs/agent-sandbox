@@ -77,8 +77,9 @@ Confirm the workload runs under its own guest kernel rather than the node's kern
 # Kernel inside the sandbox (the Kata pod VM's guest kernel)
 kubectl exec kata-aks-example -- uname -r
 
-# Kernel on the node
-kubectl get node -o jsonpath='{.items[0].status.nodeInfo.kernelVersion}'
+# Kernel on the node hosting the sandbox
+SANDBOX_NODE="$(kubectl get pod kata-aks-example -o jsonpath='{.spec.nodeName}')"
+kubectl get node "${SANDBOX_NODE}" -o jsonpath='{.status.nodeInfo.kernelVersion}'
 ```
 
 The two versions differ: the sandboxed workload is running inside its own VM with a dedicated kernel, isolated from the host by the hypervisor boundary.

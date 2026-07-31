@@ -62,8 +62,9 @@ Running the turn in-guest keeps it on the gateway's loopback interface, which av
 # Kernel inside the sandbox (the Kata pod VM's guest kernel)
 kubectl exec openclaw-kata-aks-sandbox -- uname -r
 
-# Kernel on the node
-kubectl get node -o jsonpath='{.items[0].status.nodeInfo.kernelVersion}'
+# Kernel on the node hosting the sandbox
+SANDBOX_NODE="$(kubectl get pod openclaw-kata-aks-sandbox -o jsonpath='{.spec.nodeName}')"
+kubectl get node "${SANDBOX_NODE}" -o jsonpath='{.status.nodeInfo.kernelVersion}'
 ```
 
 The two differ: the agent runtime is running in its own VM, not sharing the host kernel.

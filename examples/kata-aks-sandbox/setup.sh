@@ -82,7 +82,6 @@ if az aks show --name "${CLUSTER_NAME}" --resource-group "${RESOURCE_GROUP}" > /
         --os-sku AzureLinux \
         --workload-runtime KataVmIsolation \
         --node-vm-size "${VM_SIZE}"
-    az aks update --name "${CLUSTER_NAME}" --resource-group "${RESOURCE_GROUP}" --output none
 else
     echo "### Cluster '${CLUSTER_NAME}' not found. Creating it with Pod Sandboxing enabled ###"
     az aks create \

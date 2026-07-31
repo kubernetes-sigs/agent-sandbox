@@ -88,7 +88,18 @@ var errSandboxAlreadyExists = errors.New("sandbox already exists (cache lag)")
 // just-created sandbox is visible in the informer cache. Long enough to
 // cover typical watch latency (so most claims converge in one extra pass),
 // but far below the multi-second exponential backoff it replaces.
-const cacheLagRequeueDelay = 50 * time.Millisecond
+//
+// The Owns(&Sandbox{}) watch is the primary convergence trigger; this requeue
+// is only a fallback for the window before the created sandbox is indexed.
+//
+// TODO(#1313): a persistently lagging informer (one that never delivers a
+// sandbox that provably exists on the server) re-issues Create at this flat
+// rate indefinitely, because the sentinel returns a nil error and resets the
+// workqueue failure counter every pass. This modest delay only bounds the
+// flat-rate churn; the real fix is an in-memory per-claim attempt counter that
+// grows the delay on repeated consecutive misses, kept on the benign nil-error
+// path (AlreadyExists must never surface as a reconcile error).
+const cacheLagRequeueDelay = 200 * time.Millisecond
 
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}

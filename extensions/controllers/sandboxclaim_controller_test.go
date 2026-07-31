@@ -1263,7 +1263,7 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{TTLSecondsAfterCreated: &ttl},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).WithStatusSubresource(claim).Build()
 	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, Recorder: fakeRecorder, Tracer: asmetrics.NewNoOp()}
 
 	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})

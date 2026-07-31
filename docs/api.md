@@ -556,8 +556,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated limits how long the SandboxClaim exists after creation.<br />When set, the controller deletes the SandboxClaim after the TTL expires.<br />When unset, the SandboxClaim is not automatically reaped based on its age. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox. |  | Required: \{\} <br /> |
+| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated limits how long the SandboxClaim exists after creation.<br />When set, the controller deletes the SandboxClaim after the TTL expires.<br />When unset, the SandboxClaim is not automatically reaped based on its age. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
 | `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns.<br />Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict. |  | Optional: \{\} <br /> |

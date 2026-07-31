@@ -1219,7 +1219,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 func TestSandboxClaimReconcileRequeuesForActiveTTL(t *testing.T) {
 	scheme := newScheme(t)
 	ttl := int32(60)
-	createdAt := time.Now().Add(-30 * time.Second)
+	createdAt := time.Now().UTC().Add(-30 * time.Second).Truncate(time.Second)
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "ttl-template", Namespace: "default"},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
@@ -1266,8 +1266,14 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
 	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, Recorder: fakeRecorder, Tracer: asmetrics.NewNoOp()}
 
-	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
+	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
 	require.NoError(t, err)
+	require.Equal(t, immediateRequeueDelay, result.RequeueAfter)
+	require.Equal(t, "Normal "+extensionsv1beta1.ClaimExpiredReason+" ClaimExpired Claim expired", <-fakeRecorder.Events)
+
+	result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
+	require.NoError(t, err)
+	require.Zero(t, result)
 
 	fetched := &extensionsv1beta1.SandboxClaim{}
 	err = client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched)

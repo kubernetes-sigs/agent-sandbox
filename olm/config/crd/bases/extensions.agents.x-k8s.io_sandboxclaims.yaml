@@ -84,6 +84,7 @@ spec:
                     type: integer
                 type: object
               ttlSecondsAfterCreated:
+                description: ttlSecondsAfterCreated initializes lifecycle.shutdownTime to CreationTimestamp+TTL when shutdownTime is unset. A nil lifecycle is initialized with the Delete policy. An explicit shutdownTime is never overwritten.
                 format: int32
                 minimum: 0
                 type: integer
@@ -327,6 +328,7 @@ spec:
                 - name
                 type: object
               ttlSecondsAfterCreated:
+                description: ttlSecondsAfterCreated initializes lifecycle.shutdownTime to CreationTimestamp+TTL when shutdownTime is unset. A nil lifecycle is initialized with the Delete policy. An explicit shutdownTime is never overwritten.
                 format: int32
                 minimum: 0
                 type: integer

@@ -176,6 +176,11 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	claim.Name = "test-claim"
 	claim.Namespace = ns.Name
 	claim.Spec.WarmPoolRef.Name = warmPool.Name
+	// Retain so the sandbox survives pod deletion — this test observes
+	// the not-ready condition, which requires the object to still exist.
+	claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
+		ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
+	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
 
 	// Wait for claim to be ready with sandbox name in status

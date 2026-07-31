@@ -153,7 +153,7 @@ func TestSandboxReconcilerInitializesLastActivityTime(t *testing.T) {
 	assert.True(t, updated.Status.LastActivityTime.Time.After(oldCreateTime.Time))
 }
 
-func TestSuspensionServerResumeHandler(t *testing.T) {
+func TestSuspensionServerResumeHandler_AdministrativelySuspended(t *testing.T) {
 	scheme := setupScheme(t)
 
 	sandbox := &agentsv1beta1.Sandbox{
@@ -187,13 +187,112 @@ func TestSuspensionServerResumeHandler(t *testing.T) {
 
 	srv.Handler().ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cannot resume sandbox with spec.operatingMode set to Suspended")
 
 	var updated agentsv1beta1.Sandbox
 	err := client.Get(context.Background(), types.NamespacedName{Name: "suspended-sandbox", Namespace: "default"}, &updated)
 	require.NoError(t, err)
 	assert.Equal(t, agentsv1beta1.SandboxOperatingModeSuspended, updated.Spec.OperatingMode)
+	assert.Nil(t, updated.Status.LastActivityTime)
+}
+
+func TestSuspensionServerResumeHandler_Running(t *testing.T) {
+	scheme := setupScheme(t)
+
+	sandbox := &agentsv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "running-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1beta1.SandboxSpec{
+			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
+			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
+				PodTemplate: agentsv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
+	srv := NewSuspensionServer(client, logr.Discard())
+
+	payload := map[string]string{
+		"name":      "running-sandbox",
+		"namespace": "default",
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes/resume", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var updated agentsv1beta1.Sandbox
+	err := client.Get(context.Background(), types.NamespacedName{Name: "running-sandbox", Namespace: "default"}, &updated)
+	require.NoError(t, err)
+	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
 	assert.NotNil(t, updated.Status.LastActivityTime)
+}
+
+func TestSuspensionServerResumeForAutoSuspended(t *testing.T) {
+	scheme := setupScheme(t)
+
+	oldTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	timeout := int32(300)
+
+	sandbox := &agentsv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "auto-suspended-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1beta1.SandboxSpec{
+			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: agentsv1beta1.Lifecycle{
+				AutoSuspension: &agentsv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: &timeout,
+				},
+			},
+			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
+				PodTemplate: agentsv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1beta1.SandboxStatus{
+			LastActivityTime: &oldTime,
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(sandbox).WithObjects(sandbox).Build()
+	srv := NewSuspensionServer(client, logr.Discard())
+
+	payload := map[string]string{
+		"name":      "auto-suspended-sandbox",
+		"namespace": "default",
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes/resume", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var updated agentsv1beta1.Sandbox
+	err := client.Get(context.Background(), types.NamespacedName{Name: "auto-suspended-sandbox", Namespace: "default"}, &updated)
+	require.NoError(t, err)
+	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+	assert.NotNil(t, updated.Status.LastActivityTime)
+	assert.True(t, updated.Status.LastActivityTime.Time.After(oldTime.Time), "lastActivityTime must be refreshed to now()")
 }
 
 func TestSuspensionServerActivityHandler(t *testing.T) {

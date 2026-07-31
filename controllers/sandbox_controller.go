@@ -276,13 +276,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	sandboxDeleted := false
 	result := ctrl.Result{}
 
-	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspension != nil && sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds != nil && *sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds > 0 && sandbox.Status.LastActivityTime == nil {
-		now := metav1.Now()
-		sandbox.Status.LastActivityTime = &now
-		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
-			return ctrl.Result{}, statusUpdateErr
+	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspension != nil && sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds != nil && *sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds > 0 {
+		cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+		wasUserSuspended := cond != nil && cond.Status == metav1.ConditionFalse && (cond.Reason == string(sandboxv1beta1.SandboxReasonUserSuspended) || cond.Reason == "SandboxSuspended")
+		if sandbox.Status.LastActivityTime == nil || (sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeRunning && wasUserSuspended) {
+			now := metav1.Now()
+			sandbox.Status.LastActivityTime = &now
+			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+				return ctrl.Result{}, statusUpdateErr
+			}
+			oldStatus = sandbox.Status.DeepCopy()
 		}
-		oldStatus = sandbox.Status.DeepCopy()
 	}
 
 	expired, _ := checkSandboxExpiry(sandbox, time.Now())
@@ -412,7 +416,11 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 		// Stable State: Fully Suspended
 		suspended.Status = metav1.ConditionTrue
 		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
-		suspended.Message = "Pod has been terminated. Sandbox is suspended"
+		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+			suspended.Message = "Pod has been terminated. Sandbox is administratively suspended"
+		} else {
+			suspended.Message = "Pod has been terminated. Sandbox is auto-suspended due to inactivity"
+		}
 		return suspended
 	}
 
@@ -423,7 +431,11 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	}
 
 	suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
-	suspended.Message = "Pod is terminating. Sandbox is suspending"
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		suspended.Message = "Pod is terminating. Sandbox is administratively suspending"
+	} else {
+		suspended.Message = "Pod is terminating. Sandbox is auto-suspending"
+	}
 	return suspended
 }
 
@@ -444,11 +456,20 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 
 	shouldSuspend, _ := r.shouldSuspend(sandbox)
 	if shouldSuspend {
-		readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
-		if pod != nil {
-			readyCondition.Message = "Sandbox is suspending"
+		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonUserSuspended
+			if pod != nil {
+				readyCondition.Message = "Sandbox is administratively suspending"
+			} else {
+				readyCondition.Message = "Sandbox is administratively suspended (spec.operatingMode == Suspended)"
+			}
 		} else {
-			readyCondition.Message = "Sandbox is suspended"
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonAutoSuspended
+			if pod != nil {
+				readyCondition.Message = "Sandbox is auto-suspending due to inactivity"
+			} else {
+				readyCondition.Message = "Sandbox is auto-suspended due to inactivity; waiting for resume signal"
+			}
 		}
 		return readyCondition
 	}

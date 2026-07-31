@@ -106,6 +106,11 @@ func (s *SuspensionServer) handleResume(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if sandbox.Spec.OperatingMode == agentsv1beta1.SandboxOperatingModeSuspended {
+		http.Error(w, "cannot resume sandbox with spec.operatingMode set to Suspended", http.StatusConflict)
+		return
+	}
+
 	// Update Status.LastActivityTime on resume so the reconciler sees the fresh timestamp
 	// and does not evaluate the sandbox as idle.
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {

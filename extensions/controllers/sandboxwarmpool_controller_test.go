@@ -214,7 +214,7 @@ func TestSandboxWarmPoolReconcileDeletesExpiredTTL(t *testing.T) {
 	fetched := &extensionsv1beta1.SandboxWarmPool{}
 	err = client.Get(context.Background(), types.NamespacedName{Name: warmPool.Name, Namespace: warmPool.Namespace}, fetched)
 	require.True(t, k8serrors.IsNotFound(err))
-	require.Equal(t, "Normal TTLExpired TTLExpired Deleting SandboxWarmPool because ttlSecondsAfterCreated expired", <-fakeRecorder.Events)
+	require.Equal(t, "Normal TTLExpired Deleting SandboxWarmPool because ttlSecondsAfterCreated expired", <-fakeRecorder.Events)
 }
 
 func TestReconcilePool(t *testing.T) {

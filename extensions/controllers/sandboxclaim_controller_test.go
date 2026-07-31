@@ -1266,7 +1266,7 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 	fetched := &extensionsv1beta1.SandboxClaim{}
 	err = client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched)
 	require.True(t, k8errors.IsNotFound(err))
-	require.Equal(t, "Normal ClaimExpiredReason TTLExpired Deleting Claim because ttlSecondsAfterCreated expired", <-fakeRecorder.Events)
+	require.Equal(t, "Normal " + extensionsv1beta1.ClaimExpiredReason + " Deleting Claim because ttlSecondsAfterCreated expired", <-fakeRecorder.Events)
 }
 
 // TestSandboxClaimCleanupPolicy verifies that the Claim deletes itself

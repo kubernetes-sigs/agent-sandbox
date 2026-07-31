@@ -101,7 +101,6 @@ const (
 type SandboxWarmPoolReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
-	Recorder               events.EventRecorder
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
 	// Recorder emits pool-level Events (e.g. WarmPoolNotProgressing). May be

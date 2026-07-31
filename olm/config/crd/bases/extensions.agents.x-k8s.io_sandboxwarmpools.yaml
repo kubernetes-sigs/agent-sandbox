@@ -42,10 +42,6 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
-              ttlSecondsAfterCreated:
-                format: int32
-                minimum: 0
-                type: integer
               sandboxTemplateRef:
                 properties:
                   name:
@@ -53,6 +49,10 @@ spec:
                 required:
                 - name
                 type: object
+              ttlSecondsAfterCreated:
+                format: int32
+                minimum: 0
+                type: integer
               updateStrategy:
                 properties:
                   type:
@@ -116,10 +116,6 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
-              ttlSecondsAfterCreated:
-                format: int32
-                minimum: 0
-                type: integer
               sandboxTemplateRef:
                 properties:
                   name:
@@ -127,6 +123,10 @@ spec:
                 required:
                 - name
                 type: object
+              ttlSecondsAfterCreated:
+                format: int32
+                minimum: 0
+                type: integer
               updateStrategy:
                 properties:
                   type:

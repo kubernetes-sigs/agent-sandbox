@@ -112,6 +112,9 @@ type SandboxClaimSpec struct {
 	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
 
 	// lifecycle defines when and how the SandboxClaim should be shut down.
+	// When omitted on a claim with a warmPoolRef, the controller defaults to
+	// ShutdownPolicy=Delete with TTLSecondsAfterFinished=0 so that finished
+	// warm-pool claims are automatically cleaned up. Set explicitly to override.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 

@@ -191,8 +191,8 @@ func TestComputeConditions(t *testing.T) {
 				},
 			},
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is suspending"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is administratively suspending"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxUserSuspended", Message: "Sandbox is administratively suspending"},
 			},
 		},
 		{
@@ -213,7 +213,7 @@ func TestComputeConditions(t *testing.T) {
 			},
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodNotOwned", Message: "Refused to delete pod because it is not owned by this sandbox"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxUserSuspended", Message: "Sandbox is administratively suspending"},
 			},
 		},
 		{
@@ -241,7 +241,7 @@ func TestComputeConditions(t *testing.T) {
 			podErr: errors.New("failed to delete pod: boom"),
 			err:    errors.New("failed to delete pod: boom"),
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is suspending"},
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is administratively suspending"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: failed to delete pod: boom"},
 			},
 		},
@@ -251,8 +251,8 @@ func TestComputeConditions(t *testing.T) {
 			svc:     &corev1.Service{},
 			pod:     nil,
 			expectedConditions: []metav1.Condition{
-				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been terminated. Sandbox is suspended"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
+				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been terminated. Sandbox is administratively suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxUserSuspended", Message: "Sandbox is administratively suspended (spec.operatingMode == Suspended)"},
 			},
 		},
 		{
@@ -340,7 +340,7 @@ func TestComputeConditions(t *testing.T) {
 			},
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodNotOwned", Message: "Refused to delete pod because it is not owned by this sandbox"},
-				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxUserSuspended", Message: "Sandbox is administratively suspending"},
 			},
 		},
 		{
@@ -1199,14 +1199,14 @@ func TestReconcile(t *testing.T) {
 						Status:             "False",
 						ObservedGeneration: 1,
 						Reason:             "PodTerminating",
-						Message:            "Pod is terminating. Sandbox is suspending",
+						Message:            "Pod is terminating. Sandbox is administratively suspending",
 					},
 					{
 						Type:               "Ready",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             sandboxv1beta1.SandboxReasonSuspended,
-						Message:            "Sandbox is suspending",
+						Reason:             sandboxv1beta1.SandboxReasonUserSuspended,
+						Message:            "Sandbox is administratively suspending",
 					},
 				},
 			},
@@ -1231,14 +1231,14 @@ func TestReconcile(t *testing.T) {
 						Status:             "True",
 						ObservedGeneration: 1,
 						Reason:             "PodTerminated",
-						Message:            "Pod has been terminated. Sandbox is suspended",
+						Message:            "Pod has been terminated. Sandbox is administratively suspended",
 					},
 					{
 						Type:               "Ready",
 						Status:             "False",
 						ObservedGeneration: 1,
-						Reason:             sandboxv1beta1.SandboxReasonSuspended,
-						Message:            "Sandbox is suspended",
+						Reason:             sandboxv1beta1.SandboxReasonUserSuspended,
+						Message:            "Sandbox is administratively suspended (spec.operatingMode == Suspended)",
 					},
 				},
 			},
@@ -4771,7 +4771,7 @@ func TestSandboxReconcilerAutoSuspendSpecImmutability(t *testing.T) {
 	readyCond := meta.FindStatusCondition(updated.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	require.NotNil(t, readyCond)
 	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
-	assert.Equal(t, sandboxv1beta1.SandboxReasonSuspended, readyCond.Reason)
+	assert.Equal(t, string(sandboxv1beta1.SandboxReasonAutoSuspended), readyCond.Reason)
 }
 
 func TestSandboxReconcilerAutoSuspendRequeue(t *testing.T) {
@@ -4822,4 +4822,72 @@ func TestSandboxReconcilerAutoSuspendRequeue(t *testing.T) {
 	var updated sandboxv1beta1.Sandbox
 	require.NoError(t, client.Get(t.Context(), req.NamespacedName, &updated))
 	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+}
+
+func TestSandboxReconcilerManualUnsuspendResetsLastActivityTime(t *testing.T) {
+	staleTime := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	sandboxUID := types.UID("manual-unsuspend-uid")
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "manual-unsuspend",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				AutoSuspension: &sandboxv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: new(int32(600)),
+				},
+			},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			LastActivityTime: &staleTime,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: string(sandboxv1beta1.SandboxReasonUserSuspended),
+				},
+			},
+		},
+	}
+
+	client := newFakeClient(sandbox)
+	r := &SandboxReconciler{
+		Client:            client,
+		Scheme:            Scheme,
+		Tracer:            asmetrics.NewNoOp(),
+		EnableAutoSuspend: true,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "manual-unsuspend", Namespace: "default"}}
+	res, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	var updated sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), req.NamespacedName, &updated)
+	require.NoError(t, err)
+
+	// 1. Verify lastActivityTime was refreshed to now()
+	require.NotNil(t, updated.Status.LastActivityTime)
+	assert.WithinDuration(t, time.Now(), updated.Status.LastActivityTime.Time, 10*time.Second)
+
+	// 2. Verify RequeueAfter is set to approx 10 minutes (600s)
+	assert.Positive(t, res.RequeueAfter)
+	assert.LessOrEqual(t, res.RequeueAfter, 10*time.Minute)
+	assert.GreaterOrEqual(t, res.RequeueAfter, 9*time.Minute)
+
+	// 3. Verify Pod was created by controller upon manual un-suspension
+	podName := resolvePodName(&updated)
+	var createdPod corev1.Pod
+	err = client.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: "default"}, &createdPod)
+	require.NoError(t, err, "Pod must be created immediately upon manual un-suspension")
 }

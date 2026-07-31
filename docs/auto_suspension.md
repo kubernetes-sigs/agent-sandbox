@@ -4,8 +4,8 @@ In agentic AI workflows and interactive development environments, sandboxes ofte
 
 Agent Sandbox provides **Auto-Suspension and Traffic-Triggered Resume**:
 
-* **Auto-Suspension**: When a sandbox remains inactive for a configured duration (`inactivityTimeoutSeconds`), the control plane automatically terminates its underlying Kubernetes Pod while preserving user intent (`.spec.operatingMode` remains `Running`). Sandbox suspension is indicated via status conditions:
-  - **`Ready` Condition**: Transitioned to `Status: "False"` with Reason **`SandboxSuspended`** (indicating the sandbox is not ready due to idle suspension).
+* **Auto-Suspension**: When a sandbox remains inactive for a configured duration (`inactivityTimeoutSeconds`), the control plane automatically terminates its underlying Kubernetes Pod while preserving user intent (`.spec.operatingMode` remains `Running`). Sandbox suspension status is indicated via status conditions:
+  - **`Ready` Condition**: Transitioned to `Status: "False"` with Reason **`SandboxAutoSuspended`** for idle suspension.
   - **`Suspended` Condition**: Transitioned to `Status: "True"` with Reason `PodTerminated`.
   The `Sandbox` resource, its stable identity, and any persistent volumes remain intact.
 * **Traffic-Triggered Resume**: When new HTTP requests arrive for a suspended sandbox, Envoy Gateway intercepts the request stream via the **Sandbox Router** (`ext_proc`). The router signals the control plane (`POST /v1/sandboxes/resume`) to update `status.lastActivityTime` to `now()`, which prompts the controller to dynamically provision a fresh Pod, wait for it to become ready, and transparently proxy the request without dropping client connections.
@@ -51,7 +51,7 @@ sequenceDiagram
 
     Note over CTRL,POD: 1. Auto-Suspension on Idle
     CTRL->>CTRL: inactivityTimeoutSeconds timer expires
-    CTRL->>POD: Delete Pod (status condition Ready: False, Reason: SandboxSuspended)
+    CTRL->>POD: Delete Pod (status condition Ready: False, Reason: SandboxAutoSuspended)
 
     Note over Client,POD: 2. Traffic-Triggered Resume
     Client->>EG: HTTP Request (X-Sandbox-ID header)

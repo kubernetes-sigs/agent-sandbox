@@ -30,6 +30,7 @@ func TestSandboxClaimConversion(t *testing.T) {
 		templateName        string
 		sandboxName         string
 		expectedWarmPoolRef string
+		omitTTL             bool
 	}{
 		{
 			name:                "Cold start with specific warm pool policy",
@@ -87,6 +88,13 @@ func TestSandboxClaimConversion(t *testing.T) {
 			sandboxName:         "",
 			expectedWarmPoolRef: "shadow-pool-my-template",
 		},
+		{
+			name:                "TTL unset",
+			claimName:           "my-claim",
+			templateName:        "my-template",
+			expectedWarmPoolRef: "shadow-pool-my-template",
+			omitTTL:             true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -94,6 +102,10 @@ func TestSandboxClaimConversion(t *testing.T) {
 			// Create src v1alpha1 SandboxClaim
 			wpPolicy := WarmPoolPolicy(tc.warmPool)
 			ttl := int32(300)
+			ttlAfterCreated := &ttl
+			if tc.omitTTL {
+				ttlAfterCreated = nil
+			}
 			src := &SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      tc.claimName,
@@ -107,7 +119,7 @@ func TestSandboxClaimConversion(t *testing.T) {
 					},
 				},
 				Spec: SandboxClaimSpec{
-					TTLSecondsAfterCreated: &ttl,
+					TTLSecondsAfterCreated: ttlAfterCreated,
 					TemplateRef: SandboxTemplateRef{
 						Name: tc.templateName,
 					},
@@ -150,7 +162,9 @@ func TestSandboxClaimConversion(t *testing.T) {
 			}
 
 			// Verify WarmPoolRef name in v1beta1
-			if dst.Spec.TTLSecondsAfterCreated == nil || *dst.Spec.TTLSecondsAfterCreated != ttl {
+			if tc.omitTTL && dst.Spec.TTLSecondsAfterCreated != nil {
+				t.Errorf("expected nil ttlSecondsAfterCreated, got %v", dst.Spec.TTLSecondsAfterCreated)
+			} else if !tc.omitTTL && (dst.Spec.TTLSecondsAfterCreated == nil || *dst.Spec.TTLSecondsAfterCreated != ttl) {
 				t.Errorf("unexpected ttlSecondsAfterCreated: %v", dst.Spec.TTLSecondsAfterCreated)
 			}
 			if dst.Spec.WarmPoolRef.Name != tc.expectedWarmPoolRef {
@@ -169,7 +183,9 @@ func TestSandboxClaimConversion(t *testing.T) {
 			}
 
 			// Verify round-trip preserves fields losslessly (due to state annotation preservation)
-			if roundTrip.Spec.TTLSecondsAfterCreated == nil || *roundTrip.Spec.TTLSecondsAfterCreated != ttl {
+			if tc.omitTTL && roundTrip.Spec.TTLSecondsAfterCreated != nil {
+				t.Errorf("expected nil roundtrip ttlSecondsAfterCreated, got %v", roundTrip.Spec.TTLSecondsAfterCreated)
+			} else if !tc.omitTTL && (roundTrip.Spec.TTLSecondsAfterCreated == nil || *roundTrip.Spec.TTLSecondsAfterCreated != ttl) {
 				t.Errorf("roundtrip ttlSecondsAfterCreated mismatch: %v", roundTrip.Spec.TTLSecondsAfterCreated)
 			}
 			if roundTrip.Spec.TemplateRef.Name != src.Spec.TemplateRef.Name {

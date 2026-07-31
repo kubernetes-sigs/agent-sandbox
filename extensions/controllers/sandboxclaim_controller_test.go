@@ -1216,9 +1216,39 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimReconcileRequeuesForActiveTTL(t *testing.T) {
+	scheme := newScheme(t)
+	ttl := int32(60)
+	createdAt := time.Now().Add(-30 * time.Second)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "ttl-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "active-ttl-claim", Namespace: "default", CreationTimestamp: metav1.NewTime(createdAt)},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef:            extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+			TTLSecondsAfterCreated: &ttl,
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, warmPool, template).WithStatusSubresource(claim).Build()
+	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, WarmSandboxQueue: queue.NewSimpleSandboxQueue(), Tracer: asmetrics.NewNoOp()}
+
+	result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
+	require.NoError(t, err)
+	require.InDelta(t, 30*time.Second, result.RequeueAfter, float64(time.Second))
+}
+
 func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 	scheme := newScheme(t)
 	ttl := int32(60)
+	fakeRecorder := events.NewFakeRecorder(10)
 	claim := &extensionsv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "expired-claim",
@@ -1228,7 +1258,7 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 		Spec: extensionsv1beta1.SandboxClaimSpec{TTLSecondsAfterCreated: &ttl},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
-	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, Tracer: asmetrics.NewNoOp()}
+	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, Recorder: fakeRecorder, Tracer: asmetrics.NewNoOp()}
 
 	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}})
 	require.NoError(t, err)
@@ -1236,6 +1266,7 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 	fetched := &extensionsv1beta1.SandboxClaim{}
 	err = client.Get(context.Background(), types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, fetched)
 	require.True(t, k8errors.IsNotFound(err))
+	require.Equal(t, "Normal ClaimExpiredReason TTLExpired Deleting Claim because ttlSecondsAfterCreated expired", <-fakeRecorder.Events)
 }
 
 // TestSandboxClaimCleanupPolicy verifies that the Claim deletes itself

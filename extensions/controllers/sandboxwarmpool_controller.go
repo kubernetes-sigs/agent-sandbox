@@ -101,6 +101,7 @@ const (
 type SandboxWarmPoolReconciler struct {
 	client.Client
 	Scheme                 *runtime.Scheme
+	Recorder               events.EventRecorder
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
 	// Recorder emits pool-level Events (e.g. WarmPoolNotProgressing). May be
@@ -185,8 +186,11 @@ func (r *SandboxWarmPoolReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	poolTTLExpired, poolTTLTimeLeft := lifecycle.TimeLeftAfterCreated(r.clockNow(), warmPool.CreationTimestamp, warmPool.Spec.TTLSecondsAfterCreated)
 	if poolTTLExpired {
 		logger.Info("Deleting SandboxWarmPool because ttlSecondsAfterCreated expired", "warmPool", warmPool.Name)
-		if err := r.Delete(ctx, warmPool); err != nil {
-			return ctrl.Result{}, client.IgnoreNotFound(err)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(warmPool, nil, corev1.EventTypeNormal, "TTLExpired", "TTLExpired", "Deleting SandboxWarmPool because ttlSecondsAfterCreated expired")
+		}
+		if err := r.Delete(ctx, warmPool, client.Preconditions{UID: &warmPool.UID}); err != nil && !k8serrors.IsNotFound(err) && !k8serrors.IsConflict(err) {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}

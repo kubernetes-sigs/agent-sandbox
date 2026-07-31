@@ -502,6 +502,7 @@ func main() {
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
 			Client:                 mgr.GetClient(),
 			Scheme:                 mgr.GetScheme(),
+			Recorder:               mgr.GetEventRecorder("sandboxwarmpool-controller"),
 			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
 			EnableWarmPoolEviction: enableWarmPoolEviction,
 			Recorder:               mgr.GetEventRecorder("sandboxwarmpool-controller"),

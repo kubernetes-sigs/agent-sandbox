@@ -26,6 +26,7 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 	tests := []struct {
 		name           string
 		updateStrategy *SandboxWarmPoolUpdateStrategy
+		omitTTL        bool
 	}{
 		{
 			name: "with update strategy",
@@ -38,11 +39,19 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 			name:           "nil update strategy",
 			updateStrategy: nil,
 		},
+		{
+			name:    "TTL unset",
+			omitTTL: true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ttl := int32(300)
+			ttlAfterCreated := &ttl
+			if tc.omitTTL {
+				ttlAfterCreated = nil
+			}
 			src := &SandboxWarmPool{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "my-warmpool",
@@ -57,7 +66,7 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 				},
 				Spec: SandboxWarmPoolSpec{
 					Replicas:               3,
-					TTLSecondsAfterCreated: &ttl,
+					TTLSecondsAfterCreated: ttlAfterCreated,
 					TemplateRef: SandboxTemplateRef{
 						Name: "my-template",
 					},
@@ -98,7 +107,9 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 			}
 
 			// Verify v1beta1 fields
-			if dst.Spec.TTLSecondsAfterCreated == nil || *dst.Spec.TTLSecondsAfterCreated != ttl {
+			if tc.omitTTL && dst.Spec.TTLSecondsAfterCreated != nil {
+				t.Errorf("expected nil ttlSecondsAfterCreated, got %v", dst.Spec.TTLSecondsAfterCreated)
+			} else if !tc.omitTTL && (dst.Spec.TTLSecondsAfterCreated == nil || *dst.Spec.TTLSecondsAfterCreated != ttl) {
 				t.Errorf("unexpected ttlSecondsAfterCreated: %v", dst.Spec.TTLSecondsAfterCreated)
 			}
 			if dst.Spec.Replicas == nil || *dst.Spec.Replicas != 3 {
@@ -130,7 +141,9 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 			}
 
 			// Verify round-trip preserves all fields
-			if roundTrip.Spec.TTLSecondsAfterCreated == nil || *roundTrip.Spec.TTLSecondsAfterCreated != ttl {
+			if tc.omitTTL && roundTrip.Spec.TTLSecondsAfterCreated != nil {
+				t.Errorf("expected nil roundtrip ttlSecondsAfterCreated, got %v", roundTrip.Spec.TTLSecondsAfterCreated)
+			} else if !tc.omitTTL && (roundTrip.Spec.TTLSecondsAfterCreated == nil || *roundTrip.Spec.TTLSecondsAfterCreated != ttl) {
 				t.Errorf("roundtrip ttlSecondsAfterCreated mismatch: %v", roundTrip.Spec.TTLSecondsAfterCreated)
 			}
 			if roundTrip.Spec.Replicas != src.Spec.Replicas {

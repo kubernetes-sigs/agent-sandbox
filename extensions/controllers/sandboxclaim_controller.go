@@ -222,8 +222,11 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	claimTTLExpired, claimTTLTimeLeft := lifecycle.TimeLeftAfterCreated(time.Now(), claim.CreationTimestamp, claim.Spec.TTLSecondsAfterCreated)
 	if claimTTLExpired {
 		logger.Info("Deleting SandboxClaim because ttlSecondsAfterCreated expired", "claim", claim.Name)
-		if err := r.Delete(ctx, claim); err != nil {
-			return ctrl.Result{}, client.IgnoreNotFound(err)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1beta1.ClaimExpiredReason, "TTLExpired", "Deleting Claim because ttlSecondsAfterCreated expired")
+		}
+		if err := r.Delete(ctx, claim, client.Preconditions{UID: &claim.UID}); err != nil && !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
@@ -231,6 +234,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		defer func() {
 			if reconcileErr == nil && (result.RequeueAfter == 0 || claimTTLTimeLeft < result.RequeueAfter) {
 				result.RequeueAfter = claimTTLTimeLeft
+				logger.V(2).Info("Requeueing SandboxClaim for ttlSecondsAfterCreated", "claim", claim.Name, "requeueAfter", result.RequeueAfter)
 			}
 		}()
 	}

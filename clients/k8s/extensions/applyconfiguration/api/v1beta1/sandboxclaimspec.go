@@ -17,8 +17,7 @@
 package v1beta1
 
 import (
-	apiv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	applyconfigurationapiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1beta1"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1beta1"
 )
 
 // SandboxClaimSpecApplyConfiguration represents a declarative configuration of the SandboxClaimSpec type for use
@@ -32,14 +31,15 @@ type SandboxClaimSpecApplyConfiguration struct {
 	Lifecycle *LifecycleApplyConfiguration `json:"lifecycle,omitempty"`
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
-	AdditionalPodMetadata *apiv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
+	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
+	AdditionalPodMetadata *apiv1beta1.PodMetadataApplyConfiguration `json:"additionalPodMetadata,omitempty"`
 	// env is a list of environment variables to inject into the sandbox.
 	// Please note adding this field means the Sandbox will always be cold-started from the
 	// template of the warmpool.
 	Env []EnvVarApplyConfiguration `json:"env,omitempty"`
 	// volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.
 	// Specifying this field forces a cold start because warm pool pods will not have these volumes.
-	VolumeClaimTemplates []applyconfigurationapiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
+	VolumeClaimTemplates []apiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
 }
 
 // SandboxClaimSpecApplyConfiguration constructs a declarative configuration of the SandboxClaimSpec type for use with
@@ -67,8 +67,8 @@ func (b *SandboxClaimSpecApplyConfiguration) WithLifecycle(value *LifecycleApply
 // WithAdditionalPodMetadata sets the AdditionalPodMetadata field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the AdditionalPodMetadata field is set to the value of the last call.
-func (b *SandboxClaimSpecApplyConfiguration) WithAdditionalPodMetadata(value apiv1beta1.PodMetadata) *SandboxClaimSpecApplyConfiguration {
-	b.AdditionalPodMetadata = &value
+func (b *SandboxClaimSpecApplyConfiguration) WithAdditionalPodMetadata(value *apiv1beta1.PodMetadataApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
+	b.AdditionalPodMetadata = value
 	return b
 }
 
@@ -88,7 +88,7 @@ func (b *SandboxClaimSpecApplyConfiguration) WithEnv(values ...*EnvVarApplyConfi
 // WithVolumeClaimTemplates adds the given value to the VolumeClaimTemplates field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the VolumeClaimTemplates field.
-func (b *SandboxClaimSpecApplyConfiguration) WithVolumeClaimTemplates(values ...*applyconfigurationapiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
+func (b *SandboxClaimSpecApplyConfiguration) WithVolumeClaimTemplates(values ...*apiv1beta1.PersistentVolumeClaimTemplateApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithVolumeClaimTemplates")

@@ -181,7 +181,7 @@ func (s *MinReadyReplicasPredicate) Matches(obj client.Object) (bool, error) {
 
 	var status objectWithStatus
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &status); err != nil {
-		return false, fmt.Errorf("failed to convert to objectWithStatus: %v", err)
+		return false, fmt.Errorf("failed to convert to objectWithStatus: %w", err)
 	}
 	if s.MinReady > status.Spec.Replicas {
 		return false, fmt.Errorf("minReady %d exceeds spec.replicas %d", s.MinReady, status.Spec.Replicas)

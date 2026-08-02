@@ -673,7 +673,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 					_ = cw.Write([]string{
 						strconv.Itoa(r.batch),
 						strconv.Itoa(r.claimIndex),
-						strconv.Itoa(batchSize),
+						strconv.Itoa(count),
 						fmt.Sprintf("%.3f", r.latency.Seconds()),
 						r.createTime.UTC().Format("2006-01-02T15:04:05.000Z"),
 						fmt.Sprintf("%.3f", r.wallOffset.Seconds()),
@@ -1087,9 +1087,17 @@ func emitBatchSummary(cw *csv.Writer, records []claimRecord, batchFrom, batchTo 
 	warmRatio := float64(warm) / float64(len(records))
 	var throughput float64
 	if len(records) > 1 {
-		first := records[0].wallOffset - records[0].latency
-		last := records[len(records)-1].wallOffset
-		if dur := last - first; dur > 0 {
+		earliest := records[0].wallOffset - records[0].latency
+		latest := records[0].wallOffset
+		for _, r := range records[1:] {
+			if ct := r.wallOffset - r.latency; ct < earliest {
+				earliest = ct
+			}
+			if r.wallOffset > latest {
+				latest = r.wallOffset
+			}
+		}
+		if dur := latest - earliest; dur > 0 {
 			throughput = float64(len(records)) / dur.Seconds()
 		}
 	}

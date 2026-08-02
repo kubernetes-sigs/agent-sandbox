@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import atexit
 import logging
-import requests
 from .trace_manager import create_tracer_manager, trace_span, trace
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
@@ -26,7 +24,8 @@ from .models import (
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
-from .utils import select_pod_ip
+from .utils import select_pod_ip, extract_sandbox_name_hash
+
 
 class Sandbox:
     """
@@ -100,15 +99,11 @@ class Sandbox:
             return self._sandbox_name_hash
 
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        status = sandbox_object.get('status') or {}
-        selector = status.get('selector') or ""
-        if "=" in selector:
-            key, value = selector.split("=")
-            if key == SANDBOX_NAME_HASH_LABEL:
-                self._sandbox_name_hash = value
-                return value
-                
-        return None
+        sandbox_name_hash = extract_sandbox_name_hash(sandbox_object)
+        if sandbox_name_hash:
+            self._sandbox_name_hash = sandbox_name_hash
+
+        return sandbox_name_hash
 
     def get_pod_ip(self) -> str | None:
         """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).

@@ -17,6 +17,9 @@
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 import ipaddress
+from typing import Any
+
+from k8s_agent_sandbox.constants import SANDBOX_NAME_HASH_LABEL
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
@@ -146,3 +149,14 @@ def is_valid_gateway_hostname(s: str) -> bool:
             return False
     last = s[-1]
     return last != '-' and last != '.'
+
+
+def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
+    status = sandbox_object.get("status") or {}
+    selector = status.get("selector") or ""
+    for requirement in selector.split(","):
+        key, sep, value = requirement.partition("=")
+        if sep and key.strip() == SANDBOX_NAME_HASH_LABEL:
+            return value.strip()
+
+    return None

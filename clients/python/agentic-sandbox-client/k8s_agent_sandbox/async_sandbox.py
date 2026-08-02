@@ -21,7 +21,7 @@ from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
 from .files.async_filesystem import AsyncFilesystem
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
-from .utils import select_pod_ip
+from .utils import select_pod_ip, extract_sandbox_name_hash
 
 
 class AsyncSandbox:
@@ -104,15 +104,11 @@ class AsyncSandbox:
             return self._sandbox_name_hash
 
         sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        status = sandbox_object.get("status") or {}
-        selector = status.get("selector") or ""
-        if "=" in selector:
-            key, value = selector.split("=")
-            if key == SANDBOX_NAME_HASH_LABEL:
-                self._sandbox_name_hash = value
-                return value
+        sandbox_name_hash = extract_sandbox_name_hash(sandbox_object)
+        if sandbox_name_hash:
+            self._sandbox_name_hash = sandbox_name_hash
 
-        return None
+        return sandbox_name_hash
 
     async def get_pod_ip(self) -> str | None:
         """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).

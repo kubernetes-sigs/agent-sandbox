@@ -2287,7 +2287,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					},
 					Spec: extensionsv1beta1.SandboxClaimSpec{
 						WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
-						WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+						WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
 							ContainerName: workspaceContainerName,
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -2298,7 +2298,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 									corev1.ResourceCPU:    resource.MustParse("2000m"),
 									corev1.ResourceMemory: resource.MustParse("4096Mi"),
 								},
-							},
+							}},
 						},
 					},
 				},
@@ -3232,7 +3232,7 @@ func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
-			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+			WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
 				ContainerName: workspaceContainerName,
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -3245,7 +3245,7 @@ func TestSandboxClaimCreateAppliesWorkspaceResources(t *testing.T) {
 						corev1.ResourceMemory:           resource.MustParse("8192Mi"),
 						corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
 					},
-				},
+				}},
 			},
 		},
 	}
@@ -3340,13 +3340,13 @@ func TestSandboxClaimCreateRejectsWorkspaceResourcesWithoutWorkspaceContainer(t 
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
-			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+			WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
 				ContainerName: workspaceContainerName,
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU: resource.MustParse("2000m"),
 					},
-				},
+				}},
 			},
 		},
 	}
@@ -3432,13 +3432,13 @@ func TestSandboxClaimCreateRejectsWorkspaceResourcesWithRequestAboveLimit(t *tes
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
-			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+			WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
 				ContainerName: workspaceContainerName,
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU: resource.MustParse("2000m"),
 					},
-				},
+				}},
 			},
 		},
 	}
@@ -3524,7 +3524,7 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
 		Spec: extensionsv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
-			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+			WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
 				ContainerName: workspaceContainerName,
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -3537,7 +3537,7 @@ func TestSandboxClaimWithWorkspaceResourcesSkipsWarmAdoption(t *testing.T) {
 						corev1.ResourceMemory:           resource.MustParse("4096Mi"),
 						corev1.ResourceEphemeralStorage: resource.MustParse("20Gi"),
 					},
-				},
+				}},
 			},
 		},
 	}
@@ -3664,12 +3664,12 @@ func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
 	cases := []struct {
 		name     string
 		current  corev1.ResourceRequirements
-		override extensionsv1beta1.WorkspaceResources
+		override extensionsv1beta1.WorkspaceResourceOverride
 	}{
 		{
 			name:     "nil current resources stay nil",
 			current:  corev1.ResourceRequirements{},
-			override: extensionsv1beta1.WorkspaceResources{ContainerName: workspaceContainerName},
+			override: extensionsv1beta1.WorkspaceResourceOverride{ContainerName: workspaceContainerName},
 		},
 		{
 			name: "populated current resources stay populated and unchanged",
@@ -3678,7 +3678,7 @@ func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
 				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")},
 				Claims:   []corev1.ResourceClaim{{Name: "template-claim"}},
 			},
-			override: extensionsv1beta1.WorkspaceResources{ContainerName: workspaceContainerName},
+			override: extensionsv1beta1.WorkspaceResourceOverride{ContainerName: workspaceContainerName},
 		},
 	}
 	for _, tc := range cases {
@@ -3692,23 +3692,23 @@ func TestApplyWorkspaceResourceOverridesNoResourceEntriesIsNoOp(t *testing.T) {
 	}
 }
 
-func TestHasWorkspaceResourceOverridesEmptyClaimsIsOverride(t *testing.T) {
+func TestHasWorkspaceResourceOverridesEmptyClaimsIsNoOp(t *testing.T) {
 	claim := &extensionsv1beta1.SandboxClaim{
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+			WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
 				ContainerName: workspaceContainerName,
 				Resources: corev1.ResourceRequirements{
 					Claims: []corev1.ResourceClaim{},
 				},
-			},
+			}},
 		},
 	}
-	if !hasWorkspaceResourceOverrides(claim) {
-		t.Fatal("expected explicit empty claims list to count as an override")
+	if hasWorkspaceResourceOverrides(claim) {
+		t.Fatal("expected empty claims list to be a no-op")
 	}
 }
 
-func TestApplyWorkspaceResourceOverridesEmptyClaimsClearsTemplateClaims(t *testing.T) {
+func TestApplyWorkspaceResourceOverridesEmptyClaimsPreservesTemplateClaims(t *testing.T) {
 	container := &corev1.Container{
 		Name: workspaceContainerName,
 		Resources: corev1.ResourceRequirements{
@@ -3716,31 +3716,28 @@ func TestApplyWorkspaceResourceOverridesEmptyClaimsClearsTemplateClaims(t *testi
 		},
 	}
 
-	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResources{
+	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResourceOverride{
 		ContainerName: workspaceContainerName,
 		Resources: corev1.ResourceRequirements{
 			Claims: []corev1.ResourceClaim{},
 		},
 	})
 
-	if container.Resources.Claims == nil {
-		t.Fatal("expected explicit empty claims list to be preserved")
-	}
-	if len(container.Resources.Claims) != 0 {
-		t.Fatalf("expected template claims to be cleared, got %#v", container.Resources.Claims)
+	if !reflect.DeepEqual(container.Resources.Claims, []corev1.ResourceClaim{{Name: "template-claim", Request: "gpu"}}) {
+		t.Fatalf("expected template claims to be preserved, got %#v", container.Resources.Claims)
 	}
 }
 
 func TestApplyWorkspaceResourceOverridesInitializesOnlyOverriddenMaps(t *testing.T) {
 	cases := []struct {
 		name         string
-		override     extensionsv1beta1.WorkspaceResources
+		override     extensionsv1beta1.WorkspaceResourceOverride
 		wantRequests bool
 		wantLimits   bool
 	}{
 		{
 			name: "requests only leaves limits nil",
-			override: extensionsv1beta1.WorkspaceResources{
+			override: extensionsv1beta1.WorkspaceResourceOverride{
 				ContainerName: workspaceContainerName,
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
@@ -3750,7 +3747,7 @@ func TestApplyWorkspaceResourceOverridesInitializesOnlyOverriddenMaps(t *testing
 		},
 		{
 			name: "limits only leaves requests nil",
-			override: extensionsv1beta1.WorkspaceResources{
+			override: extensionsv1beta1.WorkspaceResourceOverride{
 				ContainerName: workspaceContainerName,
 				Resources: corev1.ResourceRequirements{
 					Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1000m")},
@@ -3776,12 +3773,12 @@ func TestApplyWorkspaceResourceOverridesInitializesOnlyOverriddenMaps(t *testing
 func TestApplyClaimWorkspaceResourcesToPodSpecTargetsInitContainer(t *testing.T) {
 	claim := &extensionsv1beta1.SandboxClaim{
 		Spec: extensionsv1beta1.SandboxClaimSpec{
-			WorkspaceResources: &extensionsv1beta1.WorkspaceResources{
+			WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
 				ContainerName: "workspace-sidecar",
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
 				},
-			},
+			}},
 		},
 	}
 	spec := &corev1.PodSpec{
@@ -3821,7 +3818,7 @@ func TestApplyWorkspaceResourceOverridesPartialOverrideKeepsTemplateValues(t *te
 	}
 	container := &corev1.Container{Name: workspaceContainerName, Resources: *current.DeepCopy()}
 
-	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResources{
+	applyWorkspaceResourceOverrides(container, &extensionsv1beta1.WorkspaceResourceOverride{
 		ContainerName: workspaceContainerName,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -3849,6 +3846,105 @@ func TestApplyWorkspaceResourceOverridesPartialOverrideKeepsTemplateValues(t *te
 	}
 	if !reflect.DeepEqual(container.Resources, expected) {
 		t.Fatalf("expected partial override to preserve omitted resources\n  got:    %#v\n  wanted: %#v", container.Resources, expected)
+	}
+}
+
+func TestApplyClaimWorkspaceResourcesToPodSpecAppliesMultipleTargets(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{Spec: extensionsv1beta1.SandboxClaimSpec{
+		WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{
+			{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+					Claims:   []corev1.ResourceClaim{{Name: "gpu", Request: "gpu-class"}},
+				},
+			},
+			{
+				ContainerName: "setup",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+				},
+			},
+		},
+	}}
+	spec := &corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{Name: "gpu"}},
+		InitContainers: []corev1.Container{{Name: "setup"}},
+		Containers:     []corev1.Container{{Name: workspaceContainerName}, {Name: "sidecar"}},
+	}
+
+	if err := applyClaimWorkspaceResourcesToPodSpec(spec, claim); err != nil {
+		t.Fatalf("applyClaimWorkspaceResourcesToPodSpec() error = %v", err)
+	}
+	if got := spec.Containers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("2")) != 0 {
+		t.Fatalf("workspace CPU request = %s, want 2", got.String())
+	}
+	if !reflect.DeepEqual(spec.Containers[0].Resources.Claims, []corev1.ResourceClaim{{Name: "gpu", Request: "gpu-class"}}) {
+		t.Fatalf("workspace claims = %#v", spec.Containers[0].Resources.Claims)
+	}
+	if got := spec.InitContainers[0].Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("setup memory limit = %s, want 1Gi", got.String())
+	}
+	if !reflect.DeepEqual(spec.Containers[1].Resources, corev1.ResourceRequirements{}) {
+		t.Fatalf("untargeted sidecar was changed: %#v", spec.Containers[1].Resources)
+	}
+}
+
+func TestApplyClaimWorkspaceResourcesToPodSpecRejectsDuplicateTargetsAtomically(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{Spec: extensionsv1beta1.SandboxClaimSpec{
+		WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{
+			{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+				},
+			},
+			{
+				ContainerName: workspaceContainerName,
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3")},
+				},
+			},
+		},
+	}}
+	spec := &corev1.PodSpec{Containers: []corev1.Container{{
+		Name: workspaceContainerName,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+		},
+	}}}
+	want := spec.DeepCopy()
+
+	err := applyClaimWorkspaceResourcesToPodSpec(spec, claim)
+	if err == nil || !errors.Is(err, ErrWorkspaceResourcesInvalid) || !strings.Contains(err.Error(), "specified more than once") {
+		t.Fatalf("expected duplicate target error, got %v", err)
+	}
+	if !reflect.DeepEqual(spec, want) {
+		t.Fatalf("pod spec mutated after rejected overrides\n  got:  %#v\n  want: %#v", spec, want)
+	}
+}
+
+func TestApplyClaimWorkspaceResourcesToPodSpecRejectsUnknownResourceClaim(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{Spec: extensionsv1beta1.SandboxClaimSpec{
+		WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
+			ContainerName: workspaceContainerName,
+			Resources: corev1.ResourceRequirements{
+				Claims: []corev1.ResourceClaim{{Name: "missing", Request: "gpu-class"}},
+			},
+		}},
+	}}
+	spec := &corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{Name: "available"}},
+		Containers:     []corev1.Container{{Name: workspaceContainerName}},
+	}
+	want := spec.DeepCopy()
+
+	err := applyClaimWorkspaceResourcesToPodSpec(spec, claim)
+	if err == nil || !errors.Is(err, ErrWorkspaceResourcesInvalid) || !strings.Contains(err.Error(), `resource claim "missing"`) {
+		t.Fatalf("expected unknown resource claim error, got %v", err)
+	}
+	if !reflect.DeepEqual(spec, want) {
+		t.Fatalf("pod spec mutated after rejected resource claim\n  got:  %#v\n  want: %#v", spec, want)
 	}
 }
 

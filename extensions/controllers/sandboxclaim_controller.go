@@ -911,38 +911,42 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 	return labels
 }
 
-// hasWorkspaceResourceOverrides reports whether the claim asks to merge any
-// resource requirement into the target container. A nil workspaceResources
-// field or an object with no requests, limits, or claims field returns false.
-func hasWorkspaceResourceOverrides(claim *extensionsv1beta1.SandboxClaim) bool {
-	r := claim.Spec.WorkspaceResources
-	if r == nil {
-		return false
-	}
-	return len(r.Resources.Requests) > 0 || len(r.Resources.Limits) > 0 || r.Resources.Claims != nil
+// hasResourceOverride reports whether a resource requirement changes a target
+// container. Empty claims have the same durable API representation as omitted
+// claims and therefore do not request clearing template claims.
+func hasResourceOverride(resources corev1.ResourceRequirements) bool {
+	return len(resources.Requests) > 0 || len(resources.Limits) > 0 || len(resources.Claims) > 0
 }
 
-func applyWorkspaceResourceOverrides(container *corev1.Container, overrides *extensionsv1beta1.WorkspaceResources) {
-	if overrides == nil {
+// hasWorkspaceResourceOverrides reports whether the claim asks to merge any
+// resource requirement into at least one target container.
+func hasWorkspaceResourceOverrides(claim *extensionsv1beta1.SandboxClaim) bool {
+	for i := range claim.Spec.WorkspaceResources {
+		if hasResourceOverride(claim.Spec.WorkspaceResources[i].Resources) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyWorkspaceResourceOverrides(container *corev1.Container, override *extensionsv1beta1.WorkspaceResourceOverride) {
+	if override == nil || !hasResourceOverride(override.Resources) {
 		return
 	}
-	if len(overrides.Resources.Requests) == 0 && len(overrides.Resources.Limits) == 0 && overrides.Resources.Claims == nil {
-		return
-	}
-	if len(overrides.Resources.Requests) > 0 && container.Resources.Requests == nil {
+	if len(override.Resources.Requests) > 0 && container.Resources.Requests == nil {
 		container.Resources.Requests = corev1.ResourceList{}
 	}
-	if len(overrides.Resources.Limits) > 0 && container.Resources.Limits == nil {
+	if len(override.Resources.Limits) > 0 && container.Resources.Limits == nil {
 		container.Resources.Limits = corev1.ResourceList{}
 	}
-	if len(overrides.Resources.Requests) > 0 {
-		maps.Copy(container.Resources.Requests, overrides.Resources.Requests)
+	if len(override.Resources.Requests) > 0 {
+		maps.Copy(container.Resources.Requests, override.Resources.Requests)
 	}
-	if len(overrides.Resources.Limits) > 0 {
-		maps.Copy(container.Resources.Limits, overrides.Resources.Limits)
+	if len(override.Resources.Limits) > 0 {
+		maps.Copy(container.Resources.Limits, override.Resources.Limits)
 	}
-	if overrides.Resources.Claims != nil {
-		container.Resources.Claims = slices.Clone(overrides.Resources.Claims)
+	if len(override.Resources.Claims) > 0 {
+		container.Resources.Claims = slices.Clone(override.Resources.Claims)
 	}
 }
 
@@ -959,31 +963,70 @@ func validateResourceRequirements(requirements corev1.ResourceRequirements) erro
 	return nil
 }
 
+func validateResourceClaimReferences(spec *corev1.PodSpec, containerName string, claims []corev1.ResourceClaim) error {
+	availableClaims := make(map[string]struct{}, len(spec.ResourceClaims))
+	for i := range spec.ResourceClaims {
+		availableClaims[spec.ResourceClaims[i].Name] = struct{}{}
+	}
+	for i := range claims {
+		if _, ok := availableClaims[claims[i].Name]; !ok {
+			return fmt.Errorf("%w: resource claim %q for container %q is not declared in podSpec.resourceClaims", ErrWorkspaceResourcesInvalid, claims[i].Name, containerName)
+		}
+	}
+	return nil
+}
+
 func applyClaimWorkspaceResourcesToPodSpec(spec *corev1.PodSpec, claim *extensionsv1beta1.SandboxClaim) error {
 	if !hasWorkspaceResourceOverrides(claim) {
 		return nil
 	}
-	targetContainerName := claim.Spec.WorkspaceResources.ContainerName
-	if targetContainerName == "" {
-		return fmt.Errorf("%w: containerName is required", ErrWorkspaceResourcesInvalid)
-	}
-	for i := range spec.Containers {
-		container := &spec.Containers[i]
-		if container.Name != targetContainerName {
+
+	updated := spec.DeepCopy()
+	seenTargets := make(map[string]struct{}, len(claim.Spec.WorkspaceResources))
+	for i := range claim.Spec.WorkspaceResources {
+		override := &claim.Spec.WorkspaceResources[i]
+		if !hasResourceOverride(override.Resources) {
 			continue
 		}
-		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
-		return validateResourceRequirements(container.Resources)
-	}
-	for i := range spec.InitContainers {
-		container := &spec.InitContainers[i]
-		if container.Name != targetContainerName {
-			continue
+		if override.ContainerName == "" {
+			return fmt.Errorf("%w: containerName is required", ErrWorkspaceResourcesInvalid)
 		}
-		applyWorkspaceResourceOverrides(container, claim.Spec.WorkspaceResources)
-		return validateResourceRequirements(container.Resources)
+		if _, exists := seenTargets[override.ContainerName]; exists {
+			return fmt.Errorf("%w: containerName %q is specified more than once", ErrWorkspaceResourcesInvalid, override.ContainerName)
+		}
+		seenTargets[override.ContainerName] = struct{}{}
+
+		if err := validateResourceClaimReferences(updated, override.ContainerName, override.Resources.Claims); err != nil {
+			return err
+		}
+
+		var target *corev1.Container
+		for j := range updated.Containers {
+			if updated.Containers[j].Name == override.ContainerName {
+				target = &updated.Containers[j]
+				break
+			}
+		}
+		if target == nil {
+			for j := range updated.InitContainers {
+				if updated.InitContainers[j].Name == override.ContainerName {
+					target = &updated.InitContainers[j]
+					break
+				}
+			}
+		}
+		if target == nil {
+			return fmt.Errorf("%w: target container %q not found in the SandboxTemplate", ErrWorkspaceResourcesInvalid, override.ContainerName)
+		}
+
+		applyWorkspaceResourceOverrides(target, override)
+		if err := validateResourceRequirements(target.Resources); err != nil {
+			return err
+		}
 	}
-	return fmt.Errorf("%w: target container %q not found in the SandboxTemplate", ErrWorkspaceResourcesInvalid, targetContainerName)
+
+	*spec = *updated
+	return nil
 }
 
 func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, int, error) {

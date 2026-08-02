@@ -96,13 +96,22 @@ func TestSandboxPodFailurePolicyRecreate(t *testing.T) {
 		Service:       sandbox.Name,
 		ServiceFQDN:   fmt.Sprintf("%s.%s.svc.cluster.local", sandbox.Name, ns.Name),
 		LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
-		Conditions: []metav1.Condition{{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: 1,
-			Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
-			Message:            "Pod is Ready; Service Exists",
-		}},
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
+				Message:            "Sandbox is not suspended",
+			},
+			{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
+				Message:            "Pod is Ready; Service Exists",
+			},
+		},
 	})))
 
 	pvc := &corev1.PersistentVolumeClaim{}

@@ -106,21 +106,22 @@ type EnvVar struct {
 	ContainerName string `json:"containerName,omitempty"`
 }
 
-// WorkspaceResources defines per-claim resource requirement overrides for a
-// named PodSpec container or init container. Requests and limits are merged by
-// resource name; claims replace the target container's resource claims when set,
-// including an empty list.
-type WorkspaceResources struct {
+// WorkspaceResourceOverride defines per-claim resource requirement overrides
+// for a named PodSpec container or init container. Requests and limits are
+// merged by resource name; non-empty claims replace the target container's
+// resource claims.
+type WorkspaceResourceOverride struct {
 	// containerName specifies the target regular container or init container for
 	// the resource override.
 	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ContainerName string `json:"containerName"`
 
 	// resources specifies resource requirements to merge into the target container.
 	// Request and limit entries left unset keep the values from the SandboxTemplate.
-	// Claims replace the target container's resource claims when specified,
-	// including an empty list.
+	// Non-empty claims replace the target container's resource claims.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
@@ -154,11 +155,15 @@ type SandboxClaimSpec struct {
 	// +listType=atomic
 	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 
-	// workspaceResources overrides resource requirements for a named PodSpec container or init container at claim time.
+	// workspaceResources overrides resource requirements for named PodSpec containers or init containers at claim time.
 	// Unset request and limit entries keep the values from the SandboxTemplate.
-	// Specifying any override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
+	// Any non-empty override forces a cold start because warm-pool adoption is skipped for per-claim sizing.
+	// Claim writers may override resources independently of the SandboxTemplate; namespace ResourceQuota and LimitRange policies still apply.
 	// +optional
-	WorkspaceResources *WorkspaceResources `json:"workspaceResources,omitempty"`
+	// +listType=map
+	// +listMapKey=containerName
+	// +kubebuilder:validation:MaxItems=64
+	WorkspaceResources []WorkspaceResourceOverride `json:"workspaceResources,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.

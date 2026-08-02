@@ -16,9 +16,14 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
@@ -237,5 +242,108 @@ func TestSandboxClaimConversionFromHub(t *testing.T) {
 				t.Errorf("expected TemplateRef.Name %q, got %q", tc.expectedTemplateRef, dst.Spec.TemplateRef.Name)
 			}
 		})
+	}
+}
+
+func TestSandboxClaimConversionPreservesV1beta1OnlyFields(t *testing.T) {
+	src := &v1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "my-claim",
+			Namespace:   "default",
+			Annotations: map[string]string{"example.com/preserved": "true"},
+		},
+		Spec: v1beta1.SandboxClaimSpec{
+			WarmPoolRef: v1beta1.SandboxWarmPoolRef{Name: "my-pool"},
+			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+				EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				},
+			}},
+			WorkspaceResources: []v1beta1.WorkspaceResourceOverride{
+				{
+					ContainerName: "workspace",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						Claims:   []corev1.ResourceClaim{{Name: "gpu", Request: "gpu-class"}},
+					},
+				},
+				{
+					ContainerName: "setup",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &SandboxClaim{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	stateJSON, ok := spoke.Annotations[v1beta1SandboxClaimStateAnnotation]
+	if !ok {
+		t.Fatal("expected v1beta1 preservation annotation")
+	}
+	var state v1beta1SandboxClaimState
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		t.Fatalf("unmarshal preserved state: %v", err)
+	}
+	if !reflect.DeepEqual(state.VolumeClaimTemplates, src.Spec.VolumeClaimTemplates) {
+		t.Fatalf("volumeClaimTemplates were not preserved: got %#v, want %#v", state.VolumeClaimTemplates, src.Spec.VolumeClaimTemplates)
+	}
+	if !reflect.DeepEqual(state.WorkspaceResources, src.Spec.WorkspaceResources) {
+		t.Fatalf("workspaceResources were not preserved: got %#v, want %#v", state.WorkspaceResources, src.Spec.WorkspaceResources)
+	}
+
+	roundTrip := &v1beta1.SandboxClaim{}
+	if err := spoke.ConvertTo(roundTrip); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if !reflect.DeepEqual(roundTrip.Spec.VolumeClaimTemplates, src.Spec.VolumeClaimTemplates) {
+		t.Fatalf("round-trip volumeClaimTemplates mismatch: got %#v, want %#v", roundTrip.Spec.VolumeClaimTemplates, src.Spec.VolumeClaimTemplates)
+	}
+	if !reflect.DeepEqual(roundTrip.Spec.WorkspaceResources, src.Spec.WorkspaceResources) {
+		t.Fatalf("round-trip workspaceResources mismatch: got %#v, want %#v", roundTrip.Spec.WorkspaceResources, src.Spec.WorkspaceResources)
+	}
+	if _, ok := roundTrip.Annotations[v1beta1SandboxClaimStateAnnotation]; ok {
+		t.Fatal("v1beta1 preservation annotation leaked into hub object")
+	}
+
+	var alphaState SandboxClaim
+	if err := json.Unmarshal([]byte(roundTrip.Annotations[v1alpha1SandboxClaimStateAnnotation]), &alphaState); err != nil {
+		t.Fatalf("unmarshal v1alpha1 state: %v", err)
+	}
+	if _, ok := alphaState.Annotations[v1beta1SandboxClaimStateAnnotation]; ok {
+		t.Fatal("v1beta1 preservation annotation was nested in v1alpha1 state")
+	}
+}
+
+func TestSandboxClaimConversionRejectsMalformedV1beta1State(t *testing.T) {
+	spoke := &SandboxClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:        "my-claim",
+		Annotations: map[string]string{v1beta1SandboxClaimStateAnnotation: "{"},
+	}}
+	err := spoke.ConvertTo(&v1beta1.SandboxClaim{})
+	if err == nil || !strings.Contains(err.Error(), "failed to unmarshal v1beta1 SandboxClaim state") {
+		t.Fatalf("expected malformed state error, got %v", err)
+	}
+}
+
+func TestSandboxClaimConversionClearsStaleV1beta1State(t *testing.T) {
+	src := &v1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "my-claim",
+			Annotations: map[string]string{v1beta1SandboxClaimStateAnnotation: `{"workspaceResources":[{"containerName":"stale"}]}`},
+		},
+		Spec: v1beta1.SandboxClaimSpec{WarmPoolRef: v1beta1.SandboxWarmPoolRef{Name: "my-pool"}},
+	}
+	spoke := &SandboxClaim{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	if _, ok := spoke.Annotations[v1beta1SandboxClaimStateAnnotation]; ok {
+		t.Fatal("stale v1beta1 preservation annotation was not cleared")
 	}
 }

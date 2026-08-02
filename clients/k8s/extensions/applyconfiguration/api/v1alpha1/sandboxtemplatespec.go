@@ -17,7 +17,7 @@
 package v1alpha1
 
 import (
-	apiv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	apiv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1alpha1"
 	extensionsapiv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
@@ -30,13 +30,13 @@ type SandboxTemplateSpecApplyConfiguration struct {
 	// an agent sandbox.
 	// If AutomountServiceAccountToken is not specified in the PodSpec, it defaults to false
 	// to ensure a secure-by-default environment.
-	PodTemplate *apiv1alpha1.PodTemplate `json:"podTemplate,omitempty"`
+	PodTemplate *apiv1alpha1.PodTemplateApplyConfiguration `json:"podTemplate,omitempty"`
 	// volumeClaimTemplates is a list of claims that pods created from this template
 	// are allowed to reference. When a SandboxClaim or SandboxWarmPool creates a sandbox
 	// from this template, PVCs will be created from these templates.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
-	VolumeClaimTemplates []apiv1alpha1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+	VolumeClaimTemplates []apiv1alpha1.PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
 	// networkPolicy defines the network policy to be applied to the sandboxes
 	// created from this template. A single shared NetworkPolicy is created per Template.
 	// Behavior is dictated by the NetworkPolicyManagement field:
@@ -83,17 +83,20 @@ func SandboxTemplateSpec() *SandboxTemplateSpecApplyConfiguration {
 // WithPodTemplate sets the PodTemplate field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the PodTemplate field is set to the value of the last call.
-func (b *SandboxTemplateSpecApplyConfiguration) WithPodTemplate(value apiv1alpha1.PodTemplate) *SandboxTemplateSpecApplyConfiguration {
-	b.PodTemplate = &value
+func (b *SandboxTemplateSpecApplyConfiguration) WithPodTemplate(value *apiv1alpha1.PodTemplateApplyConfiguration) *SandboxTemplateSpecApplyConfiguration {
+	b.PodTemplate = value
 	return b
 }
 
 // WithVolumeClaimTemplates adds the given value to the VolumeClaimTemplates field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the VolumeClaimTemplates field.
-func (b *SandboxTemplateSpecApplyConfiguration) WithVolumeClaimTemplates(values ...apiv1alpha1.PersistentVolumeClaimTemplate) *SandboxTemplateSpecApplyConfiguration {
+func (b *SandboxTemplateSpecApplyConfiguration) WithVolumeClaimTemplates(values ...*apiv1alpha1.PersistentVolumeClaimTemplateApplyConfiguration) *SandboxTemplateSpecApplyConfiguration {
 	for i := range values {
-		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, values[i])
+		if values[i] == nil {
+			panic("nil value passed to WithVolumeClaimTemplates")
+		}
+		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, *values[i])
 	}
 	return b
 }

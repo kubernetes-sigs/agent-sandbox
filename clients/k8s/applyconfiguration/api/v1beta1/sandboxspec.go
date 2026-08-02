@@ -25,6 +25,7 @@ import (
 // with apply.
 //
 // SandboxSpec defines the desired state of Sandbox.
+// volumeClaimTemplates is immutable after creation.
 type SandboxSpecApplyConfiguration struct {
 	// SandboxBlueprint defines the workload configuration shared with SandboxTemplate.
 	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.

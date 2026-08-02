@@ -17,7 +17,7 @@
 package v1alpha1
 
 import (
-	agentsandboxapiv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	applyconfigurationapiv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1alpha1"
 	apiv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
 
@@ -37,7 +37,8 @@ type SandboxClaimSpecApplyConfiguration struct {
 	WarmPool *apiv1alpha1.WarmPoolPolicy `json:"warmpool,omitempty"`
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
-	AdditionalPodMetadata *agentsandboxapiv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
+	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
+	AdditionalPodMetadata *applyconfigurationapiv1alpha1.PodMetadataApplyConfiguration `json:"additionalPodMetadata,omitempty"`
 	// env is a list of environment variables to inject into the sandbox
 	Env []EnvVarApplyConfiguration `json:"env,omitempty"`
 }
@@ -75,8 +76,8 @@ func (b *SandboxClaimSpecApplyConfiguration) WithWarmPool(value apiv1alpha1.Warm
 // WithAdditionalPodMetadata sets the AdditionalPodMetadata field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the AdditionalPodMetadata field is set to the value of the last call.
-func (b *SandboxClaimSpecApplyConfiguration) WithAdditionalPodMetadata(value agentsandboxapiv1alpha1.PodMetadata) *SandboxClaimSpecApplyConfiguration {
-	b.AdditionalPodMetadata = &value
+func (b *SandboxClaimSpecApplyConfiguration) WithAdditionalPodMetadata(value *applyconfigurationapiv1alpha1.PodMetadataApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
+	b.AdditionalPodMetadata = value
 	return b
 }
 

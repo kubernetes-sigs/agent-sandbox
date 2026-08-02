@@ -1925,6 +1925,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 		},
 	}
+	claimPastWarmCandidateGracePeriod := claim.DeepCopy()
+	claimPastWarmCandidateGracePeriod.CreationTimestamp = metav1.NewTime(time.Now().Add(-warmCandidateGracePeriod - time.Second))
 
 	warmPoolUID := types.UID("warmpool-uid-123")
 	poolNameHash := sandboxcontrollers.NameHash("test-pool")
@@ -2133,10 +2135,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
-			name: "skips warm pool sandboxes with no backing pod and falls through to cold creation",
+			name: "falls through to cold creation after grace expires when warm candidates lack PodIPs",
 			existingObjects: []client.Object{
 				template,
-				claim,
+				claimPastWarmCandidateGracePeriod,
 				createRotatingSandbox("rotating-sb-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
 				createRotatingSandbox("rotating-sb-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}),
 			},

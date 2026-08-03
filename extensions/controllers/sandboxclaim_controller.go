@@ -780,12 +780,14 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.Sa
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
 		claim.Status.SandboxStatus.PodIPs = sandbox.Status.PodIPs
+		claim.Status.SandboxStatus.ServiceFQDN = sandbox.Status.ServiceFQDN
 	} else if err == nil || errors.Is(err, ErrSandboxNotOwned) {
 		// Only clear bound sandbox identity when there is no error (sandbox legitimately deleted or unbound)
 		// or when ownership verification fails. Never clear on transient lookup or patch errors, as wiping
 		// status.sandbox.name forces a fallback to cold-start on the next reconcile retry.
 		claim.Status.SandboxStatus.Name = ""
 		claim.Status.SandboxStatus.PodIPs = nil
+		claim.Status.SandboxStatus.ServiceFQDN = ""
 	}
 }
 
@@ -2087,9 +2089,9 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 
 // sandboxStatusRelevantChange reports whether a Sandbox update changed a field
 // the SandboxClaim reconciler actually consumes: the Ready condition, the
-// Finished condition, PodIPs (mirrored into claim.Status.SandboxStatus), or the
-// DeletionTimestamp (the claim must react when its adopted Sandbox starts
-// terminating). Only these two conditions are compared — by type, not the whole
+// Finished condition, PodIPs and ServiceFQDN (mirrored into
+// claim.Status.SandboxStatus), or the DeletionTimestamp (the claim must react
+// when its adopted Sandbox starts terminating). Only these two conditions are compared — by type, not the whole
 // slice — so churn on conditions the claim does not read (e.g. Suspended) does
 // not trigger a needless claim reconcile.
 //
@@ -2111,6 +2113,12 @@ func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 		return true
 	}
 	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {
+		return true
+	}
+	// ServiceFQDN is mirrored into claim.Status.SandboxStatus like PodIPs. It
+	// is written once (immutable after set), so this admits at most one extra
+	// reconcile per sandbox.
+	if oldSb.Status.ServiceFQDN != newSb.Status.ServiceFQDN {
 		return true
 	}
 	for _, condType := range []string{

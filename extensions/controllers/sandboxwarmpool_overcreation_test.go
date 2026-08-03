@@ -12,16 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Regression tests for #1215: SandboxWarmPool over-creates replicas.
-//
-// The production failure mode: reconcilePool computes
-// "toCreate = spec.replicas - len(cachedSandboxes)" from the informer cache,
-// which lags the controller's own just-issued creates. Every create event
-// re-enqueues the pool (ownership watch), so under load the same pool is
-// re-reconciled while the cache still shows the pre-create state, and each
-// pass creates toward the target again — ~10x over-creation observed at
-// --sandbox-warm-pool-concurrent-workers=1000 (>=5,000 creates for a 500-pod
-// target; log-confirmed by tomergee on the issue).
 package controllers
 
 import (
@@ -32,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -662,14 +653,14 @@ func TestReconcilePool_YoungNotReadyArmsGraceRequeue(t *testing.T) {
 	require.NoError(t, err)
 	// Earliest deadline wins: the 4-minute-old sandbox has 1 minute of grace
 	// left. The fake clock makes this exact.
-	require.Equal(t, warmPoolReadinessGracePeriod-4*time.Minute+graceRequeueSlack, requeueAfter,
+	require.Equal(t, defaultWarmPoolReadinessGracePeriod-4*time.Minute+graceRequeueSlack, requeueAfter,
 		"requeue must target the earliest remaining grace deadline")
 
 	// With the default jitter factor, the requeue is spread inside
 	// [base, base*(1+factor)] — never earlier than the deadline, never more
 	// than 50% beyond it.
 	graceRequeueJitterFactor = 0.5
-	jitterBase := warmPoolReadinessGracePeriod - 4*time.Minute + graceRequeueSlack
+	jitterBase := defaultWarmPoolReadinessGracePeriod - 4*time.Minute + graceRequeueSlack
 	for range 20 {
 		rj := SandboxWarmPoolReconciler{
 			Client: newFakeClient(scheme,
@@ -777,7 +768,7 @@ func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
 	// post-grace evaluation is self-scheduled.
 	requeueAfter, err := r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
-	require.Equal(t, warmPoolReadinessGracePeriod+graceRequeueSlack, requeueAfter)
+	require.Equal(t, defaultWarmPoolReadinessGracePeriod+graceRequeueSlack, requeueAfter)
 	select {
 	case e := <-recorder.Events:
 		t.Fatalf("no event may fire inside the grace period, got: %s", e)
@@ -854,4 +845,92 @@ func TestWarmPoolSandboxEventHandler_ObservesOwnedEvents(t *testing.T) {
 	require.False(t, e.SatisfiedExpectations(poolKey))
 	h.Delete(ctx, event.DeleteEvent{Object: owned}, nil)
 	require.True(t, e.SatisfiedExpectations(poolKey))
+}
+
+// TestReconcilePool_ConfigurableReadinessGracePeriod verifies that
+// ReadinessGracePeriod on the reconciler overrides the default: a not-Ready
+// sandbox older than the default 5m is still held (and the post-grace requeue
+// targets the configured deadline) under a longer grace, and is replaced under
+// a shorter one. The grace period must track the operator's fill horizon —
+// at large fills, readiness-status lag past a short grace replaces healthy
+// sandboxes, and even without replacements the self-scheduled deadline
+// evaluations re-reconcile pools near-continuously.
+func TestReconcilePool_ConfigurableReadinessGracePeriod(t *testing.T) {
+	zeroGraceJitter(t)
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(1)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-grace",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+
+	base := time.Now().Truncate(time.Second)
+	controller := true
+	newNotReadySandbox := func(age time.Duration) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-grace")
+		sb.UID = "uid-grace"
+		sb.CreationTimestamp = metav1.Time{Time: base.Add(-age)}
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionFalse,
+		}}
+		sb.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       "SandboxWarmPool",
+			Name:       poolName,
+			UID:        warmPool.UID,
+			Controller: &controller,
+		}}
+		return sb
+	}
+
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	// A 10-minute-old not-Ready sandbox is PAST the 5m default but within a
+	// 30m configured grace: it must be held, and the requeue must target the
+	// configured deadline (30m - 10m + slack), not the default's.
+	longGrace := SandboxWarmPoolReconciler{
+		Client:               newFakeClient(scheme, template, warmPool, newNotReadySandbox(10*time.Minute)),
+		Scheme:               scheme,
+		MaxBatchSize:         sandboxCreateDeleteMaxBatchSize,
+		ReadinessGracePeriod: 30 * time.Minute,
+		now:                  func() time.Time { return base },
+	}
+	requeueAfter, err := longGrace.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Minute-10*time.Minute+graceRequeueSlack, requeueAfter,
+		"requeue must target the CONFIGURED grace deadline, not the default")
+	held := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, longGrace.Client.Get(ctx,
+		types.NamespacedName{Name: newNotReadySandbox(0).Name, Namespace: poolNamespace}, held),
+		"sandbox within the configured grace must be held, not replaced")
+
+	// The same sandbox under a 1m configured grace is stuck: it must be
+	// replaced (deleted) instead of held.
+	shortGrace := SandboxWarmPoolReconciler{
+		Client:               newFakeClient(scheme, template, warmPool, newNotReadySandbox(10*time.Minute)),
+		Scheme:               scheme,
+		MaxBatchSize:         sandboxCreateDeleteMaxBatchSize,
+		ReadinessGracePeriod: time.Minute,
+		now:                  func() time.Time { return base },
+	}
+	_, err = shortGrace.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	gone := &sandboxv1beta1.Sandbox{}
+	getErr := shortGrace.Client.Get(ctx,
+		types.NamespacedName{Name: newNotReadySandbox(0).Name, Namespace: poolNamespace}, gone)
+	require.True(t, apierrors.IsNotFound(getErr),
+		"sandbox past the configured grace must be replaced (deleted)")
 }

@@ -60,9 +60,15 @@ const (
 	// of O(sandboxes-in-namespace).
 	sandboxWarmPoolLabelIndex = ".metadata.labels[" + warmPoolSandboxLabel + "]"
 
-	// warmPoolReadinessGracePeriod is how long a pool sandbox may stay
-	// non-Ready before the reconciler considers it stuck and replaces it.
-	warmPoolReadinessGracePeriod = 5 * time.Minute
+	// defaultWarmPoolReadinessGracePeriod is the default for how long a pool
+	// sandbox may stay non-Ready before the reconciler considers it stuck and
+	// replaces it. Configurable via ReadinessGracePeriod on the reconciler
+	// (--sandbox-warm-pool-readiness-grace-period): the grace period must
+	// exceed the pool's expected fill horizon — when deadlines land inside a
+	// large fill, the self-scheduled post-grace evaluations keep pools
+	// re-reconciling near-continuously, which measurably slows the fill even
+	// when nothing is ever replaced.
+	defaultWarmPoolReadinessGracePeriod = 5 * time.Minute
 
 	// expectationsPendingRequeueDelay is the fallback requeue used when create
 	// or delete work is skipped because previously issued writes have not been
@@ -102,6 +108,13 @@ type SandboxWarmPoolReconciler struct {
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
+	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready
+	// before it is considered stuck and replaced (unschedulable sandboxes are
+	// held instead, #1215). Zero or negative means
+	// defaultWarmPoolReadinessGracePeriod. Operators should keep this above
+	// the pool's expected time-to-Ready under their fill sizes; see
+	// defaultWarmPoolReadinessGracePeriod for why.
+	ReadinessGracePeriod time.Duration
 	// Recorder emits pool-level Events (e.g. WarmPoolNotProgressing). May be
 	// nil (tests); all uses are nil-guarded.
 	Recorder events.EventRecorder
@@ -119,6 +132,15 @@ type SandboxWarmPoolReconciler struct {
 
 	// now is a test hook for the reconciler's clock; nil means time.Now.
 	now func() time.Time
+}
+
+// readinessGracePeriod returns the effective readiness grace period
+// (ReadinessGracePeriod, defaulted when unset).
+func (r *SandboxWarmPoolReconciler) readinessGracePeriod() time.Duration {
+	if r.ReadinessGracePeriod > 0 {
+		return r.ReadinessGracePeriod
+	}
+	return defaultWarmPoolReadinessGracePeriod
 }
 
 // clockNow returns the reconciler's current time (time.Now unless a test
@@ -248,6 +270,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	activeSandboxes, terminatingReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
 
 	now := r.clockNow()
+	readinessGrace := r.readinessGracePeriod()
 	var healthySandboxes []sandboxv1beta1.Sandbox
 	unschedulableReplicas := int32(0)
 	// nextGraceDeadline is the time remaining until the earliest readiness
@@ -256,7 +279,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(sb.CreationTimestamp.Time)
-			if age <= warmPoolReadinessGracePeriod {
+			if age <= readinessGrace {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -266,7 +289,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// unschedulable-hold/NotProgressing signal unreachable.
 				// Requeue for the earliest grace deadline so the evaluation
 				// is deterministic.
-				if remaining := warmPoolReadinessGracePeriod - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
+				if remaining := readinessGrace - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
 					nextGraceDeadline = remaining
 				}
 				healthySandboxes = append(healthySandboxes, sb)
@@ -448,7 +471,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	if unschedulableReplicas > 0 {
 		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
 			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
-			unschedulableReplicas, desiredReplicas, warmPoolReadinessGracePeriod))
+			unschedulableReplicas, desiredReplicas, readinessGrace))
 		requeueAfter = minNonZeroDuration(requeueAfter, unschedulableRequeueDelay)
 	} else {
 		r.setNotProgressing(warmPool, poolKey, false, "")

@@ -77,6 +77,7 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
+	var sandboxWarmPoolReadinessGracePeriod time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
@@ -140,6 +141,7 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300. Creates advance one observed batch per watch round-trip (the expectations gate waits for a batch's add events before issuing the next), so a large pool fills in about ceil(replicas/batchSize) round-trips; raising this trades round-trips for burst size and is safe at any value under the gate.")
+	flag.DurationVar(&sandboxWarmPoolReadinessGracePeriod, "sandbox-warm-pool-readiness-grace-period", 5*time.Minute, "How long a warm-pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (unschedulable sandboxes are held instead of replaced). Must exceed the expected time for a pool to reach Ready under your fill sizes: readiness-status lag behind a large fill can otherwise cause healthy sandboxes to be replaced, and even with no replacements, grace deadlines landing inside the fill make the self-scheduled post-grace evaluations re-reconcile pools near-continuously, which measurably slows large fills. Default is 5m.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
@@ -196,6 +198,10 @@ func main() {
 	// Validation checks for sandboxWarmPoolMaxBatchSize (maximum batch size for sandbox creation and deletion in SandboxWarmPool controller)
 	if sandboxWarmPoolMaxBatchSize <= 0 {
 		setupLog.Error(nil, "sandbox-warm-pool-max-batch-size must be greater than 0")
+		os.Exit(1)
+	}
+	if sandboxWarmPoolReadinessGracePeriod <= 0 {
+		setupLog.Error(nil, "sandbox-warm-pool-readiness-grace-period must be greater than 0")
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -504,6 +510,7 @@ func main() {
 			Scheme:                 mgr.GetScheme(),
 			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
 			EnableWarmPoolEviction: enableWarmPoolEviction,
+			ReadinessGracePeriod:   sandboxWarmPoolReadinessGracePeriod,
 			Recorder:               mgr.GetEventRecorder("sandboxwarmpool-controller"),
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")

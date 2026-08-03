@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package v1beta1
+package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 )
 
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
@@ -33,10 +33,31 @@ const (
 
 	// AssignedSandboxNameAnnotation is the annotation key applied to the claim to identify the adopted Sandbox Name.
 	AssignedSandboxNameAnnotation = "agents.x-k8s.io/sandbox-name"
-
-	// WarmPoolRefField is the field used for indexing SandboxClaims by their warm pool reference name.
-	WarmPoolRefField = ".spec.warmPoolRef.name"
 )
+
+// WarmPoolPolicy describes the policy for using warm pools.
+// It can be one of the following:
+//   - "none": Do not use any warm pool, always create fresh sandboxes
+//   - "default": Select from all available warm pools that match the template (default)
+//   - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+type WarmPoolPolicy string
+
+const (
+	// WarmPoolPolicyNone indicates that no warm pool should be used.
+	// A fresh sandbox will always be created.
+	WarmPoolPolicyNone WarmPoolPolicy = "none"
+
+	// WarmPoolPolicyDefault indicates the default behavior: select from all
+	// available warm pools that match the template. This is the default behavior
+	// if warmpool is not specified.
+	WarmPoolPolicyDefault WarmPoolPolicy = "default"
+)
+
+// IsSpecificPool returns true if the policy specifies a specific warm pool name
+// (not "none" or "default").
+func (p WarmPoolPolicy) IsSpecificPool() bool {
+	return p != WarmPoolPolicyNone && p != WarmPoolPolicyDefault && p != ""
+}
 
 // ShutdownPolicy describes the policy for shutting down the underlying Sandbox when the SandboxClaim expires.
 // +kubebuilder:validation:Enum=Delete;DeleteForeground;Retain
@@ -82,11 +103,11 @@ type Lifecycle struct {
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
-// SandboxWarmPoolRef references a SandboxWarmPool.
-type SandboxWarmPoolRef struct {
-	// name of the SandboxWarmPool
+// SandboxTemplateRef references a SandboxTemplate.
+type SandboxTemplateRef struct {
+	// name of the SandboxTemplate
 	// +required
-	Name string `json:"name"`
+	Name string `json:"name,omitempty"`
 }
 
 // EnvVar represents a custom environment variable key-value pair.
@@ -107,32 +128,32 @@ type EnvVar struct {
 
 // SandboxClaimSpec defines the desired state of Sandbox.
 type SandboxClaimSpec struct {
-	// warmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
+	// sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox.
 	// +required
-	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
+	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
 
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 
+	// warmpool specifies the warm pool policy for sandbox adoption.
+	// - "none": Do not use any warm pool, always create fresh sandboxes
+	// - "default": Use default behavior, select from all matching warm pools (default)
+	// - A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool")
+	// +optional
+	// +kubebuilder:default=default
+	WarmPool *WarmPoolPolicy `json:"warmpool,omitempty"`
+
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
 	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
 	// +optional
-	AdditionalPodMetadata sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
+	AdditionalPodMetadata sandboxv1alpha1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
-	// env is a list of environment variables to inject into the sandbox.
-	// Please note adding this field means the Sandbox will always be cold-started from the
-	// template of the warmpool.
+	// env is a list of environment variables to inject into the sandbox
 	// +listType=atomic
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
-
-	// volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.
-	// Specifying this field forces a cold start because warm pool pods will not have these volumes.
-	// +optional
-	// +listType=atomic
-	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of Sandbox.
@@ -158,18 +179,21 @@ type SandboxStatus struct {
 	// created or while the Sandbox is suspended).
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
+
+	// serviceFQDN is the in-cluster DNS name of the bound Sandbox's service,
+	// mirrored from the Sandbox's status.serviceFQDN so consumers can reach
+	// the sandbox from the claim alone. Like name and podIPs, it is eventually
+	// consistent: it may lag the Sandbox by a reconcile, and is cleared when
+	// the claim loses its sandbox.
+	// +optional
+	ServiceFQDN string `json:"serviceFQDN,omitempty"`
 }
 
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxclaim
-// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
-// +kubebuilder:printcolumn:name="Sandbox",type="string",JSONPath=".status.sandbox.name"
-// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:storageversion
-// +kubebuilder:conversion:strategy=Webhook
+// +kubebuilder:deprecatedversion:warning="extensions.agents.x-k8s.io/v1alpha1 SandboxClaim is deprecated; use extensions.agents.x-k8s.io/v1beta1 SandboxClaim instead"
 // SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`
@@ -188,6 +212,7 @@ type SandboxClaim struct {
 }
 
 // +kubebuilder:object:root=true
+
 // SandboxList contains a list of Sandbox.
 type SandboxClaimList struct {
 	metav1.TypeMeta `json:",inline"`

@@ -414,6 +414,7 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Message: "Sandbox is ready",
 	}}
 	readySandbox.Status.PodIPs = []string{"10.244.0.6"}
+	readySandbox.Status.ServiceFQDN = "test-claim.default.svc.cluster.local"
 
 	// Validation Functions
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate) {
@@ -1191,6 +1192,11 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					if diff := cmp.Diff(tc.expectedPodIPs, updatedClaim.Status.SandboxStatus.PodIPs); diff != "" {
 						t.Errorf("unexpected PodIPs:\n%s", diff)
 					}
+					// The bound-sandbox cases mirror from readySandbox, whose
+					// fixture sets ServiceFQDN — it must ride along with PodIPs.
+					if got := updatedClaim.Status.SandboxStatus.ServiceFQDN; got != "test-claim.default.svc.cluster.local" {
+						t.Errorf("expected mirrored ServiceFQDN %q, got %q", "test-claim.default.svc.cluster.local", got)
+					}
 				}
 				if diff := cmp.Diff(tc.expectedCondition, condition, cmp.Comparer(ignoreTimestamp)); diff != "" {
 					t.Errorf("unexpected condition:\n%s", diff)
@@ -1420,6 +1426,9 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 					}
 					if fetchedClaim.Status.SandboxStatus.PodIPs != nil {
 						t.Errorf("expected SandboxStatus.PodIPs to be nil, got %v", fetchedClaim.Status.SandboxStatus.PodIPs)
+					}
+					if fetchedClaim.Status.SandboxStatus.ServiceFQDN != "" {
+						t.Errorf("expected SandboxStatus.ServiceFQDN to be empty, got %q", fetchedClaim.Status.SandboxStatus.ServiceFQDN)
 					}
 				}
 			}
@@ -4849,8 +4858,9 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 				LastTransitionTime: metav1.Now(),
 			}},
 			SandboxStatus: extensionsv1beta1.SandboxStatus{
-				Name:   "adopted-sb",
-				PodIPs: []string{"10.1.2.3"},
+				Name:        "adopted-sb",
+				PodIPs:      []string{"10.1.2.3"},
+				ServiceFQDN: "adopted-sb.default.svc.cluster.local",
 			},
 		},
 	}
@@ -4899,7 +4909,8 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 		// The sandbox is live and Ready; informer lag on the ownership patch does not
 		// erase its status, so the stale view still carries it.
 		Status: sandboxv1beta1.SandboxStatus{
-			PodIPs: []string{"10.1.2.3"},
+			PodIPs:      []string{"10.1.2.3"},
+			ServiceFQDN: "adopted-sb.default.svc.cluster.local",
 			Conditions: []metav1.Condition{{
 				Type:               string(sandboxv1beta1.SandboxConditionReady),
 				Status:             metav1.ConditionTrue,
@@ -4958,6 +4969,9 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 	}
 	if len(updatedClaim.Status.SandboxStatus.PodIPs) != 1 || updatedClaim.Status.SandboxStatus.PodIPs[0] != "10.1.2.3" {
 		t.Errorf("expected finalized PodIPs to be preserved, got %v", updatedClaim.Status.SandboxStatus.PodIPs)
+	}
+	if updatedClaim.Status.SandboxStatus.ServiceFQDN != "adopted-sb.default.svc.cluster.local" {
+		t.Errorf("expected finalized ServiceFQDN to be preserved, got %q", updatedClaim.Status.SandboxStatus.ServiceFQDN)
 	}
 	readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	if readyCondition == nil {
@@ -6489,6 +6503,18 @@ func TestSandboxStatusRelevantChange(t *testing.T) {
 					Conditions: []metav1.Condition{
 						{Type: string(sandboxv1beta1.SandboxConditionFinished), Status: metav1.ConditionTrue},
 					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "ServiceFQDN set",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					ServiceFQDN: "sb.default.svc.cluster.local",
 				},
 			},
 			expected: true,

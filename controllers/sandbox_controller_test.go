@@ -115,7 +115,7 @@ func inPlaceResizePod(resources corev1.ResourceRequirements) *corev1.Pod {
 	}
 }
 
-func TestReconcileInPlaceResourcesUsesResizeSubresourceWithoutRestart(t *testing.T) {
+func TestReconcileInPlaceResourcesUsesStrategicResizeSubresourceWithoutRestart(t *testing.T) {
 	current := resizeResources("1", "1Gi")
 	desired := resizeResources("2", "2Gi")
 	sandbox := inPlaceResizeSandbox(desired)
@@ -124,10 +124,12 @@ func TestReconcileInPlaceResourcesUsesResizeSubresourceWithoutRestart(t *testing
 	rawClient := newFakeClient()
 	var subresource string
 	var patched *corev1.Pod
+	var patch client.Patch
 	clientWithResize := interceptor.NewClient(rawClient, interceptor.Funcs{
-		SubResourcePatch: func(_ context.Context, _ client.Client, name string, obj client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+		SubResourcePatch: func(_ context.Context, _ client.Client, name string, obj client.Object, gotPatch client.Patch, _ ...client.SubResourcePatchOption) error {
 			subresource = name
 			patched = obj.(*corev1.Pod).DeepCopy()
+			patch = gotPatch
 			return nil
 		},
 	})
@@ -139,10 +141,33 @@ func TestReconcileInPlaceResourcesUsesResizeSubresourceWithoutRestart(t *testing
 	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
 	assert.Equal(t, "resize", subresource)
 	require.NotNil(t, patched)
+	require.NotNil(t, patch)
+	assert.Equal(t, types.StrategicMergePatchType, patch.Type(), "resize must merge containers by name instead of replacing the array")
 	assert.Equal(t, types.UID("pod-uid"), patched.UID, "in-place resize must retain Pod identity")
 	assert.Equal(t, int32(3), patched.Status.ContainerStatuses[0].RestartCount, "in-place resize must not restart the container")
 	assert.True(t, patched.Spec.Containers[0].Resources.Requests.Cpu().Equal(resource.MustParse("2")))
 	assert.True(t, patched.Spec.Containers[0].Resources.Limits.Memory().Equal(resource.MustParse("2Gi")))
+}
+
+func TestSetResourceResizeConditionRetainsTerminalOutcomeUntilDisabled(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	completed := resourceResizeCondition(
+		sandbox,
+		metav1.ConditionTrue,
+		sandboxv1beta1.SandboxReasonResourceResizeCompleted,
+		"CPU and memory resources were resized in place",
+	)
+	setResourceResizeCondition(sandbox, completed)
+	setResourceResizeCondition(sandbox, nil)
+
+	condition := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeCompleted, condition.Reason)
+
+	sandbox.Spec.ResourceResizePolicy = nil
+	setResourceResizeCondition(sandbox, nil)
+	assert.Nil(t, meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize)))
 }
 
 func TestReconcileInPlaceResourcesRejectsRestartContainerPolicy(t *testing.T) {

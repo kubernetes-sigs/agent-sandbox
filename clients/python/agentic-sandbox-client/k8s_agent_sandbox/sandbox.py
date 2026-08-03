@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import logging
-from .trace_manager import create_tracer_manager, trace_span, trace
+from .trace_manager import create_tracer_manager
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
@@ -23,7 +23,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
-from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
+from .constants import POD_NAME_ANNOTATION
 from .utils import select_pod_ip, extract_sandbox_name_hash
 
 

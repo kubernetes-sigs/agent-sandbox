@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 import ipaddress
 from typing import Any
 
-from k8s_agent_sandbox.constants import SANDBOX_NAME_HASH_LABEL
+from .constants import SANDBOX_NAME_HASH_LABEL
 
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:

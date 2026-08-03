@@ -17,7 +17,7 @@ import logging
 from .async_connector import AsyncSandboxConnector
 from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
-from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
+from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager

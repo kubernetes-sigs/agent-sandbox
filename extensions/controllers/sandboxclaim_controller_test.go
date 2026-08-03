@@ -1288,7 +1288,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		sandboxNotOwned            bool // sandbox exists at statusName but belongs to a different owner
 		expectClaimDeleted         bool
 		expectSandboxDeleted       bool
-		expectSandboxStatusCleared bool // SandboxStatus.Name and PodIPs must be empty
+		expectSandboxStatusCleared bool // SandboxStatus.Name, PodIPs, and ServiceFQDN must be empty
 		expectStatus               string
 	}{
 		{
@@ -1374,6 +1374,11 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 					{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind, Name: "other-claim", UID: "other-uid", Controller: func() *bool { b := true; return &b }()},
 				}
 				tc.claim.Status.SandboxStatus.Name = sandbox.Name
+				// Seed the mirrored fields so the cleared-status assertions
+				// below actually exercise the clear path (against the
+				// zero-value fixture they pass vacuously).
+				tc.claim.Status.SandboxStatus.PodIPs = []string{"10.0.0.99"}
+				tc.claim.Status.SandboxStatus.ServiceFQDN = "previous-sandbox.default.svc.cluster.local"
 			}
 
 			client := fake.NewClientBuilder().WithScheme(scheme).

@@ -441,11 +441,6 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, conditionErrors, svc, pod, podErr)
-	if resizeCondition != nil {
-		conditions = append(conditions, *resizeCondition)
-	} else {
-		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
-	}
 	// Conditions that are only present while they apply: Finished has no
 	// meaning without a terminal pod, PodScheduled none without a pod at
 	// all. Any of these not computed this pass is removed from status.
@@ -467,6 +462,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		}
 	}
 
+	setResourceResizeCondition(sandbox, resizeCondition)
 	return allErrors
 }
 
@@ -1222,7 +1218,7 @@ func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandb
 	for _, target := range targets {
 		pod.Spec.Containers[target.index].Resources = target.resources
 	}
-	if err := r.SubResource("resize").Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+	if err := r.SubResource("resize").Patch(ctx, pod, client.StrategicMergeFrom(base)); err != nil {
 		if terminalPodResizeError(err) {
 			return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeFailed, "Pod resize was rejected: "+err.Error()), nil
 		}
@@ -1230,6 +1226,18 @@ func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandb
 	}
 
 	return resourceResizeCondition(sandbox, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonResourceResizePending, "Pod resize was accepted; waiting for kubelet status"), nil
+}
+
+// setResourceResizeCondition keeps terminal in-place resize outcomes visible
+// until a later resize supersedes them or the opt-in policy is disabled.
+func setResourceResizeCondition(sandbox *sandboxv1beta1.Sandbox, condition *metav1.Condition) {
+	if condition != nil {
+		meta.SetStatusCondition(&sandbox.Status.Conditions, *condition)
+		return
+	}
+	if !inPlaceResourceResizeEnabled(sandbox) {
+		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
+	}
 }
 
 type inPlaceResizeTarget struct {

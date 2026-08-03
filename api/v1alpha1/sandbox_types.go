@@ -117,6 +117,29 @@ type PodTemplate struct {
 	ObjectMeta PodMetadata `json:"metadata"`
 }
 
+// ResourceResizePolicyType controls how the controller reconciles CPU and
+// memory changes in a running Sandbox PodTemplate.
+// +kubebuilder:validation:Enum=Disabled;InPlace
+type ResourceResizePolicyType string
+
+const (
+	// ResourceResizePolicyDisabled leaves a running Pod unchanged when its
+	// template resources change. This is the safe default.
+	ResourceResizePolicyDisabled ResourceResizePolicyType = "Disabled"
+	// ResourceResizePolicyInPlace permits the controller to request a
+	// restart-free CPU or memory update through the Pod resize subresource.
+	ResourceResizePolicyInPlace ResourceResizePolicyType = "InPlace"
+)
+
+// ResourceResizePolicy defines the desired reconciliation behavior for CPU
+// and memory changes in a running Sandbox PodTemplate.
+type ResourceResizePolicy struct {
+	// type selects whether resource changes to a running backing Pod are
+	// ignored or reconciled through the Pod resize subresource.
+	// +required
+	Type ResourceResizePolicyType `json:"type"`
+}
+
 type PersistentVolumeClaimTemplate struct {
 	// metadata is the PVC's metadata.
 	// +optional
@@ -163,6 +186,13 @@ type SandboxSpec struct {
 	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
+
+	// resourceResizePolicy controls CPU and memory reconciliation for an
+	// already-running backing Pod. Disabled is the safe default: the
+	// controller never replaces a Pod in response to resource changes.
+	// +kubebuilder:default={type:Disabled}
+	// +optional
+	ResourceResizePolicy *ResourceResizePolicy `json:"resourceResizePolicy,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

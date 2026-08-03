@@ -61,6 +61,7 @@ func TestSandboxConversion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			now := metav1.Now()
 			policy := ShutdownPolicyDelete
+			resizePolicy := ResourceResizePolicyInPlace
 			bTrue := true
 
 			// Create src v1alpha1 Sandbox
@@ -108,8 +109,9 @@ func TestSandboxConversion(t *testing.T) {
 						ShutdownTime:   &now,
 						ShutdownPolicy: &policy,
 					},
-					Replicas: tc.replicas,
-					Service:  &bTrue,
+					Replicas:             tc.replicas,
+					Service:              &bTrue,
+					ResourceResizePolicy: &ResourceResizePolicy{Type: resizePolicy},
 				},
 				Status: SandboxStatus{
 					ServiceFQDN:   "my-sandbox.default.svc.cluster.local",
@@ -161,6 +163,9 @@ func TestSandboxConversion(t *testing.T) {
 			if dst.Spec.Lifecycle.ShutdownPolicy == nil || string(*dst.Spec.Lifecycle.ShutdownPolicy) != string(ShutdownPolicyDelete) {
 				t.Errorf("expected ShutdownPolicy %q, got %v", ShutdownPolicyDelete, dst.Spec.Lifecycle.ShutdownPolicy)
 			}
+			if dst.Spec.ResourceResizePolicy == nil || dst.Spec.ResourceResizePolicy.Type != v1beta1.ResourceResizePolicyInPlace {
+				t.Errorf("expected ResourceResizePolicy %q, got %v", v1beta1.ResourceResizePolicyInPlace, dst.Spec.ResourceResizePolicy)
+			}
 
 			// Convert back to Spoke (v1alpha1)
 			roundTrip := &Sandbox{}
@@ -198,6 +203,9 @@ func TestSandboxConversion(t *testing.T) {
 
 			if roundTrip.Spec.Lifecycle.ShutdownPolicy == nil || *roundTrip.Spec.Lifecycle.ShutdownPolicy != *src.Spec.Lifecycle.ShutdownPolicy {
 				t.Errorf("roundtrip ShutdownPolicy mismatch")
+			}
+			if roundTrip.Spec.ResourceResizePolicy == nil || roundTrip.Spec.ResourceResizePolicy.Type != src.Spec.ResourceResizePolicy.Type {
+				t.Errorf("roundtrip ResourceResizePolicy mismatch")
 			}
 		})
 	}

@@ -150,6 +150,14 @@ func ConvertSpecTo(src *SandboxSpec, dst *v1beta1.SandboxSpec) error {
 	// Service
 	dst.Service = src.Service
 
+	if src.ResourceResizePolicy != nil {
+		dst.ResourceResizePolicy = &v1beta1.ResourceResizePolicy{
+			Type: v1beta1.ResourceResizePolicyType(src.ResourceResizePolicy.Type),
+		}
+	} else {
+		dst.ResourceResizePolicy = nil
+	}
+
 	return nil
 }
 
@@ -187,6 +195,14 @@ func ConvertSpecFrom(src *v1beta1.SandboxSpec, dst *SandboxSpec) error {
 
 	// Service
 	dst.Service = src.Service
+
+	if src.ResourceResizePolicy != nil {
+		dst.ResourceResizePolicy = &ResourceResizePolicy{
+			Type: ResourceResizePolicyType(src.ResourceResizePolicy.Type),
+		}
+	} else {
+		dst.ResourceResizePolicy = nil
+	}
 
 	return nil
 }

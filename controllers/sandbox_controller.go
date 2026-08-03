@@ -72,14 +72,11 @@ const (
 //   - metadata.finalizers: never read on Pods by any controller in this repo
 //     (the sandboxes/finalizers RBAC is for the Sandbox CR itself, not Pods).
 //     Stripping is safe and saves a trivial amount of memory.
-//   - spec: the only spec field any controller reads is spec.nodeName
-//     (propagated to Sandbox status), so it is the only field preserved. The
-//     pod spec the controller WRITES is built from the Sandbox's PodTemplate
-//     (reconcilePod's create path), never from the cached pod, and every pod write in this
-//     repo is a metadata-only merge patch diffed against the same transformed
-//     cache object — stripped fields appear on neither side of the diff, so
-//     they can never leak into (or be deleted by) a patch. See
-//     TestPodCacheTransformMergePatchUnaffected.
+//   - spec: nodeName plus each container's name, CPU/memory resources, and
+//     resizePolicy survive. The narrow opt-in resize reconciler needs exactly
+//     these fields to prepare a Pod /resize patch and to reject policies that
+//     would restart a container. The controller otherwise still builds Pod
+//     specs from the Sandbox PodTemplate and only metadata-patches cached Pods.
 //
 // metadata (labels/annotations/ownerRefs) and status are kept in full.
 // Non-pod inputs (e.g. cache.DeletedFinalStateUnknown tombstones) pass
@@ -91,7 +88,15 @@ func PodCacheTransform(obj any) (any, error) {
 	}
 	pod.ManagedFields = nil
 	pod.Finalizers = nil
-	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName}
+	containers := make([]corev1.Container, len(pod.Spec.Containers))
+	for i, container := range pod.Spec.Containers {
+		containers[i] = corev1.Container{
+			Name:         container.Name,
+			Resources:    *container.Resources.DeepCopy(),
+			ResizePolicy: slices.Clone(container.ResizePolicy),
+		}
+	}
+	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName, Containers: containers}
 	return pod, nil
 }
 
@@ -184,6 +189,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=pods/resize,verbs=patch
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
@@ -294,6 +300,8 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// Reconcile Pod
 	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, podErr)
+	resizeCondition, resizeErr := r.reconcileInPlaceResources(ctx, sandbox, pod)
+	allErrors = errors.Join(allErrors, resizeErr)
 
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
@@ -315,6 +323,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, allErrors, svc, pod, podErr)
+	if resizeCondition != nil {
+		conditions = append(conditions, *resizeCondition)
+	} else {
+		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
+	}
 	hasFinished := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
@@ -963,6 +976,249 @@ func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1beta1.Sandbox) 
 	sandbox.Status.ServiceFQDN = ""
 }
 
+// reconcileInPlaceResources narrows mutable PodTemplate reconciliation to
+// CPU/memory resources on an already-running, controller-owned Pod. It never
+// updates a regular Pod endpoint and never replaces a Pod: the resize
+// subresource is the only mutation path when the policy opts in.
+func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (*metav1.Condition, error) {
+	if !inPlaceResourceResizeEnabled(sandbox) || pod == nil || pod.Status.Phase != corev1.PodRunning || !isOwnedBySandbox(pod, sandbox) {
+		return nil, nil
+	}
+
+	targets, unsupported := inPlaceResizeTargets(sandbox, pod)
+	if unsupported != "" {
+		return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, unsupported), nil
+	}
+	if len(targets) == 0 {
+		if condition := resizeConditionFromPod(sandbox, pod); condition != nil {
+			return condition, nil
+		}
+		if resourceResizeAwaitingCompletion(sandbox) && podTemplateResourcesEnacted(pod, sandbox) {
+			return resourceResizeCondition(sandbox, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonResourceResizeCompleted, "CPU and memory resources were resized in place"), nil
+		}
+		return nil, nil
+	}
+
+	if condition := resizeConditionFromPod(sandbox, pod); condition != nil {
+		return condition, nil
+	}
+	if resizeTargetsEnacted(pod, targets) {
+		return resourceResizeCondition(sandbox, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonResourceResizeCompleted, "CPU and memory resources were resized in place"), nil
+	}
+
+	base := pod.DeepCopy()
+	for _, target := range targets {
+		pod.Spec.Containers[target.index].Resources = target.resources
+	}
+	if err := r.SubResource("resize").Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+		if terminalPodResizeError(err) {
+			return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeFailed, "Pod resize was rejected: "+err.Error()), nil
+		}
+		return resourceResizeCondition(sandbox, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonResourceResizePending, "Waiting to submit Pod resize"), fmt.Errorf("resize pod resources: %w", err)
+	}
+
+	return resourceResizeCondition(sandbox, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonResourceResizePending, "Pod resize was accepted; waiting for kubelet status"), nil
+}
+
+type inPlaceResizeTarget struct {
+	index     int
+	name      string
+	resources corev1.ResourceRequirements
+}
+
+func inPlaceResourceResizeEnabled(sandbox *sandboxv1beta1.Sandbox) bool {
+	return sandbox.Spec.ResourceResizePolicy != nil && sandbox.Spec.ResourceResizePolicy.Type == sandboxv1beta1.ResourceResizePolicyInPlace
+}
+
+// inPlaceResizeTargets returns resource-only drift between Sandbox intent and
+// the backing Pod. Any resource which would restart a container is rejected
+// before the resize request reaches Kubernetes.
+func inPlaceResizeTargets(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) ([]inPlaceResizeTarget, string) {
+	desiredByName := make(map[string]corev1.Container, len(sandbox.Spec.PodTemplate.Spec.Containers))
+	for _, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		desiredByName[container.Name] = container
+	}
+
+	var targets []inPlaceResizeTarget
+	for index, current := range pod.Spec.Containers {
+		desired, found := desiredByName[current.Name]
+		if !found {
+			continue
+		}
+		target, changed := resourceResizeTarget(current.Resources, desired.Resources)
+		if !changed {
+			continue
+		}
+		if message := incompatibleResizePolicy(current, target); message != "" {
+			return nil, message
+		}
+		targets = append(targets, inPlaceResizeTarget{index: index, name: current.Name, resources: target})
+	}
+	return targets, ""
+}
+
+// resourceResizeTarget changes only CPU and memory requests/limits, leaving
+// every other resource and every non-resource Pod field untouched.
+func resourceResizeTarget(current, desired corev1.ResourceRequirements) (corev1.ResourceRequirements, bool) {
+	target := *current.DeepCopy()
+	changed := false
+	for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		changed = copyResizeResource(&target.Requests, desired.Requests, resourceName) || changed
+		changed = copyResizeResource(&target.Limits, desired.Limits, resourceName) || changed
+	}
+	return target, changed
+}
+
+func copyResizeResource(target *corev1.ResourceList, desired corev1.ResourceList, resourceName corev1.ResourceName) bool {
+	want, wantSet := desired[resourceName]
+	current, currentSet := (*target)[resourceName]
+	if wantSet == currentSet && (!wantSet || want.Equal(current)) {
+		return false
+	}
+	if *target == nil {
+		*target = corev1.ResourceList{}
+	}
+	if wantSet {
+		(*target)[resourceName] = want
+	} else {
+		delete(*target, resourceName)
+	}
+	return true
+}
+
+func incompatibleResizePolicy(container corev1.Container, target corev1.ResourceRequirements) string {
+	for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		if !resizeResourceChanged(container.Resources, target, resourceName) {
+			continue
+		}
+		for _, policy := range container.ResizePolicy {
+			if policy.ResourceName != resourceName {
+				continue
+			}
+			if policy.RestartPolicy == corev1.RestartContainer {
+				return fmt.Sprintf("container %q requires RestartContainer for %s", container.Name, resourceName)
+			}
+			break
+		}
+		if !hasRestartFreeResizePolicy(container, resourceName) {
+			return fmt.Sprintf("container %q was not created with a restart-free resizePolicy for %s", container.Name, resourceName)
+		}
+	}
+	return ""
+}
+
+func resizeResourceChanged(current, target corev1.ResourceRequirements, resourceName corev1.ResourceName) bool {
+	return !resourceListValueEqual(current.Requests, target.Requests, resourceName) || !resourceListValueEqual(current.Limits, target.Limits, resourceName)
+}
+
+func resourceListValueEqual(left, right corev1.ResourceList, resourceName corev1.ResourceName) bool {
+	leftValue, leftSet := left[resourceName]
+	rightValue, rightSet := right[resourceName]
+	return leftSet == rightSet && (!leftSet || leftValue.Equal(rightValue))
+}
+
+func hasRestartFreeResizePolicy(container corev1.Container, resourceName corev1.ResourceName) bool {
+	for _, policy := range container.ResizePolicy {
+		if policy.ResourceName == resourceName {
+			return policy.RestartPolicy != corev1.RestartContainer
+		}
+	}
+	return false
+}
+
+func resizeConditionFromPod(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
+	for _, condition := range pod.Status.Conditions {
+		switch condition.Type {
+		case corev1.PodResizePending:
+			if condition.Reason == corev1.PodReasonInfeasible {
+				return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeFailed, podResizeMessage(condition))
+			}
+			return resourceResizeCondition(sandbox, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonResourceResizePending, podResizeMessage(condition))
+		case corev1.PodResizeInProgress:
+			if condition.Reason == corev1.PodReasonError {
+				return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeFailed, podResizeMessage(condition))
+			}
+			return resourceResizeCondition(sandbox, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonResourceResizeInProgress, podResizeMessage(condition))
+		}
+	}
+	return nil
+}
+
+func podResizeMessage(condition corev1.PodCondition) string {
+	if condition.Message != "" {
+		return condition.Message
+	}
+	if condition.Reason != "" {
+		return "Pod resize: " + condition.Reason
+	}
+	return "Pod resize is pending"
+}
+
+func resizeTargetsEnacted(pod *corev1.Pod, targets []inPlaceResizeTarget) bool {
+	statusByName := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
+	for _, status := range pod.Status.ContainerStatuses {
+		statusByName[status.Name] = status
+	}
+	for _, target := range targets {
+		status, found := statusByName[target.name]
+		if !found || status.Resources == nil || resizeResourceChanged(*status.Resources, target.resources, corev1.ResourceCPU) || resizeResourceChanged(*status.Resources, target.resources, corev1.ResourceMemory) {
+			return false
+		}
+	}
+	return true
+}
+
+func resourceResizeAwaitingCompletion(sandbox *sandboxv1beta1.Sandbox) bool {
+	condition := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
+	return condition != nil && condition.Status == metav1.ConditionUnknown
+}
+
+func podTemplateResourcesEnacted(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
+	targets := make([]inPlaceResizeTarget, 0, len(sandbox.Spec.PodTemplate.Spec.Containers))
+	for index, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		targets = append(targets, inPlaceResizeTarget{index: index, name: container.Name, resources: container.Resources})
+	}
+	return resizeTargetsEnacted(pod, targets)
+}
+
+func resourceResizeCondition(sandbox *sandboxv1beta1.Sandbox, status metav1.ConditionStatus, reason, message string) *metav1.Condition {
+	return &metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionResourceResize),
+		Status:             status,
+		ObservedGeneration: sandbox.Generation,
+		Reason:             reason,
+		Message:            message,
+	}
+}
+
+func terminalPodResizeError(err error) bool {
+	return k8serrors.IsBadRequest(err) || k8serrors.IsForbidden(err) || k8serrors.IsInvalid(err) || k8serrors.IsMethodNotSupported(err) || k8serrors.IsNotFound(err)
+}
+
+func ensureRestartFreeResizePolicies(spec *corev1.PodSpec) {
+	for index := range spec.Containers {
+		container := &spec.Containers[index]
+		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			if hasResizePolicy(container, resourceName) {
+				continue
+			}
+			container.ResizePolicy = append(container.ResizePolicy, corev1.ContainerResizePolicy{
+				ResourceName:  resourceName,
+				RestartPolicy: corev1.NotRequired,
+			})
+		}
+	}
+}
+
+func hasResizePolicy(container *corev1.Container, resourceName corev1.ResourceName) bool {
+	for _, policy := range container.ResizePolicy {
+		if policy.ResourceName == resourceName {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Pod, error) {
 	logger := log.FromContext(ctx)
 
@@ -1184,6 +1440,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
+	if inPlaceResourceResizeEnabled(sandbox) {
+		// The backing Pod must be born with an explicit restart-free policy.
+		// Updating resizePolicy on an already-running Pod is not supported, so
+		// legacy Pods are rejected by reconcileInPlaceResources instead.
+		ensureRestartFreeResizePolicies(mutatedSpec)
+	}
 
 	// Build PVC volumes from volumeClaimTemplates
 	var pvcVolumes []corev1.Volume

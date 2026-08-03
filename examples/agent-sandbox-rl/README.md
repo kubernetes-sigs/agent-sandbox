@@ -32,7 +32,7 @@ across clusters.
 
 | Requirement | Notes |
 | :--- | :--- |
-| **Python ≥ 3.10** | The package targets 3.10+. |
+| **Python ≥ 3.11** | The package targets 3.11+. |
 | **A Kubernetes cluster** | With the **Agent Sandbox** controller + **v1beta1 extensions** installed (next step). GKE, kind, or any conformant cluster. |
 | **`kubectl` + a kube context** | `agent-sandbox-rl` reads your kubeconfig; each `ClusterConfig` selects a context by name (`context=`), or uses the ambient one. |
 | **`gke-gcloud-auth-plugin`** | GKE only — must be on `PATH` (`gcloud components install gke-gcloud-auth-plugin`). |

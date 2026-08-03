@@ -1054,7 +1054,7 @@ func slowStartBatch(ctx context.Context, count int, initialBatchSize int, fn fun
 		eg, _ := errgroup.WithContext(ctx)
 		var batchSuccesses atomic.Int64
 
-		for i := 0; i < batchSize; i++ {
+		for i := range batchSize {
 			index := successes + i
 			eg.Go(func() error {
 				if err := fn(index); err != nil {

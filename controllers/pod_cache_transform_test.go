@@ -60,7 +60,8 @@ func fullPodFixture() *corev1.Pod {
 
 // TestPodCacheTransform verifies exactly what the informer transform keeps
 // and drops: everything the controllers read survives (metadata, status,
-// spec.nodeName); managedFields and the bulky spec payload do not.
+// spec.nodeName and the narrow in-place resize inputs); managedFields and the
+// bulky spec payload do not.
 func TestPodCacheTransform(t *testing.T) {
 	out, err := PodCacheTransform(fullPodFixture())
 	if err != nil {
@@ -78,7 +79,8 @@ func TestPodCacheTransform(t *testing.T) {
 	if pod.Finalizers != nil {
 		t.Error("finalizers not stripped")
 	}
-	if len(pod.Spec.Containers) != 0 || len(pod.Spec.InitContainers) != 0 ||
+	if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Name != "c" ||
+		pod.Spec.Containers[0].Image != "" || len(pod.Spec.InitContainers) != 0 ||
 		len(pod.Spec.Volumes) != 0 || len(pod.Spec.Tolerations) != 0 {
 		t.Errorf("pod spec not stripped: %+v", pod.Spec)
 	}

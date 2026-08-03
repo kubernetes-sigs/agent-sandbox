@@ -141,8 +141,11 @@ func (r *SandboxReconciler) recordStageLatencies(ctx context.Context, sandbox *s
 	observe(asmetrics.StagePodReady, podReadyWithIP(pod), podConditionTransitionTime(pod, corev1.PodReady, now))
 
 	if len(sandbox.Spec.VolumeClaimTemplates) > 0 {
-		allBound, boundAt := r.pvcsBound(ctx, sandbox, now)
-		observe(asmetrics.StagePVCBound, allBound, boundAt)
+		// Skip PVC Gets once pvc_bound is already recorded; observe() would no-op anyway.
+		if _, already := recorded[asmetrics.StagePVCBound]; !already {
+			allBound, boundAt := r.pvcsBound(ctx, sandbox, now)
+			observe(asmetrics.StagePVCBound, allBound, boundAt)
+		}
 	}
 
 	svcRequired := serviceRequired(sandbox, svc)

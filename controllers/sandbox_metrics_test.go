@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -90,7 +91,7 @@ func TestRecordStageLatenciesOneShot(t *testing.T) {
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
 
 	r.recordStageLatencies(context.Background(), sandbox, pod, svc)
-	require.Equal(t, 5, testutil.CollectAndCount(asmetrics.SandboxStageLatency),
+	require.Equal(t, uint64(5), histogramSampleCount(t, asmetrics.SandboxStageLatency),
 		"expected pod_created, pod_scheduled, pod_running, pod_ready, service_ready")
 
 	updated := &sandboxv1beta1.Sandbox{}
@@ -103,10 +104,10 @@ func TestRecordStageLatenciesOneShot(t *testing.T) {
 	require.Contains(t, recorded, asmetrics.StageServiceReady)
 	require.NotContains(t, recorded, asmetrics.StagePVCBound)
 
-	// Second call must not double-count.
+	// Second call must not double-count observations (CollectAndCount only checks series).
 	sandbox.Annotations = updated.Annotations
 	r.recordStageLatencies(context.Background(), sandbox, pod, svc)
-	require.Equal(t, 5, testutil.CollectAndCount(asmetrics.SandboxStageLatency))
+	require.Equal(t, uint64(5), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
 func TestRecordStageLatenciesSkipsPreObservationStages(t *testing.T) {
@@ -224,10 +225,15 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 
 	r.recordStageLatencies(context.Background(), sandbox, nil, nil)
 
-	require.Equal(t, 1, testutil.CollectAndCount(asmetrics.SandboxStageLatency))
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 	updated := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, updated))
 	require.Contains(t, asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation]), asmetrics.StagePVCBound)
+
+	// Second call must skip PVC Gets (stage already recorded) and not double-count.
+	sandbox.Annotations = updated.Annotations
+	r.recordStageLatencies(context.Background(), sandbox, nil, nil)
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
 func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
@@ -348,7 +354,7 @@ func TestRecordStageLatenciesPatchFailureDoesNotEmitMetrics(t *testing.T) {
 		"metrics must not emit when annotation patch fails")
 }
 
-func TestEnsureSandboxObservabilityAnnotationsPatchFailureIsBestEffort(_ *testing.T) {
+func TestEnsureSandboxObservabilityAnnotationsPatchFailureIsBestEffort(t *testing.T) {
 	sandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "obs-fail-sb",
@@ -365,11 +371,19 @@ func TestEnsureSandboxObservabilityAnnotationsPatchFailureIsBestEffort(_ *testin
 				},
 			},
 		},
+		Status: sandboxv1beta1.SandboxStatus{
+			ServiceFQDN: "keep-me.svc.cluster.local",
+		},
 	}
+	statusBefore := sandbox.Status.DeepCopy()
 	// Client without the Sandbox: Patch fails. Must not panic or block callers.
 	c := newFakeClient()
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
 	r.ensureSandboxObservabilityAnnotations(context.Background(), sandbox)
+
+	// Best-effort: local annotation mutate is kept for this reconcile; status is restored.
+	require.NotEmpty(t, sandbox.Annotations[asmetrics.ObservabilityAnnotation])
+	require.Equal(t, *statusBefore, sandbox.Status)
 }
 
 func TestReconcileSuspendedStampsObservabilityViaEnsure(t *testing.T) {
@@ -523,7 +537,8 @@ func TestRecordChildReconcileErrorOnOwnershipConflict(t *testing.T) {
 
 	_, err := r.reconcilePod(context.Background(), sandbox, NameHash(sandbox.Name))
 	require.Error(t, err)
-	require.Equal(t, 1, testutil.CollectAndCount(asmetrics.ChildReconcileErrors))
+	require.InDelta(t, 1, testutil.ToFloat64(asmetrics.ChildReconcileErrors.WithLabelValues(
+		"default", asmetrics.ResourcePod, asmetrics.ReasonOwnershipConflict)), 0)
 }
 
 func TestPVCBoundTransitionTimeUsesFallback(t *testing.T) {
@@ -536,4 +551,26 @@ func TestPVCBoundTransitionTimeUsesFallback(t *testing.T) {
 	got := pvcBoundTransitionTime(pvc, fallback)
 	require.Equal(t, fallback, got)
 	require.Equal(t, fallback, pvcBoundTransitionTime(nil, fallback))
+}
+
+// histogramSampleCount sums observation counts across all series of a histogram
+// collector. testutil.CollectAndCount only counts series, so it cannot detect
+// duplicate observations into an existing series.
+func histogramSampleCount(t *testing.T, c prometheus.Collector) uint64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(c); err != nil {
+		t.Fatalf("failed to register collector: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+	var total uint64
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			total += m.GetHistogram().GetSampleCount()
+		}
+	}
+	return total
 }

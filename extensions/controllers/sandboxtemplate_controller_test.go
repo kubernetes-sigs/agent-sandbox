@@ -422,7 +422,8 @@ func TestSandboxTemplateReconcile_RecordsOwnershipConflictMetric(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ownership conflict error")
 	}
-	if got := testutil.CollectAndCount(asmetrics.TemplateReconcileErrors); got != 1 {
-		t.Fatalf("expected 1 template reconcile error metric, got %d", got)
+	got := testutil.ToFloat64(asmetrics.TemplateReconcileErrors.WithLabelValues("default", asmetrics.ReasonOwnershipConflict))
+	if got != 1 {
+		t.Fatalf("expected 1 template reconcile error metric, got %v", got)
 	}
 }

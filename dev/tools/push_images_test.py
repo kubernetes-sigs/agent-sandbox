@@ -153,6 +153,44 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             "testtag",
         )
 
+    def test_controller_only_permits_explicit_controller_image_request(self):
+        # Positive side of the guard: requesting the controller image by name
+        # must stay valid, so a future tightening cannot break it unnoticed.
+        args = argparse.Namespace(
+            controller_only=True,
+            image_tag="testtag",
+            images=["agent-sandbox-controller"],
+        )
+        discovered_dockerfiles = [
+            (".", ["sandbox-router"], ["Dockerfile"]),
+            (os.path.join(".", "sandbox-router"), [], ["Dockerfile"]),
+        ]
+
+        with (
+            mock.patch.object(
+                push_images.os,
+                "walk",
+                return_value=discovered_dockerfiles,
+            ),
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+            ),
+            mock.patch.object(
+                push_images,
+                "build_and_push_image",
+            ) as build_image,
+        ):
+            push_images.main(args)
+
+        build_image.assert_called_once_with(
+            args,
+            "agent-sandbox-controller",
+            ".",
+            os.path.join(".", "Dockerfile"),
+            "testtag",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

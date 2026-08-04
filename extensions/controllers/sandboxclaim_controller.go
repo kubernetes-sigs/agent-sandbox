@@ -2249,9 +2249,10 @@ func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {
 		return true
 	}
-	// ServiceFQDN is mirrored into claim.Status.SandboxStatus like PodIPs. It
-	// is written once (immutable after set), so this admits at most one extra
-	// reconcile per sandbox.
+	// ServiceFQDN is mirrored into claim.Status.SandboxStatus like PodIPs.
+	// Admit its changes so the claim converges whenever the Sandbox controller
+	// sets or clears the field (it is cleared when the Service is deleted, so
+	// it can change more than once over a sandbox's life).
 	if oldSb.Status.ServiceFQDN != newSb.Status.ServiceFQDN {
 		return true
 	}

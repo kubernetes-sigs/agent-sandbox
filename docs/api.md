@@ -963,6 +963,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | name is the name of the Sandbox created from this claim |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters. |  | Optional: \{\} <br /> |
+| `serviceFQDN` _string_ | serviceFQDN is the in-cluster DNS name of the bound Sandbox's service,<br />mirrored from the Sandbox's status.serviceFQDN so consumers can reach<br />the sandbox from the claim alone. Like name and podIPs, it is eventually<br />consistent: it may lag the Sandbox by a reconcile, and is cleared when<br />the claim loses its sandbox. |  | Optional: \{\} <br /> |
 
 
 #### SandboxTemplate

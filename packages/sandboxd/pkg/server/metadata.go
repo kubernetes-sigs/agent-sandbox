@@ -22,7 +22,15 @@ import (
 // sensitiveEnvMarkers guards /v1/metadata against accidentally exposing
 // credentials even when they match the allowlist prefix: untrusted agent
 // code can query this endpoint over loopback.
-var sensitiveEnvMarkers = []string{"TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "KEY"}
+//
+// This is defense in depth, not the primary control — a substring denylist
+// can never enumerate every secret-shaped name. The primary control is the
+// producer-side contract (spec): orchestrators and template authors must
+// never inject credentials under the metadata prefix in the first place.
+var sensitiveEnvMarkers = []string{
+	"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CRED", "KEY",
+	"AUTH", "BEARER", "PRIVATE", "CERT",
+}
 
 // handleMetadata serves GET /v1/metadata: orchestrator-injected, workload-
 // scoped environment configuration. The response is computed once on first

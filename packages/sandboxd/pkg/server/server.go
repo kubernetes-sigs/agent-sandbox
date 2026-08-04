@@ -31,9 +31,9 @@ import (
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
-// Process-lifecycle timing knobs for the server package.
-//  Daemon-level knobs (HTTP timeouts, shutdown budget) live in 
-// cmd/sandboxd/main.go, mirroring how envd organizes its constants.
+// Process-lifecycle timing knobs for the server package. Daemon-level knobs
+// (HTTP timeouts, shutdown budget) live in cmd/sandboxd/main.go, mirroring
+// how envd organizes its constants.
 const (
 	// processShutdownGrace is how long managed processes get to exit after
 	// SIGTERM before being SIGKILLed during daemon shutdown.

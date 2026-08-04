@@ -346,9 +346,15 @@ func TestMetadataFiltersEnv(t *testing.T) {
 		return []string{
 			"SANDBOX_ID=sbx-123",
 			"SANDBOX_WORKSPACE=/workspace",
-			"SANDBOX_API_TOKEN=super-secret",  // sensitive marker: filtered
-			"SANDBOX_SSH_KEY=super-secret",    // sensitive marker: filtered
-			"KUBERNETES_SERVICE_HOST=1.2.3.4", // wrong prefix: filtered
+			"SANDBOX_API_TOKEN=super-secret",   // sensitive marker: filtered
+			"SANDBOX_SSH_KEY=super-secret",     // sensitive marker: filtered
+			"SANDBOX_AUTH_HEADER=super-secret", // sensitive marker: filtered
+			"SANDBOX_BEARER=super-secret",      // sensitive marker: filtered
+			"SANDBOX_CRED=super-secret",        // sensitive marker: filtered
+			"SANDBOX_PASSWD=super-secret",      // sensitive marker: filtered
+			"SANDBOX_TLS_CERT=super-secret",    // sensitive marker: filtered
+			"SANDBOX_PRIVATE_URL=super-secret", // sensitive marker: filtered
+			"KUBERNETES_SERVICE_HOST=1.2.3.4",  // wrong prefix: filtered
 			"MALFORMED_NO_EQUALS",
 		}
 	}

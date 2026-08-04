@@ -14,5 +14,6 @@
 
 // Package v1alpha1 contains API Schema definitions for the agents v1alpha1 API group
 //
+// +k8s:openapi-gen=true
 // +groupName=agents.x-k8s.io
 package v1alpha1

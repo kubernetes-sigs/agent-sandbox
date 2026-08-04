@@ -23,6 +23,7 @@ import (
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	gentype "k8s.io/client-go/gentype"
+	applyconfigurationapiv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/api/v1alpha1"
 	scheme "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/scheme"
 	apiv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 )
@@ -45,18 +46,21 @@ type SandboxWarmPoolInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*apiv1alpha1.SandboxWarmPoolList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *apiv1alpha1.SandboxWarmPool, err error)
+	Apply(ctx context.Context, sandboxWarmPool *applyconfigurationapiv1alpha1.SandboxWarmPoolApplyConfiguration, opts v1.ApplyOptions) (result *apiv1alpha1.SandboxWarmPool, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, sandboxWarmPool *applyconfigurationapiv1alpha1.SandboxWarmPoolApplyConfiguration, opts v1.ApplyOptions) (result *apiv1alpha1.SandboxWarmPool, err error)
 	SandboxWarmPoolExpansion
 }
 
 // sandboxWarmPools implements SandboxWarmPoolInterface
 type sandboxWarmPools struct {
-	*gentype.ClientWithList[*apiv1alpha1.SandboxWarmPool, *apiv1alpha1.SandboxWarmPoolList]
+	*gentype.ClientWithListAndApply[*apiv1alpha1.SandboxWarmPool, *apiv1alpha1.SandboxWarmPoolList, *applyconfigurationapiv1alpha1.SandboxWarmPoolApplyConfiguration]
 }
 
 // newSandboxWarmPools returns a SandboxWarmPools
 func newSandboxWarmPools(c *ExtensionsV1alpha1Client, namespace string) *sandboxWarmPools {
 	return &sandboxWarmPools{
-		gentype.NewClientWithList[*apiv1alpha1.SandboxWarmPool, *apiv1alpha1.SandboxWarmPoolList](
+		gentype.NewClientWithListAndApply[*apiv1alpha1.SandboxWarmPool, *apiv1alpha1.SandboxWarmPoolList, *applyconfigurationapiv1alpha1.SandboxWarmPoolApplyConfiguration](
 			"sandboxwarmpools",
 			c.RESTClient(),
 			scheme.ParameterCodec,

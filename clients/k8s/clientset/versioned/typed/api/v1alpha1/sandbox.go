@@ -24,6 +24,7 @@ import (
 	watch "k8s.io/apimachinery/pkg/watch"
 	gentype "k8s.io/client-go/gentype"
 	apiv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
+	applyconfigurationapiv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1alpha1"
 	scheme "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/scheme"
 )
 
@@ -45,18 +46,21 @@ type SandboxInterface interface {
 	List(ctx context.Context, opts v1.ListOptions) (*apiv1alpha1.SandboxList, error)
 	Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error)
 	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *apiv1alpha1.Sandbox, err error)
+	Apply(ctx context.Context, sandbox *applyconfigurationapiv1alpha1.SandboxApplyConfiguration, opts v1.ApplyOptions) (result *apiv1alpha1.Sandbox, err error)
+	// Add a +genclient:noStatus comment above the type to avoid generating ApplyStatus().
+	ApplyStatus(ctx context.Context, sandbox *applyconfigurationapiv1alpha1.SandboxApplyConfiguration, opts v1.ApplyOptions) (result *apiv1alpha1.Sandbox, err error)
 	SandboxExpansion
 }
 
 // sandboxes implements SandboxInterface
 type sandboxes struct {
-	*gentype.ClientWithList[*apiv1alpha1.Sandbox, *apiv1alpha1.SandboxList]
+	*gentype.ClientWithListAndApply[*apiv1alpha1.Sandbox, *apiv1alpha1.SandboxList, *applyconfigurationapiv1alpha1.SandboxApplyConfiguration]
 }
 
 // newSandboxes returns a Sandboxes
 func newSandboxes(c *AgentsV1alpha1Client, namespace string) *sandboxes {
 	return &sandboxes{
-		gentype.NewClientWithList[*apiv1alpha1.Sandbox, *apiv1alpha1.SandboxList](
+		gentype.NewClientWithListAndApply[*apiv1alpha1.Sandbox, *apiv1alpha1.SandboxList, *applyconfigurationapiv1alpha1.SandboxApplyConfiguration](
 			"sandboxes",
 			c.RESTClient(),
 			scheme.ParameterCodec,

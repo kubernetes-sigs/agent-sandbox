@@ -194,12 +194,15 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
 
 2.  **Deploy the Gateway (Production Only):**
     If you need external access via a public IP, apply the Gateway configuration.
-    This requires a Gateway API controller (e.g. Istio, GKE built-in, Envoy Gateway).
+    This requires the Gateway API CRDs and a Gateway API controller
+    (e.g. Istio, GKE built-in, Envoy Gateway) — see the
+    [sandbox-router README](../../clients/python/agentic-sandbox-client/sandbox-router/README.md) for prerequisites.
     Edit `spec.gatewayClassName` in the YAML to match your environment — see the
     comments in `gateway.yaml` for options.
     ```bash
-    # Deploys Gateway, HTTPRoute, and (GKE-only) HealthCheckPolicy
     kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
+    # GKE only: apply the HealthCheckPolicy
+    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/gateway-gke-healthcheck.yaml
     ```
 
 **For Production (via Gateway)**

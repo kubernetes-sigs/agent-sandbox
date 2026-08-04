@@ -18,7 +18,7 @@
 // The GatewayName must match a Gateway resource deployed in the cluster.
 // The Gateway's gatewayClassName determines the ingress implementation
 // (e.g. "istio", "gke-l7-global-external-managed", "cloud-provider-kind").
-// See sandbox-router/gateway.yaml for example manifests.
+// See clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml for example manifests.
 package main
 
 import (

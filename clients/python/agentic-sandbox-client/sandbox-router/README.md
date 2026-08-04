@@ -76,24 +76,37 @@ kubectl apply -n agent-sandbox-system -f sandbox_router.yaml
 ### Deploy the Gateway
 
 In order to use the Python client in "Gateway Mode", you will need to create the Gateway resources.
-This requires a Gateway API controller running in your cluster — the controller watches Gateway and
-HTTPRoute resources and provisions the actual load balancer.
+This requires:
+
+1. **Gateway API CRDs** installed in the cluster. These must be installed separately. See the
+   [Gateway API documentation](https://gateway-api.sigs.k8s.io/guides/#installing-gateway-api)
+   for instructions.
+2. **A Gateway API controller** running in your cluster — the controller watches Gateway and
+   HTTPRoute resources and provisions the actual load balancer.
+   On GKE, enable the Gateway API on your cluster first
+   (`gcloud container clusters update CLUSTER --gateway-api=standard`).
 
 Common Gateway API controllers:
 
 | Controller | GatewayClass | Install |
 |---|---|---|
 | Istio | `istio` | `istioctl install` (works on any cluster) |
-| GKE (built-in) | `gke-l7-global-external-managed` | Pre-installed on GKE |
+| GKE (built-in) | `gke-l7-global-external-managed` | Pre-installed on GKE (requires [enablement](https://cloud.google.com/kubernetes-engine/docs/how-to/deploying-gateways#enable-gateway)) |
 | KinD (local dev) | `cloud-provider-kind` | `go install sigs.k8s.io/cloud-provider-kind@latest` |
 | Envoy Gateway | `eg` | See [Envoy Gateway docs](https://gateway.envoyproxy.io/) |
 
 The example `gateway.yaml` defaults to the `istio` GatewayClass, which works on any conformant
-Kubernetes cluster. Change `spec.gatewayClassName` to match your environment. The HealthCheckPolicy
-at the bottom is GKE-specific and can be skipped on other clusters.
+Kubernetes cluster. Change `spec.gatewayClassName` to match your environment.
 
 ```bash
 kubectl apply -f gateway.yaml
+```
+
+On GKE clusters, also apply the HealthCheckPolicy so the load balancer health-checks
+use the router's `/healthz` endpoint:
+
+```bash
+kubectl apply -f gateway-gke-healthcheck.yaml
 ```
 
 ## Testing

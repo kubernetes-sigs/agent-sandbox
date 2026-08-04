@@ -6,7 +6,6 @@
 # Standard with self-managed Cilium. On other clusters, swap it:
 #   Istio:   istio
 #   KinD:    cloud-provider-kind
-#   AWS:     amazon-vpc-lattice
 #   Envoy:   eg
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway

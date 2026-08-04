@@ -17,6 +17,9 @@ from fastmcp.exceptions import ToolError
 
 from k8s_agent_sandbox.models import FileEntry
 
+from k8s_agent_sandbox_mcp_server.tools.list_files import MAX_ENTRIES_LIMIT
+from k8s_agent_sandbox_mcp_server.utils import TOOL_MAX_TIMEOUT
+
 
 @pytest.mark.anyio
 @pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
@@ -53,7 +56,9 @@ async def test_call_list_files_tool_with_default_args(
                 "type": "directory",
                 "mod_time": 1700000001.5,
             },
-        ]
+        ],
+        "total_entries": 2,
+        "truncated": False,
     }
     assert result.is_error is False
     mock_sandbox_client.get_sandbox.assert_called_once_with(
@@ -85,7 +90,11 @@ async def test_call_list_files_tool_with_non_default_args(
         },
     )
 
-    assert result.structured_content == {"entries": []}
+    assert result.structured_content == {
+        "entries": [],
+        "total_entries": 0,
+        "truncated": False,
+    }
     assert result.is_error is False
     mock_sandbox.files.list.assert_called_once_with(
         "some/path",
@@ -110,7 +119,11 @@ async def test_call_list_files_tool_on_empty_directory(
         },
     )
 
-    assert result.structured_content == {"entries": []}
+    assert result.structured_content == {
+        "entries": [],
+        "total_entries": 0,
+        "truncated": False,
+    }
     assert result.is_error is False
 
 
@@ -135,9 +148,68 @@ async def test_call_list_files_tool_surfaces_sandbox_failure(
 
 @pytest.mark.anyio
 @pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
-async def test_call_list_files_tool_rejects_out_of_range_timeout(
+async def test_call_list_files_tool_truncates_large_directory(
     mcp_client,
     mock_sandbox,
+):
+    mock_sandbox.files.list.return_value = [
+        FileEntry(name=f"f{i}.txt", size=1, type="file", mod_time=0.0)
+        for i in range(5)
+    ]
+
+    result = await mcp_client.call_tool(
+        "list_files",
+        {
+            "sandbox_claim_name": "my-claim",
+            "namespace": "my-namespace",
+            "path": "some/path",
+            "max_entries": 2,
+        },
+    )
+
+    content = result.structured_content
+    assert [e["name"] for e in content["entries"]] == ["f0.txt", "f1.txt"]
+    # total_entries reports the full directory, so the model is not misled
+    # into thinking it saw everything.
+    assert content["total_entries"] == 5
+    assert content["truncated"] is True
+    assert result.is_error is False
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
+async def test_call_list_files_tool_not_truncated_at_exact_limit(
+    mcp_client,
+    mock_sandbox,
+):
+    mock_sandbox.files.list.return_value = [
+        FileEntry(name=f"f{i}.txt", size=1, type="file", mod_time=0.0)
+        for i in range(3)
+    ]
+
+    result = await mcp_client.call_tool(
+        "list_files",
+        {
+            "sandbox_claim_name": "my-claim",
+            "namespace": "my-namespace",
+            "path": "some/path",
+            "max_entries": 3,
+        },
+    )
+
+    # Exactly at the limit is complete, not truncated.
+    assert len(result.structured_content["entries"]) == 3
+    assert result.structured_content["truncated"] is False
+    assert result.is_error is False
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
+@pytest.mark.parametrize("max_entries", [0, MAX_ENTRIES_LIMIT + 1])
+async def test_call_list_files_tool_rejects_out_of_range_max_entries(
+    mcp_client,
+    mock_sandbox,
+    max_entries,
 ):
     with pytest.raises(ToolError):
         await mcp_client.call_tool(
@@ -146,7 +218,29 @@ async def test_call_list_files_tool_rejects_out_of_range_timeout(
                 "sandbox_claim_name": "my-claim",
                 "namespace": "my-namespace",
                 "path": "some/path",
-                "timeout": 0,
+                "max_entries": max_entries,
+            },
+        )
+
+    mock_sandbox.files.list.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
+@pytest.mark.parametrize("timeout", [0, TOOL_MAX_TIMEOUT + 1])
+async def test_call_list_files_tool_rejects_out_of_range_timeout(
+    mcp_client,
+    mock_sandbox,
+    timeout,
+):
+    with pytest.raises(ToolError):
+        await mcp_client.call_tool(
+            "list_files",
+            {
+                "sandbox_claim_name": "my-claim",
+                "namespace": "my-namespace",
+                "path": "some/path",
+                "timeout": timeout,
             },
         )
 

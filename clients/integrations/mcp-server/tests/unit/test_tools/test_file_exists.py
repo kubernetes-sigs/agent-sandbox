@@ -15,6 +15,8 @@
 import pytest
 from fastmcp.exceptions import ToolError
 
+from k8s_agent_sandbox_mcp_server.utils import TOOL_MAX_TIMEOUT
+
 
 @pytest.mark.anyio
 @pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
@@ -92,6 +94,28 @@ async def test_call_file_exists_tool_with_non_default_args(
         "some/path",
         timeout=20,
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
+@pytest.mark.parametrize("timeout", [0, TOOL_MAX_TIMEOUT + 1])
+async def test_call_file_exists_tool_rejects_out_of_range_timeout(
+    mcp_client,
+    mock_sandbox,
+    timeout,
+):
+    with pytest.raises(ToolError):
+        await mcp_client.call_tool(
+            "file_exists",
+            {
+                "sandbox_claim_name": "my-claim",
+                "namespace": "my-namespace",
+                "path": "some/path",
+                "timeout": timeout,
+            },
+        )
+
+    mock_sandbox.files.exists.assert_not_called()
 
 
 @pytest.mark.anyio

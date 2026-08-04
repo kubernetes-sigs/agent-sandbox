@@ -364,6 +364,26 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "",
 		},
+		{
+			name:    "zero activity flush interval",
+			mut:     func(c *Config) { c.ActivityFlushInterval = 0 },
+			wantErr: "--activity-flush-interval",
+		},
+		{
+			name:    "negative activity flush interval",
+			mut:     func(c *Config) { c.ActivityFlushInterval = -1 * time.Second },
+			wantErr: "--activity-flush-interval",
+		},
+		{
+			name:    "zero default resume timeout",
+			mut:     func(c *Config) { c.DefaultResumeTimeout = 0 },
+			wantErr: "--default-resume-timeout",
+		},
+		{
+			name:    "negative default resume timeout",
+			mut:     func(c *Config) { c.DefaultResumeTimeout = -1 * time.Second },
+			wantErr: "--default-resume-timeout",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

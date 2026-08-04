@@ -32,6 +32,8 @@ controller:
   leaderElect: true
   # leaderElectionNamespace: ""
   extensions: false
+  enableAutoSuspendAndResume: false
+  # suspensionServerBindAddress: ":8090"
   # enableTracing: false
   # enablePprof: false
   # enablePprofDebug: false

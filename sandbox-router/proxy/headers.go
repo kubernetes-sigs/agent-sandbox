@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // Header names the router consumes. Kept exported so tests and downstream
@@ -75,6 +76,28 @@ type ParseOptions struct {
 // status codes and detail-message shape as the Python router.
 func ParseSandboxHeaders(h http.Header, opts ParseOptions) (Target, *Error) {
 	id := h.Get(HeaderSandboxID)
+	ns := h.Get(HeaderSandboxNamespace)
+
+	if id == "" || ns == "" {
+		host := h.Get("Host")
+		if host != "" {
+			hostOnly, _, err := net.SplitHostPort(host)
+			if err != nil {
+				hostOnly = host
+			}
+			hostOnly = strings.TrimSuffix(strings.ToLower(hostOnly), ".")
+			if before, ok := strings.CutSuffix(hostOnly, ".sandbox.local"); ok {
+				trimmed := before
+				parts := strings.Split(trimmed, ".")
+				if id == "" && len(parts) > 0 && parts[0] != "" {
+					id = parts[0]
+				}
+				if ns == "" && len(parts) > 1 && parts[1] != "" {
+					ns = parts[1]
+				}
+			}
+		}
+	}
 	if id == "" {
 		return Target{}, &Error{Status: http.StatusBadRequest, Detail: "X-Sandbox-ID header is required."}
 	}
@@ -86,7 +109,6 @@ func ParseSandboxHeaders(h http.Header, opts ParseOptions) (Target, *Error) {
 		return Target{}, &Error{Status: http.StatusBadRequest, Detail: "Invalid sandbox ID format."}
 	}
 
-	ns := h.Get(HeaderSandboxNamespace)
 	if ns == "" {
 		ns = DefaultSandboxNamespace
 	}

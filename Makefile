@@ -5,6 +5,10 @@ all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify ve
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: fix-api-docs
+fix-api-docs:
+	dev/tools/fix-api-docs
+
 .PHONY: install-gen-tools
 install-gen-tools:
 	dev/tools/fix-go-generate --install-only
@@ -78,7 +82,7 @@ KIND_CLUSTER=agent-sandbox
 deploy-kind:
 	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
 	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
+	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(filter true,$(AUTO_SUSPENSION)),--auto-suspension) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
 
 .PHONY: deploy-cloud-provider-kind
 deploy-cloud-provider-kind:

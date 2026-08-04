@@ -37,6 +37,13 @@ spec:
             type: object
           spec:
             properties:
+              autoSuspension:
+                properties:
+                  inactivityTimeoutSeconds:
+                    format: int32
+                    minimum: 60
+                    type: integer
+                type: object
               operatingMode:
                 default: Running
                 enum:
@@ -4004,6 +4011,9 @@ spec:
                   - type
                   type: object
                 type: array
+              lastActivityTime:
+                format: date-time
+                type: string
               nodeName:
                 type: string
               podIPs:

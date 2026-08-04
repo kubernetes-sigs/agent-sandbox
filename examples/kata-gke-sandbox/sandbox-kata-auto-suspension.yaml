@@ -1,0 +1,22 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: kata-auto-suspension-example
+  namespace: default
+spec:
+  operatingMode: Running
+  autoSuspension:
+    inactivityTimeoutSeconds: 600
+  podTemplate:
+    spec:
+      runtimeClassName: kata-qemu
+      containers:
+      - name: web
+        image: python:3.10-alpine
+        command: ["python3", "-m", "http.server", "8888"]
+        ports:
+        - containerPort: 8888
+          protocol: TCP
+      nodeSelector:
+        # Force this pod onto the Ubuntu/Intel pool where Kata is installed
+        cloud.google.com/gke-os-distribution: ubuntu

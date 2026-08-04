@@ -175,9 +175,32 @@ func init() {
 // SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
-	Scheme        *runtime.Scheme
-	Tracer        asmetrics.Instrumenter
-	ClusterDomain string
+	Scheme            *runtime.Scheme
+	Tracer            asmetrics.Instrumenter
+	ClusterDomain     string
+	EnableAutoSuspend bool
+}
+
+func (r *SandboxReconciler) shouldSuspend(sandbox *sandboxv1beta1.Sandbox) (bool, time.Duration) {
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		return true, 0
+	}
+	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspension != nil && sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds != nil {
+		timeoutSec := *sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds
+		if timeoutSec > 0 {
+			inactivityDuration := time.Duration(timeoutSec) * time.Second
+			lastActivity := sandbox.Status.LastActivityTime
+			if lastActivity == nil {
+				return false, inactivityDuration
+			}
+			elapsed := time.Since(lastActivity.Time)
+			if elapsed >= inactivityDuration {
+				return true, 0
+			}
+			return false, inactivityDuration - elapsed
+		}
+	}
+	return false, 0
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -213,15 +236,18 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Start Tracing Span
-	initialAttrs := map[string]string{
-		"sandbox.name":      sandbox.Name,
-		"sandbox.namespace": sandbox.Namespace,
+	if r.Tracer != nil {
+		initialAttrs := map[string]string{
+			"sandbox.name":      sandbox.Name,
+			"sandbox.namespace": sandbox.Namespace,
+		}
+		if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
+			initialAttrs[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
+		}
+		var end func()
+		ctx, end = r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
+		defer end()
 	}
-	if val, ok := sandbox.Labels[sandboxv1beta1.CreatedByLabel]; ok {
-		initialAttrs[sandboxv1beta1.CreatedByLabel] = asmetrics.NormalizeCreatedBy(val)
-	}
-	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
-	defer end()
 
 	// If the sandbox is being deleted, do nothing
 	if !sandbox.DeletionTimestamp.IsZero() {
@@ -230,16 +256,18 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
-	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+	if r.Tracer != nil {
+		tc := r.Tracer.GetTraceContext(ctx)
+		if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+			patch := client.MergeFrom(sandbox.DeepCopy())
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = make(map[string]string)
+			}
+			sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 
-		if err := r.Patch(ctx, sandbox, patch); err != nil {
-			return ctrl.Result{}, err
+			if err := r.Patch(ctx, sandbox, patch); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -247,6 +275,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var err error
 	sandboxDeleted := false
 	result := ctrl.Result{}
+
+	if r.EnableAutoSuspend && sandbox.Spec.AutoSuspension != nil && sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds != nil && *sandbox.Spec.AutoSuspension.InactivityTimeoutSeconds > 0 {
+		cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+		wasUserSuspended := cond != nil && cond.Status == metav1.ConditionFalse && (cond.Reason == string(sandboxv1beta1.SandboxReasonUserSuspended) || cond.Reason == "SandboxSuspended")
+		if sandbox.Status.LastActivityTime == nil || (sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeRunning && wasUserSuspended) {
+			now := metav1.Now()
+			sandbox.Status.LastActivityTime = &now
+			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+				return ctrl.Result{}, statusUpdateErr
+			}
+			oldStatus = sandbox.Status.DeepCopy()
+		}
+	}
 
 	expired, _ := checkSandboxExpiry(sandbox, time.Now())
 	if expired {
@@ -267,6 +308,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if expiredAfterReconcile {
 			setSandboxExpiredCondition(sandbox)
 			result.RequeueAfter = immediateRequeueDelay
+		}
+		_, requeueAfterSuspend := r.shouldSuspend(sandbox)
+		if requeueAfterSuspend > 0 {
+			if result.RequeueAfter == 0 || requeueAfterSuspend < result.RequeueAfter {
+				result.RequeueAfter = requeueAfterSuspend
+			}
 		}
 	}
 
@@ -345,7 +392,6 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 }
 
 func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
-	// Initialize the Suspended condition which tracks only the suspension state, persisting once set.
 	suspended := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
@@ -354,7 +400,8 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 		Message:            "Sandbox is not suspended",
 	}
 
-	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+	shouldSuspend, _ := r.shouldSuspend(sandbox)
+	if !shouldSuspend {
 		return suspended
 	}
 
@@ -369,7 +416,11 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 		// Stable State: Fully Suspended
 		suspended.Status = metav1.ConditionTrue
 		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
-		suspended.Message = "Pod has been terminated. Sandbox is suspended"
+		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+			suspended.Message = "Pod has been terminated. Sandbox is administratively suspended"
+		} else {
+			suspended.Message = "Pod has been terminated. Sandbox is auto-suspended due to inactivity"
+		}
 		return suspended
 	}
 
@@ -380,7 +431,11 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 	}
 
 	suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
-	suspended.Message = "Pod is terminating. Sandbox is suspending"
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+		suspended.Message = "Pod is terminating. Sandbox is administratively suspending"
+	} else {
+		suspended.Message = "Pod is terminating. Sandbox is auto-suspending"
+	}
 	return suspended
 }
 
@@ -399,13 +454,22 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		return readyCondition
 	}
 
-	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
-	if isSuspended {
-		readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
-		if pod != nil {
-			readyCondition.Message = "Sandbox is suspending"
+	shouldSuspend, _ := r.shouldSuspend(sandbox)
+	if shouldSuspend {
+		if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonUserSuspended
+			if pod != nil {
+				readyCondition.Message = "Sandbox is administratively suspending"
+			} else {
+				readyCondition.Message = "Sandbox is administratively suspended (spec.operatingMode == Suspended)"
+			}
 		} else {
-			readyCondition.Message = "Sandbox is suspended"
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonAutoSuspended
+			if pod != nil {
+				readyCondition.Message = "Sandbox is auto-suspending due to inactivity"
+			} else {
+				readyCondition.Message = "Sandbox is auto-suspended due to inactivity; waiting for resume signal"
+			}
 		}
 		return readyCondition
 	}
@@ -1009,13 +1073,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = nil
 	}
 
-	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+	shouldSuspend, _ := r.shouldSuspend(sandbox)
+	if shouldSuspend {
 		if pod != nil {
 			ownership, controllerRef := checkOwnership(pod, sandbox)
 			switch ownership {
 			case resourceOwnedBySandbox:
 				if pod.DeletionTimestamp.IsZero() {
-					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					logger.Info("Deleting Pod because Sandbox should be suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
 						return pod, fmt.Errorf("failed to delete pod: %w", err)
 					}

@@ -106,6 +106,34 @@ kubectl exec -it $POD_NAME -- uname -r
 * **Success**: The output is a different kernel version (e.g., `6.1.38`). This proves the agent is running inside its own VM with its own kernel, isolated from the host.
 * **Failure**: The output is identical to the host node's kernel. This indicates the sandbox is not using the Kata runtime correctly.
 
+## Step 5: Using Auto-Suspension & Traffic-Triggered Resume with Kata
+
+> [!IMPORTANT]
+> **Explicitly Enable Auto-Suspension on the Controller**:
+> Auto-Suspension is disabled by default in Agent Sandbox (`controller.enableAutoSuspendAndResume: false`). Before using any auto-suspension manifest, you **must explicitly enable the flag on the controller and deploy the router overlay**:
+> ```sh
+> # Using Helm:
+> helm upgrade --install agent-sandbox ../../helm \
+>   --namespace agent-sandbox-system \
+>   --set controller.enableAutoSuspendAndResume=true
+> 
+> # Apply the Auto-Suspension Gateway & Router overlay:
+> kubectl apply -f ../../k8s/auto-suspension.yaml
+> ```
+
+You can combine Kata VM isolation with **Auto-Suspension and Traffic-Triggered Resume** so that inactive Kata microVMs automatically scale to zero Pods when idle, freeing up hardware virtualization resources while preserving the Sandbox identity and storage.
+
+1.  Ensure you have deployed the Auto-Suspension router overlay in your cluster:
+    ```shell
+    kubectl apply -f ../../k8s/auto-suspension.yaml
+    ```
+2.  Deploy the auto-suspending Kata Sandbox example (`sandbox-kata-auto-suspension.yaml`):
+    ```shell
+    kubectl apply -f sandbox-kata-auto-suspension.yaml
+    ```
+3.  **Idle Suspension**: When no HTTP traffic reaches `kata-auto-suspension-example` for `10m`, the controller patches `.spec.operatingMode` to `Suspended` and deletes the Kata microVM Pod.
+4.  **Traffic-Triggered Resume**: When an incoming request carrying header `X-Sandbox-ID: kata-auto-suspension-example` reaches `sandbox-router`, the router transparently signals the controller to thaw the Sandbox back to `Running`, boots a fresh Kata VM, and proxies the request without dropping the connection.
+
 # Troubleshooting
 
 | Error                                           | Cause                                                                                  | Solution                                                                                       |

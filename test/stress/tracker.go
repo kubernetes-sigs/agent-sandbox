@@ -26,21 +26,27 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 )
 
-// Phase identifies which part of the stress test a Sandbox belongs to by name
-// (fill, probe, throughput-mifN). Names may repeat across a run when --phases
-// lists the same entry more than once; PhaseNumber distinguishes those entries.
-type Phase string
+// PhaseName identifies which part of the stress test a Sandbox belongs to by
+// name (fill, probe, throughput-mif:N). Names may repeat across a run when
+// --phases lists the same entry more than once; PhaseNumber distinguishes
+// those entries. The parsed, runnable form of a phase is the Phase interface
+// (see phase.go); the constants below are the phase kind names it recognizes.
+type PhaseName string
 
 const (
 	// PhaseFill sandboxes provide background scale; they run until the test ends.
-	PhaseFill Phase = "fill"
+	PhaseFill PhaseName = "fill"
 	// PhaseProbe sandboxes measure launch latency against the filled cluster.
-	PhaseProbe Phase = "probe"
+	PhaseProbe PhaseName = "probe"
 	// PhaseThroughput sandboxes are churned (create -> ready -> delete) to measure sustained throughput.
-	PhaseThroughput Phase = "throughput"
+	PhaseThroughput PhaseName = "throughput"
 	// PhaseClaimsWarm fires SandboxClaims simultaneously against a fully
 	// provisioned SandboxWarmPool, measuring claim-create -> claim-Ready latency.
-	PhaseClaimsWarm Phase = "claims-warm"
+	PhaseClaimsWarm PhaseName = "claims-warm"
+	// PhaseClaimsWarmSustained streams SandboxClaims at a target rate with
+	// Poisson jitter against continuously replenished warm pools, measuring
+	// whether create -> Ready latency holds over time (see sustained.go).
+	PhaseClaimsWarmSustained PhaseName = "claims-warm-sustained"
 )
 
 // PhaseNumber is a 1-based index into the run's phase list (Config.Phases /
@@ -96,7 +102,7 @@ type SandboxRecord struct {
 	// Phase is the phase name for this sandbox (may repeat if --phases lists
 	// the same name more than once). PhaseNumber is the 1-based index of that
 	// run entry and is the key used when aggregating summary stats.
-	Phase       Phase       `json:"phase"`
+	Phase       PhaseName   `json:"phase"`
 	PhaseNumber PhaseNumber `json:"phaseNumber"`
 
 	// Pod identity, for joining against node-side data sources.
@@ -173,7 +179,7 @@ func NewTracker() *Tracker {
 // stamping CreateCalled with the current time.
 // number is the 1-based index of the phase entry in this run; name is that
 // entry's phase name (kept for sandboxes.jsonl readability).
-func (t *Tracker) Register(id types.NamespacedName, name Phase, number PhaseNumber) *SandboxRecord {
+func (t *Tracker) Register(id types.NamespacedName, name PhaseName, number PhaseNumber) *SandboxRecord {
 	rec := &SandboxRecord{
 		Name:         id.Name,
 		Namespace:    id.Namespace,
@@ -191,7 +197,7 @@ func (t *Tracker) Register(id types.NamespacedName, name Phase, number PhaseNumb
 
 // RegisterClaim is Register for a SandboxClaim: the record's milestones are
 // driven by the sandboxclaims watch only (see SandboxRecord.isClaim).
-func (t *Tracker) RegisterClaim(id types.NamespacedName, name Phase, number PhaseNumber) *SandboxRecord {
+func (t *Tracker) RegisterClaim(id types.NamespacedName, name PhaseName, number PhaseNumber) *SandboxRecord {
 	rec := t.Register(id, name, number)
 	t.mu.Lock()
 	rec.isClaim = true
@@ -307,7 +313,7 @@ func (t *Tracker) Records() []SandboxRecord {
 
 // PhaseCounts summarizes progress for one phase entry in the run.
 type PhaseCounts struct {
-	Name       Phase
+	Name       PhaseName
 	Registered int
 	Created    int
 	Ready      int

@@ -228,6 +228,24 @@ function buildFlameTree(profile, valueIndex) {
     return root;
 }
 
+// searchSelfTime sums the self ("flat" in pprof terms) time of matched
+// frames: each frame's value minus its children's, over every matched
+// occurrence including nested and recursive ones. Complements the
+// inclusive total that d3-flame-graph's search handler reports, which
+// counts each matched subtree once (frames under an already-matched
+// ancestor are excluded there to avoid double counting).
+function searchSelfTime(nodes) {
+    let self = 0;
+    for (const node of nodes) {
+        let childSum = 0;
+        for (const child of node.children || []) {
+            childSum += child.value;
+        }
+        self += node.value - childSum;
+    }
+    return self;
+}
+
 // loadPprof fetches a pprof file, gunzips it if needed (pprof files are
 // gzip-compressed by convention), and parses it.
 async function loadPprof(url) {

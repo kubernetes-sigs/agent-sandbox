@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxextensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -54,6 +55,7 @@ type ClusterClient struct {
 	T
 	client        client.Client
 	dynamicClient dynamic.Interface
+	restConfig    *rest.Config
 	scheme        *runtime.Scheme
 	watchSet      *WatchSet
 }
@@ -237,9 +239,7 @@ func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicat
 
 	timeout := DefaultTimeout
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
+		timeout = time.Until(deadline)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -269,8 +269,8 @@ func (cl *ClusterClient) PollUntilObjectMatches(obj client.Object, p ...predicat
 // the provided predicates.
 // It will wait for the object to be created, but if the object is deleted,
 // it will return an error.
-// The timeout is capped at DefaultTimeout (1 minute). A shorter timeout can
-// be specified via the context.
+// When the context carries a deadline, that deadline controls the timeout.
+// Otherwise DefaultTimeout (1 minute) is applied.
 // It uses a watch for more precise timing than polling.
 // It uses a shared WatchSet to avoid per-call watch setup latency.
 func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p ...predicates.ObjectPredicate) error {
@@ -278,9 +278,7 @@ func (cl *ClusterClient) WaitForObject(ctx context.Context, obj client.Object, p
 
 	timeout := DefaultTimeout
 	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
+		timeout = time.Until(deadline)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

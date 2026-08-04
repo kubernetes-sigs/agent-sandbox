@@ -39,7 +39,10 @@ type stressTest struct {
 	// are sharded over N dedicated connections so create bursts neither
 	// queue on the ~100-stream per-connection cap nor congest the watches
 	// (see clientconns.go).
-	mutateClient  dynamic.Interface
+	mutateClient dynamic.Interface
+	// nsClient creates/deletes the extra namespaces of the multi-namespace
+	// sustained phase (cluster-scoped).
+	nsClient      dynamic.ResourceInterface
 	sandboxClient dynamic.ResourceInterface
 	// Extensions clients (extensions.agents.x-k8s.io/v1beta1), used by the
 	// claims-warm phases. The extensions controller must be deployed
@@ -101,7 +104,7 @@ func buildSandboxObject(id types.NamespacedName, image string) *unstructured.Uns
 // createSandbox registers a record and issues the Create call.
 // Create errors are recorded on the SandboxRecord rather than returned:
 // individual failures should not abort the run, they are reported in the summary.
-func (s *stressTest) createSandbox(ctx context.Context, id types.NamespacedName, name Phase, number PhaseNumber) error {
+func (s *stressTest) createSandbox(ctx context.Context, id types.NamespacedName, name PhaseName, number PhaseNumber) error {
 	sandbox := buildSandboxObject(id, s.cfg.Image)
 	s.tracker.Register(id, name, number)
 	_, err := s.sandboxClient.Create(ctx, sandbox, metav1.CreateOptions{})
@@ -129,15 +132,18 @@ func (s *stressTest) deleteSandbox(ctx context.Context, id types.NamespacedName)
 	}
 }
 
-// runFillPhase creates cfg.FillCount long-running sandboxes and waits for all of
+// runFillPhase creates count long-running sandboxes and waits for all of
 // them to become Ready. These stay running for the rest of the test, so the
 // probe and throughput phases measure performance on a cluster at scale.
-func (s *stressTest) runFillPhase(ctx context.Context, number PhaseNumber) error {
-	count := s.cfg.FillCount
-	if count == 0 {
+// name is the phase's display name (fill or fill-pct:N) and count its
+// resolved size (see fillPhase.Resolve); a fill-pct:N entry resolves to 0
+// when the cluster is already at its target utilization.
+func (s *stressTest) runFillPhase(ctx context.Context, name PhaseName, number PhaseNumber, count int) error {
+	if count <= 0 {
+		log.Printf("[%s#%d] cluster already at target; nothing to create", name, number)
 		return nil
 	}
-	log.Printf("[fill#%d] creating %d background sandboxes (create-concurrency=%d)", number, count, s.cfg.CreateConcurrency)
+	log.Printf("[%s#%d] creating %d background sandboxes (create-concurrency=%d)", name, number, count, s.cfg.CreateConcurrency)
 
 	names := make([]types.NamespacedName, 0, count)
 	for i := range count {
@@ -147,7 +153,7 @@ func (s *stressTest) runFillPhase(ctx context.Context, number PhaseNumber) error
 
 	if _, err := ForkJoin(ctx, names, s.cfg.CreateConcurrency, func(id types.NamespacedName) (struct{}, error) {
 		// Errors are recorded per-sandbox; do not abort the phase.
-		_ = s.createSandbox(ctx, id, PhaseFill, number)
+		_ = s.createSandbox(ctx, id, name, number)
 		return struct{}{}, nil
 	}); err != nil {
 		return err
@@ -160,11 +166,11 @@ func (s *stressTest) runFillPhase(ctx context.Context, number PhaseNumber) error
 	for {
 		counts := s.tracker.Snapshot()[number]
 		if counts.Created == 0 {
-			return fmt.Errorf("[fill#%d] all %d sandbox creations failed", number, counts.Failed)
+			return fmt.Errorf("[%s#%d] all %d sandbox creations failed", name, number, counts.Failed)
 		}
 		if counts.Ready >= counts.Created {
-			log.Printf("[fill#%d] all %d created sandboxes are Ready (%d failed to create)",
-				number, counts.Created, counts.Failed)
+			log.Printf("[%s#%d] all %d created sandboxes are Ready (%d failed to create)",
+				name, number, counts.Created, counts.Failed)
 			return nil
 		}
 		if counts.Ready != lastReady {
@@ -172,7 +178,7 @@ func (s *stressTest) runFillPhase(ctx context.Context, number PhaseNumber) error
 			lastProgress = time.Now()
 		}
 		if time.Since(lastProgress) > s.cfg.PerSandboxTimeout {
-			return fmt.Errorf("[fill#%d] stalled: %d/%d sandboxes Ready with no progress for %v", number, counts.Ready, counts.Created, s.cfg.PerSandboxTimeout)
+			return fmt.Errorf("[%s#%d] stalled: %d/%d sandboxes Ready with no progress for %v", name, number, counts.Ready, counts.Created, s.cfg.PerSandboxTimeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -244,7 +250,7 @@ func (s *stressTest) runProbePhase(ctx context.Context, number PhaseNumber) erro
 // Multiple levels run back-to-back as separate phases (a max-in-flight sweep
 // within a single run): each level fully drains (every pod observed deleted)
 // before the next begins, so levels do not contaminate each other.
-func (s *stressTest) runThroughputLevel(ctx context.Context, name Phase, number PhaseNumber, maxInFlight int) error {
+func (s *stressTest) runThroughputLevel(ctx context.Context, name PhaseName, number PhaseNumber, maxInFlight int) error {
 	count := s.cfg.ThroughputCount
 	if count == 0 {
 		return nil
@@ -402,7 +408,7 @@ func buildClaimObject(id types.NamespacedName, poolName string) *unstructured.Un
 // createClaim registers a record and issues the SandboxClaim Create call via
 // the given (namespace-bound) client. Like createSandbox, Create errors are
 // recorded on the record rather than aborting the phase.
-func (s *stressTest) createClaim(ctx context.Context, claimClient dynamic.ResourceInterface, id types.NamespacedName, poolName string, phase Phase, number PhaseNumber) error {
+func (s *stressTest) createClaim(ctx context.Context, claimClient dynamic.ResourceInterface, id types.NamespacedName, poolName string, phase PhaseName, number PhaseNumber) error {
 	claim := buildClaimObject(id, poolName)
 	s.tracker.RegisterClaim(id, phase, number)
 	_, err := claimClient.Create(ctx, claim, metav1.CreateOptions{})
@@ -418,7 +424,7 @@ func (s *stressTest) createClaim(ctx context.Context, claimClient dynamic.Resour
 // latency against a fully provisioned pool rather than sandbox launch
 // latency. Progress-stall detection mirrors the fill phase: if readyReplicas
 // stops advancing for PerSandboxTimeout, fail.
-func (s *stressTest) waitWarmPoolReady(ctx context.Context, poolClient dynamic.ResourceInterface, phase Phase, poolName string, want int, number PhaseNumber) error {
+func (s *stressTest) waitWarmPoolReady(ctx context.Context, poolClient dynamic.ResourceInterface, phase PhaseName, poolName string, want int, number PhaseNumber) error {
 	lastReady := int64(-1)
 	lastProgress := time.Now()
 	for {
@@ -465,7 +471,7 @@ func (s *stressTest) waitWarmPoolReady(ctx context.Context, poolClient dynamic.R
 // Capacity: the pool itself needs ClaimsWarmCount pod slots, and the pool
 // controller replenishes claimed sandboxes, so up to ~2x ClaimsWarmCount pods
 // can transiently exist during and after the burst. Size the cluster with
-// headroom (see checkClusterCapacity's warning) or throttle replenishment via
+// headroom (see resolvePhases's warning) or throttle replenishment via
 // --sandbox-warm-pool-concurrent-workers.
 func (s *stressTest) runClaimsWarmPhase(ctx context.Context, number PhaseNumber) error {
 	count := s.cfg.ClaimsWarmCount

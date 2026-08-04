@@ -137,6 +137,32 @@ echo "Using CNI: ${CNI}"
 STRESS_NODE_COUNT="${STRESS_NODE_COUNT:-20}"
 echo "Using node count: ${STRESS_NODE_COUNT}"
 
+# Control-plane sizing: on n2-standard-8 the throughput phases pin
+# kube-apiserver at a flat ~5.6-5.7 cores across mif200/400/600 (a plateau
+# despite 3x offered load, i.e. saturation) on a node that also runs etcd,
+# KCM (~0.35 cores) and the scheduler (~0.23). Going to 16 vCPUs (8-core
+# kindnet run 2079750013621112832 vs 16-core cilium run 2079885693798060032;
+# CNI differs but the apiserver signals are CNI-independent) let the
+# apiserver burn 9.25 cores, dropped its mean request latency 34.7ms ->
+# 6.6ms, and lifted mif600 claim throughput 60/s -> 91/s, with the sandbox
+# controller's workqueue wait collapsing 445ms -> 3ms downstream. Override via
+# STRESS_CONTROL_PLANE_SIZE (e.g. back to n2-standard-8) to reproduce the
+# saturated-server regime.
+#
+# Second round: with the node I/O wall lifted, the bottleneck moved back to
+# control-plane CPU. The pd-ssd leg (run 2080670751672766464) reached 151
+# claims/s with the apiserver at 10.5 of 16 n2 cores and 8ms latency; the
+# 40-node leg (run 2080670827233153024) reached 145/s with the apiserver at
+# 12.0 cores and latency degrading to 20ms - saturation on the shared
+# 16-core box. Rather than doubling n2 again, move to c3 (Sapphire Rapids,
+# roughly +35% per core over n2's Cascade/Ice Lake): apiserver request
+# latency benefits from the faster cores directly, not just from more of
+# them. NOTE: c3/c4 machine families do not support pd-standard boot disks,
+# so the control-plane root volume is set to pd-ssd below alongside the
+# nodes'.
+STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
+echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -147,7 +173,7 @@ kops create cluster \
   --zones="${ZONE}" \
   --project="${PROJECT_ID}" \
   --control-plane-count=1 \
-  --control-plane-size=n2-standard-8 \
+  --control-plane-size="${STRESS_CONTROL_PLANE_SIZE}" \
   --node-count="${STRESS_NODE_COUNT}" \
   --node-size=n2-standard-8
 
@@ -156,6 +182,28 @@ kops create cluster \
 # it, and a new knob is a new block instead of another line in a shared flag
 # list -- so tuning changes stop conflicting with each other. The edits
 # mutate the spec in the state store; `kops update cluster` below applies them.
+
+# Node root volumes: kOps' GCE default is pd-standard (spinning disk), and
+# the bpftrace node profiler (kindnet run 2080606920242106368, 20 nodes)
+# showed the pod launch pipeline is disk-sync-bound on it: containerd spent
+# 2,718s blocked across 923k fsync-family calls (kubelet another 987s at
+# 15ms/call), run_podsandbox mean rose ~130ms -> 1.0-1.2s under load, and
+# iowait hit ~2.1-2.5 cores/node while node CPU stayed under half busy.
+# pd-ssd raises IOPS/GB 40x over pd-standard and attacks that wall
+# directly.
+STRESS_NODE_VOLUME_TYPE="${STRESS_NODE_VOLUME_TYPE:-pd-ssd}"
+echo "Using node root volume type: ${STRESS_NODE_VOLUME_TYPE}"
+kops edit instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" \
+  --set "spec.rootVolume.type=${STRESS_NODE_VOLUME_TYPE}"
+
+# Control-plane root volume: required to be non-pd-standard by the c3
+# machine family (see the control-plane sizing note above), and it retires
+# the cluster's last spinning disk. Nothing latency-critical lives on the
+# CP root - the etcd data volumes are separate PDs and already pd-ssd by
+# kOps' GCE default (DefaultGCEEtcdVolumeType; measured 1.5ms mean fsync) -
+# so this is an enabler, not a tuning claim.
+kops edit instancegroup --name "${CLUSTER_NAME}" "control-plane-${ZONE}" \
+  --set "spec.rootVolume.type=pd-ssd"
 
 # authorizationAlwaysAllowPaths: allow unauthenticated GETs of /metrics on
 # kube-controller-manager and kube-scheduler so the stress test can scrape
@@ -189,6 +237,26 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubeControllerManager.kubeAPIQPS=500 \
   --set cluster.spec.kubeControllerManager.kubeAPIBurst=500
 
+# etcdClusters[].manager.listenMetricsURLs: have etcd serve its dedicated
+# plain-HTTP metrics listener. etcd's client port requires mTLS, so the
+# stress tool deliberately does not scrape it; the metrics listener carries
+# /metrics without auth, and the tool reaches it through the apiserver pod
+# proxy like every other component. WAL fsync and backend-commit latency
+# live here -- the direct way to tell etcd disk stalls from control-plane
+# CPU starvation (run 2079306544964440064 needed exactly this distinction).
+# The ports differ because both etcd-manager pods (main and events) run
+# hostNetwork on the control-plane node, and neither can be etcd's
+# conventional 2381: kOps assigns 2380/2381/2382 as the main/events/cilium
+# PEER ports (pkg/model/components/etcdmanager PortsForCluster), so binding
+# the metrics listener there collides with etcd-events' peer listener and
+# etcd never comes up (run 2079330812058144768). 2391/2392 are outside
+# kOps' wellknownports range. Index addressing matches the order
+# `kops create cluster` emits: [0]=main, [1]=events. Not internet-reachable:
+# same deny-by-default VPC as the 10257/10259 note above.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set 'cluster.spec.etcdClusters[0].manager.listenMetricsURLs=http://0.0.0.0:2391' \
+  --set 'cluster.spec.etcdClusters[1].manager.listenMetricsURLs=http://0.0.0.0:2392'
+
 # kubeScheduler.qps/burst: the scheduler's client defaults (50/100) throttle
 # it under churn -- every sandbox is a pod to schedule, and each pod costs
 # the scheduler a binding plus status writes, which shows up as
@@ -201,6 +269,21 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubeScheduler.qps=500 \
   --set cluster.spec.kubeScheduler.burst=500
+
+# kubelet.kubeAPIQPS (default 50): the kubelets make multiple pod
+# status updates per pod.
+# Each kubelet status-manager sync is a GET plus a PATCH through one serialized loop,
+# so this becomes a bottleneck when churning more than 5 pods / second / node.
+#
+# kubelet.eventQPS/eventBurst: kubelet event emission has its own limiter,
+# not covered by kubeAPIQPS.
+# Note this is different from other rate limits: we drop extra events.
+# A diagnostics trade-off that is acceptable here, needs more careful
+# evaluation before using in production clusters.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set cluster.spec.kubelet.kubeAPIQPS=500 \
+  --set cluster.spec.kubelet.eventQPS=5 \
+  --set cluster.spec.kubelet.eventBurst=50
 
 
 if [[ "${CNI}" == "cilium" ]]; then
@@ -250,16 +333,42 @@ if [[ "${CNI}" == "cilium" ]]; then
   kops validate cluster --wait 5m
 fi
 
+# node-exporter: node-level CPU (incl. iowait), memory and disk stats for
+# every node including the control plane; the stress tool scrapes it via the
+# apiserver pod proxy (see promscrape.go). Without it the report cannot tell
+# control-plane CPU saturation from disk stalls at the node level.
+echo "Deploying node-exporter..."
+kubectl apply -f test/benchmarks/scenarios/benchmarks-kops-gcp/node-exporter.yaml
+kubectl --namespace kube-system rollout status daemonset/node-exporter --timeout=3m
+
 # Deploy to cluster. CONTROLLER_ARGS optionally appends controller flags
 # (e.g. "--enable-pprof-debug" so the stress tool's --profile-controller can
 # actually fetch CPU/heap profiles; see benchmarks-kops-gcp-claims).
 echo "Deploying to cluster..."
 dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
-  ${CONTROLLER_ARGS:+--controller-args "${CONTROLLER_ARGS}"}
+  ${CONTROLLER_ARGS:+--controller-args="${CONTROLLER_ARGS}"}
 
 # Wait for controller to be ready
 echo "Waiting for controller to be ready..."
 kubectl rollout status deployment agent-sandbox-controller --namespace agent-sandbox-system --timeout=10m
+
+# Serve only the beta API: the mere presence of a v1alpha1 version
+# causes the kube-apiserver to build a v1alpha1 version for every resource,
+# in the informer cache, even if v1alpha1 is never used, adding unnecessary
+# load on the control plane.
+for crd in sandboxes.agents.x-k8s.io \
+           sandboxclaims.extensions.agents.x-k8s.io \
+           sandboxtemplates.extensions.agents.x-k8s.io \
+           sandboxwarmpools.extensions.agents.x-k8s.io; do
+  versions=($(kubectl get crd "${crd}" -o jsonpath='{.spec.versions[*].name}' 2>/dev/null)) || continue
+  for i in "${!versions[@]}"; do
+    if [[ "${versions[$i]}" == "v1alpha1" ]]; then
+      echo "Marking ${crd} v1alpha1 as served=false"
+      kubectl patch crd "${crd}" --type=json \
+        -p "[{\"op\": \"replace\", \"path\": \"/spec/versions/${i}/served\", \"value\": false}]"
+    fi
+  done
+done
 
 # Run the benchmarks
 echo "Running benchmarks..."
@@ -269,16 +378,28 @@ echo "Benchmark completed successfully."
 
 # Run the stress test.
 #
-# Phases are a comma-separated list of names (see test/stress/main.go):
-#   fill              long-running background sandboxes (scale)
+# Phases are a comma-separated list of names (see test/stress/phase.go):
+#   fill              long-running background sandboxes (fill-per-node * nodes)
+#   fill-pct:N        top the cluster up to N% total worker pod utilization
 #   probe             low-concurrency launch latency
-#   throughput-mifN   closed-loop churn capped at N in-flight
+#   throughput-mif:N  closed-loop churn capped at N in flight (add label:<x>
+#                     to repeat a level under a distinct report name)
 #   claims-warm       SandboxClaim burst against a provisioned warm pool
 #
-# Keep fill (fill-per-node * nodes) + max(mifN) below spare pod capacity
-# (roughly 3 * 110 minus system pods on the default cluster); the test
-# refuses to run if they don't fit.
-# Defaults below are sized for the default 3-node cluster.
+# What the default list below does, on the default 20-node cluster
+# (2,200 pod slots):
+#   1. fill: 10 sandboxes per node = 200 pods, ~10% utilization.
+#   2. probe, then the descending mif sweep: launch latency and throughput
+#      on that mostly-empty cluster.
+#   3. fill-pct:80: top the cluster up to 80% utilization (~1,760 pods).
+#   4. throughput-mif:400-label:pct80: run mif400 again at density. 400 in
+#      flight is ~18% of the cluster, so this level peaks at ~98%
+#      utilization - it fits, and the tool's capacity preflight (which
+#      walks the phases in order, so it knows mif400 fits before the 80%
+#      fill and only barely after it) warns above 90% but allows it.
+# Comparing the two mif400 legs separates the launch pipeline's own cost
+# from the cost of resident-pod scale (kubelet status load, watch fanout,
+# etcd working set).
 STRESS_OUTPUT_DIR="${ARTIFACTS:-.}/stress-test/"
 mkdir -p "${STRESS_OUTPUT_DIR}"
 
@@ -300,7 +421,7 @@ set +o errexit
 # each one (e.g. --client-connections=4 in benchmarks-kops-gcp-claims).
 # shellcheck disable=SC2086
 go run ./test/stress \
-  --phases="${STRESS_PHASES:-fill,probe,throughput-mif600,throughput-mif400,throughput-mif200,throughput-mif100,throughput-mif50}" \
+  --phases="${STRESS_PHASES:-fill,probe,throughput-mif:600,throughput-mif:400,throughput-mif:200,throughput-mif:100,throughput-mif:50,fill-pct:80,throughput-mif:400-label:pct80}" \
   --fill-per-node="${STRESS_FILL_PER_NODE:-10}" \
   --probe-count="${STRESS_PROBE_COUNT:-30}" \
   --throughput-count="${STRESS_THROUGHPUT_COUNT:-500}" \

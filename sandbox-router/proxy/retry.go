@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 )
 
@@ -129,4 +130,16 @@ func isRetriableDialError(err error) bool {
 		}
 	}
 	return false
+}
+
+// isDeadHostDialError reports whether a dial failure indicates the target
+// IP itself is unreachable (timeout, no route), as opposed to a live host
+// refusing the connection. A refusal (RST) proves something answers at
+// that IP — e.g. the caller picked a port the Pod isn't listening on — so
+// the cache entry it came from is not stale and must not be evicted.
+func isDeadHostDialError(err error) bool {
+	if !isRetriableDialError(err) {
+		return false
+	}
+	return !errors.Is(err, syscall.ECONNREFUSED)
 }

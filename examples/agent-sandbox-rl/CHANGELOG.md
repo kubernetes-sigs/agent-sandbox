@@ -8,7 +8,59 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 Initial implementation (design phases 1–7), live-verified on GKE against Agent
 Sandbox `v0.5.0rc1` (v1beta1).
 
+### Added (safety / runaway safeguards)
+- **Circuit breaker** (`config.py`, `fleet.py`): a background monitor
+  (`fleet.overcommit_guard`) samples the live Sandbox count this run owns (by run-id
+  label) and, if it exceeds `min(expected × overcommit_factor, max_live_sandboxes)`,
+  **tears the fleet down and raises `FleetOvercommitError`**. Keys off *intent*, so it
+  catches accidental over-creation (runaway / orphaned driver / warm-pool #1215)
+  regardless of source, and being in-SDK it acts in-process (aborts the run + tears
+  down) rather than needing an external watchdog. It samples via the apiserver, so on a
+  list error it fails **open** (under-counts, not a false trip) — it is not a substitute
+  for control-plane back-pressure during sustained 429s. Wired into `run()`. Config:
+  `overcommit_factor` (1.5), `max_live_sandboxes` (None), `breaker_poll_s` (5.0).
+- **Best-effort teardown + label reaper** (`fleet.py`, `reaper.py`, `constants.py`):
+  every created resource is stamped with a per-run label (`RUN_ID_LABEL` = `fleet.run_id`);
+  `setup()` installs `atexit` + SIGINT/SIGTERM handlers that tear down on **graceful**
+  exits (`install_teardown_hooks`, default on) — best-effort, they can't catch SIGKILL /
+  OOM / node loss. For those abrupt cases, **`reap(run_id=…)`** / `python -m
+  agent_sandbox_rl.reaper` deletes a run's resources by label — the recovery path for an
+  **orphaned** driver that died without cleanup (the failure mode behind the worst incident).
+- **Capacity/QPS advisory** (`fleet.py`): `plan()` attaches `plan.warnings` (+ logs) when
+  the warm footprint or `max_concurrent` looks beyond what the control plane absorbs
+  (Pending-pod risk, apiserver 429 risk, #1215 deep-warm risk). **Warn only — never
+  refuses**: the customer owns their cluster. See `plans/sdk-runaway-safeguards.md` (notes).
+
 ### Added (performance & scale)
+- **`recycle=` flag on `run()`** (`fleet.py`, `async_fleet.py`, `strategies.py`):
+  recycling is now an **orthogonal modifier** on the managed runner —
+  `fleet.run(fn, strategy="naive", recycle=True, …)` (and the async twin) — not a
+  strategy value. The chosen warm-pool `strategy` still governs warming; `recycle`
+  swaps the task→sandbox binding to reset-and-reuse via
+  `reuse_git_restore_sandbox(_async)` (executor injection through the strategy
+  functions). Off by default (a no-op for 1:1 eval; only multi-task-per-image shapes
+  benefit, and not every RL/eval scenario resets cleanly). Recycle opts
+  (`reset`/`max_reuses`/`reset_timeout`/`use_session`/`scale_on_hold`; async also
+  `shards_per_image`/`claim_concurrency`) are forwarded and ignored when
+  `recycle=False`. The low-level executors remain public for use outside `run()`.
+- **Sandbox recycling — `reuse_git_restore_sandbox`** (`recycle.py`): reset-and-reuse
+  one claimed sandbox across same-image tasks so **claims scale with problems, not
+  tasks** (÷ tasks-per-image) — the RL-rollout claim-churn lever. `GitRestoreReset`
+  restores `/testbed` to a pristine tag (`git reset --hard` + `clean -xdff` + detach),
+  sweeps processes + `/tmp`, disables git gc/maintenance (avoids shared-store
+  corruption), then **verifies** the repo is back at the pristine SHA and clean; drift
+  → the sandbox is **quarantined** (released, fresh claim) so contamination never
+  silently biases rewards. Reset is **git-only by default** (fast); the site-packages
+  (`pip freeze`) and git-config/hooks tripwires are opt-in (`check_env`/`check_config`,
+  bounded otherwise by `max_reuses` + the canary). Scales via a **persistent exec
+  session** (`SandboxSession`, `use_session=True`): one held-open `bash` stream per
+  sandbox → exec cost O(sandboxes) not O(tasks). Safe on mixed image sets: a non-git
+  `/testbed` falls back to fresh-claim-per-task; an exec failure mid-reset quarantines
+  rather than aborting. `determinism_canary` asserts byte-identical output across a
+  reset (correctness gate). New `reset`/`quarantine`/`rotate` phases in `RunReport`.
+  Measured (no-op, mc=100): RL shape 50×40 reuse 416s/81 claims/100% vs regular
+  944s/1,987/99.35%. Costlier reset tiers (env-dir restore, overlay/checkpoint) are
+  deferred. Design + deep-research hardening: `plans/sandbox-recycling.md`.
 - **`pipelined` strategy** (`strategies.py`, `async_fleet.py`): double-buffered
   sliding window — prefetch window N+1's pools (background thread / `asyncio.Task`)
   while window N's tasks run, so image pull overlaps execution. Footprint bounded
@@ -33,6 +85,40 @@ Sandbox `v0.5.0rc1` (v1beta1).
   parallel); `_run_windowed`/`_run_pipelined` use it instead of warming one image at a
   time. Measured at 500 images: `sliding` dropped **2556s → 279s (9.2×)**, making the
   windowed strategies competitive with `naive` (the async path was already concurrent).
+- **Staged warm fill (`warm_create_budget`)** (`config.py`, `fleet.py`):
+  `start_warmpools`/`setup` warm pools in **waves** of ≤ `warm_create_budget` sandbox
+  creates in flight (default **1000**), waiting for each wave to reach Ready before the
+  next. Bounds the controller's concurrent create burst (Σ pools×replicas) so a large
+  or deep warm can't trip the SandboxWarmPool over-creation race (upstream
+  [#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)) — the burst
+  that triggers it is `warm-pool-workers × replicas_per_pool`, and the wait between
+  waves lets the informer cache converge. `warm_create_budget=0` (or `create_budget=0`)
+  restores the old warm-all-at-once behavior; a warm ≤ the budget is a single wave
+  (no change). **Reduces but does not by itself eliminate** the controller-side race —
+  for large/deep *cold* warms it must be paired with a low
+  `--sandbox-warm-pool-concurrent-workers` (the churn is per-pool + lagging pod GC).
+  The robust fix is upstream (expectations pattern on warm-pool creates + counting
+  `Terminating` toward the target); the RL-safe path is to not deep-warm at all
+  (recycle → 1 replica/pool).
+- **Recycle scale-on-hold (`scale_on_hold`, default on)** (`recycle.py`): once
+  `reuse_git_restore_sandbox` claims and holds a recyclable sandbox for its group, it
+  drops that image's warm pool (`unwarm_image`) so the controller doesn't
+  **replenish** a replacement the reuse never claims — removing the *sustained*
+  idle-warm footprint (steady state ~1× the held count instead of ~2×) and the
+  ongoing claim-driven replenishment that feeds #1215 (the peak during the initial
+  concurrent-claim burst can still transiently ~2× until claims are staged too).
+  Quarantine/rotation re-claims JIT re-warm first. Verified safe by probe: a claimed
+  sandbox survives its pool being scaled to 0 / deleted (a `SandboxClaim` detaches it
+  from warm-pool ownership). Non-recyclable (fresh-claim-per-task) images keep their
+  pools. `scale_on_hold=False` restores resident pools.
+- **Async recycle (`reuse_git_restore_sandbox_async`)** (`recycle.py`): coroutine-per-group
+  twin of `reuse_git_restore_sandbox` for `AsyncSandboxFleet`. Blocking git/exec/claim calls
+  are offloaded to the fleet's bounded pool, so it **holds far more concurrent recycled
+  sandboxes than the sync thread-per-group executor** (one OS thread per held sandbox) —
+  lifting the driver-side concurrency ceiling. Effective *exec* concurrency is still bounded
+  by the pool + apiserver exec path (a native async I/O backend would lift that too). Same
+  semantics (reset / quarantine / rotate / `scale_on_hold`); `process_fn` may be sync or
+  async. (`AsyncSandboxFleet.start_warmpools` also gained the `create_budget` staging arg.)
 - **Node-aware disk window sizing** (`sizing.py`, `config.py`, `fleet.py`):
   `recommend_window_disk` / `recommend_window_pipelined` gained a `nodes` arg so the
   disk budget is the **whole pool's** usable disk (distinct images spread across nodes),

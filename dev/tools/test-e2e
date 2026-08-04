@@ -38,7 +38,9 @@ def run_go_e2e_tests(repo_root, artifact_dir, env):
 
     go_test_cmd = utils.go_tool_args(
         "gotestsum",
-         f"--junitfile={repo_root}/bin/e2e-go-junit.xml",
+         # junit_ prefix + $ARTIFACTS: prow spyglass only renders junit files
+         # matching artifacts/junit*.xml.
+         f"--junitfile={artifact_dir}/junit_e2e-go.xml",
          f"--jsonfile={artifact_dir}/test-e2e.json",
          "--",
          *go_test_args,
@@ -125,8 +127,8 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
     """Runs the Python e2e tests and generates a junit report"""
     print("========= Running Python SDK E2E tests... =========")
 
-    # Define the path for the JUnit report
-    junit_report_path = f"{repo_root}/bin/e2e-python-sdk-junit.xml"
+    # junit_ prefix + $ARTIFACTS so prow spyglass renders it.
+    junit_report_path = os.path.join(artifact_dir, "junit_e2e-python-sdk.xml")
 
     # Set the environment variable for the test namespace
     test_env = env.copy()

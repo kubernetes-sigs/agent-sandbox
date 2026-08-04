@@ -2,7 +2,7 @@
 
 This example demonstrates how to configure Google Kubernetes Engine (GKE) Memory Swap using dedicated Local SSDs to drastically increase the density of `agent-sandbox` workloads (specifically Chromium pods) on a single node.
 
-By enabling swap on a dedicated Local SSD, we can ensure 100% workload success up to the **200 pods per node** on a cost-effective `c4-standard-8` instance (8 vCPUs, 32 GB RAM), whereas the baseline pool collapses and experiences severe workload instability starting from 130 pods per node.
+By enabling swap on a dedicated Local SSD, we can ensure 100% workload success up to the **200 pods per node** on a cost-effective `c4-standard-8` instance (8 vCPUs, 30 GB RAM), whereas the baseline pool collapses and experiences severe workload instability starting from 130 pods per node.
 
 ## Why Swap for Agent Sandboxes?
 
@@ -12,7 +12,20 @@ In a standard Kubernetes cluster, when physical memory is exhausted, the node's 
 
 By enabling swap on fast, local NVMe SSDs (Local SSDs), GKE can swap out idle memory pages, allowing you to overcommit memory safely and pack significantly more pods onto each node.
 
-## Performance Results
+## Container Runtimes & Isolation Options
+
+Depending on your security and isolation requirements, `agent-sandbox` supports multiple container isolation runtimes on GKE. We have conducted high-density swap benchmarks across three major runtimes:
+
+1. **Default `runc` (Process Isolation)**: Standard Linux container isolation. Lowest overhead, highest density (**200 pods/node** with swap, +66% gain).
+2. **gVisor `runsc` (Syscall Interception)**: User-space kernel sandboxing. Strong process isolation, medium density (**160 pods/node** with swap, +100% gain).
+3. **Kata Containers (`kata-clh` / `kata-qemu`) (MicroVMs)**: Hardware-assisted nested virtualization. Maximum VM-level security boundary (**50 pods/node** with swap under `kata-clh`, **20 pods/node** under `kata-qemu`).
+
+> [!TIP]
+> **Cross-Runtime Benchmark Summary**: For a comprehensive side-by-side comparison matrix, memory footprint analysis, and architectural trade-offs across runtimes, visit the [**Container Isolation Runtimes Overview**](./runtimes/README.md).
+
+---
+
+## Vanilla `runc` Performance Results
 
 We evaluated and compared two node pools on GKE using `c4-standard-8` instances, running a concurrent density sweep of **120, 160, 200, and 240 pods**:
 
@@ -133,3 +146,10 @@ chmod +x run_chromesandbox_density_test.sh
 #### Results:
 - Raw timing metrics are saved to `artifacts/<scenario>/<density>/.../density_metrics.json`.
 - A compiled performance results table is written to `artifacts/perf_test_summary.md`.
+
+## Alternative Runtimes
+
+For gVisor or Kata Containers deployments and benchmarks, refer to:
+- [**`runtimes/README.md`**](./runtimes/README.md) — Multi-runtime comparison summary
+- [**`runtimes/gVisor/README.md`**](./runtimes/gVisor/README.md) — gVisor setup & results (160 pods max stable density)
+- [**`runtimes/kata/README.md`**](./runtimes/kata/README.md) — Kata Containers setup & results (`kata-clh` & `kata-qemu`, up to 50 pods (kata-clh) / 20 pods (kata-qemu))

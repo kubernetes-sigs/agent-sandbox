@@ -155,6 +155,7 @@ func NewTestContext(t T) *TestContext {
 		T:             t,
 		client:        client,
 		dynamicClient: dynamicClient,
+		restConfig:    restConfig,
 		scheme:        controllers.Scheme,
 		watchSet:      watchSet,
 	}

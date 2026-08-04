@@ -438,6 +438,73 @@ def main():
             "avg_latency_ms": avg_latency_ms
         })
 
+    # etcd server-side disk latency (present when the cluster serves etcd's
+    # plain-HTTP metrics listener; see promscrape.go). WAL fsync is the write
+    # path's disk wait and backend commit is the boltdb flush: elevated
+    # client-observed etcd latency with FLAT fsync/commit numbers means the
+    # time is going to CPU starvation or queueing on the control-plane node,
+    # not storage (run 2079306544964440064 needed exactly this distinction).
+    print("Querying etcd disk latency by phase...")
+    etcd_disk_avg_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["etcd_disk_wal_fsync_duration_seconds_count",
+                 "etcd_disk_wal_fsync_duration_seconds_sum",
+                 "etcd_disk_backend_commit_duration_seconds_count",
+                 "etcd_disk_backend_commit_duration_seconds_sum"],
+        group_by=["source"],
+        where="source IN ('etcd-main', 'etcd-events')")
+
+    # p99 needs the histogram buckets: sum per-scrape bucket deltas per phase,
+    # then interpolate within the bucket that crosses the 99th percentile.
+    etcd_disk_bucket_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["etcd_disk_wal_fsync_duration_seconds_bucket",
+                 "etcd_disk_backend_commit_duration_seconds_bucket"],
+        labels={"le": "le"},
+        group_by=["source", "le"],
+        where="source IN ('etcd-main', 'etcd-events')")
+
+    def bucket_p99(buckets):
+        """buckets: {le(float): cumulative count delta} including +Inf."""
+        total = buckets.get(float("inf"), 0.0)
+        if total <= 0:
+            return 0.0
+        target = 0.99 * total
+        cum_prev, le_prev = 0.0, 0.0
+        for le in sorted(buckets):
+            cum = buckets[le]
+            if cum >= target:
+                if le == float("inf"):
+                    return le_prev * 1000
+                frac = (target - cum_prev) / max(cum - cum_prev, 1e-9)
+                return (le_prev + frac * (le - le_prev)) * 1000
+            cum_prev, le_prev = cum, le
+        return le_prev * 1000
+
+    etcd_disk_buckets = {}
+    for phase_name, source, le, fsync_delta, commit_delta in etcd_disk_bucket_raw:
+        le_f = float("inf") if le == "+Inf" else float(le)
+        entry = etcd_disk_buckets.setdefault((phase_name, source), ({}, {}))
+        entry[0][le_f] = entry[0].get(le_f, 0.0) + fsync_delta
+        entry[1][le_f] = entry[1].get(le_f, 0.0) + commit_delta
+
+    etcd_disk = []
+    for row in etcd_disk_avg_raw:
+        phase_name, source, fsync_n, fsync_sum, commit_n, commit_sum = row
+        if fsync_n <= 0 and commit_n <= 0:
+            continue
+        fsync_buckets, commit_buckets = etcd_disk_buckets.get((phase_name, source), ({}, {}))
+        etcd_disk.append({
+            "phase_name": phase_name,
+            "source": source,
+            "fsync_n": int(fsync_n),
+            "fsync_avg_ms": (fsync_sum / fsync_n * 1000) if fsync_n > 0 else 0.0,
+            "fsync_p99_ms": bucket_p99(fsync_buckets),
+            "commit_avg_ms": (commit_sum / commit_n * 1000) if commit_n > 0 else 0.0,
+            "commit_p99_ms": bucket_p99(commit_buckets),
+        })
+    etcd_disk.sort(key=lambda r: (phase_order_map_early.get(r["phase_name"], 99), r["source"]))
+
     print("Querying etcd timeseries...")
     etcd_ts_raw = metrics_timeseries(
         conn, metrics_path_str,
@@ -612,6 +679,75 @@ def main():
             "total_wait_s": wait_total,
             "avg_wait_ms": (wait_total / count_delta) * 1000 if count_delta > 0 else 0
         })
+
+    # Limiter regime per (phase, component): a client-go limiter hurts in
+    # two distinguishable ways. A saturated limiter with open-loop callers
+    # QUEUES - a backlog forms and waits grow into the tail (the classic,
+    # loud signature the >100ms finding below catches). A limiter running at
+    # exactly its QPS with closed-loop callers PACES - each request just
+    # waits for the next token, uniformly distributed over 0..1/QPS, so the
+    # mean wait is half the token interval and NO request ever exceeds one
+    # interval. Tail- and threshold-based checks read pacing as healthy: in
+    # run 2080987052014309376 the kubelets ran at ~50 req/s/node against
+    # kubeAPIQPS=50 and paid a uniform 9.1ms mean (0% of waits over 25ms),
+    # which was ~60% of the serialized status-sync lane's service time.
+    # The uniform shape also makes the mean a limit estimator: implied
+    # per-instance QPS ~= 1 / (2 * mean_wait).
+    print("Querying limiter regime by phase and component...")
+    # verb/host must be extracted even though we don't group by them: they
+    # partition the delta computation (mixing label streams corrupts deltas;
+    # see the module comment on _counter_deltas_cte).
+    limiter_regime_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["rest_client_rate_limiter_duration_seconds_count",
+                 "rest_client_rate_limiter_duration_seconds_sum"],
+        labels={"verb": "verb", "host": "host"},
+        group_by=["source", "verb", "instance"])
+    phase_durations = {name: (p_end - p_start).total_seconds()
+                       for name, p_start, p_end in phases}
+    regime_agg = {}
+    for phase_name, source, verb, instance, count_delta, wait_total in limiter_regime_raw:
+        if count_delta <= 0:
+            continue
+        entry = regime_agg.setdefault((phase_name, source, verb),
+                                      {"count": 0.0, "wait": 0.0, "instances": set()})
+        entry["count"] += count_delta
+        entry["wait"] += wait_total
+        entry["instances"].add(instance)
+
+    limiter_regime_ops = []
+    for (phase_name, source, verb), entry in regime_agg.items():
+        duration_s = phase_durations.get(phase_name, 0)
+        if duration_s <= 0 or entry["count"] < 100:
+            continue
+        n_instances = len(entry["instances"])
+        rate_per_instance = entry["count"] / duration_s / n_instances
+        mean_wait_ms = entry["wait"] / entry["count"] * 1000
+        implied_qps = 1000.0 / (2 * mean_wait_ms) if mean_wait_ms >= 1.0 else None
+        if mean_wait_ms >= 100:
+            verdict = "queueing"
+        elif implied_qps is not None and rate_per_instance >= 0.5 * implied_qps:
+            verdict = "pacing"
+        elif mean_wait_ms >= 1.0:
+            # Waits despite sustained-rate headroom: demand SPIKES exceed the
+            # bucket even though the average does not (observed on kubelets at
+            # ~59 req/s/node sustained vs a 100 QPS limit - PLEG-batch sync
+            # bursts drained the bucket; kOps exposes no kubelet burst field).
+            verdict = "bursty"
+        else:
+            verdict = "ok"
+        limiter_regime_ops.append({
+            "phase_name": phase_name,
+            "source": source,
+            "verb": verb,
+            "instances": n_instances,
+            "rate_per_instance": rate_per_instance,
+            "mean_wait_ms": mean_wait_ms,
+            "implied_qps": implied_qps,
+            "verdict": verdict,
+        })
+    limiter_regime_ops.sort(
+        key=lambda r: (phase_order_map_early.get(r["phase_name"], 99), -r["mean_wait_ms"]))
 
     print("Querying client throttling timeseries...")
     client_ratelimit_ts_raw = metrics_timeseries(
@@ -808,8 +944,116 @@ def main():
                 "limit": pod_capacity
             })
 
+    # Node-level CPU from node-exporter (source 'node'; captured when the
+    # scenario deploys the DaemonSet). node_cpu_seconds_total is a counter
+    # per cpu per mode; summing per-scrape deltas over cpus per node gives
+    # cpu-seconds by mode, so busy% = 1 - (idle + iowait) / total. iowait is
+    # carried separately: it is the waiting-on-disk share, the node-level
+    # number that distinguishes I/O starvation from CPU starvation.
+    def node_role(instance):
+        return "control-plane" if ("control-plane" in instance or "master" in instance) else "worker"
+
+    def cpu_shares(modes):
+        total = sum(modes.values())
+        if total <= 0:
+            return None
+        idle = modes.get("idle", 0.0)
+        iowait = modes.get("iowait", 0.0)
+        return ((total - idle - iowait) / total * 100, iowait / total * 100)
+
+    print("Querying node CPU by phase...")
+    node_cpu_raw = metrics_by_phase(
+        conn, metrics_path_str,
+        metrics=["node_cpu_seconds_total"],
+        labels={"mode": "mode", "cpu": "cpu"},
+        group_by=["instance", "mode"],
+        where="source = 'node'")
+
+    node_mode_seconds = {}
+    for phase_name, instance, mode, seconds in node_cpu_raw:
+        node_mode_seconds.setdefault((phase_name, instance), {})[mode] = seconds
+
+    # Per phase: one row for the control plane, one aggregated over workers.
+    node_cpu_summary = []
+    nodes_per_phase = {}
+    for (phase_name, instance), modes in node_mode_seconds.items():
+        shares = cpu_shares(modes)
+        if shares is not None:
+            nodes_per_phase.setdefault(phase_name, {}).setdefault(node_role(instance), []).append(shares)
+    for phase_name, roles in nodes_per_phase.items():
+        for role, shares in roles.items():
+            busy = [s[0] for s in shares]
+            iowait = [s[1] for s in shares]
+            node_cpu_summary.append({
+                "phase_name": phase_name,
+                "role": role,
+                "nodes": len(shares),
+                "busy_avg_pct": sum(busy) / len(busy),
+                "busy_max_pct": max(busy),
+                "iowait_avg_pct": sum(iowait) / len(iowait),
+                "iowait_max_pct": max(iowait),
+            })
+    node_cpu_summary.sort(key=lambda r: (phase_order_map_early.get(r["phase_name"], 99), r["role"]))
+
+    print("Querying node CPU timeseries...")
+    node_cpu_ts_raw = metrics_timeseries(
+        conn, metrics_path_str,
+        metrics=["node_cpu_seconds_total"],
+        labels={"mode": "mode", "cpu": "cpu"},
+        group_by=["instance", "mode"],
+        where="source = 'node'")
+
+    ts_modes = {}
+    for ts, instance, mode, seconds in node_cpu_ts_raw:
+        ts_modes.setdefault((ts, instance), {})[mode] = seconds
+    ts_roles = {}
+    for (ts, instance), modes in ts_modes.items():
+        shares = cpu_shares(modes)
+        if shares is not None:
+            ts_roles.setdefault(ts, {}).setdefault(node_role(instance), []).append(shares)
+    node_chart_data = []
+    for ts in sorted(ts_roles):
+        row = {"ts": ts}
+        for role, shares in ts_roles[ts].items():
+            prefix = "cp" if role == "control-plane" else "worker"
+            row[prefix + "_busy"] = sum(s[0] for s in shares) / len(shares)
+            row[prefix + "_iowait"] = sum(s[1] for s in shares) / len(shares)
+        node_chart_data.append(row)
+
     # 4. Analyzer rules to identify findings
     findings = []
+
+    # Node CPU / iowait checks: a saturated control-plane node slows every
+    # component on it (etcd, apiserver, KCM, scheduler), while iowait points
+    # at the disk instead.
+    cp_worst = None
+    io_worst = None
+    for row in node_cpu_summary:
+        if not row['phase_name'].startswith('throughput'):
+            continue
+        # Gate on the busiest node, not the role average: on an HA control
+        # plane one saturated node (e.g. the etcd leader) must not be
+        # averaged away by idle peers.
+        if row['role'] == 'control-plane' and (cp_worst is None or row['busy_max_pct'] > cp_worst['busy_max_pct']):
+            cp_worst = row
+        if io_worst is None or row['iowait_max_pct'] > io_worst['iowait_max_pct']:
+            io_worst = row
+
+    if cp_worst and cp_worst['busy_max_pct'] > 75.0:
+        findings.append({
+            "severity": "critical" if cp_worst['busy_max_pct'] > 90.0 else "warning",
+            "title": f"Control Plane CPU Saturation ({cp_worst['busy_max_pct']:.0f}% busy)",
+            "desc": f"During phase {cp_worst['phase_name']} the busiest control-plane node ran at {cp_worst['busy_max_pct']:.0f}% CPU busy (iowait {cp_worst['iowait_max_pct']:.1f}%). etcd, the apiserver, kube-controller-manager and the scheduler share these cores, so every control-plane latency — including client-observed etcd latency — inflates under this. Consider a larger control-plane machine type.",
+            "link": "nodes.html"
+        })
+
+    if io_worst and io_worst['iowait_max_pct'] > 10.0:
+        findings.append({
+            "severity": "critical" if io_worst['iowait_max_pct'] > 25.0 else "warning",
+            "title": f"Node I/O Wait ({io_worst['iowait_max_pct']:.1f}% iowait)",
+            "desc": f"During phase {io_worst['phase_name']}, a {io_worst['role']} node spent up to {io_worst['iowait_max_pct']:.1f}% of CPU time waiting on I/O. The disk, not the CPU, is pacing that node.",
+            "link": "nodes.html"
+        })
 
     # CRI check
     cri_run_pod_latency_max = 0.0
@@ -882,7 +1126,25 @@ def main():
         findings.append({
             "severity": "warning",
             "title": f"Elevated etcd Update Latency ({etcd_update_latency_max:.2f}ms)",
-            "desc": f"etcd update operation average latency reached {etcd_update_latency_max:.2f}ms under load. While standard, high write latencies from etcd indicate write disk throughput contention.",
+            "desc": f"etcd update operation average latency reached {etcd_update_latency_max:.2f}ms under load. This is the apiserver's client-side view: check the etcd page's server-side WAL fsync latency to tell disk stalls from control-plane CPU starvation.",
+            "link": "etcd.html"
+        })
+
+    # etcd disk stall check: the client-side latency above cannot separate
+    # disk from CPU, but the server-side WAL fsync p99 can. etcd's own
+    # guidance is p99 fsync < 10ms on suitable disks.
+    fsync_worst = None
+    for row in etcd_disk:
+        if row['source'] == 'etcd-main' and row['phase_name'].startswith('throughput') and row['fsync_n'] >= 50:
+            if fsync_worst is None or row['fsync_p99_ms'] > fsync_worst['fsync_p99_ms']:
+                fsync_worst = row
+
+    if fsync_worst and fsync_worst['fsync_p99_ms'] > 10.0:
+        w = fsync_worst
+        findings.append({
+            "severity": "critical" if w['fsync_p99_ms'] > 100.0 else "warning",
+            "title": f"etcd WAL fsync Latency ({w['fsync_p99_ms']:.1f}ms p99)",
+            "desc": f"During phase {w['phase_name']}, etcd's WAL fsync p99 reached {w['fsync_p99_ms']:.1f}ms (avg {w['fsync_avg_ms']:.2f}ms over {w['fsync_n']:,} fsyncs). etcd waits on every write for this, so the storage volume is the bottleneck: consider a faster or larger etcd disk. If client-observed etcd latency is elevated while this number stays flat, the time is going to control-plane CPU instead.",
             "link": "etcd.html"
         })
 
@@ -933,6 +1195,33 @@ def main():
             "severity": "critical" if w['avg_wait_ms'] > 1000 else "warning",
             "title": f"Client-side API Throttling in {w['source']} ({w['avg_wait_ms']/1000:.2f}s avg wait)",
             "desc": f"During phase {w['phase_name']}, {w['count_delta']:,} {w['verb']} requests from {w['source']} waited an average of {w['avg_wait_ms']/1000:.2f}s ({w['total_wait_s']:.0f}s in total) in the component's own client-side rate limiter before being sent to the apiserver. Consider raising that component's client QPS/burst configuration.",
+            "link": "ratelimits.html"
+        })
+
+    # Pacing check: the quiet failure mode the >100ms threshold above cannot
+    # see. A limiter running at its QPS with closed-loop callers paces every
+    # request by up to one token interval - mean wait of half the interval,
+    # zero tail - so it looks healthy to percentile checks while taxing 100%
+    # of requests (and any serialized caller loop proportionally).
+    pacing_worst = None
+    for row in limiter_regime_ops:
+        if (row['phase_name'].startswith('throughput') and row['verdict'] == 'pacing'
+                and row['rate_per_instance'] >= 10):
+            if pacing_worst is None or row['mean_wait_ms'] > pacing_worst['mean_wait_ms']:
+                pacing_worst = row
+
+    if pacing_worst:
+        w = pacing_worst
+        findings.append({
+            "severity": "warning",
+            "title": f"{w['source']} {w['verb']} is pacing at its client QPS limit (~{w['implied_qps']:.0f}/s per instance)",
+            "desc": f"During phase {w['phase_name']}, {w['source']} ({w['instances']} instance(s)) ran at "
+                    f"{w['rate_per_instance']:.0f} req/s per instance with a uniform {w['mean_wait_ms']:.1f}ms mean "
+                    f"rate-limiter wait - the signature of a token bucket metering requests at its QPS limit "
+                    f"(implied limit ~{w['implied_qps']:.0f}/s = 1/(2 x mean wait)). Pacing produces no latency tail, "
+                    f"so it evades percentile-based checks, but it taxes every request; serialized callers (e.g. the "
+                    f"kubelet status manager) lose throughput proportionally. Consider raising the component's client "
+                    f"QPS. See the Limiter Regime table on the Rate Limiting page.",
             "link": "ratelimits.html"
         })
 
@@ -1051,6 +1340,14 @@ def main():
         shutil.copy(watch_file, output_dir / watch_log_name)
         print(f"Copied watch log: {output_dir / watch_log_name}")
 
+    # Copy the scrape log so metrics.html can fetch and parse it client-side,
+    # under the bare name for the same prow .gz-stripping reason as above.
+    # Unlike the watch log, metrics.jsonl is a hard input requirement (main()
+    # exits at the top without it), so the copy is unconditional.
+    metrics_log_name = "metrics.jsonl"
+    shutil.copy(metrics_file, output_dir / metrics_log_name)
+    print(f"Copied metrics log: {output_dir / metrics_log_name}")
+
     def render_page(template_name, output_filename, context):
         template = env.get_template(template_name)
         rendered = template.render(context)
@@ -1108,6 +1405,7 @@ def main():
         "active_page": "etcd",
         "summary": summary,
         "etcd_ops": etcd_ops,
+        "etcd_disk": etcd_disk,
         "chart_data": etcd_chart_data,
         "phases": js_phases
     }
@@ -1131,6 +1429,7 @@ def main():
         "active_page": "ratelimits",
         "summary": summary,
         "client_ratelimit_ops": client_ratelimit_ops,
+        "limiter_regime_ops": limiter_regime_ops,
         "apf_ops": apf_ops,
         "chart_data": client_ratelimit_chart_data,
         "phases": js_phases
@@ -1148,6 +1447,16 @@ def main():
     }
     render_page("capacity.html", "capacity.html", capacity_ctx)
 
+    # Node resources context
+    nodes_ctx = {
+        "active_page": "nodes",
+        "summary": summary,
+        "node_cpu_summary": node_cpu_summary,
+        "chart_data": node_chart_data,
+        "phases": js_phases
+    }
+    render_page("nodes.html", "nodes.html", nodes_ctx)
+
     # CPU profiles context
     pprof_ctx = {
         "active_page": "pprof",
@@ -1164,6 +1473,15 @@ def main():
         "phases": js_phases
     }
     render_page("watch.html", "watch.html", watch_ctx)
+
+    # Metric explorer context
+    metrics_ctx = {
+        "active_page": "metrics",
+        "summary": summary,
+        "metrics_log": metrics_log_name,
+        "phases": js_phases
+    }
+    render_page("metrics.html", "metrics.html", metrics_ctx)
 
     print("All report pages generated successfully!")
 

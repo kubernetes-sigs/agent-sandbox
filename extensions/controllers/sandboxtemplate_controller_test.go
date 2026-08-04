@@ -108,8 +108,8 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxTemplate",
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxTemplateKind,
 					Name:       templateOptOut.Name,
 					UID:        templateOptOut.UID,
 					Controller: new(bool),
@@ -126,8 +126,8 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxTemplate",
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxTemplateKind,
 					Name:       templateWithNP.Name,
 					UID:        templateWithNP.UID,
 					Controller: new(bool),

@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,12 +52,31 @@ func newAPIServerProfiler(restConfig *rest.Config, outputDir string) (*apiserver
 	return &apiserverProfiler{kube: kube, outputDir: outputDir}, nil
 }
 
+// fileSafePhase flattens a phase name for embedding in artifact filenames:
+// every character outside [a-zA-Z0-9._-] becomes '-'. Phase names may
+// contain ':' (throughput-mif:600), which browsers reject when the report's
+// pprof viewer fetches "pprof-...-mif:600.pprof" as a relative URL (the
+// text before the first ':' parses as a URL scheme), and which Windows
+// filesystems refuse outright. download_results.py mirrors this mapping
+// when it reconstructs profile names from summary.json phase names.
+func fileSafePhase(phase PhaseName) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, string(phase))
+}
+
 // CaptureCPUProfile records one CPU profile of the given duration, starting
 // after delay (to skip a phase's warm-up), and writes it to
 // pprof-apiserver-<phase>.pprof (the standard pprof format: gzip-compressed
 // profile.proto). Synchronous; run it in a goroutine alongside the phase.
 // Analyze with: go tool pprof -top <file>.
-func (p *apiserverProfiler) CaptureCPUProfile(ctx context.Context, phase Phase, delay, duration time.Duration) {
+func (p *apiserverProfiler) CaptureCPUProfile(ctx context.Context, phase PhaseName, delay, duration time.Duration) {
 	select {
 	case <-time.After(delay):
 	case <-ctx.Done():
@@ -77,7 +97,7 @@ func (p *apiserverProfiler) CaptureCPUProfile(ctx context.Context, phase Phase, 
 		return
 	}
 
-	path := filepath.Join(p.outputDir, fmt.Sprintf("pprof-apiserver-%s.pprof", phase))
+	path := filepath.Join(p.outputDir, fmt.Sprintf("pprof-apiserver-%s.pprof", fileSafePhase(phase)))
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		log.Printf("[pprof] writing %s: %v", path, err)
 		return
@@ -156,7 +176,7 @@ func (p *controllerProfiler) capture(ctx context.Context, pod, endpoint, outFile
 // alongside the phase so the profile window covers the load being measured
 // (e.g. delay=0 started right as the claims burst fires).
 // Analyze with: go tool pprof -top pprof-controller-<phase>-<pod>.pprof.
-func (p *controllerProfiler) CaptureCPUProfile(ctx context.Context, phase Phase, delay, duration time.Duration) {
+func (p *controllerProfiler) CaptureCPUProfile(ctx context.Context, phase PhaseName, delay, duration time.Duration) {
 	select {
 	case <-time.After(delay):
 	case <-ctx.Done():
@@ -170,7 +190,7 @@ func (p *controllerProfiler) CaptureCPUProfile(ctx context.Context, phase Phase,
 	for _, pod := range p.podNames(ctx) {
 		wg.Go(func() {
 			p.capture(ctx, pod, "profile",
-				fmt.Sprintf("pprof-controller-%s-%s.pprof", phase, pod),
+				fmt.Sprintf("pprof-controller-%s-%s.pprof", fileSafePhase(phase), pod),
 				map[string]string{"seconds": strconv.Itoa(int(duration.Seconds()))})
 		})
 	}
@@ -181,12 +201,12 @@ func (p *controllerProfiler) CaptureCPUProfile(ctx context.Context, phase Phase,
 // (requires --enable-pprof-debug). label distinguishes multiple snapshots
 // within one phase (e.g. burst-start vs burst-end).
 // Analyze with: go tool pprof -top -sample_index=inuse_space <file>.
-func (p *controllerProfiler) CaptureHeapProfile(ctx context.Context, phase Phase, label string) {
+func (p *controllerProfiler) CaptureHeapProfile(ctx context.Context, phase PhaseName, label string) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	for _, pod := range p.podNames(ctx) {
 		p.capture(ctx, pod, "heap",
-			fmt.Sprintf("pprof-controller-heap-%s-%s-%s.pprof", phase, label, pod), nil)
+			fmt.Sprintf("pprof-controller-heap-%s-%s-%s.pprof", fileSafePhase(phase), label, pod), nil)
 	}
 }

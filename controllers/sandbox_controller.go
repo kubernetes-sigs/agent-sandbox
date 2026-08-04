@@ -20,18 +20,18 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,16 +45,55 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const (
 	sandboxLabel = "agents.x-k8s.io/sandbox-name-hash"
+	// SandboxNameHashLabel is the tracking label the controller stamps on
+	// every Pod and Service it creates or adopts. Exported so the manager
+	// setup (cmd/agent-sandbox-controller) can scope the Pod/Service informer
+	// caches to labeled objects (--cache-label-selectors).
+	SandboxNameHashLabel = sandboxLabel
 	// podSandboxNameHashIndex is the cache field index over the sandboxLabel
 	// value on Pods, so per-reconcile pod lookups are O(1).
 	podSandboxNameHashIndex     = ".metadata.labels[" + sandboxLabel + "]"
 	sandboxControllerFieldOwner = "sandbox-controller"
 	immediateRequeueDelay       = time.Millisecond
 )
+
+// PodCacheTransform is a client-go informer transform for the manager's Pod
+// cache. It strips fields the controllers never read, before the object is
+// stored, so cache memory and per-event JSON decode garbage stay O(what we
+// use) instead of O(pod spec):
+//
+//   - metadata.managedFields: written via server-side apply by the kubelet on
+//     every status update and never read by any controller here.
+//   - metadata.finalizers: never read on Pods by any controller in this repo
+//     (the sandboxes/finalizers RBAC is for the Sandbox CR itself, not Pods).
+//     Stripping is safe and saves a trivial amount of memory.
+//   - spec: the only spec field any controller reads is spec.nodeName
+//     (propagated to Sandbox status), so it is the only field preserved. The
+//     pod spec the controller WRITES is built from the Sandbox's PodTemplate
+//     (reconcilePod's create path), never from the cached pod, and every pod write in this
+//     repo is a metadata-only merge patch diffed against the same transformed
+//     cache object — stripped fields appear on neither side of the diff, so
+//     they can never leak into (or be deleted by) a patch. See
+//     TestPodCacheTransformMergePatchUnaffected.
+//
+// metadata (labels/annotations/ownerRefs) and status are kept in full.
+// Non-pod inputs (e.g. cache.DeletedFinalStateUnknown tombstones) pass
+// through unchanged.
+func PodCacheTransform(obj any) (any, error) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return obj, nil
+	}
+	pod.ManagedFields = nil
+	pod.Finalizers = nil
+	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName}
+	return pod, nil
+}
 
 // resourceOwnership represents the ownership state of a Kubernetes resource relative to a Sandbox.
 type resourceOwnership int
@@ -81,6 +120,15 @@ func checkOwnership(obj client.Object, sandbox *sandboxv1beta1.Sandbox) (resourc
 		return resourceOwnedBySandbox, controllerRef
 	}
 	return resourceOwnedByOther, controllerRef
+}
+
+// isOwnedBySandbox reports whether pod is non-nil and owned by the given Sandbox.
+func isOwnedBySandbox(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
+	if pod == nil {
+		return false
+	}
+	ownership, _ := checkOwnership(pod, sandbox)
+	return ownership == resourceOwnedBySandbox
 }
 
 // resolvePodName returns the name of the pod associated with the given Sandbox.
@@ -138,6 +186,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;update;patch,resourceNames=sandboxes.agents.x-k8s.io;sandboxclaims.extensions.agents.x-k8s.io;sandboxtemplates.extensions.agents.x-k8s.io;sandboxwarmpools.extensions.agents.x-k8s.io
@@ -243,15 +292,21 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 
 	// Reconcile Pod
-	pod, err := r.reconcilePod(ctx, sandbox, nameHash)
-	allErrors = errors.Join(allErrors, err)
+	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash)
+	allErrors = errors.Join(allErrors, podErr)
+
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
 		sandbox.Status.NodeName = ""
 	} else {
 		sandbox.Status.LabelSelector = sandboxLabel + "=" + nameHash
-		sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
-		sandbox.Status.NodeName = pod.Spec.NodeName
+		if isOwnedBySandbox(pod, sandbox) {
+			sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
+			sandbox.Status.NodeName = pod.Spec.NodeName
+		} else {
+			sandbox.Status.PodIPs = nil
+			sandbox.Status.NodeName = ""
+		}
 	}
 
 	// Reconcile Service
@@ -259,7 +314,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 
 	// compute and set overall conditions
-	conditions := r.computeConditions(sandbox, allErrors, svc, pod)
+	conditions := r.computeConditions(sandbox, allErrors, svc, pod, podErr)
 	hasFinished := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
@@ -275,12 +330,10 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	return allErrors
 }
 
-func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) []metav1.Condition {
+func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod, podErr error) []metav1.Condition {
 	var conditions []metav1.Condition
 
-	if suspended := r.computeSuspendedCondition(sandbox, pod); suspended != nil {
-		conditions = append(conditions, *suspended)
-	}
+	conditions = append(conditions, r.computeSuspendedCondition(sandbox, pod, podErr))
 
 	if finished := r.computeFinishedCondition(sandbox, pod); finished != nil {
 		conditions = append(conditions, *finished)
@@ -291,28 +344,44 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 	return conditions
 }
 
-func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
-	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
-	if !isSuspended {
-		return nil
-	}
-
+func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	// Initialize the Suspended condition which tracks only the suspension state, persisting once set.
 	suspended := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionSuspended),
 		ObservedGeneration: sandbox.Generation,
-	}
-	if pod == nil {
-		// Mark Suspended condition as True
-		suspended.Status = metav1.ConditionTrue
-		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
-		suspended.Message = "Pod has been terminated. Sandbox is not operational."
-	} else {
-		suspended.Status = metav1.ConditionFalse
-		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodNotTerminated
-		suspended.Message = "Pod has not been terminated. Sandbox is operational."
+		Status:             metav1.ConditionFalse,
+		Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
+		Message:            "Sandbox is not suspended",
 	}
 
-	return &suspended
+	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		return suspended
+	}
+
+	if pod == nil && podErr != nil {
+		suspended.Status = metav1.ConditionUnknown
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodStateUnknown
+		suspended.Message = "Pod state is unknown. Sandbox suspension cannot be confirmed"
+		return suspended
+	}
+
+	if pod == nil {
+		// Stable State: Fully Suspended
+		suspended.Status = metav1.ConditionTrue
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminated
+		suspended.Message = "Pod has been terminated. Sandbox is suspended"
+		return suspended
+	}
+
+	if !isOwnedBySandbox(pod, sandbox) {
+		suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodNotOwned
+		suspended.Message = "Refused to delete pod because it is not owned by this sandbox"
+		return suspended
+	}
+
+	suspended.Reason = sandboxv1beta1.SandboxReasonSuspendedPodTerminating
+	suspended.Message = "Pod is terminating. Sandbox is suspending"
+	return suspended
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
@@ -410,7 +479,8 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 }
 
 func (r *SandboxReconciler) computeFinishedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
-	if pod == nil {
+	// Only a Pod this Sandbox owns may drive its Finished condition
+	if !isOwnedBySandbox(pod, sandbox) {
 		return nil
 	}
 
@@ -449,7 +519,7 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) error {
 	logger := log.FromContext(ctx)
 
-	if reflect.DeepEqual(oldStatus, &sandbox.Status) {
+	if apiequality.Semantic.DeepEqual(oldStatus, &sandbox.Status) {
 		return nil
 	}
 
@@ -467,8 +537,25 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return nil
 	}
 
-	if err := r.Status().Update(ctx, sandbox); err != nil {
-		logger.Error(err, "Failed to update sandbox status")
+	// Merge-patch (no resourceVersion precondition) the status subresource.
+	// Two deliberate trade-offs now that the optimistic lock is gone:
+	//   1. A JSON merge patch replaces the whole status.conditions array whenever
+	//      any condition differs from base. That is safe only while this
+	//      controller is the SOLE writer of Sandbox status -- true today, since
+	//      reconciles are workqueue-serialized per object. If a second status
+	//      writer is ever added, switch to MergeFromWithOptimisticLock or SSA.
+	//   2. The old Update's 409 doubled as a stale-informer-cache guard: a
+	//      reconcile computed from a stale read used to fail and re-run with
+	//      fresh data. The patch instead writes through. Status is derived from
+	//      pod state, so it self-heals on the next watch event and converges.
+	base := sandbox.DeepCopy()
+	base.Status = *oldStatus
+	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
+		if k8serrors.IsNotFound(err) {
+			// Sandbox was deleted mid-reconcile
+			return nil
+		}
+		logger.Error(err, "Failed to patch sandbox status")
 		return err
 	}
 
@@ -484,7 +571,7 @@ func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool
 	}
 	scratch := newStatus.DeepCopy()
 	scratch.NodeName = oldStatus.NodeName
-	return reflect.DeepEqual(oldStatus, scratch)
+	return apiequality.Semantic.DeepEqual(oldStatus, scratch)
 }
 
 // GetNumericHash generates a raw FNV-1a hash value.
@@ -541,14 +628,14 @@ func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]strin
 	if ref == nil {
 		return nil
 	}
-	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
-	if gvk.Group != extensionsv1beta1.GroupVersion.Group {
+	g, k := utils.GetGroupKind(ref)
+	if g != extensionsv1beta1.GroupVersion.Group {
 		return nil
 	}
 
 	var labels map[string]string
 
-	if gvk.Kind == "SandboxWarmPool" {
+	if k == extensionsv1beta1.SandboxWarmPoolKind {
 		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
 			if labels == nil {
 				labels = make(map[string]string, 2)
@@ -585,9 +672,107 @@ func isControllerManagedPodAnnotation(key string) bool {
 	}
 }
 
+func servicePortsForSandbox(sandbox *sandboxv1beta1.Sandbox) []corev1.ServicePort {
+	type servicePortKey struct {
+		port     int32
+		protocol corev1.Protocol
+	}
+
+	explicitNamesByPort := map[servicePortKey]string{}
+	reservedNames := map[string]struct{}{}
+	addContainerPorts := func(container corev1.Container) {
+		for _, containerPort := range container.Ports {
+			if containerPort.ContainerPort == 0 {
+				continue
+			}
+			protocol := containerPort.Protocol
+			if protocol == "" {
+				protocol = corev1.ProtocolTCP
+			}
+			key := servicePortKey{
+				port:     containerPort.ContainerPort,
+				protocol: protocol,
+			}
+			if _, ok := explicitNamesByPort[key]; !ok {
+				explicitNamesByPort[key] = ""
+			}
+			// Deduplicate Service ports by (port, protocol). Preserve the first
+			// explicit container port name for each Service port. If another
+			// Service port reuses that explicit name, the first one keeps it,
+			// matching apiserver named-port lookup behavior.
+			if containerPort.Name == "" || explicitNamesByPort[key] != "" {
+				continue
+			}
+			if _, reserved := reservedNames[containerPort.Name]; reserved {
+				continue
+			}
+			explicitNamesByPort[key] = containerPort.Name
+			reservedNames[containerPort.Name] = struct{}{}
+		}
+	}
+	for _, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		addContainerPorts(container)
+	}
+	for _, container := range sandbox.Spec.PodTemplate.Spec.InitContainers {
+		if container.RestartPolicy != nil && *container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			addContainerPorts(container)
+		}
+	}
+	if len(explicitNamesByPort) == 0 {
+		return nil
+	}
+
+	keys := make([]servicePortKey, 0, len(explicitNamesByPort))
+	for key := range explicitNamesByPort {
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(a, b servicePortKey) int {
+		if a.port < b.port {
+			return -1
+		}
+		if a.port > b.port {
+			return 1
+		}
+		return strings.Compare(string(a.protocol), string(b.protocol))
+	})
+
+	servicePorts := make([]corev1.ServicePort, 0, len(keys))
+	for _, key := range keys {
+		name := explicitNamesByPort[key]
+		if name == "" {
+			// Unnamed Service ports use a generated name. If the generated name
+			// conflicts with a reserved explicit name, change the generated name
+			// to preserve the user provided names for ports.
+			name = generatedServicePortName(key.port, key.protocol, reservedNames)
+		}
+		reservedNames[name] = struct{}{}
+		servicePorts = append(servicePorts, corev1.ServicePort{
+			Name:       name,
+			Protocol:   key.protocol,
+			Port:       key.port,
+			TargetPort: intstr.FromInt32(key.port),
+		})
+	}
+	return servicePorts
+}
+
+func generatedServicePortName(port int32, protocol corev1.Protocol, reservedNames map[string]struct{}) string {
+	baseName := fmt.Sprintf("p-%d-%s", port, strings.ToLower(string(protocol)))
+	if _, reserved := reservedNames[baseName]; !reserved {
+		return baseName
+	}
+	for suffix := 2; ; suffix++ {
+		name := fmt.Sprintf("%s-%d", baseName, suffix)
+		if _, reserved := reservedNames[name]; !reserved {
+			return name
+		}
+	}
+}
+
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
 	logger := log.FromContext(ctx)
 	desired := sandbox.Spec.Service
+	desiredPorts := servicePortsForSandbox(sandbox)
 
 	service := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
@@ -611,6 +796,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 					Selector: map[string]string{
 						sandboxLabel: nameHash,
 					},
+					Ports: desiredPorts,
 				},
 			}
 			service.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Service"))
@@ -691,6 +877,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		service.Spec.Selector = map[string]string{
 			sandboxLabel: nameHash,
 		}
+		service.Spec.Ports = desiredPorts
 
 		if err := ctrl.SetControllerReference(sandbox, service, r.Scheme); err != nil {
 			return nil, fmt.Errorf("SetControllerReference for Service failed: %w", err)
@@ -713,8 +900,12 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			service.Labels[sandboxLabel] = nameHash
 			needsUpdate = true
 		}
-		if !reflect.DeepEqual(service.Spec.Selector, desiredSelector) {
+		if !apiequality.Semantic.DeepEqual(service.Spec.Selector, desiredSelector) {
 			service.Spec.Selector = desiredSelector
+			needsUpdate = true
+		}
+		if desired != nil && *desired && !servicePortsEqual(service.Spec.Ports, desiredPorts) {
+			service.Spec.Ports = desiredPorts
 			needsUpdate = true
 		}
 
@@ -728,6 +919,21 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 
 	r.setServiceStatus(sandbox, service)
 	return service, nil
+}
+
+func servicePortsEqual(a, b []corev1.ServicePort) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name ||
+			a[i].Protocol != b[i].Protocol ||
+			a[i].Port != b[i].Port ||
+			a[i].TargetPort != b[i].TargetPort {
+			return false
+		}
+	}
+	return true
 }
 
 // clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
@@ -811,11 +1017,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				if pod.DeletionTimestamp.IsZero() {
 					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
-						return nil, fmt.Errorf("failed to delete pod: %w", err)
+						return pod, fmt.Errorf("failed to delete pod: %w", err)
 					}
 				} else {
 					logger.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
+				// Return the deleting pod to track the transient suspending phase until garbage collection completes.
+				return pod, nil
 			case resourceUnowned:
 				logger.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
@@ -828,10 +1036,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		// Remove the pod name annotation from the sandbox if it exists
 		if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-			return nil, err
+			return pod, err
 		}
 
-		return nil, nil
+		return pod, nil
 	}
 
 	ensurePodNameAnnotation := func(podName string) error {

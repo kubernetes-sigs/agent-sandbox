@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-tuner-ds
+  namespace: kube-system
+  labels:
+    app: node-tuner
+spec:
+  selector:
+    matchLabels:
+      app: node-tuner
+  template:
+    metadata:
+      labels:
+        app: node-tuner
+    spec:
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+      - operator: Exists
+      volumes:
+      - name: host-root
+        hostPath:
+          path: /
+          type: Directory
+      initContainers:
+      - name: apply-node-tuning
+        image: ubuntu:24.04
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: host-root
+          mountPath: /host
+          mountPropagation: Bidirectional
+        command:
+         - /bin/bash
+         - -c
+         - |
+          set -e
+          
+          NUM_CPUS=$(chroot /host nproc)
+          echo "Node has $NUM_CPUS CPUs."
+          
+          if [ "$NUM_CPUS" -le 2 ]; then
+            # 1-2 cores: do not apply CPU isolation to avoid starved node
+            PIN_CPUS=""
+            KUBELET_CPUS=""
+          elif [ "$NUM_CPUS" -le 8 ]; then
+            # 4-8 cores: reserve 2 cores for system (0-1)
+            PIN_CPUS="0,1"
+            KUBELET_CPUS="0,1"
+          else
+            # 12+ cores (e.g. c4-standard-32): reserve 8 cores for system (0-7)
+            PIN_CPUS="0-7"
+            KUBELET_CPUS="0-7"
+          fi
+          
+          echo "1. Applying ARP cache sysctl settings for 1024 pods/node..."
+          chroot /host sysctl -w net.ipv4.neigh.default.gc_thresh1=2048
+          chroot /host sysctl -w net.ipv4.neigh.default.gc_thresh2=4096
+          chroot /host sysctl -w net.ipv4.neigh.default.gc_thresh3=8192
+          
+          if [ -n "$PIN_CPUS" ]; then
+            echo "2. Pinning system.slice to CPUs $PIN_CPUS..."
+            if [ -f /host/sys/fs/cgroup/system.slice/cpuset.cpus ]; then
+              echo "$PIN_CPUS" > /host/sys/fs/cgroup/system.slice/cpuset.cpus
+            elif [ -f /host/sys/fs/cgroup/cpuset/system.slice/cpuset.cpus ]; then
+              echo "$PIN_CPUS" > /host/sys/fs/cgroup/cpuset/system.slice/cpuset.cpus
+            else
+              echo "Warning: Could not find system.slice cpuset file."
+            fi
+          else
+            echo "2. Pinning system.slice: Skipped (node too small)."
+          fi
+          
+          echo "3. Relocating journal logs and applying rate limits..."
+          mkdir -p /host/var/lib/containerd/systemd-journal
+          mkdir -p /host/var/log/journal
+          # Mount only if not already bind-mounted
+          if ! chroot /host mountpoint -q /var/log/journal; then
+            mount --bind /host/var/lib/containerd/systemd-journal /host/var/log/journal
+          fi
+          mkdir -p /host/etc/systemd/journald.conf.d
+          echo -e "[Journal]\nSystemMaxUse=500M\nRateLimitIntervalSec=30s\nRateLimitBurst=1000" > /host/etc/systemd/journald.conf.d/tuning.conf
+          chroot /host systemctl restart systemd-journald
+
+          if [ -n "$KUBELET_CPUS" ]; then
+            echo "4. Updating Kubelet config for reservedSystemCPUs and static CPU manager..."
+            KUBELET_CFG="/host/home/kubernetes/kubelet-config.yaml"
+            
+            if [ -f "$KUBELET_CFG" ]; then
+              NEEDS_RESTART=0
+              
+              # Update reservedSystemCPUs only if not already set to target value
+              if ! grep -q "reservedSystemCPUs: \"$KUBELET_CPUS\"" "$KUBELET_CFG"; then
+                if ! grep -q "reservedSystemCPUs" "$KUBELET_CFG"; then
+                  echo "reservedSystemCPUs: \"$KUBELET_CPUS\"" >> "$KUBELET_CFG"
+                else
+                  sed -i "s/reservedSystemCPUs:.*/reservedSystemCPUs: \"$KUBELET_CPUS\"/" "$KUBELET_CFG"
+                fi
+                NEEDS_RESTART=1
+              fi
+              
+              # Enforce cpuManagerPolicy: "static" only if not already set
+              if ! grep -q 'cpuManagerPolicy: "static"' "$KUBELET_CFG"; then
+                if ! grep -q "cpuManagerPolicy" "$KUBELET_CFG"; then
+                  echo 'cpuManagerPolicy: "static"' >> "$KUBELET_CFG"
+                else
+                  sed -i 's/cpuManagerPolicy:.*/cpuManagerPolicy: "static"/' "$KUBELET_CFG"
+                fi
+                NEEDS_RESTART=1
+              fi
+
+              if [ "$NEEDS_RESTART" -eq 1 ]; then
+                echo "Cleaning CPU manager state and restarting kubelet..."
+                rm -f /host/var/lib/kubelet/cpu_manager_state
+                chroot /host systemctl restart kubelet
+              else
+                echo "Kubelet configuration is already correct."
+              fi
+            fi
+          else
+            echo "4. Kubelet core isolation: Skipped (node too small)."
+          fi
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.9

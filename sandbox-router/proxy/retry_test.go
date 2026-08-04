@@ -20,8 +20,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -64,6 +66,39 @@ func TestIsRetriableDialError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsDeadHostDialError(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}
+	timeout := &net.OpError{Op: "dial", Net: "tcp", Err: &timeoutError{}}
+	noRoute := &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.EHOSTUNREACH}}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		// A refusal proves a live host (e.g. wrong caller-selected port):
+		// retriable, but must not evict the cache entry.
+		{"connection refused", refused, false},
+		{"dial timeout", timeout, true},
+		{"no route to host", noRoute, true},
+		{"DNS error", dnsErr(), true},
+		{"read OpError", &net.OpError{Op: "read", Err: errors.New("x")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDeadHostDialError(tc.err); got != tc.want {
+				t.Errorf("isDeadHostDialError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// timeoutError mimics net's internal timeout error for dial deadlines.
+type timeoutError struct{}
+
+func (*timeoutError) Error() string { return "i/o timeout" }
+func (*timeoutError) Timeout() bool { return true }
 
 func newRequest(ctx context.Context, t *testing.T) *http.Request {
 	t.Helper()

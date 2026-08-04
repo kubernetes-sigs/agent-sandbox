@@ -37,7 +37,7 @@ cleanup_local_key() {
 trap cleanup_local_key EXIT
 
 # Derive the image tag from the manifest so the two never drift.
-IMAGE="$(grep -E '^\s+image:' sandbox.yaml | head -1 | awk '{print $2}' || true)"
+IMAGE="$(grep -E '^[[:space:]]+image:' sandbox.yaml | head -1 | awk '{print $2}' || true)"
 if [ -z "${IMAGE}" ]; then
   echo "ERROR: could not read image tag from sandbox.yaml" >&2
   exit 1

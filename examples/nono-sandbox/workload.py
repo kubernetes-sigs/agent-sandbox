@@ -42,6 +42,7 @@ import urllib.request
 
 
 def fs_attempt(label, fn):
+    """Run an allowed filesystem operation and report whether it succeeded."""
     try:
         fn()
         print(f"[ok]    {label}", flush=True)
@@ -50,6 +51,7 @@ def fs_attempt(label, fn):
 
 
 def expect_blocked(label, fn):
+    """Run an operation that policy is expected to block and report the result."""
     try:
         fn()
         print(f"[policy-fail] unexpectedly allowed {label}", flush=True)
@@ -58,16 +60,19 @@ def expect_blocked(label, fn):
 
 
 def write_workspace():
+    """Write the permitted demo file into the workspace."""
     with open("/workspace/hello.txt", "w", encoding="utf-8") as fh:
         fh.write("written by the sandboxed agent\n")
 
 
 def read_secret():
+    """Attempt to read mounted secret data that is outside the filesystem grant."""
     with open("/etc/secret-config/token", "r", encoding="utf-8") as fh:
         fh.read()
 
 
 def read_audit_state():
+    """Attempt to list supervisor-owned audit state that the agent cannot access."""
     os.listdir("/var/lib/nono-state/nono/audit")
 
 
@@ -85,6 +90,7 @@ def credential_probe():
 
 
 def expect_http_blocked(label, method, url):
+    """Send an HTTP request that network policy is expected to reject."""
     req = urllib.request.Request(url, method=method)
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -128,6 +134,7 @@ def run_logcli(*args):
 
 
 def tool_sandbox_probes():
+    """Exercise the allowed and denied LogCLI tool-sandbox boundaries."""
     # The broker source token and the tool-only destination variables must not
     # be present in the outer agent process.
     tool_only_env = ("LOKI_TOKEN", "LOKI_ADDR", "LOKI_BEARER_TOKEN")

@@ -24,9 +24,6 @@ FROM debian:bookworm-slim AS base
 ARG TARGETARCH
 
 # --- install nono ---------------------------------------------------------
-# Pin a released version; the installer verifies the download. For an air-gapped
-# or reproducible build, COPY a vendored, checksummed binary instead of curling.
-ARG NONO_VERSION=v0.71.0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl python3 tar \
  && rm -rf /var/lib/apt/lists/* \

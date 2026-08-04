@@ -20,6 +20,7 @@ from pathlib import Path
 
 
 def require(value, message):
+    """Exit with an audit failure when an expected condition is false."""
     if not value:
         print(f"[audit-fail] {message}", file=sys.stderr)
         raise SystemExit(1)

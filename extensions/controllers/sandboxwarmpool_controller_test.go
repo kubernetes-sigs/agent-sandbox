@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -801,6 +802,104 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 			require.Equal(t, tc.expectedReadyReplicas, warmPool.Status.ReadyReplicas)
 		})
 	}
+}
+
+func TestAvailableCondition(t *testing.T) {
+	pool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Generation: 7},
+	}
+	testCases := []struct {
+		name       string
+		desired    int32
+		ready      int32
+		wantStatus metav1.ConditionStatus
+		wantReason string
+	}{
+		{"all ready", 3, 3, metav1.ConditionTrue, extensionsv1beta1.SandboxWarmPoolMinimumReplicasAvailable},
+		{"more than desired ready", 3, 4, metav1.ConditionTrue, extensionsv1beta1.SandboxWarmPoolMinimumReplicasAvailable},
+		{"some ready", 3, 2, metav1.ConditionFalse, extensionsv1beta1.SandboxWarmPoolMinimumReplicasUnavailable},
+		{"none ready", 3, 0, metav1.ConditionFalse, extensionsv1beta1.SandboxWarmPoolMinimumReplicasUnavailable},
+		{"scaled to zero", 0, 0, metav1.ConditionTrue, extensionsv1beta1.SandboxWarmPoolMinimumReplicasAvailable},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cond := availableCondition(pool, tc.desired, tc.ready)
+			require.Equal(t, extensionsv1beta1.SandboxWarmPoolConditionAvailable, cond.Type)
+			require.Equal(t, tc.wantStatus, cond.Status)
+			require.Equal(t, tc.wantReason, cond.Reason)
+			require.Equal(t, int64(7), cond.ObservedGeneration, "condition should carry the pool generation")
+		})
+	}
+}
+
+func TestReconcilePoolSetsAvailableCondition(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	template := createTemplate(poolNamespace)
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	newPool := func() *extensionsv1beta1.SandboxWarmPool {
+		return &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       poolName,
+				Namespace:  poolNamespace,
+				UID:        "warmpool-uid-123",
+				Generation: 3,
+			},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas:    &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+			},
+		}
+	}
+	readySandbox := func(suffix string, ready metav1.ConditionStatus) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: ready,
+		}}
+		return sb
+	}
+
+	t.Run("available when ready meets desired", func(t *testing.T) {
+		warmPool := newPool()
+		r := SandboxWarmPoolReconciler{
+			Client: newFakeClient(scheme, template,
+				readySandbox("-a", metav1.ConditionTrue),
+				readySandbox("-b", metav1.ConditionTrue)),
+			Scheme: scheme,
+		}
+		_, err := r.reconcilePool(context.Background(), warmPool)
+		require.NoError(t, err)
+
+		require.Equal(t, int64(3), warmPool.Status.ObservedGeneration)
+		cond := meta.FindStatusCondition(warmPool.Status.Conditions, extensionsv1beta1.SandboxWarmPoolConditionAvailable)
+		require.NotNil(t, cond, "Available condition should be set")
+		require.Equal(t, metav1.ConditionTrue, cond.Status)
+		require.Equal(t, extensionsv1beta1.SandboxWarmPoolMinimumReplicasAvailable, cond.Reason)
+		require.EqualValues(t, 3, cond.ObservedGeneration)
+	})
+
+	t.Run("unavailable when short of desired", func(t *testing.T) {
+		warmPool := newPool()
+		r := SandboxWarmPoolReconciler{
+			Client: newFakeClient(scheme, template,
+				readySandbox("-a", metav1.ConditionTrue),
+				readySandbox("-b", metav1.ConditionFalse)),
+			Scheme: scheme,
+		}
+		_, err := r.reconcilePool(context.Background(), warmPool)
+		require.NoError(t, err)
+
+		cond := meta.FindStatusCondition(warmPool.Status.Conditions, extensionsv1beta1.SandboxWarmPoolConditionAvailable)
+		require.NotNil(t, cond, "Available condition should be set")
+		require.Equal(t, metav1.ConditionFalse, cond.Status)
+		require.Equal(t, extensionsv1beta1.SandboxWarmPoolMinimumReplicasUnavailable, cond.Reason)
+	})
 }
 
 func TestUpdateStatusClearsZeroValues(t *testing.T) {

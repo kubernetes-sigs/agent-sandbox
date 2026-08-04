@@ -27,7 +27,7 @@ Depending on your security and isolation requirements, `agent-sandbox` supports 
 
 ## Vanilla `runc` Performance Results
 
-### Moderate Density Benchmarks on `c4-standard-8` (30 GB RAM)
+### Moderate Density Benchmarks on `c4-standard-8` (30 GB RAM, 200 Pods)
 
 We evaluated and compared two node pools on GKE using `c4-standard-8` instances, running a concurrent density sweep of **120, 160, 200, and 240 pods**:
 
@@ -66,12 +66,12 @@ Because of these dynamics, memory pressure is not a static number. In our experi
 
 Repeating the tests multiple times, the aggregated data clearly shows that while the baseline pool *can* occasionally survive higher densities, **~120 pods is the limit for reliable deployments**. Beyond 120 pods, the baseline pool can become unstable or experience high latency. Conversely, the **swap-enabled pool can reliably sustain 200 pods** across all runs.
 
-### High & Extreme Density Benchmarks on `c4-standard-32` (120 GB RAM)
+### High & Extreme Density Benchmarks on `c4-standard-32` (120 GB RAM, 768 Pods)
 
 We evaluated baseline vs LSSD swap configurations on `c4-standard-32` instances (120 GB RAM) and tested densities up to 1024 pods.
 
 #### 1. The Critical Role of Node Tuning
-The high-density results detailed in the metrics below (particularly reaching 768 stable pods) are **only achievable when utilizing the provided Node Tuner DaemonSet**. 
+The high-density results detailed in the metrics below (particularly reaching 768 stable pods) are **only achievable when utilizing the provided [`node-tuner-daemonset.yaml`](node-tuner-daemonset.yaml)**. 
 
 **Why is tuning required?**
 At extreme pod densities, system daemons experience heavy CPU churn handling pod creation, CRI/CNI setup, and health checks. Without CPU isolation, these pod initialization loops starve Kubelet of compute cycles, causing it to drop heartbeats and trigger node watchdog crashes. Additionally, rapid cgroup events and container thrashing flood `systemd-journald`, which creates high CPU load and saturates boot disk write queues.
@@ -151,9 +151,6 @@ MAX_PODS_PER_NODE=1024 BASELINE_MACHINE_TYPE="c4-standard-32" SWAP_MACHINE_TYPE=
 ```
 
 ### Step 3: Optional Node Tuning for High-Density Tests (>256 Pods)
-
-> [!NOTE]
-> Standard GKE node pools default to a maximum of 256 pods per node. Evaluating densities above 256 pods (512–1024) requires a benchmark cluster environment configured to support higher pod-per-node limits and sufficient Pod CIDR allocation.
 
 If you plan to run extreme density sweeps (512–1024 pods per node), apply the provided [`node-tuner-daemonset.yaml`](node-tuner-daemonset.yaml) to configure CPU isolation, ARP cache expansion, and journald log rate-limiting, then wait for the rollout to complete:
 

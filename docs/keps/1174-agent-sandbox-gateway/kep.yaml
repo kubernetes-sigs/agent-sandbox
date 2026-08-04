@@ -1,0 +1,11 @@
+title: Envoy-Based Sandbox Gateway (Request-Buffering Auto-Resume)
+kep-number: 1174
+authors:
+  - "@SHRUTI6991"
+status: provisional
+creation-date: 2026-07-14
+last-updated: 2026-07-15
+reviewers:
+  - "@barney-s"
+approvers:
+  - "@janetkuo"

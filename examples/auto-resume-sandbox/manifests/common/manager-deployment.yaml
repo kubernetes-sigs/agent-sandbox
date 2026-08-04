@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-suspension-manager-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-suspension-manager-cluster-role
+rules:
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes"]
+  verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-suspension-manager-cluster-binding
+subjects:
+- kind: ServiceAccount
+  name: sandbox-suspension-manager-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: sandbox-suspension-manager-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-suspension-manager
+  namespace: default
+  labels:
+    app: sandbox-suspension-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-suspension-manager
+  template:
+    metadata:
+      labels:
+        app: sandbox-suspension-manager
+    spec:
+      serviceAccountName: sandbox-suspension-manager-sa
+      containers:
+      - name: suspension-manager
+        image: sandbox-suspension-manager:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8090
+          name: http-manager
+        env:
+        - name: PORT
+          value: "8090"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-suspension-manager-svc
+  namespace: default
+spec:
+  selector:
+    app: sandbox-suspension-manager
+  ports:
+  - name: http-manager
+    port: 8090
+    targetPort: 8090

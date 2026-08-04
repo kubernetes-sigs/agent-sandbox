@@ -7,7 +7,6 @@
 #   Istio (any cluster):          istio
 #   GKE (managed L7 LB):         gke-l7-global-external-managed
 #   KinD (local dev):             cloud-provider-kind
-#   AWS ALB Controller:           amazon-vpc-lattice
 #   Envoy Gateway:                eg
 #
 # The default below uses Istio, which works on any conformant Kubernetes cluster
@@ -45,23 +44,3 @@ spec:
     backendRefs:
     - name: sandbox-router-svc # Route all traffic to the router service
       port: 8080
----
-# GKE-specific: HealthCheckPolicy tells the GKE Gateway to use the router app
-# "/healthz" endpoint for its health checks instead of the default "/".
-# Skip this resource on non-GKE clusters — most Gateway implementations use
-# the HTTPRoute backend's readiness probe or their own health check defaults.
-apiVersion: networking.gke.io/v1
-kind: HealthCheckPolicy
-metadata:
-  name: router-health-check-policy
-  namespace: default
-spec:
-  targetRef:
-    group: ""
-    kind: Service
-    name: sandbox-router-svc # This must match the name of the router's service
-  default:
-    config:
-      type: HTTP
-      httpHealthCheck:
-        requestPath: /healthz # Tell the health checker to use this path

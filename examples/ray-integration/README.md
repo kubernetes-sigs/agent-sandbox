@@ -155,7 +155,7 @@ Result: Agent successfully solved the task securely.
 
 To make the "Remote Ray -> Sandboxes" architecture more stable, we can drop the local tunnel and use Gateway Mode.
 
-This provisions a load balancer via the Kubernetes Gateway API that securely routes external internet (or VPC) traffic directly into your sandbox-router.
+This provisions a load balancer via the Kubernetes Gateway API that routes external internet (or VPC) traffic directly into your sandbox-router.
 
 Here is the exact playbook to upgrade your PoC to the Gateway architecture.
 
@@ -163,14 +163,18 @@ Here is the exact playbook to upgrade your PoC to the Gateway architecture.
 
 The repository includes Gateway and HTTPRoute manifests that work with any Gateway API controller. The default `gatewayClassName` is `istio` — change it to match your environment (e.g. `gke-l7-global-external-managed` on GKE). See the comments in `gateway.yaml` for a full list of alternatives.
 
-> **Prerequisite:** your cluster must have a Gateway API controller installed.
-> Istio works on any cluster (`istioctl install`); GKE has one built-in;
-> see the [sandbox-router README](../../clients/python/agentic-sandbox-client/sandbox-router/README.md) for other options.
+> **Prerequisites:** your cluster needs the Gateway API CRDs and a Gateway API
+> controller. Istio works on any cluster (`istioctl install`); GKE has one
+> built-in (requires [enablement](https://cloud.google.com/kubernetes-engine/docs/how-to/deploying-gateways#enable-gateway));
+> see the [sandbox-router README](../../clients/python/agentic-sandbox-client/sandbox-router/README.md) for other options and CRD installation.
 
 Apply the Gateway manifest to your cluster:
 
 ```bash
 kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
+
+# GKE only: apply the HealthCheckPolicy
+kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/gateway-gke-healthcheck.yaml
 ```
 
 
@@ -229,6 +233,8 @@ kubectl delete -f clients/python/agentic-sandbox-client/sandbox-router/sandbox_r
 
 # Delete the Gateway and its load balancer
 kubectl delete -f clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
+# GKE only:
+kubectl delete -f clients/python/agentic-sandbox-client/sandbox-router/gateway-gke-healthcheck.yaml
 ```
 
 3. Delete Agent Sandbox controller: 

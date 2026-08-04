@@ -49,18 +49,10 @@ func mapCommandError(err error, defaultCode codes.Code, msg string) error {
 	return status.Errorf(defaultCode, "%s: %v", msg, err)
 }
 
-const (
-	// streamChunkSize is the read buffer size for stdout/stderr streaming.
-	streamChunkSize = 4096
-	// executeWaitDelay bounds how long Execute waits for the command's I/O
-	// pipes to drain after the process itself has exited (e.g. when a
-	// grandchild inherited stdout and keeps it open). Also bounds Wait in
-	// Start for unkillable processes.
-	executeWaitDelay = 10 * time.Second
-	// pipeDrainGrace bounds how long Start waits for non-PTY stdout/stderr
-	// pipe readers to reach EOF after cmd.Wait has reaped the child process.
-	pipeDrainGrace = 5 * time.Second
-)
+// streamChunkSize is the read buffer size for stdout/stderr streaming.
+// Timing constants (waitDelay, pipeDrainGrace, ...) are collected in one
+// block in server.go.
+const streamChunkSize = 4096
 
 // ProcessServer implements the ProcessService gRPC API defined in
 // packages/sandboxd/spec/process/v1/process.proto.
@@ -130,7 +122,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		Done: make(chan struct{}),
 	}
 
-	cmd.WaitDelay = executeWaitDelay
+	cmd.WaitDelay = waitDelay
 
 	var ptyFile *os.File
 	var stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW *os.File
@@ -297,7 +289,7 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 		return nil, err
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = executeWaitDelay
+	cmd.WaitDelay = waitDelay
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf

@@ -124,11 +124,12 @@ spec:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--grpc-addr` | `127.0.0.1:9090` | gRPC ProcessService listen address (keep on localhost). |
-| `--rest-addr` | `127.0.0.1:8080` | REST API listen address (keep on localhost). |
-| `--root-dir` | `/workspace` | Sandbox root confining all file operations and working directories. |
+| `--grpc-port` | `9090` | Port for the gRPC ProcessService. Always binds to `127.0.0.1`. |
+| `--rest-port` | `8080` | Port for the REST API. Always binds to `127.0.0.1`. |
+| `--root-dir` | `/workspace` | Sandbox root confining all file operations and working directories. Created if missing. |
 | `--metadata-env-prefix` | `SANDBOX_` | Env var prefix exposed on `/v1/metadata`. |
 | `--shutdown-timeout` | `10s` | Grace period for in-flight requests and child processes. |
+| `--http-idle-timeout` | `60s` | Close idle HTTP keep-alive connections after this duration. |
 | `--version` | | Print version info and exit. |
 
 ## Talking to sandboxd

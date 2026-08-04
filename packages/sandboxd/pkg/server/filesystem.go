@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -35,48 +36,10 @@ import (
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/pathutil"
 )
 
-// Wire types matching packages/sandboxd/spec/filesystem/v1/filesystem.yaml.
-// Hand-written rather than generated: the repo carries no OpenAPI codegen
-// toolchain and the surface is small; conformance is pinned by tests.
-
-// FileEntry is one row of a DirectoryListing.
-type FileEntry struct {
-	Name       string `json:"name"`
-	Size       int64  `json:"size"`
-	Type       string `json:"type"` // "file" | "directory"
-	ModifiedAt string `json:"modified_at"`
-	Mode       string `json:"mode,omitempty"` // octal, e.g. "0644"
-}
-
-// DirectoryListing is returned by GET /v1/files/{path} for directories.
-type DirectoryListing struct {
-	Path    string      `json:"path"`
-	Entries []FileEntry `json:"entries"`
-}
-
-// HealthResponse is returned by GET /v1/health.
-type HealthResponse struct {
-	Status        string `json:"status"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
-}
-
-// MetadataResponse is returned by GET /v1/metadata.
-type MetadataResponse struct {
-	Env map[string]string `json:"env"`
-}
-
-// APIError is the error body shared by all non-2xx responses.
-type APIError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
+// Wire types live in filesystem_types.go; the /v1/metadata handler lives in
+// metadata.go.
 
 var modePattern = regexp.MustCompile(`^0[0-7]{3}$`)
-
-// sensitiveEnvMarkers guards /v1/metadata against accidentally exposing
-// credentials even when they match the allowlist prefix: untrusted agent
-// code can query this endpoint over loopback.
-var sensitiveEnvMarkers = []string{"TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "KEY"}
 
 // RESTServer implements the sandboxd Filesystem & Runtime REST API on top of
 // net/http. All file paths are confined to rootDir via pathutil.SanitizePath.
@@ -90,6 +53,9 @@ type RESTServer struct {
 
 	// environ is swappable for tests; defaults to os.Environ.
 	environ func() []string
+	// metadataEnv returns the filtered /v1/metadata env map, computed once
+	// on first use: the daemon's environment is immutable after start.
+	metadataEnv func() map[string]string
 }
 
 // NewRESTServer builds a RESTServer rooted at rootDir. rootDir must be
@@ -113,6 +79,7 @@ func NewRESTServer(rootDir, metadataEnvPrefix string, log logr.Logger) *RESTServ
 		environ:           os.Environ,
 	}
 	s.ready.Store(true)
+	s.metadataEnv = sync.OnceValue(s.buildMetadataEnv)
 	return s
 }
 
@@ -198,8 +165,10 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = f.Close() }()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	// ServeContent handles HEAD, Content-Length, and Range requests, and
-	// keeps the Content-Type we set above.
+	// ServeContent streams via seek + chunked io.Copy — the file is never
+	// fully buffered in memory, so downloads are not size-capped. It also
+	// handles HEAD, Content-Length, and Range requests, and keeps the
+	// Content-Type set above.
 	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
@@ -320,8 +289,14 @@ func requestFileBody(r *http.Request) (io.Reader, func(), error) {
 }
 
 // atomicWrite streams src into target using the temp-file-then-rename
-// strategy so concurrent readers never observe a partial file. Parent
-// directories are created automatically.
+// strategy. Parent directories are created automatically.
+//
+// Concurrency: handlers run in parallel (one goroutine per request, no
+// cross-request locking) and rely on filesystem atomicity — rename(2)
+// guarantees readers see either the previous complete file or the new one,
+// never partial content (an already-open FD keeps the old inode alive), and
+// concurrent PUT/DELETE on one path resolve to last-syscall-wins with no
+// torn state.
 func atomicWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -439,32 +414,4 @@ func (s *RESTServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Status:        "ok",
 		UptimeSeconds: int64(time.Since(s.startTime).Seconds()),
 	})
-}
-
-func (s *RESTServer) handleMetadata(w http.ResponseWriter, _ *http.Request) {
-	env := map[string]string{}
-	for _, kv := range s.environ() {
-		name, value, found := strings.Cut(kv, "=")
-		if !found || !strings.HasPrefix(name, s.metadataEnvPrefix) {
-			continue
-		}
-		if isSensitiveEnvName(name) {
-			continue
-		}
-		env[name] = value
-	}
-	s.writeJSON(w, http.StatusOK, MetadataResponse{Env: env})
-}
-
-// isSensitiveEnvName reports whether an environment variable name looks like
-// it carries a credential. The spec forbids serving orchestrator credentials,
-// API tokens, or cloud IAM keys on /v1/metadata.
-func isSensitiveEnvName(name string) bool {
-	upper := strings.ToUpper(name)
-	for _, marker := range sensitiveEnvMarkers {
-		if strings.Contains(upper, marker) {
-			return true
-		}
-	}
-	return false
 }

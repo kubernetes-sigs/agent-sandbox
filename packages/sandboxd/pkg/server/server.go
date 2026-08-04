@@ -31,9 +31,21 @@ import (
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
-// processShutdownGrace is how long managed processes get to exit after
-// SIGTERM before being SIGKILLed during daemon shutdown.
-const processShutdownGrace = 2 * time.Second
+// Process-lifecycle timing knobs for the server package.
+//  Daemon-level knobs (HTTP timeouts, shutdown budget) live in 
+// cmd/sandboxd/main.go, mirroring how envd organizes its constants.
+const (
+	// processShutdownGrace is how long managed processes get to exit after
+	// SIGTERM before being SIGKILLed during daemon shutdown.
+	processShutdownGrace = 2 * time.Second
+	// pipeDrainGrace bounds how long Start waits for non-PTY stdout/stderr
+	// pipe readers to reach EOF after cmd.Wait has reaped the child process
+	// (a grandchild may still hold the write end).
+	pipeDrainGrace = 5 * time.Second
+	// waitDelay bounds cmd.Wait on I/O drain in Execute and on unkillable
+	// children in Start.
+	waitDelay = 10 * time.Second
+)
 
 // Options configures a sandboxd Server.
 type Options struct {

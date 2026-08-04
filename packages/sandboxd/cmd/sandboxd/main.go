@@ -18,8 +18,8 @@
 //	gRPC  :9090  ProcessService    — streaming process execution
 //	HTTP  :8080  FilesystemService — stateless file operations & probes
 //
-// Both listeners bind to localhost only; they are reachable outside the pod
-// solely through explicit proxying (sandbox-router). SDKs discover the
+// Both listeners always bind to 127.0.0.1; they are reachable outside the
+// pod solely through explicit proxying (sandbox-router). SDKs discover the
 // endpoints via the SANDBOXD_GRPC_ADDR / SANDBOXD_REST_ADDR environment
 // variables on the workload container.
 package main
@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -47,13 +48,32 @@ import (
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 )
 
+// Daemon-level timing knobs. Process-lifecycle grace periods live in one
+// const block in pkg/server (they are internal to that package).
+const (
+	// defaultShutdownTimeout is the default for --shutdown-timeout.
+	defaultShutdownTimeout = 10 * time.Second
+	// defaultHTTPIdleTimeout is the default for --http-idle-timeout.
+	defaultHTTPIdleTimeout = 60 * time.Second
+	// readHeaderTimeout bounds reading request headers only. Body transfers
+	// are deliberately unbounded: ReadTimeout/WriteTimeout would abort large
+	// file PUT/GET streams, which this API exists to serve.
+	readHeaderTimeout = 10 * time.Second
+
+	// loopbackHost is the only interface sandboxd ever binds: the runtime
+	// API must not be reachable from outside the pod without explicit
+	// proxying (sandbox-router).
+	loopbackHost = "127.0.0.1"
+)
+
 // config holds the daemon's flag-configurable settings.
 type config struct {
-	grpcAddr          string
-	restAddr          string
+	grpcPort          int
+	restPort          int
 	rootDir           string
 	metadataEnvPrefix string
 	shutdownTimeout   time.Duration
+	httpIdleTimeout   time.Duration
 	printVersion      bool
 }
 
@@ -61,16 +81,18 @@ func main() {
 	var cfg config
 	zapOpts := zap.Options{Development: false}
 
-	flag.StringVar(&cfg.grpcAddr, "grpc-addr", "127.0.0.1:9090",
-		"Listen address for the gRPC ProcessService. Must be a loopback IP per KEP-539.2.")
-	flag.StringVar(&cfg.restAddr, "rest-addr", "127.0.0.1:8080",
-		"Listen address for the Filesystem & Runtime REST API. Must be a loopback IP per KEP-539.2.")
+	flag.IntVar(&cfg.grpcPort, "grpc-port", 9090,
+		"Port for the gRPC ProcessService. Binds to 127.0.0.1.")
+	flag.IntVar(&cfg.restPort, "rest-port", 8080,
+		"Port for the Filesystem & Runtime REST API. Binds to 127.0.0.1.")
 	flag.StringVar(&cfg.rootDir, "root-dir", "/workspace",
-		"Sandbox root directory that file operations and working directories are confined to.")
+		"Sandbox root directory that file operations and working directories are confined to. Created if missing.")
 	flag.StringVar(&cfg.metadataEnvPrefix, "metadata-env-prefix", "SANDBOX_",
 		"Only environment variables with this prefix are exposed on GET /v1/metadata.")
-	flag.DurationVar(&cfg.shutdownTimeout, "shutdown-timeout", 10*time.Second,
+	flag.DurationVar(&cfg.shutdownTimeout, "shutdown-timeout", defaultShutdownTimeout,
 		"Maximum time to wait for in-flight requests and child processes during graceful shutdown.")
+	flag.DurationVar(&cfg.httpIdleTimeout, "http-idle-timeout", defaultHTTPIdleTimeout,
+		"Close idle HTTP keep-alive connections after this duration.")
 	flag.BoolVar(&cfg.printVersion, "version", false, "Print version information and exit.")
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -89,13 +111,11 @@ func main() {
 	}
 }
 
-func ensureLoopback(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("invalid listen address %q: %w", addr, err)
-	}
-	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("listen address %q must be a loopback IP per KEP-539.2 (e.g. 127.0.0.1:9090)", addr)
+// validatePort rejects out-of-range port numbers before they reach
+// net.Listen, where the error message would be less direct.
+func validatePort(name string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("--%s must be in range 1-65535 (got %d)", name, port)
 	}
 	return nil
 }
@@ -104,17 +124,20 @@ func run(cfg *config, log logr.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := ensureLoopback(cfg.grpcAddr); err != nil {
+	if err := validatePort("grpc-port", cfg.grpcPort); err != nil {
 		return err
 	}
-	if err := ensureLoopback(cfg.restAddr); err != nil {
+	if err := validatePort("rest-port", cfg.restPort); err != nil {
 		return err
+	}
+	if cfg.grpcPort == cfg.restPort {
+		return fmt.Errorf("--grpc-port and --rest-port must differ (both %d)", cfg.grpcPort)
 	}
 
-	if info, err := os.Stat(cfg.rootDir); err != nil {
+	// Create the sandbox root if missing so a template whose image lacks the
+	// directory still starts. MkdirAll errors if the path exists as a file.
+	if err := os.MkdirAll(cfg.rootDir, 0o755); err != nil {
 		return fmt.Errorf("root dir %q: %w", cfg.rootDir, err)
-	} else if !info.IsDir() {
-		return fmt.Errorf("root dir %q is not a directory", cfg.rootDir)
 	}
 
 	srv, err := server.New(server.Options{
@@ -126,14 +149,17 @@ func run(cfg *config, log logr.Logger) error {
 		return fmt.Errorf("build server: %w", err)
 	}
 
-	grpcLis, err := net.Listen("tcp", cfg.grpcAddr)
+	grpcAddr := net.JoinHostPort(loopbackHost, strconv.Itoa(cfg.grpcPort))
+	restAddr := net.JoinHostPort(loopbackHost, strconv.Itoa(cfg.restPort))
+
+	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
-		return fmt.Errorf("listen grpc %q: %w", cfg.grpcAddr, err)
+		return fmt.Errorf("listen grpc %q: %w", grpcAddr, err)
 	}
-	restLis, err := net.Listen("tcp", cfg.restAddr)
+	restLis, err := net.Listen("tcp", restAddr)
 	if err != nil {
 		_ = grpcLis.Close()
-		return fmt.Errorf("listen rest %q: %w", cfg.restAddr, err)
+		return fmt.Errorf("listen rest %q: %w", restAddr, err)
 	}
 
 	grpcServer := grpc.NewServer()
@@ -141,11 +167,8 @@ func run(cfg *config, log logr.Logger) error {
 	reflection.Register(grpcServer)
 	httpServer := &http.Server{
 		Handler:           srv.RESTHandler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		// No ReadTimeout/WriteTimeout: they bound entire body transfers and
-		// would abort large file PUT/GET streams (KEP-539.2 chose REST for
-		// exactly those). Loopback-only binding limits exposure.
-		IdleTimeout: 60 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       cfg.httpIdleTimeout,
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -172,8 +195,12 @@ func run(cfg *config, log logr.Logger) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
 		defer cancel()
 		srv.ShutdownProcesses(shutdownCtx)
+		// Shutdown is bounded by shutdownCtx; if it expires with connections
+		// still open, force-close them so shutdown-timeout is a hard bound,
+		// mirroring the gRPC GracefulStop/Stop fallback below.
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			log.Error(err, "rest server shutdown")
+			log.Error(err, "rest server graceful shutdown incomplete; forcing close")
+			_ = httpServer.Close()
 		}
 
 		grpcStopped := make(chan struct{})

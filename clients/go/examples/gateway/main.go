@@ -14,6 +14,11 @@
 
 // gateway demonstrates production usage of the Go sandbox client with
 // Gateway API discovery for the sandbox-router external address.
+//
+// The GatewayName must match a Gateway resource deployed in the cluster.
+// The Gateway's gatewayClassName determines the ingress implementation
+// (e.g. "istio", "gke-l7-global-external-managed", "cloud-provider-kind").
+// See sandbox-router/gateway.yaml for example manifests.
 package main
 
 import (

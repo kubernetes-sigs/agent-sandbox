@@ -76,9 +76,21 @@ kubectl apply -n agent-sandbox-system -f sandbox_router.yaml
 ### Deploy the Gateway
 
 In order to use the Python client in "Gateway Mode", you will need to create the Gateway resources.
+This requires a Gateway API controller running in your cluster — the controller watches Gateway and
+HTTPRoute resources and provisions the actual load balancer.
 
-Note that the example Gateway resources are specific to GKE. If running on a different Kubernetes
-provider you will need to modify the `gateway.yaml`.
+Common Gateway API controllers:
+
+| Controller | GatewayClass | Install |
+|---|---|---|
+| Istio | `istio` | `istioctl install` (works on any cluster) |
+| GKE (built-in) | `gke-l7-global-external-managed` | Pre-installed on GKE |
+| KinD (local dev) | `cloud-provider-kind` | `go install sigs.k8s.io/cloud-provider-kind@latest` |
+| Envoy Gateway | `eg` | See [Envoy Gateway docs](https://gateway.envoyproxy.io/) |
+
+The example `gateway.yaml` defaults to the `istio` GatewayClass, which works on any conformant
+Kubernetes cluster. Change `spec.gatewayClassName` to match your environment. The HealthCheckPolicy
+at the bottom is GKE-specific and can be skipped on other clusters.
 
 ```bash
 kubectl apply -f gateway.yaml

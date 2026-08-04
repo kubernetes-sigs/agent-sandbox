@@ -80,7 +80,7 @@ At extreme pod densities, system daemons experience heavy CPU churn handling pod
 To prevent system lockups during extreme pod density tests, the [`node-tuner-daemonset.yaml`](node-tuner-daemonset.yaml) configuration must be applied:
 *   **Dynamic CPU Isolation:** Expands CPU pinning dynamically to ensure Kubelet and system daemons have enough compute cycles.
 *   **ARP Cache Tuning:** Increases ARP cache thresholds (`gc_thresh` 2048/4096/8192) to accommodate the massive number of pod IP addresses routing through the node.
-*   **Advanced Logging Mitigation:** Applies `systemd-journald` rate limits (`SystemMaxUse=500M`, `RateLimitIntervalSec=30s`, `RateLimitBurst=1000`) and redirects journal logging to NVMe Local SSDs (`/var/log/journal` bind-mounted to `/var/lib/containerd/systemd-journal`) to prevent logging loops from overwhelming system resources.
+*   **Advanced Logging Mitigation:** Applies `systemd-journald` rate limits (`SystemMaxUse=500M`, `RateLimitIntervalSec=30s`, `RateLimitBurst=1000`) and redirects journal logging to NVMe Local SSDs (bind-mounting `/var/lib/containerd/systemd-journal` onto `/var/log/journal`) to prevent logging loops from overwhelming system resources.
 
 
 #### 2. Performance Metrics (256, 512, 768, and 1024 Densities)
@@ -101,7 +101,7 @@ The table below compares the baseline and LSSD swap node pools under a 1000ms st
 1.  **512 Pods pushes the limits without swap**: In standard network PD pools, running 512 pods saturates physical memory allocations and triggers active page cache evictions. This pushes the node to the edge of stability due to slow disk-wait queues on standard PD.
 2.  **Significant Density Improvement (512 -> 768 Pods)**: By combining NVMe Local SSD swap with node-level CPU isolation and ARP cache tuning, we achieved a **50% increase in stable pod density** (from 512 pods up to 768 pods per node) without node crashes. 
 3.  **Local SSDs prevent Page Cache Bottlenecks**: Even when swap usage is 0B, if memory pressure evicts file-backed page caches (Chrome binaries), re-reading them from NVMe Local SSDs (mounted at `/var/lib/containerd`) takes milliseconds. On baseline PD pools, reading evicted binaries back from network disks saturates the 3,000 IOPS queue and causes watchdog timeouts.
-4.  **CPU isolation is mandatory**: Reserve at least 2 cores (`reservedSystemCPUs: "0,1"`) for Kubelet and OS services. For 768+ active pods under swap, reserve **4 to 8 cores** (`reservedSystemCPUs: "0-7"`).
+4.  **CPU isolation is mandatory**: Reserve at least 2 cores (`reservedSystemCPUs: "0,1"`) for Kubelet and OS services. For 768+ active pods on `c4-standard-32` under swap, reserve **8 cores** (`reservedSystemCPUs: "0-7"`).
 
 
 ## Run the Example
@@ -135,21 +135,31 @@ linuxConfig:
 
 ### Step 2: Deploy the GKE Cluster
 
-We provide a helper script [`deploy_cluster.sh`](deploy_cluster.sh) that automates the cluster provisioning, using `c4-standard-8` as the standard machine type. It will create the baseline node pool and the Memory Swap enabled node pool.
+We provide a helper script [`deploy_cluster.sh`](deploy_cluster.sh) that automates cluster provisioning by creating both the baseline node pool and the Memory Swap enabled node pool.
 
-Run the deployment script:
+For standard moderate density testing (`c4-standard-8`):
 
 ```bash
 chmod +x deploy_cluster.sh
 ./deploy_cluster.sh
 ```
 
+For high-density benchmarking (`c4-standard-32`):
+
+```bash
+MAX_PODS_PER_NODE=1024 BASELINE_MACHINE_TYPE="c4-standard-32" SWAP_MACHINE_TYPE="c4-standard-32-lssd" ./deploy_cluster.sh
+```
+
 ### Step 3: Optional Node Tuning for High-Density Tests (>256 Pods)
 
-If you plan to run extreme density sweeps (512–1024 pods per node), apply the provided [`node-tuner-daemonset.yaml`](node-tuner-daemonset.yaml) to configure CPU isolation, ARP cache expansion, and journald log rate-limiting:
+> [!NOTE]
+> Standard GKE node pools default to a maximum of 256 pods per node. Evaluating densities above 256 pods (512–1024) requires a benchmark cluster environment configured to support higher pod-per-node limits and sufficient Pod CIDR allocation.
+
+If you plan to run extreme density sweeps (512–1024 pods per node), apply the provided [`node-tuner-daemonset.yaml`](node-tuner-daemonset.yaml) to configure CPU isolation, ARP cache expansion, and journald log rate-limiting, then wait for the rollout to complete:
 
 ```bash
 kubectl apply -f node-tuner-daemonset.yaml
+kubectl rollout status daemonset/node-tuner-ds -n kube-system
 ```
 
 ### Step 4: Configure the Sandbox Workloads
@@ -184,11 +194,19 @@ spec:
 
 ### Step 5: Run the Performance/Density Tests
 
-Use the provided [`run_chromesandbox_density_test.sh`](run_chromesandbox_density_test.sh) script to run the density sweep (`120 160 200 240` pods) and compare the baseline and swap pools:
+Use the provided [`run_chromesandbox_density_test.sh`](run_chromesandbox_density_test.sh) script to run the density sweep.
+
+For moderate density testing on `c4-standard-8` (`120 160 200 240` pods):
 
 ```bash
 chmod +x run_chromesandbox_density_test.sh
 ./run_chromesandbox_density_test.sh
+```
+
+For high-density benchmarking on `c4-standard-32` (`256 512 768 1024` pods, requires node-tuner applied):
+
+```bash
+DENSITIES="256 512 768 1024" ./run_chromesandbox_density_test.sh
 ```
 
 #### Results:

@@ -20,6 +20,7 @@ REGION=${REGION:-"us-east4"}
 ZONE=${ZONE:-"us-east4-a"}
 BASELINE_MACHINE_TYPE=${BASELINE_MACHINE_TYPE:-"c4-standard-8"}
 SWAP_MACHINE_TYPE=${SWAP_MACHINE_TYPE:-"c4-standard-8-lssd"}
+MAX_PODS_PER_NODE=${MAX_PODS_PER_NODE:-256}
 
 # Get the directory of this script
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -36,17 +37,15 @@ gcloud container node-pools create baseline-pool \
     --zone "${ZONE}" \
     --machine-type "${BASELINE_MACHINE_TYPE}" \
     --num-nodes 1 \
-    --max-pods-per-node 256
+    --max-pods-per-node "${MAX_PODS_PER_NODE}"
  
 echo "Creating lssd-swap node pool (with dedicated LSSD swap)..."
-# We use c4-standard-8-lssd which comes with 1 local SSD.
-# We dedicate this single SSD entirely to swap (via swap-dedicated-lssd.yaml).
 gcloud container node-pools create lssd-swap-pool \
     --cluster "${CLUSTER_NAME}" \
     --zone "${ZONE}" \
     --machine-type "${SWAP_MACHINE_TYPE}" \
     --num-nodes 1 \
-    --max-pods-per-node 256 \
+    --max-pods-per-node "${MAX_PODS_PER_NODE}" \
     --system-config-from-file "${DIR}/swap-dedicated-lssd.yaml"
 
 echo "Fetching cluster credentials..."

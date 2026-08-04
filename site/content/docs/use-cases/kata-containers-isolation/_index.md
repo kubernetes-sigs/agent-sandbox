@@ -83,7 +83,9 @@ kubectl port-forward svc/sandbox-router-svc 8080:8080 -n default
 curl -H "X-Sandbox-ID: sandbox-example" -H "X-Sandbox-Port: 13337" http://localhost:8080
 ```
 
-For production external access (e.g., on GKE), deploy the Gateway configuration:
+For production external access, deploy the Gateway configuration (requires a
+Gateway API controller — e.g. Istio, GKE built-in, Envoy Gateway; edit
+`spec.gatewayClassName` to match your environment):
 
 ```bash
 kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml

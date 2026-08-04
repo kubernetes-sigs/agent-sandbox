@@ -49,6 +49,22 @@ The MCP server exposes the following tools:
     * `timeout` (int, default: 60)
   * **Returns**: Content of the file and the number of bytes read.
 
+* **`list_files`**: Lists the contents of a directory in a sandbox.
+  * **Arguments**:
+    * `sandbox_claim_name` (str)
+    * `namespace` (str)
+    * `path` (str)
+    * `timeout` (int, default: 60)
+  * **Returns**: The directory entries, each with `name`, `size`, `type` (`file` or `directory`) and `mod_time` (POSIX timestamp).
+
+* **`file_exists`**: Checks whether a file or directory exists in a sandbox.
+  * **Arguments**:
+    * `sandbox_claim_name` (str)
+    * `namespace` (str)
+    * `path` (str)
+    * `timeout` (int, default: 60)
+  * **Returns**: Whether the path exists. A missing path is a successful `exists: false` result, not an error.
+
 *(The server also provides a `get_sandboxes` resource to fetch a list of existing sandboxes.)*
 
 ## Configuration

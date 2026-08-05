@@ -17,6 +17,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,12 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 )
 
@@ -115,6 +122,100 @@ func TestBuildInfo(t *testing.T) {
 	if err := testutil.CollectAndCompare(BuildInfo, strings.NewReader(expected)); err != nil {
 		t.Errorf("BuildInfo metric mismatch: %v", err)
 	}
+}
+
+func TestStageLatencyRecording(t *testing.T) {
+	SandboxStageLatency.Reset()
+	RecordStageLatency(500*time.Millisecond, "default", LaunchTypeCold, "tmpl", OwnedByNone, StagePodReady)
+	if testutil.CollectAndCount(SandboxStageLatency) != 1 {
+		t.Errorf("Expected 1 observation for SandboxStageLatency")
+	}
+}
+
+func TestChildAndTemplateReconcileErrorRecording(t *testing.T) {
+	ChildReconcileErrors.Reset()
+	RecordChildReconcileError("default", ResourcePod, ReasonCreateFailed)
+	if testutil.CollectAndCount(ChildReconcileErrors) != 1 {
+		t.Errorf("Expected 1 observation for ChildReconcileErrors")
+	}
+
+	TemplateReconcileErrors.Reset()
+	RecordTemplateReconcileError("default", ReasonOwnershipConflict)
+	if testutil.CollectAndCount(TemplateReconcileErrors) != 1 {
+		t.Errorf("Expected 1 observation for TemplateReconcileErrors")
+	}
+}
+
+func TestClassifyReconcileError(t *testing.T) {
+	t.Parallel()
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "p", nil)
+	conflict := apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, "p", nil)
+
+	require.Equal(t, ReasonForbidden, ClassifyReconcileError(forbidden, ReasonCreateFailed))
+	require.Equal(t, ReasonUpdateConflict, ClassifyReconcileError(conflict, ReasonCreateFailed))
+	require.Equal(t, ReasonCreateFailed, ClassifyReconcileError(errors.New("create boom"), ReasonCreateFailed))
+	require.Equal(t, ReasonOwnershipConflict, ClassifyReconcileError(errors.New("owned by other"), ReasonOwnershipConflict))
+	require.Equal(t, ReasonAdoptRefused, ClassifyReconcileError(errors.New("missing label"), ReasonAdoptRefused))
+	require.Equal(t, ReasonOther, ClassifyReconcileError(errors.New("weird"), "not-a-reason"))
+	require.Equal(t, ReasonOther, ClassifyReconcileError(nil, ""))
+}
+
+func TestNormalizeAllowlists(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, StagePodReady, NormalizeStage(StagePodReady))
+	require.Equal(t, ReasonOther, NormalizeStage("bogus"))
+	require.Equal(t, ResourcePVC, NormalizeResource(ResourcePVC))
+	require.Equal(t, ReasonOther, NormalizeResource("deployment"))
+	require.Equal(t, ReasonDeleteFailed, NormalizeReason(ReasonDeleteFailed))
+	require.Equal(t, ReasonOther, NormalizeReason("raw api error text"))
+}
+
+func TestStageLatencyRecordedAnnotationRoundTrip(t *testing.T) {
+	t.Parallel()
+	recorded := map[string]struct{}{
+		StagePodReady:     {},
+		StagePodCreated:   {},
+		StagePodScheduled: {},
+	}
+	formatted := FormatStageLatencyRecorded(recorded)
+	require.Equal(t, "pod_created,pod_ready,pod_scheduled", formatted)
+	parsed := ParseStageLatencyRecorded(formatted + ",bogus")
+	require.Equal(t, recorded, parsed)
+	require.Empty(t, ParseStageLatencyRecorded(""))
+}
+
+func TestLabelsFromSandbox(t *testing.T) {
+	t.Parallel()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sb",
+			Namespace: "ns",
+			Labels: map[string]string{
+				sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeWarm,
+			},
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxTemplateRefAnnotation: "my-template",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
+				Name:       "claim",
+				UID:        "uid",
+				Controller: new(true),
+			}},
+		},
+	}
+	labels := LabelsFromSandbox(sandbox)
+	require.Equal(t, "ns", labels.Namespace)
+	require.Equal(t, LaunchTypeWarm, labels.LaunchType)
+	require.Equal(t, "my-template", labels.Template)
+	require.Equal(t, OwnedBySandboxClaim, labels.OwnedBy)
+
+	bare := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "ns2"}}
+	bareLabels := LabelsFromSandbox(bare)
+	require.Equal(t, LaunchTypeCold, bareLabels.LaunchType)
+	require.Equal(t, "unknown", bareLabels.Template)
+	require.Equal(t, OwnedByNone, bareLabels.OwnedBy)
 }
 
 func TestStartSpanEndFuncEndsSpan(t *testing.T) {

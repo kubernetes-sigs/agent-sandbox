@@ -143,9 +143,16 @@ func (e *multipleSandboxPodsError) Error() string {
 	return fmt.Sprintf("multiple Pods (%d) are controlled by this Sandbox; refusing to choose or create a Pod", e.count)
 }
 
-func isMultipleSandboxPodsError(err error) bool {
+func asMultipleSandboxPodsError(err error) *multipleSandboxPodsError {
 	var multiplePodsErr *multipleSandboxPodsError
-	return errors.As(err, &multiplePodsErr)
+	if errors.As(err, &multiplePodsErr) {
+		return multiplePodsErr
+	}
+	return nil
+}
+
+func isMultipleSandboxPodsError(err error) bool {
+	return asMultipleSandboxPodsError(err) != nil
 }
 
 // sandboxOwnedPods filters tracking-label candidates by controller owner UID.
@@ -457,9 +464,9 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 	}
 
 	if err != nil {
-		if isMultipleSandboxPodsError(err) {
+		if multiplePodsErr := asMultipleSandboxPodsError(err); multiplePodsErr != nil {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonMultiplePods
-			readyCondition.Message = err.Error()
+			readyCondition.Message = multiplePodsErr.Error()
 			return readyCondition
 		}
 		readyCondition.Reason = "ReconcilerError"

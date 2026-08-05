@@ -467,6 +467,18 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
 			},
 		},
+		{
+			name:    "16. Multiple owned Pods message excludes joined transient errors",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			err: errors.Join(
+				errors.New("failed to reconcile PVC: temporary error"),
+				&multipleSandboxPodsError{count: 2},
+			),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "MultiplePods", Message: "multiple Pods (2) are controlled by this Sandbox; refusing to choose or create a Pod"},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -3134,7 +3146,7 @@ func TestReconcilePodRecoversOwnedPodWhenTrackedPodIsMissing(t *testing.T) {
 		ClusterDomain: "cluster.local",
 	}
 
-	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash)
+	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pod)
 	assert.Equal(t, survivor, pod.Name)
@@ -3200,7 +3212,7 @@ func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
 		ClusterDomain: "cluster.local",
 	}
 
-	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash)
+	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pod)
 	assert.Equal(t, survivor, pod.Name)
@@ -3252,7 +3264,7 @@ func TestReconcilePodFailsClosedForMultipleOwnedPods(t *testing.T) {
 		ClusterDomain: "cluster.local",
 	}
 
-	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash)
+	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash, nil)
 	require.Error(t, err)
 	assert.Nil(t, pod)
 	assert.Contains(t, err.Error(), "multiple Pods")
@@ -3307,7 +3319,7 @@ func TestReconcileChildResourcesSurfacesMultipleOwnedPods(t *testing.T) {
 		ClusterDomain: "cluster.local",
 	}
 
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandbox))
+	require.NoError(t, r.reconcileChildResources(t.Context(), sandbox, nil))
 	ready := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
@@ -3330,7 +3342,7 @@ func TestReconcileChildResourcesSurfacesMultipleOwnedPods(t *testing.T) {
 
 	// The conflict is watch-driven and does not return an error or emit a new
 	// Event on every reconcile while the Ready condition already reports it.
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandbox))
+	require.NoError(t, r.reconcileChildResources(t.Context(), sandbox, nil))
 	select {
 	case event := <-recorder.Events:
 		t.Fatalf("unexpected duplicate Event: %s", event)
@@ -3388,7 +3400,7 @@ func TestReconcilePodWaitsForOwnedTerminatingPod(t *testing.T) {
 		ClusterDomain: "cluster.local",
 	}
 
-	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash)
+	pod, err := r.reconcilePod(t.Context(), sandbox.DeepCopy(), nameHash, nil)
 	require.NoError(t, err)
 	require.NotNil(t, pod)
 	assert.Equal(t, terminatingPod.Name, pod.Name)

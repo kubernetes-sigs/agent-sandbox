@@ -10,7 +10,7 @@ This guide covers the tools and techniques available for assessing the performan
 
 ## Controller Performance Tuning
 
-The `agent-sandbox-controller` exposes several flags that directly affect throughput and API server pressure. Raising these is the first step before running any load test.
+The `agent-sandbox-controller` exposes several flags that directly affect throughput and API server pressure. Raising these is the first step before running any load test. The table below is kept in sync with [`docs/configuration.md`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md), which is the canonical flag reference — check there first if the two ever disagree.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -18,8 +18,9 @@ The `agent-sandbox-controller` exposes several flags that directly affect throug
 | `--sandbox-claim-concurrent-workers` | `50` | Max concurrent reconciles for the SandboxClaim controller |
 | `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller |
 | `--sandbox-template-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxTemplate controller |
+| `--sandbox-warm-pool-max-batch-size` | `300` | Max sandboxes the SandboxWarmPool controller creates or deletes in a single batch |
 | `--kube-api-qps` | `-1` (no client-side throttling) | Disables client-side rate limiting to the Kubernetes API server. Server-side throttling (API Priority and Fairness) still applies. When setting a positive value, use at least the sum of all `--*-concurrent-workers` flags to avoid starving reconcile loops. |
-| `--kube-api-burst` | `10` | Max burst for API server throttle requests. Ignored when `--kube-api-qps` is `-1`. When `--kube-api-qps` is set to a positive value, set this to equal or greater than `--kube-api-qps`. |
+| `--kube-api-burst` | `10` | Max burst for API server throttle requests. Ignored when `--kube-api-qps` is `-1`. When `--kube-api-qps` is set to a positive value, set this to equal or greater than `--kube-api-qps`. Must stay a positive integer even when unused — the controller exits on startup if it's `<= 0`. |
 
 ### Choosing worker counts
 
@@ -31,9 +32,9 @@ A good starting point is to size each value to the expected steady-state object 
 
 ### Applying Flags
 
-**Via manifest** — edit the relevant manifest for your deployment:
+**Via manifest** — edit the relevant manifest for your deployment. The snippets below show the in-repo source under `k8s/`; the corresponding release assets (`sandbox.yaml`, `extensions.yaml`) carry the same `args`, but with the `ko://` placeholder replaced by a published `registry.k8s.io/agent-sandbox/agent-sandbox-controller:<version>` image.
 
-*Core install (`manifest.yaml`):*
+*Core install (`k8s/controller.yaml`):*
 
 ```yaml
 containers:
@@ -48,7 +49,7 @@ containers:
   - --kube-api-burst=100
 ```
 
-*Extensions install (`extensions.yaml`) — note the additional `--extensions` flag, which enables the SandboxTemplate controller and its associated RBAC:*
+*Extensions install (`k8s/extensions.controller.yaml`) — note the additional `--extensions` flag, which enables the SandboxTemplate controller and its associated RBAC. (`k8s/extensions.yaml` is RBAC only — the Deployment lives in this separate file so `kubectl apply -f k8s/*.yaml` doesn't declare two Deployments.):*
 
 ```yaml
 containers:
@@ -82,6 +83,8 @@ kubectl patch deployment agent-sandbox-controller \
 ```
 
 **Via Kustomize** — use a JSON 6902 patch to append flags without replacing the existing `args` list. A strategic-merge patch on `containers[].args` replaces the entire list, which silently drops required flags such as `--leader-elect` and `--extensions`.
+
+> **Note:** If you consume `k8s/kustomization.yaml` (or its rendered `sandbox-with-extensions.yaml` release asset) rather than applying `sandbox.yaml`/`extensions.yaml` sequentially, start from that file — it already assembles core + extensions into a single Deployment. Add the JSON 6902 patch below as an additional entry under its `patches:` list.
 
 *Core install:*
 
@@ -225,6 +228,7 @@ go build -o clusterloader2 ./cmd/clusterloader.go
   <testcase name="agent-sandbox-load-test: [step: 02] Create Sandboxes" .../>
   <testcase name="agent-sandbox-load-test: [step: 03] Wait for Sandboxes to be Ready" .../>
   <testcase name="agent-sandbox-load-test: [step: 04] Gather Results" .../>
+  <testcase name="agent-sandbox-load-test: [step: 05] Delete Sandboxes" .../>
 </testsuite>
 ```
 
@@ -232,7 +236,7 @@ go build -o clusterloader2 ./cmd/clusterloader.go
 
 ## Test Recipes
 
-`dev/load-test/test-recipes/` contains ready-made scenarios for more demanding performance testing. Each recipe uses Prometheus to collect detailed metrics.
+`dev/load-test/test-recipes/` contains ready-made scenarios for more demanding performance testing. Some recipes query Prometheus directly for detailed latency metrics; others rely on ClusterLoader2's built-in measurement methods. See [Metrics Collected](#metrics-collected) for which recipe reports what.
 
 ### Available recipes
 
@@ -290,13 +294,21 @@ All artifacts (CL2 log, test overrides, Prometheus reports) are saved to a times
 
 ## Metrics Collected
 
-All load test recipes collect the following Prometheus-backed metrics:
+Recipes differ in which measurements they run and how they collect them. Some query Prometheus directly (CL2's `GenericPrometheusQuery` method); others use CL2's built-in `PodStartupLatency` or `SchedulingThroughput` methods, which don't go through Prometheus at all.
+
+| Recipe | Measurements |
+|---|---|
+| `rapid-burst-test.yaml` | `SandboxStartupLatency` (`PodStartupLatency`, selector `app=agent-sandbox-load-test`), `SandboxClaimStartupLatency` (`GenericPrometheusQuery`, requires the timestamp-injection webhook below), `SandboxClaimControllerStartupLatency` (`GenericPrometheusQuery`) |
+| `high-volume-test.yaml` | `SchedulingThroughput` (`SchedulingThroughput`), `SandboxStartupLatency` (`PodStartupLatency`, selector `group=linear-rampup`) |
+| `medium-scale-concurrent-load-test.yaml` | `SandboxStartupLatency` (`PodStartupLatency`, selector `group=continuous-churn-group`) |
+| `throughput-test.yaml` | `SchedulingThroughput` (`SchedulingThroughput`), `ReadyPerSecond` (`GenericPrometheusQuery`), `SandboxStartupLatency` (`PodStartupLatency`, selector `group=throughput-test`) |
+| `warmpool-burst-test.yaml` | `ColdAcquisitionLatency` (`PodStartupLatency`, selector `latency-type=cold`) |
 
 ### SandboxClaim startup latency
 
-Measures the end-to-end time from when the kube-apiserver receives the SandboxClaim create request to when the claim is marked as Ready (implying the claim, sandbox, and pod are all ready).
+Only `rapid-burst-test.yaml` collects this metric. It measures the end-to-end time from when the kube-apiserver receives the SandboxClaim create request to when the claim is marked as Ready (implying the claim, sandbox, and pod are all ready).
 
-> **Note:** This metric requires a mutating admission webhook to record the start timestamp. The webhook is not yet merged (see PR #761). Because the kube-apiserver and controller may run on different nodes, this metric may include clock skew.
+> **Note:** This metric requires a mutating admission webhook to record the start timestamp. See the [timestamp-injection webhook example](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/webhook-inject-timestamp/testing_webhook_guide.md) for setup instructions. Because the kube-apiserver and controller may run on different nodes, this metric may include clock skew.
 
 | Metric | Prometheus query | Default threshold |
 |--------|-----------------|-------------------|
@@ -306,7 +318,7 @@ Measures the end-to-end time from when the kube-apiserver receives the SandboxCl
 
 ### SandboxClaim controller startup latency
 
-Measures the time from when the SandboxClaim controller's informer first observes the SandboxClaim creation to when the controller marks it as Ready. Because the informer sees the resource only after it has been persisted by the API server, this is a subset of the `agent_sandbox_claim_startup_latency_ms_bucket` metric — the delta between the two represents time spent in the kube-apiserver plus network propagation delay (plus or minus any clock skew). This metric has no clock skew of its own, since both the start and end timestamps are recorded by the same controller. Unlike `agent_sandbox_claim_startup_latency_ms_bucket`, this metric requires no webhook and works out of the box.
+Only `rapid-burst-test.yaml` collects this metric. It measures the time from when the SandboxClaim controller's informer first observes the SandboxClaim creation to when the controller marks it as Ready. Because the informer sees the resource only after it has been persisted by the API server, this is a subset of the `agent_sandbox_claim_startup_latency_ms_bucket` metric — the delta between the two represents time spent in the kube-apiserver plus network propagation delay (plus or minus any clock skew). This metric has no clock skew of its own, since both the start and end timestamps are recorded by the same controller. Unlike `agent_sandbox_claim_startup_latency_ms_bucket`, this metric requires no webhook and works out of the box.
 
 | Metric | Prometheus query | Default threshold |
 |--------|-----------------|-------------------|
@@ -314,9 +326,14 @@ Measures the time from when the SandboxClaim controller's informer first observe
 | `ControllerStartupLatency90` | `histogram_quantile(0.90, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))` | 1 000 ms |
 | `ControllerStartupLatency99` | `histogram_quantile(0.99, sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le))` | 5 000 ms |
 
-### Scheduling throughput
+### Scheduling throughput and pod startup latency
 
-`SchedulingThroughput` — measured via CL2's built-in `PodStartupLatency` method, tracking pods labelled `app=agent-sandbox-load-test`.
+These are two distinct measurements, backed by different CL2 methods:
+
+- `SchedulingThroughput` (`high-volume-test.yaml`, `throughput-test.yaml`) — pod scheduling rate, via CL2's built-in `SchedulingThroughput` method.
+- `SandboxStartupLatency` / `ColdAcquisitionLatency` (all five recipes) — pod startup latency, via CL2's built-in `PodStartupLatency` method. The label selector varies per recipe — see the table above. `rapid-burst-test.yaml` additionally collects the two Prometheus-backed SandboxClaim metrics documented below.
+
+`throughput-test.yaml` also runs `ReadyPerSecond`, a `GenericPrometheusQuery` measurement of pods entering the `Running` phase per second; it isn't documented elsewhere in this guide.
 
 The controller exposes all metrics at its `/metrics` endpoint; a Prometheus `ServiceMonitor` is provided at `dev/load-test/test-recipes/monitor/agent-sandbox-controller-monitor.yaml`.
 

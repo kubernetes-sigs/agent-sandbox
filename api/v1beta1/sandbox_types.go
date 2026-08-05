@@ -49,6 +49,10 @@ const (
 	// SandboxReasonDependenciesNotReady indicates the Sandbox is expected to be running
 	// but its underlying dependencies are not fully provisioned or ready yet.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
+	// SandboxReasonMultiplePods indicates the Sandbox cannot become ready because
+	// more than one Pod is controlled by its UID and the controller cannot choose
+	// a canonical stateful Pod safely.
+	SandboxReasonMultiplePods = "MultiplePods"
 	// SandboxReasonSuspended indicates the Sandbox has been administratively suspended
 	// (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"

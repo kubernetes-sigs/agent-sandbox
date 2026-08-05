@@ -31,8 +31,18 @@ data:
         if not f.read().strip():
             sys.exit(f"{token_file} is empty -- projected ServiceAccount token was not mounted")
 
+    # Read explicitly and pass to the client below rather than relying on
+    # boto3 picking up AWS_ENDPOINT_URL_STS implicitly -- older botocore
+    # versions don't honor that env var at all and would silently call real
+    # AWS STS instead of LocalStack (see README's boto3 version note).
+    sts_endpoint = os.environ.get("AWS_ENDPOINT_URL_STS")
+    if not sts_endpoint:
+        sys.exit("AWS_ENDPOINT_URL_STS not set -- refusing to guess whether this would hit real AWS")
+
     session = boto3.Session(region_name="us-east-1")
     resolved_creds = session.get_credentials()
+    if resolved_creds is None:
+        sys.exit("session.get_credentials() returned None -- no credential provider in the chain found anything usable")
     if resolved_creds.method != "assume-role-with-web-identity":
         sys.exit(f"boto3 used credential provider {resolved_creds.method!r}, not IRSA -- check is not testing what it claims to")
 
@@ -42,6 +52,6 @@ data:
     print(f"SecretKey present: {bool(creds.secret_key)}")
     print(f"SessionToken present: {bool(creds.token)}")
 
-    sts = session.client("sts")
+    sts = session.client("sts", endpoint_url=sts_endpoint)
     identity = sts.get_caller_identity()
     print(f"Assumed identity ARN: {identity['Arn']}")

@@ -53,14 +53,17 @@ Install `amazon-eks-pod-identity-webhook` (real, unmodified upstream — not
 vendored here):
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/master/deploy/deployment-base.yaml
-kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/master/deploy/auth.yaml
-kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/master/deploy/service.yaml
-kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/master/deploy/mutatingwebhook.yaml
+# Pinned to the same release tag as the image below, not the moving `master`
+# branch, so this doesn't break if upstream manifests change incompatibly.
+kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/v0.6.17/deploy/deployment-base.yaml
+kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/v0.6.17/deploy/auth.yaml
+kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/v0.6.17/deploy/service.yaml
+kubectl apply -f https://raw.githubusercontent.com/aws/amazon-eks-pod-identity-webhook/v0.6.17/deploy/mutatingwebhook.yaml
 
 # deployment-base.yaml ships with an unresolved IMAGE placeholder in the
-# container spec — point it at a real released image tag:
-kubectl set image deployment/pod-identity-webhook \
+# container spec — point it at a real released image tag (deploys into the
+# `default` namespace; see deployment-base.yaml):
+kubectl set image deployment/pod-identity-webhook -n default \
   pod-identity-webhook=public.ecr.aws/eks/amazon-eks-pod-identity-webhook:v0.6.17
 ```
 
@@ -101,9 +104,16 @@ The container runs as a non-root user whose home directory isn't writable, so
 override `HOME` for the install and the script:
 
 ```sh
-kubectl -n irsa-sim-ns exec irsa-sim-sandbox -- sh -c 'HOME=/tmp pip install --user --quiet boto3'
+kubectl -n irsa-sim-ns exec irsa-sim-sandbox -- sh -c 'HOME=/tmp python3 -m pip install --user --quiet "boto3>=1.29"'
 kubectl -n irsa-sim-ns exec irsa-sim-sandbox -- sh -c 'HOME=/tmp python3 /irsa-sim/check_irsa.py'
 ```
+
+`python3 -m pip` (rather than a bare `pip`) guarantees the package installs
+for the same interpreter that runs the script, regardless of what else is on
+`PATH` in the container. The `boto3>=1.29` floor matters functionally, not
+just stylistically: `AWS_ENDPOINT_URL_STS` is only honored automatically
+starting around that botocore release — on an older version the check would
+silently fall through to calling real AWS STS instead of LocalStack.
 
 Expected output:
 

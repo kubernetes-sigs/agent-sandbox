@@ -72,6 +72,23 @@ All `{path}` values are resolved against the sandbox root (`/workspace` by
 default) via symlink-aware sanitization; traversal attempts return
 `403 {"code":"PERMISSION_DENIED"}`.
 
+### Concurrency semantics
+
+Requests are handled in parallel (no server-side serialization); clients do
+not need their own locking for correctness:
+
+- **Write vs. read** — writes are atomic (temp file + rename), so a
+  concurrent reader sees either the complete previous file or the complete
+  new one, never partial content.
+- **Write vs. delete** — last operation wins: the path ends up present (new
+  content) or absent, with no torn state.
+- **Delete vs. read** — an in-flight download completes even if the file is
+  deleted mid-transfer.
+- **Concurrent writes to one path** — the last write wins atomically.
+
+There is no cross-request transaction or compare-and-swap; agents that need
+coordination on shared paths must layer it themselves.
+
 ## Deploying as a sidecar
 
 `sandboxd` runs as a sidecar next to your (unmodified) workload container.
@@ -130,6 +147,7 @@ spec:
 | `--metadata-env-prefix` | `SANDBOX_` | Env var prefix exposed on `/v1/metadata`. |
 | `--shutdown-timeout` | `10s` | Grace period for in-flight requests and child processes. |
 | `--http-idle-timeout` | `60s` | Close idle HTTP keep-alive connections after this duration. |
+| `--stream-chunk-size` | `4096` | Buffer size in bytes for streaming process stdout/stderr chunks. |
 | `--version` | | Print version info and exit. |
 
 ## Talking to sandboxd
@@ -166,6 +184,12 @@ grpcurl -plaintext -d '{"config":{"command":["echo","hello"]}}' \
 
 # Streaming execution: watch InitEvent → stdout chunks → ExitEvent
 grpcurl -plaintext -d '{"config":{"command":["sh","-c","for i in 1 2 3; do echo $i; sleep 1; done"]}}' \
+  localhost:9090 process.v1.ProcessService/Start
+
+# PTY execution: stty and tty only succeed with a real terminal attached,
+# so this verifies genuine PTY allocation (expect "24 80" and /dev/pts/N)
+grpcurl -plaintext \
+  -d '{"config":{"command":["sh","-c","stty size && tty"]},"pty":{"cols":80,"rows":24}}' \
   localhost:9090 process.v1.ProcessService/Start
 ```
 

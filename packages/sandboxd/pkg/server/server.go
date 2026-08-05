@@ -56,7 +56,10 @@ type Options struct {
 	// MetadataEnvPrefix selects which environment variables are exposed on
 	// GET /v1/metadata.
 	MetadataEnvPrefix string
-	Log               logr.Logger
+	// StreamChunkSize is the stdout/stderr streaming buffer size in bytes
+	// for ProcessService.Start. Non-positive selects the 4096-byte default.
+	StreamChunkSize int
+	Log             logr.Logger
 }
 
 // Server bundles the gRPC ProcessService and REST FilesystemService behind a
@@ -75,7 +78,7 @@ func New(opts Options) (*Server, error) {
 	registry := processmanager.NewProcessRegistry()
 	return &Server{
 		registry:      registry,
-		processServer: NewProcessServer(opts.RootDir, registry),
+		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize),
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
 	}, nil
 }

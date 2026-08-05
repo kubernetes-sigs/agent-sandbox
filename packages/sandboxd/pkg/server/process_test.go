@@ -45,7 +45,7 @@ func newProcessClient(t *testing.T, rootDir string) processv1.ProcessServiceClie
 	lis := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
 	processv1.RegisterProcessServiceServer(grpcServer,
-		NewProcessServer(rootDir, processmanager.NewProcessRegistry()))
+		NewProcessServer(rootDir, processmanager.NewProcessRegistry(), 0))
 	go func() { _ = grpcServer.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -65,6 +65,8 @@ func newProcessClient(t *testing.T, rootDir string) processv1.ProcessServiceClie
 
 // startResult is the fully drained output of a Start stream.
 type startResult struct {
+	// pid is sandboxd's registry-assigned virtual process ID (from the
+	// InitEvent), not an OS pid — clients never see real host pids.
 	pid      int32
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer

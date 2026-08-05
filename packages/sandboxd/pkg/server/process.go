@@ -49,29 +49,36 @@ func mapCommandError(err error, defaultCode codes.Code, msg string) error {
 	return status.Errorf(defaultCode, "%s: %v", msg, err)
 }
 
-// streamChunkSize is the read buffer size for stdout/stderr streaming.
-// Timing constants (waitDelay, pipeDrainGrace, ...) are collected in one
-// block in server.go.
-const streamChunkSize = 4096
+// defaultStreamChunkSize is the default read buffer size for stdout/stderr
+// streaming, overridable via the --stream-chunk-size daemon flag. Timing
+// constants (waitDelay, pipeDrainGrace, ...) are collected in one block in
+// server.go.
+const defaultStreamChunkSize = 4096
 
 // ProcessServer implements the ProcessService gRPC API defined in
 // packages/sandboxd/spec/process/v1/process.proto.
 type ProcessServer struct {
 	processv1.UnimplementedProcessServiceServer
-	rootDir  string
-	registry *processmanager.ProcessRegistry
+	rootDir         string
+	registry        *processmanager.ProcessRegistry
+	streamChunkSize int
 }
 
 // NewProcessServer builds a ProcessServer rooted at rootDir. rootDir must be
 // non-empty. A nil registry gets a fresh one, but callers normally share the
-// daemon-wide registry so shutdown can signal every child.
-func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry) *ProcessServer {
+// daemon-wide registry so shutdown can signal every child. A non-positive
+// streamChunkSize selects the default.
+func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry, streamChunkSize int) *ProcessServer {
 	if registry == nil {
 		registry = processmanager.NewProcessRegistry()
 	}
+	if streamChunkSize <= 0 {
+		streamChunkSize = defaultStreamChunkSize
+	}
 	return &ProcessServer{
-		rootDir:  rootDir,
-		registry: registry,
+		rootDir:         rootDir,
+		registry:        registry,
+		streamChunkSize: streamChunkSize,
 	}
 }
 
@@ -85,6 +92,10 @@ func (s *ProcessServer) buildCommand(ctx context.Context, config *processv1.Proc
 	command := config.GetCommand()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 
+	// A nil cmd.Env inherits the daemon environment automatically, so it is
+	// only materialized when the request adds vars. Request vars are
+	// appended AFTER os.Environ() deliberately: os/exec resolves duplicate
+	// keys to the last value, so request-supplied vars override daemon ones.
 	if len(config.GetEnvVars()) > 0 {
 		cmd.Env = os.Environ()
 		for k, v := range config.GetEnvVars() {
@@ -93,6 +104,9 @@ func (s *ProcessServer) buildCommand(ctx context.Context, config *processv1.Proc
 	}
 
 	if config.GetCwd() != "" {
+		// Security check: confine the requested working directory to the
+		// sandbox root with the same symlink-aware sanitization the
+		// filesystem API uses; escaping paths get PERMISSION_DENIED.
 		sanitizedCwd, err := pathutil.SanitizePath(s.rootDir, config.GetCwd())
 		if err != nil {
 			if errors.Is(err, pathutil.ErrPathEscapes) {
@@ -204,7 +218,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	// reader is exhausted (EOF on pipes, EIO/ErrClosed on a PTY).
 	streamOutput := func(reader io.Reader, isStderr bool) {
 		defer streamWg.Done()
-		buf := make([]byte, streamChunkSize)
+		buf := make([]byte, s.streamChunkSize)
 		for {
 			n, rErr := reader.Read(buf)
 			if n > 0 {

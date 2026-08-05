@@ -74,6 +74,7 @@ type config struct {
 	metadataEnvPrefix string
 	shutdownTimeout   time.Duration
 	httpIdleTimeout   time.Duration
+	streamChunkSize   int
 	printVersion      bool
 }
 
@@ -93,6 +94,8 @@ func main() {
 		"Maximum time to wait for in-flight requests and child processes during graceful shutdown.")
 	flag.DurationVar(&cfg.httpIdleTimeout, "http-idle-timeout", defaultHTTPIdleTimeout,
 		"Close idle HTTP keep-alive connections after this duration.")
+	flag.IntVar(&cfg.streamChunkSize, "stream-chunk-size", 0,
+		"Buffer size in bytes for streaming process stdout/stderr chunks. 0 selects the default (4096).")
 	flag.BoolVar(&cfg.printVersion, "version", false, "Print version information and exit.")
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -143,6 +146,7 @@ func run(cfg *config, log logr.Logger) error {
 	srv, err := server.New(server.Options{
 		RootDir:           cfg.rootDir,
 		MetadataEnvPrefix: cfg.metadataEnvPrefix,
+		StreamChunkSize:   cfg.streamChunkSize,
 		Log:               log.WithName("rest"),
 	})
 	if err != nil {

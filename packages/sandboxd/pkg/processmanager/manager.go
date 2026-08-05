@@ -35,7 +35,9 @@ func NewProcessRegistry() *ProcessRegistry {
 	}
 }
 
-// NextPID generates a monotonically incrementing virtual process ID starting at 1.
+// NextPID generates a monotonically incrementing virtual process ID starting
+// at 1. Wrap-around after 2^31 starts is acceptable: IDs only need to be
+// unique among concurrently live processes in the registry.
 func (r *ProcessRegistry) NextPID() int32 {
 	return r.pidCounter.Add(1)
 }

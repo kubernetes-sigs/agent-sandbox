@@ -13,6 +13,12 @@ spec:
       labels:
         app: localstack
     spec:
+      # Plain emptyDir volumes are created world-writable (0777) by kubelet
+      # regardless of security context, so UID 1000 can already write to both
+      # mounts below without this -- fsGroup is set anyway for explicitness
+      # and so ownership isn't left to an implementation detail of emptyDir.
+      securityContext:
+        fsGroup: 1000
       containers:
       - name: localstack
         image: localstack/localstack:3.8
@@ -29,6 +35,7 @@ spec:
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000
+          runAsGroup: 1000
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]

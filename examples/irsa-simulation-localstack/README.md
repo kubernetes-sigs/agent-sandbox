@@ -108,6 +108,7 @@ kubectl -n irsa-sim-ns exec irsa-sim-sandbox -- sh -c 'HOME=/tmp python3 /irsa-s
 Expected output:
 
 ```
+Credential provider: assume-role-with-web-identity
 AccessKeyId: ASIA...
 SecretKey present: True
 SessionToken present: True

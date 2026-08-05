@@ -14,11 +14,30 @@ data:
     for credentials via the standard boto3 credential chain -- no
     application code changes needed.
     """
+    import os
+    import sys
+
     import boto3
 
-    session = boto3.Session(region_name="us-east-1")
-    creds = session.get_credentials().get_frozen_credentials()
+    # Assert the webhook actually did its job before trusting any credentials
+    # boto3 hands back -- otherwise a stray static/env credential elsewhere in
+    # the pod could make this smoke test pass even if webhook injection is
+    # broken, defeating the point of the check.
+    role_arn = os.environ.get("AWS_ROLE_ARN")
+    token_file = os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE")
+    if not role_arn or not token_file:
+        sys.exit("AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE not set -- webhook did not inject IRSA env vars")
+    with open(token_file) as f:
+        if not f.read().strip():
+            sys.exit(f"{token_file} is empty -- projected ServiceAccount token was not mounted")
 
+    session = boto3.Session(region_name="us-east-1")
+    resolved_creds = session.get_credentials()
+    if resolved_creds.method != "assume-role-with-web-identity":
+        sys.exit(f"boto3 used credential provider {resolved_creds.method!r}, not IRSA -- check is not testing what it claims to")
+
+    creds = resolved_creds.get_frozen_credentials()
+    print(f"Credential provider: {resolved_creds.method}")
     print(f"AccessKeyId: {creds.access_key}")
     print(f"SecretKey present: {bool(creds.secret_key)}")
     print(f"SessionToken present: {bool(creds.token)}")

@@ -21,12 +21,33 @@ spec:
         env:
         - name: SERVICES
           value: "sts"
+        # The image runs as root by default and writes to /tmp/localstack and
+        # /var/lib/localstack/cache at startup; without the emptyDir mounts
+        # below, running as non-root fails with repeated PermissionErrors on
+        # those paths (verified: the container still becomes Ready, but logs
+        # are full of write failures and its on-disk cache never persists).
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: localstack-var
+          mountPath: /var/lib/localstack
         readinessProbe:
           httpGet:
             path: /_localstack/health
             port: 4566
           initialDelaySeconds: 5
           periodSeconds: 5
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: localstack-var
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

@@ -89,7 +89,11 @@ The server exposes two endpoints for Kubernetes probes:
 | Endpoint | Meaning |
 |---|---|
 | `GET /healthz` | **Liveness.** The process is up and routing HTTP. Never contacts the Kubernetes API. |
-| `GET /readyz` | **Readiness.** Lists SandboxClaims in `K8S_SANDBOX_PROBE_NAMESPACE` to confirm the Kubernetes API is reachable. Returns `503` with `{"ready": false}` while starting or when the API is unreachable. |
+| `GET /readyz` | **Readiness.** Lists SandboxClaims in `K8S_SANDBOX_PROBE_NAMESPACE` to confirm the Kubernetes API is reachable. Returns `200` with `{"ready": true}`, or `503` with `{"ready": false, "reason": "..."}`. |
+
+`/readyz` failure reasons are `"starting"` (the server has not finished initializing) and
+`"kubernetes API unavailable"`. The reason is deliberately generic — the endpoint is
+unauthenticated, so the underlying exception is logged rather than returned.
 
 `/healthz` is deliberately independent of the Kubernetes API: wiring a liveness probe to an
 external dependency turns a transient control-plane blip into a rolling restart of every replica.

@@ -101,7 +101,12 @@ async def test_readyz_is_not_ready_when_kubernetes_unreachable(
     response = await probe(mcp_server_settings, k8s_client, "/readyz")
 
     assert response.status_code == 503
-    assert response.json()["ready"] is False
+    # Pin the documented body shape: README promises {"ready": ..., "reason": ...}
+    # and drifted from the implementation once already.
+    assert response.json() == {
+        "ready": False,
+        "reason": "kubernetes API unavailable",
+    }
     # The reason must not leak the underlying exception text to an
     # unauthenticated caller.
     assert "connection refused" not in response.text

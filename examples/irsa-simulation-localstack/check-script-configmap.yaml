@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: irsa-sim-check-script
+  namespace: irsa-sim-ns
+data:
+  check_irsa.py: |
+    """Validates the IRSA credential-loading code path against a
+    LocalStack-mocked STS. Does NOT validate the real AWS OIDC trust
+    boundary (issuer/JWKS signature checks) -- LocalStack accepts any web
+    identity token without verifying it. This only proves the pod correctly
+    discovers AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE (injected by
+    amazon-eks-pod-identity-webhook) and can exchange the projected token
+    for credentials via the standard boto3 credential chain -- no
+    application code changes needed.
+    """
+    import boto3
+
+    session = boto3.Session(region_name="us-east-1")
+    creds = session.get_credentials().get_frozen_credentials()
+
+    print(f"AccessKeyId: {creds.access_key}")
+    print(f"SecretKey present: {bool(creds.secret_key)}")
+    print(f"SessionToken present: {bool(creds.token)}")
+
+    sts = session.client("sts")
+    identity = sts.get_caller_identity()
+    print(f"Assumed identity ARN: {identity['Arn']}")

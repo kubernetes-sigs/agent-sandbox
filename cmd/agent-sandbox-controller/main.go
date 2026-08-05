@@ -425,6 +425,7 @@ func main() {
 	if err = (&controllers.SandboxReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
+		Recorder:      mgr.GetEventRecorder("sandbox-controller"),
 		Tracer:        instrumenter,
 		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {

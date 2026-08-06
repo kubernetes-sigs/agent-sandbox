@@ -19,11 +19,15 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Resolve KUBECONFIG: Use existing KUBECONFIG or fall back to repo-root bin/KUBECONFIG or ~/.kube/config
-export KUBECONFIG="${KUBECONFIG:-"${REPO_ROOT}/bin/KUBECONFIG"}"
-mkdir -p "$(dirname "${KUBECONFIG}")"
-if [ -f ~/.kube/config ]; then
-  cp ~/.kube/config "${KUBECONFIG}"
+# Resolve KUBECONFIG: Use existing KUBECONFIG or fall back to repo-root bin/KUBECONFIG
+if [ -z "${KUBECONFIG:-}" ]; then
+    export KUBECONFIG="${REPO_ROOT}/bin/KUBECONFIG"
+    mkdir -p "$(dirname "${KUBECONFIG}")"
+    if [ ! -f "${KUBECONFIG}" ] && [ -f "${HOME}/.kube/config" ]; then
+        cp "${HOME}/.kube/config" "${KUBECONFIG}"
+    fi
+else
+    mkdir -p "$(dirname "${KUBECONFIG}")"
 fi
 
 # Define benchmark configuration defaults (overrideable via environment variables)
@@ -79,6 +83,8 @@ log "Pools: ${POOLS}"
 log "Densities: ${DENSITIES}"
 log "Artifact Directory: ${ARTIFACT_DIR}"
 
+FAILED_SWEEPS=0
+
 for pool in ${POOLS}; do
     for density in ${DENSITIES}; do
         log "----------------------------------------------------------------------"
@@ -89,16 +95,22 @@ for pool in ${POOLS}; do
         SWEEP_DIR="${ARTIFACT_DIR}/${pool}/${density}"
         mkdir -p "${SWEEP_DIR}"
 
-        # Clean up any lingering test namespaces, sandboxes, or finalizers from prior failed runs
-        log "Purging any lingering test namespaces and stripping finalizers..."
-        kubectl get sandboxes -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null | xargs -L1 -r bash -c 'kubectl patch sandbox $1 -n $0 -p "{\"metadata\":{\"finalizers\":[]}}" --type=merge 2>/dev/null' || true
-        kubectl get ns | grep perf-py | awk '{print $1}' | xargs -L1 -r bash -c 'kubectl patch ns $0 -p "{\"spec\":{\"finalizers\":[]}}" --type=merge 2>/dev/null' || true
-        kubectl get ns | grep perf-py | awk '{print $1}' | xargs -r kubectl delete ns --force --grace-period=0 2>/dev/null || true
+        # Clean up any lingering test namespaces (perf-py-*) and strip finalizers from prior failed runs
+        log "Purging any lingering test namespaces (perf-py-*) and stripping finalizers..."
+        for ns in $(kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E '^perf-py-' || true); do
+            kubectl get sandboxes -n "${ns}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | xargs -r -L1 -I {} kubectl patch sandbox {} -n "${ns}" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+            kubectl patch ns "${ns}" -p '{"spec":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+            kubectl delete ns "${ns}" --force --grace-period=0 2>/dev/null || true
+        done
 
         # Identify target node name matching current GKE node pool
         NODE_NAME=$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${pool}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+        if [ -z "${NODE_NAME}" ]; then
+            log "No node found for pool ${pool}"
+            exit 1
+        fi
         
-        # Flush host node Page Cache (echo 3 > /proc/sys/vm/drop_caches) to reset node RAM to clean baseline
+        # Flush host node Page Cache to reset node RAM to clean baseline
         if [ -n "${NODE_NAME}" ]; then
             log "Flushing Page Cache on node ${NODE_NAME}..."
             kubectl run --rm -i "cache-dropper-${pool}" --image=alpine --restart=Never --overrides="{
@@ -122,11 +134,16 @@ for pool in ${POOLS}; do
         TEST_START_TIME=$(date +%s)
 
         # Run Go E2E density test suite targeting TestPythonSandboxDensity
-        POOLS="${pool}" DENSITIES="${density}" \
-        BENCHMARK_SCRIPT_PATH="${REPO_ROOT}/test/e2e/extensions/python_workload.py" \
-        ARTIFACTS="${SWEEP_DIR}" \
-        ARTIFACT_DIR="${SWEEP_DIR}" \
-        go test -v -timeout 45m ./test/e2e/extensions/ -run ^TestPythonSandboxDensity$ -args -kubeconfig="${KUBECONFIG}" -run-perf-load-test -density="${density}" -node-name="${NODE_NAME}" -runtime-class-name="${RUNTIME_CLASS}" | tee "${SWEEP_DIR}/test.log" || true
+        if ! POOLS="${pool}" DENSITIES="${density}" \
+           BENCHMARK_SCRIPT_PATH="${REPO_ROOT}/test/e2e/extensions/python_workload.py" \
+           ARTIFACTS="${SWEEP_DIR}" \
+           ARTIFACT_DIR="${SWEEP_DIR}" \
+           go test -v -timeout 45m ./test/e2e/extensions/ -run ^TestPythonSandboxDensity$ \
+             -args -kubeconfig="${KUBECONFIG}" -run-perf-load-test -density="${density}" \
+             -node-name="${NODE_NAME}" -runtime-class-name="${RUNTIME_CLASS}" 2>&1 | tee "${SWEEP_DIR}/test.log"; then
+            log "ERROR: Sweep failed for pool=${pool}, density=${density}"
+            FAILED_SWEEPS=$(( FAILED_SWEEPS + 1 ))
+        fi
 
         TEST_END_TIME=$(date +%s)
         TEST_DURATION=$(( TEST_END_TIME - TEST_START_TIME + 60 ))
@@ -185,3 +202,8 @@ done
 
 log "=== All MovieLens Density Sweeps Completed ==="
 log "Results saved in: ${ARTIFACT_DIR}"
+
+if [ "${FAILED_SWEEPS}" -gt 0 ]; then
+    log "ERROR: ${FAILED_SWEEPS} benchmark sweep(s) failed."
+    exit 1
+fi

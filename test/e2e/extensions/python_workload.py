@@ -21,6 +21,7 @@ It measures execution latency (TTFE/CEL) and memory footprint (max RSS) under GK
 
 Required packages: pandas (provided by python-sandbox container).
 """
+from contextlib import suppress
 import csv
 import json
 import os
@@ -61,11 +62,10 @@ def run_benchmark():
     pid = os.fork()
     if pid == 0:
         # Child process: detach file descriptors & hold Pandas RAM in memory for 10 minutes
-        try:
+        with suppress(OSError):
             os.close(1)
+        with suppress(OSError):
             os.close(2)
-        except Exception:
-            pass
         time.sleep(600)
         os._exit(0)
 

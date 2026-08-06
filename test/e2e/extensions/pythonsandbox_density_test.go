@@ -226,7 +226,7 @@ func pythonSandboxPerf(namespace, name, nodeName string) *sandboxv1beta1.Sandbox
 								corev1.ResourceCPU:    resource.MustParse("15m"),
 							},
 							Limits: corev1.ResourceList{
-								corev1.ResourceMemory: resource.MustParse("2G"),
+								corev1.ResourceMemory: resource.MustParse("2Gi"),
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{
@@ -332,15 +332,6 @@ func runPythonSandboxPerf(tc *framework.TestContext, namespace, name, nodeName s
 	pyCtx, pyCancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer pyCancel()
 
-	var podIdx int
-	_, _ = fmt.Sscanf(name, "python-sandbox-%d", &podIdx)
-	select {
-	case <-pyCtx.Done():
-		tc.Errorf("Context canceled during stagger delay for %s: %v", name, pyCtx.Err())
-		return metrics
-	case <-time.After(time.Duration(podIdx) * 1 * time.Second):
-	}
-
 	if pyStats, err := runPythonBenchmarkExec(pyCtx, podID); err != nil {
 		tc.Errorf("Failed to wait for python %s benchmark: %v", name, err)
 	} else {
@@ -352,38 +343,54 @@ func runPythonSandboxPerf(tc *framework.TestContext, namespace, name, nodeName s
 	return metrics
 }
 
-func runPythonBenchmarkExec(ctx context.Context, podID types.NamespacedName) (map[string]any, error) {
-	pollDuration := 3 * time.Second
+func waitForPythonServerReady(ctx context.Context, podID types.NamespacedName) error {
+	pollDuration := 1 * time.Second
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("python readiness polling canceled: %w", ctx.Err())
+			return fmt.Errorf("python readiness polling canceled: %w", ctx.Err())
 		default:
-			pyPostCmd := "import urllib.request, json; req = urllib.request.Request('http://localhost:8888/execute', data=json.dumps({'command': 'python3 /scripts/benchmark_density.py'}).encode(), headers={'Content-Type': 'application/json'}); print(urllib.request.urlopen(req).read().decode())"
-			cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", podID.Namespace, podID.Name, "-c", "python-sandbox", "--", "python3", "-c", pyPostCmd)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				time.Sleep(pollDuration)
-				continue
+			probeCmd := "import urllib.request; urllib.request.urlopen('http://localhost:8888/')"
+			cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", podID.Namespace, podID.Name, "-c", "python-sandbox", "--", "python3", "-c", probeCmd)
+			if err := cmd.Run(); err == nil {
+				return nil
 			}
-
-			var res struct {
-				Stdout   string `json:"stdout"`
-				Stderr   string `json:"stderr"`
-				ExitCode int    `json:"exit_code"`
-			}
-			if err := json.Unmarshal(out, &res); err == nil && res.ExitCode == 0 {
-				var m map[string]any
-				lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
-				lastLine := lines[len(lines)-1]
-				if err := json.Unmarshal([]byte(lastLine), &m); err == nil {
-					return m, nil
-				}
-			}
-			fmt.Printf("REST API EXEC FAILED: %v, OUTPUT: %s\n", err, string(out))
 			time.Sleep(pollDuration)
 		}
 	}
+}
+
+func runPythonBenchmarkExec(ctx context.Context, podID types.NamespacedName) (map[string]any, error) {
+	if err := waitForPythonServerReady(ctx, podID); err != nil {
+		return nil, err
+	}
+
+	pyPostCmd := "import urllib.request, json; req = urllib.request.Request('http://localhost:8888/execute', data=json.dumps({'command': 'python3 /scripts/benchmark_density.py'}).encode(), headers={'Content-Type': 'application/json'}); print(urllib.request.urlopen(req).read().decode())"
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", podID.Namespace, podID.Name, "-c", "python-sandbox", "--", "python3", "-c", pyPostCmd)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl exec benchmark failed: %w, output: %s", err, string(out))
+	}
+
+	var res struct {
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal REST API output: %w, raw: %s", err, string(out))
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("benchmark command exited with code %d: stderr: %s", res.ExitCode, res.Stderr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
+	lastLine := lines[len(lines)-1]
+	var m map[string]any
+	if err := json.Unmarshal([]byte(lastLine), &m); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal metrics JSON from last line (%q): %w, stdout: %s", lastLine, err, res.Stdout)
+	}
+	return m, nil
 }
 
 func logAndSavePythonMetricsStats(t *testing.T, artifactsDir string, metrics []*PythonSandboxMetrics) {

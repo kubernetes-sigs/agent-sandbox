@@ -39,13 +39,13 @@ with `agent-sandbox` enables nodes to host up to **120% more active agent sandbo
     (`/dev/mapper/encswap`), running on an isolated NVMe hardware bus separate from
     the boot disk.
 *   **Pandas Analytics Workload:** The Go test harness (`pythonsandbox_density_test.go`)
-    invokes `main.py` inside each sandbox by posting an execution command payload
+    invokes `benchmark_density.py` inside each sandbox by posting an execution command payload
     (`python3 /scripts/benchmark_density.py`) to the sandbox REST API endpoint
     (`http://localhost:8888/execute`). The script loads 5,000,000 rows into a Pandas
     DataFrame and performs analytical aggregations (`groupby('movieId')['rating'].agg(['mean', 'count'])`),
     creating a ~375 MB active RAM footprint per sandbox.
 *   **Stateful Resident Memory (`os.fork()`):** Upon completing analytical
-    calculations, `main.py` forks a background child process via `os.fork()`.
+    calculations, `benchmark_density.py` forks a background child process via `os.fork()`.
     The parent process outputs JSON execution telemetry and exits immediately
     (returning HTTP 200 OK), while the child process detaches standard file descriptors
     and enters `time.sleep(600)`. This retains the ~375 MB Pandas DataFrame resident in

@@ -134,7 +134,7 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              endpoint=https://nono-demo-loki.default.svc.cluster.local:3100
+              endpoint=https://nono-demo-loki:3100
               until curl -fsS --cacert /etc/loki/tls/ca.crt "${endpoint}/ready" >/dev/null; do sleep 1; done
               timestamp="$(date +%s%N)"
               curl -fsS --cacert /etc/loki/tls/ca.crt \

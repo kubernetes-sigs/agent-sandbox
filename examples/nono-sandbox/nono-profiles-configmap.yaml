@@ -40,7 +40,7 @@ data:
         "credentials": {
           "loki": {
             "type": "proxy",
-            "upstream": "https://nono-demo-loki.default.svc.cluster.local:3100",
+            "upstream": "https://nono-demo-loki:3100",
             "credential_key": "file:///etc/nono/loki-credential/token",
             "env_var": "LOKI_BEARER_TOKEN",
             "base_url_env_var": "LOKI_ADDR",
@@ -56,7 +56,7 @@ data:
               "session": {
                 "sandbox": {
                   "network": {
-                    "allow_domain": ["nono-demo-loki.default.svc.cluster.local"]
+                    "allow_domain": ["nono-demo-loki"]
                   },
                   "credentials": [
                     {

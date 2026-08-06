@@ -80,14 +80,14 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
   -keyout "${LOKI_TLS_CA_KEY}" \
   -out "${LOKI_TLS_CA_CERT}"
 openssl req -new -newkey rsa:2048 -sha256 -nodes \
-  -subj "/CN=nono-demo-loki.default.svc.cluster.local" \
+  -subj "/CN=nono-demo-loki" \
   -keyout "${LOKI_TLS_KEY}" \
   -out "${LOKI_TLS_CSR}"
 printf '%s\n' \
   'basicConstraints=critical,CA:FALSE' \
   'keyUsage=critical,digitalSignature,keyEncipherment' \
   'extendedKeyUsage=serverAuth' \
-  'subjectAltName=DNS:nono-demo-loki,DNS:nono-demo-loki.default.svc,DNS:nono-demo-loki.default.svc.cluster.local' \
+  'subjectAltName=DNS:nono-demo-loki' \
   >"${LOKI_TLS_EXT}"
 openssl x509 -req -sha256 -days 1 \
   -in "${LOKI_TLS_CSR}" \
@@ -98,7 +98,7 @@ openssl x509 -req -sha256 -days 1 \
   -out "${LOKI_TLS_CERT}"
 openssl verify \
   -CAfile "${LOKI_TLS_CA_CERT}" \
-  -verify_hostname nono-demo-loki.default.svc.cluster.local \
+  -verify_hostname nono-demo-loki \
   "${LOKI_TLS_CERT}"
 
 mkdir -p "${AUDIT_ARTIFACT_DIR}"

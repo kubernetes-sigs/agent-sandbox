@@ -242,7 +242,7 @@ func TestOperations_URLEncodesSpecialChars(t *testing.T) {
 				receivedPath = r.URL.EscapedPath()
 				switch {
 				case strings.Contains(r.URL.Path, "/list/"):
-					_ = json.NewEncoder(w).Encode([]FileEntry{})
+					_ = json.NewEncoder(w).Encode([]legacyFileEntry{})
 				case strings.Contains(r.URL.Path, "/exists/"):
 					_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
 				default:
@@ -272,7 +272,7 @@ func TestList_DotPathDoesNotRedirect(t *testing.T) {
 			t.Errorf("expected /list/%%2E, got %s", r.URL.EscapedPath())
 			return
 		}
-		_ = json.NewEncoder(w).Encode([]FileEntry{})
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{})
 	}))
 	defer server.Close()
 
@@ -288,7 +288,7 @@ func TestList_DotPathDoesNotRedirect(t *testing.T) {
 
 func TestList_ParsesEntries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]FileEntry{
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{
 			{Name: "file.txt", Size: 42, Type: "file", ModTime: 1700000000.0},
 			{Name: "subdir", Size: 0, Type: "directory", ModTime: 1700000001.0},
 		})
@@ -332,7 +332,7 @@ func TestList_EmptyDirectoryReturnsEmptySlice(t *testing.T) {
 
 func TestList_UnknownFileType_Filtered(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]FileEntry{
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{
 			{Name: "good.txt", Size: 10, Type: FileTypeFile, ModTime: 1700000000.0},
 			{Name: "link.txt", Size: 10, Type: "symlink", ModTime: 1700000000.0},
 			{Name: "subdir", Size: 0, Type: FileTypeDirectory, ModTime: 1700000000.0},
@@ -355,7 +355,7 @@ func TestList_UnknownFileType_Filtered(t *testing.T) {
 
 func TestList_AllUnknownTypes_ReturnsEmptySlice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]FileEntry{
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{
 			{Name: "link1", Size: 10, Type: "symlink", ModTime: 1700000000.0},
 			{Name: "pipe1", Size: 0, Type: "pipe", ModTime: 1700000000.0},
 		})

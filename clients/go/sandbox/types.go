@@ -50,6 +50,9 @@ var (
 	ErrSandboxDeleted   = errors.New("sandbox was deleted before becoming ready")
 	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
 	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
+	// ErrUnsupportedByRuntime is returned by operations the selected
+	// runtime cannot perform (e.g. Delete on the legacy python-runtime).
+	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 
 // HTTPError represents a non-OK HTTP response from the sandbox.
@@ -137,10 +140,46 @@ const (
 	FileTypeDirectory FileType = "directory"
 )
 
-// FileEntry represents a file or directory entry in the sandbox.
+// FileEntry represents a file or directory entry in the sandbox. It is
+// runtime-neutral: the SDK decodes the legacy wire format (mod_time as a
+// float POSIX timestamp) and the sandboxd wire format (modified_at as an
+// RFC 3339 string, plus mode) into this one shape.
 type FileEntry struct {
+	Name    string
+	Size    int64
+	Type    FileType
+	ModTime time.Time
+	// Mode holds octal permission bits (e.g. "0644"). Only populated by
+	// the sandboxd runtime; empty on legacy.
+	Mode string
+}
+
+// legacyFileEntry is the python-runtime wire format for a listing entry.
+type legacyFileEntry struct {
 	Name    string   `json:"name"`
 	Size    int64    `json:"size"`
 	Type    FileType `json:"type"`
 	ModTime float64  `json:"mod_time"`
+}
+
+// sandboxdFileEntry is the sandboxd wire format for a listing entry, per
+// packages/sandboxd/spec/filesystem/v1/filesystem.yaml.
+type sandboxdFileEntry struct {
+	Name       string   `json:"name"`
+	Size       int64    `json:"size"`
+	Type       FileType `json:"type"`
+	ModifiedAt string   `json:"modified_at"`
+	Mode       string   `json:"mode,omitempty"`
+}
+
+// sandboxdDirectoryListing wraps sandboxd listing entries.
+type sandboxdDirectoryListing struct {
+	Path    string              `json:"path"`
+	Entries []sandboxdFileEntry `json:"entries"`
+}
+
+// sandboxdAPIError is the error body sandboxd returns on non-2xx responses.
+type sandboxdAPIError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

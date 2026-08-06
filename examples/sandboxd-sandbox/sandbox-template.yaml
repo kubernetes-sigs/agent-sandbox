@@ -1,0 +1,61 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SandboxTemplate running the sandboxd portable runtime daemon (KEP-539.2)
+# as a sidecar next to an (unmodified) workload container. The two share the
+# /workspace volume; the workload reaches sandboxd over pod loopback and
+# discovers it via the SANDBOXD_* env vars.
+#
+# SDK access: sandboxd binds 127.0.0.1 only, so it is not reachable through
+# the sandbox-router. External SDK clients use pod port-forward mode
+# (Go: Runtime: RuntimeSandboxd; Python: SandboxdPodTunnelConnectionConfig).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sandboxd-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      securityContext:
+        # Ensure the shared emptyDir is writable by the non-root runtime user.
+        fsGroup: 1000
+      containers:
+        - name: sandboxd
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080  # REST filesystem + probes
+            - containerPort: 9090  # gRPC ProcessService
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        - name: workload
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep infinity"]
+          env:
+            - name: SANDBOXD_GRPC_ADDR
+              value: "localhost:9090"
+            - name: SANDBOXD_REST_ADDR
+              value: "localhost:8080"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workspace
+          emptyDir: {}

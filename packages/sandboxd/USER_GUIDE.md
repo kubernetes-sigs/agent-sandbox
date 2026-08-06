@@ -229,6 +229,46 @@ resp, _ := client.Execute(ctx, &processv1.ExecuteRequest{
 fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
 ```
 
+## Agent Sandbox SDK access
+
+The Go and Python SDKs speak sandboxd directly. Because sandboxd binds
+loopback-only inside the pod, the SDKs connect via a **port-forward straight
+to the sandbox pod** (both `:8080` and `:9090`) rather than through the
+sandbox-router — filesystem calls go over REST, `Run` goes over gRPC.
+
+> **Router limitation:** the sandbox-router cannot currently reach sandboxd
+> (it dials the pod IP and is HTTP/1.1-only, while sandboxd is loopback +
+> gRPC). Gateway/router access to sandboxd is a follow-up requiring router
+> h2c support and a non-loopback bind option.
+
+**Go** — select the runtime via `Options`:
+
+```go
+sb, _ := sandbox.New(ctx, sandbox.Options{
+    WarmPoolName: "my-pool",
+    Runtime:      sandbox.RuntimeSandboxd, // pod port-forward; REST + gRPC
+})
+_ = sb.Open(ctx)
+_ = sb.Write(ctx, "src/main.py", code)         // PUT /v1/files/...
+res, _ := sb.Run(ctx, "python3 src/main.py")   // gRPC ProcessService.Execute
+_ = sb.Delete(ctx, "src", true)                // sandboxd-only
+```
+
+**Python** — select the runtime via the connection config:
+
+```python
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
+with client.claim("my-pool") as sandbox:
+    sandbox.files.write("src/main.py", code)      # PUT /v1/files/...
+    result = sandbox.commands.run("python3 src/main.py")  # gRPC Execute
+    sandbox.files.delete("src", recursive=True)   # sandboxd-only
+```
+
+The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[grpc]`.
+
 ## Security model
 
 - **Network containment:** both ports bind to `127.0.0.1` only; external

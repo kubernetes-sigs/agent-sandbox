@@ -13,7 +13,8 @@
 # limitations under the License.
 
 import re
-from typing import Literal, Union
+from datetime import datetime, timezone
+from typing import Literal, Optional, Union
 from pydantic import BaseModel, field_validator
 
 class ExecutionResult(BaseModel):
@@ -23,11 +24,39 @@ class ExecutionResult(BaseModel):
     exit_code: int = -1  # Exit code of the command.
 
 class FileEntry(BaseModel):
-    """Represents a file or directory entry in the sandbox."""
-    name: str # Name of the file.
+    """Represents a file or directory entry in the sandbox.
+
+    Runtime-neutral: the SDK decodes both the legacy python-runtime wire
+    format (``mod_time`` as a float POSIX timestamp) and the sandboxd wire
+    format (``modified_at`` as an RFC 3339 string, plus ``mode``) into this
+    one shape. ``modified`` is always a timezone-aware datetime.
+    """
+    name: str  # Name of the file.
     size: int  # Size of the file in bytes.
     type: Literal["file", "directory"]  # Type of the entry (file or directory).
-    mod_time: float # Last modification time of the file. (POSIX timestamp)
+    modified: datetime  # Last modification time (timezone-aware).
+    mode: Optional[str] = None  # Octal permission bits (sandboxd only), e.g. "0644".
+
+    @classmethod
+    def from_legacy(cls, entry: dict) -> "FileEntry":
+        """Build from the legacy python-runtime listing entry."""
+        return cls(
+            name=entry["name"],
+            size=entry["size"],
+            type=entry["type"],
+            modified=datetime.fromtimestamp(entry.get("mod_time", 0), tz=timezone.utc),
+        )
+
+    @classmethod
+    def from_sandboxd(cls, entry: dict) -> "FileEntry":
+        """Build from a sandboxd DirectoryListing entry."""
+        return cls(
+            name=entry["name"],
+            size=entry["size"],
+            type=entry["type"],
+            modified=datetime.fromisoformat(entry["modified_at"].replace("Z", "+00:00")),
+            mode=entry.get("mode"),
+        )
 
 class SandboxDirectConnectionConfig(BaseModel):
     """Configuration for connecting directly to a Sandbox URL."""
@@ -54,6 +83,25 @@ class SandboxLocalTunnelConnectionConfig(BaseModel):
             raise ValueError("Invalid Kubernetes namespace name format")
         return v
 
+class SandboxdPodTunnelConnectionConfig(BaseModel):
+    """Configuration for the sandboxd runtime via a direct pod port-forward.
+
+    sandboxd binds loopback-only inside the pod (KEP-539.2), so it is not
+    reachable through the sandbox-router. This config port-forwards directly
+    to the sandbox pod, exposing both listeners: the Filesystem & Runtime
+    REST API and the gRPC ProcessService.
+    """
+    rest_port: int = 8080  # sandboxd REST filesystem port on the pod.
+    grpc_port: int = 9090  # sandboxd gRPC ProcessService port on the pod.
+    port_forward_ready_timeout: int = 30  # Seconds to wait for port-forward readiness.
+
+    @field_validator("rest_port", "grpc_port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        if v < 1 or v > 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return v
+
 class SandboxInClusterConnectionConfig(BaseModel):
     """Configuration for direct in-cluster connection to the sandbox pod, bypassing the router.
 
@@ -68,6 +116,7 @@ SandboxConnectionConfig = Union[
     SandboxGatewayConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 ]
 
 class SandboxTracerConfig(BaseModel):

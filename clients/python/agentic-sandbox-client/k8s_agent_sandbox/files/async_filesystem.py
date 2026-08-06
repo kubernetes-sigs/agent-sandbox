@@ -105,7 +105,7 @@ class AsyncFilesystem:
             return []
 
         try:
-            file_entries = [FileEntry(**e) for e in entries]
+            file_entries = [FileEntry.from_legacy(e) for e in entries]
         except Exception as e:
             raise RuntimeError(
                 f"Server returned invalid file entry format: {entries}"

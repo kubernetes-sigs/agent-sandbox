@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: managed-sandbox-example-controller
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: managed-sandbox-example-controller
+rules:
+- apiGroups:
+  - examples.agents.x-k8s.io
+  resources:
+  - managedsandboxes
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - examples.agents.x-k8s.io
+  resources:
+  - managedsandboxes/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - pods
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: managed-sandbox-example-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: managed-sandbox-example-controller
+subjects:
+- kind: ServiceAccount
+  name: managed-sandbox-example-controller
+  namespace: default

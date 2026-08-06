@@ -1,0 +1,128 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package agentsandbox.worker.v1;
+
+option go_package = "sigs.k8s.io/agent-sandbox/examples/managed-sandbox/clients/agentsandbox/worker/v1;workerv1";
+
+// WorkerService runs inside the bubblewrap sandbox. It is exposed only
+// over the per-tenant Unix socket bind-mounted into the sandbox by the
+// pod-agent; nothing outside the sandbox needs this API.
+//
+// The pod-agent is the sole client. End users do not talk to this API
+// directly — they hit the pod-agent's HTTP/SSH proxy which translates to
+// the worker.
+service WorkerService {
+  // Ping is a cheap liveness check. Worker returns its own pid and start
+  // time so the pod-agent can detect a worker restart inside an otherwise
+  // healthy-looking sandbox.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Exec runs a command inside the sandbox and streams its stdout/stderr.
+  // The final stream message carries the exit status. Stdin is not yet
+  // supported; that will be added when SSH lands.
+  rpc Exec(ExecRequest) returns (stream ExecResponse);
+
+  // OpenShell starts an interactive shell inside the sandbox under a
+  // freshly-allocated PTY. The client sends Start exactly once as the
+  // first frame, then Stdin/Resize/Eof frames; the server streams
+  // Stdout/Stderr/Exit. Used by the pod-agent's SSH server.
+  rpc OpenShell(stream OpenShellRequest) returns (stream OpenShellResponse);
+}
+
+message PingRequest {}
+
+message PingResponse {
+  int64 pid = 1;
+  // start_time_unix_micros is the worker process's start time in Unix
+  // microseconds. Stable across the worker's lifetime; changes only after
+  // a restart.
+  int64 start_time_unix_micros = 2;
+}
+
+message ExecRequest {
+  // argv[0] is the program to run; argv[1..] are its arguments. The
+  // worker performs no shell parsing.
+  repeated string argv = 1;
+
+  // env is appended to the worker's own environment. Keys here override
+  // the inherited values.
+  map<string, string> env = 2;
+
+  // cwd is the working directory inside the sandbox. Empty means use the
+  // worker's cwd (typically the workspace mount path).
+  string cwd = 3;
+}
+
+message ExecResponse {
+  oneof kind {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    ExecExit exit = 3;
+  }
+}
+
+message ExecExit {
+  // exit_code is the process exit code. -1 means the process was killed
+  // by a signal (see `signal`).
+  int32 exit_code = 1;
+  // signal is the terminating signal number, or 0 if the process exited
+  // normally.
+  int32 signal = 2;
+}
+
+// OpenShellRequest is the client→worker direction of the OpenShell bidi
+// stream. The first frame on the stream MUST set `start`; subsequent
+// frames carry stdin bytes or window resizes.
+message OpenShellRequest {
+  oneof kind {
+    OpenShellStart start = 1;
+    bytes stdin = 2;
+    OpenShellResize resize = 3;
+    // eof closes the slave's stdin side. The shell typically exits soon
+    // after.
+    bool eof = 4;
+  }
+}
+
+message OpenShellStart {
+  // argv to exec inside the sandbox. Empty → use `["/bin/bash","-l"]`.
+  repeated string argv = 1;
+  // env entries to set/override (PATH, TERM, etc.).
+  map<string, string> env = 2;
+  // cwd to chdir into before exec. Empty → worker's cwd.
+  string cwd = 3;
+  // Initial PTY size. 0/0 → use kernel defaults.
+  uint32 cols = 4;
+  uint32 rows = 5;
+}
+
+message OpenShellResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+// OpenShellResponse is the worker→client direction of the bidi stream.
+message OpenShellResponse {
+  oneof kind {
+    // Stdout and stderr are merged into `stdout` because the shell's
+    // controlling tty unifies them; `stderr` is reserved for future
+    // non-PTY exec.
+    bytes stdout = 1;
+    bytes stderr = 2;
+    ExecExit exit = 3;
+  }
+}

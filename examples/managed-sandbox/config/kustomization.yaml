@@ -1,0 +1,4 @@
+resources:
+- managedsandbox-crd.yaml
+- rbac.yaml
+- controller-deployment.yaml

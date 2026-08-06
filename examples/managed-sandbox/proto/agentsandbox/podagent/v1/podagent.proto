@@ -1,0 +1,125 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package agentsandbox.podagent.v1;
+
+option go_package = "sigs.k8s.io/agent-sandbox/examples/managed-sandbox/clients/agentsandbox/podagent/v1;podagentv1";
+
+// PodAgentService is the in-pod component that hosts bubblewrap-isolated
+// tenants inside a shared pool pod. The agent-sandbox controller is its
+// only client; users interact with the controller's Kubernetes CRD, not
+// this API.
+//
+// Idempotency: every RPC keyed by sandbox_uid is idempotent — re-issuing
+// CreateSandbox with the same uid returns the existing handle, and
+// DeleteSandbox is a no-op if the sandbox is unknown.
+service PodAgentService {
+  // CreateSandbox launches (or reattaches to) a bubblewrap tenant for the
+  // given Sandbox UID. The base rootfs is the pool pod's mounted image;
+  // the per-tenant overlay upper directory lives on the pool PVC.
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+
+  // GetSandbox returns the current observed state of one tenant. Returns
+  // NOT_FOUND if the uid is unknown.
+  rpc GetSandbox(GetSandboxRequest) returns (GetSandboxResponse);
+
+  // DeleteSandbox stops the tenant and reclaims runtime resources. The
+  // overlay upper directory on the pool PVC is intentionally retained for
+  // future resume; storage GC is the controller's responsibility.
+  rpc DeleteSandbox(DeleteSandboxRequest) returns (DeleteSandboxResponse);
+
+  // ListSandboxes returns every tenant the agent knows about. Used by the
+  // controller after pod-agent restart to reconcile drift between CR
+  // status and observed kernel state.
+  rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+}
+
+message CreateSandboxRequest {
+  // sandbox_uid is the Sandbox CR UID and the primary key for idempotency.
+  string sandbox_uid = 1;
+
+  // sandbox_name is the namespaced name "namespace/name" of the CR.
+  // Carried for logs and tracing only; never used as an identifier.
+  string sandbox_name = 2;
+
+  // image_reference is the OCI reference of the base rootfs. Supplied for
+  // cross-checking with the pool pod's mounted image. The agent rejects
+  // requests whose image does not match its own mount.
+  string image_reference = 3;
+
+  // workspace_mount_path is where the per-tenant overlay upper is exposed
+  // inside the sandbox. Defaults to "/home" if empty.
+  string workspace_mount_path = 4;
+
+  // session_token is a high-entropy secret (32 random bytes, hex-encoded)
+  // the controller generated for this Sandbox. The pod-agent stores it in
+  // memory and uses it as the SSH password (with username = sandbox_uid).
+  // Empty disables SSH for this tenant.
+  string session_token = 5;
+}
+
+message CreateSandboxResponse {
+  string sandbox_uid = 1;
+  SandboxState state = 2;
+}
+
+message GetSandboxRequest {
+  string sandbox_uid = 1;
+}
+
+message GetSandboxResponse {
+  SandboxState state = 1;
+}
+
+message DeleteSandboxRequest {
+  string sandbox_uid = 1;
+}
+
+message DeleteSandboxResponse {}
+
+message ListSandboxesRequest {}
+
+message ListSandboxesResponse {
+  repeated SandboxState sandboxes = 1;
+}
+
+// Phase enumerates the runtime states a tenant can be in. Matches the
+// pool.Phase string set in the Go controller.
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_CREATING = 1;
+  PHASE_RUNNING = 2;
+  PHASE_STOPPING = 3;
+  PHASE_STOPPED = 4;
+  PHASE_FAILED = 5;
+}
+
+message SandboxState {
+  string sandbox_uid = 1;
+  Phase phase = 2;
+
+  // exit_code is set when phase is STOPPED or FAILED; unset otherwise.
+  // -1 represents "process was killed" cases where no normal exit code
+  // was available.
+  optional int32 exit_code = 3;
+
+  // reason is a short, machine-parseable token (e.g. "PodAgentLost",
+  // "OOMKilled"). Empty in healthy steady states.
+  string reason = 4;
+
+  // message is a human-readable explanation. Empty in healthy steady states.
+  string message = 5;
+}

@@ -1,0 +1,9 @@
+apiVersion: examples.agents.x-k8s.io/v1alpha1
+kind: ManagedSandbox
+metadata:
+  name: smoke
+spec:
+  image:
+    reference: docker.io/library/debian:bookworm-slim
+  workspace:
+    mountPath: /home

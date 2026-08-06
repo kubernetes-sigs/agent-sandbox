@@ -1,0 +1,60 @@
+# Per-template allowlist: FQDN egress with wildcards
+# (GKE FQDNNetworkPolicy).
+#
+# Covers: CUJ SAND-EGRESS-4b (fully qualified domain name including wildcards).
+#
+# Why FQDNNetworkPolicy and not CiliumNetworkPolicy.toFQDNs:
+#   - On GKE Dataplane v2, Google ships FQDNNetworkPolicy
+#     (networking.gke.io/v1alpha1) as the supported FQDN egress primitive.
+#     It is a GKE wrapper around Cilium's DNS proxy, but with GKE-managed DNS
+#     handling so the user does NOT need to add a separate DNS-intercept rule.
+#   - Cilium's native toFQDNs in CiliumNetworkPolicy is not the documented
+#     path on GKE DPv2 and may not behave as expected with the managed Cilium.
+#
+# REQUIRES on GKE Dataplane v2: opt in to the FQDNNetworkPolicy CRD.
+#
+#   gcloud container clusters update <cluster> --location <region> \
+#     --enable-fqdn-network-policy
+#
+# Verify with `kubectl api-resources | grep fqdnnetworkpolicies`.
+#
+# Limits to know about (per GKE FQDNNetworkPolicy docs):
+#   - Only kube-dns or Cloud DNS for GKE are supported as the cluster DNS.
+#     Custom CoreDNS deployments are not supported.
+#   - At most 50 resolved IP addresses per FQDNNetworkPolicy. Wildcard patterns
+#     that fan out to many IPs (e.g. *.googleapis.com) can hit this.
+#   - Traffic to ClusterIP / Headless Services is not allowed as an egress
+#     destination — GKE translates the VIP to a Pod IP before policy
+#     evaluation. Use a separate NetworkPolicy with podSelector for in-cluster
+#     destinations.
+#   - CNAMEs are not resolved through. You must allow the underlying A/AAAA
+#     hostname the CNAME points at.
+#   - DNS lookups themselves (nslookup, dig) are NOT filtered by this policy.
+#     Only connections to the resolved IPs are filtered.
+#
+# Combined with default-deny-egress(-netpol).yaml and an FQDNNetworkPolicy:
+# egress is allowed if EITHER policy permits it — there is no hierarchy
+# between standard NetworkPolicy and FQDNNetworkPolicy, both are checked
+# in parallel and union'd.
+apiVersion: networking.gke.io/v1alpha1
+kind: FQDNNetworkPolicy
+metadata:
+  name: my-agent-sandbox-allow-fqdn
+  namespace: agent-sandbox-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: my-agent-sandbox
+  egress:
+    - matches:
+        # Wildcards for whole API surfaces.
+        - pattern: "*.googleapis.com"
+        - pattern: "*.pypi.org"
+        # Exact hostnames where wildcards would be too broad.
+        - name: "files.pythonhosted.org"
+        - name: "registry.npmjs.org"
+        - name: "api.openai.com"
+        - name: "api.anthropic.com"
+      ports:
+        - protocol: TCP
+          port: 443

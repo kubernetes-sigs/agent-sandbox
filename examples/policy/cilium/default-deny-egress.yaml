@@ -1,0 +1,73 @@
+# Cluster-wide default-deny posture for every agent-sandbox Pod (CCNP variant).
+#
+# Covers: CUJ SAND-EGRESS-1, plus a matching ingress floor.
+#
+# REQUIRES on GKE Dataplane v2: the CiliumClusterwideNetworkPolicy (CCNP) CRD
+# is opt-in. Enable it on the cluster BEFORE applying this manifest:
+#
+#   gcloud container clusters update <cluster> --location <region> \
+#     --enable-cilium-clusterwide-network-policy
+#
+# Verify with `kubectl api-resources | grep ciliumclusterwidenetworkpolicies`.
+# If you do not want to opt into the CCNP CRD, apply
+# default-deny-egress-netpol.yaml instead — it uses standard Kubernetes
+# NetworkPolicy and has none of the GKE schema quirks described below.
+#
+# Why this CCNP looks the way it does (GKE-specific schema):
+#   - GKE's CCNP CRD REQUIRES `spec.ingress` to be present (upstream Cilium
+#     makes it optional). The presence of an `ingress` section automatically
+#     flips selected pods into default-deny ingress mode, so we can't ship a
+#     "pure egress floor" CCNP on GKE — this CCNP necessarily becomes a
+#     bi-directional floor.
+#   - GKE's schema also rejects a CCNP whose spec contains only `endpoint
+#     Selector` + `enableDefaultDeny`; at least one of `ingress` / `egress` /
+#     `ingressDeny` / `egressDeny` must contain a real rule (anyOf
+#     constraint).
+#   - For the same selected pods, multiple policies union allow rules. The
+#     ingress allow below pairs cleanly with agent-sandbox's standard
+#     posture (sandbox-router is the only ingress source). The egress allow
+#     opens only cluster DNS; per-template policies (allowlist-cidr,
+#     allowlist-fqdn) and the egress-gateway NetworkPolicy open holes for
+#     real destinations.
+#
+# How it works:
+#   - The agent-sandbox controller injects the label
+#     `agents.x-k8s.io/sandbox-template-ref-hash` onto every Pod it creates
+#     from a SandboxTemplate. We use `Exists` so this CCNP matches every
+#     sandbox Pod in the cluster regardless of template.
+#   - Without other policies attached, the only egress allowed is DNS, and
+#     the only ingress allowed is sandbox-router. Per-template allow
+#     policies union additional allows.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: agent-sandbox-default-deny
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: agents.x-k8s.io/sandbox-template-ref-hash
+        operator: Exists
+  ingress:
+    # Allow ingress only from the agent-sandbox sandbox-router. Matches the
+    # built-in NetworkPolicy posture documented in
+    # examples/policy/network-policy-management/. If your deployment does not
+    # use sandbox-router, replace this with your own ingress source (or
+    # remove this CCNP and use default-deny-egress-netpol.yaml).
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: agent-sandbox-demo
+            app: sandbox-router
+  egress:
+    # Allow only cluster DNS. Per-template allow policies open holes for the
+    # real egress destinations.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+        - ports:
+            - port: "53"
+              protocol: TCP

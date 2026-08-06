@@ -1,0 +1,57 @@
+# Deliberately non-compliant SandboxTemplates used to verify the
+# `restrict-template-egress` ValidatingAdmissionPolicy is firing.
+#
+# Apply this manifest to a namespace labeled
+# `agent-sandbox.x-k8s.io/restrict-public-egress=true`. Admission should
+# REJECT BOTH templates with the policy's message:
+#
+#   kubectl apply -n agent-sandbox-demo -f restrict-template-egress-test.yaml
+#
+# Expected:
+#   - test-public-egress (explicit 0.0.0.0/0 in egress) → rejected
+#   - test-managed-nil-networkpolicy (Managed default + omitted
+#     spec.networkPolicy → controller would generate a Secure Default
+#     with public-internet egress) → rejected
+#
+# Tip: use `--dry-run=server` to exercise admission without persisting
+# anything (the policy still fires; nothing is created even on success):
+#
+#   kubectl apply -n agent-sandbox-demo --dry-run=server -f restrict-template-egress-test.yaml
+#
+# If admission accepts either manifest, either:
+#   - the namespace is not opted into the policy (check the label), OR
+#   - the ValidatingAdmissionPolicy resource itself is missing (verify with
+#     `kubectl get validatingadmissionpolicy restrict-template-egress`).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: test-public-egress
+spec:
+  networkPolicy:
+    egress:
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+  podTemplate:
+    spec:
+      containers:
+        - name: agent
+          image: busybox
+---
+# This SandboxTemplate omits spec.networkPolicy entirely. Under the
+# default spec.networkPolicyManagement: Managed, the controller would
+# generate a Secure Default policy whose egress permits the public
+# internet (0.0.0.0/0 except RFC1918 + metadata server, plus ::/0).
+# The VAP must reject this at admission so the implicit Secure Default
+# never materializes - otherwise the most common template shape (no
+# explicit networkPolicy) would slip past CUJ SAND-EGRESS-5.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: test-managed-nil-networkpolicy
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: agent
+          image: busybox

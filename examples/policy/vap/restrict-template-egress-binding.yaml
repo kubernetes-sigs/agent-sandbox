@@ -1,0 +1,24 @@
+# Binding for restrict-template-egress-policy.yaml.
+#
+# Scopes the policy to namespaces explicitly labeled
+# `agent-sandbox.x-k8s.io/restrict-public-egress=true`. Without that label,
+# the policy is inert in the namespace — so enabling enforcement is an
+# explicit, per-namespace admin opt-in.
+#
+# Label a namespace with:
+#   kubectl label namespace <ns> agent-sandbox.x-k8s.io/restrict-public-egress=true
+#
+# To apply globally instead, replace `namespaceSelector` with an empty
+# selector (matchLabels: {}); to exclude specific namespaces, use the
+# matchExpressions form (compare secure-sandbox-binding.yaml).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: restrict-template-egress
+spec:
+  policyName: restrict-template-egress
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        agent-sandbox.x-k8s.io/restrict-public-egress: "true"

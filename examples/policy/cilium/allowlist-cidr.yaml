@@ -1,0 +1,88 @@
+# Per-template allowlist: direct egress to a known internal destination
+# (standard Kubernetes NetworkPolicy).
+#
+# Covers: CUJ SAND-EGRESS-4a (IP and subnet range, with protocol and port).
+#
+# The CUJ literally says "IP and subnet range" — see the commented ipBlock
+# variant below for that form. In practice on GKE Dataplane v2, pod IPs are
+# not stable, so podSelector/namespaceSelector (which match by pod identity
+# regardless of IP) is the idiomatic shape for in-cluster destinations.
+# Both forms satisfy the CUJ; pick whichever matches your destination shape.
+#
+# Why standard NetworkPolicy instead of CiliumNetworkPolicy:
+#   - On GKE Dataplane v2, both work for L3/L4. Standard NetworkPolicy needs
+#     no opt-in flag, CNP needs --enable-cilium-clusterwide-network-policy.
+#   - CNP would only earn its keep here if you needed Cilium-specific
+#     selectors (FQDN, entity selectors, identity-based matching). For FQDN
+#     see allowlist-fqdn.yaml.
+#
+# Selection: pods carrying `app: my-agent-sandbox`, which is set at template
+# level in the SandboxTemplate's podTemplate.metadata.labels.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-agent-sandbox-allow-cidr
+  namespace: agent-sandbox-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: my-agent-sandbox
+  policyTypes:
+    - Egress
+  egress:
+    # Echo server (deployed by test-targets.yaml). Used for the EGRESS-4a
+    # verify steps in README §6. In production, swap this for the labels
+    # of your internal Postgres / artifact registry / etc.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: echo
+      ports:
+        - protocol: TCP
+          port: 80
+
+    # ipBlock form, for destinations outside the cluster (or stable
+    # IPs/CIDRs inside it). Uncomment and edit when you have a real target.
+    # - to:
+    #     - ipBlock:
+    #         cidr: 10.20.30.40/32   # internal Postgres
+    #   ports:
+    #     - protocol: TCP
+    #       port: 5432
+    # - to:
+    #     - ipBlock:
+    #         cidr: 10.50.0.0/16     # internal artifact registry subnet
+    #   ports:
+    #     - protocol: TCP
+    #       port: 443
+
+    # Cluster DNS — needed by anything in the pod that resolves names
+    # (including the kubelet-injected /etc/resolv.conf). Without this,
+    # standard NetworkPolicy's default-deny floor blocks DNS itself.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # GKE NodeLocal DNSCache — per-node DNS proxy at a link-local IP that
+    # fronts kube-dns. Default-on for Autopilot, opt-in via
+    # --addons NodeLocalDNS on Standard. When the sandbox's resolv.conf
+    # nameserver is 169.254.20.10 (check inside the pod), the kube-dns
+    # podSelector rule above is NOT enough — traffic to the link-local IP
+    # needs its own ipBlock allow. Harmless on clusters not using
+    # NodeLocal DNS.
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

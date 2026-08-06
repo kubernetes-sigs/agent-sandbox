@@ -261,3 +261,74 @@ You should see the test spin up a local API server, apply the policy, and reject
 PASS
 ok      sigs.k8s.io/agent-sandbox/examples/policy/vap   7.481s
 ```
+
+---
+
+# Restrict Template Public Egress (VAP)
+
+A second, narrower policy in this directory rejects any `SandboxTemplate` whose `spec.networkPolicy.egress` allows public-internet egress (`0.0.0.0/0` or `::/0`). It's the admission-time guardrail behind CUJ SAND-EGRESS-5 in [`examples/policy/cilium/README.md`](../cilium/README.md): the intent is to force public-bound sandbox traffic through a forward proxy (see [`examples/policy/cilium/egress-gateway.yaml`](../cilium/egress-gateway.yaml)) rather than allowing the SandboxTemplate's built-in egress to grant unrestricted internet.
+
+Files:
+- [`restrict-template-egress-policy.yaml`](restrict-template-egress-policy.yaml) — the `ValidatingAdmissionPolicy`. CEL expression that rejects any egress rule with `ipBlock.cidr` of `0.0.0.0/0` or `::/0`.
+- [`restrict-template-egress-binding.yaml`](restrict-template-egress-binding.yaml) — the binding. **Namespace-scoped opt-in**: enforcement only applies to namespaces labeled `agent-sandbox.x-k8s.io/restrict-public-egress=true`. Without that label the policy is inert, which makes rollout safe (label your hardened namespaces, leave dev/test alone).
+
+## Scope and limits
+
+- **Validates `SandboxTemplate` only.** Sibling policies for raw `NetworkPolicy`, `CiliumNetworkPolicy`, `CiliumClusterwideNetworkPolicy`, and `FQDNNetworkPolicy` follow the same shape but each Kind needs its own `ValidatingAdmissionPolicy` because CEL can't usefully match across unrelated schemas. Add them as you need.
+- **Strict reading of "no public egress."** Any rule allowing `0.0.0.0/0` is rejected, even if `except:` ranges narrow it. The shipped Cilium example's [`sandboxtemplate-defense-in-depth.yaml`](../cilium/sandboxtemplate-defense-in-depth.yaml) would be rejected by this policy — by design, since the goal is to force the proxy path.
+- **A more permissive variant** that allows `0.0.0.0/0` only when `except:` covers RFC1918 + the metadata server is included as a commented alternative inside [`restrict-template-egress-policy.yaml`](restrict-template-egress-policy.yaml). Swap in if the strict form is too aggressive for your policy.
+
+## Deployment
+
+```bash
+kubectl apply -f restrict-template-egress-policy.yaml
+kubectl apply -f restrict-template-egress-binding.yaml
+
+# Opt the namespace in.
+kubectl label namespace agent-sandbox-demo \
+  agent-sandbox.x-k8s.io/restrict-public-egress=true
+```
+
+## Testing & verification
+
+Without the opt-in label, nothing is enforced — applying a SandboxTemplate with `0.0.0.0/0` egress succeeds. After labeling the namespace, the same Template is rejected at admission with the policy's `message`.
+
+```bash
+# Should be REJECTED in an opted-in namespace:
+cat <<EOF | kubectl apply -n agent-sandbox-demo -f -
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: public-egress-template
+spec:
+  networkPolicy:
+    egress:
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+  podTemplate:
+    spec:
+      containers:
+        - name: agent
+          image: busybox
+EOF
+# expect:
+# Error from server: error when creating "STDIN": admission webhook denied the request:
+#   ValidatingAdmissionPolicy 'restrict-template-egress' with binding 'restrict-template-egress' denied request:
+#   SandboxTemplate.spec.networkPolicy.egress must not allow 0.0.0.0/0 or ::/0. ...
+
+# Should SUCCEED — the same template with no networkPolicy (delegating to Unmanaged + external policy):
+cat <<EOF | kubectl apply -n agent-sandbox-demo -f -
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: gateway-only-template
+spec:
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    spec:
+      containers:
+        - name: agent
+          image: busybox
+EOF
+```

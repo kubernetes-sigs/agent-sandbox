@@ -1,0 +1,469 @@
+# Named egress gateway: forward-proxy Deployment that all sandbox egress
+# routes through via HTTPS_PROXY. Holds upstream credentials in a Kubernetes
+# Secret that is mounted ONLY on the gateway pod — sandboxes have no
+# access to it. Optionally terminates TLS (ssl_bump) for selected
+# destinations to enable header injection and URL/path filtering on HTTPS.
+#
+# Covers:
+#   - CUJ SAND-EGRESS-2  (named "Agent Gateway"; fail-closed because the
+#                         default-deny floor blocks any egress that bypasses
+#                         the proxy; the only allowed egress destination is
+#                         the gateway service itself. The dynamic per-claim
+#                         gateway-selection half — USE_CALLER_GATEWAY /
+#                         GATEWAY_PATH — is NOT shipped; see README §9.)
+#   - CUJ SAND-EGRESS-3  (coarse half — upstream APIs IAM-allowlist the
+#                         gateway's GSA via GKE Workload Identity; the
+#                         gateway is the single egress identity for all
+#                         sandboxes routed through it. Per-agent identity
+#                         needs upstream agent-sandbox work; see README §9.)
+#   - CUJ SAND-EGRESS-4c (URL/path filtering — for plaintext HTTP via
+#                         urlpath_regex ACLs; for HTTPS via ssl_bump
+#                         (configured below) which terminates TLS for
+#                         specific targets so Squid can see the request URL.
+#                         Targets that are NOT bumped get splice
+#                         (passthrough); their TLS goes end-to-end and
+#                         Squid only sees the SNI.)
+#   - CUJ SAND-AUTH-1    (creds bound to identity, never visible in sandbox:
+#                         (a) GKE Workload Identity on the gateway SA for
+#                             upstreams that accept GCP OAuth tokens,
+#                         (b) a Kubernetes Secret with static bearer tokens
+#                             mounted on the gateway initContainer for
+#                             upstreams that use API keys,
+#                         (c) Squid request_header_add directives inject
+#                             bearer tokens — on plaintext HTTP always, and
+#                             on bumped HTTPS, and
+#                         (d) sandbox pods have automountServiceAccountToken
+#                             false and no other path to either credential).
+#
+# Why a forward proxy instead of CiliumEgressGatewayPolicy:
+#   CiliumEgressGatewayPolicy is NOT supported on GKE Dataplane v2 (it
+#   requires self-managed Cilium, which conflicts with GKE's managed Cilium).
+#   A forward-proxy Deployment provides the same "named gateway, stable
+#   identity" outcome and additionally enables L7 features that Cilium on
+#   GKE DPv2 cannot do (URL/path filtering, credential injection).
+#
+# SECURITY WARNING — TLS interception (ssl_bump)
+#   ssl_bump terminates TLS at the proxy for any destination matched by the
+#   `bump_targets` ACL. For those destinations:
+#     - The proxy can see all request/response data, including headers,
+#       URLs, body, and credentials.
+#     - The sandbox must trust the gateway's CA, so anyone who controls
+#       that CA's private key can impersonate any bumped destination to
+#       the sandbox.
+#     - For destinations NOT in `bump_targets`, Squid uses `splice`
+#       (passthrough) — TLS is end-to-end and the proxy sees only the SNI.
+#   Bump intentionally and narrowly; do not bump entire wildcards.
+#
+# REPLACE BEFORE APPLYING:
+#   - PROJECT_ID with your GCP project ID (in the SA annotation below)
+#   - The Google Service Account email
+#   - INTERNAL_API_BEARER in the Secret with your real upstream API key
+#     (or wire in ExternalSecrets / GCP Secret Manager for production)
+#   - The Squid allowed_hosts.txt and bump_targets ACL with your real lists
+#
+# BEFORE APPLYING — create the CA out-of-band. See README §7.5 for the
+# openssl + kubectl create commands. The Squid container mounts the Secret
+# `egress-gateway-ca` (kubernetes.io/tls); sandboxes mount the ConfigMap
+# `gateway-ca-bundle` from `agent-sandbox-demo`.
+#
+# Apply order: this file's resources need to exist BEFORE sandboxes start, so
+# their HTTPS_PROXY env points at a working service.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-sandbox-egress
+
+---
+# KSA bound to a GSA via GKE Workload Identity. For upstreams that accept GCP
+# OAuth tokens (Vertex AI, GCS, BigQuery, etc.), the gateway can call them
+# directly using the GSA — no static credentials needed.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: egress-gateway
+  namespace: agent-sandbox-egress
+  annotations:
+    iam.gke.io/gcp-service-account: egress-gateway@PROJECT_ID.iam.gserviceaccount.com
+
+---
+# Static upstream credentials for APIs that use bearer tokens / API keys
+# rather than GCP OAuth. NEVER mounted into sandbox pods — only the gateway
+# initContainer reads this.
+#
+# For production, source these from ExternalSecrets / GCP Secret Manager /
+# Vault rather than committing values directly.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: egress-gateway-credentials
+  namespace: agent-sandbox-egress
+type: Opaque
+stringData:
+  # Used by the example request_header_add directive in the Squid template
+  # below for the `internal_api` ACL. Add more keys for additional upstreams.
+  INTERNAL_API_BEARER: "REPLACE_ME_internal_api_bearer_token"
+
+---
+# Squid config TEMPLATE. Placeholders like ${INTERNAL_API_BEARER} get
+# substituted by the initContainer at pod start, using values from the Secret
+# above. The resulting rendered config lives in an emptyDir volume on the
+# gateway pod and is what Squid actually reads — the unrendered template is
+# what's committed here, so this manifest never contains real credentials.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: egress-gateway-config
+  namespace: agent-sandbox-egress
+data:
+  squid.conf.template: |
+    # Listen on 3128 for plain HTTP and HTTPS-via-CONNECT. The ssl-bump
+    # options enable TLS interception for destinations matched by the
+    # `bump_targets` ACL below; everything else gets `splice` (passthrough,
+    # TLS stays end-to-end).
+    http_port 3128 ssl-bump \
+      generate-host-certificates=on \
+      dynamic_cert_mem_cache_size=4MB \
+      tls-cert=/etc/squid/ca/tls.crt \
+      tls-key=/etc/squid/ca/tls.key
+
+    # Helper that generates per-destination server certs on the fly, signed
+    # by our CA. The ssl_db cache is initialized by the init-ssl-db
+    # initContainer; Squid writes to it at runtime.
+    sslcrtd_program /usr/lib/squid/security_file_certgen \
+      -s /var/cache/squid/ssl_db -M 4MB
+
+    # Use Squid's default log paths (/var/log/squid/{access,cache}.log) which
+    # the squid-openssl package pre-creates with `proxy` ownership.
+    # Writing logs to stdio:/dev/stderr fails on this image because Squid
+    # drops worker privileges to the `proxy` user on startup, and the
+    # container's /dev/stderr is owned by the root that invoked PID 1 —
+    # the worker can't write to it after the privilege drop. To view
+    # access logs:
+    #   kubectl exec -n agent-sandbox-egress deploy/egress-gateway -- \
+    #     tail -f /var/log/squid/access.log
+    cache deny all
+
+    # ACLs.
+    acl SSL_ports port 443
+    acl Safe_ports port 80 443
+    acl CONNECT method CONNECT
+    acl allowed_hosts dstdomain "/etc/squid/allowed_hosts.txt"
+
+    # Production credential-injection destinations. The request_header_add
+    # directive below injects ${INTERNAL_API_BEARER} (sourced from the
+    # `egress-gateway-credentials` Secret) on requests matching this ACL.
+    # ONLY put trusted internal hostnames here — anything in this list
+    # receives the bearer token in cleartext (post-bump for HTTPS).
+    # Note: Squid's DNS resolver does NOT iterate /etc/resolv.conf search
+    # domains the way glibc does, so use the full FQDN here rather than the
+    # short form.
+    acl internal_api dstdomain echo.agent-sandbox-demo.svc.cluster.local
+
+    # Demo/verification destinations — explicitly separate from internal_api
+    # so the production bearer token is never sent to an external host.
+    # httpbin.org echoes request headers back, which lets the §7.5 verify
+    # steps prove that ssl_bump + header injection actually work end-to-end
+    # without leaking a real credential.
+    acl verify_httpbin dstdomain httpbin.org
+
+    # Destinations to TLS-intercept (bump). Squid will terminate TLS for
+    # these and re-encrypt to the upstream, allowing path filtering and
+    # header injection on HTTPS. Everything else gets `splice all` below.
+    # Bump narrowly — anything you bump grants the proxy full visibility.
+    acl bump_targets ssl::server_name httpbin.org
+
+    # URL/path ACLs. These fire on plaintext HTTP requests AND on the
+    # decrypted HTTP requests inside bumped HTTPS tunnels. For splice'd
+    # destinations the request is opaque to Squid and these don't apply.
+    acl httpbin_blocked_path urlpath_regex ^/anything/blocked
+    acl httpbin_allowed_path urlpath_regex ^/(get|post|status|headers|anything)(/|$)
+
+    # ssl_bump pipeline: at step 1, peek at the TLS ClientHello (extracts
+    # SNI). If the SNI matches bump_targets, terminate TLS at step 2;
+    # otherwise splice (passthrough).
+    acl step1 at_step SslBump1
+    ssl_bump peek step1
+    ssl_bump bump bump_targets
+    ssl_bump splice all
+
+    # http_access rules. Order matters — deny rules first.
+    http_access deny !Safe_ports
+    http_access deny CONNECT !SSL_ports
+    # Deny known-bad paths on bumped HTTPS destinations.
+    http_access deny bump_targets httpbin_blocked_path
+    # Allow everything else that's in the host allowlist.
+    http_access allow allowed_hosts
+    http_access deny all
+
+    # Production: inject the bearer token from the Secret for internal_api
+    # destinations only. Fires on plaintext HTTP AND on bumped HTTPS
+    # destinations (because Squid sees the inner HTTP request after
+    # terminating the TLS). Spliced destinations are still opaque.
+    request_header_add Authorization "Bearer ${INTERNAL_API_BEARER}" internal_api
+
+    # Demo/verification: inject a clearly-non-credential header for httpbin
+    # so the verify steps in README §7.5 can prove the injection mechanism
+    # works on a public test endpoint WITHOUT shipping a real bearer there.
+    # When you replace INTERNAL_API_BEARER in the Secret with a real token,
+    # this rule keeps that token away from httpbin.org.
+    request_header_add X-Demo-Injection "verify-only-not-a-credential" verify_httpbin
+
+    # Disable client trust of any forwarded headers from sandboxes.
+    forwarded_for delete
+    via off
+
+  allowed_hosts.txt: |
+    .googleapis.com
+    .pypi.org
+    files.pythonhosted.org
+    registry.npmjs.org
+    api.openai.com
+    api.anthropic.com
+    # Verify target for AUTH-1 plaintext injection (see test-targets.yaml).
+    # Use the FULL FQDN — Squid's DNS does not append search domains.
+    echo.agent-sandbox-demo.svc.cluster.local
+    # Verify target for EGRESS-4c HTTPS path filtering and AUTH-1 HTTPS
+    # injection. httpbin.org echoes request headers/path back; combined with
+    # the bump_targets ACL above, Squid intercepts its TLS so we can see
+    # path and inject headers.
+    httpbin.org
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-gateway
+  namespace: agent-sandbox-egress
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: egress-gateway
+  template:
+    metadata:
+      labels:
+        app: egress-gateway
+    spec:
+      serviceAccountName: egress-gateway
+      initContainers:
+        # 1. Render the Squid config template with credential placeholders
+        # substituted from the Secret. Env vars on this initContainer are
+        # scoped to its lifetime — the main Squid container does NOT inherit
+        # them, so `kubectl exec gateway -- printenv` will not leak.
+        - name: render-config
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              cp /etc/squid-template/allowed_hosts.txt /rendered/allowed_hosts.txt
+              # Using sed instead of envsubst (not in busybox). Pre-escape
+              # any sed-replacement-meaningful characters in the bearer
+              # token (\, &, |) so a token containing these characters
+              # doesn't corrupt the rendered squid.conf. Without this
+              # escaping, a bearer like "abc|def" would break the sed
+              # expression and either fail the substitution or worse
+              # produce an invalid Squid config.
+              ESCAPED_BEARER=$(printf '%s' "${INTERNAL_API_BEARER}" \
+                | sed -e 's/[\\&|]/\\&/g')
+              sed \
+                -e "s|\${INTERNAL_API_BEARER}|${ESCAPED_BEARER}|g" \
+                /etc/squid-template/squid.conf.template > /rendered/squid.conf
+          env:
+            - name: INTERNAL_API_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: egress-gateway-credentials
+                  key: INTERNAL_API_BEARER
+          volumeMounts:
+            - name: config-template
+              mountPath: /etc/squid-template
+              readOnly: true
+            - name: rendered-config
+              mountPath: /rendered
+
+        # 2. Initialize Squid's per-destination cert cache for ssl_bump.
+        # security_file_certgen creates the directory structure and DB files
+        # that Squid writes per-site certs into. Must be writable by the
+        # `proxy` user (UID 13 in this image).
+        - name: init-ssl-db
+          # Built from examples/policy/cilium/gateway/Dockerfile. Canonical's
+          # ubuntu/squid image is built against GnuTLS and lacks the
+          # security_file_certgen helper required for ssl_bump (see README §7.5).
+          image: us-docker.pkg.dev/vicenteferrara-gke-dev/gateway/squid:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              rm -rf /var/cache/squid/ssl_db
+              /usr/lib/squid/security_file_certgen -c \
+                -s /var/cache/squid/ssl_db -M 4MB
+              chown -R proxy:proxy /var/cache/squid/ssl_db
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: ssl-db
+              mountPath: /var/cache/squid
+
+      containers:
+        - name: squid
+          # Built from examples/policy/cilium/gateway/Dockerfile. Canonical's
+          # ubuntu/squid image is built against GnuTLS and lacks the
+          # security_file_certgen helper required for ssl_bump (see README §7.5).
+          image: us-docker.pkg.dev/vicenteferrara-gke-dev/gateway/squid:latest
+          ports:
+            - containerPort: 3128
+              name: proxy
+          volumeMounts:
+            # Mount the rendered (post-substitution) config, not the template.
+            - name: rendered-config
+              mountPath: /etc/squid/squid.conf
+              subPath: squid.conf
+              readOnly: true
+            - name: rendered-config
+              mountPath: /etc/squid/allowed_hosts.txt
+              subPath: allowed_hosts.txt
+              readOnly: true
+            # CA cert + key for ssl_bump signing. The Secret is admin-created
+            # out-of-band — see README §7.5.
+            - name: ca-cert
+              mountPath: /etc/squid/ca
+              readOnly: true
+            # Per-destination cert cache, populated at runtime by Squid.
+            - name: ssl-db
+              mountPath: /var/cache/squid
+          readinessProbe:
+            tcpSocket:
+              port: proxy
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: proxy
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: config-template
+          configMap:
+            name: egress-gateway-config
+        # emptyDir holds the rendered config produced by the initContainer.
+        - name: rendered-config
+          emptyDir: {}
+        # CA for TLS interception. Admin-created kubernetes.io/tls Secret;
+        # see README §7.5 for openssl + kubectl create commands.
+        - name: ca-cert
+          secret:
+            secretName: egress-gateway-ca
+        # Cache for per-site server certs Squid generates at runtime.
+        - name: ssl-db
+          emptyDir: {}
+
+---
+# Stable in-cluster DNS for sandboxes to point HTTPS_PROXY at.
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-gateway
+  namespace: agent-sandbox-egress
+spec:
+  selector:
+    app: egress-gateway
+  ports:
+    - name: proxy
+      port: 3128
+      targetPort: proxy
+      protocol: TCP
+
+---
+# Allow sandbox pods (in agent-sandbox-demo) to reach the gateway service
+# (in agent-sandbox-egress) AND cluster DNS. The default-deny floor blocks
+# cross-namespace egress by default; this opens just the proxy port plus DNS.
+#
+# DNS is REQUIRED here, not optional: a NetworkPolicy with `policyTypes:
+# [Egress]` selecting a pod puts the pod into default-deny egress for the
+# whole pod. Without an explicit DNS allow rule, the sandbox can't resolve
+# the proxy hostname (`egress-gateway.agent-sandbox-egress.svc`) and curl
+# fails with "Could not resolve proxy". Adding DNS here keeps this policy
+# self-sufficient: applying just egress-gateway.yaml + a SandboxTemplate
+# gives a working proxy path without depending on another policy
+# (default-deny-egress / allowlist-cidr) for DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-agent-sandbox-allow-egress-gateway
+  namespace: agent-sandbox-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: my-agent-sandbox
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-sandbox-egress
+          podSelector:
+            matchLabels:
+              app: egress-gateway
+      ports:
+        - protocol: TCP
+          port: 3128
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # GKE NodeLocal DNSCache: a per-node DNS proxy that fronts kube-dns,
+    # listening on a link-local address. Always present on GKE Autopilot;
+    # optional on GKE Standard (enabled via --addons NodeLocalDNS or
+    # cluster-add-ons config). When the sandbox's resolv.conf nameserver
+    # points at this address (check with `cat /etc/resolv.conf` in the pod),
+    # the kube-dns podSelector rule above is NOT enough — traffic to the
+    # link-local IP needs its own ipBlock allow. Harmless to ship even on
+    # clusters not using NodeLocal DNS.
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Reciprocal ingress rule on the gateway side: only sandbox pods may talk to
+# the proxy. Prevents random workloads in the cluster from using it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-gateway-allow-sandboxes
+  namespace: agent-sandbox-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: egress-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-sandbox-demo
+          podSelector:
+            matchLabels:
+              app: my-agent-sandbox
+      ports:
+        - protocol: TCP
+          port: 3128

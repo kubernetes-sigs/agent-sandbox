@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -296,7 +297,18 @@ func main() {
 			metricsOpts.ExtraHandlers["/debug/pprof/block"] = pprof.Handler("block")
 			metricsOpts.ExtraHandlers["/debug/pprof/mutex"] = pprof.Handler("mutex")
 			metricsOpts.ExtraHandlers["/debug/pprof/trace"] = http.HandlerFunc(pprof.Trace)
-			metricsOpts.ExtraHandlers["/debug/fgprof"] = fgprof.Handler()
+			// Wrap fgprof handler with mutex to reject concurrent profiling requests,
+			// aligning with pprof CPU profiling behavior.
+			var fgprofMu sync.Mutex
+			fgprofHandler := fgprof.Handler()
+			metricsOpts.ExtraHandlers["/debug/fgprof"] = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !fgprofMu.TryLock() {
+					http.Error(w, "Could not enable fgprof profiling: fgprof profiling already in use", http.StatusInternalServerError)
+					return
+				}
+				defer fgprofMu.Unlock()
+				fgprofHandler.ServeHTTP(w, r)
+			})
 		}
 	}
 

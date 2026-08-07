@@ -23,7 +23,7 @@ challenge:
     can host.
 
 This benchmark rigorously evaluates how **GKE Local NVMe SSD Swap** combined
-with `agent-sandbox` enables nodes to host up to **120% more active agent sandboxes for native `runc`** (scaling from 100 to 220 sandboxes) and **100% more for secure `gvisor`** (scaling from 80 to 160 sandboxes) on the exact same physical hardware footprint without latency degradation.
+with `agent-sandbox` enables nodes to host up to **120% more active agent sandboxes for native `runc`** (scaling from 100 to 220 sandboxes) and **100% more for secure `gvisor`** (scaling from 80 to 160 sandboxes) on the exact same physical hardware footprint.
 
 ---
 
@@ -164,8 +164,7 @@ RUNTIME_CLASS="gvisor" POOLS="lssd-swap-pool" DENSITIES="140" ./run_pythonsandbo
 1.  **120% Density Boost (100 -> 220 Sandboxes @ 100% Pass Rate):**
     *   **Without Swap (`baseline-pool`):** Hits a hard physical wall at 100 sandboxes, failing at 120.
     *   **With Local NVMe SSD Swap (`lssd-swap-pool`):** Scales cleanly all the way to **220 concurrent sandboxes (100% Pass Rate)**, offloading **`35.03 GB`** of dormant memory out to disk while maintaining **1.16s bare-metal execution speed**!
-2.  **Zero Memory Stall Pressure up to 220 Density:** Memory stall pressure (`mem_psi`) remains minimal (under 20s cumulative across all 220 pods during startup), preserving sub-second execution responsiveness.
-
+2.  **Low Memory Stall Pressure up to 220 Density:** Memory stall pressure (`mem_psi`) remains minimal (under 20s cumulative during startup), preserving fast execution responsiveness (1.16s average, 2.55s P99 at 220 density).
 ### B. Secure `gvisor` (`runsc`) Performance & Sentry Swapability
 1.  **100% Density Boost (80 -> 160 Sandboxes @ 100% Pass Rate):**
     *   **Without Swap (`gvisor-baseline-pool`):** Fails at 100 sandboxes (70/100 pass, 30 pods OOM Killed) because each gVisor pod uses `~441 MB` of RAM (375 MB Pandas DataFrame + **~65 MB Sentry user-space kernel RAM**), causing memory demand to exceed the physical RAM limit.

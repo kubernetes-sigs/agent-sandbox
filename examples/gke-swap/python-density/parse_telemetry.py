@@ -21,8 +21,10 @@ import sys
 
 
 def process_telemetry(csv_path: str, json_path: str) -> None:
-    if not (os.path.exists(csv_path) and os.path.exists(json_path)):
-        return
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Telemetry CSV file not found: {csv_path}")
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Density metrics JSON file not found: {json_path}")
 
     metrics_min = {}
     metrics_max = {}
@@ -102,5 +104,7 @@ def process_telemetry(csv_path: str, json_path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3:
-        process_telemetry(sys.argv[1], sys.argv[2])
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <resource_profile.csv> <density_metrics.json>", file=sys.stderr)
+        sys.exit(1)
+    process_telemetry(sys.argv[1], sys.argv[2])

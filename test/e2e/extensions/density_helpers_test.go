@@ -30,8 +30,8 @@ var (
 	runPerfLoadTest  = flag.Bool("run-perf-load-test", false, "Whether to run the performance density load test.")
 	nodeName         = flag.String("node-name", "", "The Kubernetes node to schedule sandboxes on. If empty, the first worker node is selected.")
 	density          = flag.Int("density", 20, "The number of pods/sandboxes to provision.")
-	imageTag         = flag.String("image-tag", "latest", "The tag of the Chrome Sandbox image.")
-	imagePrefix      = flag.String("image-prefix", "kind.local/", "The prefix of the Chrome Sandbox image.")
+	imageTag         = flag.String("image-tag", "latest", "The tag of the sandbox image.")
+	imagePrefix      = flag.String("image-prefix", "kind.local/", "The prefix of the sandbox image.")
 	runtimeClassName = flag.String("runtime-class-name", "", "The RuntimeClassName to use for the sandbox pods.")
 )
 

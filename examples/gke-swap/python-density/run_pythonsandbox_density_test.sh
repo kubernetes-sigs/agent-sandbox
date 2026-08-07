@@ -48,13 +48,14 @@ log() {
 cd "${REPO_ROOT}"
 
 # Step 1: Pre-stage MovieLens dataset ONCE on all target nodes under /tmp/movielens
-# Uses an ephemeral Alpine pod mounting host root to download/extract ratings.csv directly onto host disk
+# Uses an ephemeral Alpine pod mounting host root to download/extract ratings.csv directly on?
+to host disk
 log "=== Pre-staging ML-20M dataset on nodes (/tmp/movielens/ratings.csv) ==="
 for pool in ${POOLS}; do
     NODE=$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${pool}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     if [ -n "${NODE}" ]; then
         log "Pre-staging ML-20M dataset on node ${NODE}..."
-        kubectl run "prestager-${pool}" --image=alpine --restart=Never --overrides="{
+        if ! kubectl run "prestager-${pool}" --image=alpine --restart=Never --overrides="{
           \"spec\": {
             \"nodeName\": \"${NODE}\",
             \"containers\": [{
@@ -65,10 +66,18 @@ for pool in ${POOLS}; do
             }],
             \"volumes\": [{\"name\": \"h\", \"hostPath\": {\"path\": \"/\"}}]
           }
-        }" >/dev/null 2>&1 || true
+        }" >/dev/null 2>&1; then
+            log "ERROR: Failed to create prestager pod for node ${NODE}"
+            exit 1
+        fi
         
         # Wait for prestaging pod to finish downloading without attaching stdin
-        kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/prestager-${pool}" --timeout=180s >/dev/null 2>&1 || true
+        if ! kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/prestager-${pool}" --timeout=300s >/dev/null 2>&1; then
+            log "ERROR: Failed to prestage MovieLens dataset on node ${NODE}"
+            kubectl logs "pod/prestager-${pool}" 2>&1 || true
+            kubectl delete "pod/prestager-${pool}" --grace-period=0 --force >/dev/null 2>&1 || true
+            exit 1
+        fi
         kubectl delete "pod/prestager-${pool}" --grace-period=0 --force >/dev/null 2>&1 || true
     fi
 done
@@ -150,9 +159,12 @@ for pool in ${POOLS}; do
             kubectl logs "${MONITOR_POD}" -n default --since="${TEST_DURATION}s" 2>/dev/null | \
               awk -F, -v start="${TEST_START_TIME}" -v end="${TEST_END_TIME}" '$4 >= start && $4 <= end' > "${SWEEP_DIR}/resource_profile.csv" || true
             
-            python3 "${SCRIPT_DIR}/parse_telemetry.py" \
+            if ! python3 "${SCRIPT_DIR}/parse_telemetry.py" \
               "${SWEEP_DIR}/resource_profile.csv" \
-              "${SWEEP_DIR}/TestPythonSandboxDensity/density_metrics.json" || true
+              "${SWEEP_DIR}/TestPythonSandboxDensity/density_metrics.json"; then
+                log "ERROR: Telemetry parser failed for sweep pool=${pool}, density=${density}"
+                FAILED_SWEEPS=$(( FAILED_SWEEPS + 1 ))
+            fi
         fi
 
         log "Completed sweep: Pool=${pool}, Density=${density}"

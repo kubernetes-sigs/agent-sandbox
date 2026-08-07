@@ -1656,6 +1656,169 @@ func TestSandboxClaimTTLAfterFinishedCleanupPolicy(t *testing.T) {
 	}
 }
 
+func TestSandboxClaimWarmPoolDefaultLifecycle(t *testing.T) {
+	scheme := newScheme(t)
+	finishedAt := metav1.NewTime(time.Now().Add(-1 * time.Minute))
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "default-lifecycle-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "default-lifecycle-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "default-lifecycle-template", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{}}},
+	}
+
+	controller := true
+	createSandbox := func(claim *extensionsv1beta1.SandboxClaim, finished bool) *sandboxv1beta1.Sandbox {
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      claim.Name,
+				Namespace: claim.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxClaimKind,
+					Name:       claim.Name,
+					UID:        claim.UID,
+					Controller: &controller,
+				}},
+			},
+			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{}}},
+		}
+		if finished {
+			sb.Status.Conditions = []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionFinished),
+				Status:             metav1.ConditionTrue,
+				Reason:             sandboxv1beta1.SandboxReasonPodSucceeded,
+				LastTransitionTime: finishedAt,
+			}}
+		} else {
+			sb.Status.Conditions = []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "DependenciesReady",
+				LastTransitionTime: finishedAt,
+			}}
+		}
+		return sb
+	}
+
+	testCases := []struct {
+		name               string
+		slug               string
+		lifecycle          *extensionsv1beta1.Lifecycle
+		warmPoolRef        string
+		finished           bool
+		expectClaimDeleted bool
+	}{
+		{
+			name:               "warm pool claim with nil lifecycle is deleted after finish",
+			slug:               "warm-nil-finished",
+			warmPoolRef:        "default-lifecycle-pool",
+			finished:           true,
+			expectClaimDeleted: true,
+		},
+		{
+			name:               "warm pool claim with nil lifecycle stays active before finish",
+			slug:               "warm-nil-active",
+			warmPoolRef:        "default-lifecycle-pool",
+			finished:           false,
+			expectClaimDeleted: false,
+		},
+		{
+			name: "warm pool claim with explicit Retain is not overridden",
+			slug: "warm-retain",
+			lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
+			},
+			warmPoolRef:        "default-lifecycle-pool",
+			finished:           true,
+			expectClaimDeleted: false,
+		},
+		{
+			name:               "non-warm-pool claim with nil lifecycle stays immortal",
+			slug:               "no-pool-nil",
+			warmPoolRef:        "",
+			finished:           true,
+			expectClaimDeleted: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: tc.slug, Namespace: "default", UID: types.UID(tc.slug)},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: tc.warmPoolRef},
+					Lifecycle:   tc.lifecycle,
+				},
+			}
+			if tc.finished {
+				claim.Status.Conditions = []metav1.Condition{{
+					Type:               string(sandboxv1beta1.SandboxConditionFinished),
+					Status:             metav1.ConditionTrue,
+					Reason:             sandboxv1beta1.SandboxReasonPodSucceeded,
+					LastTransitionTime: finishedAt,
+				}}
+			}
+
+			sandbox := createSandbox(claim, tc.finished)
+			objs := []client.Object{claim, sandbox, template}
+			if tc.warmPoolRef != "" {
+				objs = append(objs, warmPool)
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(objs...).
+				WithStatusSubresource(claim).
+				Build()
+
+			reconciler := &SandboxClaimReconciler{
+				Client:           fakeClient,
+				Scheme:           scheme,
+				Recorder:         events.NewFakeRecorder(10),
+				Tracer:           asmetrics.NewNoOp(),
+				WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+			}
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+
+			// First reconcile: sets Expired condition (if applicable).
+			_, err := reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+
+			// Second reconcile: acts on the policy.
+			_, err = reconciler.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+
+			updatedClaim := &extensionsv1beta1.SandboxClaim{}
+			getErr := fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim)
+			if tc.expectClaimDeleted {
+				require.True(t, k8errors.IsNotFound(getErr),
+					"expected claim to be deleted, but it still exists")
+			} else {
+				require.NoError(t, getErr,
+					"expected claim to still exist")
+				if tc.lifecycle == nil {
+					require.Nil(t, updatedClaim.Spec.Lifecycle,
+						"effective lifecycle default must not be persisted to claim.Spec")
+				} else {
+					require.Equal(t, tc.lifecycle.ShutdownPolicy, updatedClaim.Spec.Lifecycle.ShutdownPolicy,
+						"explicit lifecycle policy must be preserved after reconciliation")
+				}
+				if !tc.finished {
+					expiredCond := meta.FindStatusCondition(updatedClaim.Status.Conditions,
+						string(sandboxv1beta1.SandboxConditionReady))
+					if expiredCond != nil {
+						require.NotEqual(t, extensionsv1beta1.ClaimExpiredReason, expiredCond.Reason,
+							"active claim must not be marked expired")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
 	scheme := newScheme(t)
 	ttlZero := int32(0)

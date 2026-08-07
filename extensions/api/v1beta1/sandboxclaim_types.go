@@ -155,6 +155,14 @@ type SandboxStatus struct {
 	// A pod may have multiple IPs in dual-stack clusters.
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
+
+	// serviceFQDN is the in-cluster DNS name of the bound Sandbox's service,
+	// mirrored from the Sandbox's status.serviceFQDN so consumers can reach
+	// the sandbox from the claim alone. Like name and podIPs, it is eventually
+	// consistent: it may lag the Sandbox by a reconcile, and is cleared when
+	// the claim loses its sandbox.
+	// +optional
+	ServiceFQDN string `json:"serviceFQDN,omitempty"`
 }
 
 // +genclient

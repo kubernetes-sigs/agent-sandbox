@@ -1,0 +1,116 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: box-a
+spec:
+  # No K8s credential in the pod at all — the agent's only credential is
+  # the scoped token minted for this sandbox by mint-token, verified by
+  # sandbox-router's --authz-mode=scoped-token. Nothing in this pod ever
+  # needs to call the K8s API.
+  podTemplate:
+    metadata:
+      # A label we control, so the headless Service below can select this
+      # pod. (The controller also stamps agents.x-k8s.io/sandbox-name-hash,
+      # but its value is a hash we can't name in a static manifest.)
+      labels:
+        router-scoped-mcp/sandbox: box-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: mcp
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: mcp
+          containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        readinessProbe:
+          # TCP, not httpGet: the streamable-http MCP endpoint answers a
+          # plain GET (no SSE Accept header) with 406, which an HTTP
+          # probe would count as failure forever.
+          tcpSocket:
+            port: mcp
+          initialDelaySeconds: 2
+          periodSeconds: 2
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+---
+# Headless Service so the router can resolve box-a by its
+# (namespace, name) DNS name — box-a.default.svc.cluster.local.
+# Scoped-token mode rejects the X-Sandbox-UID cache fast-path and the
+# X-Sandbox-Pod-IP override, because either could send a valid box-a
+# token to a different pod; only resolution keyed on (namespace, name)
+# survives, which keeps the dial target equal to what the token
+# authorizes. The router prefers its cache's (namespace, name) index —
+# same key, same guarantee — and falls back to this DNS name when the
+# cache is disabled or hasn't seen the pod yet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: box-a
+spec:
+  clusterIP: None
+  selector:
+    router-scoped-mcp/sandbox: box-a
+  ports:
+  - name: mcp
+    port: 8000
+    targetPort: mcp
+---
+# The MCP server itself has no authentication: the scoped token is
+# checked by sandbox-router, not by mcp_server.py. So the token boundary
+# only holds as long as the router is the only way to reach port 8000 —
+# otherwise any pod in the cluster dials the Pod IP directly and gets
+# unauthenticated read/write on this sandbox's PVC.
+#
+# This policy makes the router the sole ingress path. It is what lets
+# the example claim a credential boundary rather than just a
+# credential-checking proxy in front of an open port.
+#
+# Enforcement is the CNI's job, and kind's default kindnetd does not
+# enforce NetworkPolicy in every version — run-test-kind.sh therefore
+# applies this but does not assert it. On a cluster with an enforcing
+# CNI (Calico, Cilium, kindnet with its NetworkPolicy support enabled),
+# a direct dial to port 8000 from any non-router pod times out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: box-a-router-only
+spec:
+  podSelector:
+    matchLabels:
+      router-scoped-mcp/sandbox: box-a
+  policyTypes: ["Ingress"]
+  ingress:
+  # Matches the pod labels sandbox-router/deploy/deployment.yaml stamps
+  # on the router pods. Both boxes and the router live in `default`
+  # here, so a podSelector alone is the whole rule; across namespaces
+  # this needs a namespaceSelector for the router's namespace too.
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: sandbox-router
+          app.kubernetes.io/component: sandbox-router
+    ports:
+    - protocol: TCP
+      port: 8000

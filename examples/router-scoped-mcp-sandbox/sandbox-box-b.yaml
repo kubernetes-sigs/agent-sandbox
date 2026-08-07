@@ -1,0 +1,88 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: box-b
+spec:
+  # Identical to box-a (sandbox.yaml) — a second sandbox to prove a token
+  # minted for box-a is rejected here with 403. See "Run it" step 5.
+  podTemplate:
+    metadata:
+      labels:
+        router-scoped-mcp/sandbox: box-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: mcp
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: mcp
+          containerPort: 8000
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        readinessProbe:
+          # TCP, not httpGet: the streamable-http MCP endpoint answers a
+          # plain GET (no SSE Accept header) with 406, which an HTTP
+          # probe would count as failure forever.
+          tcpSocket:
+            port: mcp
+          initialDelaySeconds: 2
+          periodSeconds: 2
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: box-b
+spec:
+  clusterIP: None
+  selector:
+    router-scoped-mcp/sandbox: box-b
+  ports:
+  - name: mcp
+    port: 8000
+    targetPort: mcp
+---
+# Router-only ingress, same as box-a's — see sandbox.yaml for why the
+# token boundary depends on it. Note this also stops box-a's pod from
+# reaching box-b's MCP port directly: the 403 the scoping test asserts
+# is the router refusing to proxy, and this keeps that from being
+# routable around at the network layer either.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: box-b-router-only
+spec:
+  podSelector:
+    matchLabels:
+      router-scoped-mcp/sandbox: box-b
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: sandbox-router
+          app.kubernetes.io/component: sandbox-router
+    ports:
+    - protocol: TCP
+      port: 8000

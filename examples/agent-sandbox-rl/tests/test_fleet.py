@@ -516,3 +516,42 @@ def test_reap_deletes_by_run_id_selector(monkeypatch):
   res.delete_sandbox.assert_any_call("sb1")
   res.delete_warmpool.assert_any_call("wp1")
   assert counts["sandboxes"] == 2 and counts["claims"] == 1
+
+
+def test_unwarm_images_batch_and_error_propagation(make_cluster):
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(max_concurrent=8), registry=ClusterRegistry([c]))
+  f.load_tasks(["i1", "i2", "i3"])
+  f.warm_image("i1", replicas_override=2)
+  f.warm_image("i2", replicas_override=3)
+  f.warm_image("i3", replicas_override=4)
+  assert c.active_replicas == 9
+
+  # Test batch unwarm
+  f.unwarm_images(["i1", "i2"])
+  assert c.active_replicas == 4
+  assert "i1" not in f._warmed and "i2" not in f._warmed
+  assert "i3" in f._warmed
+
+  # Test error propagation and _warmed restoration
+  c.resources.delete_warmpool.side_effect = RuntimeError("k8s api failure")
+  with pytest.raises(RuntimeError, match="k8s api failure"):
+    f.unwarm_images(["i3"])
+  # i3 is restored in _warmed and replicas are NOT released on error
+  assert "i3" in f._warmed
+  assert c.active_replicas == 4
+
+
+def test_unwarm_image_failure_restores_warmed(make_cluster):
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(max_concurrent=8), registry=ClusterRegistry([c]))
+  f.load_tasks(["i1"])
+  f.warm_image("i1", replicas_override=2)
+  assert c.active_replicas == 2
+
+  c.resources.delete_warmpool.side_effect = RuntimeError("network error")
+  with pytest.raises(RuntimeError, match="network error"):
+    f.unwarm_image("i1")
+  assert "i1" in f._warmed
+  assert c.active_replicas == 2
+

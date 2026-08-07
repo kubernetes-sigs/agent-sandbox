@@ -657,6 +657,48 @@ class SandboxFleet:
       raise KeyError(f"image not in plan: {image}")
     self._warm_entry(entry, wait, replicas_override=replicas_override)
 
+  def unwarm_images(self, images) -> None:
+    """Tear down a subset of images' pools + templates concurrently."""
+    plan = self.plan_ or self.plan()
+    images = list(dict.fromkeys(images))
+    resolved = [(img, plan.for_image(img)) for img in images]
+    entries = [e for _img, e in resolved if e is not None]
+    if not entries:
+      return
+    workers = max(1, min(len(entries), self.config.max_concurrent))
+    if workers == 1 or len(entries) == 1:
+      for e in entries:
+        self._unwarm_entry(e)
+      return
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+      futures = [ex.submit(self._unwarm_entry, e) for e in entries]
+      err = None
+      for f in as_completed(futures):
+        try:
+          f.result()
+        except BaseException as exc:  # noqa: BLE001 — surface first
+          logger.exception("Failed to unwarm entry: %s", exc)
+          err = err or exc
+      if err is not None:
+        raise err
+
+  def _unwarm_entry(self, entry) -> None:
+    """Tear down a single plan entry's warm pool and template, releasing replicas."""
+    with self._lock:
+      if entry.image not in self._warmed:
+        return                                 # already unwarmed — don't double-release
+      reps = self._warmed.pop(entry.image)
+    c = self.registry.get(entry.cluster)
+    try:
+      c.resources.delete_warmpool(entry.pool)
+      c.resources.delete_template(entry.template)
+    except BaseException:
+      with self._lock:
+        self._warmed[entry.image] = reps
+      raise
+    c.release_replicas(reps)
+    self._obs.warm_remove(entry.cluster, reps)
+
   def unwarm_image(self, image: str) -> None:
     """Tear down one image's pool + template. **Idempotent**: a no-op if the image
     isn't currently warmed. Two callers can legitimately unwarm the same image —
@@ -668,15 +710,7 @@ class SandboxFleet:
     entry = (self.plan_ or self.plan()).for_image(image)
     if entry is None:
       return                                   # locate the pool before mutating state
-    with self._lock:
-      if image not in self._warmed:
-        return                                 # already unwarmed — don't double-release
-      reps = self._warmed.pop(image)
-    c = self.registry.get(entry.cluster)
-    c.resources.delete_warmpool(entry.pool)
-    c.resources.delete_template(entry.template)
-    c.release_replicas(reps)
-    self._obs.warm_remove(entry.cluster, reps)
+    self._unwarm_entry(entry)
 
   def set_pool_replicas(self, image: str, replicas: int) -> None:
     """Patch an image's warm pool to ``replicas`` (scale up or down) without
@@ -702,21 +736,21 @@ class SandboxFleet:
 
   def prepull(self, wait: bool = True) -> None:
     """Pre-pull each cluster's planned images via a DaemonSet (optional)."""
-    from . import prepull as _pp
+    from .prepull import prepull as _do_prepull
     plan = self.plan_ or self.plan()
     with self._obs.phase("prepull"):
       for cname, entries in plan.by_cluster().items():
         c = self.registry.get(cname)
         ts = c.template_spec(self.config.template)
-        _pp.prepull(c, [e.image for e in entries],
+        _do_prepull(c, [e.image for e in entries],
                     node_selector=ts.node_selector,
                     image_pull_secret=ts.image_pull_secret,
                     labels=self.config.labels, wait=wait)
 
   def prepull_delete(self) -> None:
-    from . import prepull as _pp
+    from .prepull import prepull_delete as _do_prepull_delete
     for c in self.registry:
-      _pp.prepull_delete(c)
+      _do_prepull_delete(c)
 
   def setup(self, prepull: bool = False,
             create_budget: int | None = None) -> "SandboxFleet":
@@ -855,12 +889,16 @@ class SandboxFleet:
       sel = c.resources.managed_selector()
       # Sweep any stray claims first (defensive: untracked/leaked claims keep
       # their adopted sandbox alive even after the pool is gone).
-      for claim in c.resources.list_claims(label_selector=sel):
-        c.resources.delete_claim(claim)
-      for pool in c.resources.list_warmpools(label_selector=sel):
-        c.resources.delete_warmpool(pool)
-      for tmpl in c.resources.list_templates(label_selector=sel):
-        c.resources.delete_template(tmpl)
+      claims = c.resources.list_claims(label_selector=sel)
+      pools = c.resources.list_warmpools(label_selector=sel)
+      tmpls = c.resources.list_templates(label_selector=sel)
+      total_items = len(claims) + len(pools) + len(tmpls)
+      if total_items > 0:
+        workers = min(50, total_items)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+          list(ex.map(c.resources.delete_claim, claims))
+          list(ex.map(c.resources.delete_warmpool, pools))
+          list(ex.map(c.resources.delete_template, tmpls))
       c.reset_counts()
       if delete_namespace:
         try:

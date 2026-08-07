@@ -39,6 +39,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -65,6 +66,205 @@ func sandboxControllerRef(name string) metav1.OwnerReference {
 		Controller:         new(true),
 		BlockOwnerDeletion: new(true),
 	}
+}
+
+func resizeResources(cpu, memory string) corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpu),
+			corev1.ResourceMemory: resource.MustParse(memory),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpu),
+			corev1.ResourceMemory: resource.MustParse(memory),
+		},
+	}
+}
+
+func inPlaceResizeSandbox(resources corev1.ResourceRequirements) *sandboxv1beta1.Sandbox {
+	return &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "resize", Namespace: "default", UID: sandboxUID, Generation: 7},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "workspace", Resources: resources}}},
+			}},
+			ResourceResizePolicy: &sandboxv1beta1.ResourceResizePolicy{Type: sandboxv1beta1.ResourceResizePolicyInPlace},
+		},
+	}
+}
+
+func inPlaceResizePod(resources corev1.ResourceRequirements) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "resize", Namespace: "default", UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{sandboxControllerRef("resize")},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:      "workspace",
+			Resources: resources,
+			ResizePolicy: []corev1.ContainerResizePolicy{
+				{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},
+				{ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.NotRequired},
+			},
+		}}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "workspace", RestartCount: 3, Resources: resources.DeepCopy(),
+			}},
+		},
+	}
+}
+
+func TestReconcileInPlaceResourcesUsesStrategicResizeSubresourceWithoutRestart(t *testing.T) {
+	current := resizeResources("1", "1Gi")
+	desired := resizeResources("2", "2Gi")
+	sandbox := inPlaceResizeSandbox(desired)
+	pod := inPlaceResizePod(current)
+
+	rawClient := newFakeClient()
+	var subresource string
+	var patched *corev1.Pod
+	var patch client.Patch
+	clientWithResize := interceptor.NewClient(rawClient, interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, name string, obj client.Object, gotPatch client.Patch, _ ...client.SubResourcePatchOption) error {
+			subresource = name
+			patched = obj.(*corev1.Pod).DeepCopy()
+			patch = gotPatch
+			return nil
+		},
+	})
+
+	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
+	assert.Equal(t, "resize", subresource)
+	require.NotNil(t, patched)
+	require.NotNil(t, patch)
+	assert.Equal(t, types.StrategicMergePatchType, patch.Type(), "resize must merge containers by name instead of replacing the array")
+	assert.Equal(t, types.UID("pod-uid"), patched.UID, "in-place resize must retain Pod identity")
+	assert.Equal(t, int32(3), patched.Status.ContainerStatuses[0].RestartCount, "in-place resize must not restart the container")
+	assert.True(t, patched.Spec.Containers[0].Resources.Requests.Cpu().Equal(resource.MustParse("2")))
+	assert.True(t, patched.Spec.Containers[0].Resources.Limits.Memory().Equal(resource.MustParse("2Gi")))
+}
+
+func TestSetResourceResizeConditionRetainsTerminalOutcomeUntilDisabled(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	completed := resourceResizeCondition(
+		sandbox,
+		metav1.ConditionTrue,
+		sandboxv1beta1.SandboxReasonResourceResizeCompleted,
+		"CPU and memory resources were resized in place",
+	)
+	setResourceResizeCondition(sandbox, completed)
+	setResourceResizeCondition(sandbox, nil)
+
+	condition := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeCompleted, condition.Reason)
+
+	sandbox.Spec.ResourceResizePolicy = nil
+	setResourceResizeCondition(sandbox, nil)
+	assert.Nil(t, meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize)))
+}
+
+func TestReconcileInPlaceResourcesRejectsRestartContainerPolicy(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	pod.Spec.Containers[0].ResizePolicy[1].RestartPolicy = corev1.RestartContainer
+
+	condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, condition.Reason)
+	assert.Contains(t, condition.Message, "RestartContainer")
+}
+
+func TestReconcileInPlaceResourcesDisabledDoesNotPatchPod(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	sandbox.Spec.ResourceResizePolicy = nil
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+
+	condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	assert.Nil(t, condition)
+	assert.True(t, pod.Spec.Containers[0].Resources.Requests.Cpu().Equal(resource.MustParse("1")), "Disabled must retain the running Pod resources")
+}
+
+func TestReconcileInPlaceResourcesProjectsTerminalPodFailure(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodResizePending, Status: corev1.ConditionFalse, Reason: corev1.PodReasonInfeasible, Message: "node capacity exhausted",
+	}}
+
+	condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeFailed, condition.Reason)
+	assert.Equal(t, "node capacity exhausted", condition.Message)
+}
+
+func TestReconcileInPlaceResourcesProjectsPodResizeInProgress(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	pod := inPlaceResizePod(resizeResources("2", "2Gi"))
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodResizeInProgress, Status: corev1.ConditionTrue, Reason: "Actuating", Message: "kubelet is resizing",
+	}}
+
+	condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeInProgress, condition.Reason)
+	assert.Equal(t, "kubelet is resizing", condition.Message)
+}
+
+func TestReconcileInPlaceResourcesCompletesOnlyAfterKubeletEnactsResources(t *testing.T) {
+	desired := resizeResources("2", "2Gi")
+	sandbox := inPlaceResizeSandbox(desired)
+	sandbox.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionResourceResize), Status: metav1.ConditionUnknown,
+		Reason: sandboxv1beta1.SandboxReasonResourceResizePending,
+	}}
+	pod := inPlaceResizePod(desired)
+	pod.Status.ContainerStatuses[0].Resources = desired.DeepCopy()
+
+	condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeCompleted, condition.Reason)
+}
+
+func TestEnsureRestartFreeResizePoliciesPreservesExplicitRestartPolicy(t *testing.T) {
+	spec := corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "workspace",
+		ResizePolicy: []corev1.ContainerResizePolicy{{
+			ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.RestartContainer,
+		}},
+	}}}
+
+	ensureRestartFreeResizePolicies(&spec)
+	require.Len(t, spec.Containers[0].ResizePolicy, 2)
+	assert.True(t, hasRestartFreeResizePolicy(spec.Containers[0], corev1.ResourceCPU))
+	assert.False(t, hasRestartFreeResizePolicy(spec.Containers[0], corev1.ResourceMemory))
+}
+
+func TestReconcilePodCreatesInPlaceSandboxWithRestartFreePolicies(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("1", "1Gi"))
+	client := newFakeClient(sandbox)
+	reconciler := &SandboxReconciler{Client: client, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pod, err := reconciler.reconcilePod(context.Background(), sandbox, NameHash(sandbox.Name))
+	require.NoError(t, err)
+	require.NotNil(t, pod)
+	require.True(t, hasRestartFreeResizePolicy(pod.Spec.Containers[0], corev1.ResourceCPU))
+	require.True(t, hasRestartFreeResizePolicy(pod.Spec.Containers[0], corev1.ResourceMemory))
 }
 
 func TestComputeConditions(t *testing.T) {

@@ -54,7 +54,7 @@ for pool in ${POOLS}; do
     NODE=$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${pool}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     if [ -n "${NODE}" ]; then
         log "Pre-staging ML-20M dataset on node ${NODE}..."
-        kubectl run --rm "prestager-${pool}" --image=alpine --restart=Never --overrides="{
+        kubectl run "prestager-${pool}" --image=alpine --restart=Never --overrides="{
           \"spec\": {
             \"nodeName\": \"${NODE}\",
             \"containers\": [{
@@ -65,7 +65,11 @@ for pool in ${POOLS}; do
             }],
             \"volumes\": [{\"name\": \"h\", \"hostPath\": {\"path\": \"/\"}}]
           }
-        }" 2>/dev/null || true
+        }" >/dev/null 2>&1 || true
+        
+        # Wait for prestaging pod to finish downloading without attaching stdin
+        kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/prestager-${pool}" --timeout=180s >/dev/null 2>&1 || true
+        kubectl delete "pod/prestager-${pool}" --grace-period=0 --force >/dev/null 2>&1 || true
     fi
 done
 
@@ -146,46 +150,9 @@ for pool in ${POOLS}; do
             kubectl logs "${MONITOR_POD}" -n default --since="${TEST_DURATION}s" 2>/dev/null | \
               awk -F, -v start="${TEST_START_TIME}" -v end="${TEST_END_TIME}" '$4 >= start && $4 <= end' > "${SWEEP_DIR}/resource_profile.csv" || true
             
-            python3 -c "
-import csv, json, os
-
-csv_path = '${SWEEP_DIR}/resource_profile.csv'
-json_path = '${SWEEP_DIR}/TestPythonSandboxDensity/density_metrics.json'
-
-if os.path.exists(csv_path) and os.path.exists(json_path):
-    metrics_min, metrics_max = {}, {}
-    with open(csv_path, 'r') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 3: continue
-            m = row[1].strip()
-            try: v = float(row[2].strip())
-            except ValueError: continue
-            if m not in metrics_min:
-                metrics_min[m], metrics_max[m] = v, v
-            else:
-                if v < metrics_min[m]: metrics_min[m] = v
-                if v > metrics_max[m]: metrics_max[m] = v
-
-    ram_max = round(metrics_max.get('node_memory_working_set_bytes', 0.0)/(1024**3), 2)
-    ram_delta = round((metrics_max.get('node_memory_working_set_bytes', 0.0) - metrics_min.get('node_memory_working_set_bytes', 0.0))/(1024**3), 2)
-    swap_delta = round((metrics_max.get('host_swap_used_bytes', 0.0) - metrics_min.get('host_swap_used_bytes', 0.0))/(1024**3), 2)
-
-    node_telemetry = {
-        'peak_node_ram_gb': ram_max,
-        'net_ram_added_gb': max(ram_delta, 0.0),
-        'net_swap_added_gb': max(swap_delta, 0.0),
-        'kubelet_memory_mb': round(metrics_max.get('kubelet_memory', 0.0)/(1024**2), 1),
-        'containerd_memory_mb': round(metrics_max.get('runtime_memory', 0.0)/(1024**2), 1),
-        'mem_psi_seconds': round(metrics_max.get('host_mem_psi_waiting_seconds_total', 0.0) - metrics_min.get('host_mem_psi_waiting_seconds_total', 0.0), 4),
-        'io_psi_seconds': round(metrics_max.get('host_io_psi_waiting_seconds_total', 0.0) - metrics_min.get('host_io_psi_waiting_seconds_total', 0.0), 4),
-        'cpu_psi_seconds': round(metrics_max.get('host_cpu_psi_waiting_seconds_total', 0.0) - metrics_min.get('host_cpu_psi_waiting_seconds_total', 0.0), 4),
-    }
-
-    with open(json_path, 'r') as f: data = json.load(f)
-    data['node_telemetry_peaks'] = node_telemetry
-    with open(json_path, 'w') as f: json.dump(data, f, indent=2)
-" || true
+            python3 "${SCRIPT_DIR}/parse_telemetry.py" \
+              "${SWEEP_DIR}/resource_profile.csv" \
+              "${SWEEP_DIR}/TestPythonSandboxDensity/density_metrics.json" || true
         fi
 
         log "Completed sweep: Pool=${pool}, Density=${density}"

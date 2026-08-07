@@ -45,6 +45,9 @@ import (
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
 
+// Shared density load testing flags (runPerfLoadTest, density, nodeName, runtimeClassName),
+// AtomicTimeDuration, and helpers (getFirstWorkerNode, hashString) are defined in density_helpers_test.go.
+
 // PythonSandboxMetrics holds timing measurements for the Python sandbox startup and workload execution.
 type PythonSandboxMetrics struct {
 	SandboxReady AtomicTimeDuration `json:"sandbox_ready"`
@@ -268,6 +271,11 @@ func pythonSandboxPerf(namespace, name, nodeName string) *sandboxv1beta1.Sandbox
 								Name:      "benchmark-script",
 								MountPath: "/scripts",
 							},
+							{
+								Name:      "data-vol",
+								MountPath: "/data",
+								ReadOnly:  true,
+							},
 						},
 					}
 				}(),
@@ -283,25 +291,18 @@ func pythonSandboxPerf(namespace, name, nodeName string) *sandboxv1beta1.Sandbox
 						},
 					},
 				},
-			},
-		},
-	}
-	sandbox.Spec.PodTemplate.Spec.Containers[0].VolumeMounts = append(
-		sandbox.Spec.PodTemplate.Spec.Containers[0].VolumeMounts,
-		corev1.VolumeMount{Name: "data-vol", MountPath: "/data", ReadOnly: true},
-	)
-	sandbox.Spec.PodTemplate.Spec.Volumes = append(
-		sandbox.Spec.PodTemplate.Spec.Volumes,
-		corev1.Volume{
-			Name: "data-vol",
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: "movielens-pvc",
-					ReadOnly:  true,
+				{
+					Name: "data-vol",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "movielens-pvc",
+							ReadOnly:  true,
+						},
+					},
 				},
 			},
 		},
-	)
+	}
 	if *runtimeClassName != "" {
 		sandbox.Spec.PodTemplate.Spec.RuntimeClassName = runtimeClassName
 	}

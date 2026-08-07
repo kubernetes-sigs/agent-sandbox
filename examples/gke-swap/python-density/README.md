@@ -68,11 +68,12 @@ with `agent-sandbox` enables nodes to host up to **120% more active agent sandbo
 
 ---
 
-## 2. Repository Layout
+## 2. Related Files
 
+*   **`pythonsandbox_density_test.go`**: Go e2e benchmark test harness located at [`test/e2e/extensions/pythonsandbox_density_test.go`](../../../test/e2e/extensions/pythonsandbox_density_test.go).
 *   **`python_workload.py`**: Python analytical workload script located at [`test/e2e/extensions/python_workload.py`](../../../test/e2e/extensions/python_workload.py).
-*   **`run_pythonsandbox_density_test.sh`**: Fully automated terminal-driven benchmark runner in this directory.
-*   **`README.md`**: Architectural documentation and telemetry benchmarks.
+*   **`run_pythonsandbox_density_test.sh`**: Automated runner script in this directory.
+*   **`parse_telemetry.py`**: Telemetry metrics parser in this directory.
 
 ---
 
@@ -176,9 +177,9 @@ RUNTIME_CLASS="gvisor" POOLS="lssd-swap-pool" DENSITIES="140" ./run_pythonsandbo
 1.  **The Capacity & Throughput Bottleneck (Why 170+ gVisor / 240+ runc Fails):**
     *   **Shared Failure Root Cause:** For both runtimes, failure occurs when total memory demand outpaces `kswapd`'s asynchronous page eviction throughput or exhausts combined physical RAM + Swap partition capacity.
 
-### D. 23x Execution Speedup Mechanics (25.5s -> 1.59s)
+### D. Core Isolation, Deployment Pacing & CPU Overcommitment
 1.  **Core Isolation & Deployment Pacing:**
-    *   **Node Core Isolation (`node-tuner-ds`):** Without node tuning, system daemons competed for CPU against sandbox worker cores, degrading P99 latency to **25.5s** at 120 pods. Running the node tuning daemonset, we achieve a 23x speedup down to **1.59s**. 
-    *   **Orchestrator-Level Staggering:** Moving deployment delays to a 1.0s Go test runner loop provided `kswapd` a continuous 1.0s window per pod to write pages out to the Local NVMe SSD, eliminating Page Cache thrashing storms on boot.
+    *   **Node Core Isolation (`node-tuner-ds`):** Pins Kubelet and containerd system daemons to Cores 0 and 1, preventing system daemons from competing for CPU against sandbox workers and maintaining sub-2-second P99 execution latency at high densities.
+    *   **Orchestrator-Level Staggering:** Moving deployment delays to a 1.0s Go test runner loop provides `kswapd` a continuous 1.0s window per pod to write pages out to the Local NVMe SSD, eliminating Page Cache thrashing storms on boot.
 2.  **Massive CPU Overcommitment (`15m` Requests):**
     *   By lowering the CPU request to `15m` per sandbox, we allow the Kubernetes scheduler to pack hundreds of sandboxes onto an 8-core node. Because the active execution takes only ~1 second and the rest of the time is spent idle, we can safely overcommit CPU limits and rely on the Linux kernel to burst CPU allocation dynamically when a sandbox wakes up. If we don't include a CPU request, the pods schedule infinitely but face catastrophic CPU starvation when computing simultaneously. Without guaranteed `cpu.shares`, execution times skyrocket, causing the benchmark to fail due to execution timeouts.

@@ -759,6 +759,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 	// Forward the condition from Sandbox Status
 	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == string(v1beta1.SandboxConditionReady) {
+			condition.ObservedGeneration = claim.Generation
 			return condition
 		}
 	}

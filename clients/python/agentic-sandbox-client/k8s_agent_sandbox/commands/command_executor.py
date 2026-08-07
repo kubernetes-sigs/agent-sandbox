@@ -78,7 +78,7 @@ class CommandExecutor:
         """
         try:
             import grpc
-            from k8s_agent_sandbox._proto.process.v1 import (
+            from k8s_agent_sandbox.commands._process_stubs import (
                 process_pb2,
                 process_pb2_grpc,
             )
@@ -88,6 +88,11 @@ class CommandExecutor:
                 "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
             ) from e
 
+        # Ensure the pod tunnel is established (and the gRPC target
+        # published) before dialing. connect() is idempotent — it returns the
+        # live tunnel or re-establishes a dead one — so this also handles
+        # gRPC being the first operation and reconnecting after a teardown.
+        self.connector.connect()
         channel = self.connector.grpc_channel()
         stub = process_pb2_grpc.ProcessServiceStub(channel)
         request = process_pb2.ExecuteRequest(

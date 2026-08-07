@@ -531,6 +531,11 @@ class SandboxConnector:
             directly to the caller because requests does not consider them redirects
             and raise_for_status only raises for status codes 400 and above.
         """
+        # allowed_statuses lets a caller treat specific non-2xx codes as a
+        # normal outcome (e.g. HEAD 404 for exists()): the response is
+        # returned as-is instead of raising — which is important because the
+        # raise path also calls self.close() and tears down the connection.
+        allowed_statuses = kwargs.pop("allowed_statuses", None)
         try:
             # Establish connection (re-establishes if closed/dead)
             base_url = self.connect()
@@ -580,6 +585,11 @@ class SandboxConnector:
                     f"Redirection is not allowed (status code {response.status_code}).",
                     response=response,
                 )
+            # Return caller-tolerated statuses without raising (and thus
+            # without closing the connection). Redirects are still rejected
+            # above regardless of allowed_statuses.
+            if allowed_statuses and response.status_code in allowed_statuses:
+                return response
             response.raise_for_status()
             return response
         except SandboxPortForwardError:

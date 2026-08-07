@@ -117,18 +117,25 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(entries[1].type, "directory")
 
     def test_exists_true_on_head_ok(self):
-        self._connector.send_request.return_value = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        self._connector.send_request.return_value = resp
         self.assertTrue(self._fs.exists("present.txt"))
-        args, _ = self._last_call()
+        args, kwargs = self._last_call()
         self.assertEqual(args[0], "HEAD")
         self.assertEqual(args[1], "v1/files/present.txt")
+        # 404 must be passed as an allowed status so the connector does not
+        # raise (and tear down the connection) on a missing file.
+        self.assertIn(404, kwargs["allowed_statuses"])
 
     def test_exists_false_on_head_404(self):
-        self._connector.send_request.side_effect = SandboxRequestError(
-            "not found", status_code=404)
+        resp = MagicMock()
+        resp.status_code = 404
+        self._connector.send_request.return_value = resp
         self.assertFalse(self._fs.exists("absent.txt"))
 
     def test_exists_reraises_non_404(self):
+        # A non-allowed error status still propagates (connector raises).
         self._connector.send_request.side_effect = SandboxRequestError(
             "boom", status_code=500)
         with self.assertRaises(SandboxRequestError):

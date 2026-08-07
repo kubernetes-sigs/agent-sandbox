@@ -29,6 +29,7 @@ from .models import (
     SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
@@ -75,6 +76,13 @@ class AsyncSandboxConnector:
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "or SandboxInClusterConnectionConfig instead. "
                 "For local development, use the synchronous SandboxClient."
+            )
+        if isinstance(connection_config, SandboxdPodTunnelConnectionConfig):
+            raise NotImplementedError(
+                "The async client does not yet support the sandboxd runtime "
+                "(SandboxdPodTunnelConnectionConfig): it needs a port-forward "
+                "subprocess and a gRPC channel. Use the synchronous SandboxClient "
+                "for sandboxd."
             )
 
         self.id = sandbox_id

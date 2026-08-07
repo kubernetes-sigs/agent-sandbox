@@ -236,6 +236,13 @@ loopback-only inside the pod, the SDKs connect via a **port-forward straight
 to the sandbox pod** (both `:8080` and `:9090`) rather than through the
 sandbox-router — filesystem calls go over REST, `Run` goes over gRPC.
 
+> **Where commands run:** `ProcessService` executes commands **inside the
+> `sandboxd` container**, not the workload container. The base `sandboxd`
+> image is minimal (a shell + coreutils), so `Run` can use `sh`, `cat`,
+> `ls`, etc. out of the box; to run a language runtime (e.g. `python3`),
+> build a sandboxd image that includes it. Files written over REST land in
+> the shared `/workspace` volume, visible to both containers.
+
 > **Router limitation:** the sandbox-router cannot currently reach sandboxd
 > (it dials the pod IP and is HTTP/1.1-only, while sandboxd is loopback +
 > gRPC). Gateway/router access to sandboxd is a follow-up requiring router
@@ -249,8 +256,8 @@ sb, _ := sandbox.New(ctx, sandbox.Options{
     Runtime:      sandbox.RuntimeSandboxd, // pod port-forward; REST + gRPC
 })
 _ = sb.Open(ctx)
-_ = sb.Write(ctx, "src/main.py", code)         // PUT /v1/files/...
-res, _ := sb.Run(ctx, "python3 src/main.py")   // gRPC ProcessService.Execute
+_ = sb.Write(ctx, "src/notes.txt", data)       // PUT /v1/files/...
+res, _ := sb.Run(ctx, "cat src/notes.txt")     // gRPC ProcessService.Execute
 _ = sb.Delete(ctx, "src", true)                // sandboxd-only
 ```
 
@@ -262,8 +269,8 @@ from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
 
 client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
 with client.claim("my-pool") as sandbox:
-    sandbox.files.write("src/main.py", code)      # PUT /v1/files/...
-    result = sandbox.commands.run("python3 src/main.py")  # gRPC Execute
+    sandbox.files.write("src/notes.txt", data)    # PUT /v1/files/...
+    result = sandbox.commands.run("cat src/notes.txt")  # gRPC Execute
     sandbox.files.delete("src", recursive=True)   # sandboxd-only
 ```
 

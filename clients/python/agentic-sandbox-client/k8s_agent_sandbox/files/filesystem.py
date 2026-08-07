@@ -19,7 +19,6 @@ import posixpath
 import urllib.parse
 from typing import List
 from k8s_agent_sandbox.connector import SandboxConnector
-from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import trace_span, trace
 
@@ -184,16 +183,13 @@ class Filesystem:
 
         if self.connector.is_sandboxd():
             # sandboxd has no exists endpoint: HEAD answers existence
-            # (200 vs 404) without transferring the body.
-            try:
-                self.connector.send_request(
-                    "HEAD", _sandboxd_files_endpoint(path), timeout=timeout)
-                exists = True
-            except SandboxRequestError as e:
-                if e.status_code == 404:
-                    exists = False
-                else:
-                    raise
+            # (200 vs 404) without transferring the body. 404 is passed via
+            # allowed_statuses so it is returned instead of raising — a raise
+            # would tear down the connection (connector closes on error).
+            response = self.connector.send_request(
+                "HEAD", _sandboxd_files_endpoint(path),
+                timeout=timeout, allowed_statuses={404})
+            exists = response.status_code != 404
             if span.is_recording():
                 span.set_attribute("sandbox.file.exists", exists)
             return exists

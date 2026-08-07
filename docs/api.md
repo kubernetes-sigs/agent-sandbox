@@ -929,6 +929,7 @@ _Appears in:_
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns.<br />Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 | `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.<br />Specifying this field forces a cold start because warm pool pods will not have these volumes. |  | Optional: \{\} <br /> |
+| `workspaceResources` _[WorkspaceResourceOverride](#workspaceresourceoverride) array_ | workspaceResources overrides resource requirements for named PodSpec containers or init containers at claim time.<br />Unset request and limit entries keep the values from the SandboxTemplate.<br />Any non-empty override forces a cold start because warm-pool adoption is skipped for per-claim sizing.<br />Claim writers may override resources independently of the SandboxTemplate; namespace ResourceQuota and LimitRange policies still apply. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
 
 
 #### SandboxClaimStatus
@@ -1166,5 +1167,25 @@ _Appears in:_
 | `Disallowed` | VolumeClaimTemplatesPolicyDisallowed prevents a SandboxClaim from specifying any volume claim templates.<br /> |
 | `Allowed` | VolumeClaimTemplatesPolicyAllowed allows a SandboxClaim to inject new volume claim templates, but not override existing ones.<br /> |
 | `Overrides` | VolumeClaimTemplatesPolicyOverrides allows a SandboxClaim to inject new and override existing volume claim templates.<br /> |
+
+
+#### WorkspaceResourceOverride
+
+
+
+WorkspaceResourceOverride defines per-claim resource requirement overrides
+for a named PodSpec container or init container. Requests and limits are
+merged by resource name; non-empty claims replace the target container's
+resource claims.
+
+
+
+_Appears in:_
+- [SandboxClaimSpec](#sandboxclaimspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `containerName` _string_ | containerName specifies the target regular container or init container for<br />the resource override. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#resourcerequirements-v1-core)_ | resources specifies resource requirements to merge into the target container.<br />Request and limit entries left unset keep the values from the SandboxTemplate.<br />Non-empty claims replace the target container's resource claims. |  | Optional: \{\} <br /> |
 
 

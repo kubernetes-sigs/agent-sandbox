@@ -62,6 +62,7 @@ class Sandbox:
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
+            get_pod_name=self.get_pod_name,
         )
 
         # Tracer initialization

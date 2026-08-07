@@ -30,6 +30,8 @@ import (
 const (
 	defaultNamespace               = "default"
 	defaultServerPort              = 8888
+	defaultSandboxdRESTPort        = 8080
+	defaultSandboxdGRPCPort        = 9090
 	defaultSandboxReadyTimeout     = 180 * time.Second
 	defaultGatewayReadyTimeout     = 180 * time.Second
 	defaultPortForwardReadyTimeout = 30 * time.Second
@@ -40,11 +42,42 @@ const (
 	defaultMaxUploadSize           = 256 << 20 // 256 MB
 )
 
+// Runtime identifies the in-sandbox runtime API the SDK speaks.
+type Runtime string
+
+const (
+	// RuntimeLegacy is the python-runtime HTTP API (POST /upload,
+	// GET /download|list|exists/{path}, POST /execute on port 8888),
+	// reached through the sandbox-router. Default.
+	RuntimeLegacy Runtime = "legacy"
+	// RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
+	// REST filesystem (/v1/files/...) on port 8080 plus gRPC
+	// ProcessService on port 9090. sandboxd binds loopback-only inside
+	// the pod, so connectivity uses a port-forward directly to the
+	// sandbox pod rather than the sandbox-router.
+	RuntimeSandboxd Runtime = "sandboxd"
+)
+
 // Options configures a Sandbox instance.
 type Options struct {
 	// WarmPoolName is the name of the SandboxWarmPool to use. Required.
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
 	WarmPoolName string
+
+	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacy.
+	// RuntimeSandboxd requires pod port-forward connectivity: GatewayName
+	// is rejected (the router cannot reach sandboxd's loopback-only
+	// listeners). APIURL remains available as an advanced/testing escape
+	// hatch for the REST endpoint.
+	Runtime Runtime
+
+	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
+	// REST API. Only used with RuntimeSandboxd. Default: 8080.
+	SandboxdRESTPort int
+
+	// SandboxdGRPCPort is the pod port of sandboxd's gRPC ProcessService.
+	// Only used with RuntimeSandboxd. Default: 9090.
+	SandboxdGRPCPort int
 
 	// Namespace where the SandboxClaim will be created. Default: "default".
 	// Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
@@ -148,8 +181,17 @@ func (o *Options) setDefaults() {
 	if o.GatewayScheme == "" {
 		o.GatewayScheme = "http"
 	}
+	if o.Runtime == "" {
+		o.Runtime = RuntimeLegacy
+	}
 	if o.ServerPort == 0 {
 		o.ServerPort = defaultServerPort
+	}
+	if o.SandboxdRESTPort == 0 {
+		o.SandboxdRESTPort = defaultSandboxdRESTPort
+	}
+	if o.SandboxdGRPCPort == 0 {
+		o.SandboxdGRPCPort = defaultSandboxdGRPCPort
 	}
 	if o.SandboxReadyTimeout == 0 {
 		o.SandboxReadyTimeout = defaultSandboxReadyTimeout
@@ -271,6 +313,23 @@ func (o *Options) validate() error {
 	}
 	if o.ServerPort <= 0 || o.ServerPort > 65535 {
 		return fmt.Errorf("sandbox: ServerPort must be between 1 and 65535, got %d", o.ServerPort)
+	}
+	if o.Runtime != RuntimeLegacy && o.Runtime != RuntimeSandboxd {
+		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacy, RuntimeSandboxd, o.Runtime)
+	}
+	if o.Runtime == RuntimeSandboxd {
+		if o.GatewayName != "" {
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd binds loopback-only inside the pod, which the sandbox-router cannot reach; use the default pod port-forward mode")
+		}
+		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
+			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)
+		}
+		if o.SandboxdGRPCPort <= 0 || o.SandboxdGRPCPort > 65535 {
+			return fmt.Errorf("sandbox: SandboxdGRPCPort must be between 1 and 65535, got %d", o.SandboxdGRPCPort)
+		}
+		if o.SandboxdRESTPort == o.SandboxdGRPCPort {
+			return fmt.Errorf("sandbox: SandboxdRESTPort and SandboxdGRPCPort must differ (both %d)", o.SandboxdRESTPort)
+		}
 	}
 	if o.SandboxReadyTimeout <= 0 {
 		return fmt.Errorf("sandbox: SandboxReadyTimeout must be positive")

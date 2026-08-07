@@ -85,6 +85,21 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	switch {
 	case opts.APIURL != "":
 		strategy = &DirectStrategy{URL: opts.APIURL}
+	case opts.Runtime == RuntimeSandboxd:
+		// sandboxd binds loopback-only inside the pod, so the only viable
+		// external transport is a port-forward directly to the sandbox pod
+		// (validated earlier: GatewayName is rejected with RuntimeSandboxd).
+		strategy = &podTunnelStrategy{
+			coreClient: k8s.CoreClient,
+			restConfig: k8s.RestConfig,
+			namespace:  opts.Namespace,
+			restPort:   opts.SandboxdRESTPort,
+			grpcPort:   opts.SandboxdGRPCPort,
+			pfTimeout:  opts.PortForwardReadyTimeout,
+			log:        opts.Logger,
+			tracer:     tracer,
+			svcName:    svcName,
+		}
 	case opts.GatewayName != "":
 		strategy = &gatewayStrategy{
 			dynamicClient:    k8s.DynamicClient,
@@ -113,6 +128,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Strategy:          strategy,
 		Namespace:         opts.Namespace,
 		ServerPort:        opts.ServerPort,
+		RouterHeaders:     opts.Runtime != RuntimeSandboxd,
 		RequestTimeout:    opts.RequestTimeout,
 		PerAttemptTimeout: opts.PerAttemptTimeout,
 		HTTPTransport:     opts.HTTPTransport,
@@ -121,9 +137,13 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		TraceServiceName:  svcName,
 	})
 
-	// Wire tunnel's connector reference for death notifications.
+	// Wire strategy connector references for death notifications (and, for
+	// the pod tunnel, gRPC target publication).
 	if ts, ok := strategy.(*tunnelStrategy); ok {
 		ts.connector = conn
+	}
+	if pts, ok := strategy.(*podTunnelStrategy); ok {
+		pts.connector = conn
 	}
 
 	s := &Sandbox{
@@ -147,6 +167,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 
 	s.commands = &Commands{
 		connector:    conn,
+		runtime:      opts.Runtime,
 		tracer:       tracer,
 		svcName:      svcName,
 		log:          opts.Logger,
@@ -156,6 +177,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 	s.files = &Files{
 		connector:    conn,
+		runtime:      opts.Runtime,
 		tracer:       tracer,
 		svcName:      svcName,
 		log:          opts.Logger,
@@ -164,6 +186,11 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		errPrefix:    errPrefix,
 		trackOp:      trackOp,
 		lifecycleCtx: getLifecycleCtx,
+	}
+
+	// The pod tunnel needs the resolved pod name at Connect time.
+	if pts, ok := strategy.(*podTunnelStrategy); ok {
+		pts.getPodName = s.PodName
 	}
 
 	return s, nil
@@ -534,6 +561,13 @@ func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]
 }
 func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (bool, error) {
 	return s.files.Exists(ctx, path, opts...)
+}
+
+// Delete removes a file or directory (sandboxd runtime only; the legacy
+// python-runtime returns ErrUnsupportedByRuntime). Not part of the Handle
+// interface to avoid breaking existing implementers.
+func (s *Sandbox) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error {
+	return s.files.Delete(ctx, path, recursive, opts...)
 }
 
 // Info accessors.

@@ -25,6 +25,9 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/status"
+
+	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
 const maxExecutionResponseSize = 16 << 20 // 16 MB
@@ -32,6 +35,7 @@ const maxExecutionResponseSize = 16 << 20 // 16 MB
 // Commands provides command execution on a sandbox.
 type Commands struct {
 	connector    *connector
+	runtime      Runtime
 	tracer       trace.Tracer
 	svcName      string
 	log          logr.Logger
@@ -59,6 +63,10 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 	ctx = withLifecycleSpan(ctx, c.lifecycleCtx())
 	ctx, span := startSpan(ctx, c.tracer, c.svcName, "run", AttrCommandExecutable.String(commandExecutable(command)))
 	defer func() { span.End() }()
+
+	if c.runtime == RuntimeSandboxd {
+		return c.runSandboxd(ctx, span, command)
+	}
 
 	payload, err := json.Marshal(map[string]string{"command": command})
 	if err != nil {
@@ -95,6 +103,42 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 	span.SetAttributes(AttrExitCode.Int(result.ExitCode))
 	c.log.V(1).Info("run completed", "exitCode", result.ExitCode)
 	return &result, nil
+}
+
+// runSandboxd executes the command through sandboxd's gRPC ProcessService.
+// The shell-string API is preserved by wrapping the command in "/bin/sh -c",
+// matching what the legacy python-runtime did server-side.
+func (c *Commands) runSandboxd(ctx context.Context, span trace.Span, command string) (*ExecutionResult, error) {
+	conn, err := c.connector.GRPCConn()
+	if err != nil {
+		recordError(span, err)
+		return nil, fmt.Errorf("%s: run failed: %w", c.errPrefix(), err)
+	}
+	client := processv1.NewProcessServiceClient(conn)
+
+	resp, err := client.Execute(ctx, &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{
+			Command: []string{"/bin/sh", "-c", command},
+		},
+	})
+	if err != nil {
+		if st, ok := status.FromError(err); ok {
+			err = fmt.Errorf("%s: run: process service returned %s: %s", c.errPrefix(), st.Code(), st.Message())
+		} else {
+			err = fmt.Errorf("%s: run failed: %w", c.errPrefix(), err)
+		}
+		recordError(span, err)
+		return nil, err
+	}
+
+	result := &ExecutionResult{
+		Stdout:   string(resp.GetStdout()),
+		Stderr:   string(resp.GetStderr()),
+		ExitCode: int(resp.GetExitCode()),
+	}
+	span.SetAttributes(AttrExitCode.Int(result.ExitCode))
+	c.log.V(1).Info("run completed", "exitCode", result.ExitCode)
+	return result, nil
 }
 
 func commandExecutable(command string) string {

@@ -420,15 +420,14 @@ func waitForPythonServerReady(ctx context.Context, restConfig *rest.Config, core
 	pollDuration := 1 * time.Second
 	probeCmd := []string{"python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/')"}
 	for {
+		_, _, exitCode, err := execInPod(ctx, restConfig, coreClient, podID, "python-sandbox", probeCmd)
+		if err == nil && exitCode == 0 {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("python readiness polling canceled: %w", ctx.Err())
-		default:
-			_, _, exitCode, err := execInPod(ctx, restConfig, coreClient, podID, "python-sandbox", probeCmd)
-			if err == nil && exitCode == 0 {
-				return nil
-			}
-			time.Sleep(pollDuration)
+		case <-time.After(pollDuration):
 		}
 	}
 }

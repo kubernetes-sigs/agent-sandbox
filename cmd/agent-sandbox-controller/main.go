@@ -77,6 +77,7 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
+	var sandboxWriteBehindWindow time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
@@ -158,6 +159,8 @@ func main() {
 			"metrics and trace propagation to the Sandbox keep working within the controller process. Costs the on-object "+
 			"debugging breadcrumbs and, after a controller restart, the startup-latency metric for claims first observed "+
 			"by the previous process. Default false (annotations persisted).")
+	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
+		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -196,6 +199,13 @@ func main() {
 	// Validation checks for sandboxWarmPoolMaxBatchSize (maximum batch size for sandbox creation and deletion in SandboxWarmPool controller)
 	if sandboxWarmPoolMaxBatchSize <= 0 {
 		setupLog.Error(nil, "sandbox-warm-pool-max-batch-size must be greater than 0")
+		os.Exit(1)
+	}
+	// 0 means "write-behind disabled"; a negative window is always a
+	// misconfiguration, so fail fast instead of silently disabling.
+	if sandboxWriteBehindWindow < 0 {
+		setupLog.Error(nil, "sandbox-write-behind-window must be >= 0 (0 disables write-behind coalescing)",
+			"value", sandboxWriteBehindWindow)
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -422,11 +432,21 @@ func main() {
 	// Register the custom Sandbox metric collector globally.
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
+	// RequeueAfter-based write deferral for the Sandbox controller's
+	// recoverable metadata-only writes. Default (0) is fully synchronous:
+	// the controller keeps its stock write path. No background goroutine is
+	// involved; the workqueue's AddAfter provides the coalescing window.
+	if sandboxWriteBehindWindow > 0 {
+		setupLog.Info("Sandbox controller write deferral enabled (--sandbox-write-behind-window)",
+			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
+	}
+
 	if err = (&controllers.SandboxReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Tracer:        instrumenter,
-		ClusterDomain: clusterDomain,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Tracer:            instrumenter,
+		ClusterDomain:     clusterDomain,
+		WriteBehindWindow: sandboxWriteBehindWindow,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

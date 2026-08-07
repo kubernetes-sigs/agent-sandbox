@@ -1,0 +1,142 @@
+// Copyright 2025 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/*
+This program demonstrates client-side stochastic routing in Go.
+It reads the canary-routing-config ConfigMap to determine which SandboxWarmPool to target
+when creating a SandboxClaim. This allows for canary rollouts controlled by GitOps (Argo CD).
+*/
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"math/rand"
+	"os"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	extensionsclientset "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		log.Fatal("Usage: go run main.go <claim_name>")
+	}
+	claimName := os.Args[1]
+
+	ctx := context.Background()
+
+	// Load Kubernetes config. It will try in-cluster config first (when running inside a pod),
+	// and fall back to local kubeconfig (~/.kube/config) for local development.
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		config, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			clientcmd.NewDefaultClientConfigLoadingRules(),
+			&clientcmd.ConfigOverrides{},
+		).ClientConfig()
+		if err != nil {
+			log.Fatalf("Failed to load kubeconfig: %v", err)
+		}
+	}
+
+	// Create standard Kubernetes clientset. We use this to read standard resources like ConfigMaps.
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create kubernetes client: %v", err)
+	}
+
+	// Create Extensions clientset. This is generated code specific to agent-sandbox CRDs.
+	// We use it to interact with SandboxClaims, SandboxWarmPools, etc.
+	extClient, err := extensionsclientset.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create extensions client: %v", err)
+	}
+
+	// 1. Read routing config from ConfigMap
+	cm, err := clientset.CoreV1().ConfigMaps("default").Get(ctx, "canary-routing-config", metav1.GetOptions{})
+	if err != nil {
+		log.Fatalf("Failed to read ConfigMap: %v", err)
+	}
+
+	primaryPool := cm.Data["primary_pool"]
+	if primaryPool == "" {
+		primaryPool = "python-pool-v1"
+	}
+	canaryPool := cm.Data["canary_pool"]
+	if canaryPool == "" {
+		canaryPool = "python-pool-v2"
+	}
+	canaryPercentage := 0
+	if val, ok := cm.Data["canary_percentage"]; ok && val != "" {
+		if _, err := fmt.Sscanf(val, "%d", &canaryPercentage); err != nil {
+			log.Printf("Warning: Failed to parse canary_percentage %q, falling back to 0. Error: %v", val, err)
+			canaryPercentage = 0
+		}
+	} else {
+		log.Println("canary_percentage not specified in ConfigMap, defaulting to 0")
+	}
+
+	if canaryPercentage < 0 || canaryPercentage > 100 {
+		log.Printf("Warning: Invalid canary percentage %d. Must be between 0 and 100. Bounding to closest limit.", canaryPercentage)
+		if canaryPercentage < 0 {
+			canaryPercentage = 0
+		} else {
+			canaryPercentage = 100
+		}
+	}
+
+	fmt.Printf("Routing Config: Primary=%s, Canary=%s, Percentage=%d%%\n", primaryPool, canaryPool, canaryPercentage)
+
+	// 2. Stochastic routing decision
+	selectedPool := primaryPool
+
+	// Generate a random number between 0 and 99.
+	// If it's less than the canary percentage, we route to the canary pool.
+	// Note: Since Go 1.20, the math/rand package automatically seeds the global RNG at startup.
+	if rand.Intn(100) < canaryPercentage {
+		selectedPool = canaryPool
+		fmt.Println("[CANARY] Routing to Canary pool")
+	} else {
+		fmt.Println("[PRIMARY] Routing to Stable pool")
+	}
+
+	// 3. Create SandboxClaim using the selected pool
+
+	claim := &extv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			Labels: map[string]string{
+				"app": "argocd-sdk-test", // Label used by analysis job to find these claims
+			},
+		},
+		Spec: extv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
+				Name: selectedPool,
+			},
+		},
+	}
+
+	createdClaim, err := extClient.ExtensionsV1beta1().SandboxClaims("default").Create(ctx, claim, metav1.CreateOptions{})
+	if err != nil {
+		log.Fatalf("Failed to create SandboxClaim: %v", err)
+	}
+
+	fmt.Printf("Successfully created SandboxClaim %s targeting pool %s\n", createdClaim.Name, selectedPool)
+}

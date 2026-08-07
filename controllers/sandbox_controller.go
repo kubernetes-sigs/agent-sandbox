@@ -563,6 +563,42 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	return nil
 }
 
+// stripManagedFieldsPatch resets a resource's managedFields: a non-nil empty
+// list (or a list of one empty entry) is the API server's documented reset
+// sentinel (apimachinery isResetManagedFields).
+var stripManagedFieldsPatch = []byte(`{"metadata":{"managedFields":[{}]}}`)
+
+// stripPodManagedFields clears managedFields on a just-created Pod, opting
+// its remaining lifecycle out of the API server's field tracking.
+//
+// Why: field tracking measured at 14.6% of kube-apiserver CPU during the
+// mif600 stress phase (run 2080880843894558720; FieldManager.Update alone
+// 9.1%), and pods are the dominant payer: every scheduler binding, kubelet
+// status PATCH, and teardown write converts the full object to
+// structured-merge-diff typed form twice and diffs it. The apiserver's
+// skipNonAppliedManager short-circuits all of that for plain (non-apply)
+// writes when the live object has no managedFields - and its subresource
+// path takes managedFields from the live object only, so a stripped pod
+// cannot be re-seeded by kubelet status writes. Cheaper pods/status PATCHes
+// feed straight into kubelet's serialized status-sync loop, the measured
+// end-to-end bottleneck.
+//
+// Objects are always born tracked (DefaultTrackOnCreateProbability=1, and
+// the reset sentinel is ignored on create), so the strip must be this
+// separate follow-up patch: one merge-patch write buys the fast path for
+// the pod's remaining ~6-10 writes. The only path that resumes tracking is
+// a server-side-apply against the pod, which nothing in the sandbox
+// lifecycle performs; if some external client does, tracking resumes with
+// before-first-apply semantics and only the CPU saving is lost.
+//
+// Best-effort by design: a failed strip leaves a normally-tracked pod.
+func stripPodManagedFields(ctx context.Context, c client.Client, pod *corev1.Pod) {
+	if err := c.Patch(ctx, pod, client.RawPatch(types.MergePatchType, stripManagedFieldsPatch)); err != nil {
+		log.FromContext(ctx).V(1).Info("Failed to strip pod managedFields; pod stays field-tracked",
+			"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name, "error", err)
+	}
+}
+
 // nodeNameOnlyChange reports whether the node assignment is the only
 // difference between the two statuses.
 func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool {
@@ -1225,6 +1261,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return nil, err
 	}
+
+	stripPodManagedFields(ctx, r.Client, pod)
 
 	if err := ensurePodNameAnnotation(pod.Name); err != nil {
 		return nil, err

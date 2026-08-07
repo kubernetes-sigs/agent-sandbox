@@ -1,0 +1,35 @@
+# HPA scaling the warmpool on the claim-creation rate (External/Value metric).
+# Value-type => races to max when load flows.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ${WARMPOOL_NAME}-hpa
+  namespace: ${NAMESPACE}
+spec:
+  scaleTargetRef:
+    apiVersion: extensions.agents.x-k8s.io/v1beta1
+    kind: SandboxWarmPool
+    name: ${WARMPOOL_NAME}
+  minReplicas: ${HPA_MIN_REPLICAS}
+  maxReplicas: ${HPA_MAX_REPLICAS}
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: "${HPA_METRIC_NAME}"
+        selector:
+          matchLabels:
+            metric.labels.warmpool_name: "${WARMPOOL_NAME}"
+            metric.labels.exported_namespace: "${NAMESPACE}"
+      target:
+        type: Value
+        value: "${HPA_TARGET_VALUE}"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: ${HPA_SCALE_UP_PERCENT}
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: ${HPA_SCALE_DOWN_STABILIZATION}

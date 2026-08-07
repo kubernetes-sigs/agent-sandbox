@@ -1,0 +1,20 @@
+# Cold Standby (CSN) buffer — suspendable nodes (~2-4% of active cost) that
+# resume in ~30s. Fixed-size (limits.cpu) cores, init-time controls
+# how long a resumed/new node stays active before suspending (shorter = more
+# aggressive suspension, observable sooner during idle).
+apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: churn-csn-buffer
+  namespace: ${NAMESPACE}
+  annotations:
+    buffer.gke.io/standby-capacity-init-time: "${CSN_INIT_TIME}"
+    buffer.gke.io/standby-capacity-refresh-frequency: "1d"
+spec:
+  limits:
+    cpu: "${CSN_BUFFER_CORES}"
+  scalableRef:
+    apiGroup: extensions.agents.x-k8s.io
+    kind: SandboxWarmPool
+    name: ${WARMPOOL_NAME}
+  provisioningStrategy: "buffer.gke.io/standby-capacity"

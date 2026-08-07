@@ -1,0 +1,15 @@
+# Active Standby (ASN) buffer — always-on nodes that bridge the ~30s CSN resume
+# gap during the initial spike.
+apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: churn-asn-buffer
+  namespace: ${NAMESPACE}
+spec:
+  limits:
+    cpu: "${ASN_BUFFER_CORES}"
+  scalableRef:
+    apiGroup: extensions.agents.x-k8s.io
+    kind: SandboxWarmPool
+    name: ${WARMPOOL_NAME}
+  provisioningStrategy: "buffer.x-k8s.io/active-capacity"

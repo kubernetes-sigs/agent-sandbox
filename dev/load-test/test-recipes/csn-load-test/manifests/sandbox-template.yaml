@@ -1,0 +1,33 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: churn-template
+  namespace: ${NAMESPACE}
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        latency-type: realistic-churn
+    spec:
+      restartPolicy: Never
+      # CRITICAL for churn: sleep-infinity ignores SIGTERM, so the default 30s
+      # grace makes every deleted pod squat its node slot for 30s. At high churn
+      # that is thousands of zombie pods always Terminating, which fills the
+      # cluster and starves new pods -> Pending -> warmpool ready=0 -> high P99.
+      # 0 = release capacity immediately on delete.
+      terminationGracePeriodSeconds: 0
+      # Pins workload + (via scalableRef propagation) buffer nodes to the class.
+      nodeSelector:
+        cloud.google.com/compute-class: ${COMPUTE_CLASS}
+      containers:
+        - name: python-agent
+          image: python:3.11-slim
+          command: ["/bin/sh", "-c"]
+          args: ["echo 'Hello from the Sandbox!' && sleep infinity"]
+          resources:
+            requests:
+              cpu: "${SANDBOX_CPU}"
+              memory: "${SANDBOX_MEMORY}"
+            limits:
+              cpu: "${SANDBOX_CPU}"
+              memory: "${SANDBOX_MEMORY}"

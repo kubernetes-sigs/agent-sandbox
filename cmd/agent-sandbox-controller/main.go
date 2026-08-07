@@ -77,6 +77,8 @@ func main() {
 	var sandboxWarmPoolConcurrentWorkers int
 	var sandboxTemplateConcurrentWorkers int
 	var sandboxWarmPoolMaxBatchSize int
+	var sandboxWarmPoolReadinessGracePeriod time.Duration
+	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
@@ -140,6 +142,8 @@ func main() {
 	flag.IntVar(&sandboxWarmPoolConcurrentWorkers, "sandbox-warm-pool-concurrent-workers", 1, "Max concurrent reconciles for the SandboxWarmPool controller")
 	flag.IntVar(&sandboxTemplateConcurrentWorkers, "sandbox-template-concurrent-workers", 1, "Max concurrent reconciles for the SandboxTemplate controller")
 	flag.IntVar(&sandboxWarmPoolMaxBatchSize, "sandbox-warm-pool-max-batch-size", 300, "Max batch size for parallel sandbox creation and deletion in SandboxWarmPool controller. Default is 300. Creates advance one observed batch per watch round-trip (the expectations gate waits for a batch's add events before issuing the next), so a large pool fills in about ceil(replicas/batchSize) round-trips; raising this trades round-trips for burst size and is safe at any value under the gate.")
+	flag.DurationVar(&sandboxWarmPoolReadinessGracePeriod, "sandbox-warm-pool-readiness-grace-period", extensionscontrollers.DefaultWarmPoolReadinessGracePeriod, "How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be greater than 0.")
+	flag.DurationVar(&sandboxWarmPoolUnschedulableRecheckInterval, "sandbox-warm-pool-unschedulable-recheck-interval", extensionscontrollers.DefaultUnschedulableRecheckInterval, "Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be greater than 0.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
@@ -177,6 +181,14 @@ func main() {
 	}
 	if strings.TrimSpace(webhookKeyName) == "" {
 		setupLog.Error(nil, "--webhook-key-name cannot be empty")
+		os.Exit(1)
+	}
+	if sandboxWarmPoolReadinessGracePeriod <= 0 {
+		setupLog.Error(nil, "--sandbox-warm-pool-readiness-grace-period must be greater than 0", "value", sandboxWarmPoolReadinessGracePeriod)
+		os.Exit(1)
+	}
+	if sandboxWarmPoolUnschedulableRecheckInterval <= 0 {
+		setupLog.Error(nil, "--sandbox-warm-pool-unschedulable-recheck-interval must be greater than 0", "value", sandboxWarmPoolUnschedulableRecheckInterval)
 		os.Exit(1)
 	}
 
@@ -500,11 +512,13 @@ func main() {
 		}
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
-			Client:                 mgr.GetClient(),
-			Scheme:                 mgr.GetScheme(),
-			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
-			EnableWarmPoolEviction: enableWarmPoolEviction,
-			Recorder:               mgr.GetEventRecorder("sandboxwarmpool-controller"),
+			Client:                       mgr.GetClient(),
+			Scheme:                       mgr.GetScheme(),
+			MaxBatchSize:                 sandboxWarmPoolMaxBatchSize,
+			EnableWarmPoolEviction:       enableWarmPoolEviction,
+			ReadinessGracePeriod:         sandboxWarmPoolReadinessGracePeriod,
+			UnschedulableRecheckInterval: sandboxWarmPoolUnschedulableRecheckInterval,
+			Recorder:                     mgr.GetEventRecorder("sandboxwarmpool-controller"),
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)

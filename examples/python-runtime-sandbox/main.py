@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import subprocess
+import asyncio
 import os
 import shlex
 import logging
@@ -65,16 +65,17 @@ async def execute_command(request: ExecuteRequest):
         # Split the command string into a list to safely pass to subprocess
         args = shlex.split(request.command)
         
-        # Execute the command, always from the /app directory
-        process = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            cwd="/app" 
+        # Execute the command asynchronously, always from the /app directory.
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/app"
         )
+        stdout, stderr = await process.communicate()
         return ExecuteResponse(
-            stdout=process.stdout,
-            stderr=process.stderr,
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
             exit_code=process.returncode
         )
     except Exception as e:

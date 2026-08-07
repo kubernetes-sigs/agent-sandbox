@@ -15,13 +15,13 @@
 package extensions
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,6 +34,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes/scheme"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
+	remoteexec "k8s.io/client-go/util/exec"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
@@ -121,6 +127,21 @@ func TestPythonSandboxDensity(t *testing.T) {
 					Path: "/tmp/movielens",
 				},
 			},
+			NodeAffinity: &corev1.VolumeNodeAffinity{
+				Required: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      "kubernetes.io/hostname",
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{targetNode},
+								},
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 	tc.MustCreateWithCleanup(pv)
@@ -157,6 +178,19 @@ func TestPythonSandboxDensity(t *testing.T) {
 	}
 	tc.MustCreateWithCleanup(cm)
 
+	// Build restConfig and coreClient once for in-process pod exec
+	restConfig, err := clientcmd.BuildConfigFromFlags("", framework.GetKubeconfig())
+	if err != nil {
+		t.Fatalf("Failed to build rest config: %v", err)
+	}
+	restConfig.QPS = 50
+	restConfig.Burst = 100
+
+	coreClient, err := corev1client.NewForConfig(restConfig)
+	if err != nil {
+		t.Fatalf("Failed to create core v1 client: %v", err)
+	}
+
 	var wg sync.WaitGroup
 	metricsCh := make(chan *PythonSandboxMetrics, densityCount)
 
@@ -165,7 +199,7 @@ func TestPythonSandboxDensity(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			metrics := runPythonSandboxPerf(tc, ns.Name, fmt.Sprintf("python-sandbox-%d", idx), targetNode)
+			metrics := runPythonSandboxPerf(tc, restConfig, coreClient, ns.Name, fmt.Sprintf("python-sandbox-%d", idx), targetNode)
 			metricsCh <- metrics
 		}(i)
 		time.Sleep(1 * time.Second)
@@ -274,7 +308,7 @@ func pythonSandboxPerf(namespace, name, nodeName string) *sandboxv1beta1.Sandbox
 	return sandbox
 }
 
-func runPythonSandboxPerf(tc *framework.TestContext, namespace, name, nodeName string) *PythonSandboxMetrics {
+func runPythonSandboxPerf(tc *framework.TestContext, restConfig *rest.Config, coreClient corev1client.CoreV1Interface, namespace, name, nodeName string) *PythonSandboxMetrics {
 	ctx, cancel := context.WithTimeout(tc.Context(), 10*time.Minute)
 	defer cancel()
 	metrics := &PythonSandboxMetrics{}
@@ -332,7 +366,7 @@ func runPythonSandboxPerf(tc *framework.TestContext, namespace, name, nodeName s
 	pyCtx, pyCancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer pyCancel()
 
-	if pyStats, err := runPythonBenchmarkExec(pyCtx, podID); err != nil {
+	if pyStats, err := runPythonBenchmarkExec(pyCtx, restConfig, coreClient, podID); err != nil {
 		tc.Errorf("Failed to wait for python %s benchmark: %v", name, err)
 	} else {
 		metrics.PythonReady.Set(time.Since(startTime))
@@ -343,16 +377,55 @@ func runPythonSandboxPerf(tc *framework.TestContext, namespace, name, nodeName s
 	return metrics
 }
 
-func waitForPythonServerReady(ctx context.Context, podID types.NamespacedName) error {
+func execInPod(ctx context.Context, restConfig *rest.Config, coreClient corev1client.CoreV1Interface, podID types.NamespacedName, container string, command []string) (string, string, int, error) {
+	req := coreClient.RESTClient().Post().
+		Resource("pods").
+		Name(podID.Name).
+		Namespace(podID.Namespace).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: container,
+			Command:   command,
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", req.URL())
+	if err != nil {
+		return "", "", 0, fmt.Errorf("failed to create SPDY executor: %w", err)
+	}
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdoutBuf,
+		Stderr: &stderrBuf,
+		Tty:    false,
+	})
+
+	exitCode := 0
+	if err != nil {
+		var exitErr remoteexec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitStatus()
+		} else {
+			return stdoutBuf.String(), stderrBuf.String(), 0, err
+		}
+	}
+	return stdoutBuf.String(), stderrBuf.String(), exitCode, nil
+}
+
+func waitForPythonServerReady(ctx context.Context, restConfig *rest.Config, coreClient corev1client.CoreV1Interface, podID types.NamespacedName) error {
 	pollDuration := 1 * time.Second
+	probeCmd := []string{"python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/')"}
 	for {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("python readiness polling canceled: %w", ctx.Err())
 		default:
-			probeCmd := "import urllib.request; urllib.request.urlopen('http://localhost:8888/')"
-			cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", podID.Namespace, podID.Name, "-c", "python-sandbox", "--", "python3", "-c", probeCmd)
-			if err := cmd.Run(); err == nil {
+			_, _, exitCode, err := execInPod(ctx, restConfig, coreClient, podID, "python-sandbox", probeCmd)
+			if err == nil && exitCode == 0 {
 				return nil
 			}
 			time.Sleep(pollDuration)
@@ -360,16 +433,18 @@ func waitForPythonServerReady(ctx context.Context, podID types.NamespacedName) e
 	}
 }
 
-func runPythonBenchmarkExec(ctx context.Context, podID types.NamespacedName) (map[string]any, error) {
-	if err := waitForPythonServerReady(ctx, podID); err != nil {
+func runPythonBenchmarkExec(ctx context.Context, restConfig *rest.Config, coreClient corev1client.CoreV1Interface, podID types.NamespacedName) (map[string]any, error) {
+	if err := waitForPythonServerReady(ctx, restConfig, coreClient, podID); err != nil {
 		return nil, err
 	}
 
-	pyPostCmd := "import urllib.request, json; req = urllib.request.Request('http://localhost:8888/execute', data=json.dumps({'command': 'python3 /scripts/benchmark_density.py'}).encode(), headers={'Content-Type': 'application/json'}); print(urllib.request.urlopen(req).read().decode())"
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", podID.Namespace, podID.Name, "-c", "python-sandbox", "--", "python3", "-c", pyPostCmd)
-	out, err := cmd.CombinedOutput()
+	pyPostCmd := []string{"python3", "-c", "import urllib.request, json; req = urllib.request.Request('http://localhost:8888/execute', data=json.dumps({'command': 'python3 /scripts/benchmark_density.py'}).encode(), headers={'Content-Type': 'application/json'}); print(urllib.request.urlopen(req).read().decode())"}
+	stdout, stderr, exitCode, err := execInPod(ctx, restConfig, coreClient, podID, "python-sandbox", pyPostCmd)
 	if err != nil {
-		return nil, fmt.Errorf("kubectl exec benchmark failed: %w, output: %s", err, string(out))
+		return nil, fmt.Errorf("pod exec benchmark failed: %w, stdout: %s, stderr: %s", err, stdout, stderr)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("benchmark command exited with code %d: stderr: %s", exitCode, stderr)
 	}
 
 	var res struct {
@@ -377,8 +452,8 @@ func runPythonBenchmarkExec(ctx context.Context, podID types.NamespacedName) (ma
 		Stderr   string `json:"stderr"`
 		ExitCode int    `json:"exit_code"`
 	}
-	if err := json.Unmarshal(out, &res); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal REST API output: %w, raw: %s", err, string(out))
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal REST API output: %w, raw: %s", err, stdout)
 	}
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("benchmark command exited with code %d: stderr: %s", res.ExitCode, res.Stderr)

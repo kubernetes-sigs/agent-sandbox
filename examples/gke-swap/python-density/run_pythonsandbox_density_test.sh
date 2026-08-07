@@ -19,16 +19,8 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# Resolve KUBECONFIG: Use existing KUBECONFIG or fall back to repo-root bin/KUBECONFIG
-if [ -z "${KUBECONFIG:-}" ]; then
-    export KUBECONFIG="${REPO_ROOT}/bin/KUBECONFIG"
-    mkdir -p "$(dirname "${KUBECONFIG}")"
-    if [ ! -f "${KUBECONFIG}" ] && [ -f "${HOME}/.kube/config" ]; then
-        cp "${HOME}/.kube/config" "${KUBECONFIG}"
-    fi
-else
-    mkdir -p "$(dirname "${KUBECONFIG}")"
-fi
+# Resolve KUBECONFIG: Use existing KUBECONFIG or fall back to ~/.kube/config directly
+export KUBECONFIG="${KUBECONFIG:-"${HOME}/.kube/config"}"
 
 # Define benchmark configuration defaults (overrideable via environment variables)
 # POOLS: Target GKE node pools (e.g., "lssd-swap-pool baseline-pool")
@@ -62,7 +54,7 @@ for pool in ${POOLS}; do
     NODE=$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${pool}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     if [ -n "${NODE}" ]; then
         log "Pre-staging ML-20M dataset on node ${NODE}..."
-        kubectl run --rm -i "prestager-${pool}" --image=alpine --restart=Never --overrides="{
+        kubectl run --rm "prestager-${pool}" --image=alpine --restart=Never --overrides="{
           \"spec\": {
             \"nodeName\": \"${NODE}\",
             \"containers\": [{
@@ -113,7 +105,7 @@ for pool in ${POOLS}; do
         # Flush host node Page Cache to reset node RAM to clean baseline
         if [ -n "${NODE_NAME}" ]; then
             log "Flushing Page Cache on node ${NODE_NAME}..."
-            kubectl run --rm -i "cache-dropper-${pool}" --image=alpine --restart=Never --overrides="{
+            kubectl run --rm "cache-dropper-${pool}" --image=alpine --restart=Never --overrides="{
               \"spec\": {
                 \"nodeName\": \"${NODE_NAME}\",
                 \"hostPID\": true,

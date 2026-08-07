@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyter-l4-gpu
+  labels:
+    app: jupyter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jupyter
+  template:
+    metadata:
+      labels:
+        app: jupyter
+    spec:
+      serviceAccountName: jupyter-sandbox-sa
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      containers:
+      - name: jupyter
+        image: tensorflow/tensorflow:latest-gpu-jupyter
+        ports:
+        - containerPort: 8888
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: "16Gi"
+          requests:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: "16Gi"
+            ephemeral-storage: "20Gi"
+        volumeMounts:
+        - name: notebook-volume
+          mountPath: /tf/rl_training.ipynb
+          subPath: rl_training.ipynb
+      volumes:
+      - name: notebook-volume
+        configMap:
+          name: rl-notebook-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jupyter-service
+spec:
+  type: ClusterIP
+  selector:
+    app: jupyter
+  ports:
+  - port: 80
+    targetPort: 8888

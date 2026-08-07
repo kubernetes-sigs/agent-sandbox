@@ -50,6 +50,7 @@ async = [
     "httpx",
     "kubernetes_asyncio<34.0.0",
 ]
+rl = ["gymnasium>=1.3.0"]
 test = [
     "pytest",
     "pytest-xdist",

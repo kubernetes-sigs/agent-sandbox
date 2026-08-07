@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "k8s-agent-sandbox-gymnasium"
+description = "Gymnasium-compatible RL environments backed by kubernetes-sigs/agent-sandbox"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dynamic = ["version"]
+dependencies = [
+    "k8s-agent-sandbox~=0.5.1",
+    "gymnasium>=0.29",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.setuptools.packages.find]
+include = ["k8s_agent_sandbox_gymnasium*"]
+exclude = ["tests*"]
+
+[tool.setuptools_scm]
+root = "../../.."

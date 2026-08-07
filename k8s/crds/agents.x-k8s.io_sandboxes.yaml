@@ -43,6 +43,12 @@ spec:
                 - Running
                 - Suspended
                 type: string
+              podFailurePolicy:
+                default: Ignore
+                enum:
+                - Ignore
+                - Recreate
+                type: string
               podTemplate:
                 properties:
                   metadata:

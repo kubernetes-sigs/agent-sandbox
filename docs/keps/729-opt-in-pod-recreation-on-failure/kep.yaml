@@ -1,0 +1,17 @@
+title: Opt-in Pod Recreation on PodFailed
+kep-number: 729
+authors:
+  - "@aegeiger"
+status: implementable
+creation-date: "2026-07-14"
+last-updated: "2026-07-14"
+stage: alpha
+reviewers:
+  - "@janetkuo"
+  - "@barney-s"
+approvers:
+  - "@janetkuo"
+see-also:
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/729"
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/612"
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/1054"

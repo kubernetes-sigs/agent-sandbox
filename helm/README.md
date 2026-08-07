@@ -110,3 +110,22 @@ The following table lists the configurable parameters and their defaults.
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
 | `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
 | `webhookServiceName` | Name of the conversion webhook Service | `agent-sandbox-webhook-service` |
+| `metrics.serviceMonitor.enabled` | Create a Prometheus Operator `ServiceMonitor` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
+| `metrics.serviceMonitor.additionalLabels` | Extra labels on the `ServiceMonitor` (often required to match the Prometheus `serviceMonitorSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |
+| `metrics.serviceMonitor.interval` | Scrape interval | `30s` |
+| `metrics.serviceMonitor.scrapeTimeout` | Scrape timeout (omitted unless set) | `""` |
+
+## Metrics
+
+The controller serves Prometheus metrics over HTTP at `:8080/metrics` (exposed by the controller `Service` on the `metrics` port). To scrape it with the Prometheus Operator, enable the bundled `ServiceMonitor`:
+
+```bash
+helm install agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system \
+  --create-namespace \
+  --set image.tag=<version> \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.serviceMonitor.additionalLabels.release=kube-prometheus-stack
+```
+
+> **Note**: The `ServiceMonitor` kind is provided by the prometheus-operator CRDs (`monitoring.coreos.com/v1`). Enabling it without those CRDs installed will fail at apply time.

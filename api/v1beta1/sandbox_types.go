@@ -154,6 +154,7 @@ type PersistentVolumeClaimTemplate struct {
 }
 
 // SandboxOperatingMode defines the desired operational state of the Sandbox.
+// +kubebuilder:validation:Enum=Running;Suspended
 type SandboxOperatingMode string
 
 const (
@@ -216,7 +217,6 @@ type SandboxSpec struct {
 	// operatingMode specifies the desired operational state of the Sandbox.
 	// Defaults to Running if not specified.
 	// +kubebuilder:default=Running
-	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
 }

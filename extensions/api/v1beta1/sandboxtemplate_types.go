@@ -26,9 +26,11 @@ import (
 
 // NetworkPolicyManagement defines whether the controller automatically generates
 // and manages a shared NetworkPolicy for this template.
+// +kubebuilder:validation:Enum=Managed;Unmanaged
 type NetworkPolicyManagement string
 
 // EnvVarsInjectionPolicy defines whether a SandboxClaim is allowed to inject or override environment variables.
+// +kubebuilder:validation:Enum=Allowed;Overrides;Disallowed
 type EnvVarsInjectionPolicy string
 
 const (
@@ -57,6 +59,7 @@ const (
 )
 
 // VolumeClaimTemplatesPolicy defines whether a SandboxClaim is allowed to inject or override volume claim templates.
+// +kubebuilder:validation:Enum=Disallowed;Allowed;Overrides
 type VolumeClaimTemplatesPolicy string
 
 const (
@@ -120,21 +123,18 @@ type SandboxTemplateSpec struct {
 
 	// networkPolicyManagement defines whether the controller manages the NetworkPolicy.
 	// Valid values are "Managed" (default) or "Unmanaged".
-	// +kubebuilder:validation:Enum=Managed;Unmanaged
 	// +kubebuilder:default=Managed
 	// +optional
 	NetworkPolicyManagement NetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
 
 	// envVarsInjectionPolicy allows a SandboxClaim to inject or override environment variables defined in the template.
 	// If set to Disallowed, the SandboxClaim will be rejected if it specifies any environment variables.
-	// +kubebuilder:validation:Enum=Allowed;Overrides;Disallowed
 	// +kubebuilder:default=Disallowed
 	// +optional
 	EnvVarsInjectionPolicy EnvVarsInjectionPolicy `json:"envVarsInjectionPolicy,omitempty"`
 
 	// volumeClaimTemplatesPolicy allows a SandboxClaim to inject or override volume claim templates defined in the template.
 	// If set to Disallowed, the SandboxClaim will be rejected if it specifies any volume claim templates.
-	// +kubebuilder:validation:Enum=Disallowed;Allowed;Overrides
 	// +kubebuilder:default=Disallowed
 	// +optional
 	VolumeClaimTemplatesPolicy VolumeClaimTemplatesPolicy `json:"volumeClaimTemplatesPolicy,omitempty"`

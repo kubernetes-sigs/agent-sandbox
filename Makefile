@@ -135,7 +135,7 @@ fix-api:
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
-# Default remote (can be overriden: make release-publish REMOTE=upstream ...)
+# Default remote (can be overridden: make release-publish REMOTE=upstream ...)
 REMOTE_UPSTREAM ?= upstream
 REMOTE_FORK ?= origin
 

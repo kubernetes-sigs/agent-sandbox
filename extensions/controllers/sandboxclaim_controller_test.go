@@ -4987,6 +4987,99 @@ func TestWarmPoolMapWatchPredicate(t *testing.T) {
 	}
 }
 
+func TestMapSandboxTemplateToClaims(t *testing.T) {
+	scheme := newScheme(t)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "target-template", Namespace: "default"},
+	}
+	warmPool1 := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-1", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	warmPool2 := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-2", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+	otherTemplatePool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-template-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "other-template"}},
+	}
+	otherNamespacePool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-namespace-pool", Namespace: "other"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+	}
+
+	claim1 := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-1", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool1.Name}},
+	}
+	claim2 := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-2", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool2.Name}},
+	}
+	boundClaim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "bound-claim", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool1.Name},
+			AdditionalPodMetadata: sandboxv1beta1.PodMetadata{
+				Labels: map[string]string{"example.com/reconcile": "required"},
+			},
+		},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "bound-sandbox"},
+		},
+	}
+	deletingClaim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "deleting-claim",
+			Namespace:         "default",
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Finalizers:        []string{"test-finalizer"},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool1.Name}},
+	}
+	otherTemplateClaim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-template-claim", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: otherTemplatePool.Name}},
+	}
+	otherNamespaceClaim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-namespace-claim", Namespace: "other"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: otherNamespacePool.Name}},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(warmPool1, warmPool2, otherTemplatePool, otherNamespacePool, claim1, claim2, boundClaim, deletingClaim, otherTemplateClaim, otherNamespaceClaim).
+		WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+		WithIndex(&extensionsv1beta1.SandboxClaim{}, extensionsv1beta1.WarmPoolRefField, func(obj client.Object) []string {
+			claim := obj.(*extensionsv1beta1.SandboxClaim)
+			if claim.Spec.WarmPoolRef.Name == "" {
+				return nil
+			}
+			return []string{claim.Spec.WarmPoolRef.Name}
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{Client: fakeClient, Scheme: scheme}
+	requests := reconciler.mapSandboxTemplateToClaims(context.Background(), template)
+
+	require.ElementsMatch(t, []reconcile.Request{
+		{NamespacedName: types.NamespacedName{Name: claim1.Name, Namespace: claim1.Namespace}},
+		{NamespacedName: types.NamespacedName{Name: claim2.Name, Namespace: claim2.Namespace}},
+		{NamespacedName: types.NamespacedName{Name: boundClaim.Name, Namespace: boundClaim.Namespace}},
+	}, requests)
+}
+
+func TestSandboxTemplateCreatePredicate(t *testing.T) {
+	pred := sandboxTemplateCreatePredicate()
+	template := &extensionsv1beta1.SandboxTemplate{}
+
+	require.True(t, pred.Create(event.CreateEvent{Object: template}))
+	require.False(t, pred.Update(event.UpdateEvent{ObjectOld: template, ObjectNew: template.DeepCopy()}))
+	require.False(t, pred.Delete(event.DeleteEvent{Object: template}))
+	require.False(t, pred.Generic(event.GenericEvent{Object: template}))
+}
+
 func TestSandboxClaimLegacyLabelMigration(t *testing.T) {
 	scheme := newScheme(t)
 

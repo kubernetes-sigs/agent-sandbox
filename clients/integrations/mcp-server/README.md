@@ -80,6 +80,41 @@ Connects directly to the sandbox pod from within the cluster (bypassing the rout
 ### General Settings
 
 * `K8S_SANDBOX_SESSION_ID_LABEL_KEY`: The Kubernetes label key to apply for tracking session IDs on the sandboxes. (Default: `"mcp.k8s-agent-sandbox/session-id"`)
+* `K8S_SANDBOX_PROBE_NAMESPACE`: Namespace the `/readyz` probe lists SandboxClaims in to confirm the Kubernetes API is reachable. Must be a namespace the server's service account can list claims in. (Default: `"default"`)
+
+## Health checks
+
+The server exposes two endpoints for Kubernetes probes:
+
+| Endpoint | Meaning |
+|---|---|
+| `GET /healthz` | **Liveness.** The process is up and routing HTTP. Never contacts the Kubernetes API. |
+| `GET /readyz` | **Readiness.** Lists SandboxClaims in `K8S_SANDBOX_PROBE_NAMESPACE` to confirm the Kubernetes API is reachable. Returns `200` with `{"ready": true}`, or `503` with `{"ready": false, "reason": "..."}`. |
+
+`/readyz` failure reasons are `"starting"` (the server has not finished initializing) and
+`"kubernetes API unavailable"`. The reason is deliberately generic — the endpoint is
+unauthenticated, so the underlying exception is logged rather than returned.
+
+`/healthz` is deliberately independent of the Kubernetes API: wiring a liveness probe to an
+external dependency turns a transient control-plane blip into a rolling restart of every replica.
+Use `/readyz` — which does check — to pull a pod out of the Service instead.
+
+Because `/readyz` makes a real API call, keep `periodSeconds` modest rather than polling it
+aggressively:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8000
+  initialDelaySeconds: 5
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 15
+```
 
 ## Security
 

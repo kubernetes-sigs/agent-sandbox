@@ -389,6 +389,7 @@ func (r *SandboxClaimReconciler) initializeLifecycleFromTTL(ctx context.Context,
 			ShutdownTime:   &shutdownTime,
 		}
 	} else {
+		claim.Spec.Lifecycle.ShutdownPolicy = extensionsv1beta1.ShutdownPolicyDelete
 		claim.Spec.Lifecycle.ShutdownTime = &shutdownTime
 	}
 

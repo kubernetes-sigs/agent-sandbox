@@ -1251,7 +1251,7 @@ func TestSandboxClaimReconcileRequeuesForActiveTTL(t *testing.T) {
 	require.True(t, createdAt.Add(time.Duration(ttl)*time.Second).Equal(fetched.Spec.Lifecycle.ShutdownTime.Time))
 }
 
-func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
+func TestSandboxClaimReconcileDeletesExpiredTTLWithExistingLifecycle(t *testing.T) {
 	scheme := newScheme(t)
 	ttl := int32(60)
 	fakeRecorder := events.NewFakeRecorder(10)
@@ -1261,7 +1261,12 @@ func TestSandboxClaimReconcileDeletesExpiredTTL(t *testing.T) {
 			Namespace:         "default",
 			CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
 		},
-		Spec: extensionsv1beta1.SandboxClaimSpec{TTLSecondsAfterCreated: &ttl},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			TTLSecondsAfterCreated: &ttl,
+			Lifecycle: &extensionsv1beta1.Lifecycle{
+				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
+			},
+		},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).WithStatusSubresource(claim).Build()
 	reconciler := &SandboxClaimReconciler{Client: client, Scheme: scheme, Recorder: fakeRecorder, Tracer: asmetrics.NewNoOp()}
@@ -1300,11 +1305,11 @@ func TestSandboxClaimInitializeLifecycleFromTTL(t *testing.T) {
 			wantInitialPatches: 1,
 		},
 		{
-			name: "preserves existing lifecycle policy",
+			name: "overrides retain policy for TTL cleanup",
 			lifecycle: &extensionsv1beta1.Lifecycle{
 				ShutdownPolicy: extensionsv1beta1.ShutdownPolicyRetain,
 			},
-			wantPolicy:         extensionsv1beta1.ShutdownPolicyRetain,
+			wantPolicy:         extensionsv1beta1.ShutdownPolicyDelete,
 			wantShutdownTime:   metav1.NewTime(createdAt.Add(time.Duration(ttl) * time.Second)),
 			wantInitialPatches: 1,
 		},

@@ -37,6 +37,9 @@ from .exceptions import (
 )
 
 ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
+# POST endpoints include command execution, so replaying them can duplicate
+# side effects after the server handled a request but returned a 5xx response.
+RETRYABLE_METHODS = frozenset({"GET", "PUT", "DELETE"})
 
 
 def _router_timeout_header_value(timeout) -> str | None:
@@ -310,7 +313,7 @@ class SandboxConnector:
             total=5,
             backoff_factor=0.5,
             status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "POST", "PUT", "DELETE"]
+            allowed_methods=RETRYABLE_METHODS,
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))

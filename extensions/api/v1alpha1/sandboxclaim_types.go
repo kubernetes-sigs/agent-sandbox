@@ -135,7 +135,8 @@ type SandboxClaimSpec struct {
 	// ttlSecondsAfterCreated initializes lifecycle.shutdownTime to CreationTimestamp+TTL
 	// when shutdownTime is unset.
 	// A nil lifecycle is initialized with the Delete policy. An explicit shutdownTime
-	// is never overwritten.
+	// is never overwritten. Once initialized, later changes to ttlSecondsAfterCreated
+	// do not update shutdownTime.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`

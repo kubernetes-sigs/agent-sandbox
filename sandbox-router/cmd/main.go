@@ -45,6 +45,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/management"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/observability"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/proxy"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/server"
@@ -223,6 +224,21 @@ func run(cfg *config.Config, log logr.Logger) error {
 		authorizer = st
 	}
 
+	// --- Management API (optional) ----------------------------------------
+	var mgmtHandler http.Handler
+	if cfg.ManagementEnabled {
+		restConfig, err := loadRESTConfig(cfg.Kubeconfig)
+		if err != nil {
+			return fmt.Errorf("management api rest config: %w", err)
+		}
+		mgmtClient, err := management.New(restConfig, cfg.ManagementNamespace)
+		if err != nil {
+			return fmt.Errorf("management api client: %w", err)
+		}
+		mgmtHandler = management.NewHandler(mgmtClient, log.WithName("management"), cfg.ManagementNamespace)
+		log.Info("management API enabled", "defaultNamespace", cfg.ManagementNamespace)
+	}
+
 	// --- Proxy handler -----------------------------------------------------
 	proxyOpts := proxy.Options{
 		Config:     cfg,
@@ -242,6 +258,9 @@ func run(cfg *config.Config, log logr.Logger) error {
 	probes := server.NewProbes()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", probes.Healthz)
+	if mgmtHandler != nil {
+		mux.Handle("/v1/", mgmtHandler)
+	}
 	mux.Handle("/", handler)
 
 	// Wrap with observability middleware. Layering (outer → inner):

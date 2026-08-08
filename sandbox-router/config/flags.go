@@ -156,6 +156,11 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 				"Empty means use in-cluster config. Honors "+EnvKubeconfig+".")
 	}
 
+	fs.BoolVar(&c.ManagementEnabled, "management-api", false,
+		"Enable the /v1/ SandboxClaim management REST API.")
+	fs.StringVar(&c.ManagementNamespace, "management-namespace", c.ManagementNamespace,
+		"Default namespace for SandboxClaim operations via the management API.")
+
 	fs.BoolVar(&c.AccessLog, "access-log", c.AccessLog,
 		"Emit one structured log line per inbound request on the proxy "+
 			"port. Health/metrics endpoints are skipped.")

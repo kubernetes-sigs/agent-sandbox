@@ -185,6 +185,13 @@ type Config struct {
 	// must share it out-of-band, e.g. the same K8s Secret mounted into
 	// both.
 	AuthzScopedTokenSecretFile string
+
+	// ManagementEnabled turns on the /v1/ SandboxClaim management API.
+	ManagementEnabled bool
+	// ManagementNamespace is the default Kubernetes namespace for SandboxClaim
+	// operations when the caller does not specify one. Empty means callers must
+	// always provide a namespace.
+	ManagementNamespace string
 }
 
 // Defaults returns a Config populated with the default values used when no

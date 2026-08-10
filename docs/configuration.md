@@ -2,6 +2,8 @@
 
 The `agent-sandbox-controller` supports several command-line flags to tune performance and scalability under high load or in large clusters.
 
+For a comprehensive guide on optimizing for high throughput — including API connection tuning, warm pool refill shaping, write reduction, and ready-to-use configs for burst and sustained traffic profiles — see [Performance Tuning](performance-tuning.md).
+
 ## Concurrency Settings
 
 * `--sandbox-concurrent-workers` (default: 100): The maximum number of concurrent reconciles for the Sandbox controller.

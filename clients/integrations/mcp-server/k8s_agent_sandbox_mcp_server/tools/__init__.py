@@ -17,6 +17,7 @@ from .delete_sandbox import delete_sandbox
 from .execute_command import execute_command
 from .upload_file import upload_file
 from .download_file import download_file
+from .get_sandbox_status import get_sandbox_status
 
 __all__ = [
     'create_sandbox',
@@ -24,4 +25,5 @@ __all__ = [
     'execute_command',
     'upload_file',
     'download_file',
+    'get_sandbox_status',
 ]

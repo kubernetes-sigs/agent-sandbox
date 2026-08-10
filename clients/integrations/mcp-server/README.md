@@ -49,6 +49,12 @@ The MCP server exposes the following tools:
     * `timeout` (int, default: 60)
   * **Returns**: Content of the file and the number of bytes read.
 
+* **`get_sandbox_status`**: Reports the readiness of a sandbox, derived from its Kubernetes conditions. 
+  * **Arguments**:
+    * `sandbox_claim_name` (str)
+    * `namespace` (str)
+  * **Returns**: `status` (one of `SandboxReady`, `SandboxNotReady`, or `SandboxNotFound`), `ready` (True only when the `Ready` condition is True), and `message` (the Kubernetes condition message, empty if none is set).
+
 *(The server also provides a `get_sandboxes` resource to fetch a list of existing sandboxes.)*
 
 ## Configuration

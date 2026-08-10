@@ -201,7 +201,7 @@ class KindLoadImagesExtraTagsTest(unittest.TestCase):
             # Collect last three arguments which should be the image names
             all_image_names.extend(cmd[4:])
 
-        # Moke the subprocess run for kind load docker-images
+        # Mock the subprocess run for kind load docker-images
         with (
             mock.patch.object(
                 push_images.subprocess, "run", side_effect=fake_run

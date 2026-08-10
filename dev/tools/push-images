@@ -107,7 +107,7 @@ def load_kind_image(args, cluster_name, service_name, srcdir, image_tag):
     ]
 
     subprocess.run(build_cmd, cwd=srcdir, check=True)
-    print(f"loaded image(s) {', '.join(all_image_names)} into kind cluster {args.kind_cluster_name}")
+    print(f"loaded image(s) {', '.join(all_image_names)} into kind cluster {cluster_name}")
 
 
 def build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag):

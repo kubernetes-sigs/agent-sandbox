@@ -49,7 +49,7 @@ containers:
   - --kube-api-burst=100
 ```
 
-*Extensions install (`k8s/extensions.controller.yaml`) — note the additional `--extensions` flag, which enables the SandboxTemplate controller and its associated RBAC. (`k8s/extensions.yaml` is RBAC only — the Deployment lives in this separate file so `kubectl apply -f k8s/*.yaml` doesn't declare two Deployments.):*
+*Extensions install (`k8s/extensions.controller.yaml`) — note the additional `--extensions` flag, which enables the SandboxTemplate controller and its associated RBAC. (`k8s/extensions.yaml` is RBAC only — the Deployment lives in `k8s/extensions.controller.yaml`, a second copy of the core Deployment applied after `sandbox.yaml` so the sequential `sandbox.yaml` → `extensions.yaml` install path lands a Deployment with `--extensions` set. Kustomize consumers get the same result via the patch in `k8s/kustomization.yaml`, which excludes this file.):*
 
 ```yaml
 containers:
@@ -131,7 +131,7 @@ kubectl patch deployment agent-sandbox-controller \
   value: "--kube-api-burst=100"
 ```
 
-Reference the patch from `kustomization.yaml` using `patches` with an explicit `target` and `options.type: json`:
+Reference the patch from `kustomization.yaml` using `patches` with an explicit `target`:
 
 ```yaml
 # kustomization.yaml
@@ -141,8 +141,6 @@ patches:
       kind: Deployment
       name: agent-sandbox-controller
       namespace: agent-sandbox-system
-    options:
-      type: json
 ```
 
 ---
@@ -333,7 +331,7 @@ These are two distinct measurements, backed by different CL2 methods:
 - `SchedulingThroughput` (`high-volume-test.yaml`, `throughput-test.yaml`) — pod scheduling rate, via CL2's built-in `SchedulingThroughput` method.
 - `SandboxStartupLatency` / `ColdAcquisitionLatency` (all five recipes) — pod startup latency, via CL2's built-in `PodStartupLatency` method. The label selector varies per recipe — see the table above. `rapid-burst-test.yaml` additionally collects the two Prometheus-backed SandboxClaim metrics documented below.
 
-`throughput-test.yaml` also runs `ReadyPerSecond`, a `GenericPrometheusQuery` measurement of pods entering the `Running` phase per second; it isn't documented elsewhere in this guide.
+`throughput-test.yaml` also runs `ReadyPerSecond`, a `GenericPrometheusQuery` measurement; it isn't documented elsewhere in this guide.
 
 The controller exposes all metrics at its `/metrics` endpoint; a Prometheus `ServiceMonitor` is provided at `dev/load-test/test-recipes/monitor/agent-sandbox-controller-monitor.yaml`.
 

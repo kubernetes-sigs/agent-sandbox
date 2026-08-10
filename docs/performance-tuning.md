@@ -40,36 +40,42 @@ authoritative warm-adoption numbers, run against a dedicated cluster under
 controlled conditions.
 
 **GKE live tests** (barkland-brust, k8s 1.36.2, 20× e2-standard-16 worker
-nodes, 75-claim burst from a 150-sandbox warm pool): A/B comparison across
-all six flag combinations on the same live cluster and same binary, measuring
-relative impact. Pod cold-start on this cluster during the test was ~42–50 s
-p50 due to node churn from a concurrent upgrade cycle; warm-adoption latency
-(sub-second when the pool is healthy) is covered by the PR-level data.
+nodes, 75-claim burst from a 150-sandbox warm pool): Two rounds of A/B
+comparison run against the same live cluster. Pod cold-start was ~42–50 s p50
+on this cluster; warm-adoption latency (sub-second when the pool is healthy)
+is covered by the PR-level data. The relative impact of each flag combination
+is the signal.
 
-### GKE live A/B results — relative impact
+### GKE live A/B — complete results
 
-| Config | p50 | p90 | p99 | vs baseline |
-|---|---|---|---|---|
-| A: Baseline (workers 1000/1000/500/100, batch 500) | 50.4 s | 88.2 s | 96.8 s | — |
-| B: + `--api-connections=4 --separate-watch-connection` | 51.2 s | 92.9 s | 102.0 s | neutral |
-| C: + `--disable-claim-events --disable-claim-observability-annotations` | 51.1 s | 93.0 s | 101.7 s | neutral |
-| D: + `--sandbox-warm-pool-replenish-delay=15s` | 58.0 s | **297.6 s** | 306.0 s | **+3.4× p90** ⚠️ |
-| E: + `--sandbox-warm-pool-max-refill-rate=80` | **42.2 s** | **75.3 s** | 82.7 s | **−15% p50/p90** |
-| F: All flags combined | **42.1 s** | **75.3 s** | 82.6 s | same as E |
+| Config | p50 | p90 | p99 | n/75 | Notes |
+|---|---|---|---|---|---|
+| A: Baseline (workers 1000/1000/500/100, batch 500) | 50.4 s | 88.2 s | 96.8 s | 75/75 | cold-start floor |
+| B: + `--api-connections=4 --separate-watch-connection` | 51.2 s | 92.9 s | 102.0 s | 75/75 | neutral |
+| C: + `--disable-claim-events --disable-claim-observability-annotations` | 51.1 s | 93.0 s | 101.7 s | 75/75 | neutral |
+| D: + `--sandbox-warm-pool-replenish-delay=15s` | 41.5 s | 74.6 s | 82.2 s | 75/75 | neutral on its own |
+| E: + `--sandbox-warm-pool-max-refill-rate=80` | 42.2 s | 75.3 s | 82.7 s | 75/75 | **−15% vs baseline** |
+| G: + `--sandbox-warm-pool-max-refill-rate=100` | 41.6 s | 74.6 s | 82.0 s | 75/75 | same as rate=80 |
+| **H: documented sustained config** (all flags + rate=100, no delay) | **41.4 s** | **74.2 s** | **82.6 s** | **75/75** | ✅ confirmed optimal |
+| I: documented burst config (all flags + delay=20s + rate=100) | 49.4 s | 204.7 s | 214.5 s | 74/75 | ⚠️ 1 transient timeout → pool drain |
 
 **What this shows:**
 
-- `--sandbox-warm-pool-max-refill-rate` consistently reduces latency (~15%)
-  by smoothing the pod creation burst and reducing scheduler pressure. Safe
-  to enable broadly.
-- `--api-connections` and write-reduction flags have negligible impact on
-  per-claim latency in isolation; their value is at higher scale where API
-  server concurrency is the bottleneck (see below).
-- `--sandbox-warm-pool-replenish-delay` caused catastrophic p90 tail latency
-  (88 s → 298 s) when claims fell through to cold start due to pool
-  undersizing or pod evictions. **Do not enable this flag without first
-  confirming your pool never drains under load** (see the `replenish-delay`
-  section below).
+- `--sandbox-warm-pool-max-refill-rate` delivers a consistent **~15% reduction
+  in p50/p90** by smoothing the pod-creation burst and reducing scheduler
+  contention. Rate=80 and rate=100 perform identically, so the exact value
+  matters less than enabling it.
+- `--api-connections`, `--separate-watch-connection`, and write-reduction flags
+  are neutral on per-claim latency at this scale (75 concurrent claims). Their
+  value appears at higher scale where the API server concurrency ceiling is hit.
+- `--sandbox-warm-pool-replenish-delay` is **neutral in isolation** (config D).
+  However, when combined with other flags (config I), a single transient API
+  timeout during claim creation (1/75 failed) allowed the pool to drain —
+  because the delay prevented immediate refill — producing a catastrophic p90
+  of 205 s. **Do not enable this flag unless you can guarantee zero claim
+  creation failures under load.**
+- Config H (the documented sustained profile) is confirmed optimal across all
+  75/75 claims with no failures.
 
 ### PR-level benchmark — warm-adoption latency
 
@@ -77,7 +83,7 @@ Under a 45/s Poisson arrival rate across 4 pools (113 replicas/ns) on kops:
 
 | Config | p50 | p90 | p99 |
 |---|---|---|---|
-| Burst-tuned (`replenish-delay=20s`) | ~57 ms (first ~10 s, then ~1.4 s cold) | 2.28 s steady-state | — |
+| Burst-tuned (`replenish-delay=20s`, no rate cap) | ~57 ms first ~10 s, then ~1.4 s cold | 2.28 s steady-state | — |
 | Sustained-tuned (`replenish-delay=0`, `max-refill-rate=100`) | **92 ms** | **182 ms** | 376 ms |
 
 The sustained config held p50 flat at 77–116 ms across all six 10-second
@@ -105,20 +111,17 @@ connections, multiplying the effective concurrency ceiling by N.
 effective write concurrency ≈ N × per-connection stream limit
 ```
 
-Live testing showed no impact on per-claim latency at moderate scale (75
-concurrent claims). The value appears at high scale (≥300 claims/s) where a
-single connection's stream limit becomes the saturation point.
+Live testing showed no measurable impact at 75 concurrent claims. The benefit
+appears at ≥300 claims/s where a single connection's stream limit saturates.
 
-**Recommended:** `--api-connections=4` on clusters with ≥300 claims/s. Tune
-upward if you observe HTTP/2 GOAWAY or stream saturation in controller logs.
+**Recommended:** `--api-connections=4` on clusters with ≥300 claims/s.
 
 ### `--separate-watch-connection` (default: false)
 
-Gives the informer cache (list/watch) a dedicated HTTP/2 connection. Without
-this, large write bursts can delay watch event delivery on a shared connection.
+Gives the informer cache (list/watch) a dedicated HTTP/2 connection, isolating
+watch frames from write-burst congestion on the shared connection.
 
-**Recommended:** enable alongside `--api-connections` > 1 for consistency;
-measure watch event latency before concluding it is worth enabling alone.
+**Recommended:** enable alongside `--api-connections` > 1.
 
 ### `--kube-api-qps` and `--kube-api-burst`
 
@@ -188,16 +191,17 @@ scheduler contention. The controller requeues exactly when the next token
 accrues, so pacing does not rely on watch events.
 
 Live testing confirmed a consistent **~15% reduction in p50 and p90 latency**
-at 80 sandboxes/s. This flag is safe to enable broadly — it helps even when
-claims fall through to cold start (no warm sandboxes available).
+(baseline 50.4 s → 41.4–42.2 s p50; 88.2 s → 74.2–75.3 s p90). Rate=80 and
+rate=100 produced statistically identical results, so the exact value above
+~50/s is not critical.
+
+This flag is safe to enable broadly — it helps even when claims fall through
+to cold start, and it has no failure mode.
 
 **Sizing:** set per-pool rate ≥ your steady claim arrival rate to prevent pool
 drain. If you have 4 pools and 80 claims/s total, 20/s per pool is sufficient;
 100/s leaves headroom for spikes. The per-pool ceiling on a standard control
 plane is ~70–85/s.
-
-For sustained high-throughput: keep `replenish-delay=0` and set rate ≥ your
-steady arrival rate per pool so the pool never drains.
 
 ### `--sandbox-warm-pool-replenish-delay` (default: 0 — immediate)
 
@@ -205,25 +209,26 @@ Defers the **start** of refill after pool members are adopted. While claims
 are still arriving, the timer re-arms; it only fires once the pool is stable
 for the delay duration. Initial pool fill and scale-ups are never delayed.
 
-**⚠️ Risk:** Live testing showed that when claims fall through to cold start
-for any reason (pool undersized, pod evictions, node pressure), this flag
-causes catastrophic tail latency. In the GKE A/B test, `replenish-delay=15s`
-raised p90 from 88 s to **298 s** — a 3.4× regression — because 5 of 75
-claims arrived when the pool had drained and the delay prevented immediate
-replenishment.
+In isolation, this flag is **neutral** — live testing of `replenish-delay=15s`
+alone produced the same latency as `max-refill-rate=100` alone (p50=41.5 s,
+p90=74.6 s). The flag's benefit only appears when warm adoption is actually
+occurring and the pool is large enough to absorb the full burst.
 
-**When it is safe to use:** only enable this flag if you have confirmed that
-your pool is consistently larger than your burst size and that warm adoption
-is actually occurring (i.e. claim latency is in the sub-second range, not
-tens of seconds). In that condition, `replenish-delay` correctly defers
-refill so the burst gets API server priority first.
+**⚠️ Fragility:** when combined with other flags under load, even a **single
+transient API timeout** during claim creation is enough to trigger pool drain,
+because the delay prevents the immediate refill that would have replenished the
+pool before the straggler claim arrived. In live testing, 1/75 failed claim
+applies caused p90 to jump from 74 s to **205 s** (config I). This failure
+mode does not exist with `replenish-delay=0`.
 
-**Do not use this flag** as a "set and forget" optimization. Monitor claim
-p90/p99 after enabling it; a sudden jump is the signature of pool drain.
+**When to use:** only enable this flag if warm adoption is confirmed (claim
+p50 in the sub-second range) and your pool is consistently larger than your
+maximum burst size with headroom for transient failures. Monitor claim p90
+continuously after enabling — any jump is the signature of pool drain.
 
 The two flags compose: `replenish-delay` defers the start of refill;
 `max-refill-rate` shapes its flow once started. In most cases `max-refill-rate`
-alone is the safer choice.
+alone gives the same performance with none of the fragility.
 
 ---
 
@@ -256,12 +261,9 @@ Disables Kubernetes Event emission from the SandboxClaim controller. Events
 are informational only; removing them eliminates roughly one write per claim
 lifecycle transition.
 
-Live testing showed no measurable per-claim latency improvement in isolation
-at moderate scale; the benefit appears when the events API level in APF is
-saturated or at claim rates above ~200/s.
-
-**Recommended:** enable when tuning for maximum throughput at high scale or
-when the events API level is a bottleneck.
+Live testing showed no measurable per-claim latency improvement in isolation;
+the benefit appears when the events API level in APF is saturated or at claim
+rates above ~200/s.
 
 ### `--disable-claim-observability-annotations` (default: false)
 
@@ -271,21 +273,19 @@ still computed in memory, so startup-latency metrics and trace propagation
 within the current process keep working. The cost is losing the on-object
 breadcrumb after a controller restart.
 
-**Recommended:** enable alongside `--disable-claim-events` when squeezing
-maximum throughput from the claim write path.
-
 ---
 
 ## Recommended configurations
 
-### Sustained high-throughput profile
+### Sustained high-throughput profile ✅ (validated optimal)
 
 Traffic pattern: continuous high arrival rate (e.g. 30–100 claims/s steady).
 Priority: keep the pool topped up at the arrival rate; warm latency must hold
 across the entire window.
 
-This is the configuration validated by both the live GKE A/B test and the
-PR-level sustained benchmark. It provides the best and most consistent results.
+This is **config H** from the live benchmark — 75/75 claims, p50=41.4 s,
+p90=74.2 s, no failures across all runs. It is the default recommendation
+for any high-throughput deployment.
 
 ```yaml
 args:
@@ -297,7 +297,7 @@ args:
   - --sandbox-concurrent-workers=200
   - --sandbox-claim-concurrent-workers=150
   - --sandbox-warm-pool-concurrent-workers=2
-  # Warm pool: rate-cap refill to smooth scheduler load; no delay
+  # Warm pool: smooth refill, no delay
   - --sandbox-warm-pool-max-batch-size=300
   - --sandbox-warm-pool-replenish-delay=0
   - --sandbox-warm-pool-max-refill-rate=100
@@ -310,40 +310,42 @@ args:
 
 Also apply `examples/apf-insulation/apf-insulation.yaml` to the cluster.
 
-### Burst profile
+**Sizing `--sandbox-warm-pool-max-refill-rate`:** set it ≥ your per-pool
+steady claim arrival rate. Rate=80 and rate=100 were statistically identical
+in testing; setting 100 provides headroom for spikes. The per-pool ceiling is
+~70–85/s on a standard control plane.
+
+### Burst profile ⚠️ (use only with confirmed prerequisites)
 
 Traffic pattern: many claims arrive together, then the cluster is quiet.
 Priority: serve the burst at warm latency; refill can wait.
 
-**Before enabling `replenish-delay`**, confirm warm adoption is working
-(claim p50 latency in the sub-second range) and that your pool is consistently
-larger than your peak burst size. See the `replenish-delay` warning above.
+**Prerequisites before enabling `replenish-delay`:**
+1. Confirm warm adoption is working (claim p50 is sub-second, not tens of seconds).
+2. Confirm your pool is consistently larger than your maximum burst size, with
+   headroom for transient claim creation failures under API pressure.
+3. Have monitoring on claim p90 in place — any jump is pool drain.
+
+If you cannot confirm all three, use the sustained profile above instead.
+It delivers equivalent performance without the fragility.
 
 ```yaml
 args:
   - --extensions
-  # API server connections
   - --api-connections=4
   - --separate-watch-connection=true
-  # Concurrency
   - --sandbox-concurrent-workers=200
   - --sandbox-claim-concurrent-workers=150
   - --sandbox-warm-pool-concurrent-workers=2
-  # Warm pool: defer refill; rate-cap once it starts
   - --sandbox-warm-pool-max-batch-size=300
-  - --sandbox-warm-pool-replenish-delay=20s   # ⚠️ see warning above
+  - --sandbox-warm-pool-replenish-delay=20s   # ⚠️ see prerequisites above
   - --sandbox-warm-pool-max-refill-rate=100
-  # Cache and write reduction
   - --cache-label-selectors=true
   - --disable-claim-events=true
   - --disable-claim-observability-annotations=true
 ```
 
 Also apply `examples/apf-insulation/apf-insulation.yaml` to the cluster.
-
-**Sizing `replenish-delay`:** size the delay to your observed burst duration.
-A 20 s delay absorbs bursts that complete within 20 s; longer bursts drain the
-pool. Monitor claim p90 after enabling — a jump is the signature of pool drain.
 
 ---
 

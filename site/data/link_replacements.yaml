@@ -13,10 +13,10 @@ replacements:
     replacement: '](/docs/use-cases/examples/)'
     description: "Examples directory to docs/examples"
 
-  # Extensions examples - redirect to GitHub
-  - pattern: '\]\(extensions/examples/\)'
-    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/extensions/examples)'
-    description: "Extensions examples to GitHub"
+  # Warmpool quickstart examples - redirect to GitHub
+  - pattern: '\]\(../warmpool-quickstart/\)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/warmpool-quickstart)'
+    description: "Warmpool quickstart examples to GitHub"
 
   # Agentic-sandbox-client Python SDK (relative paths) - redirect to GitHub
   - pattern: '\]\(\.\./\.\./clients/python/agentic-sandbox-client/\)'

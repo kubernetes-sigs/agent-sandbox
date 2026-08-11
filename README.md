@@ -154,7 +154,7 @@ spec:
 
 This will create a new Sandbox named `my-sandbox` running the image you specify. You can then access the Sandbox using its stable hostname, `my-sandbox`.
 
-For more complex examples, including how to use the extensions, please see the [examples/](examples/) and [extensions/examples/](extensions/examples/) directories.
+For more complex examples, including how to use the extensions, please see the [examples/](examples/) directory.
 
 ## Motivation
 

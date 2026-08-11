@@ -12,74 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import subprocess
-import time
-import urllib.request
 import json
-import sys
-import os
+import urllib.error
+from unittest import mock
 
-def get_pod_name():
-    try:
-        # Use local kubeconfig file if present
-        cmd = ["kubectl"]
-        if os.path.exists("kubeconfig"):
-            cmd.append("--kubeconfig=kubeconfig")
-        cmd.extend(["get", "pods", "-o", "name"])
-        
-        output = subprocess.check_output(cmd, text=True)
-        for line in output.strip().split('\n'):
-            if "hermes-agent" in line:
-                return line.strip().replace("pod/", "")
-    except Exception as e:
-        print(f"Error getting pod name: {e}")
-        return None
-    return None
+from chat_hermes import chat_with_hermes
 
-def test_hermes():
-    pod_name = get_pod_name()
-    if not pod_name:
-        print("Failed to find hermes-agent pod.")
-        sys.exit(1)
-    
-    print(f"Found pod: {pod_name}")
-    
-    # Start port forwarding using local kubeconfig if present
-    cmd = ["kubectl"]
-    if os.path.exists("kubeconfig"):
-        cmd.append("--kubeconfig=kubeconfig")
-    cmd.extend(["port-forward", f"pod/{pod_name}", "8642:8642"])
-    
-    pf_process = subprocess.Popen(cmd)
-    
-    success = False
-    try:
-        print("Waiting for port-forwarding to be ready...")
-        time.sleep(5) # Give it some time to establish
-        
-        url = "http://localhost:8642/v1/models"
-        print(f"Querying {url}...")
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode())
-                print(f"Success! Response: {data}")
-                success = True
-            else:
-                print(f"Failed with status code: {response.status}")
-    except Exception as e:
-        print(f"Connection failed: {e}")
-    finally:
-        print("Cleaning up port-forwarding...")
-        pf_process.terminate()
-        pf_process.wait()
-        
-    if success:
-        print("Test Passed!")
-        sys.exit(0)
-    else:
-        print("Test Failed!")
-        sys.exit(1)
 
-if __name__ == "__main__":
-    test_hermes()
+def _mock_response(status, body):
+    response = mock.MagicMock()
+    response.status = status
+    response.read.return_value = json.dumps(body).encode()
+    response.__enter__.return_value = response
+    return response
+
+
+@mock.patch("chat_hermes.urllib.request.urlopen")
+def test_chat_with_hermes_returns_message_content(mock_urlopen):
+    mock_urlopen.return_value = _mock_response(
+        200, {"choices": [{"message": {"content": "hello there"}}]}
+    )
+
+    assert chat_with_hermes("hi") == "hello there"
+
+
+@mock.patch("chat_hermes.urllib.request.urlopen")
+def test_chat_with_hermes_reports_non_200_status(mock_urlopen):
+    mock_urlopen.return_value = _mock_response(500, {})
+
+    assert chat_with_hermes("hi") == "Error: Received status code 500"
+
+
+@mock.patch("chat_hermes.urllib.request.urlopen")
+def test_chat_with_hermes_reports_connection_failure(mock_urlopen):
+    mock_urlopen.side_effect = urllib.error.URLError("connection refused")
+
+    result = chat_with_hermes("hi")
+
+    assert "Connection failed" in result
+    assert "Is port-forwarding running?" in result

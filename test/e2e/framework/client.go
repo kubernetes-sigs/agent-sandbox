@@ -654,6 +654,21 @@ func (cl *ClusterClient) WaitForWarmPoolReady(ctx context.Context, sandboxWarmpo
 
 }
 
+// WaitForWarmPoolMinReady watches until at least minReady replicas are ready.
+// Returns an error if minReady exceeds spec.replicas — the caller must pass a valid count.
+func (cl *ClusterClient) WaitForWarmPoolMinReady(ctx context.Context, sandboxWarmpoolID types.NamespacedName, minReady int32) error {
+	cl.Helper()
+	cl.Logf("Waiting for SandboxWarmPool %s to have at least %d ready replicas", sandboxWarmpoolID, minReady)
+
+	warmpool := &unstructured.Unstructured{}
+	warmpool.SetGroupVersionKind(sandboxWarmpoolGVK)
+	if err := cl.client.Get(ctx, sandboxWarmpoolID, warmpool); err != nil {
+		return fmt.Errorf("getting warmpool %s: %w", sandboxWarmpoolID, err)
+	}
+
+	return cl.WaitForObject(ctx, warmpool, &predicates.MinReadyReplicasPredicate{MinReady: int(minReady)})
+}
+
 // GetSandbox returns the Sandbox object from the cluster.
 func (cl *ClusterClient) GetSandbox(ctx context.Context, sandboxID types.NamespacedName) (*unstructured.Unstructured, error) {
 	sandbox := &unstructured.Unstructured{}

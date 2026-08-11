@@ -527,3 +527,32 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 		t.Errorf("expected warm-pool-sandbox-xyz, got %s", state.SandboxName)
 	}
 }
+
+func TestStampClientRequestTime(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+
+	t.Run("stamps the key when absent", func(t *testing.T) {
+		got := stampClientRequestTime(nil, now)
+		if got[clientAnnotation] != "2026-08-05T12:00:00Z" {
+			t.Errorf("expected stamped time, got %q", got[clientAnnotation])
+		}
+	})
+
+	t.Run("preserves a caller-supplied value", func(t *testing.T) {
+		caller := "2026-08-05T11:59:00Z"
+		got := stampClientRequestTime(map[string]string{clientAnnotation: caller}, now)
+		if got[clientAnnotation] != caller {
+			t.Errorf("expected caller value %q to be preserved, got %q", caller, got[clientAnnotation])
+		}
+	})
+
+	t.Run("leaves unrelated annotations intact", func(t *testing.T) {
+		got := stampClientRequestTime(map[string]string{"opentelemetry.io/trace-context": "abc"}, now)
+		if got["opentelemetry.io/trace-context"] != "abc" {
+			t.Errorf("trace-context annotation was clobbered: %v", got)
+		}
+		if got[clientAnnotation] == "" {
+			t.Error("expected client annotation to be stamped alongside existing keys")
+		}
+	})
+}

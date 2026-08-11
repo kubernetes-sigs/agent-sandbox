@@ -249,6 +249,64 @@ def test_start_warmpools_provisions_each_entry(two_cluster_registry):
     assert c.active_replicas >= 1
 
 
+def _spy_waves(monkeypatch, f):
+  """Record how many pools each ``_warm_entries`` call warms (= one wave)."""
+  waves = []
+  orig = f._warm_entries
+  def spy(entries, wait, replicas_override=None):
+    waves.append(len(entries))
+    return orig(entries, wait, replicas_override=replicas_override)
+  monkeypatch.setattr(f, "_warm_entries", spy)
+  return waves
+
+
+def _ten_pools_of_four(c):
+  """A solo-cluster fleet whose plan is 10 pools × 4 replicas (40 creates)."""
+  f = _fleet(ClusterRegistry([c]), max_concurrent=10,
+             warm_per_task=True, max_warmpool_size=4)
+  imgs = [f"img{i}" for i in range(10)]
+  f.load_tasks([img for img in imgs for _ in range(4)])   # 4 tasks/image → 4 replicas
+  assert {e.replicas for e in f.plan().entries} == {4}
+  return f
+
+
+def test_start_warmpools_stages_by_create_budget(make_cluster, monkeypatch):
+  f = _ten_pools_of_four(make_cluster("solo"))
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True, create_budget=4)        # 4 replicas → 1 pool/wave
+  assert waves == [1] * 10                              # 10 pools, 10 waves
+
+
+def test_start_warmpools_entry_over_budget_warms_solo(make_cluster, monkeypatch):
+  # a single pool whose replicas exceed the budget can't be split -> it warms solo
+  c = make_cluster("solo")
+  f = _ten_pools_of_four(c)                     # 10 pools × 4 replicas
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True, create_budget=2) # 2 < 4 -> every pool is oversized
+  assert waves == [1] * 10                      # each warms alone, none dropped
+  assert c.resources.create_warmpool.call_count == 10
+
+
+def test_start_warmpools_budget_zero_warms_all_at_once(make_cluster, monkeypatch):
+  c = make_cluster("solo")
+  f = _ten_pools_of_four(c)
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True, create_budget=0)         # explicit opt-out → single wave
+  assert waves == [10]
+  assert c.resources.create_warmpool.call_count == 10
+
+
+def test_start_warmpools_uses_config_budget_default(make_cluster, monkeypatch):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=10, warm_per_task=True,
+             max_warmpool_size=4, warm_create_budget=8)  # no create_budget arg below
+  imgs = [f"img{i}" for i in range(10)]
+  f.load_tasks([img for img in imgs for _ in range(4)])
+  waves = _spy_waves(monkeypatch, f)
+  f.start_warmpools(wait=True)                          # falls back to config budget 8 → 2/wave
+  assert waves == [2, 2, 2, 2, 2]
+
+
 def test_acquire_returns_handle_on_right_cluster(two_cluster_registry):
   f = _fleet(two_cluster_registry, placement="image-affinity")
   tasks = f.load_tasks(["imgA", "imgB"])
@@ -399,3 +457,62 @@ def test_plan_budget_no_overshoot_three_clusters(make_cluster):
   plan = f.plan()
   assert plan.total_replicas == 8
   assert plan.total_replicas <= 8       # would have been 9 with round()
+
+
+# --- runaway safeguards --------------------------------------------------- #
+def test_run_id_label_stamped(make_cluster):
+  from agent_sandbox_rl.constants import RUN_ID_LABEL
+  f = _fleet(ClusterRegistry([make_cluster("solo")]))
+  assert len(f.run_id) == 12
+  assert f.config.labels[RUN_ID_LABEL] == f.run_id      # flows onto every create
+  assert f.run_selector() == f"{RUN_ID_LABEL}={f.run_id}"
+
+
+def test_circuit_breaker_trips_and_tears_down(make_cluster, monkeypatch):
+  import time
+  import unittest.mock as m
+  from agent_sandbox_rl import FleetOvercommitError
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), max_concurrent=4,
+             overcommit_factor=1.5, breaker_poll_s=0.02)
+  f.load_tasks(["i1", "i2"]); f.plan()
+  monkeypatch.setattr(f, "live_owned_count", lambda: 999)   # simulate runaway
+  td = m.MagicMock(wraps=f.teardown); monkeypatch.setattr(f, "teardown", td)
+  with pytest.raises(FleetOvercommitError):
+    with f.overcommit_guard(expected=2):                    # ceiling = 3
+      time.sleep(0.2)                                       # let the breaker poll
+  assert td.called                                          # tore down on trip
+
+
+def test_circuit_breaker_disabled_when_factor_zero(make_cluster, monkeypatch):
+  c = make_cluster("solo")
+  f = _fleet(ClusterRegistry([c]), overcommit_factor=0, max_live_sandboxes=None)
+  monkeypatch.setattr(f, "live_owned_count", lambda: 10**9)
+  with f.overcommit_guard(expected=2):                      # no ceiling → never trips
+    pass
+
+
+def test_plan_advisory_warns_but_never_raises(make_cluster):
+  f = _fleet(ClusterRegistry([make_cluster("solo")]), max_concurrent=5000)
+  f.load_tasks(["i1", "i2"])
+  plan = f.plan()                                           # must NOT raise
+  assert any("max_concurrent" in w for w in plan.warnings)  # warned, proceeded
+
+
+def test_reap_deletes_by_run_id_selector(monkeypatch):
+  import unittest.mock as m
+  import agent_sandbox_rl.reaper as reap_mod
+  from agent_sandbox_rl.constants import RUN_ID_LABEL
+  res = m.MagicMock()
+  res.list_claims.return_value = ["cl1"]
+  res.list_warmpools.return_value = ["wp1"]
+  res.list_sandboxes.return_value = ["sb1", "sb2"]
+  res.list_templates.return_value = []
+  fake = m.MagicMock(); fake.resources = res
+  monkeypatch.setattr(reap_mod, "Cluster", lambda *a, **k: fake)
+  counts = reap_mod.reap(run_id="abc123", context="x", namespace="ns")
+  sel = f"{RUN_ID_LABEL}=abc123"
+  res.list_sandboxes.assert_called_with(label_selector=sel)
+  res.delete_sandbox.assert_any_call("sb1")
+  res.delete_warmpool.assert_any_call("wp1")
+  assert counts["sandboxes"] == 2 and counts["claims"] == 1

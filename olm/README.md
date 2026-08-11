@@ -55,7 +55,7 @@ Other `make` targets (`test`, `deploy`, `bundle`, …) depend on `manifests` and
 
 ### Typical workflow
 
-1. Change API or controller code in the parent repo; run `make fix-go-generate` at the repo root. This regenerates `k8s/` and syncs `olm/config/` (via [`dev/tools/sync-olm-manifests`](../dev/tools/sync-olm-manifests) in [`codegen.go`](../codegen.go)).
+1. Change API or controller code in the parent repo; run `make fix-go-generate` at the repo root. This regenerates `k8s/` and syncs `olm/config/` (via [`dev/tools/fix-olm-manifests`](../dev/tools/fix-olm-manifests) in [`codegen.go`](../codegen.go)).
 2. Commit the updated `k8s/` output and synced `config/crd/bases/`, `config/rbac/`, and `config/manager/manager.yaml` together with any OLM bundle changes (`make bundle` when publishing).
 
 ### Operator-only config (safe to edit)

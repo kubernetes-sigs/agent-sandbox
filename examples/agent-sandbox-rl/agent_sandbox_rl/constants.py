@@ -44,3 +44,6 @@ KEEPALIVE_COMMAND = ["sleep", "infinity"]
 MANAGED_BY_LABEL = "app"
 MANAGED_BY_VALUE = "agent-sandbox-rl"
 DEFAULT_LABELS = {MANAGED_BY_LABEL: MANAGED_BY_VALUE}
+# Per-run label stamped on every resource a fleet creates, so an orphaned run's
+# resources can always be swept by the reaper (`reap(run_id=…)`).
+RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"

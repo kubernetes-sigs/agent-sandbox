@@ -21,7 +21,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -188,9 +190,19 @@ func (th *TestContext) afterEach() error {
 	return nil
 }
 
-// dumpControllerLogs fetches and logs the agent-sandbox-controller logs
-// to help diagnose test failures.
 func (th *TestContext) dumpControllerLogs() {
+	th.Helper()
+	th.fetchControllerLogs(nil, "")
+}
+
+// DumpControllerLogsSince fetches controller logs from sinceTime onward and
+// writes them to the artifacts directory with the given label in the filename.
+func (th *TestContext) DumpControllerLogsSince(sinceTime time.Time, label string) {
+	th.Helper()
+	th.fetchControllerLogs(&sinceTime, label)
+}
+
+func (th *TestContext) fetchControllerLogs(sinceTime *time.Time, label string) {
 	th.Helper()
 
 	clientset, err := kubernetes.NewForConfig(th.restConfig)
@@ -209,44 +221,41 @@ func (th *TestContext) dumpControllerLogs() {
 	}
 
 	for _, pod := range pods.Items {
-		// Write full logs to artifacts file
-		fullReq := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{})
-		fullStream, err := fullReq.Stream(context.Background())
+		logOpts := &corev1.PodLogOptions{}
+		if sinceTime != nil {
+			since := metav1.NewTime(*sinceTime)
+			logOpts.SinceTime = &since
+		}
+
+		stream, err := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, logOpts).Stream(context.Background())
 		if err != nil {
 			th.Logf("failed to get logs for pod %s: %v", pod.Name, err)
 			continue
 		}
-		var fullBuf bytes.Buffer
-		if _, err := fullBuf.ReadFrom(fullStream); err != nil {
-			fullStream.Close()
+		var buf bytes.Buffer
+		if _, err := buf.ReadFrom(stream); err != nil {
+			stream.Close()
 			th.Logf("failed to read logs for pod %s: %v", pod.Name, err)
 			continue
 		}
-		fullStream.Close()
+		stream.Close()
 
-		logFile := filepath.Join(th.artifactsDir, fmt.Sprintf("controller-%s.log", pod.Name))
-		if err := os.WriteFile(logFile, fullBuf.Bytes(), 0o644); err != nil {
+		filename := fmt.Sprintf("controller-%s.log", pod.Name)
+		if label != "" {
+			filename = fmt.Sprintf("controller-%s-%s.log", label, pod.Name)
+		}
+		logFile := filepath.Join(th.artifactsDir, filename)
+		if err := os.WriteFile(logFile, buf.Bytes(), 0o644); err != nil {
 			th.Logf("failed to write controller logs to %s: %v", logFile, err)
 		}
 
-		// Print last 42 lines to test output (following k8s e2e convention)
-		tailReq := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
-			TailLines: new(int64(42)),
-		})
-		tailStream, err := tailReq.Stream(context.Background())
-		if err != nil {
-			th.Logf("failed to get tail logs for pod %s: %v", pod.Name, err)
-			continue
+		lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+		tail := lines
+		if len(tail) > 42 {
+			tail = tail[len(tail)-42:]
 		}
-		var tailBuf bytes.Buffer
-		if _, err := tailBuf.ReadFrom(tailStream); err != nil {
-			tailStream.Close()
-			th.Logf("failed to read tail logs for pod %s: %v", pod.Name, err)
-			continue
-		}
-		tailStream.Close()
-
-		th.Logf("=== Controller logs (last 42 lines) from %s (full logs: %s) ===\n%s", pod.Name, logFile, tailBuf.String())
+		th.Logf("=== Controller logs [%s] %s (%d lines, full: %s) ===\n%s",
+			label, pod.Name, len(lines), logFile, strings.Join(tail, "\n"))
 	}
 }
 

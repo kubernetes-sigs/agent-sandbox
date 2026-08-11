@@ -54,6 +54,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/rawpatch"
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
@@ -73,14 +74,8 @@ var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 var ErrWarmPoolNotFound = errors.New("SandboxWarmPool not found")
 
 // errAdoptionConflict classifies expected contention on the optimistically
-// locked adoption writes: the in-pass annotation retry could not resolve its
-// 409 (e.g. the fresh read shows a different sandbox already assigned), or a
-// committed adoption could not be completed (the assigned sandbox was
-// deleted, was won by another owner, or its adoption patch kept
-// conflicting). It is contention, not a claim failure: the Ready condition
-// surfaces it with a benign AdoptionConflict reason instead of a generic
-// ReconcilerError, and the next pass re-enters or finishes the adoption from
-// the converged view.
+// locked adoption writes; the Ready condition surfaces it as the benign
+// AdoptionConflict reason instead of ReconcilerError.
 var errAdoptionConflict = errors.New("adoption write conflict")
 
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
@@ -163,6 +158,15 @@ type SandboxClaimReconciler struct {
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
 	AllowedLabelDomains     []string
+	// DisableObservabilityAnnotations skips persisting the observability
+	// annotations (first-observed timestamp, trace context) onto the claim,
+	// removing one API write per claim. The values are still stamped on the
+	// in-memory object, so same-process consumers (startup-latency metrics,
+	// trace propagation to the Sandbox) keep working. Costs the on-object
+	// debugging breadcrumbs and, after a controller restart, the
+	// startup-latency metric for claims first observed by the previous
+	// process. Wired to --disable-claim-observability-annotations.
+	DisableObservabilityAnnotations bool
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -369,28 +373,47 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 // initializeAnnotations initializes trace ID and observation time for active resources missing them.
+//
+// The persisted patch is built directly with rawpatch instead of the
+// historical DeepCopy+client.MergeFrom pattern: MergeFrom serialized the
+// entire claim twice and diffed the two documents just to emit this exact
+// {"metadata":{"annotations":{...}}} body (building that full-object patch
+// was measured at 15.8% of controller CPU in a 300-claim warm-adoption
+// benchmark). rawpatch's tests pin byte-equivalence with MergeFrom for
+// metadata-only set mutations, so nothing changes on the wire.
+//
+// When DisableObservabilityAnnotations is set the API write is skipped
+// entirely, but the annotations are still stamped on the in-memory object so
+// same-process consumers (startup-latency metrics, trace propagation to the
+// Sandbox) keep working.
 func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
 	traceContext := r.Tracer.GetTraceContext(ctx)
-	needObservabilityPatch := claim.Annotations[asmetrics.ObservabilityAnnotation] == ""
-	needTraceContextPatch := traceContext != "" && (claim.Annotations[asmetrics.TraceContextAnnotation] == "")
 
-	if needObservabilityPatch || needTraceContextPatch {
-		patch := client.MergeFrom(claim.DeepCopy())
-		if claim.Annotations == nil {
-			claim.Annotations = make(map[string]string)
-		}
-		if needObservabilityPatch {
-			timestamp := r.getOrRecordObservedTime(claim)
-			claim.Annotations[asmetrics.ObservabilityAnnotation] = timestamp.Format(time.RFC3339Nano)
-		}
-		if needTraceContextPatch {
-			claim.Annotations[asmetrics.TraceContextAnnotation] = traceContext
-		}
-		if err := r.Patch(ctx, claim, patch); err != nil {
-			return err
-		}
+	stamped := make(map[string]string, 2)
+	if claim.Annotations[asmetrics.ObservabilityAnnotation] == "" {
+		stamped[asmetrics.ObservabilityAnnotation] = r.getOrRecordObservedTime(claim).Format(time.RFC3339Nano)
 	}
-	return nil
+	if traceContext != "" && claim.Annotations[asmetrics.TraceContextAnnotation] == "" {
+		stamped[asmetrics.TraceContextAnnotation] = traceContext
+	}
+	if len(stamped) == 0 {
+		return nil
+	}
+
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string, len(stamped))
+	}
+	maps.Copy(claim.Annotations, stamped)
+
+	if r.DisableObservabilityAnnotations {
+		return nil
+	}
+
+	patch, err := rawpatch.Annotations(stamped)
+	if err != nil {
+		return err
+	}
+	return r.Patch(ctx, claim, patch)
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
@@ -636,14 +659,9 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 			}
 		}
 		if errors.Is(err, errAdoptionConflict) {
-			// Expected contention on the optimistically locked adoption write,
-			// not a claim failure: the next pass re-enters or completes the
-			// adoption from the converged view. The error text carries the
-			// per-case detail (concurrent update, sandbox deleted, or won by
-			// another owner), so surface it instead of asserting one cause —
-			// but trim the raw apiserver conflict text from the tail: that
-			// low-level detail belongs in logs, not in the condition users
-			// read via kubectl describe.
+			// Expected contention, not a claim failure. Surface the per-case
+			// detail, but trim any raw apiserver conflict tail — that belongs
+			// in logs, not in kubectl describe output.
 			msg := err.Error()
 			var apiErr *k8errors.StatusError
 			if errors.As(err, &apiErr) && strings.HasSuffix(msg, apiErr.Error()) {
@@ -992,25 +1010,13 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 					logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
 					return false, err
 				}
-				// A 404/409 here only proves the CANDIDATE's cache view was
-				// stale (deleted, already adopted, or concurrently written —
-				// freshly refilled pool sandboxes are actively written by the
-				// sandbox and warm-pool controllers). The adoption annotation
-				// is already committed on the claim, so this pass must NOT
-				// move on to another candidate: overwriting the committed
-				// assignment orphans the recorded sandbox and, under sustained
-				// load, cascades into assignment-flip storms, burned
-				// candidates, duplicate binds and cold-create status
-				// overwrites. Resolve the committed assignment against
-				// authoritative reads instead.
+				// A 404/409 only proves the cached candidate view is stale.
+				// The annotation is already committed: never move on to
+				// another candidate; resolve THIS assignment authoritatively.
 				resolved, resolveErr := r.resolveAdoptionCompletion(ctx, claim, adopted.Name)
 				if resolveErr != nil {
-					// Terminal for this pass: the dead reference was cleaned up
-					// (deleted/stolen sandbox) or contention persists, and the
-					// retry is paced by the workqueue's per-item rate limiter.
-					// The candidate key is deliberately NOT re-queued: a
-					// still-adoptable sandbox re-enters the warm queue via its
-					// own watch events.
+					// Terminal for this pass; the workqueue rate limiter paces
+					// the retry. The candidate key is deliberately not re-queued.
 					return false, resolveErr
 				}
 				resolved.DeepCopyInto(adopted)
@@ -1140,13 +1146,9 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		}
 	}
 
-	// Optimistic lock: the ownership transfer must only apply to the exact
-	// revision this pass computed it from. Without it, a patch built from a
-	// stale cache base can silently re-transfer a sandbox that another claim
-	// (or an earlier pass) already adopted. With it, any concurrent write —
-	// including the sandbox controller's own status/annotation writes on a
-	// freshly refilled candidate — surfaces as a 409 that the callers resolve
-	// against a fresh authoritative read (resolveAdoptionCompletion).
+	// Optimistic lock: a transfer computed from a stale base is rejected
+	// instead of silently re-transferring an already-adopted sandbox; 409s
+	// are resolved authoritatively by resolveAdoptionCompletion.
 	if err := r.Patch(ctx, adopted, client.MergeFromWithOptions(originalAdopted, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
@@ -1179,7 +1181,7 @@ func (r *SandboxClaimReconciler) authoritativeReader() client.Reader {
 func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, mutate func(fresh *extensionsv1beta1.SandboxClaim) (bool, error)) error {
 	reader := r.authoritativeReader()
 	key := client.ObjectKeyFromObject(claim)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	attempt := func() error {
 		fresh := &extensionsv1beta1.SandboxClaim{}
 		if err := reader.Get(ctx, key, fresh); err != nil {
 			return err
@@ -1195,7 +1197,26 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 		}
 		fresh.DeepCopyInto(claim)
 		return nil
+	}
+	return retryOnConflictKeepingAttemptErr(attempt)
+}
+
+// retryOnConflictKeepingAttemptErr runs fn under RetryOnConflict but keeps the
+// last attempt's own error authoritative: client-go maps an interrupted
+// attempt (an error wrapping context.Canceled/DeadlineExceeded) to the last
+// conflict — nil when the first attempt is interrupted — which would report a
+// canceled write as success, or mask a cancellation that followed an earlier
+// conflict as contention.
+func retryOnConflictKeepingAttemptErr(fn func() error) error {
+	var attemptErr error
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		attemptErr = fn()
+		return attemptErr
 	})
+	if errors.Is(attemptErr, context.Canceled) || errors.Is(attemptErr, context.DeadlineExceeded) || (err == nil && attemptErr != nil) {
+		return attemptErr
+	}
+	return err
 }
 
 // retryAdoptionAnnotation retries the optimistically locked claim update that
@@ -1223,38 +1244,24 @@ func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, cl
 	})
 }
 
-// resolveAdoptionCompletion resolves a completeAdoption failure (404, or 409
-// on the optimistically locked adoption patch) against authoritative reads.
-// It is called only AFTER the adoption annotation has been committed on the
-// claim, and it upholds one invariant: a committed assignment is never
-// abandoned for another candidate inside the same pass. A stale cache view of
-// the assigned sandbox must degrade to (in order):
-//
-//   - no write at all, when the fresh object shows the adoption already
-//     completed (an earlier pass's patch landed);
-//   - one re-patch on the fresh base, when the sandbox is genuinely still
-//     pool-owned and adoptable (the 409 came from a concurrent benign write,
-//     e.g. the sandbox controller's status transition on a fresh candidate);
-//   - authoritative cleanup of the dead reference plus a benign
-//     errAdoptionConflict, when the sandbox is deleted or was won by another
-//     owner. The next pass then re-enters adoption cleanly, paced by the
-//     workqueue's per-item rate limiter.
-//
-// Nothing here retries a write against a deleted object, requeues on a fixed
-// delay, or records any in-memory state.
+// resolveAdoptionCompletion resolves a completeAdoption 404/409 against
+// authoritative reads, upholding one invariant: a committed assignment is
+// never abandoned for another candidate inside the same pass. Outcomes:
+// no-op when the adoption already completed; one fresh-base re-patch when
+// the sandbox is still pool-owned and adoptable; otherwise terminal cleanup
+// of the dead reference plus a benign errAdoptionConflict.
 func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	reader := r.authoritativeReader()
 	key := client.ObjectKey{Namespace: claim.Namespace, Name: sandboxName}
 	var resolved *v1beta1.Sandbox
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	attempt := func() error {
 		fresh := &v1beta1.Sandbox{}
 		if err := reader.Get(ctx, key, fresh); err != nil {
 			return err
 		}
 		if metav1.IsControlledBy(fresh, claim) {
-			// The adoption is already complete on the server; this pass has
-			// nothing left to write for it.
+			// Already complete on the server; nothing left to write.
 			resolved = fresh
 			return nil
 		}
@@ -1264,25 +1271,38 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 		if err := verifySandboxCandidate(fresh, claim); err != nil {
 			return fmt.Errorf("%w: sandbox %s is no longer adoptable by claim %s: %s", errAdoptionConflict, sandboxName, claim.Name, err.Error())
 		}
-		// Still pool-owned and adoptable on the authoritative object:
-		// re-apply the adoption patch on the fresh base. A further 409 re-runs
-		// this closure with another fresh read.
+		// Still pool-owned and adoptable: re-patch on the fresh base; a
+		// further 409 re-runs this closure with another fresh read.
 		if err := r.completeAdoption(ctx, claim, fresh); err != nil {
 			return err
 		}
 		resolved = fresh
 		return nil
-	})
+	}
+	// Without the attempt-error guard a canceled attempt reports success
+	// with resolved == nil, and callers would dereference nil.
+	err := retryOnConflictKeepingAttemptErr(attempt)
 	if err == nil {
 		return resolved, nil
 	}
 	if k8errors.IsNotFound(err) || errors.Is(err, errAdoptionConflict) {
-		// The assigned sandbox is deleted or lost for good. Clear the
-		// committed reference on a fresh claim base so the next pass re-enters
-		// adoption cleanly instead of re-resolving a dead assignment.
+		// Deleted or lost for good: clear the committed reference so the next
+		// pass re-enters adoption cleanly.
 		logger.V(4).Info("Assigned sandbox unrecoverable; clearing reference", "sandbox", sandboxName, "claim", claim.Name, "reason", err.Error())
 		if cleanupErr := r.removeAssignedSandboxReference(ctx, claim, sandboxName); cleanupErr != nil {
-			return nil, fmt.Errorf("%w: sandbox %s unrecoverable and reference cleanup failed: %w", errAdoptionConflict, sandboxName, errors.Join(err, cleanupErr))
+			// Cancellation/timeout is shutdown, not contention: propagate it
+			// instead of classifying it as a benign adoption conflict.
+			if errors.Is(cleanupErr, context.Canceled) || errors.Is(cleanupErr, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("cleaning up unrecoverable sandbox reference %s: %w", sandboxName, cleanupErr)
+			}
+			// Full chain to logs only; the returned (and surfaced) message
+			// stays stable and terse, keeping the deleted-vs-won distinction.
+			logger.Error(errors.Join(err, cleanupErr), "Assigned sandbox unrecoverable and reference cleanup failed; retrying next pass", "sandbox", sandboxName, "claim", claim.Name)
+			reason := "lost to another owner"
+			if k8errors.IsNotFound(err) {
+				reason = "deleted"
+			}
+			return nil, fmt.Errorf("%w: sandbox %s %s and reference cleanup failed", errAdoptionConflict, sandboxName, reason)
 		}
 		if errors.Is(err, errAdoptionConflict) {
 			return nil, err
@@ -1290,26 +1310,20 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 		return nil, fmt.Errorf("%w: sandbox %s deleted before adoption completed", errAdoptionConflict, sandboxName)
 	}
 	if k8errors.IsConflict(err) {
-		// Retries exhausted on persistent contention: keep the committed
-		// reference (the sandbox is still adoptable and assigned to us) and
-		// let the next event-driven or rate-limited pass finish it.
+		// Retries exhausted: keep the committed reference (still ours to
+		// finish); the next event-driven or rate-limited pass completes it.
 		return nil, fmt.Errorf("%w: completing adoption of %s for claim %s: %w", errAdoptionConflict, sandboxName, claim.Name, err)
 	}
 	return nil, err
 }
 
-// removeAssignedSandboxReference clears the assigned-sandbox reference — the
-// annotation and, for legacy claims, the deprecated label — on a fresh claim
-// base via updateClaimOnFreshBase, guarded so it only removes the exact
-// reference it was asked to clean (a concurrent pass may already have moved
-// it). Both fields must be covered: getOrCreateSandbox still accepts the
-// deprecated label as the assigned reference, so clearing only the annotation
-// would leave a label-based claim re-deriving the same dead sandbox name on
-// subsequent stale passes until the informer converges.
+// removeAssignedSandboxReference clears the assigned-sandbox annotation and,
+// for legacy claims, the deprecated label (getOrCreateSandbox still accepts
+// the label as the assigned reference) on a fresh claim base, guarded to the
+// exact reference being cleaned.
 func (r *SandboxClaimReconciler) removeAssignedSandboxReference(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) error {
-	// A deleted or recreated claim means there is nothing left to clean: it
-	// must not surface as an error, and a recreated claim (different UID)
-	// must not be copied back over this pass's object.
+	// A deleted or recreated claim leaves nothing to clean and must not be
+	// copied back over this pass's object.
 	errClaimGone := errors.New("claim gone")
 	err := r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
 		if fresh.UID != claim.UID {
@@ -1834,15 +1848,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
 							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
-						// A 404/409 here only proves the cached sandbox view is
-						// stale (deleted, already adopted, or concurrently
-						// written). Do NOT fall through to adopt a different
-						// candidate while the claim still references this one —
-						// overwriting the recorded assignment cascades under
-						// load. Resolve authoritatively instead: accept an
-						// already-completed adoption without a write, re-patch
-						// on a fresh base, or clean the dead reference and end
-						// the pass with the benign AdoptionConflict.
+						// A 404/409 only proves the cached view is stale; never
+						// fall through to another candidate while the claim
+						// references this one — resolve authoritatively.
 						resolved, resolveErr := r.resolveAdoptionCompletion(ctx, claim, sbName)
 						if resolveErr != nil {
 							return nil, resolveErr
@@ -1856,11 +1864,9 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 							logger.Info("Successfully migrated legacy sandbox label to annotation during adoption completion", "claim", claim.Name)
 						}
 					}
-					// completeAdoption (or its fresh-base resolution) wrote the API
-					// server's response back into `sandbox`, so returning it finalizes
-					// the claim status in this same pass. No requeue for cache lag:
-					// the Owns(&Sandbox{}) watch drives convergence once the cache
-					// catches up (#1107).
+					// The server's response is in `sandbox`; returning it finalizes
+					// status in this pass. No requeue: the Owns(&Sandbox{}) watch
+					// drives convergence (#1107).
 					logger.V(4).Info("Completed adoption for sandbox", "sandbox", sbName, "claim", claim.Name)
 					return sandbox, nil
 				}
@@ -1938,7 +1944,13 @@ func (r *SandboxClaimReconciler) initializeSandboxLaunchTypeLabel(ctx context.Co
 		}
 	}
 
-	patch := client.MergeFrom(sandbox.DeepCopy())
+	// Raw single-label merge patch: byte-identical to what DeepCopy+MergeFrom
+	// computed here, without serializing the whole sandbox twice to diff out
+	// one label (see internal/rawpatch).
+	patch, err := rawpatch.Labels(map[string]string{v1beta1.SandboxLaunchTypeLabel: launchType})
+	if err != nil {
+		return err
+	}
 	if sandbox.Labels == nil {
 		sandbox.Labels = make(map[string]string)
 	}
@@ -2284,6 +2296,22 @@ func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Contex
 	return nil
 }
 
+// recordClientClaimStartupLatency records the client claim startup latency based on annotation.
+func (r *SandboxClaimReconciler) recordClientClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string) {
+	logger := log.FromContext(ctx)
+	clientRequestTime := claim.Annotations[asmetrics.ClientAnnotation]
+	if clientRequestTime == "" {
+		return
+	}
+	requestTime, err := time.Parse(time.RFC3339Nano, clientRequestTime)
+	if err != nil {
+		// Debug level: user-controlled annotation, avoid log spam on every reconcile.
+		logger.V(1).Info("Failed to parse client request time", "value", clientRequestTime, "error", err)
+		return
+	}
+	asmetrics.RecordClientClaimStartupLatency(ctx, requestTime, launchType, templateName)
+}
+
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 // It returns an error when the first-ready annotation fails to persist so that
 // the reconciler retries. The retry is safe because the status already has
@@ -2340,6 +2368,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
+	r.recordClientClaimStartupLatency(ctx, claim, launchType, templateName)
 
 	// Stamp the first-ready annotation to prevent duplicate metric recording on
 	// re-Ready events (e.g. readiness probe flaps).

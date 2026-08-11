@@ -119,6 +119,30 @@ class FleetConfig(BaseModel):
   warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
+  # Stage the warm fill in waves of <= this many sandbox creates in flight,
+  # waiting for each wave to reach Ready before the next. Bounds the controller's
+  # concurrent create burst (Σ pools×replicas) so a large/deep warm can't trip the
+  # SandboxWarmPool over-creation race (#1215). 0 = warm everything at once (old
+  # behavior). The safe value scales inversely with controller warm-pool worker
+  # concurrency; 1000 is calibrated for a high-worker controller.
+  warm_create_budget: int = 1000
+  # --- runaway safeguards (see plans/sdk-runaway-safeguards.md) ------------- #
+  # Circuit breaker (#1, fail-safe): abort + teardown if live sandboxes this run
+  # owns exceed the safe ceiling — min(expected × overcommit_factor,
+  # max_live_sandboxes). Keys off *intent*, so it catches accidental over-creation
+  # (runaway/orphan/#1215) not a large-but-intended run. 0/None on factor disables.
+  overcommit_factor: float = 1.5
+  max_live_sandboxes: int | None = None      # optional absolute hard ceiling
+  breaker_poll_s: float = 5.0
+  # Trip only after the ceiling is breached for this many *consecutive* polls, so a
+  # transient spike (a claim briefly double-warms before scale-down; Terminating-pod
+  # GC lag) can't tear down a healthy run on a single sample. One healthy poll resets
+  # the counter. Sustained breach = breaker_trip_polls × breaker_poll_s.
+  breaker_trip_polls: int = 3
+  # Guaranteed teardown (#4): install atexit + SIGINT/SIGTERM handlers that tear
+  # the fleet down on any exit path (orphan defense; pairs with the run-id label +
+  # reaper). Set False if the host owns signal handling.
+  install_teardown_hooks: bool = True
   template: TemplateSpec = Field(default_factory=TemplateSpec)
   template_name_prefix: str = "r2e-img-"
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))

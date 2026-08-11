@@ -15,7 +15,9 @@ spec:
     - name: agent-sandbox-controller.rules
       rules:
         - alert: AgentSandboxControllerMetricsTargetsDown
-          expr: max by (namespace, service) (up{namespace="{{ $namespace }}", service="agent-sandbox-controller"}) < 1
+          expr: |
+            absent(up{namespace="{{ $namespace }}", service="agent-sandbox-controller"}) or
+            max by (namespace, service) (up{namespace="{{ $namespace }}", service="agent-sandbox-controller"}) < 1
           for: 5m
           labels:
             severity: warning

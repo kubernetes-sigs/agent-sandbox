@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from typing import Annotated
-
+from asyncio import CancelledError
 from pydantic import (
     BaseModel,
     Field,
@@ -58,6 +58,8 @@ async def get_sandbox_status(
 
     try:
         status, message = await sandbox.status()
+    except CancelledError:
+        raise
     except Exception as e:
         raise RuntimeError(f"Failed to get sandbox status: {e}") from e
 

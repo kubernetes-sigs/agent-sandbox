@@ -14,7 +14,7 @@ replacements:
     description: "Examples directory to docs/examples"
 
   # Warmpool quickstart examples - redirect to GitHub
-  - pattern: '\]\(../warmpool-quickstart/\)'
+  - pattern: '\]\(\.\./warmpool-quickstart/\)'
     replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/warmpool-quickstart)'
     description: "Warmpool quickstart examples to GitHub"
 

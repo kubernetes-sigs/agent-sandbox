@@ -56,6 +56,21 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		Build()
 }
 
+type createTimestampClient struct {
+	client.WithWatch
+	now func() time.Time
+}
+
+func (c *createTimestampClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if pod, ok := obj.(*corev1.Pod); ok && pod.CreationTimestamp.IsZero() {
+		pod.CreationTimestamp = metav1.NewTime(c.now())
+	}
+	if svc, ok := obj.(*corev1.Service); ok && svc.CreationTimestamp.IsZero() {
+		svc.CreationTimestamp = metav1.NewTime(c.now())
+	}
+	return c.WithWatch.Create(ctx, obj, opts...)
+}
+
 const sandboxUID = types.UID("test-sandbox-uid")
 
 func sandboxControllerRef(name string) metav1.OwnerReference {
@@ -4942,7 +4957,10 @@ func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
 			},
 		},
 	}
-	c := newFakeClient(sandbox)
+	c := &createTimestampClient{
+		WithWatch: newFakeClient(sandbox),
+		now:       time.Now,
+	}
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}})
@@ -4952,10 +4970,10 @@ func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
 	require.NotEmpty(t, updated.Annotations[asmetrics.ObservabilityAnnotation])
 	require.Contains(t, asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation]), asmetrics.StagePodCreated)
-	require.GreaterOrEqual(t, testutil.CollectAndCount(asmetrics.SandboxStageLatency), 1)
+	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
-func TestRecordStageLatenciesBatchesObservabilityAnnotation(t *testing.T) {
+func TestRecordStageLatenciesSkipsMissingObservabilityAnnotation(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
 	sandbox := &sandboxv1beta1.Sandbox{
@@ -4992,9 +5010,9 @@ func TestRecordStageLatenciesBatchesObservabilityAnnotation(t *testing.T) {
 
 	updated := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
-	require.NotEmpty(t, updated.Annotations[asmetrics.ObservabilityAnnotation],
-		"ObservabilityAnnotation should be persisted by recordStageLatencies")
-	require.Contains(t, asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation]), asmetrics.StagePodCreated)
+	require.Empty(t, updated.Annotations[asmetrics.ObservabilityAnnotation])
+	require.Empty(t, updated.Annotations[asmetrics.StageLatencyRecordedAnnotation])
+	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
 func TestRecordStageLatenciesPatchFailureDoesNotEmitMetrics(t *testing.T) {

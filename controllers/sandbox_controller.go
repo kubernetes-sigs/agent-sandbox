@@ -1657,10 +1657,8 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		Complete(r)
 }
 
-// ensureSandboxObservabilityAnnotations stamps optional trace context, and
-// controller-first-observed-at when stage recording will not run (Suspended).
-// For Running sandboxes, ObservabilityAnnotation is stamped in
-// recordStageLatencies so it can be batched with stage-latency-recorded.
+// ensureSandboxObservabilityAnnotations stamps optional trace context and
+// controller-first-observed-at before child reconciliation.
 // Annotation persistence is best-effort: patch failures are logged and do not
 // fail reconcile.
 func (r *SandboxReconciler) ensureSandboxObservabilityAnnotations(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
@@ -1668,14 +1666,6 @@ func (r *SandboxReconciler) ensureSandboxObservabilityAnnotations(ctx context.Co
 	tc := r.Tracer.GetTraceContext(ctx)
 	needObservability := sandbox.Annotations == nil || sandbox.Annotations[asmetrics.ObservabilityAnnotation] == ""
 	needTraceContext := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
-
-	// Running path: defer ObservabilityAnnotation to recordStageLatencies for a
-	// single metadata patch with stage-latency-recorded.
-	persistObservabilityNow := needObservability &&
-		sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
-	if !persistObservabilityNow {
-		needObservability = false
-	}
 	if !needObservability && !needTraceContext {
 		return
 	}
@@ -1719,25 +1709,33 @@ type pendingStageLatency struct {
 func (r *SandboxReconciler) recordStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, svc *corev1.Service) {
 	logger := log.FromContext(ctx)
 	now := time.Now()
+	t0, ok := sandboxObservedAt(sandbox)
+	if !ok {
+		logger.V(1).Info("Skipping stage latencies: missing controller-first-observed-at annotation")
+		return
+	}
 
-	// Capture merge base before mutating annotations so ObservabilityAnnotation
-	// and stage-latency-recorded can be written in a single patch.
 	statusCopy := sandbox.Status.DeepCopy()
-	patch := client.MergeFrom(sandbox.DeepCopy())
 	if sandbox.Annotations == nil {
 		sandbox.Annotations = make(map[string]string)
 	}
-
-	needObservability := sandbox.Annotations[asmetrics.ObservabilityAnnotation] == ""
-	if needObservability {
-		sandbox.Annotations[asmetrics.ObservabilityAnnotation] = now.Format(time.RFC3339Nano)
+	patchBase := sandbox.DeepCopy()
+	if patchBase.Annotations == nil {
+		patchBase.Annotations = make(map[string]string)
 	}
+	// Re-include controller-first-observed-at in the stage patch so a prior
+	// best-effort write failure does not strand later stage observations without
+	// a persisted baseline.
+	delete(patchBase.Annotations, asmetrics.ObservabilityAnnotation)
+	if len(patchBase.Annotations) == 0 {
+		patchBase.Annotations = nil
+	}
+	patch := client.MergeFrom(patchBase)
 
-	t0 := sandboxStageStartTime(sandbox, now)
 	labels := asmetrics.LabelsFromSandbox(sandbox)
 
 	recorded := asmetrics.ParseStageLatencyRecorded(sandbox.Annotations[asmetrics.StageLatencyRecordedAnnotation])
-	updated := needObservability
+	updated := false
 	var pending []pendingStageLatency
 
 	observe := func(stage string, reached bool, endTime time.Time) {
@@ -1806,18 +1804,15 @@ func (r *SandboxReconciler) recordStageLatencies(ctx context.Context, sandbox *s
 	}
 }
 
-func sandboxStageStartTime(sandbox *sandboxv1beta1.Sandbox, fallback time.Time) time.Time {
+func sandboxObservedAt(sandbox *sandboxv1beta1.Sandbox) (time.Time, bool) {
 	if sandbox.Annotations != nil {
 		if raw := sandbox.Annotations[asmetrics.ObservabilityAnnotation]; raw != "" {
 			if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-				return t
+				return t, true
 			}
 		}
 	}
-	if !sandbox.CreationTimestamp.IsZero() {
-		return sandbox.CreationTimestamp.Time
-	}
-	return fallback
+	return time.Time{}, false
 }
 
 func podCreated(pod *corev1.Pod) bool {

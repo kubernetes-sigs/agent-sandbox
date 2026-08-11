@@ -21,9 +21,9 @@ cd "${repo_root}"
 # Customizable scale & execution parameters via Environment Variables:
 #   TEST_SCENARIO:               continuous-burst | rapid-burst (default: continuous-burst)
 #   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 100)
-#   CL2_QPS:                     Target claim creation QPS (default: 75)
-#   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 10 -> 750 total claims)
-#   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 1050)
+#   CL2_QPS:                     Target claim creation QPS (default: 100)
+#   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 10 -> 1,000 total claims)
+#   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 1400)
 #   CL2_THRESHOLD_50_MS:         Claim adoption latency P50 threshold in ms (default: 300)
 #   CL2_THRESHOLD_90_MS:         Claim adoption latency P90 threshold in ms (default: 300)
 #   CL2_THRESHOLD_99_MS:         Claim adoption latency P99 threshold in ms (default: 500)
@@ -36,9 +36,9 @@ cd "${repo_root}"
 
 SCENARIO="${TEST_SCENARIO:-continuous-burst}"
 NUM_NODES="${SIMULATED_NODES:-100}"
-QPS="${CL2_QPS:-75}"
+QPS="${CL2_QPS:-100}"
 DURATION="${CL2_DURATION_SECONDS:-10}"
-WARMPOOL="${CL2_WARMPOOL_SIZE:-1050}"
+WARMPOOL="${CL2_WARMPOOL_SIZE:-1400}"
 CLIENTS="${CL2_K8S_CLIENTS_NUMBER:-20}"
 
 CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"

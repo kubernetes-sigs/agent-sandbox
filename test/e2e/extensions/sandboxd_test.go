@@ -37,6 +37,13 @@ import (
 // sandboxdManifest runs sandboxd as the sole container (it binds loopback,
 // which port-forward reaches from inside the pod netns). Real deployments
 // run it as a sidecar next to the workload; the daemon behavior is identical.
+//
+// This test targets a non-gVisor cluster (kind in CI). NOTE: under gVisor,
+// kubectl port-forward cannot reach the daemon's loopback listeners — a
+// known limitation tracked separately (sandboxd needs a non-loopback bind
+// option). The readiness probe uses exec rather than httpGet for the same
+// reason: a kubelet httpGet probe dials the pod IP, which cannot reach a
+// loopback-only listener.
 const sandboxdManifest = `
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
@@ -48,17 +55,35 @@ spec:
       labels:
         sandbox: my-sandboxd-sandbox
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
       containers:
       - name: sandboxd
         image: %ssandboxd:%s
         imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
         ports:
         - containerPort: 8080
         - containerPort: 9090
         readinessProbe:
-          httpGet:
-            path: /v1/health
-            port: 8080
+          exec:
+            command: ["/usr/local/bin/sandboxd", "-version"]
 `
 
 // TestRunSandboxdSandbox runs sandboxd in a Pod and exercises both surfaces:
@@ -66,8 +91,7 @@ spec:
 // ProcessService (Execute), reaching the loopback-bound daemon via
 // port-forward directly to the pod.
 func TestRunSandboxdSandbox(testingT *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := testingT.Context()
 
 	testContext := framework.NewTestContext(testingT)
 

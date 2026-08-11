@@ -28,20 +28,41 @@ metadata:
 spec:
   podTemplate:
     spec:
+      # The sandbox runs untrusted agent code; it needs no API access.
+      automountServiceAccountToken: false
       securityContext:
+        runAsNonRoot: true
         # Ensure the shared emptyDir is writable by the non-root runtime user.
         fsGroup: 1000
       containers:
         - name: sandboxd
           image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           ports:
             - containerPort: 8080  # REST filesystem + probes
             - containerPort: 9090  # gRPC ProcessService
+          # NOTE: a kubelet httpGet probe dials the pod IP, which cannot
+          # reach sandboxd's loopback-only listeners, so /v1/health is not
+          # usable as an httpGet probe today. Use an exec probe (runs inside
+          # the container) until sandboxd supports a non-loopback bind.
           readinessProbe:
-            httpGet:
-              path: /v1/health
-              port: 8080
+            exec:
+              command: ["/usr/local/bin/sandboxd", "-version"]
           volumeMounts:
             - name: workspace
               mountPath: /workspace

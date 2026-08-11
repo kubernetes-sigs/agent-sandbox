@@ -23,7 +23,7 @@ challenge:
     can host.
 
 This benchmark rigorously evaluates how **GKE Local NVMe SSD Swap** combined
-with `agent-sandbox` enables nodes to host up to **120% more active agent sandboxes for native `runc`** (scaling from 100 to 220 sandboxes) and **100% more for secure `gvisor`** (scaling from 80 to 160 sandboxes) on the exact same physical hardware footprint.
+with `agent-sandbox` enables nodes to host up to **200% more active agent sandboxes for native `runc`** (scaling from 80 to 240 sandboxes) and **200% more for secure `gvisor`** (scaling from 80 to 240 sandboxes) on the exact same physical hardware footprint.
 
 ---
 

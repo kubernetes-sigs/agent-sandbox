@@ -197,7 +197,7 @@ func TestPythonSandboxDensity(t *testing.T) {
 	var wg sync.WaitGroup
 	metricsCh := make(chan *PythonSandboxMetrics, densityCount)
 
-	// Provision sandboxes concurrently with a 1.0s orchestrator deployment stagger delay
+	// Provision sandboxes concurrently with a 1.8s orchestrator deployment stagger delay
 	for i := range densityCount {
 		wg.Add(1)
 		go func(idx int) {

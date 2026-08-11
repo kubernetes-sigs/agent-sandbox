@@ -29,7 +29,8 @@ cd "${repo_root}"
 #   CL2_THRESHOLD_99_MS:         Claim adoption latency P99 threshold in ms (default: 500)
 #   CONTROLLER_KUBE_API_QPS:     Controller API QPS (default: 1000)
 #   CONTROLLER_KUBE_API_BURST:   Controller API Burst (default: 2000)
-#   CONTROLLER_WORKERS:          Reconciler worker concurrency (default: 50)
+#   CONTROLLER_WORKERS:          Sandbox reconciler worker concurrency (default: 50)
+#   CONTROLLER_CLAIM_WORKERS:    SandboxClaim reconciler worker concurrency (default: 50)
 #   CONTROLLER_MAX_BATCH_SIZE:   WarmPool refill batch size (default: 300)
 
 #   CL2_K8S_CLIENTS_NUMBER:      Number of parallel client-go instances for ClusterLoader2 (default: 20)

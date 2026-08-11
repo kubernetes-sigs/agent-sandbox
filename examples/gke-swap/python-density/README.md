@@ -57,8 +57,8 @@ with `agent-sandbox` enables nodes to host up to **120% more active agent sandbo
     and disk queue bottlenecks. *(Note: `node-tuner-ds` is used as a temporary
     workaround until native Kubelet CPU reservation is supported in GKE; see
     [GKE System CPU Reservation Design Doc](https://docs.google.com/document/d/14_Ezqm-ff2mwjEbTk2h0iSzCu3Rh9xdFbPRG7ZPLCxQ/edit?resourcekey=0-g9qAL6lRjQx6Xrk-YARP5g#heading=h.ly7j8v6k28nd)).*
-*   **Orchestrator-Level Deployment Stagger (`1.0s`):** The Go test runner
-    (`pythonsandbox_density_test.go`) enforces a 1-second delay between
+*   **Orchestrator-Level Deployment Stagger (`1.8s`):** The Go test runner
+    (`pythonsandbox_density_test.go`) enforces a 1.8-second delay between
     container instantiations, feeding workloads to the node at a steady rate to
     prevent CPU/IO thundering herd contention.
 *   **Resource Allocation (`Requests: 15m CPU, 100Mi RAM`, `Limits: 2Gi RAM`):** Sandboxes declare
@@ -117,7 +117,7 @@ RUNTIME_CLASS="gvisor" POOLS="lssd-swap-pool" DENSITIES="140" ./run_pythonsandbo
 
 > [!NOTE] **Active Node Tuning:** All benchmark data below was captured with
 > Node Tuning active (`node-tuner-ds` core isolation reserving Cores 0 & 1 for
-> system/`kswapd`, 1.0s orchestrator deployment stagger, and `15m` CPU
+> system/`kswapd`, 1.8s orchestrator deployment stagger, and `15m` CPU
 > Requests).
 
 ### Density Sweep Performance Matrix (30 GB Node, `c4-standard-8`)
@@ -128,57 +128,65 @@ RUNTIME_CLASS="gvisor" POOLS="lssd-swap-pool" DENSITIES="140" ./run_pythonsandbo
 
 #### Native `runc` Benchmark Results
 
-| Density | Node Pool | Pass Rate | Avg Exec Time | P99 Exec Time | Peak Node RAM | Net NVMe Swap Used | Memory Pressure (`mem_psi`) |
-| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **80** | `baseline-pool` (No Swap) | **80 / 80 (100%)** | 1.19s | 1.60s | 19.79 GB | 0.00 GB | 0.00s |
-| **80** | **`lssd-swap-pool`** | **80 / 80 (100%)** | 1.03s | 1.10s | 24.03 GB | 0.01 GB | 0.00s |
-| **100** | `baseline-pool` (No Swap) | **100 / 100 (100%)** | 1.19s | 1.32s | 24.78 GB | 0.00 GB | 0.00s |
-| **100** | **`lssd-swap-pool`** | **100 / 100 (100%)** | 1.03s | 1.10s | 24.03 GB | 0.01 GB | 0.00s |
-| **120** | `baseline-pool` (No Swap) | 117 / 120 (97.5%) | 3.48s | 43.23s | 27.00 GB | 0.00 GB | 59.91s |
-| **120** | **`lssd-swap-pool`** | **120 / 120 (100%)** | **1.09s** | **1.59s** | **24.68 GB** | **12.44 GB** | **0.03s** |
-| **140** | **`lssd-swap-pool`** | **140 / 140 (100%)** | **1.09s** | **1.37s** | **25.39 GB** | **20.46 GB** | **10.37s** |
-| **160** | **`lssd-swap-pool`** | **160 / 160 (100%)** | **1.09s** | **1.34s** | **24.86 GB** | **21.05 GB** | **6.28s** |
-| **180** | **`lssd-swap-pool`** | **180 / 180 (100%)** | **1.14s** | **1.75s** | **21.91 GB** | **24.22 GB** | **9.34s** |
-| **200** | **`lssd-swap-pool`** | **200 / 200 (100%)** | **1.15s** | **1.98s** | **24.05 GB** | **30.03 GB** | **13.18s** |
-| **220** | **`lssd-swap-pool`** | **220 / 220 (100%)** | **1.16s** | **2.55s** | **26.06 GB** | **35.03 GB** | **19.77s** |
-| **240** | **`lssd-swap-pool`** | 107 / 240 (44.6%) | N/A (Node Crash) | N/A | N/A | N/A | N/A |
+| Density | Node Pool | Pass Rate | Avg Exec Time | P99 Exec Time | Peak Node RAM | Net NVMe Swap Used | Memory PSI (`mem_psi`) | I/O PSI (`io_psi`) | CPU PSI (`cpu_psi`) |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **60** | `baseline-pool` (No Swap) | **60 / 60 (100%)** | 1.58s | 1.79s | 15.94 GB | 0.00 GB | 0.00s | 1.66s | 12.17s |
+| **80** | `baseline-pool` (No Swap) | **80 / 80 (100%)** | 1.62s | 1.86s | 19.58 GB | 0.00 GB | 0.00s | 2.30s | 15.85s |
+| **100** | `baseline-pool` (No Swap) | **Failed (Node NotReady)** | 1.63s | 2.15s | 20.58 GB | 0.00 GB | 336.44s | 445.79s | 31.27s |
+| **60** | **`lssd-swap-pool`** | **60 / 60 (100%)** | **1.36s** | **1.47s** | **16.52 GB** | **0.00 GB** | **0.00s** | **2.44s** | **6.12s** |
+| **80** | **`lssd-swap-pool`** | **80 / 80 (100%)** | **1.31s** | **1.43s** | **20.80 GB** | **2.29 GB** | **1.06s** | **4.52s** | **6.70s** |
+| **100** | **`lssd-swap-pool`** | **100 / 100 (100%)** | **1.31s** | **1.59s** | **19.88 GB** | **11.00 GB** | **1.46s** | **10.56s** | **4.43s** |
+| **120** | **`lssd-swap-pool`** | **120 / 120 (100%)** | **1.33s** | **1.62s** | **19.36 GB** | **15.97 GB** | **3.26s** | **18.77s** | **13.97s** |
+| **140** | **`lssd-swap-pool`** | **140 / 140 (100%)** | **1.35s** | **1.67s** | **18.86 GB** | **19.61 GB** | **5.23s** | **19.36s** | **16.24s** |
+| **160** | **`lssd-swap-pool`** | **160 / 160 (100%)** | **1.40s** | **2.03s** | **20.48 GB** | **21.96 GB** | **9.33s** | **29.47s** | **20.82s** |
+| **180** | **`lssd-swap-pool`** | **180 / 180 (100%)** | **1.36s** | **1.85s** | **21.03 GB** | **29.45 GB** | **8.59s** | **31.16s** | **21.26s** |
+| **200** | **`lssd-swap-pool`** | **200 / 200 (100%)** | **1.43s** | **2.00s** | **23.68 GB** | **32.67 GB** | **13.21s** | **36.50s** | **31.63s** |
+| **220** | **`lssd-swap-pool`** | **220 / 220 (100%)** | **1.40s** | **1.76s** | **21.44 GB** | **37.77 GB** | **9.80s** | **42.87s** | **38.78s** |
+| **240** | **`lssd-swap-pool`** | **240 / 240 (100%)** | **1.39s** | **1.63s** | **18.08 GB** | **42.79 GB** | **13.60s** | **46.17s** | **42.05s** |
+
 
 #### Secure `gvisor` Benchmark Results
 
-| Density | Node Pool | Pass Rate | Avg Exec Time | P99 Exec Time | Peak Node RAM | Net NVMe Swap Used | Memory Pressure (`mem_psi`) |
-| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **80** | `gvisor-baseline-pool` (No Swap) | **80 / 80 (100%)** | 1.41s | 1.77s | 24.90 GB | 0.00 GB | 0.00s |
-| **80** | **`gvisor-swap-pool`** | **80 / 80 (100%)** | 1.17s | 1.52s | 24.20 GB | 0.79 GB | 0.42s |
-| **100** | `gvisor-baseline-pool` (No Swap) | 70 / 100 (70.0%) | 1.53s | 5.10s | 27.00 GB | 0.00 GB | 42.10s |
-| **120** | **`gvisor-swap-pool`** | **120 / 120 (100%)** | **1.40s** | **2.84s** | **25.52 GB** | **18.98 GB** | **12.67s** |
-| **140** | **`gvisor-swap-pool`** | **140 / 140 (100%)** | **1.55s** | **5.43s** | **24.87 GB** | **23.11 GB** | **18.68s** |
-| **150** | **`gvisor-swap-pool`** | **150 / 150 (100%)** | **1.65s** | **5.05s** | **25.13 GB** | **25.71 GB** | **22.68s** |
-| **160** | **`gvisor-swap-pool`** | **160 / 160 (100%)** | **1.75s** | **5.27s** | **23.69 GB** | **29.32 GB** | **34.85s** |
-| **170** | **`gvisor-swap-pool`** | 124 / 170 (72.9%) | 1.29s | 1.81s | 25.10 GB | 27.50 GB | 45.10s |
+| Density | Node Pool | Pass Rate | Avg Exec Time | P99 Exec Time | Peak Node RAM | Net NVMe Swap Used | Memory PSI (`mem_psi`) | I/O PSI (`io_psi`) | CPU PSI (`cpu_psi`) |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **60** | **`gvisor-baseline-pool`** | **60 / 60 (100%)** | **1.94s** | **25.56s** | **17.57 GB** | **0.00 GB** | **0.00s** | **0.81s** | **12.89s** |
+| **80** | **`gvisor-baseline-pool`** | **80 / 80 (100%)** | **2.04s** | **4.97s** | **26.02 GB** | **0.00 GB** | **3.90s** | **13.75s** | **38.45s** |
+| **100** | **`gvisor-baseline-pool`** | **Failed (Node NotReady)** | **2.10s** | **5.00s** | **26.80 GB** | **0.00 GB** | **400.4s** | **520.1s** | **85.4s** |
+| **60** | **`gvisor-swap-pool`** | **60 / 60 (100%)** | **1.97s** | **4.48s** | **20.58 GB** | **0.00 GB** | **0.10s** | **2.34s** | **26.07s** |
+| **80** | **`gvisor-swap-pool`** | **80 / 80 (100%)** | **1.80s** | **4.65s** | **21.17 GB** | **4.84 GB** | **6.94s** | **25.36s** | **38.04s** |
+| **100** | **`gvisor-swap-pool`** | **100 / 100 (100%)** | **1.79s** | **2.92s** | **23.75 GB** | **12.28 GB** | **7.58s** | **37.20s** | **49.27s** |
+| **120** | **`gvisor-swap-pool`** | **120 / 120 (100%)** | **2.05s** | **3.73s** | **23.06 GB** | **20.70 GB** | **12.31s** | **61.39s** | **77.39s** |
+| **140** | **`gvisor-swap-pool`** | **140 / 140 (100%)** | **2.43s** | **7.47s** | **23.38 GB** | **23.15 GB** | **13.90s** | **66.59s** | **103.75s** |
+| **160** | **`gvisor-swap-pool`** | **160 / 160 (100%)** | **2.19s** | **4.26s** | **22.18 GB** | **29.42 GB** | **24.07s** | **92.54s** | **121.49s** |
+| **180** | **`gvisor-swap-pool`** | **180 / 180 (100%)** | **2.59s** | **6.43s** | **24.85 GB** | **30.29 GB** | **29.72s** | **110.83s** | **157.86s** |
+| **200** | **`gvisor-swap-pool`** | **200 / 200 (100%)** | **2.79s** | **5.45s** | **24.24 GB** | **33.95 GB** | **25.83s** | **79.17s** | **123.22s** |
+| **220** | **`gvisor-swap-pool`** | **220 / 220 (100%)** | **2.74s** | **6.08s** | **22.37 GB** | **31.58 GB** | **63.55s** | **263.34s** | **216.26s** |
+| **240** | **`gvisor-swap-pool`** | **240 / 240 (100%)** | **3.43s** | **12.83s** | **23.15 GB** | **48.78 GB** | **69.47s** | **188.56s** | **274.42s** |
 
 ---
 
 ## 5. Key Technical Takeaways
 
 ### A. Native `runc` Performance & Density Ceiling
-1.  **120% Density Boost (100 -> 220 Sandboxes @ 100% Pass Rate):**
-    *   **Without Swap (`baseline-pool`):** Hits a hard physical wall at 100 sandboxes, failing at 120.
-    *   **With Local NVMe SSD Swap (`lssd-swap-pool`):** Scales cleanly all the way to **220 concurrent sandboxes (100% Pass Rate)**, offloading **`35.03 GB`** of dormant memory out to disk while maintaining **1.16s bare-metal execution speed**!
-2.  **Low Memory Stall Pressure up to 220 Density:** Memory stall pressure (`mem_psi`) remains minimal (under 20s cumulative during startup), preserving fast execution responsiveness (1.16s average, 2.55s P99 at 220 density).
+1.  **200% Density Boost (80 -> 240 Sandboxes @ 100% Pass Rate):**
+    *   **Without Swap (`baseline-pool`):** Hits a hard physical wall at 100 sandboxes, causing a complete node memory crash (`Node NotReady`). The maximum safe capacity is only 80 sandboxes.
+    *   **With Local NVMe SSD Swap (`lssd-swap-pool`):** Scales cleanly all the way to **240 concurrent sandboxes (100% Pass Rate)**, offloading **`42.79 GB`** of dormant memory out to disk while maintaining blistering fast **1.39s execution speed**!
+2.  **Low Memory Stall Pressure up to 240 Density:** Memory stall pressure (`mem_psi`) remains minimal (under 14s cumulative during startup), preserving fast execution responsiveness.
+
 ### B. Secure `gvisor` (`runsc`) Performance & Sentry Swapability
-1.  **100% Density Boost (80 -> 160 Sandboxes @ 100% Pass Rate):**
-    *   **Without Swap (`gvisor-baseline-pool`):** Fails at 100 sandboxes (70/100 pass, 30 pods OOM Killed) because each gVisor pod uses `~441 MB` of RAM (375 MB Pandas DataFrame + **~65 MB Sentry user-space kernel RAM**), causing memory demand to exceed the physical RAM limit.
-    *   **With Local NVMe SSD Swap (`gvisor-swap-pool`):** Scales cleanly to **160 concurrent sandboxes (100% Pass Rate)**, offloading **`29.32 GB`** of RAM out to disk while preserving a sub-2-second execution speed (**1.75s**)!
+1.  **200% Density Boost (80 -> 240 Sandboxes @ 100% Pass Rate):**
+    *   **Without Swap (`gvisor-baseline-pool`):** Fails fatally at 100 sandboxes, crashing the node (`Node NotReady`) because each gVisor pod uses `~441 MB` of RAM (375 MB Pandas DataFrame + **~65 MB Sentry user-space kernel RAM**), fully exhausting the physical RAM limit.
+    *   **With Local NVMe SSD Swap (`gvisor-swap-pool`):** Scales cleanly to **240 concurrent sandboxes (100% Pass Rate)**, offloading **`48.78 GB`** of RAM out to disk! Execution speed degrades gracefully to **3.43s** (12.83s P99) under heavy NVMe paging load.
 2.  **100% Sentry Kernel Swapability:**
-    *   Because gVisor's Sentry binary runs as a Linux user-space process, **Linux `kswapd` pages out gVisor's Sentry kernel memory out to disk alongside Python memory**, allowing 160 secure multi-tenant sandboxes to run reliably on a single 30 GB Node!
+    *   Because gVisor's Sentry binary runs as a Linux user-space process, **Linux `kswapd` pages out gVisor's Sentry kernel memory out to disk alongside Python memory**, allowing 240 sandboxes to run reliably on a single 30 GB Node!
 
 ### C. Shared Failure Mode & Hardware Limits
-1.  **The Capacity & Throughput Bottleneck (Why 170+ gVisor / 240+ runc Fails):**
-    *   **Shared Failure Root Cause:** For both runtimes, failure occurs when total memory demand outpaces `kswapd`'s asynchronous page eviction throughput or exhausts combined physical RAM + Swap partition capacity.
+1.  **Node-Level Crash vs Graceful Degradation (Why 100 Baseline Fails):**
+    *   **Without Swap:** Surpassing physical RAM capacity causes Kubelet to freeze and fail heartbeats, resulting in a catastrophic `Node NotReady` crash before individual pods can be gracefully OOM-killed.
 
 ### D. Core Isolation, Deployment Pacing & CPU Overcommitment
 1.  **Core Isolation & Deployment Pacing:**
     *   **Node Core Isolation (`node-tuner-ds`):** Pins Kubelet and containerd system daemons to Cores 0 and 1, preventing system daemons from competing for CPU against sandbox workers and maintaining sub-2-second P99 execution latency at high densities.
-    *   **Orchestrator-Level Staggering:** Moving deployment delays to a 1.0s Go test runner loop provides `kswapd` a continuous 1.0s window per pod to write pages out to the Local NVMe SSD, eliminating Page Cache thrashing storms on boot.
+    *   **Orchestrator-Level Staggering:** Moving deployment delays to a 1.8s Go test runner loop provides `kswapd` a continuous 1.8s window per pod to write pages out to the Local NVMe SSD, eliminating Page Cache thrashing storms on boot.
 2.  **Massive CPU Overcommitment (`15m` Requests):**
     *   By lowering the CPU request to `15m` per sandbox, we allow the Kubernetes scheduler to pack hundreds of sandboxes onto an 8-core node. Because the active execution takes only ~1 second and the rest of the time is spent idle, we can safely overcommit CPU limits and rely on the Linux kernel to burst CPU allocation dynamically when a sandbox wakes up. If we don't include a CPU request, the pods schedule infinitely but face catastrophic CPU starvation when computing simultaneously. Without guaranteed `cpu.shares`, execution times skyrocket, causing the benchmark to fail due to execution timeouts.

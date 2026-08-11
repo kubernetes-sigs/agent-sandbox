@@ -48,8 +48,7 @@ log() {
 cd "${REPO_ROOT}"
 
 # Step 1: Pre-stage MovieLens dataset ONCE on all target nodes under /tmp/movielens
-# Uses an ephemeral Alpine pod mounting host root to download/extract ratings.csv directly on?
-to host disk
+# Uses an ephemeral Alpine pod mounting host root to download/extract ratings.csv directly onto host disk
 log "=== Pre-staging ML-20M dataset on nodes (/tmp/movielens/ratings.csv) ==="
 for pool in ${POOLS}; do
     NODE=$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${pool}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
@@ -100,13 +99,27 @@ for pool in ${POOLS}; do
         SWEEP_DIR="${ARTIFACT_DIR}/${pool}/${density}"
         mkdir -p "${SWEEP_DIR}"
 
-        # Clean up any lingering test namespaces (perf-py-*) and strip finalizers from prior failed runs
-        log "Purging any lingering test namespaces (perf-py-*) and stripping finalizers..."
+        # Clean up any lingering test namespaces (perf-py-*), PVCs, and PVs, stripping finalizers
+        log "Purging any lingering test namespaces, PVCs, and PVs (perf-py-*) and stripping finalizers..."
+        for pv in $(kubectl get pv -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E '^movielens-pv-perf-py-' || true); do
+            kubectl patch pv "${pv}" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+            kubectl delete pv "${pv}" --force --grace-period=0 2>/dev/null || true
+        done
         for ns in $(kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -E '^perf-py-' || true); do
+            for pvc in $(kubectl get pvc -n "${ns}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true); do
+                kubectl patch pvc "${pvc}" -n "${ns}" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
+            done
             kubectl get sandboxes -n "${ns}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | xargs -r -L1 -I {} kubectl patch sandbox {} -n "${ns}" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
             kubectl patch ns "${ns}" -p '{"spec":{"finalizers":[]}}' --type=merge 2>/dev/null || true
             kubectl delete ns "${ns}" --force --grace-period=0 2>/dev/null || true
         done
+
+        # Wait for all test namespaces to be fully purged from the cluster before proceeding
+        log "Waiting for old test namespaces and pods to be completely removed..."
+        while kubectl get ns 2>/dev/null | grep -q -E '^perf-py-'; do
+            sleep 2
+        done
+        log "Cluster namespace purge complete. Node is clean."
 
         # Identify target node name matching current GKE node pool
         NODE_NAME=$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${pool}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
@@ -114,7 +127,7 @@ for pool in ${POOLS}; do
             log "No node found for pool ${pool}"
             exit 1
         fi
-        
+
         # Flush host node Page Cache to reset node RAM to clean baseline
         if [ -n "${NODE_NAME}" ]; then
             log "Flushing Page Cache on node ${NODE_NAME}..."
@@ -138,6 +151,14 @@ for pool in ${POOLS}; do
         MONITOR_POD=$(kubectl get pods -n default -l name=kubelet-cadvisor-monitor --field-selector="spec.nodeName=${NODE_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
         TEST_START_TIME=$(date +%s)
 
+        # Start real-time telemetry streaming in background to avoid log buffer rollover
+        TELEMETRY_PID=""
+        if [ -n "${MONITOR_POD}" ]; then
+            log "Starting background telemetry stream from ${MONITOR_POD}..."
+            kubectl logs -f "${MONITOR_POD}" -n default 2>/dev/null > "${SWEEP_DIR}/raw_telemetry.log" &
+            TELEMETRY_PID=$!
+        fi
+
         # Run Go E2E density test suite targeting TestPythonSandboxDensity
         if ! POOLS="${pool}" DENSITIES="${density}" \
            BENCHMARK_SCRIPT_PATH="${REPO_ROOT}/test/e2e/extensions/python_workload.py" \
@@ -151,13 +172,18 @@ for pool in ${POOLS}; do
         fi
 
         TEST_END_TIME=$(date +%s)
-        TEST_DURATION=$(( TEST_END_TIME - TEST_START_TIME + 60 ))
 
-        # Extract host node cAdvisor telemetry CSV and parse peak RAM, swap, and PSI metrics
-        if [ -n "${MONITOR_POD}" ]; then
-            log "Pulling telemetry logs from ${MONITOR_POD}..."
-            kubectl logs "${MONITOR_POD}" -n default --since="${TEST_DURATION}s" 2>/dev/null | \
-              awk -F, -v start="${TEST_START_TIME}" -v end="${TEST_END_TIME}" '$4 >= start && $4 <= end' > "${SWEEP_DIR}/resource_profile.csv" || true
+        # Stop background telemetry streaming
+        if [ -n "${TELEMETRY_PID}" ]; then
+            kill "${TELEMETRY_PID}" 2>/dev/null || true
+            wait "${TELEMETRY_PID}" 2>/dev/null || true
+        fi
+
+        # Process streamed telemetry CSV and parse peak RAM, swap, and PSI metrics
+        if [ -n "${MONITOR_POD}" ] && [ -f "${SWEEP_DIR}/raw_telemetry.log" ]; then
+            log "Processing telemetry stream for time window ${TEST_START_TIME} to ${TEST_END_TIME}..."
+            awk -F, -v start="${TEST_START_TIME}" -v end="${TEST_END_TIME}" '$4 >= start && $4 <= end' "${SWEEP_DIR}/raw_telemetry.log" > "${SWEEP_DIR}/resource_profile.csv" || true
+            rm -f "${SWEEP_DIR}/raw_telemetry.log"
             
             if ! python3 "${SCRIPT_DIR}/parse_telemetry.py" \
               "${SWEEP_DIR}/resource_profile.csv" \

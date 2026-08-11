@@ -205,7 +205,7 @@ func TestPythonSandboxDensity(t *testing.T) {
 			metrics := runPythonSandboxPerf(tc, restConfig, coreClient, ns.Name, fmt.Sprintf("python-sandbox-%d", idx), targetNode)
 			metricsCh <- metrics
 		}(i)
-		time.Sleep(1 * time.Second)
+		time.Sleep(1800 * time.Millisecond)
 	}
 
 	wg.Wait()

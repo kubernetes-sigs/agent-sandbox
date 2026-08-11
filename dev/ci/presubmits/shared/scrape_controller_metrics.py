@@ -28,7 +28,7 @@ def parse_histogram(metric_name, data):
     """
     value_re = r"([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)"
     pattern = re.compile(
-        rf"^{re.escape(metric_name)}_bucket\{{[^}}]*le=\"([^\"]+)\"[^}}]*\}}\s+{value_re}",
+        rf"^{re.escape(metric_name)}_bucket\{{[^}}]*\ble=\"([^\"]+)\"[^}}]*\}}\s+{value_re}",
         re.MULTILINE,
     )
     bucket_counts = {}

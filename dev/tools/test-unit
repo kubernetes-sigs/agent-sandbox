@@ -40,6 +40,30 @@ PYTHON_TEST_SUITES = [
         "requirements": "requirements.txt",
     },
     {
+        "name": "hermes-agent",
+        # chat_hermes.py only uses stdlib (urllib.request, json), so the test
+        # needs no requirements.txt -- just pytest, installed unconditionally
+        # below.
+        "dir": os.path.join("examples", "hermes-agent"),
+    },
+    {
+        "name": "demo-cilium-egress-exec-sandbox",
+        # server.py is stdlib-only (http.server, subprocess); the test starts
+        # a real ThreadingHTTPServer on an ephemeral port, so no
+        # requirements.txt is needed here either.
+        "dir": os.path.join("examples", "demo-cilium-egress", "exec-sandbox"),
+    },
+    {
+        "name": "hpa-swp-scaling",
+        "dir": os.path.join("examples", "hpa-swp-scaling"),
+        "requirements": "requirements.txt",
+    },
+    {
+        "name": "keda-scale-to-zero",
+        "dir": os.path.join("examples", "keda-scale-to-zero"),
+        "requirements": "requirements.txt",
+    },
+    {
         "name": "agent-sandbox-rl",
         "dir": os.path.join("examples", "agent-sandbox-rl"),
         # Editable installs (in order): the in-repo SDK first (so we don't depend

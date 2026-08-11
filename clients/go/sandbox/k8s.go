@@ -40,6 +40,8 @@ import (
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
+const clientAnnotation = "agents.x-k8s.io/client-first-requested-at"
+
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
 type sandboxState struct {
 	SandboxName string
@@ -121,6 +123,21 @@ func NewK8sHelper(restConfig *rest.Config, log logr.Logger) (*K8sHelper, error) 
 	}, nil
 }
 
+// stampClientRequestTime records the client-side request start time on the
+// claim annotations, allocating the map if needed. An existing value is left
+// untouched: callers may stamp the true start of the request earlier in their
+// own stack, and that is more accurate than the moment we build the claim.
+// This mirrors the Python clients, which also only set the key when absent.
+func stampClientRequestTime(annotations map[string]string, now time.Time) map[string]string {
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	if _, ok := annotations[clientAnnotation]; !ok {
+		annotations[clientAnnotation] = now.UTC().Format(time.RFC3339Nano)
+	}
+	return annotations
+}
+
 // createClaim creates a SandboxClaim and returns its generated name.
 func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
@@ -132,6 +149,7 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 			"opentelemetry.io/trace-context": traceCtx,
 		}
 	}
+	annotations = stampClientRequestTime(annotations, time.Now())
 
 	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{

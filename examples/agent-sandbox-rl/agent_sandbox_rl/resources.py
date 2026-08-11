@@ -147,15 +147,27 @@ class Resources:
         extra = {**extra, "affinity": merged_affinity}
       if "containers" in extra:
         extra_containers = extra.pop("containers")
-        if (isinstance(extra_containers, list) and len(extra_containers) > 0
-            and "containers" in pod_spec and len(pod_spec["containers"]) > 0):
-          orig_c = dict(pod_spec["containers"][0])
-          extra_c = dict(extra_containers[0])
-          merged_c = _deep_merge(orig_c, extra_c)
-          # Keep original image if extra_c did not specify image
-          if "image" not in extra_c and "image" in orig_c:
-            merged_c["image"] = orig_c["image"]
-          pod_spec["containers"] = [merged_c, *extra_containers[1:]]
+        if isinstance(extra_containers, list) and "containers" in pod_spec:
+          merged_containers = list(pod_spec["containers"])
+          for extra_c in extra_containers:
+            if not isinstance(extra_c, dict):
+              continue
+            c_name = extra_c.get("name")
+            if c_name:
+              match_idx = next(
+                  (i for i, c in enumerate(merged_containers) if c.get("name") == c_name),
+                  None,
+              )
+              if match_idx is not None:
+                merged_containers[match_idx] = _deep_merge(merged_containers[match_idx], extra_c)
+              else:
+                merged_containers.append(dict(extra_c))
+            else:
+              if merged_containers:
+                merged_containers[0] = _deep_merge(merged_containers[0], extra_c)
+              else:
+                merged_containers.append(dict(extra_c))
+          pod_spec["containers"] = merged_containers
       pod_spec.update(extra)
 
     return {

@@ -689,15 +689,29 @@ class SandboxFleet:
         return                                 # already unwarmed — don't double-release
       reps = self._warmed.pop(entry.image)
     c = self.registry.get(entry.cluster)
+    pool_deleted = False
+    err = None
     try:
       c.resources.delete_warmpool(entry.pool)
-      c.resources.delete_template(entry.template)
-    except BaseException:
+      pool_deleted = True
+    except BaseException as exc:
+      err = exc
+
+    if pool_deleted:
+      c.release_replicas(reps)
+      self._obs.warm_remove(entry.cluster, reps)
+    else:
       with self._lock:
         self._warmed[entry.image] = reps
-      raise
-    c.release_replicas(reps)
-    self._obs.warm_remove(entry.cluster, reps)
+
+    try:
+      c.resources.delete_template(entry.template)
+    except BaseException as exc:
+      if err is None:
+        err = exc
+
+    if err is not None:
+      raise err
 
   def unwarm_image(self, image: str) -> None:
     """Tear down one image's pool + template. **Idempotent**: a no-op if the image

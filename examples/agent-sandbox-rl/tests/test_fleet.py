@@ -555,3 +555,17 @@ def test_unwarm_image_failure_restores_warmed(make_cluster):
   assert "i1" in f._warmed
   assert c.active_replicas == 2
 
+
+def test_unwarm_entry_warmpool_success_template_failure_releases_replicas(make_cluster):
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(max_concurrent=8), registry=ClusterRegistry([c]))
+  f.load_tasks(["i1"])
+  f.warm_image("i1", replicas_override=2)
+  assert c.active_replicas == 2
+
+  c.resources.delete_template.side_effect = RuntimeError("template delete failure")
+  with pytest.raises(RuntimeError, match="template delete failure"):
+    f.unwarm_image("i1")
+  # Since warmpool succeeded, replicas are released and image is not left in _warmed
+  assert "i1" not in f._warmed
+  assert c.active_replicas == 0

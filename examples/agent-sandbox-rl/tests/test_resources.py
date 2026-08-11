@@ -126,6 +126,39 @@ def test_extra_pod_spec_merges_primary_container_and_appends_sidecars():
   assert pod["containers"][1]["image"] == "sidecar:v1"
 
 
+def test_extra_pod_spec_sidecar_only_does_not_clobber_primary():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [{"name": "sidecar", "image": "sidecar:v1"}]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 2
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+  assert pod["containers"][1]["name"] == "sidecar"
+  assert pod["containers"][1]["image"] == "sidecar:v1"
+
+
+def test_extra_pod_spec_merges_matching_container_by_name():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [
+      {"name": "agent-runtime", "resources": {"limits": {"cpu": "4"}}},
+      {"name": "logger", "image": "logger:latest"},
+  ]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 2
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+  assert pod["containers"][0]["resources"]["requests"]["cpu"] == "250m"
+  assert pod["containers"][0]["resources"]["limits"]["cpu"] == "4"
+  assert pod["containers"][1]["name"] == "logger"
+  assert pod["containers"][1]["image"] == "logger:latest"
+
+
 def test_ensure_template_noop_when_present():
   r = _resources()
   r.custom_api.get_namespaced_custom_object.return_value = {"metadata": {"name": TNAME}}

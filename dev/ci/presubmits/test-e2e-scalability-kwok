@@ -21,30 +21,30 @@ cd "${repo_root}"
 # Customizable scale & execution parameters via Environment Variables:
 #   TEST_SCENARIO:               continuous-burst | rapid-burst (default: continuous-burst)
 #   SIMULATED_NODES:             Number of simulated KWOK nodes (default: 100)
-#   CL2_QPS:                     Target claim creation QPS (default: 50)
-#   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 10 -> 500 total claims)
-#   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 700)
+#   CL2_QPS:                     Target claim creation QPS (default: 100)
+#   CL2_DURATION_SECONDS:        Duration of load test in seconds (default: 10 -> 1,000 total claims)
+#   CL2_WARMPOOL_SIZE:           Number of pre-warmed sandboxes (default: 1400)
 #   CL2_THRESHOLD_50_MS:         Claim adoption latency P50 threshold in ms (default: 300)
 #   CL2_THRESHOLD_90_MS:         Claim adoption latency P90 threshold in ms (default: 300)
 #   CL2_THRESHOLD_99_MS:         Claim adoption latency P99 threshold in ms (default: 500)
 #   CONTROLLER_KUBE_API_QPS:     Controller API QPS (default: 1000)
 #   CONTROLLER_KUBE_API_BURST:   Controller API Burst (default: 2000)
-#   CONTROLLER_WORKERS:          Reconciler worker concurrency (default: 50)
+#   CONTROLLER_WORKERS:          Reconciler worker concurrency (default: 100)
 #   CONTROLLER_MAX_BATCH_SIZE:   WarmPool refill batch size (default: 300)
 
 #   CL2_K8S_CLIENTS_NUMBER:      Number of parallel client-go instances for ClusterLoader2 (default: 20)
 
 SCENARIO="${TEST_SCENARIO:-continuous-burst}"
 NUM_NODES="${SIMULATED_NODES:-100}"
-QPS="${CL2_QPS:-50}"
+QPS="${CL2_QPS:-100}"
 DURATION="${CL2_DURATION_SECONDS:-10}"
-WARMPOOL="${CL2_WARMPOOL_SIZE:-700}"
+WARMPOOL="${CL2_WARMPOOL_SIZE:-1400}"
 CLIENTS="${CL2_K8S_CLIENTS_NUMBER:-20}"
 
 CONTROLLER_QPS="${CONTROLLER_KUBE_API_QPS:-1000}"
 CONTROLLER_BURST="${CONTROLLER_KUBE_API_BURST:-2000}"
-CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-50}"
-CONTROLLER_CLAIM_WORKERS="${CONTROLLER_CLAIM_WORKERS:-50}"
+CONTROLLER_WORKERS="${CONTROLLER_WORKERS:-100}"
+CONTROLLER_CLAIM_WORKERS="${CONTROLLER_CLAIM_WORKERS:-100}"
 CONTROLLER_WARM_POOL_WORKERS="${CONTROLLER_WARM_POOL_WORKERS:-1}"
 CONTROLLER_TEMPLATE_WORKERS="${CONTROLLER_TEMPLATE_WORKERS:-1}"
 CONTROLLER_BATCH="${CONTROLLER_MAX_BATCH_SIZE:-300}"

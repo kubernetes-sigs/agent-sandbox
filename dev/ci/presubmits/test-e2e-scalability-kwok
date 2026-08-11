@@ -107,6 +107,9 @@ cleanup() {
   fi
   "${KWOKCTL}" delete cluster --name="${CLUSTER_NAME}" 2>/dev/null || true
   rm -rf "${WORKDIR}"
+  if [[ -n "${CL2_TMP_DIR:-}" ]]; then
+    rm -rf "${CL2_TMP_DIR}"
+  fi
   echo "Cleanup complete."
 }
 trap cleanup EXIT
@@ -207,14 +210,17 @@ python3 "${repo_root}/dev/ci/presubmits/shared/scrape_controller_metrics.py" \
   --threshold-99="${THRESHOLD_99_MS}" || SCRAPE_RC=$?
 echo "======================================================="
 
+if [[ ${CL2_RC} -ne 0 ]]; then
+  echo "KWOK cluster benchmark finished with ClusterLoader2 return code ${CL2_RC}."
+fi
+
 if [[ ${SCRAPE_RC} -ne 0 ]]; then
   echo "KWOK cluster scalability presubmit FAILED: controller metrics validation failed (latency thresholds violated or metrics unavailable)."
   exit "${SCRAPE_RC}"
 fi
 
 if [[ ${CL2_RC} -ne 0 ]]; then
-  echo "KWOK cluster benchmark finished with ClusterLoader2 return code ${CL2_RC}."
-  exit ${CL2_RC}
+  exit "${CL2_RC}"
 fi
 
 echo "KWOK cluster scalability presubmit PASSED successfully."

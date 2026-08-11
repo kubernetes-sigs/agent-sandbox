@@ -21,21 +21,30 @@ import urllib.request
 
 
 def parse_histogram(metric_name, data):
-    """Parses Prometheus histogram buckets and computes interpolated percentiles."""
-    pattern = re.compile(rf"{metric_name}_bucket\{{[^}}]*le=\"([^\"]+)\"[^}}]*\}}\s+(\d+)")
-    buckets = []
-    total = 0
+    """Parses Prometheus histogram buckets and computes interpolated percentiles.
+
+    The controller histograms are labeled (e.g. launch_type, sandbox_template). This parser
+    aggregates bucket counts across all label sets (equivalent to PromQL `sum(...) by (le)`).
+    """
+    value_re = r"([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)"
+    pattern = re.compile(
+        rf"{re.escape(metric_name)}_bucket\{{[^}}]*le=\"([^\"]+)\"[^}}]*\}}\s+{value_re}"
+    )
+    bucket_counts = {}
+    total = 0.0
     for match in pattern.finditer(data):
         le_str, count_str = match.groups()
         c = float(count_str)
         if le_str == "+Inf":
-            total = c
-        else:
-            buckets.append((float(le_str), c))
-    buckets.sort(key=lambda x: x[0])
-    if total == 0 and buckets:
+            total += c
+            continue
+        le = float(le_str)
+        bucket_counts[le] = bucket_counts.get(le, 0.0) + c
+
+    buckets = sorted(bucket_counts.items())
+    if total == 0.0 and buckets:
         total = buckets[-1][1]
-    if total == 0:
+    if total == 0.0:
         return None
 
     def get_percentile(p):

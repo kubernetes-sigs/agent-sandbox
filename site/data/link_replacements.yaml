@@ -15,7 +15,7 @@ replacements:
 
   # Warmpool quickstart examples - redirect to GitHub
   - pattern: '\]\(../warmpool-quickstart/\)'
-    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/warmpool-quickstart)'
+    replacement: '](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/warmpool-quickstart)'
     description: "Warmpool quickstart examples to GitHub"
 
   # Agentic-sandbox-client Python SDK (relative paths) - redirect to GitHub

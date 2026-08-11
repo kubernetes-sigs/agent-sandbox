@@ -30,4 +30,5 @@ spec:
 
     # Absolute timestamp when the sandbox should expire (RFC3339 format).
     # If omitted, the sandbox will run indefinitely.
-    shutdownTime: "2025-12-31T23:59:59Z"
+    # Uncomment and set a future timestamp:
+    # shutdownTime: "2026-12-31T23:59:59Z"

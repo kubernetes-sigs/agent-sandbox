@@ -73,6 +73,8 @@ spec:
       containers:
       - name: router
         image: ${ROUTER_IMAGE}
+        securityContext:
+          allowPrivilegeEscalation: false
         # imagePullPolicy: Never  # Uncomment when loading a local image into kind/minikube.
         env:
         - name: PROXY_TIMEOUT_SECONDS

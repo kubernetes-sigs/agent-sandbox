@@ -13,8 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
 import unittest
-from dev.ci.presubmits.shared.scrape_controller_metrics import parse_histogram
+
+# Make the test importable regardless of how it is invoked (pytest, unittest, etc.)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from scrape_controller_metrics import parse_histogram
 
 
 class TestScrapeControllerMetrics(unittest.TestCase):

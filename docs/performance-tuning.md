@@ -47,37 +47,33 @@ on this cluster; warm-adoption latency (sub-second when the pool is healthy)
 is covered by the PR-level data. The relative impact of each flag combination
 is the signal.
 
-### Dedicated cluster worker-count and cache validation
+### Concurrency worker A/B — 75-claim burst
 
-aditya-perf-bench (us-east1-c, 4×e2-standard-16, k8s 1.35.6, clean state),
-75-claim burst from a 150-sandbox warm pool, all perf flags at recommended
-values unless noted:
+Worker count sweep, all other perf flags at recommended values (GKE, 75-claim
+burst from a 150-sandbox warm pool):
 
 | Config | p50 | p90 | p99 | n/75 |
 |---|---|---|---|---|
-| A: Baseline — no perf flags, 1000/1000/500/100 workers | 47.3 s | 85.3 s | 93.8 s | 75/75 |
-| L1: **Documented workers (200/150/2/1) + all perf flags** | **49.8 s** | **89.5 s** | 98.2 s | 75/75 |
-| L2: Minimal workers (50/50/1/1) + all perf flags | 55.6 s | 95.6 s | 104.5 s | 75/75 |
-| L3: High workers (1000/1000/500/100) + all perf flags | 52.7 s | 93.5 s | 102.3 s | 75/75 |
-| M: `--cache-label-selectors` only, baseline workers | 49.5 s | 89.8 s | 98.5 s | 75/75 |
+| Baseline — no perf flags, 1000/1000/500/100 workers | 47.3 s | 85.3 s | 93.8 s | 75/75 |
+| **Recommended workers (200/150/2/1) + all perf flags** | **49.8 s** | **89.5 s** | 98.2 s | 75/75 |
+| Minimal workers (50/50/1/1) + all perf flags | 55.6 s | 95.6 s | 104.5 s | 75/75 |
+| High workers (1000/1000/500/100) + all perf flags | 52.7 s | 93.5 s | 102.3 s | 75/75 |
+| `--cache-label-selectors` only, baseline workers | 49.5 s | 89.8 s | 98.5 s | 75/75 |
 
 **What this shows:**
 
-- **Worker counts 200/150/2/1 are validated.** Config L1 (the documented
-  recommendation) beats both high workers (L3) and minimal workers (L2) at this
-  scale. The documented values are not conservative guesses — they are confirmed
-  optimal for a 75-claim burst: high worker counts add unnecessary API server
-  contention, while too-few workers create a reconcile bottleneck.
-- **50/50/1 has a measurable regression** — p50 +11%, p90 +7% vs documented
+- **Worker counts 200/150/2/1 are validated.** The recommended values beat both
+  high workers and minimal workers at this scale. High worker counts add
+  unnecessary API server contention; too-few workers create a reconcile bottleneck.
+- **50/50/1 has a measurable regression** — p50 +11%, p90 +7% vs recommended
   values. There is a real floor below which under-provisioning hurts.
-- **`--cache-label-selectors` is neutral on a small clean cluster** (p50 49.5 s
-  vs 47.3 s baseline). On a cluster with >5000 total pods, it reduces informer
-  scope from O(cluster pods) to O(sandbox pods) — the benefit scales with how
-  many non-sandbox pods the cache would otherwise hold.
-- **Perf flags add ~5% cold-start overhead** (L3 vs A baseline). This is expected:
-  `--sandbox-write-behind-window`, `--cache-label-selectors`, and the rate-pacing
-  flags are designed to reduce write contention during warm-adoption bursts, not
-  to speed up cold pod scheduling.
+- **`--cache-label-selectors` is neutral on a small cluster.** On clusters with
+  >5000 total pods it reduces informer scope from O(cluster pods) to
+  O(sandbox pods) — the benefit scales with how many non-sandbox pods the cache
+  would otherwise hold.
+- **Perf flags add ~5% cold-start overhead** vs a no-flags baseline. This is
+  expected: the flags reduce write contention during warm-adoption bursts, not
+  cold pod scheduling latency.
 
 ### GKE live A/B — complete results
 
@@ -381,7 +377,7 @@ for any high-throughput deployment.
 
 Worker counts 200/150/2/1 are **directly benchmarked** — they outperform both
 high workers (1000/1000/500) and minimal workers (50/50/1) at 75 concurrent
-claims. See the dedicated cluster benchmark table above.
+claims. See the concurrency worker A/B table above.
 
 ```yaml
 args:

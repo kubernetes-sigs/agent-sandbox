@@ -34,7 +34,7 @@ import {
   SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
 import type { SandboxInit } from "./sandbox.js";
-import { Sandbox } from "./sandbox.js";
+import { raceWithTimeout, Sandbox } from "./sandbox.js";
 import type { Tracer } from "./trace-manager.js";
 import {
   getCurrentSpan,
@@ -362,7 +362,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       sandboxTracingManager?.endLifecycleSpan();
       // Clean up orphaned claim before re-throwing
       try {
-        await Promise.race([
+        await raceWithTimeout(
           this.customObjectsApi.deleteNamespacedCustomObject({
             group: CLAIM_API_GROUP,
             version: CLAIM_API_VERSION,
@@ -370,13 +370,11 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
             plural: CLAIM_PLURAL_NAME,
             name: claimName,
           }),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("Rollback cleanup timed out")),
-              CLEANUP_TIMEOUT_MS,
-            ),
-          ),
-        ]);
+          CLEANUP_TIMEOUT_MS,
+          () => {
+            throw new Error("Rollback cleanup timed out");
+          },
+        );
       } catch (cleanupErr) {
         console.error(
           `Failed to delete orphaned SandboxClaim '${claimName}': ${cleanupErr}`,

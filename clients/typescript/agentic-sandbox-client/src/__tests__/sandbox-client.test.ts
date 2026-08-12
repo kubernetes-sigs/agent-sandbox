@@ -329,39 +329,47 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("cleans up orphaned claim when sandbox watch fails", async () => {
-      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      vi.useFakeTimers();
+      try {
+        mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+        mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
 
-      // First watch: claim resolves
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          callback: (type: string, obj: Record<string, unknown>) => void,
-        ) => {
-          callback("MODIFIED", { status: { sandbox: { name: "s1" } } });
-          return Promise.resolve(new AbortController());
-        },
-      );
+        // First watch: claim resolves
+        mockWatchFn.mockImplementationOnce(
+          (
+            _path: string,
+            _query: unknown,
+            callback: (type: string, obj: Record<string, unknown>) => void,
+          ) => {
+            callback("MODIFIED", { status: { sandbox: { name: "s1" } } });
+            return Promise.resolve(new AbortController());
+          },
+        );
 
-      // Second watch: error
-      mockWatchFn.mockImplementationOnce(
-        (
-          _path: string,
-          _query: unknown,
-          _callback: unknown,
-          done: (err: unknown) => void,
-        ) => {
-          done(new Error("watch failed"));
-          return Promise.resolve(new AbortController());
-        },
-      );
+        // Second watch: error
+        mockWatchFn.mockImplementationOnce(
+          (
+            _path: string,
+            _query: unknown,
+            _callback: unknown,
+            done: (err: unknown) => void,
+          ) => {
+            done(new Error("watch failed"));
+            return Promise.resolve(new AbortController());
+          },
+        );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
-      await expect(client.createSandbox("tpl")).rejects.toThrow("watch failed");
+        const client = new SandboxClient({ apiUrl: "http://api:8080" });
+        await expect(client.createSandbox("tpl")).rejects.toThrow(
+          "watch failed",
+        );
 
-      // Orphaned claim should be deleted
-      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+        // Orphaned claim should be deleted
+        expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("falls back to sandboxName when pod annotation is absent", async () => {

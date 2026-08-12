@@ -54,7 +54,7 @@ async = [
 # command execution runs over gRPC ProcessService. The legacy python-runtime
 # needs none of this.
 grpc = [
-    "grpcio>=1.62",
+    "grpcio>=1.83.0",
     "protobuf>=7.35.1",
 ]
 test = [

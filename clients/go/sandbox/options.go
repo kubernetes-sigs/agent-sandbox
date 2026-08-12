@@ -201,7 +201,7 @@ func isValidDNSSubdomain(s string) bool {
 	if len(s) == 0 || len(s) > 253 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':

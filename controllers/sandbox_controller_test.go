@@ -1272,7 +1272,7 @@ func TestReconcile(t *testing.T) {
 				reconcileCount = 1
 			}
 			var err error
-			for i := 0; i < reconcileCount; i++ {
+			for range reconcileCount {
 				_, err = r.Reconcile(t.Context(), ctrl.Request{
 					NamespacedName: types.NamespacedName{
 						Name:      sandboxName,
@@ -4616,14 +4616,14 @@ func TestNameHash_Correctness(t *testing.T) {
 
 func BenchmarkNameHashNew(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = NameHash("my-sandbox-name")
 	}
 }
 
 func BenchmarkNameHashOld(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = fmt.Sprintf("%08x", GetNumericHash("my-sandbox-name"))
 	}
 }

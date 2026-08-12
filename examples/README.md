@@ -17,12 +17,14 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**hermes-agents-as-a-service**](./hermes-agents-as-a-service): The multi-user platform pattern distilled from a real agents-as-a-service product: per-user claims over a warm pool, suspend/resume as the cost dial, PVC state survival, and injection-policy enforcement.
 - [**hpa-swp-scaling**](./hpa-swp-scaling): An example of scaling a SandboxWarmPool using Kubernetes Horizontal Pod Autoscaler (HPA).
 - [**jupyterlab**](./jupyterlab): An example of running JupyterLab on Agent-Sandbox.
+- [**kata-aks**](./kata-aks): Full end-to-end example — Python agent, Go client, and sandbox-router — on AKS with Kata Containers (Hyper-V) VM isolation and the warm-pool/claim pattern.
 - [**kata-aks-sandbox**](./kata-aks-sandbox): An example of running a sandbox with Kata Containers hardware-virtualized isolation on AKS, using the built-in Pod Sandboxing feature.
 - [**kata-gke-sandbox**](./kata-gke-sandbox): An example of running a sandbox with Kata Containers hardware-virtualized isolation on GKE.
 - [**keda-scale-to-zero**](./keda-scale-to-zero): An example of scaling a SandboxWarmPool down to zero (and back up) using KEDA and Google Managed Service for Prometheus (GMP).
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
+- [**nono-sandbox**](./nono-sandbox): An example of running nono inside an Agent Sandbox, with fine-grained filesystem isolation, network filtering, credential brokering, and ephemeral per-tool micro-sandboxes.
 - [**nullclaw-sandbox**](./nullclaw-sandbox): An example of running Nullclaw, a minimal AI assistant runtime, inside the Agent Sandbox.
 - [**openclaw-gvisor-sandbox**](./openclaw-gvisor-sandbox): A production-shaped, gVisor-isolated OpenClaw sandbox using the template/claim pattern and persistent storage.
 - [**openclaw-kata-aks-sandbox**](./openclaw-kata-aks-sandbox): An OpenClaw sandbox isolated by Kata Containers on AKS, so the agent runtime gets its own VM and guest kernel.
@@ -31,4 +33,5 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
+- [**warmpool-quickstart**](./warmpool-quickstart): Reference YAML for the three extension CRDs — SandboxTemplate, SandboxWarmPool, and SandboxClaim — including a secure template and an LLM-scoped network policy example.
 - [**windows-sandbox**](./windows-sandbox): An example of running a Windows guest inside the Agent Sandbox via KVM/QEMU.

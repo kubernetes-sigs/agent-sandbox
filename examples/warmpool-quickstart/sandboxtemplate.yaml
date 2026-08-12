@@ -5,7 +5,8 @@ metadata:
   namespace: default
 spec:
   #enableDisruptionControl: true
-  #shutdownTime: "2025-12-31T23:59:59Z"
+  # Uncomment and set a future RFC3339 timestamp to auto-expire the template:
+  #shutdownTime: "2026-12-31T23:59:59Z"
   podTemplate:
     spec:
       # This pod uses a non-root user and gVisor for runtime sandboxing.

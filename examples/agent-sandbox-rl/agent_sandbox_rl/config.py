@@ -121,10 +121,10 @@ class FleetConfig(BaseModel):
   ready_timeout: int = 900
   # Stage the warm fill in waves of <= this many sandbox creates in flight,
   # waiting for each wave to reach Ready before the next. Bounds the controller's
-  # concurrent create burst (Σ pools×replicas) so a large/deep warm can't trip the
-  # SandboxWarmPool over-creation race (#1215). 0 = warm everything at once (old
-  # behavior). The safe value scales inversely with controller warm-pool worker
-  # concurrency; 1000 is calibrated for a high-worker controller.
+  # concurrent create burst (Σ pools×replicas). On controllers <= v0.5.3 this
+  # mitigates (but does NOT prevent) the SandboxWarmPool over-creation race
+  # (issue 1215; fixed in v0.5.4 by PR 1266) — those controllers still need
+  # --sandbox-warm-pool-concurrent-workers <= 10. 0 = warm all at once (old behavior).
   warm_create_budget: int = 1000
   # --- runaway safeguards (see plans/sdk-runaway-safeguards.md) ------------- #
   # Circuit breaker (#1, fail-safe): abort + teardown if live sandboxes this run

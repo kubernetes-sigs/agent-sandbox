@@ -15,7 +15,9 @@ spec:
       
       containers:
       - name: agent
+        # Replace with your actual agent image.
         image: python:3.11-slim
+        command: ["/bin/sh", "-c", "sleep infinity"]
         env:
         # The agent can now safely call this hostname
         - name: LLM_API_BASE
@@ -25,7 +27,10 @@ spec:
   networkPolicy:
     ingress:
       - from:
-        - podSelector:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-sandbox-system
+          podSelector:
             matchLabels:
               app: sandbox-router
     egress:

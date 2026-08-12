@@ -302,7 +302,7 @@ Balancer public IP.
 > proxy into your sandbox pods. For a real deployment, mint a token,
 > store it in a Secret, plumb it in as `ROUTER_AUTH_TOKEN`, and have
 > callers send `Authorization: Bearer <token>`. The shape to copy lives
-> at [`clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`](../../../clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml).
+> at [`clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml`](../../clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml).
 > Note that the Go SDK used in Step 6 does not yet plumb `Authorization`
 > headers, so swapping to token auth requires either an SDK change or
 > bypassing the SDK for the HTTP layer.

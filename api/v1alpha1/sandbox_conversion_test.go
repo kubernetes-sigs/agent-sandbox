@@ -203,6 +203,75 @@ func TestSandboxConversion(t *testing.T) {
 	}
 }
 
+func TestSandboxConversionV1beta1RoundTrip(t *testing.T) {
+	// Verify that v1beta1-only fields survive a v1beta1 -> v1alpha1 -> v1beta1 round-trip.
+	suspendPolicy := v1beta1.IdleExpirationPolicySuspend
+	suspendedTTL := int32(86400)
+	activityTime := metav1.NewTime(metav1.Now().Truncate(1e9))
+
+	src := &v1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "idle-sandbox",
+			Namespace: "default",
+		},
+		Spec: v1beta1.SandboxSpec{
+			OperatingMode: v1beta1.SandboxOperatingModeRunning,
+			IdleLifecycle: &v1beta1.IdleLifecyclePolicy{
+				ActiveTTLSeconds:       600,
+				ActiveExpirationPolicy: &suspendPolicy,
+				SuspendedTTLSeconds:    &suspendedTTL,
+			},
+		},
+		Status: v1beta1.SandboxStatus{
+			LastActivityTime: &activityTime,
+		},
+	}
+
+	// v1beta1 -> v1alpha1
+	spoke := &Sandbox{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom failed: %v", err)
+	}
+
+	// Verify stash annotation is present on the v1alpha1 object
+	if _, ok := spoke.Annotations[v1beta1SandboxStateAnnotation]; !ok {
+		t.Fatal("expected v1beta1 stash annotation on v1alpha1 object")
+	}
+
+	// v1alpha1 -> v1beta1
+	roundTrip := &v1beta1.Sandbox{}
+	if err := spoke.ConvertTo(roundTrip); err != nil {
+		t.Fatalf("ConvertTo failed: %v", err)
+	}
+
+	// Verify v1beta1 stash annotation was stripped
+	if _, ok := roundTrip.Annotations[v1beta1SandboxStateAnnotation]; ok {
+		t.Error("v1beta1 stash annotation should be stripped after round-trip")
+	}
+
+	// Verify IdleLifecycle was preserved
+	if roundTrip.Spec.IdleLifecycle == nil {
+		t.Fatal("IdleLifecycle was lost during round-trip")
+	}
+	if roundTrip.Spec.IdleLifecycle.ActiveTTLSeconds != 600 {
+		t.Errorf("ActiveTTLSeconds: expected 600, got %d", roundTrip.Spec.IdleLifecycle.ActiveTTLSeconds)
+	}
+	if roundTrip.Spec.IdleLifecycle.ActiveExpirationPolicy == nil || *roundTrip.Spec.IdleLifecycle.ActiveExpirationPolicy != suspendPolicy {
+		t.Error("ActiveExpirationPolicy was lost during round-trip")
+	}
+	if roundTrip.Spec.IdleLifecycle.SuspendedTTLSeconds == nil || *roundTrip.Spec.IdleLifecycle.SuspendedTTLSeconds != 86400 {
+		t.Error("SuspendedTTLSeconds was lost during round-trip")
+	}
+
+	// Verify LastActivityTime was preserved
+	if roundTrip.Status.LastActivityTime == nil {
+		t.Fatal("LastActivityTime was lost during round-trip")
+	}
+	if !roundTrip.Status.LastActivityTime.Equal(&activityTime) {
+		t.Errorf("LastActivityTime mismatch: expected %v, got %v", activityTime, *roundTrip.Status.LastActivityTime)
+	}
+}
+
 func TestSandboxConversionFromHub(t *testing.T) {
 	// Test conversion of a v1beta1 Sandbox created without v1alpha1 state annotation (e.g. created directly via v1beta1 API)
 	tests := []struct {

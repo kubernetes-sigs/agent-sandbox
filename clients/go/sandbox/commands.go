@@ -53,6 +53,9 @@ type Commands struct {
 // transient server errors (502, 503, etc.), use WithMaxAttempts:
 //
 //	result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
+//
+// WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd,
+// Run issues a single gRPC Execute regardless of the configured attempts.
 func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error) {
 	defer c.trackOp()()
 	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
@@ -123,7 +126,7 @@ func (c *Commands) runSandboxd(ctx context.Context, span trace.Span, command str
 	})
 	if err != nil {
 		if st, ok := status.FromError(err); ok {
-			err = fmt.Errorf("%s: run: process service returned %s: %s", c.errPrefix(), st.Code(), st.Message())
+			err = fmt.Errorf("%s: run: process service returned %s: %s: %w", c.errPrefix(), st.Code(), st.Message(), err)
 		} else {
 			err = fmt.Errorf("%s: run failed: %w", c.errPrefix(), err)
 		}

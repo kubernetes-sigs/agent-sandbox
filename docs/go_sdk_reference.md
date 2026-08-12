@@ -254,7 +254,7 @@ type Commands struct {
 ```
 
 <a name="Commands.Run"></a>
-#### func \(\*Commands\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go#L56>)
+#### func \(\*Commands\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go#L59>)
 
 ```go
 func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error)
@@ -267,6 +267,8 @@ Because command execution is not idempotent, Run defaults to a single attempt \(
 ```
 result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 ```
+
+WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run issues a single gRPC Execute regardless of the configured attempts.
 
 <a name="ConnectionStrategy"></a>
 ### type [ConnectionStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go#L20-L23>)
@@ -369,7 +371,7 @@ type Files struct {
 ```
 
 <a name="Files.Delete"></a>
-#### func \(\*Files\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L391>)
+#### func \(\*Files\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L393>)
 
 ```go
 func (f *Files) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error
@@ -380,7 +382,7 @@ Delete removes a file or directory in the sandbox. When recursive is true, direc
 Only supported by the sandboxd runtime: the legacy python\-runtime has no delete endpoint, and calls return ErrUnsupportedByRuntime.
 
 <a name="Files.Exists"></a>
-#### func \(\*Files\) [Exists](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L317>)
+#### func \(\*Files\) [Exists](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L319>)
 
 ```go
 func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bool, error)

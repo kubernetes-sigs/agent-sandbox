@@ -421,6 +421,7 @@ class SandboxConnector:
         self._pod_ip_resolved = False
         self._pod_ip_auth_failed = False
         self._grpc_channel = None
+        self._grpc_channel_target: str | None = None
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
@@ -466,12 +467,22 @@ class SandboxConnector:
         """
         if not self.is_sandboxd():
             raise RuntimeError("grpc_channel() is only available for the sandboxd runtime")
-        if self._grpc_channel is not None:
-            return self._grpc_channel
         target = getattr(self.strategy, "grpc_target", None)
         if not target:
             raise SandboxRequestError(
                 "sandboxd gRPC endpoint not connected; call connect() first")
+        # Invalidate the cached channel if the tunnel was re-established on a
+        # new local port (connect() allocates a fresh port each time), so we
+        # never return a channel pointing at a closed port.
+        if self._grpc_channel is not None:
+            if self._grpc_channel_target == target:
+                return self._grpc_channel
+            try:
+                self._grpc_channel.close()
+            except Exception:
+                pass
+            self._grpc_channel = None
+            self._grpc_channel_target = None
         try:
             import grpc
         except ImportError as e:
@@ -480,6 +491,7 @@ class SandboxConnector:
                 "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
             ) from e
         self._grpc_channel = grpc.insecure_channel(target)
+        self._grpc_channel_target = target
         return self._grpc_channel
 
     def connect(self) -> str:
@@ -494,6 +506,7 @@ class SandboxConnector:
             except Exception:
                 pass
             self._grpc_channel = None
+            self._grpc_channel_target = None
         self.strategy.close()
         if self.session:
             self.session.close()

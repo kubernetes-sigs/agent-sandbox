@@ -145,6 +145,7 @@ class TestFilesystemSafePaths(unittest.TestCase):
 class TestAsyncFilesystemSafePaths(TestFilesystemSafePaths):
     def setUp(self):
         self._connector = AsyncMock()
+        self._connector.is_sandboxd.return_value = False
         tracer = MagicMock()
         self._fs = AsyncFilesystem(self._connector, tracer, trace_service_name="test")
 

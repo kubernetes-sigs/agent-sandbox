@@ -13,8 +13,11 @@
 # limitations under the License.
 
 # Generates the Python ProcessService stubs vendored into the Python SDK.
-# Output lands in k8s_agent_sandbox/_proto/<proto-package-path>, so the
-# generated modules import as k8s_agent_sandbox._proto.process.v1.*.
+# Output lands under k8s_agent_sandbox/_proto/. The generated gRPC module
+# imports its sibling as a top-level "process.v1" package, so callers import
+# the stubs through k8s_agent_sandbox.commands._process_stubs, which puts
+# _proto on sys.path (do not import k8s_agent_sandbox._proto.process.v1.*
+# directly).
 # Run via: buf generate --template buf.gen.python.yaml
 version: v2
 managed:

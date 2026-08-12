@@ -172,6 +172,10 @@ class Sandbox:
         """
         if self._is_closed:
             return
+        # Invalidate the cached pod name: a suspend/resume can bind this
+        # sandbox to a differently-named pod, and a stale name would make the
+        # next reconnect port-forward to a pod that no longer exists.
+        self._pod_name = None
         # Close client side connection
         self.connector.close()
         

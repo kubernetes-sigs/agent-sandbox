@@ -152,11 +152,22 @@ class Filesystem:
                 listing = response.json()
             except ValueError as e:
                 raise RuntimeError(f"Failed to decode JSON response from sandbox: {response.text}") from e
-            entries = listing.get("entries", []) if isinstance(listing, dict) else []
-            try:
-                file_entries = [FileEntry.from_sandboxd(e) for e in entries]
-            except Exception as e:
-                raise RuntimeError(f"Server returned invalid file entry format: {listing}") from e
+            # A directory listing is a DirectoryListing envelope; reject
+            # anything else rather than silently returning an empty list.
+            if not isinstance(listing, dict) or "entries" not in listing:
+                raise RuntimeError(f"Server returned invalid directory listing: {listing}")
+            file_entries = []
+            for e in listing.get("entries") or []:
+                # Skip entry types the SDK model does not represent (e.g. a
+                # stray "symlink") so one unknown entry does not fail the
+                # whole listing.
+                if e.get("type") not in ("file", "directory"):
+                    logging.info(f"Skipping unsupported file entry type: {e.get('type')!r}")
+                    continue
+                try:
+                    file_entries.append(FileEntry.from_sandboxd(e))
+                except Exception as ex:
+                    raise RuntimeError(f"Server returned invalid file entry format: {e}") from ex
         else:
             response = self.connector.send_request("GET", f"list/{encoded_path}", timeout=timeout)
             try:

@@ -69,6 +69,16 @@ spec:
         - name: workload
           image: busybox:1.36
           command: ["sh", "-c", "sleep infinity"]
+          # Pod sets runAsNonRoot: true, so the workload must also declare a
+          # non-root user or the kubelet rejects it.
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: SANDBOXD_GRPC_ADDR
               value: "localhost:9090"

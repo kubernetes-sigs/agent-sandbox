@@ -242,7 +242,7 @@ sandbox-router — filesystem calls go over REST, `Run` goes over gRPC.
 > `ls`, etc. out of the box; to run a language runtime (e.g. `python3`),
 > build a sandboxd image that includes it. Files written over REST land in
 > the shared `/workspace` volume, visible to both containers.
-
+>
 > **Router limitation:** the sandbox-router cannot currently reach sandboxd
 > (it dials the pod IP and is HTTP/1.1-only, while sandboxd is loopback +
 > gRPC). Gateway/router access to sandboxd is a follow-up requiring router
@@ -278,8 +278,10 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
 
 ## Security model
 
-- **Network containment:** both ports bind to `127.0.0.1` only; external
-  access requires explicit proxying through `sandbox-router`.
+- **Network containment:** both ports bind to `127.0.0.1` only. External SDK
+  access currently uses a Kubernetes pod port-forward directly to sandboxd
+  (see "Agent Sandbox SDK access"); the sandbox-router cannot reach the
+  loopback listeners today.
 - **Path confinement:** every file path (and process `cwd`) is resolved with
   symlink evaluation and rejected unless it stays under `--root-dir`.
 - **Metadata hygiene:** `/v1/metadata` only serves env vars matching

@@ -163,5 +163,29 @@ class TestLegacyDeleteUnsupported(unittest.TestCase):
         connector.send_request.assert_not_called()
 
 
+class TestProcessStubs(unittest.TestCase):
+    def test_stub_import_and_construct(self):
+        try:
+            import grpc  # noqa: F401
+            from k8s_agent_sandbox.commands._process_stubs import (
+                process_pb2,
+                process_pb2_grpc,
+            )
+        except ImportError:
+            self.skipTest("grpc extra not installed; sandboxd gRPC path is opt-in")
+        req = process_pb2.ExecuteRequest(
+            config=process_pb2.ProcessConfig(
+                command=["/bin/sh", "-c", "echo hello"],
+                cwd="/workspace",
+                env_vars={"FOO": "BAR"},
+            )
+        )
+        self.assertEqual(list(req.config.command), ["/bin/sh", "-c", "echo hello"])
+        self.assertEqual(req.config.cwd, "/workspace")
+        self.assertEqual(req.config.env_vars["FOO"], "BAR")
+        self.assertTrue(hasattr(process_pb2_grpc, "ProcessServiceStub"))
+        self.assertTrue(hasattr(process_pb2_grpc, "ProcessServiceServicer"))
+
+
 if __name__ == "__main__":
     unittest.main()

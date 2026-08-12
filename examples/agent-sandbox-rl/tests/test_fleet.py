@@ -569,3 +569,49 @@ def test_unwarm_entry_warmpool_success_template_failure_releases_replicas(make_c
   # Since warmpool succeeded, replicas are released and image is not left in _warmed
   assert "i1" not in f._warmed
   assert c.active_replicas == 0
+
+
+def test_teardown_concurrent_deletion_continues_on_failure(make_cluster):
+  c = make_cluster("solo")
+  c.resources.list_claims.return_value = ["claim1"]
+  c.resources.list_warmpools.return_value = ["pool1"]
+  c.resources.list_templates.return_value = ["tmpl1"]
+
+  c.resources.delete_claim.side_effect = RuntimeError("failed to delete claim")
+
+  f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([c]))
+  with pytest.raises(RuntimeError, match="failed to delete claim"):
+    f.teardown()
+
+  # delete_claim failed, but delete_warmpool and delete_template were still invoked
+  c.resources.delete_claim.assert_called_once_with("claim1")
+  c.resources.delete_warmpool.assert_called_once_with("pool1")
+  c.resources.delete_template.assert_called_once_with("tmpl1")
+  # Cluster bookkeeping reset and fleet marked torndown
+  assert c.active_claims == 0 and c.active_replicas == 0
+  assert f._torndown is True
+
+
+def test_teardown_multi_cluster_continues_on_cluster_failure(two_cluster_registry):
+  c1, c2 = list(two_cluster_registry)
+  c1.resources.list_claims.return_value = ["c1-claim"]
+  c1.resources.list_warmpools.return_value = ["c1-pool"]
+  c1.resources.list_templates.return_value = ["c1-tmpl"]
+  c1.resources.delete_claim.side_effect = RuntimeError("c1 claim error")
+
+  c2.resources.list_claims.return_value = ["c2-claim"]
+  c2.resources.list_warmpools.return_value = ["c2-pool"]
+  c2.resources.list_templates.return_value = ["c2-tmpl"]
+
+  f = _fleet(two_cluster_registry)
+  with pytest.raises(RuntimeError, match="c1 claim error"):
+    f.teardown()
+
+  c1.resources.delete_claim.assert_called_once_with("c1-claim")
+  c1.resources.delete_warmpool.assert_called_once_with("c1-pool")
+  c1.resources.delete_template.assert_called_once_with("c1-tmpl")
+
+  c2.resources.delete_claim.assert_called_once_with("c2-claim")
+  c2.resources.delete_warmpool.assert_called_once_with("c2-pool")
+  c2.resources.delete_template.assert_called_once_with("c2-tmpl")
+  assert f._torndown is True

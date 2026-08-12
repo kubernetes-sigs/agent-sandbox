@@ -899,20 +899,32 @@ class SandboxFleet:
         return
       self._torndown = True
     self.release_all()
+    errors: list[BaseException] = []
     for c in self.registry:
       sel = c.resources.managed_selector()
       # Sweep any stray claims first (defensive: untracked/leaked claims keep
       # their adopted sandbox alive even after the pool is gone).
-      claims = c.resources.list_claims(label_selector=sel)
-      pools = c.resources.list_warmpools(label_selector=sel)
-      tmpls = c.resources.list_templates(label_selector=sel)
+      try:
+        claims = c.resources.list_claims(label_selector=sel)
+        pools = c.resources.list_warmpools(label_selector=sel)
+        tmpls = c.resources.list_templates(label_selector=sel)
+      except BaseException as exc:  # noqa: BLE001
+        logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
+        errors.append(exc)
+        claims, pools, tmpls = [], [], []
       total_items = len(claims) + len(pools) + len(tmpls)
       if total_items > 0:
         workers = min(50, total_items)
         with ThreadPoolExecutor(max_workers=workers) as ex:
-          list(ex.map(c.resources.delete_claim, claims))
-          list(ex.map(c.resources.delete_warmpool, pools))
-          list(ex.map(c.resources.delete_template, tmpls))
+          futures = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
+          futures.extend(ex.submit(c.resources.delete_warmpool, pool) for pool in pools)
+          futures.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
+          for f in as_completed(futures):
+            try:
+              f.result()
+            except BaseException as exc:  # noqa: BLE001
+              logger.exception("Failed to delete resource during teardown: %s", exc)
+              errors.append(exc)
       c.reset_counts()
       if delete_namespace:
         try:
@@ -925,6 +937,8 @@ class SandboxFleet:
       self._ondemand.clear()
     self.plan_ = None
     self._remove_teardown_hooks()
+    if errors:
+      raise errors[0]
 
   def __enter__(self) -> "SandboxFleet":
     return self.setup()

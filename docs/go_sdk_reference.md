@@ -32,6 +32,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type FileEntry](<#FileEntry>)
 - [type FileType](<#FileType>)
 - [type Files](<#Files>)
+  - [func \(f \*Files\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Files.Delete>)
   - [func \(f \*Files\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Files.Exists>)
   - [func \(f \*Files\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Files.List>)
   - [func \(f \*Files\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Files.Read>)
@@ -44,12 +45,14 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func NewK8sHelper\(restConfig \*rest.Config, log logr.Logger\) \(\*K8sHelper, error\)](<#NewK8sHelper>)
 - [type Key](<#Key>)
 - [type Options](<#Options>)
+- [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
   - [func New\(\_ context.Context, opts Options\) \(\*Sandbox, error\)](<#New>)
   - [func \(s \*Sandbox\) Annotations\(\) map\[string\]string](<#Sandbox.Annotations>)
   - [func \(s \*Sandbox\) ClaimName\(\) string](<#Sandbox.ClaimName>)
   - [func \(s \*Sandbox\) Close\(ctx context.Context\) error](<#Sandbox.Close>)
   - [func \(s \*Sandbox\) Commands\(\) \*Commands](<#Sandbox.Commands>)
+  - [func \(s \*Sandbox\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Sandbox.Delete>)
   - [func \(s \*Sandbox\) Disconnect\(ctx context.Context\) error](<#Sandbox.Disconnect>)
   - [func \(s \*Sandbox\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Sandbox.Exists>)
   - [func \(s \*Sandbox\) Files\(\) \*Files](<#Sandbox.Files>)
@@ -110,6 +113,9 @@ var (
     ErrSandboxDeleted   = errors.New("sandbox was deleted before becoming ready")
     ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
     ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
+    // ErrUnsupportedByRuntime is returned by operations the selected
+    // runtime cannot perform (e.g. Delete on the legacy python-runtime).
+    ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
 )
 ```
 
@@ -123,7 +129,7 @@ func NewTracerProvider(ctx context.Context, serviceName string) (*sdktrace.Trace
 NewTracerProvider creates a TracerProvider with an OTLP/gRPC exporter. The endpoint is read from OTEL\_EXPORTER\_OTLP\_ENDPOINT \(default: localhost:4317\). serviceName becomes the service.name resource attribute. The caller owns the returned provider and must call Shutdown when done.
 
 <a name="CallOption"></a>
-### type [CallOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L71>)
+### type [CallOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L74>)
 
 CallOption configures per\-call behavior for SDK operations.
 
@@ -132,7 +138,7 @@ type CallOption func(*callOptions)
 ```
 
 <a name="WithMaxAttempts"></a>
-#### func [WithMaxAttempts](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L91>)
+#### func [WithMaxAttempts](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L94>)
 
 ```go
 func WithMaxAttempts(n int) CallOption
@@ -145,7 +151,7 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 ```
 
 <a name="WithTimeout"></a>
-#### func [WithTimeout](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L80>)
+#### func [WithTimeout](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L83>)
 
 ```go
 func WithTimeout(d time.Duration) CallOption
@@ -237,7 +243,7 @@ func (c *Client) ListAllSandboxes(ctx context.Context, namespace string) ([]stri
 ListAllSandboxes lists all SandboxClaim names in the given namespace.
 
 <a name="Commands"></a>
-### type [Commands](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go#L33-L41>)
+### type [Commands](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go#L36-L45>)
 
 Commands provides command execution on a sandbox.
 
@@ -248,7 +254,7 @@ type Commands struct {
 ```
 
 <a name="Commands.Run"></a>
-#### func \(\*Commands\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go#L52>)
+#### func \(\*Commands\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go#L56>)
 
 ```go
 func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error)
@@ -304,7 +310,7 @@ func (s *DirectStrategy) Connect(_ context.Context) (string, error)
 
 
 <a name="ExecutionResult"></a>
-### type [ExecutionResult](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L126-L130>)
+### type [ExecutionResult](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L129-L133>)
 
 ExecutionResult holds the result of a command execution in the sandbox.
 
@@ -317,21 +323,24 @@ type ExecutionResult struct {
 ```
 
 <a name="FileEntry"></a>
-### type [FileEntry](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L141-L146>)
+### type [FileEntry](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L147-L155>)
 
-FileEntry represents a file or directory entry in the sandbox.
+FileEntry represents a file or directory entry in the sandbox. It is runtime\-neutral: the SDK decodes the legacy wire format \(mod\_time as a float POSIX timestamp\) and the sandboxd wire format \(modified\_at as an RFC 3339 string, plus mode\) into this one shape.
 
 ```go
 type FileEntry struct {
-    Name    string   `json:"name"`
-    Size    int64    `json:"size"`
-    Type    FileType `json:"type"`
-    ModTime float64  `json:"mod_time"`
+    Name    string
+    Size    int64
+    Type    FileType
+    ModTime time.Time
+    // Mode holds octal permission bits (e.g. "0644"). Only populated by
+    // the sandboxd runtime; empty on legacy.
+    Mode string
 }
 ```
 
 <a name="FileType"></a>
-### type [FileType](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L133>)
+### type [FileType](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L136>)
 
 FileType represents the type of a file entry.
 
@@ -349,7 +358,7 @@ const (
 ```
 
 <a name="Files"></a>
-### type [Files](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L84-L94>)
+### type [Files](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L86-L97>)
 
 Files provides file operations on a sandbox.
 
@@ -359,8 +368,19 @@ type Files struct {
 }
 ```
 
+<a name="Files.Delete"></a>
+#### func \(\*Files\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L391>)
+
+```go
+func (f *Files) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error
+```
+
+Delete removes a file or directory in the sandbox. When recursive is true, directories are removed with their contents \(rm \-rf semantics\); otherwise deleting a non\-empty directory fails with a 409 HTTPError.
+
+Only supported by the sandboxd runtime: the legacy python\-runtime has no delete endpoint, and calls return ErrUnsupportedByRuntime.
+
 <a name="Files.Exists"></a>
-#### func \(\*Files\) [Exists](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L250>)
+#### func \(\*Files\) [Exists](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L317>)
 
 ```go
 func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bool, error)
@@ -369,7 +389,7 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 Exists checks if a file or directory exists at the given path in the sandbox.
 
 <a name="Files.List"></a>
-#### func \(\*Files\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L201>)
+#### func \(\*Files\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L244>)
 
 ```go
 func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error)
@@ -378,7 +398,7 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 List returns the contents of a directory in the sandbox.
 
 <a name="Files.Read"></a>
-#### func \(\*Files\) [Read](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L157>)
+#### func \(\*Files\) [Read](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L198>)
 
 ```go
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error)
@@ -387,18 +407,20 @@ func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]by
 Read downloads a file from the sandbox.
 
 <a name="Files.Write"></a>
-#### func \(\*Files\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L102>)
+#### func \(\*Files\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go#L128>)
 
 ```go
 func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...CallOption) error
 ```
 
-Write uploads content to the sandbox. The path must be a plain filename without directory separators \(e.g., "script.py", not "dir/script.py"\).
+Write uploads content to the sandbox.
 
-The entire content is buffered in memory as a multipart form body to support retries on transient failures. Content exceeding MaxUploadSize \(default 256 MB\) is rejected before any network I/O.
+With the legacy runtime the path must be a plain filename without directory separators \(e.g., "script.py", not "dir/script.py"\). The sandboxd runtime supports relative paths and creates parent directories automatically.
+
+The entire content is buffered in memory to support retries on transient failures. Content exceeding MaxUploadSize \(default 256 MB\) is rejected before any network I/O.
 
 <a name="HTTPError"></a>
-### type [HTTPError](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L56-L60>)
+### type [HTTPError](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L59-L63>)
 
 HTTPError represents a non\-OK HTTP response from the sandbox.
 
@@ -411,7 +433,7 @@ type HTTPError struct {
 ```
 
 <a name="HTTPError.Error"></a>
-#### func \(\*HTTPError\) [Error](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L62>)
+#### func \(\*HTTPError\) [Error](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L65>)
 
 ```go
 func (e *HTTPError) Error() string
@@ -420,7 +442,7 @@ func (e *HTTPError) Error() string
 
 
 <a name="Handle"></a>
-### type [Handle](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L103-L114>)
+### type [Handle](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L106-L117>)
 
 Handle provides high\-level interaction with a sandbox instance. Sandbox implements this interface; consumers should accept Handle in their APIs to enable testing with mocks. For sub\-object access \(Commands\(\), Files\(\)\), use the concrete \*Sandbox type directly.
 
@@ -440,7 +462,7 @@ type Handle interface {
 ```
 
 <a name="Info"></a>
-### type [Info](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L117-L123>)
+### type [Info](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go#L120-L126>)
 
 Info provides read\-only access to sandbox identity metadata.
 
@@ -494,7 +516,7 @@ type Key struct {
 ```
 
 <a name="Options"></a>
-### type [Options](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go#L44-L139>)
+### type [Options](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go#L62-L172>)
 
 Options configures a Sandbox instance.
 
@@ -503,6 +525,21 @@ type Options struct {
     // WarmPoolName is the name of the SandboxWarmPool to use. Required.
     // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
     WarmPoolName string
+
+    // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacy.
+    // RuntimeSandboxd requires pod port-forward connectivity: GatewayName
+    // is rejected (the router cannot reach sandboxd's loopback-only
+    // listeners). APIURL remains available as an advanced/testing escape
+    // hatch for the REST endpoint.
+    Runtime Runtime
+
+    // SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
+    // REST API. Only used with RuntimeSandboxd. Default: 8080.
+    SandboxdRESTPort int
+
+    // SandboxdGRPCPort is the pod port of sandboxd's gRPC ProcessService.
+    // Only used with RuntimeSandboxd. Default: 9090.
+    SandboxdGRPCPort int
 
     // Namespace where the SandboxClaim will be created. Default: "default".
     // Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
@@ -597,6 +634,32 @@ type Options struct {
 }
 ```
 
+<a name="Runtime"></a>
+### type [Runtime](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go#L46>)
+
+Runtime identifies the in\-sandbox runtime API the SDK speaks.
+
+```go
+type Runtime string
+```
+
+<a name="RuntimeLegacy"></a>
+
+```go
+const (
+    // RuntimeLegacy is the python-runtime HTTP API (POST /upload,
+    // GET /download|list|exists/{path}, POST /execute on port 8888),
+    // reached through the sandbox-router. Default.
+    RuntimeLegacy Runtime = "legacy"
+    // RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
+    // REST filesystem (/v1/files/...) on port 8080 plus gRPC
+    // ProcessService on port 9090. sandboxd binds loopback-only inside
+    // the pod, so connectivity uses a port-forward directly to the
+    // sandbox pod rather than the sandbox-router.
+    RuntimeSandboxd Runtime = "sandboxd"
+)
+```
+
 <a name="Sandbox"></a>
 ### type [Sandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L32-L56>)
 
@@ -618,7 +681,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error)
 New creates a new Sandbox with the given options. Call Open\(\) to create a sandbox and establish connectivity.
 
 <a name="Sandbox.Annotations"></a>
-#### func \(\*Sandbox\) [Annotations](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L565>)
+#### func \(\*Sandbox\) [Annotations](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L599>)
 
 ```go
 func (s *Sandbox) Annotations() map[string]string
@@ -627,7 +690,7 @@ func (s *Sandbox) Annotations() map[string]string
 
 
 <a name="Sandbox.ClaimName"></a>
-#### func \(\*Sandbox\) [ClaimName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L541>)
+#### func \(\*Sandbox\) [ClaimName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L575>)
 
 ```go
 func (s *Sandbox) ClaimName() string
@@ -636,7 +699,7 @@ func (s *Sandbox) ClaimName() string
 
 
 <a name="Sandbox.Close"></a>
-#### func \(\*Sandbox\) [Close](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L371>)
+#### func \(\*Sandbox\) [Close](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L398>)
 
 ```go
 func (s *Sandbox) Close(ctx context.Context) error
@@ -645,7 +708,7 @@ func (s *Sandbox) Close(ctx context.Context) error
 Close deletes the SandboxClaim and cleans up resources.
 
 <a name="Sandbox.Commands"></a>
-#### func \(\*Sandbox\) [Commands](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L516>)
+#### func \(\*Sandbox\) [Commands](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L543>)
 
 ```go
 func (s *Sandbox) Commands() *Commands
@@ -653,8 +716,17 @@ func (s *Sandbox) Commands() *Commands
 
 Commands returns the command execution sub\-object.
 
+<a name="Sandbox.Delete"></a>
+#### func \(\*Sandbox\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L569>)
+
+```go
+func (s *Sandbox) Delete(ctx context.Context, path string, recursive bool, opts ...CallOption) error
+```
+
+Delete removes a file or directory \(sandboxd runtime only; the legacy python\-runtime returns ErrUnsupportedByRuntime\). Not part of the Handle interface to avoid breaking existing implementers.
+
 <a name="Sandbox.Disconnect"></a>
-#### func \(\*Sandbox\) [Disconnect](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L474>)
+#### func \(\*Sandbox\) [Disconnect](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L501>)
 
 ```go
 func (s *Sandbox) Disconnect(ctx context.Context) error
@@ -663,7 +735,7 @@ func (s *Sandbox) Disconnect(ctx context.Context) error
 Disconnect closes the transport connection without deleting the SandboxClaim. The sandbox stays alive on the server. Call Open\(\) to reconnect. Disconnect is safe to call concurrently with Open; an in\-progress Open is cancelled before the transport is torn down.
 
 <a name="Sandbox.Exists"></a>
-#### func \(\*Sandbox\) [Exists](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L535>)
+#### func \(\*Sandbox\) [Exists](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L562>)
 
 ```go
 func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (bool, error)
@@ -672,7 +744,7 @@ func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (
 
 
 <a name="Sandbox.Files"></a>
-#### func \(\*Sandbox\) [Files](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L519>)
+#### func \(\*Sandbox\) [Files](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L546>)
 
 ```go
 func (s *Sandbox) Files() *Files
@@ -681,7 +753,7 @@ func (s *Sandbox) Files() *Files
 Files returns the file operations sub\-object.
 
 <a name="Sandbox.IsReady"></a>
-#### func \(\*Sandbox\) [IsReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L511>)
+#### func \(\*Sandbox\) [IsReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L538>)
 
 ```go
 func (s *Sandbox) IsReady() bool
@@ -690,7 +762,7 @@ func (s *Sandbox) IsReady() bool
 IsReady returns true if the sandbox is ready for communication.
 
 <a name="Sandbox.List"></a>
-#### func \(\*Sandbox\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L532>)
+#### func \(\*Sandbox\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L559>)
 
 ```go
 func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error)
@@ -699,7 +771,7 @@ func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]
 
 
 <a name="Sandbox.Open"></a>
-#### func \(\*Sandbox\) [Open](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L176>)
+#### func \(\*Sandbox\) [Open](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L203>)
 
 ```go
 func (s *Sandbox) Open(ctx context.Context) (retErr error)
@@ -708,7 +780,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error)
 Open creates a SandboxClaim and waits for the sandbox to become ready, then discovers the API URL based on the configured connection mode. On failure after claim creation, the claim is automatically deleted; if deletion also fails, call Close\(\) to retry.
 
 <a name="Sandbox.PodIP"></a>
-#### func \(\*Sandbox\) [PodIP](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L559>)
+#### func \(\*Sandbox\) [PodIP](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L593>)
 
 ```go
 func (s *Sandbox) PodIP() string
@@ -717,7 +789,7 @@ func (s *Sandbox) PodIP() string
 
 
 <a name="Sandbox.PodName"></a>
-#### func \(\*Sandbox\) [PodName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L553>)
+#### func \(\*Sandbox\) [PodName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L587>)
 
 ```go
 func (s *Sandbox) PodName() string
@@ -726,7 +798,7 @@ func (s *Sandbox) PodName() string
 
 
 <a name="Sandbox.Read"></a>
-#### func \(\*Sandbox\) [Read](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L529>)
+#### func \(\*Sandbox\) [Read](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L556>)
 
 ```go
 func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error)
@@ -735,7 +807,7 @@ func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]
 
 
 <a name="Sandbox.Run"></a>
-#### func \(\*Sandbox\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L523>)
+#### func \(\*Sandbox\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L550>)
 
 ```go
 func (s *Sandbox) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error)
@@ -744,7 +816,7 @@ func (s *Sandbox) Run(ctx context.Context, command string, opts ...CallOption) (
 
 
 <a name="Sandbox.SandboxName"></a>
-#### func \(\*Sandbox\) [SandboxName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L547>)
+#### func \(\*Sandbox\) [SandboxName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L581>)
 
 ```go
 func (s *Sandbox) SandboxName() string
@@ -753,7 +825,7 @@ func (s *Sandbox) SandboxName() string
 
 
 <a name="Sandbox.Write"></a>
-#### func \(\*Sandbox\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L526>)
+#### func \(\*Sandbox\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go#L553>)
 
 ```go
 func (s *Sandbox) Write(ctx context.Context, path string, content []byte, opts ...CallOption) error

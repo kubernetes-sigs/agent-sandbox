@@ -28,6 +28,7 @@ small deployments; the high-performance settings below are opt-in.
 | Cache | `--cache-label-selectors` | false | Informer scope (O(cluster) → O(sandboxes)) |
 | Write reduction | `--disable-claim-events` | false | Eliminate Kubernetes Event writes |
 | Write reduction | `--disable-claim-observability-annotations` | false | Eliminate one annotation write per claim |
+| Write reduction | `--sandbox-write-behind-window` | 0 (disabled) | Coalesce Sandbox pod metadata patches via RequeueAfter |
 
 ---
 
@@ -90,6 +91,23 @@ The sustained config held p50 flat at 77–116 ms across all six 10-second
 windows with no pool drain. Per-pool refill ceiling is ~70–85 sandboxes/s
 (pod scheduling bounds at ~70/s at the kube-scheduler default
 `--kube-api-qps=50`).
+
+### PR-level benchmark — write-behind window
+
+Three-way A/B (300-claim warm burst + 45/s × 60s sustained Poisson, 12-node
+kops cluster, e2-standard-16 control plane):
+
+| Config | burst p50/p90 | sustained p50/p90 | pod PATCHes ok | optimistic 409s |
+|---|---|---|---|---|
+| Baseline (`window=0`) | 1465 / 3201 ms | **320 / 680 ms** | 2,953 | 5,447 |
+| `--sandbox-write-behind-window=250ms` | **1271 / 3158 ms** | 507 / 1027 ms | 2,997 | **3,077** |
+
+Key observations:
+- **44% fewer 409 conflicts** (5,447 → 3,077) — the most reliable benefit at scale.
+- **Burst p50 −13%** (1465 → 1271 ms) — write coalescing frees API seats for claim adoption.
+- **Sustained p50 +58%** (320 → 507 ms) — a real trade-off; write deferral adds latency variance under continuous churn. Still well within acceptable warm-adoption bounds.
+- +10% sandbox reconcile count (one extra deferred pass per coalesced write) at ~+2.5% total writes.
+- Pod patch bound is always ≤ `min(window, 1s)` — the `safe-to-evict` strip cannot lag the cluster autoscaler.
 
 ---
 
@@ -273,6 +291,45 @@ still computed in memory, so startup-latency metrics and trace propagation
 within the current process keep working. The cost is losing the on-object
 breadcrumb after a controller restart.
 
+### `--sandbox-write-behind-window` (default: 0 — disabled)
+
+Coalesces the Sandbox controller's recoverable pod metadata patch via
+RequeueAfter deferral. The specific write deferred is the pod
+label/annotation reconciliation on the warm-pool adoption path (warm-pool
+label prune, `cluster-autoscaler.kubernetes.io/safe-to-evict` strip,
+propagated-keys tracking). When the window is open, the reconcile pass skips
+the patch and returns `RequeueAfter: <remaining window>`; the workqueue's
+per-key dedup coalesces repeated redeliveries into a single flush pass that
+recomputes the desired state from fresh informer state and issues one merge
+patch.
+
+**Properties:**
+- Sandbox **readiness is never gated** on the deferred write — the claim Ready
+  condition is set from in-memory state without waiting for the flush.
+- Pod patch is always flushed within `min(window, 1s)`, bounding the
+  `safe-to-evict` annotation lag well below the cluster autoscaler's 10 s
+  scan interval.
+- Crash-safe: the deferral clock stores timestamps only, no mutation payload.
+  A crash merely restarts a sub-second window on the next leader's first pass.
+
+**Trade-offs (benchmarked at 250ms):**
+
+| | Baseline (0) | 250ms |
+|---|---|---|
+| 409 write conflicts | 5,447 | **3,077 (−44%)** |
+| Burst p50/p90 | 1465/3201 ms | **1271/3158 ms (−13% p50)** |
+| Sustained p50/p90 | **320/680 ms** | 507/1027 ms (+58% p50) |
+| Sandbox reconciles | +0% | +10% |
+
+The sustained latency regression is real: deferred writes add variance under
+continuous churn. For most deployments the 44% reduction in conflict errors
+and the burst improvement outweigh it.
+
+**Recommended:** `--sandbox-write-behind-window=250ms` on clusters with high
+write-conflict rates (watch for 409 errors in controller logs) or ≥300
+claims/s burst workloads. Disable (leave at 0) if sustained warm-adoption
+latency is the primary constraint and you observe no significant 409 rate.
+
 ---
 
 ## Recommended configurations
@@ -306,6 +363,8 @@ args:
   # Write reduction (benefit at ≥200 claims/s)
   - --disable-claim-events=true
   - --disable-claim-observability-annotations=true
+  # Write-behind coalescing: reduces 409 conflicts by ~44%; slight sustained latency trade-off
+  - --sandbox-write-behind-window=250ms
 ```
 
 Also apply `examples/apf-insulation/apf-insulation.yaml` to the cluster.
@@ -343,6 +402,7 @@ args:
   - --cache-label-selectors=true
   - --disable-claim-events=true
   - --disable-claim-observability-annotations=true
+  - --sandbox-write-behind-window=250ms
 ```
 
 Also apply `examples/apf-insulation/apf-insulation.yaml` to the cluster.
@@ -365,6 +425,7 @@ containers:
   - --cache-label-selectors=true
   - --disable-claim-events=true
   - --disable-claim-observability-annotations=true
+  - --sandbox-write-behind-window=250ms
 ```
 
 **Live cluster patch:**
@@ -379,6 +440,7 @@ kubectl patch deployment agent-sandbox-controller \
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-warm-pool-max-refill-rate=100"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--cache-label-selectors=true"},
     {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--disable-claim-events=true"},
-    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--disable-claim-observability-annotations=true"}
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--disable-claim-observability-annotations=true"},
+    {"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--sandbox-write-behind-window=250ms"}
   ]'
 ```

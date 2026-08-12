@@ -286,7 +286,9 @@ func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]Fi
 				f.log.V(1).Info("skipping entry with unsupported file type", "path", path, "entry", e.Name, "type", e.Type)
 				continue
 			}
-			modTime, parseErr := time.Parse(time.RFC3339, e.ModifiedAt)
+			// RFC3339Nano so fractional-second timestamps are preserved
+			// (it also parses whole-second RFC3339 values).
+			modTime, parseErr := time.Parse(time.RFC3339Nano, e.ModifiedAt)
 			if parseErr != nil {
 				f.log.V(1).Info("entry has unparseable modified_at; using zero time", "path", path, "entry", e.Name, "modified_at", e.ModifiedAt)
 			}

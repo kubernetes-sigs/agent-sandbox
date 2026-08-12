@@ -89,6 +89,37 @@ async function sleepWithSignal(
 }
 
 /**
+ * Races an operation against a timeout and always releases the timeout timer.
+ * The timeout callback may return the timeout value or throw a timeout error.
+ * @internal — not part of the public API.
+ */
+export async function raceWithTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((resolve, reject) => {
+        timer = setTimeout(() => {
+          try {
+            resolve(onTimeout());
+          } catch (err) {
+            reject(err);
+          }
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * Fetches a URL with retry logic.
  *
  * - maxRetries controls total attempt count (1 = no retry, 5 = up to 4 retries).
@@ -485,10 +516,11 @@ export class Sandbox {
     this._isClosed = true;
 
     // Drain in-flight requests; give up after CLEANUP_TIMEOUT_MS so close() is bounded
-    await Promise.race([
+    await raceWithTimeout(
       this.drainInflight(),
-      new Promise<void>((resolve) => setTimeout(resolve, CLEANUP_TIMEOUT_MS)),
-    ]);
+      CLEANUP_TIMEOUT_MS,
+      () => undefined,
+    );
 
     // Kill port-forward and clear local resources (also sets _isClosed = true, idempotent)
     await this.closeLocal();
@@ -496,7 +528,7 @@ export class Sandbox {
     if (this.claimName) {
       console.info(`Deleting SandboxClaim: ${this.claimName}`);
       try {
-        await Promise.race([
+        await raceWithTimeout(
           this.customObjectsApi.deleteNamespacedCustomObject({
             group: CLAIM_API_GROUP,
             version: CLAIM_API_VERSION,
@@ -504,18 +536,13 @@ export class Sandbox {
             plural: CLAIM_PLURAL_NAME,
             name: this.claimName,
           }),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
-                  ),
-                ),
-              CLEANUP_TIMEOUT_MS,
-            ),
-          ),
-        ]);
+          CLEANUP_TIMEOUT_MS,
+          () => {
+            throw new Error(
+              `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
+            );
+          },
+        );
       } catch (err: unknown) {
         if (!isK8s404(err)) {
           console.error(`Error deleting sandbox claim: ${err}`);

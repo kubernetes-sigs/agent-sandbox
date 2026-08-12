@@ -81,6 +81,7 @@ import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
+  CLEANUP_TIMEOUT_MS,
   HEADER_REQUEST_ID,
   MAX_BACKOFF_MS,
   MAX_DRAIN_BYTES,
@@ -536,6 +537,20 @@ describe("Sandbox", () => {
       expect(args.version).toBe(CLAIM_API_VERSION);
       expect(args.plural).toBe(CLAIM_PLURAL_NAME);
       expect(args.name).toBe("test-claim");
+    });
+
+    it("clears cleanup timers when close completes before the timeout", async () => {
+      vi.useFakeTimers();
+      try {
+        mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+
+        const sandbox = createReadySandbox();
+        await sandbox.close();
+
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("does not throw when claim is 404", async () => {
@@ -1321,18 +1336,12 @@ describe("Sandbox", () => {
 
       const sandbox = createReadySandbox();
       const closePromise = sandbox.close();
-      const settled = closePromise
-        .then(() => "resolved")
-        .catch(() => "rejected");
 
-      // Advance 10 seconds — well beyond any reasonable cleanup timeout
-      await vi.advanceTimersByTimeAsync(10_000);
+      // Advance beyond the cleanup timeout so the delete timeout wins.
+      await vi.advanceTimersByTimeAsync(CLEANUP_TIMEOUT_MS * 2);
 
-      // Expected: close() completes (resolves or rejects) within cleanup budget.
-      // Current behavior: close() hangs indefinitely because deleteNamespacedCustomObject
-      // never resolves and there is no cleanup timeout.
-      const result = await Promise.race([settled, Promise.resolve("hanging")]);
-      expect(result).not.toBe("hanging");
+      await expect(closePromise).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 

@@ -260,7 +260,9 @@ itself, so on large or shared clusters this cuts informer list/watch volume,
 JSON decode CPU, and cache memory from O(cluster pods) to O(sandbox pods).
 
 **Recommended:** enable on clusters with > ~5000 total pods or where the
-controller's pod cache is a meaningful fraction of memory.
+controller's pod cache is a meaningful fraction of memory. This flag has
+not yet been directly benchmarked in isolation; the recommendation is based
+on the theoretical reduction in informer scope.
 
 **Caveat:** externally pre-provisioned resources on the sandbox adoptable
 path must also carry the tracking label to remain visible to the controller.
@@ -344,13 +346,19 @@ This is **config H** from the live benchmark — 75/75 claims, p50=41.4 s,
 p90=74.2 s, no failures across all runs. It is the default recommendation
 for any high-throughput deployment.
 
+> **Note on worker counts:** The specific values below (200/150/2) are
+> first-principles estimates based on typical API server write throughput;
+> the GKE live benchmarks ran with the cluster's existing 1000/1000/500/100
+> configuration. Start with these as a reasonable lower bound and tune upward
+> if you observe reconcile queue depth growing under load.
+
 ```yaml
 args:
   - --extensions
   # API server connections (benefit at ≥300 claims/s)
   - --api-connections=4
   - --separate-watch-connection=true
-  # Concurrency
+  # Concurrency — tune upward if reconcile queue depth grows under load
   - --sandbox-concurrent-workers=200
   - --sandbox-claim-concurrent-workers=150
   - --sandbox-warm-pool-concurrent-workers=2

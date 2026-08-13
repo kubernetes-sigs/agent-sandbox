@@ -455,7 +455,7 @@ type Info interface {
 ```
 
 <a name="K8sHelper"></a>
-### type [K8sHelper](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/k8s.go#L53-L62>)
+### type [K8sHelper](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/k8s.go#L55-L64>)
 
 K8sHelper encapsulates all Kubernetes API interactions for sandbox lifecycle management. It can be shared across multiple Sandbox instances.
 
@@ -473,7 +473,7 @@ type K8sHelper struct {
 ```
 
 <a name="NewK8sHelper"></a>
-#### func [NewK8sHelper](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/k8s.go#L67>)
+#### func [NewK8sHelper](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/k8s.go#L69>)
 
 ```go
 func NewK8sHelper(restConfig *rest.Config, log logr.Logger) (*K8sHelper, error)

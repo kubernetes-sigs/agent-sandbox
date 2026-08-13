@@ -25,7 +25,7 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 | [clients/k8s/](clients/k8s/) | **Generated** Kubernetes-style clientset, listers, informers (output of `dev/tools/client-gen-go.sh`). Do not hand-edit. |
 | [clients/go/](clients/go/) | Hand-written high-level Go SDK that wraps the `SandboxClaim` lifecycle and exposes Gateway / port-forward / direct connectivity. Editable. |
 | [clients/python/agentic-sandbox-client/](clients/python/agentic-sandbox-client/) | Hand-written Python SDK. Directory is named `agentic-sandbox-client` but the package publishes to PyPI as **`k8s-agent-sandbox`** — that's the name to import in docs and examples. |
-| [examples/](examples/), [extensions/examples/](extensions/examples/) | Runnable sample manifests and demo apps. |
+| [examples/](examples/) | Runnable sample manifests and demo apps. |
 | [test/e2e/](test/e2e/), [test/benchmarks/](test/benchmarks/) | End-to-end and benchmark suites (Go-driven; some scenarios shell out via the Python SDK). |
 | [dev/tools/](dev/tools/) | Repo tooling (lint, generate, deploy-kind, release scripts). Most `make` targets shell out here. |
 | [dev/ci/](dev/ci/) | Prow presubmit/periodic scripts. |
@@ -62,7 +62,7 @@ The Hugo site at [site/](site/) mounts these repo paths into `assets/additional/
 - [docs/testing.md](docs/testing.md) → `/docs/contribution-guidelines/testing/`
 - [clients/go/README.md](clients/go/README.md) → `/docs/go-client/`
 - [clients/python/agentic-sandbox-client/README.md](clients/python/agentic-sandbox-client/README.md) → `/docs/python-client/`
-- Many `examples/*/README.md` files (and some `extensions/examples/*/README.md` files) → pages under `/docs/use-cases/examples/` and `/docs/runtime-templates/`
+- Many `examples/*/README.md` files → pages under `/docs/use-cases/examples/` and `/docs/runtime-templates/`
 
 If you change one of these, preview the rendered output (`hugo server` from [site/](site/) — Hugo extended is required; check `module.hugoVersion` in [site/hugo.yaml](site/hugo.yaml) for the declared minimum, but in practice run a recent stable Hugo release). Do not edit the generated `site/public/` or `site/resources/` directories.
 
@@ -86,7 +86,7 @@ If you change one of these, preview the rendered output (`hugo server` from [sit
 The Python SDK lives at [clients/python/agentic-sandbox-client/](clients/python/agentic-sandbox-client/) and is the second supported client surface alongside the Go SDK. It has its own conventions; treat it as a Python project, not as appendage code.
 
 - **Three names, do not confuse them:** repo directory `agentic-sandbox-client`, importable package `k8s_agent_sandbox` (underscore), PyPI distribution `k8s-agent-sandbox` (hyphen). Examples and docs install with `pip install k8s-agent-sandbox` and import `from k8s_agent_sandbox import ...`.
-- **Supported Python:** `>=3.10` ([pyproject.toml](clients/python/agentic-sandbox-client/pyproject.toml)). Do not use syntax or stdlib features beyond 3.10 unless you also raise the floor deliberately.
+- **Supported Python:** `>=3.11` ([pyproject.toml](clients/python/agentic-sandbox-client/pyproject.toml)). Do not use syntax or stdlib features beyond 3.11 unless you also raise the floor deliberately.
 - **Sync/async parity:** every public sync module (`sandbox_client.py`, `sandbox.py`, `k8s_helper.py`, `connector.py`, `files/filesystem.py`, `commands/command_executor.py`) has a `async_*` sibling. When you change one, change the other — drift between sync and async is a real bug surface here. Async-only deps (`httpx`, `kubernetes_asyncio`) belong behind the `async` optional extra, not in the base `dependencies` list.
 - **Optional extras structure:** the project ships three extras — `async`, `test`, `tracing`. New optional functionality should follow the same pattern (extra in `[project.optional-dependencies]`, lazy import inside the relevant module) rather than adding to the base install footprint. The base deps are intentionally minimal: `kubernetes`, `requests`, `pydantic`.
 - **Use `pydantic` for data models.** Configuration and wire-format types belong in [k8s_agent_sandbox/models.py](clients/python/agentic-sandbox-client/k8s_agent_sandbox/models.py); extend those rather than passing free-form dicts.

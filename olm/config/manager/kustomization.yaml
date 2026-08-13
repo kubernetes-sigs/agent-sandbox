@@ -4,5 +4,5 @@ resources:
 - manager.yaml
 images:
 - name: controller
-  newName: controller
-  newTag: latest
+  newName: registry.k8s.io/agent-sandbox/agent-sandbox-controller
+  newTag: v0.5.4

@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
@@ -1871,6 +1871,22 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 					return sandbox, nil
 				}
 			}
+			if controllerRef != nil {
+				if gv, gvErr := schema.ParseGroupVersion(controllerRef.APIVersion); gvErr == nil &&
+					gv.Group == extensionsv1beta1.GroupVersion.Group &&
+					controllerRef.Kind == "SandboxClaim" {
+					logger.Info("Sandbox recorded in claim metadata belongs to another claim, removing stale reference", "sandboxName", sbName, "fromLabel", fromLabel, "claim", claim.Name, "ownerClaim", controllerRef.Name, "ownerUID", controllerRef.UID)
+					patch := client.MergeFrom(claim.DeepCopy())
+					if fromLabel {
+						delete(claim.Labels, extensionsv1beta1.DeprecatedAssignedSandboxNameLabel)
+					} else {
+						delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+					}
+					if err := r.Patch(ctx, claim, patch); err != nil {
+						return nil, fmt.Errorf("failed to remove sandbox reference owned by another claim: %w", err)
+					}
+				}
+			}
 			logger.V(4).Info("Sandbox recorded in claim metadata belongs to another claim, falling through", "sandbox", sbName, "claim", claim.Name)
 		} else if k8errors.IsNotFound(err) {
 			logger.Info("Sandbox recorded in claim metadata not found, removing stale reference", "sandboxName", sbName, "claim", claim.Name)
@@ -2311,6 +2327,22 @@ func (r *SandboxClaimReconciler) backfillFirstReadyAnnotation(ctx context.Contex
 	return nil
 }
 
+// recordClientClaimStartupLatency records the client claim startup latency based on annotation.
+func (r *SandboxClaimReconciler) recordClientClaimStartupLatency(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, launchType string, templateName string) {
+	logger := log.FromContext(ctx)
+	clientRequestTime := claim.Annotations[asmetrics.ClientAnnotation]
+	if clientRequestTime == "" {
+		return
+	}
+	requestTime, err := time.Parse(time.RFC3339Nano, clientRequestTime)
+	if err != nil {
+		// Debug level: user-controlled annotation, avoid log spam on every reconcile.
+		logger.V(1).Info("Failed to parse client request time", "value", clientRequestTime, "error", err)
+		return
+	}
+	asmetrics.RecordClientClaimStartupLatency(ctx, requestTime, launchType, templateName)
+}
+
 // recordCreationLatencyMetric detects and records transitions to Ready state.
 // It returns an error when the first-ready annotation fails to persist so that
 // the reconciler retries. The retry is safe because the status already has
@@ -2368,6 +2400,7 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
 	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
+	r.recordClientClaimStartupLatency(ctx, claim, launchType, templateName)
 
 	// Stamp the first-ready annotation to prevent duplicate metric recording on
 	// re-Ready events (e.g. readiness probe flaps).

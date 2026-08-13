@@ -5,6 +5,10 @@ all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify ve
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: fix-api-docs
+fix-api-docs:
+	dev/tools/fix-api-docs
+
 .PHONY: install-gen-tools
 install-gen-tools:
 	dev/tools/fix-go-generate --install-only
@@ -59,7 +63,7 @@ LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 	-X $(VERSION_PKG).buildDate=$(BUILD_DATE)
 
 .PHONY: build
-build: build-controller build-sandbox-router
+build: build-controller build-sandbox-router build-sandboxd
 
 .PHONY: build-controller
 build-controller:
@@ -68,6 +72,10 @@ build-controller:
 .PHONY: build-sandbox-router
 build-sandbox-router:
 	go build -ldflags "$(LD_FLAGS)" -o bin/sandbox-router ./sandbox-router/cmd
+
+.PHONY: build-sandboxd
+build-sandboxd:
+	go build -ldflags "$(LD_FLAGS)" -o bin/sandboxd ./packages/sandboxd/cmd/sandboxd
 
 KIND_CLUSTER=agent-sandbox
 
@@ -131,7 +139,7 @@ fix-api:
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
-# Default remote (can be overriden: make release-publish REMOTE=upstream ...)
+# Default remote (can be overridden: make release-publish REMOTE=upstream ...)
 REMOTE_UPSTREAM ?= upstream
 REMOTE_FORK ?= origin
 
@@ -181,7 +189,7 @@ toc-verify:
 
 .PHONY: fix-olm-manifests
 fix-olm-manifests:
-	./dev/tools/sync-olm-manifests
+	./dev/tools/fix-olm-manifests
 
 .PHONY: verify-olm
 verify-olm:

@@ -3,7 +3,7 @@
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.5.2
+VERSION ?= 0.5.4
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -301,6 +301,7 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
+	sed -i.bak 's|containerImage: .*|containerImage: $(IMG)|' bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml && rm -f bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml.bak
 	$(OPERATOR_SDK) bundle validate ./bundle
 	hack/strip-csv-webhookdefs bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml webhookdefinitions
 

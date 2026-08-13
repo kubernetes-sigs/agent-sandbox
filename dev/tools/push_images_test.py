@@ -20,6 +20,7 @@ import os
 import sys
 import unittest
 from importlib.machinery import SourceFileLoader
+from unittest import mock
 
 # The push-images tool is an extensionless script, so load it via importlib
 # rather than a normal import (same pattern as release_test.py). The tools dir
@@ -96,6 +97,136 @@ class BuildxDockerfileArgTest(unittest.TestCase):
         )
         self.assertEqual(captured["cwd"], ".")
 
+
+class ControllerOnlySelectionTest(unittest.TestCase):
+    """The controller-only mode must not build other discovered images."""
+
+    def test_controller_only_rejects_non_controller_image_request(self):
+        args = argparse.Namespace(
+            controller_only=True,
+            image_tag="testtag",
+            images=["sandbox-router-go"],
+        )
+
+        with (
+            mock.patch.object(push_images.os, "walk", return_value=[]),
+            self.assertRaisesRegex(
+                SystemExit,
+                "--controller-only cannot request non-controller image",
+            ),
+        ):
+            push_images.main(args)
+
+    def test_controller_only_builds_only_controller_image(self):
+        args = argparse.Namespace(
+            controller_only=True,
+            image_tag="testtag",
+            images=[],
+        )
+        discovered_dockerfiles = [
+            (".", ["sandbox-router"], ["Dockerfile"]),
+            (os.path.join(".", "sandbox-router"), [], ["Dockerfile"]),
+        ]
+
+        with (
+            mock.patch.object(
+                push_images.os,
+                "walk",
+                return_value=discovered_dockerfiles,
+            ),
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+            ),
+            mock.patch.object(
+                push_images,
+                "build_and_push_image",
+            ) as build_image,
+        ):
+            push_images.main(args)
+
+        build_image.assert_called_once_with(
+            args,
+            "agent-sandbox-controller",
+            ".",
+            os.path.join(".", "Dockerfile"),
+            "testtag",
+        )
+
+    def test_controller_only_permits_explicit_controller_image_request(self):
+        # Positive side of the guard: requesting the controller image by name
+        # must stay valid, so a future tightening cannot break it unnoticed.
+        args = argparse.Namespace(
+            controller_only=True,
+            image_tag="testtag",
+            images=["agent-sandbox-controller"],
+        )
+        discovered_dockerfiles = [
+            (".", ["sandbox-router"], ["Dockerfile"]),
+            (os.path.join(".", "sandbox-router"), [], ["Dockerfile"]),
+        ]
+
+        with (
+            mock.patch.object(
+                push_images.os,
+                "walk",
+                return_value=discovered_dockerfiles,
+            ),
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+            ),
+            mock.patch.object(
+                push_images,
+                "build_and_push_image",
+            ) as build_image,
+        ):
+            push_images.main(args)
+
+        build_image.assert_called_once_with(
+            args,
+            "agent-sandbox-controller",
+            ".",
+            os.path.join(".", "Dockerfile"),
+            "testtag",
+        )
+
+class KindLoadImagesExtraTagsTest(unittest.TestCase):
+    """kind load docker-images should include extra tags as well."""
+
+    def test_all_images_loaded_when_extra_image_tags_exist(self):
+
+        all_image_names = []
+        def fake_run(cmd, **kwargs):
+            # Collect last three arguments which should be the image names
+            all_image_names.extend(cmd[4:])
+
+        # Mock the subprocess run for kind load docker-images
+        with (
+            mock.patch.object(
+                push_images.subprocess, "run", side_effect=fake_run
+            )
+        ):
+            push_images.load_kind_image(
+                args=argparse.Namespace(
+                    image_prefix="test/",
+                    kind_cluster_name="test-cluster",
+                    extra_image_tags=["extra-tag-1", "extra-tag-2"]
+                ),
+                cluster_name="test-cluster",
+                service_name="test-service",
+                srcdir=".",
+                image_tag="testtag",
+            )
+
+        self.assertEqual(
+            all_image_names,
+            [
+                "test/test-service:testtag",
+                "test/test-service:extra-tag-1",
+                "test/test-service:extra-tag-2",
+            ]
+        )
 
 if __name__ == "__main__":
     unittest.main()

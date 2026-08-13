@@ -242,6 +242,31 @@ async def test_create_probe_failure_terminates_claim():
     assert client.sandbox.terminated == 1
 
 
+async def test_create_rejects_non_positive_ttl_and_ready_timeout():
+    provider = make_provider(create={"warmpool": "pool"})
+    with pytest.raises(AgentSandboxCreateError, match="ttl_s"):
+        await provider.create(SandboxSpec(ttl_s=0))
+    with pytest.raises(AgentSandboxCreateError, match="ready_timeout_s"):
+        await provider.create(SandboxSpec(ready_timeout_s=-1))
+
+
+async def test_probe_runs_without_cwd_env_wrapping():
+    # The probe must test runtime reachability only: a spec.workdir that the agent
+    # has not created yet (or a spec.env export) must not fail a healthy sandbox.
+    client = FakeClient()
+    client.sandbox._commands.default = exec_result(stdout="ok")
+    provider = make_provider(
+        client,
+        create={"warmpool": "pool"},
+        probe={"command": "printf ok", "expected_stdout": "ok", "deadline_s": 5, "stable_delay_s": 0},
+    )
+
+    await provider.create(SandboxSpec(workdir="/not-created-yet", env={"FOO": "bar"}))
+
+    probe_script = client.sandbox._commands.scripts()[0]
+    assert probe_script == "printf ok"
+
+
 async def test_create_probe_waits_for_stable_count():
     client = FakeClient()
     commands = client.sandbox._commands
@@ -389,14 +414,14 @@ async def test_download_file_stages_reads_and_cleans(tmp_path):
     assert target.read_bytes() == b"tarball-bytes"
 
 
-async def test_download_file_missing_source_raises():
+async def test_download_file_missing_source_raises(tmp_path):
     sandbox = FakeAsyncSandbox()
     sandbox._commands.results.append(exec_result(stderr="cp: not found", exit_code=1))
     provider = make_provider()
     handle = make_handle(sandbox)
 
     with pytest.raises(RuntimeError, match="not found"):
-        await provider.download_file(handle, "/data/missing", "/tmp/out")
+        await provider.download_file(handle, "/data/missing", tmp_path / "out")
 
 
 # --------------------------------------------------------------------- lifecycle
@@ -471,7 +496,7 @@ def test_provider_name_matches_entry_point():
 
 
 def test_connection_config_validation():
-    with pytest.raises(ValueError, match="connection.mode"):
+    with pytest.raises(ValueError, match=r"connection\.mode"):
         make_provider(connection={"mode": "carrier-pigeon"})
     with pytest.raises(ValueError, match="api_url"):
         make_provider(connection={"mode": "direct"})

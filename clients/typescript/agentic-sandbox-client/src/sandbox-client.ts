@@ -316,7 +316,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       throw new Error("Warmpool name cannot be empty.");
     }
 
-    // Review #16: normalize empty string to defaultNamespace (matches Go behaviour)
+    // Empty string normalizes to defaultNamespace (matches Go client behaviour).
     const ns = namespace || this.defaultNamespace;
     const sandboxReadyTimeout =
       opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;

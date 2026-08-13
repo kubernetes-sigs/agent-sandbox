@@ -8,8 +8,11 @@ image:
   tag: ""  # required, eg. v0.3.10
   pullPolicy: IfNotPresent
 
+# imagePullSecrets adds image pull secrets to the controller PodSpec (spec.template.spec.imagePullSecrets).
+# Example:
+# imagePullSecrets:
+#   - name: my-registry-creds
 imagePullSecrets: []
-
 replicaCount: 1
 
 # podAnnotations are added to the controller pod template.

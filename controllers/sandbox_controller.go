@@ -1664,7 +1664,8 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 func (r *SandboxReconciler) ensureSandboxObservabilityAnnotations(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
 	logger := log.FromContext(ctx)
 	tc := r.Tracer.GetTraceContext(ctx)
-	needObservability := sandbox.Annotations == nil || sandbox.Annotations[asmetrics.ObservabilityAnnotation] == ""
+	_, hasObservability := sandboxObservedAt(sandbox)
+	needObservability := !hasObservability
 	needTraceContext := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
 	if !needObservability && !needTraceContext {
 		return

@@ -4946,6 +4946,10 @@ func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
 			Namespace:  "default",
 			UID:        sandboxUID,
 			Generation: 1,
+			// Nonempty but unparseable: ensure must treat as missing and replace.
+			Annotations: map[string]string{
+				asmetrics.ObservabilityAnnotation: "not-a-timestamp",
+			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -4968,7 +4972,9 @@ func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
 
 	updated := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
-	require.NotEmpty(t, updated.Annotations[asmetrics.ObservabilityAnnotation])
+	require.NotEqual(t, "not-a-timestamp", updated.Annotations[asmetrics.ObservabilityAnnotation])
+	_, err = time.Parse(time.RFC3339Nano, updated.Annotations[asmetrics.ObservabilityAnnotation])
+	require.NoError(t, err, "invalid observation annotation must be replaced with RFC3339Nano")
 	require.Contains(t, asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation]), asmetrics.StagePodCreated)
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }

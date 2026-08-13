@@ -1272,7 +1272,7 @@ func TestReconcile(t *testing.T) {
 				reconcileCount = 1
 			}
 			var err error
-			for i := 0; i < reconcileCount; i++ {
+			for range reconcileCount {
 				_, err = r.Reconcile(t.Context(), ctrl.Request{
 					NamespacedName: types.NamespacedName{
 						Name:      sandboxName,
@@ -2862,7 +2862,7 @@ func TestReconcilePod(t *testing.T) {
 				ClusterDomain: "cluster.local",
 			}
 
-			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash)
+			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
 			if tc.expectErr {
 				require.Error(t, err)
 				// Verify that any initially unowned Pod remains unowned (never adopted)
@@ -4205,7 +4205,7 @@ func TestReconcileChildResourcesSuspendedForeignPodDoesNotLeakIPOrNodeName(t *te
 	}
 
 	// Refusing to delete a foreign pod is a steady state, not an error.
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandboxObj))
+	require.NoError(t, r.reconcileChildResources(t.Context(), sandboxObj, nil))
 
 	assert.Nil(t, sandboxObj.Status.PodIPs, "foreign pod IPs must NOT leak into sandbox status")
 	assert.Empty(t, sandboxObj.Status.NodeName, "foreign pod NodeName must NOT leak into sandbox status")
@@ -4616,14 +4616,14 @@ func TestNameHash_Correctness(t *testing.T) {
 
 func BenchmarkNameHashNew(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = NameHash("my-sandbox-name")
 	}
 }
 
 func BenchmarkNameHashOld(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = fmt.Sprintf("%08x", GetNumericHash("my-sandbox-name"))
 	}
 }

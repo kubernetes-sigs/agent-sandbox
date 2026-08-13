@@ -220,6 +220,42 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             "testtag",
         )
 
+class KindLoadImagesExtraTagsTest(unittest.TestCase):
+    """kind load docker-images should include extra tags as well."""
+
+    def test_all_images_loaded_when_extra_image_tags_exist(self):
+
+        all_image_names = []
+        def fake_run(cmd, **kwargs):
+            # Collect last three arguments which should be the image names
+            all_image_names.extend(cmd[4:])
+
+        # Mock the subprocess run for kind load docker-images
+        with (
+            mock.patch.object(
+                push_images.subprocess, "run", side_effect=fake_run
+            )
+        ):
+            push_images.load_kind_image(
+                args=argparse.Namespace(
+                    image_prefix="test/",
+                    kind_cluster_name="test-cluster",
+                    extra_image_tags=["extra-tag-1", "extra-tag-2"]
+                ),
+                cluster_name="test-cluster",
+                service_name="test-service",
+                srcdir=".",
+                image_tag="testtag",
+            )
+
+        self.assertEqual(
+            all_image_names,
+            [
+                "test/test-service:testtag",
+                "test/test-service:extra-tag-1",
+                "test/test-service:extra-tag-2",
+            ]
+        )
 
 # ---------------------------------------------------------------------------
 # Container engine dispatching — podman vs docker

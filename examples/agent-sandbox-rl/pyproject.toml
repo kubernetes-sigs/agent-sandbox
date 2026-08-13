@@ -21,7 +21,7 @@ name = "agent-sandbox-rl"
 version = "0.1.0.dev0"
 description = "Generic, multi-cluster batch orchestration for RL on Agent Sandbox (SWE-bench and beyond)."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",

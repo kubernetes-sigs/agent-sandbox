@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import subprocess
+import sys
+
+from shared import utils
+
+# Matches the k8s.io/api version pinned in the root go.mod, so the envtest
+# control plane's ValidatingAdmissionPolicy support (GA since 1.30) lines up
+# with the API types the test compiles against.
+ENVTEST_K8S_VERSION = "1.36.2"
+
+
+def main():
+    """ runs the policy/vap ValidatingAdmissionPolicy test under envtest
+
+    This is the only envtest-based test in the repo (everything else uses a
+    real kind cluster), so it's kept as its own lightweight presubmit rather
+    than folded into test-unit: it needs KUBEBUILDER_ASSETS pointed at real
+    etcd/kube-apiserver binaries, which the plain `go test ./...` run in
+    test-unit has no reason to fetch.
+    """
+    repo_root = utils.get_repo_root()
+    artifact_dir = os.getenv("ARTIFACTS") or os.path.join(repo_root, "bin")
+    os.makedirs(artifact_dir, exist_ok=True)
+
+    print(f"\n=== Fetching envtest binaries for Kubernetes {ENVTEST_K8S_VERSION} ===")
+    setup_envtest_result = subprocess.run(
+        utils.go_tool_args("setup-envtest", "use", ENVTEST_K8S_VERSION, "-p", "path"),
+        cwd=repo_root, capture_output=True, text=True, check=True,
+    )
+    kubebuilder_assets = setup_envtest_result.stdout.strip()
+
+    env = os.environ.copy()
+    env["KUBEBUILDER_ASSETS"] = kubebuilder_assets
+
+    print(f"\n=== Running policy/vap test (KUBEBUILDER_ASSETS={kubebuilder_assets}) ===")
+    result = subprocess.run(utils.go_tool_args(
+        "gotestsum",
+        f"--junitfile={os.path.join(artifact_dir, 'junit_policy-vap.xml')}",
+        "--",
+        "-tags=integration",
+        "./examples/policy/vap/...",
+    ), cwd=repo_root, env=env)
+
+    return result.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

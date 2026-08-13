@@ -76,6 +76,7 @@ metadata:
       ]
     capabilities: Basic Install
     categories: AI/Machine Learning
+    containerImage: controller:latest
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4

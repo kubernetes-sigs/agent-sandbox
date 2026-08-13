@@ -1112,7 +1112,7 @@ func ForkJoin[K comparable, V any](ctx context.Context, items []K, concurrency i
 	var wg sync.WaitGroup
 	jobs := make(chan int, concurrency)
 
-	for w := 0; w < concurrency; w++ {
+	for range concurrency {
 		wg.Go(func() {
 			for i := range jobs {
 				k := items[i]

@@ -500,9 +500,10 @@ class SandboxFleet:
           f"over-creation; consider staging claims or a lower cap.")
     if total > 20000:
       plan.warnings.append(
-          f"warm footprint {total} is very large; deep warm can trip the warm-pool "
-          f"over-creation race (#1215) — keep the controller's "
-          f"--sandbox-warm-pool-concurrent-workers low and stage the fill.")
+          f"warm footprint {total} is very large — stage the fill "
+          f"(warm_create_budget); on controllers <= v0.5.3 deep warm can also trip "
+          f"the warm-pool over-creation race (#1215, fixed in v0.5.4 by #1266) — "
+          f"there, keep --sandbox-warm-pool-concurrent-workers low (<=10).")
     for msg in plan.warnings:
       logger.warning("plan advisory: %s", msg)
 

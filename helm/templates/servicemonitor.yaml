@@ -5,10 +5,8 @@ metadata:
   name: agent-sandbox-controller
   namespace: {{ include "agent-sandbox.namespace" . }}
   labels:
-    {{- include "agent-sandbox.labels" . | nindent 4 }}
-    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
+    {{- $labels := include "agent-sandbox.labels" . | fromYaml }}
+    {{- toYaml (merge (dict) $labels .Values.metrics.serviceMonitor.additionalLabels) | nindent 4 }}
 spec:
   selector:
     matchLabels:

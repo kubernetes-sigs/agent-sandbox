@@ -39,6 +39,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -4714,4 +4715,30 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
+}
+
+// TestSandboxUpdatePredicate pins the event-filtering behavior: the
+// controller must not re-reconcile in response to its own status writes
+// (the reconcile-amplification fix), but must reconcile on spec changes —
+// including warm-pool adoption, which mutates spec.podTemplate.
+func TestSandboxUpdatePredicate(t *testing.T) {
+	base := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb", Generation: 1},
+	}
+
+	statusOnly := base.DeepCopy()
+	statusOnly.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+	statusOnly.Status.PodIPs = []string{"10.0.0.1"}
+	require.False(t, sandboxUpdatePredicate.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: statusOnly}),
+		"status-only updates must be filtered")
+
+	specChange := base.DeepCopy()
+	specChange.Generation = 2
+	require.True(t, sandboxUpdatePredicate.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: specChange}),
+		"generation changes must be admitted")
+
+	annotationOnly := base.DeepCopy()
+	annotationOnly.Annotations = map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "some-pod"}
+	require.False(t, sandboxUpdatePredicate.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: annotationOnly}),
+		"annotation-only updates are deliberately filtered (see sandboxUpdatePredicate)")
 }

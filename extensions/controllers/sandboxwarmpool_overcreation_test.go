@@ -922,6 +922,31 @@ func TestReconcilePool_ConfigurableGraceAndRecheck(t *testing.T) {
 	}
 }
 
+// TestWarmPoolDefaults pins the exported defaults behind the
+// --sandbox-warm-pool-readiness-grace-period and
+// --sandbox-warm-pool-unschedulable-recheck-interval flags. These are the
+// controller's user-visible flag defaults, so changing either is a behavioral
+// change for every existing deployment that does not set the flag: raising the
+// grace period delays replacement of stuck pool members, lowering it can GC
+// sandboxes that were merely slow to start. The assertions are deliberately
+// exact values rather than derived expressions so an accidental edit fails here
+// instead of silently shipping.
+func TestWarmPoolDefaults(t *testing.T) {
+	require.Equal(t, 5*time.Minute, DefaultWarmPoolReadinessGracePeriod,
+		"DefaultWarmPoolReadinessGracePeriod is the --sandbox-warm-pool-readiness-grace-period default; changing it alters replacement timing for every deployment that does not set the flag")
+	require.Equal(t, time.Minute, DefaultUnschedulableRecheckInterval,
+		"DefaultUnschedulableRecheckInterval is the --sandbox-warm-pool-unschedulable-recheck-interval default; changing it alters the requeue rate for pools holding unschedulable sandboxes")
+
+	// The zero value must remain the "use the default" sentinel: main.go
+	// rejects explicit non-positive flag values, so a zero field can only come
+	// from a programmatically constructed reconciler (or a test).
+	var r SandboxWarmPoolReconciler
+	require.Equal(t, DefaultWarmPoolReadinessGracePeriod, r.readinessGracePeriod(),
+		"zero ReadinessGracePeriod must fall back to the default")
+	require.Equal(t, DefaultUnschedulableRecheckInterval, r.unschedulableRecheckInterval(),
+		"zero UnschedulableRecheckInterval must fall back to the default")
+}
+
 // TestWarmPoolSandboxEventHandler_ObservesOwnedEvents covers the watch-side
 // bookkeeping: add/delete events for pool-owned sandboxes lower the matching
 // expectations; unowned or foreign-owned objects are ignored.

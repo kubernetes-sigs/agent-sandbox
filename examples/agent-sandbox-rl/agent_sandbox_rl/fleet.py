@@ -916,15 +916,25 @@ class SandboxFleet:
       if total_items > 0:
         workers = min(50, total_items)
         with ThreadPoolExecutor(max_workers=workers) as ex:
-          futures = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
-          futures.extend(ex.submit(c.resources.delete_warmpool, pool) for pool in pools)
-          futures.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
-          for f in as_completed(futures):
-            try:
-              f.result()
-            except BaseException as exc:  # noqa: BLE001
-              logger.exception("Failed to delete resource during teardown: %s", exc)
-              errors.append(exc)
+          # Phase 1: Sweep stray claims first so adopted sandboxes aren't leaked.
+          if claims:
+            claim_futs = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
+            for f in as_completed(claim_futs):
+              try:
+                f.result()
+              except BaseException as exc:  # noqa: BLE001
+                logger.exception("Failed to delete claim during teardown: %s", exc)
+                errors.append(exc)
+          # Phase 2: Delete pools and templates concurrently.
+          rest_futs = [ex.submit(c.resources.delete_warmpool, pool) for pool in pools]
+          rest_futs.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
+          if rest_futs:
+            for f in as_completed(rest_futs):
+              try:
+                f.result()
+              except BaseException as exc:  # noqa: BLE001
+                logger.exception("Failed to delete pool/template during teardown: %s", exc)
+                errors.append(exc)
       c.reset_counts()
       if delete_namespace:
         try:

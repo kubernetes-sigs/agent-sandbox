@@ -615,3 +615,23 @@ def test_teardown_multi_cluster_continues_on_cluster_failure(two_cluster_registr
   c2.resources.delete_warmpool.assert_called_once_with("c2-pool")
   c2.resources.delete_template.assert_called_once_with("c2-tmpl")
   assert f._torndown is True
+
+
+def test_teardown_deletes_claims_before_pools_and_templates(make_cluster):
+  c = make_cluster("solo")
+  order = []
+  c.resources.list_claims.return_value = ["claim1", "claim2"]
+  c.resources.list_warmpools.return_value = ["pool1"]
+  c.resources.list_templates.return_value = ["tmpl1"]
+  c.resources.delete_claim.side_effect = lambda name: order.append(f"claim:{name}")
+  c.resources.delete_warmpool.side_effect = lambda name: order.append(f"pool:{name}")
+  c.resources.delete_template.side_effect = lambda name: order.append(f"tmpl:{name}")
+
+  f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([c]))
+  f.teardown()
+
+  claim_indices = [i for i, item in enumerate(order) if item.startswith("claim:")]
+  rest_indices = [i for i, item in enumerate(order) if item.startswith("pool:") or item.startswith("tmpl:")]
+  assert len(claim_indices) == 2
+  assert len(rest_indices) == 2
+  assert max(claim_indices) < min(rest_indices)

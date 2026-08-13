@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { noopLogger } from "./logger.js";
+import type { Logger } from "./types.js";
+
 interface Span {
   isRecording(): boolean;
   setAttribute(key: string, value: string | number | boolean): void;
@@ -91,10 +94,13 @@ let tracerProviderServiceName: string | null = null;
 // and provider.register() is never called more than once.
 let tracerInitPromise: Promise<void> | null = null;
 
-export async function initializeTracer(serviceName: string): Promise<void> {
+export async function initializeTracer(
+  serviceName: string,
+  logger: Logger = noopLogger,
+): Promise<void> {
   const api = await loadOtel();
   if (!api) {
-    console.error(
+    logger.error(
       "OpenTelemetry not installed; skipping tracer initialization.",
     );
     return;
@@ -105,7 +111,7 @@ export async function initializeTracer(serviceName: string): Promise<void> {
       tracerProviderServiceName &&
       tracerProviderServiceName !== serviceName
     ) {
-      console.warn(
+      logger.warn(
         `Global TracerProvider already initialized with service name '${tracerProviderServiceName}'. ` +
           `Ignoring request to initialize with '${serviceName}'.`,
       );
@@ -159,17 +165,19 @@ export async function initializeTracer(serviceName: string): Promise<void> {
         // Analogous to Python's atexit.register(_TRACER_PROVIDER.shutdown).
         process.once("beforeExit", () => {
           provider.shutdown().catch((err: unknown) => {
-            console.error("OpenTelemetry TracerProvider shutdown failed:", err);
+            logger.error(
+              `OpenTelemetry TracerProvider shutdown failed: ${err}`,
+            );
           });
         });
 
         tracerProviderInitialized = true;
         tracerProviderServiceName = serviceName;
-        console.info(
+        logger.info(
           `Global OpenTelemetry TracerProvider configured for service '${serviceName}'.`,
         );
       } catch {
-        console.warn(
+        logger.warn(
           "OpenTelemetry SDK packages not installed; tracer provider not configured. " +
             "Tracing spans will use the default no-op provider.",
         );

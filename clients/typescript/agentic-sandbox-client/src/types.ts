@@ -36,6 +36,28 @@ export interface SandboxClientOptions {
    * Defaults to "agent-sandbox-system".
    */
   routerNamespace?: string;
+  /**
+   * Logger used for diagnostic output (lifecycle events, retries, warnings).
+   * Defaults to a logger that writes to stderr. Mirrors the Go client's
+   * Options.Logger.
+   */
+  logger?: Logger;
+  /**
+   * Suppresses the default stderr logger. Ignored when `logger` is set.
+   * Mirrors the Go client's Options.Quiet.
+   */
+  quiet?: boolean;
+}
+
+/**
+ * Diagnostic logger injectable via SandboxClientOptions.logger.
+ * Mirrors the Go client's logr.Logger usage (Options.Logger).
+ */
+export interface Logger {
+  debug(message: string): void;
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
 }
 
 /**

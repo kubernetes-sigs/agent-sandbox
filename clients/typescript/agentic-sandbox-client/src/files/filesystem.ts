@@ -19,13 +19,14 @@ import {
   MAX_METADATA_RESPONSE_SIZE,
   MAX_UPLOAD_SIZE,
 } from "../constants.js";
+import { noopLogger } from "../logger.js";
 import {
   parseExistsResult,
   parseFileEntries,
   readBoundedBuffer,
   readBoundedText,
 } from "../response-utils.js";
-import type { CallOptions, FileEntry, RequestFn } from "../types.js";
+import type { CallOptions, FileEntry, Logger, RequestFn } from "../types.js";
 
 function normalizeCallOptions(
   arg: number | CallOptions | undefined,
@@ -131,17 +132,20 @@ export class Filesystem {
   private getTracer: () => Tracer | null;
   private getParentContext: () => unknown;
   private traceServiceName: string;
+  private logger: Logger;
 
   constructor(
     requestFn: RequestFn,
     getTracer: () => Tracer | null,
     traceServiceName: string,
     getParentContext: () => unknown = () => null,
+    logger: Logger = noopLogger,
   ) {
     this.requestFn = requestFn;
     this.getTracer = getTracer;
     this.getParentContext = getParentContext;
     this.traceServiceName = traceServiceName;
+    this.logger = logger;
   }
 
   async write(
@@ -200,7 +204,7 @@ export class Filesystem {
           maxRetries: 1, // file upload is non-idempotent; never retry
         });
 
-        console.info(`File '${safePath}' uploaded successfully.`);
+        this.logger.info(`File '${safePath}' uploaded successfully.`);
       },
       this.getParentContext(),
     );

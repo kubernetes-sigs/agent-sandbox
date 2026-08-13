@@ -49,10 +49,11 @@ import {
   SandboxTimeoutError,
 } from "./exceptions.js";
 import { Filesystem } from "./files/index.js";
+import { noopLogger } from "./logger.js";
 import { readBoundedErrorBody } from "./response-utils.js";
 import type { Tracer } from "./trace-manager.js";
 import { type TracerManager, withSpan } from "./trace-manager.js";
-import type { RequestFn } from "./types.js";
+import type { Logger, RequestFn } from "./types.js";
 
 /**
  * Sleeps for `ms` milliseconds, aborting early if `signal` fires.
@@ -143,6 +144,7 @@ export async function fetchWithRetry(
   overallSignal?: AbortSignal,
   externalSignal?: AbortSignal,
   perAttemptTimeoutMs: number = PER_ATTEMPT_TIMEOUT_MS,
+  logger: Logger = noopLogger,
 ): Promise<Response> {
   const attempts = Math.max(1, maxRetries);
   let lastError: Error | null = null;
@@ -237,7 +239,7 @@ export async function fetchWithRetry(
           backoffFactor * 2 ** attempt * 1000,
           MAX_BACKOFF_MS,
         );
-        console.debug(
+        logger.debug(
           `Request to ${url} returned ${response.status}, retrying in ${delay}ms (attempt ${
             attempt + 1
           }/${attempts})...`,
@@ -282,7 +284,7 @@ export async function fetchWithRetry(
           backoffFactor * 2 ** attempt * 1000,
           MAX_BACKOFF_MS,
         );
-        console.debug(
+        logger.debug(
           `Request to ${url} failed: ${lastError.message}, retrying in ${delay}ms (attempt ${
             attempt + 1
           }/${attempts})...`,
@@ -357,6 +359,7 @@ export interface SandboxInit {
   traceServiceName: string;
   tracer: Tracer | null;
   tracingManager: TracerManager | null;
+  logger?: Logger;
 }
 
 /**
@@ -375,6 +378,7 @@ export class Sandbox {
   protected readonly tracingManager: TracerManager | null;
   protected readonly kubeConfig: k8s.KubeConfig;
   protected readonly customObjectsApi: k8s.CustomObjectsApi;
+  protected readonly logger: Logger;
 
   private readonly annotations: Record<string, string>;
   private readonly apiUrl: string | undefined;
@@ -413,6 +417,7 @@ export class Sandbox {
     this.traceServiceName = init.traceServiceName;
     this.tracer = init.tracer;
     this.tracingManager = init.tracingManager;
+    this.logger = init.logger ?? noopLogger;
 
     const requestFn: RequestFn = (method, endpoint, options) =>
       this.request(method, endpoint, options);
@@ -429,6 +434,7 @@ export class Sandbox {
       getTracer,
       this.traceServiceName,
       getParentContext,
+      this.logger,
     );
   }
 
@@ -460,7 +466,7 @@ export class Sandbox {
   async connect(): Promise<void> {
     if (this.apiUrl) {
       this.baseUrl = this.apiUrl;
-      console.info(`Using configured API URL: ${this.baseUrl}`);
+      this.logger.info(`Using configured API URL: ${this.baseUrl}`);
     } else if (this.gatewayName) {
       await this.waitForGatewayIp();
     } else {
@@ -477,7 +483,7 @@ export class Sandbox {
   async closeLocal(): Promise<void> {
     if (this.portForwardProcess) {
       try {
-        console.info("Stopping port-forwarding...");
+        this.logger.info("Stopping port-forwarding...");
         this.portForwardProcess.kill("SIGTERM");
         await new Promise<void>((resolve) => {
           const timeout = setTimeout(() => {
@@ -490,7 +496,7 @@ export class Sandbox {
           });
         });
       } catch (err) {
-        console.error(`Failed to stop port-forwarding: ${err}`);
+        this.logger.error(`Failed to stop port-forwarding: ${err}`);
       }
       this.portForwardProcess = null;
     }
@@ -503,7 +509,7 @@ export class Sandbox {
       try {
         this.tracingManager.endLifecycleSpan();
       } catch (err) {
-        console.error(`Failed to end tracing span: ${err}`);
+        this.logger.error(`Failed to end tracing span: ${err}`);
       }
     }
   }
@@ -526,7 +532,7 @@ export class Sandbox {
     await this.closeLocal();
 
     if (this.claimName) {
-      console.info(`Deleting SandboxClaim: ${this.claimName}`);
+      this.logger.info(`Deleting SandboxClaim: ${this.claimName}`);
       try {
         await raceWithTimeout(
           this.customObjectsApi.deleteNamespacedCustomObject({
@@ -545,7 +551,7 @@ export class Sandbox {
         );
       } catch (err: unknown) {
         if (!isK8s404(err)) {
-          console.error(`Error deleting sandbox claim: ${err}`);
+          this.logger.error(`Error deleting sandbox claim: ${err}`);
         }
       }
     }
@@ -566,11 +572,11 @@ export class Sandbox {
   private async waitForGatewayIp(): Promise<void> {
     const fn = async () => {
       if (this.baseUrl) {
-        console.info(`Using configured API URL: ${this.baseUrl}`);
+        this.logger.info(`Using configured API URL: ${this.baseUrl}`);
         return;
       }
 
-      console.info(
+      this.logger.info(
         `Waiting for Gateway '${this.gatewayName}' in namespace '${this.gatewayNamespace}'...`,
       );
 
@@ -608,7 +614,7 @@ export class Sandbox {
           timeoutMs - (Date.now() - startTime),
         );
         this.baseUrl = candidateUrl;
-        console.info(
+        this.logger.info(
           `Gateway is already ready. Base URL set to: ${this.baseUrl}`,
         );
         return;
@@ -638,7 +644,9 @@ export class Sandbox {
             timeoutMs - (Date.now() - startTime),
           );
           this.baseUrl = candidateUrl;
-          console.info(`Gateway is ready. Base URL set to: ${this.baseUrl}`);
+          this.logger.info(
+            `Gateway is ready. Base URL set to: ${this.baseUrl}`,
+          );
           return;
         }
 
@@ -649,7 +657,7 @@ export class Sandbox {
         // result.type === "clean-close": the watch stream ended normally.
         // Re-list before re-watching to avoid missing an update that arrived
         // between the stream closing and the next watch starting.
-        console.debug(
+        this.logger.debug(
           `Gateway watch closed cleanly, re-listing and re-watching (attempt ${watchAttempt + 1})...`,
         );
         const relistAddress = await getExistingAddress();
@@ -660,7 +668,7 @@ export class Sandbox {
             timeoutMs - (Date.now() - startTime),
           );
           this.baseUrl = candidateUrl;
-          console.info(
+          this.logger.info(
             `Gateway is ready (after re-list). Base URL set to: ${this.baseUrl}`,
           );
           return;
@@ -795,7 +803,7 @@ export class Sandbox {
     );
     const deadline = Date.now() + probeTimeoutMs;
 
-    console.info(
+    this.logger.info(
       `Probing gateway connectivity at ${host}:${port} (timeout ${probeTimeoutMs}ms)...`,
     );
 
@@ -817,7 +825,7 @@ export class Sandbox {
       });
 
       if (connected) {
-        console.info(
+        this.logger.info(
           `Gateway at ${host}:${port} is accepting connections ` +
             `(took ${Date.now() - startTime}ms).`,
         );
@@ -839,7 +847,7 @@ export class Sandbox {
       const localPort = await getFreePort();
       const routerSvc = "svc/sandbox-router-svc";
 
-      console.info(
+      this.logger.info(
         `Starting Dev Mode tunnel: localhost:${localPort} -> ${routerSvc}:8080...`,
       );
 
@@ -873,7 +881,7 @@ export class Sandbox {
         );
       });
 
-      console.info("Waiting for port-forwarding to be ready...");
+      this.logger.info("Waiting for port-forwarding to be ready...");
       const startTime = Date.now();
       const timeoutMs = this.portForwardReadyTimeout * 1000;
 
@@ -919,7 +927,7 @@ export class Sandbox {
             }
             this.baseUrl = `http://127.0.0.1:${localPort}`;
             this._portForwardEverConnected = true;
-            console.info(
+            this.logger.info(
               `Dev Mode ready. Tunneled to Router at ${this.baseUrl}`,
             );
             await new Promise((resolve) => setTimeout(resolve, 500));
@@ -1062,6 +1070,7 @@ export class Sandbox {
           overallSignal,
           options.signal,
           options.perAttemptTimeoutMs ?? this.perAttemptTimeoutMs,
+          this.logger,
         );
         if (response.status >= 300 && response.status < 400) {
           response.body?.cancel().catch(() => {});
@@ -1112,7 +1121,7 @@ export class Sandbox {
           );
         }
 
-        console.error(`Request to gateway router failed: ${err}`);
+        this.logger.error(`Request to gateway router failed: ${err}`);
         throw new SandboxRequestError(
           `Failed to communicate with the sandbox via the gateway at ${url}.`,
           { cause: err },
@@ -1147,7 +1156,7 @@ export class Sandbox {
         });
       });
     } catch (err) {
-      console.error(`Failed to stop port-forward process: ${err}`);
+      this.logger.error(`Failed to stop port-forward process: ${err}`);
     } finally {
       this.portForwardProcess = null;
       this.baseUrl = undefined;
@@ -1211,7 +1220,7 @@ export class Sandbox {
       const code = (err as { code?: number })?.code;
       if (code === 401 || code === 403) {
         this._podIpAuthFailed = true;
-        console.debug(`Pod IP lookup disabled: K8s API returned ${code}`);
+        this.logger.debug(`Pod IP lookup disabled: K8s API returned ${code}`);
       }
       return null;
     }
@@ -1236,14 +1245,16 @@ export class Sandbox {
       for (let i = 1; i <= MAX_RECONNECT_ATTEMPTS; i++) {
         if (this._isClosed) return;
         try {
-          console.info(
+          this.logger.info(
             `Port-forward reconnect attempt ${i}/${MAX_RECONNECT_ATTEMPTS}...`,
           );
           await this.startAndWaitForPortForward();
-          console.info("Port-forward reconnect succeeded.");
+          this.logger.info("Port-forward reconnect succeeded.");
           return;
         } catch (err) {
-          console.warn(`Port-forward reconnect attempt ${i} failed: ${err}`);
+          this.logger.warn(
+            `Port-forward reconnect attempt ${i} failed: ${err}`,
+          );
           if (i < MAX_RECONNECT_ATTEMPTS) {
             await new Promise((resolve) => setTimeout(resolve, 1000 * i));
           }

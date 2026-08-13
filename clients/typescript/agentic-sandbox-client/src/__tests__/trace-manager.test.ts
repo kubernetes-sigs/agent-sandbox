@@ -16,8 +16,23 @@ import type { Mock } from "vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Span, Tracer } from "../trace-manager.js";
 import { NoOpSpan, TracerManager, withSpan } from "../trace-manager.js";
+import type { Logger } from "../types.js";
 
 // ---------- helpers ----------
+
+function makeMockLogger(): Logger & {
+  debug: Mock;
+  info: Mock;
+  warn: Mock;
+  error: Mock;
+} {
+  return {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+}
 
 interface FakeSpan extends Span {
   end: Mock;
@@ -224,9 +239,7 @@ describe("initializeTracer — parallel call safety", () => {
   });
 
   it("concurrent calls share the in-flight loadOtel promise and do not race on otelApi", async () => {
-    const consoleErrorSpy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+    const mockLogger = makeMockLogger();
 
     vi.doMock("@opentelemetry/api", () => ({
       SpanStatusCode: { ERROR: 2 },
@@ -247,13 +260,13 @@ describe("initializeTracer — parallel call safety", () => {
     const { initializeTracer } = await import("../trace-manager.js");
 
     // Fire in parallel. With the race bug, the second call sees otelLoaded=true
-    // with otelApi still null and emits console.error("OpenTelemetry not installed").
+    // with otelApi still null and emits logger.error("OpenTelemetry not installed").
     await Promise.all([
-      initializeTracer("my-service"),
-      initializeTracer("my-service"),
+      initializeTracer("my-service", mockLogger),
+      initializeTracer("my-service", mockLogger),
     ]);
 
-    expect(consoleErrorSpy).not.toHaveBeenCalledWith(
+    expect(mockLogger.error).not.toHaveBeenCalledWith(
       expect.stringContaining("OpenTelemetry not installed"),
     );
   });
@@ -316,9 +329,7 @@ describe("initializeTracer — beforeExit shutdown error handling", () => {
   });
 
   it("shutdown failure is caught and logged, not thrown as unhandled rejection", async () => {
-    const consoleErrorSpy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+    const mockLogger = makeMockLogger();
 
     // Use an object so TypeScript does not narrow the property type to null via
     // control-flow analysis (local let variables assigned inside callbacks are
@@ -369,7 +380,7 @@ describe("initializeTracer — beforeExit shutdown error handling", () => {
     }));
 
     const { initializeTracer } = await import("../trace-manager.js");
-    await initializeTracer("my-service");
+    await initializeTracer("my-service", mockLogger);
 
     expect(captured.beforeExit).not.toBeNull();
 
@@ -377,9 +388,8 @@ describe("initializeTracer — beforeExit shutdown error handling", () => {
     captured.beforeExit?.();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
+    expect(mockLogger.error).toHaveBeenCalledWith(
       expect.stringContaining("shutdown failed"),
-      expect.any(Error),
     );
   });
 });

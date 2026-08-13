@@ -1713,6 +1713,27 @@ describe("Sandbox", () => {
       expect(fetch).toHaveBeenCalledTimes(2);
     });
 
+    it("propagates the configured logger into the retry loop", async () => {
+      const mockLogger = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      const sandbox = createReadySandbox({ logger: mockLogger });
+      (fetch as Mock)
+        .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+        .mockResolvedValueOnce(new Response("file content", { status: 200 }));
+
+      const readPromise = sandbox.files.read("test.txt");
+      await vi.advanceTimersByTimeAsync(5_000);
+      await readPromise;
+
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining("returned 502"),
+      );
+    });
+
     it(`throws SandboxRequestError after ${MAX_RETRIES} consecutive 503s`, async () => {
       const sandbox = createReadySandbox();
       (fetch as Mock).mockResolvedValue(new Response("error", { status: 503 }));

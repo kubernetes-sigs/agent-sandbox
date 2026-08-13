@@ -33,6 +33,7 @@ import {
   SandboxTimeoutError,
   SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
+import { resolveLogger } from "./logger.js";
 import type { SandboxInit } from "./sandbox.js";
 import { raceWithTimeout, Sandbox } from "./sandbox.js";
 import type { Tracer } from "./trace-manager.js";
@@ -42,7 +43,11 @@ import {
   TracerManager,
   withSpan,
 } from "./trace-manager.js";
-import type { CreateSandboxOptions, SandboxClientOptions } from "./types.js";
+import type {
+  CreateSandboxOptions,
+  Logger,
+  SandboxClientOptions,
+} from "./types.js";
 
 // Kubernetes label validation constraints
 // https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
@@ -182,6 +187,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   private readonly perAttemptTimeoutMs: number | undefined;
   private readonly enableTracing: boolean;
   private readonly traceServiceName: string;
+  private readonly logger: Logger;
 
   private tracerInitialized = false;
   private autoCleanupActive = false;
@@ -284,6 +290,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     this.perAttemptTimeoutMs = options.perAttemptTimeoutMs;
     this.enableTracing = options.enableTracing ?? false;
     this.traceServiceName = options.traceServiceName ?? "sandbox-client";
+    this.logger = resolveLogger(options.logger, options.quiet);
 
     this.kubeConfig = new k8s.KubeConfig();
     this.kubeConfig.loadFromDefault();
@@ -376,7 +383,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           },
         );
       } catch (cleanupErr) {
-        console.error(
+        this.logger.error(
           `Failed to delete orphaned SandboxClaim '${claimName}': ${cleanupErr}`,
         );
         // best-effort cleanup; always re-raise the original error
@@ -403,6 +410,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       traceServiceName: this.traceServiceName,
       tracer: sandboxTracer,
       tracingManager: sandboxTracingManager,
+      logger: this.logger,
     };
 
     const sandbox = new this.sandboxClass(init);
@@ -500,7 +508,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       }
 
       // The sandbox name has changed; evict and fall through to re-attach below.
-      console.info(
+      this.logger.info(
         `SandboxClaim '${claimName}' sandboxRef changed ` +
           `from '${existing.sandboxName}' to '${currentSandboxName}'; re-attaching.`,
       );
@@ -582,6 +590,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       traceServiceName: this.traceServiceName,
       tracer: sandboxTracer,
       tracingManager: sandboxTracingManager,
+      logger: this.logger,
     };
 
     const sandbox = new this.sandboxClass(init);
@@ -721,7 +730,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
     for (const result of results) {
       if (result.status === "rejected") {
-        console.error(`Cleanup failed: ${result.reason}`);
+        this.logger.error(`Cleanup failed: ${result.reason}`);
       }
     }
   }
@@ -773,7 +782,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
   private async ensureTracer(): Promise<void> {
     if (this.tracerInitialized || !this.enableTracing) return;
-    await initializeTracer(this.traceServiceName);
+    await initializeTracer(this.traceServiceName, this.logger);
     this.tracerInitialized = true;
   }
 
@@ -815,7 +824,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
         },
       };
 
-      console.info(
+      this.logger.info(
         `Creating SandboxClaim '${claimName}' ` +
           `in namespace '${namespace}' ` +
           `using warm pool '${warmpool}'...`,
@@ -902,7 +911,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
                 (status.sandbox as Record<string, unknown>) ?? {};
               const name = sandboxStatus.name as string | undefined;
               if (name) {
-                console.info(
+                this.logger.info(
                   `Resolved sandbox name '${name}' from claim status.`,
                 );
                 settle({ type: "resolved", value: name });
@@ -954,7 +963,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     namespace: string,
     timeoutMs: number,
   ): Promise<string> {
-    console.info(`Resolving sandbox name from claim '${claimName}'...`);
+    this.logger.info(`Resolving sandbox name from claim '${claimName}'...`);
 
     const deadline = Date.now() + timeoutMs;
     let backoffMs = 100;
@@ -994,7 +1003,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
         const sandboxStatus = (status.sandbox as Record<string, unknown>) ?? {};
         const name = sandboxStatus.name as string | undefined;
         if (name) {
-          console.info(
+          this.logger.info(
             `Resolved sandbox name '${name}' from claim status (GET).`,
           );
           return name;
@@ -1024,7 +1033,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           `Sandbox claim '${claimName}' did not resolve within ${Math.floor(timeoutMs / 1000)} seconds.`,
         );
       }
-      console.info(
+      this.logger.info(
         `Claim watch closed cleanly; re-listing after backoff (${backoffMs}ms)...`,
       );
       await new Promise<void>((r) =>
@@ -1106,14 +1115,16 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
                   });
                   return;
                 }
-                console.info(`Sandbox ${resolvedName} is ready.`);
+                this.logger.info(`Sandbox ${resolvedName} is ready.`);
 
                 const annotations =
                   (metadata.annotations as Record<string, string>) ?? {};
                 const podNameAnnotation = annotations[POD_NAME_ANNOTATION];
                 const podName = podNameAnnotation ?? resolvedName;
                 if (podNameAnnotation) {
-                  console.info(`Found pod name from annotation: ${podName}`);
+                  this.logger.info(
+                    `Found pod name from annotation: ${podName}`,
+                  );
                 }
 
                 settle({ type: "resolved", value: { podName, annotations } });
@@ -1165,7 +1176,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     namespace: string,
     timeoutMs: number,
   ): Promise<{ podName: string; annotations: Record<string, string> }> {
-    console.info("Watching for Sandbox to become ready...");
+    this.logger.info("Watching for Sandbox to become ready...");
 
     const deadline = Date.now() + timeoutMs;
     let backoffMs = 100;
@@ -1192,13 +1203,13 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
           const resolvedName = metadata.name as string | undefined;
           if (resolvedName) {
-            console.info(`Sandbox ${resolvedName} is already ready (GET).`);
+            this.logger.info(`Sandbox ${resolvedName} is already ready (GET).`);
             const annotations =
               (metadata.annotations as Record<string, string>) ?? {};
             const podNameAnnotation = annotations[POD_NAME_ANNOTATION];
             const podName = podNameAnnotation ?? resolvedName;
             if (podNameAnnotation) {
-              console.info(`Found pod name from annotation: ${podName}`);
+              this.logger.info(`Found pod name from annotation: ${podName}`);
             }
             return { podName, annotations };
           }
@@ -1234,7 +1245,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           `Sandbox '${sandboxName}' did not become ready within ${Math.floor(timeoutMs / 1000)} seconds.`,
         );
       }
-      console.info(
+      this.logger.info(
         `Sandbox watch closed cleanly; re-listing after backoff (${backoffMs}ms)...`,
       );
       await new Promise<void>((r) =>

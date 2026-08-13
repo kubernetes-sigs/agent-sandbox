@@ -358,3 +358,71 @@ def test_ensure_template_swallows_409():
   r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
   r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
   assert r.ensure_template(IMG, TNAME, TemplateSpec()) is False   # no raise
+
+
+def test_deep_merge_named_lists_merges_by_name_and_appends():
+  from agent_sandbox_rl.resources import _deep_merge
+
+  base = {
+      "env": [
+          {"name": "VAR1", "value": "val1"},
+          {"name": "VAR2", "value": "val2"},
+      ],
+      "ports": [{"name": "http", "containerPort": 80}],
+  }
+  override = {
+      "env": [
+          {"name": "VAR2", "value": "val2-updated"},
+          {"name": "VAR3", "value": "val3"},
+      ],
+      "ports": [{"name": "metrics", "containerPort": 9090}],
+  }
+  merged = _deep_merge(base, override)
+  assert merged["env"] == [
+      {"name": "VAR1", "value": "val1"},
+      {"name": "VAR2", "value": "val2-updated"},
+      {"name": "VAR3", "value": "val3"},
+  ]
+  assert merged["ports"] == [
+      {"name": "http", "containerPort": 80},
+      {"name": "metrics", "containerPort": 9090},
+  ]
+
+
+def test_deep_merge_unnamed_lists_replaces():
+  from agent_sandbox_rl.resources import _deep_merge
+
+  base = {"command": ["sleep", "10"], "args": ["--verbose"]}
+  override = {"command": ["tail", "-f", "/dev/null"]}
+  merged = _deep_merge(base, override)
+  assert merged["command"] == ["tail", "-f", "/dev/null"]
+  assert merged["args"] == ["--verbose"]
+
+
+def test_extra_pod_spec_containers_non_list_raises_type_error():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  with pytest.raises(TypeError, match="extra_pod_spec\\['containers'\\] must be a list"):
+    r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": {"name": "invalid"}}))
+
+
+def test_extra_pod_spec_merges_env_vars_in_container():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [
+      {
+          "name": "agent-runtime",
+          "env": [
+              {"name": "BASE_VAR", "value": "base"},
+              {"name": "EXTRA_VAR", "value": "extra"},
+          ],
+      }
+  ]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["env"] == [
+      {"name": "BASE_VAR", "value": "base"},
+      {"name": "EXTRA_VAR", "value": "extra"},
+  ]

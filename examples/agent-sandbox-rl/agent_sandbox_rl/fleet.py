@@ -694,7 +694,7 @@ class SandboxFleet:
     try:
       c.resources.delete_warmpool(entry.pool)
       pool_deleted = True
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001
       err = exc
 
     if pool_deleted:
@@ -706,7 +706,7 @@ class SandboxFleet:
 
     try:
       c.resources.delete_template(entry.template)
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001
       if err is None:
         err = exc
 
@@ -914,7 +914,7 @@ class SandboxFleet:
         claims, pools, tmpls = [], [], []
       total_items = len(claims) + len(pools) + len(tmpls)
       if total_items > 0:
-        workers = min(50, total_items)
+        workers = max(1, min(total_items, self.config.max_concurrent))
         with ThreadPoolExecutor(max_workers=workers) as ex:
           # Phase 1: Sweep stray claims first so adopted sandboxes aren't leaked.
           if claims:

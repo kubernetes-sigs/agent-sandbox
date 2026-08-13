@@ -34,11 +34,35 @@ logger = logging.getLogger("agent_sandbox_rl.resources")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-  """Recursively merge override dictionary into base dictionary."""
+  """Recursively merge override dictionary into base dictionary.
+
+  For list fields where elements are dictionaries with a 'name' key (such as
+  container env vars, volume mounts, and ports), elements are merged by name or
+  appended. Other list fields and primitive values are replaced by the override.
+  """
   merged = dict(base)
   for key, value in override.items():
     if isinstance(value, dict) and isinstance(merged.get(key), dict):
       merged[key] = _deep_merge(merged[key], value)
+    elif isinstance(value, list) and isinstance(merged.get(key), list):
+      base_list = list(merged[key])
+      if all(isinstance(x, dict) and "name" in x for x in base_list) and all(
+          isinstance(x, dict) and "name" in x for x in value
+      ):
+        merged_list = list(base_list)
+        for item in value:
+          item_name = item.get("name")
+          match_idx = next(
+              (i for i, x in enumerate(merged_list) if x.get("name") == item_name),
+              None,
+          )
+          if match_idx is not None:
+            merged_list[match_idx] = _deep_merge(merged_list[match_idx], item)
+          else:
+            merged_list.append(dict(item))
+        merged[key] = merged_list
+      else:
+        merged[key] = value
     else:
       merged[key] = value
   return merged
@@ -147,7 +171,11 @@ class Resources:
         extra = {**extra, "affinity": merged_affinity}
       if "containers" in extra:
         extra_containers = extra.pop("containers")
-        if isinstance(extra_containers, list) and "containers" in pod_spec:
+        if not isinstance(extra_containers, list):
+          raise TypeError(
+              f"extra_pod_spec['containers'] must be a list of container dicts, got {type(extra_containers).__name__}"
+          )
+        if "containers" in pod_spec:
           merged_containers = list(pod_spec["containers"])
           for extra_c in extra_containers:
             if not isinstance(extra_c, dict):

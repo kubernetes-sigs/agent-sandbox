@@ -5,6 +5,10 @@ all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify ve
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: fix-api-docs
+fix-api-docs:
+	dev/tools/fix-api-docs
+
 .PHONY: install-gen-tools
 install-gen-tools:
 	dev/tools/fix-go-generate --install-only
@@ -135,7 +139,7 @@ fix-api:
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
-# Default remote (can be overriden: make release-publish REMOTE=upstream ...)
+# Default remote (can be overridden: make release-publish REMOTE=upstream ...)
 REMOTE_UPSTREAM ?= upstream
 REMOTE_FORK ?= origin
 

@@ -131,6 +131,49 @@ To interact with the agent-sandbox programmatically, you can use the Python SDK.
 
 For detailed installation and usage instructions, please refer to the [Python SDK README](clients/python/agentic-sandbox-client/README.md).
 
+### Verify Installation
+
+To check whether agent-sandbox is already installed on your cluster:
+
+```sh
+# Check for agent-sandbox CRDs
+kubectl get crd sandboxes.agents.x-k8s.io
+
+# Check for the controller deployment
+kubectl get deploy agent-sandbox-controller -n agent-sandbox-system
+```
+
+If the CRDs and controller deployment are present, agent-sandbox is installed.
+
+### Uninstallation
+
+Before uninstalling, check for any in-use resources to avoid unexpected data loss:
+
+```sh
+# Check for existing Sandbox resources across all namespaces
+kubectl get sandboxes -A
+
+# Extensions (only if installed):
+kubectl get crd sandboxclaims.extensions.agents.x-k8s.io >/dev/null 2>&1 && kubectl get sandboxclaims -A
+kubectl get crd sandboxwarmpools.extensions.agents.x-k8s.io >/dev/null 2>&1 && kubectl get sandboxwarmpools -A
+kubectl get crd sandboxtemplates.extensions.agents.x-k8s.io >/dev/null 2>&1 && kubectl get sandboxtemplates -A
+```
+
+> **Warning**: Deleting the CRDs will **cascade-delete all custom resources** of those types across all namespaces.
+
+Once you have confirmed no resources are in use (or you are prepared to lose them), uninstall by deleting the same manifest you used to install:
+
+```sh
+# Standard Install (Core + Extensions):
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
+
+# Or, if you used the Selective Install:
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
+```
+
+For Helm-based installations, see the [Helm chart README](helm/README.md#uninstallation).
+
 ## Configuration
 
 For advanced scale and concurrency tuning (e.g., API QPS and worker counts), please see the [Configuration Guide](docs/configuration.md).
@@ -154,7 +197,7 @@ spec:
 
 This will create a new Sandbox named `my-sandbox` running the image you specify. You can then access the Sandbox using its stable hostname, `my-sandbox`.
 
-For more complex examples, including how to use the extensions, please see the [examples/](examples/) and [extensions/examples/](extensions/examples/) directories.
+For more complex examples, including how to use the extensions, please see the [examples/](examples/) directory.
 
 ## Motivation
 

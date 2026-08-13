@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -80,6 +81,7 @@ func main() {
 	var sandboxWarmPoolMaxBatchSize int
 	var sandboxWarmPoolReplenishDelay time.Duration
 	var sandboxWarmPoolMaxRefillRate float64
+	var sandboxWriteBehindWindow time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
@@ -170,6 +172,8 @@ func main() {
 			"metrics and trace propagation to the Sandbox keep working within the controller process. Costs the on-object "+
 			"debugging breadcrumbs and, after a controller restart, the startup-latency metric for claims first observed "+
 			"by the previous process. Default false (annotations persisted).")
+	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
+		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -216,6 +220,13 @@ func main() {
 	if math.IsNaN(sandboxWarmPoolMaxRefillRate) || math.IsInf(sandboxWarmPoolMaxRefillRate, 0) || sandboxWarmPoolMaxRefillRate < 0 {
 		setupLog.Error(nil, "sandbox-warm-pool-max-refill-rate must be a finite value >= 0 (0 disables pacing)",
 			"value", sandboxWarmPoolMaxRefillRate)
+		os.Exit(1)
+	}
+	// 0 means "write-behind disabled"; a negative window is always a
+	// misconfiguration, so fail fast instead of silently disabling.
+	if sandboxWriteBehindWindow < 0 {
+		setupLog.Error(nil, "sandbox-write-behind-window must be >= 0 (0 disables write-behind coalescing)",
+			"value", sandboxWriteBehindWindow)
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -316,7 +327,18 @@ func main() {
 			metricsOpts.ExtraHandlers["/debug/pprof/block"] = pprof.Handler("block")
 			metricsOpts.ExtraHandlers["/debug/pprof/mutex"] = pprof.Handler("mutex")
 			metricsOpts.ExtraHandlers["/debug/pprof/trace"] = http.HandlerFunc(pprof.Trace)
-			metricsOpts.ExtraHandlers["/debug/fgprof"] = fgprof.Handler()
+			// Wrap fgprof handler with mutex to reject concurrent profiling requests,
+			// aligning with pprof CPU profiling behavior.
+			var fgprofMu sync.Mutex
+			fgprofHandler := fgprof.Handler()
+			metricsOpts.ExtraHandlers["/debug/fgprof"] = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !fgprofMu.TryLock() {
+					http.Error(w, "Could not enable fgprof profiling: fgprof profiling already in use", http.StatusInternalServerError)
+					return
+				}
+				defer fgprofMu.Unlock()
+				fgprofHandler.ServeHTTP(w, r)
+			})
 		}
 	}
 
@@ -442,11 +464,21 @@ func main() {
 	// Register the custom Sandbox metric collector globally.
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
+	// RequeueAfter-based write deferral for the Sandbox controller's
+	// recoverable metadata-only writes. Default (0) is fully synchronous:
+	// the controller keeps its stock write path. No background goroutine is
+	// involved; the workqueue's AddAfter provides the coalescing window.
+	if sandboxWriteBehindWindow > 0 {
+		setupLog.Info("Sandbox controller write deferral enabled (--sandbox-write-behind-window)",
+			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
+	}
+
 	if err = (&controllers.SandboxReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Tracer:        instrumenter,
-		ClusterDomain: clusterDomain,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Tracer:            instrumenter,
+		ClusterDomain:     clusterDomain,
+		WriteBehindWindow: sandboxWriteBehindWindow,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

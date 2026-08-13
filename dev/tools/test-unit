@@ -40,6 +40,12 @@ PYTHON_TEST_SUITES = [
         "requirements": "requirements.txt",
     },
     {
+        "name": "dev-ci-presubmits-shared",
+        # Unit tests for CI presubmit utilities (scrape_controller_metrics, ...).
+        # Standard library only, runner installs pytest.
+        "dir": os.path.join("dev", "ci", "presubmits", "shared"),
+    },
+    {
         "name": "hermes-agent",
         # chat_hermes.py only uses stdlib (urllib.request, json), so the test
         # needs no requirements.txt -- just pytest, installed unconditionally

@@ -8,7 +8,6 @@
 <p>
   <a href="https://github.com/kubernetes-sigs/agent-sandbox/releases"><img src="https://img.shields.io/github/v/release/kubernetes-sigs/agent-sandbox" alt="GitHub release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/Apache-2-blue.svg" alt="Apache-2.0 license"></a>
-  <a href="https://goreportcard.com/report/sigs.k8s.io/agent-sandbox"><img src="https://goreportcard.com/badge/sigs.k8s.io/agent-sandbox" alt="Go Report Card"></a>
 </p>
 
 [Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
@@ -16,6 +15,9 @@
 **agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes.**
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
+
+> [!NOTE]
+> **Scope:** Agent Sandbox is a *sandbox orchestrator*. It delegates low-level container isolation to secure "Sandbox Runtimes" (like gVisor or Kata Containers) by managing Pods configured to use these runtimes (via `RuntimeClass`).
 
 ## Overview
 
@@ -152,7 +154,7 @@ spec:
 
 This will create a new Sandbox named `my-sandbox` running the image you specify. You can then access the Sandbox using its stable hostname, `my-sandbox`.
 
-For more complex examples, including how to use the extensions, please see the [examples/](examples/) and [extensions/examples/](extensions/examples/) directories.
+For more complex examples, including how to use the extensions, please see the [examples/](examples/) directory.
 
 ## Motivation
 
@@ -180,6 +182,10 @@ We aim for the Sandbox to be vendor-neutral, supporting various runtimes. Key ch
 ## Roadmap
 
 The current Roadmap can be found at [roadmap.md](roadmap.md).
+
+## Security
+
+For information on the security model, trust boundaries, and mitigations of Agent Sandbox, please refer to the [Threat Model](docs/security/threat_model.md).
 
 ## Community, Discussion, Contribution, and Support
 

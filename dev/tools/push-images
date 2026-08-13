@@ -16,6 +16,7 @@
 import argparse
 import os
 import subprocess
+import sys
 
 from shared import utils
 
@@ -74,27 +75,39 @@ def build_and_push_image_with_docker_buildx(args, service_name, srcdir, dockerfi
         build_cmd.extend(["-t", extra_tag])
     build_cmd.extend([
         "-f",
-        os.path.basename(dockerfile_path),
+        # Resolve the Dockerfile relative to the build context (the command
+        # runs with cwd=srcdir): when a per-Dockerfile override sets the
+        # context to another directory (sandbox-router-go uses the repo
+        # root), the basename would silently pick that directory's
+        # Dockerfile instead.
+        os.path.relpath(dockerfile_path, srcdir),
         ".",
     ])
     # Inject version info into Go binaries
     build_cmd.extend(_get_version_build_args())
     subprocess.run(build_cmd, cwd=srcdir, check=True)
-    print(f"pushed image {image_name}")
+
+    if args.docker_build_output_type == "registry":
+        print(f"pushed image {image_name}")
 
 
 def load_kind_image(args, cluster_name, service_name, srcdir, image_tag):
-    image_name = utils.get_full_image_name(args, service_name, tag=image_tag)
+    all_image_names = [utils.get_full_image_name(args, service_name, tag=image_tag)]
+    if args.extra_image_tags:
+        for tag in args.extra_image_tags:
+            extra_image_name = utils.get_full_image_name(args, service_name, tag=tag)
+            all_image_names.append(extra_image_name)
+
     build_cmd = [
         "kind",
         "load",
         "docker-image",
         f"--name={cluster_name}",
-        image_name,
+        *all_image_names,
     ]
 
     subprocess.run(build_cmd, cwd=srcdir, check=True)
-    print(f"loaded image {image_name} into kind cluster {args.kind_cluster_name}")
+    print(f"loaded image(s) {', '.join(all_image_names)} into kind cluster {cluster_name}")
 
 
 def build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag):
@@ -102,17 +115,27 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag)
     if args.kind_cluster_name:
         load_kind_image(args, args.kind_cluster_name, service_name, srcdir, image_tag)
 
-
 def main(args):
     """Builds and pushes all discovered Docker images."""
+    if args.controller_only:
+        non_controller_images = set(args.images) - {"agent-sandbox-controller"}
+        if non_controller_images:
+            sys.exit(
+                "ERROR: --controller-only cannot request non-controller "
+                f"image(s) via --images: {sorted(non_controller_images)}"
+            )
+
     image_tag = args.image_tag or utils.get_image_tag()
     excluded_dirs = {"bin", "dev", "docs", "k8s", "site",
                      "temp", "tests", "tmp", ".venv"}
 
     if args.controller_only:
-        # TODO: Implement an explicit inclusion strategy for controller only Dockerfile.
+        # Avoid walking the largest image-only subtrees. The explicit image
+        # selection below enforces controller-only mode for Dockerfiles in
+        # every other directory.
         excluded_dirs.update({"examples", "clients"})
 
+    built = set()
     for root, dirs, files in os.walk(".", topdown=True):
         dirs[:] = [d for d in dirs if d not in excluded_dirs]
 
@@ -125,6 +148,8 @@ def main(args):
                 continue
 
             if service_name == ".":
+                # The Dockerfile at the repo root is the controller image.
+                # Single source of truth: do not copy it elsewhere.
                 service_name = "agent-sandbox-controller"
 
             # Per-Dockerfile overrides. The Go sandbox-router needs the repo
@@ -136,8 +161,22 @@ def main(args):
                 context_dir = "."
                 service_name = "sandbox-router-go"
 
+            # sandboxd (the portable runtime daemon) also imports the shared
+            # Go module, so it too builds from the repo root.
+            sandboxd_dir = os.path.join(".", "packages", "sandboxd")
+            if root == sandboxd_dir:
+                context_dir = "."
+
+            if args.controller_only and service_name != "agent-sandbox-controller":
+                continue
+
             if args.images and service_name not in args.images:
                 continue
+
+            if service_name in built:
+                sys.exit(f"ERROR: duplicate Dockerfiles for image {service_name!r}: "
+                         f"second one at {dockerfile_path} (whichever builds last "
+                         "would silently win the tag)")
 
             print(f"--- Found Dockerfile at: {dockerfile_path}")
             print(f"--- Service Name: {service_name}")
@@ -147,7 +186,16 @@ def main(args):
             create_buildx_builder_if_not_exists()
             print(f"building image for {service_name}")
             build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
-            # TODO: Handle duplicate service names in different paths
+            built.add(service_name)
+
+    # A requested image with no matching Dockerfile is an error: silently
+    # skipping it leaves stale or missing images in the registry and the
+    # failure only surfaces much later as ImagePullBackOff.
+    if args.images:
+        missing = set(args.images) - built
+        if missing:
+            sys.exit(f"ERROR: no Dockerfile found for requested image(s): {sorted(missing)} "
+                     "(is the directory committed?)")
 
 
 if __name__ == "__main__":

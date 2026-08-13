@@ -1,0 +1,250 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Watch Events - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Kubernetes Watch Events{% endblock %}
+
+{% block content %}
+{% if watch_log %}
+<div class="card">
+    <div class="card-title">
+        <span>Watch stream explorer</span>
+        <span class="badge badge-info" id="watch-status">loading…</span>
+    </div>
+    <div class="profile-controls">
+        <input id="watch-search" type="search" style="max-width: none;"
+               placeholder="Search, e.g.  kind:pod name:fill-23   kind:sandbox type:deleted   reason:failedscheduling">
+    </div>
+    <div class="card-desc">
+        Terms are ANDed. <code>kind:</code>, <code>name:</code>, <code>ns:</code>, <code>type:</code>
+        (ADDED / MODIFIED / DELETED), <code>resource:</code>, <code>uid:</code>, <code>reason:</code>,
+        or bare text (matches name, reason and message). Kubernetes <code>Event</code> objects are
+        indexed under the object they describe, so <code>kind:pod name:foo</code> shows the pod's
+        watch events <em>and</em> the Events about it; use <code>resource:pods</code> /
+        <code>resource:events</code> to separate them. Click a row to expand the full change;
+        click a name to pull up that object's history.
+        MODIFIED rows show changed fields versus the previous captured state
+        (<code>metadata.managedFields</code> churn is hidden).
+    </div>
+    <div id="watch-results" class="watch-results"></div>
+    <div style="text-align: center; margin-top: 12px;">
+        <button id="watch-more" type="button" class="watch-more" hidden>Show more</button>
+    </div>
+    <div class="card-desc" style="margin-top: 12px;">
+        The raw stream sits next to this page (<a href="{{ watch_log }}"><code>{{ watch_log }}</code></a>),
+        one JSON watch event per line, and is parsed entirely in your browser at view time — so this
+        page must be served over HTTP (a <code>file://</code> URL cannot fetch sibling files).
+    </div>
+</div>
+
+<script src="watch.js"></script>
+<script>
+    const WATCH_LOG = {{ watch_log | tojson }};
+    const PHASES = {{ phases | tojson }};
+    const START_MS = Date.parse({{ summary.startTime | tojson }});
+    const RENDER_CHUNK = 300;
+
+    const statusEl = document.getElementById('watch-status');
+    const searchEl = document.getElementById('watch-search');
+    const resultsEl = document.getElementById('watch-results');
+    const moreEl = document.getElementById('watch-more');
+
+    let log = null;
+    let matches = [];
+    let rendered = 0;
+    const summaryCache = new Map(); // event index -> inline summary HTML
+
+    const TYPE_BADGE = { ADDED: 'success', MODIFIED: 'info', DELETED: 'danger' };
+
+    function phaseAt(tMs) {
+        const sec = (tMs - START_MS) / 1000;
+        const phase = PHASES.find(p => sec >= p.start_sec && sec < p.end_sec);
+        return phase ? phase.name : '';
+    }
+
+    // tMs is NaN when the record's timestamp was missing or unparseable;
+    // toISOString() throws on invalid dates, which would abort rendering of
+    // the whole result batch over one bad line.
+    function formatTime(tMs) {
+        if (!Number.isFinite(tMs)) {
+            return '<span class="watch-offset">no timestamp</span>';
+        }
+        const iso = new Date(tMs).toISOString();
+        const offset = (tMs - START_MS) / 1000;
+        const offsetHtml = Number.isFinite(offset) ? ` <span class="watch-offset">+${offset.toFixed(1)}s</span>` : '';
+        return `${iso.slice(11, 23)}${offsetHtml}`;
+    }
+
+    function changeHtml(change, maxLen) {
+        const from = escapeHtml(formatDiffValue(change.from, maxLen));
+        const to = escapeHtml(formatDiffValue(change.to, maxLen));
+        if (change.from === undefined) return `<span class="diff-new">${to}</span>`;
+        if (change.to === undefined) return `<span class="diff-old">${from}</span>`;
+        return `<span class="diff-old">${from}</span> <span class="diff-arrow">→</span> <span class="diff-new">${to}</span>`;
+    }
+
+    // Inline one-line summary: Events show reason+message, MODIFIED objects
+    // show their first few changed fields, ADDED/DELETED label themselves.
+    function rowSummary(i) {
+        if (summaryCache.has(i)) return summaryCache.get(i);
+        const ev = log.events[i];
+        let html;
+        if (ev.resource === 'events') {
+            html = `<span class="watch-reason">${escapeHtml(ev.reason)}</span> ${escapeHtml(ev.message)}`;
+        } else if (ev.type === 'MODIFIED') {
+            const changes = sortDiffForDisplay(diffForEvent(log, i) || []);
+            if (!changes.length) {
+                html = `<span class="watch-muted">${ev.prev < 0 ? 'no earlier state captured' : 'no visible change'}</span>`;
+            } else {
+                const shown = changes.slice(0, 3).map(c =>
+                    `<code>${escapeHtml(c.path)}</code>: ${changeHtml(c, 48)}`).join('<span class="watch-muted">, </span>');
+                const more = changes.length > 3 ? ` <span class="watch-muted">+${changes.length - 3} more</span>` : '';
+                html = shown + more;
+            }
+        } else {
+            html = `<span class="watch-muted">object ${ev.type === 'DELETED' ? 'deleted' : 'created'}</span>`;
+        }
+        summaryCache.set(i, html);
+        return html;
+    }
+
+    function renderDetail(i) {
+        const ev = log.events[i];
+        if (ev.type === 'MODIFIED' && ev.prev >= 0) {
+            const changes = sortDiffForDisplay(diffForEvent(log, i) || []);
+            if (changes.length) {
+                return '<table class="watch-diff-table"><thead><tr><th>Field</th><th>Change</th></tr></thead><tbody>' +
+                    changes.map(c => `<tr><td><code>${escapeHtml(c.path)}</code></td><td>${changeHtml(c, 2000)}</td></tr>`).join('') +
+                    '</tbody></table>';
+            }
+        }
+        const entry = getEntry(log, i);
+        return `<pre class="watch-object">${escapeHtml(JSON.stringify(entry.object, null, 2))}</pre>`;
+    }
+
+    function rowHtml(i) {
+        const ev = log.events[i];
+        const phase = phaseAt(ev.t);
+        const ident = ev.namespace ? `${ev.namespace}/${ev.name}` : ev.name;
+        const kindLabel = ev.resource === 'events' && ev.targetKind
+            ? `Event·${escapeHtml(ev.targetKind)}` : escapeHtml(ev.kind);
+        return `<div class="watch-row" data-i="${i}">
+            <div class="watch-row-head" tabindex="0" role="button" aria-expanded="false">
+                <span class="watch-time">${formatTime(ev.t)}</span>
+                ${phase ? `<span class="watch-phase">${escapeHtml(phase)}</span>` : ''}
+                ${badge(TYPE_BADGE[ev.type] || 'info', ev.type)}
+                <span class="watch-kind">${kindLabel}</span>
+                <a class="watch-name" href="#" data-uid="${escapeHtml(ev.targetUid || ev.uid)}" title="Show this object's history">${escapeHtml(ident)}</a>
+                <span class="watch-summary">${rowSummary(i)}</span>
+            </div>
+            <div class="watch-row-detail" hidden></div>
+        </div>`;
+    }
+
+    function renderMore() {
+        const next = matches.slice(rendered, rendered + RENDER_CHUNK);
+        resultsEl.insertAdjacentHTML('beforeend', next.map(rowHtml).join(''));
+        rendered += next.length;
+        moreEl.hidden = rendered >= matches.length;
+        moreEl.textContent = `Show more (${(matches.length - rendered).toLocaleString()} remaining)`;
+    }
+
+    function runSearch() {
+        if (!log) return;
+        matches = searchEvents(log, searchEl.value);
+        resultsEl.innerHTML = '';
+        rendered = 0;
+        statusEl.textContent = `${matches.length.toLocaleString()} / ${log.events.length.toLocaleString()} events`;
+        renderMore();
+    }
+
+    let debounce = null;
+    searchEl.addEventListener('input', () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+            history.replaceState(null, '', searchEl.value ? '#q=' + encodeURIComponent(searchEl.value) : '#');
+            runSearch();
+        }, 150);
+    });
+
+    moreEl.addEventListener('click', renderMore);
+
+    function toggleRow(row) {
+        const detail = row.querySelector('.watch-row-detail');
+        if (detail.hidden && !detail.innerHTML) {
+            detail.innerHTML = renderDetail(Number(row.dataset.i));
+        }
+        detail.hidden = !detail.hidden;
+        row.querySelector('.watch-row-head').setAttribute('aria-expanded', String(!detail.hidden));
+    }
+
+    resultsEl.addEventListener('click', e => {
+        const nameLink = e.target.closest('.watch-name');
+        if (nameLink) {
+            e.preventDefault();
+            searchEl.value = 'uid:' + nameLink.dataset.uid;
+            history.replaceState(null, '', '#q=' + encodeURIComponent(searchEl.value));
+            runSearch();
+            return;
+        }
+        const row = e.target.closest('.watch-row');
+        if (!row || window.getSelection().toString()) return;
+        toggleRow(row);
+    });
+
+    // Keyboard equivalent of the click handler: the row heads are focusable
+    // buttons, so Enter/Space must expand them. Keys on the name link are
+    // left to its own native Enter -> click behavior.
+    resultsEl.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        if (e.target.closest('.watch-name')) return;
+        const head = e.target.closest('.watch-row-head');
+        if (!head) return;
+        e.preventDefault();
+        toggleRow(head.closest('.watch-row'));
+    });
+
+    (async () => {
+        try {
+            log = await loadWatchLog(WATCH_LOG, (stage, detail) => {
+                statusEl.textContent = detail ? `${stage} (${detail})` : stage + '…';
+            });
+            if (location.hash.startsWith('#q=')) {
+                searchEl.value = decodeURIComponent(location.hash.slice(3));
+            }
+            runSearch();
+        } catch (err) {
+            statusEl.textContent = 'load failed';
+            resultsEl.innerHTML = `<div class="card-desc">Failed to load <code>${escapeHtml(WATCH_LOG)}</code>: ${escapeHtml(err.message)}.<br>` +
+                'Note: the watch log is fetched at view time, so this page must be served over HTTP ' +
+                '(a file:// URL cannot fetch sibling files).</div>';
+        }
+    })();
+</script>
+{% else %}
+<div class="card">
+    <div class="card-title">No watch log in this run</div>
+    <div class="card-desc">
+        No <code>watch.jsonl</code> or <code>watch.jsonl.gz</code> file was found in the input
+        directory. The stress tool records the Kubernetes watch stream (pods, sandboxes, events,
+        nodes) while the test runs.
+    </div>
+</div>
+{% endif %}
+{% endblock %}

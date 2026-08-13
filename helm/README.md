@@ -92,6 +92,8 @@ The following table lists the configurable parameters and their defaults.
 | `controller.sandboxClaimConcurrentWorkers` | Max concurrent reconciles for the SandboxClaim controller (extensions only) | `1` |
 | `controller.sandboxWarmPoolConcurrentWorkers` | Max concurrent reconciles for the SandboxWarmPool controller (extensions only) | `1` |
 | `controller.sandboxTemplateConcurrentWorkers` | Max concurrent reconciles for the SandboxTemplate controller (extensions only) | `1` |
+| `controller.sandboxWarmPoolMaxBatchSize` | Max batch size for parallel sandbox create/delete in the SandboxWarmPool controller (extensions only) | `300` |
+| `controller.enableWarmPoolEviction` | Mark pods created by a warm pool as safe to evict (extensions only) | `true` |
 | `controller.enableTracing` | Enable OpenTelemetry tracing via OTLP | `false` |
 | `controller.enablePprof` | Enable CPU profiling endpoint on the metrics server | `false` |
 | `controller.enablePprofDebug` | Enable all pprof endpoints (implies enablePprof) | `false` |

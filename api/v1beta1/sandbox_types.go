@@ -28,10 +28,19 @@ func (c ConditionType) String() string { return string(c) }
 const (
 	// SandboxConditionSuspended indicates the sandbox is administratively suspended.
 	SandboxConditionSuspended ConditionType = "Suspended"
-	// SandboxReasonSuspendedPodTerminated indicates that the pod has been terminated.
+	// SandboxReasonSuspendedPodTerminated indicates the Suspended condition is True because the backing Pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
 	// SandboxReasonSuspendedPodNotTerminated indicates the pod has not been terminated yet.
+	// Deprecated: Use SandboxReasonSuspendedPodTerminating instead.
 	SandboxReasonSuspendedPodNotTerminated = "PodNotTerminated"
+	// SandboxReasonSuspendedPodTerminating indicates the Suspended condition is False because the backing Pod is still terminating.
+	SandboxReasonSuspendedPodTerminating = "PodTerminating"
+	// SandboxReasonSuspendedPodNotOwned indicates the Suspended condition is False because a Pod exists with the Sandbox's name but is not owned by this Sandbox.
+	SandboxReasonSuspendedPodNotOwned = "PodNotOwned"
+	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is running.
+	SandboxReasonNotSuspended = "NotSuspended"
+	// SandboxReasonSuspendedPodStateUnknown indicates the Suspended condition is Unknown because reconciling the Pod failed, so its state cannot be determined.
+	SandboxReasonSuspendedPodStateUnknown = "PodStateUnknown"
 
 	// SandboxConditionReady indicates readiness for Sandbox.
 	SandboxConditionReady ConditionType = "Ready"
@@ -79,6 +88,8 @@ const (
 	SandboxAdoptableLabel = "agents.x-k8s.io/adoptable"
 	// SandboxWarmPoolLabel is the label used to track the warm pool that owns the Sandbox.
 	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
+	// SandboxTemplateRefHashLabel identifies which SandboxTemplate a Sandbox originated from.
+	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 type PodMetadata struct {
@@ -186,6 +197,8 @@ type SandboxBlueprint struct {
 }
 
 // SandboxSpec defines the desired state of Sandbox.
+// volumeClaimTemplates is immutable after creation.
+// +kubebuilder:validation:XValidation:rule="has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates) && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates == oldSelf.volumeClaimTemplates)",message="volumeClaimTemplates is immutable"
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html

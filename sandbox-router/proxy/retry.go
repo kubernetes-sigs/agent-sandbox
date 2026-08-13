@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 )
 
@@ -63,6 +64,10 @@ func newRetryTransport(base http.RoundTripper, attempts int, initialDelay, maxDe
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	delay := t.initialDelay
 	var lastErr error
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
 	for attempt := 1; attempt <= t.maxAttempts; attempt++ {
 		resp, err := t.base.RoundTrip(req)
 		if err == nil {
@@ -76,8 +81,15 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			t.onRetry(req, err, attempt)
 		}
 
+		timer.Stop()
 		select {
-		case <-time.After(delay):
+		case <-timer.C:
+		default:
+		}
+		timer.Reset(delay)
+
+		select {
+		case <-timer.C:
 		case <-req.Context().Done():
 			// Surface the original dial error rather than the context error so
 			// the proxy ErrorHandler reports the actual upstream failure.
@@ -118,4 +130,16 @@ func isRetriableDialError(err error) bool {
 		}
 	}
 	return false
+}
+
+// isDeadHostDialError reports whether a dial failure indicates the target
+// IP itself is unreachable (timeout, no route), as opposed to a live host
+// refusing the connection. A refusal (RST) proves something answers at
+// that IP — e.g. the caller picked a port the Pod isn't listening on — so
+// the cache entry it came from is not stale and must not be evicted.
+func isDeadHostDialError(err error) bool {
+	if !isRetriableDialError(err) {
+		return false
+	}
+	return !errors.Is(err, syscall.ECONNREFUSED)
 }

@@ -214,19 +214,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		FlushInterval: -1, // immediate flush for SSE / streaming responses
 		ErrorHandler: func(w http.ResponseWriter, errReq *http.Request, err error) {
 			h.recordUpstreamErrorReason(target0.Namespace, classifyError(err))
-			// KEP-NNNN: actively invalidate the cache entry on dial-class
-			// failures so the next request falls through to DNS instead
-			// of retrying the same stale IP. We use isRetriableDialError
-			// (shared with the retry transport) rather than the metric's
-			// string label because dial-time timeouts classifyError
-			// labels as "timeout" — but they're still dial failures
-			// (net.OpError.Op == "dial") and the IP is just as dead.
-			// String-matching "dial" would miss them and trap traffic on
-			// stale entries. We only invalidate when the IP we tried
-			// actually came from the cache — a DNS or PodIP-header
-			// failure means the cache had nothing useful to evict.
-			if src == SourceCache && h.cache != nil && isRetriableDialError(err) && target0.UID != "" {
-				if h.cache.Invalidate(types.UID(target0.UID)) && h.metrics != nil {
+			// KEP-NNNN: actively invalidate the cache entry when a dial
+			// failure indicates the IP itself is dead (timeout, no
+			// route), so the next request falls through to DNS instead
+			// of retrying the same stale IP. isDeadHostDialError rather
+			// than classifyError's string label because dial-time
+			// timeouts are labeled "timeout" yet the IP is just as dead;
+			// and NOT plain isRetriableDialError because a connection
+			// refusal proves a live host — evicting on it would let a
+			// caller-side mistake (wrong X-Sandbox-Port) strand the only
+			// working route for a warm-pool sandbox until resync. We only
+			// invalidate when the IP we tried actually came from the
+			// cache — a DNS or PodIP-header failure means the cache had
+			// nothing useful to evict — and evict by the same key the
+			// entry was resolved with: UID for the fast path,
+			// namespace/name (plus the failed IP, so a recreated Pod's
+			// fresh entry survives) for the name index.
+			if h.cache != nil && isDeadHostDialError(err) {
+				invalidated := false
+				switch {
+				case src == SourceCache && target0.UID != "":
+					invalidated = h.cache.Invalidate(types.UID(target0.UID))
+				case src == SourceCacheName:
+					// SplitHostPort strips the port and the brackets
+					// JoinHostPort added around IPv6 literals.
+					if ip, _, sperr := net.SplitHostPort(upstreamURL.Host); sperr == nil {
+						invalidated = h.cache.InvalidateByName(target0.Namespace, target0.ID, ip)
+					}
+				}
+				if invalidated && h.metrics != nil {
 					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
 				}
 			}

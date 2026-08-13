@@ -1,0 +1,108 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Cluster Capacity - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Cluster Capacity & Saturation Analysis{% endblock %}
+
+{% block content %}
+<div class="grid">
+    <div class="card chart-card" id="capacity-chart-card">
+        <div class="card-title">Workload Density & Pod Limits Over Time</div>
+        <div class="chart-container">
+            <canvas id="capacityChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Peak Workload Density by Phase</div>
+    <div class="table-container">
+        <table id="capacity-table"></table>
+    </div>
+</div>
+
+<script>
+    const capacityRows = {{ capacity_summary | tojson }}.map(row => ({
+        ...row,
+        ratio: row.limit > 0 ? row.peak_pods / row.limit * 100 : 0
+    }));
+    renderTable('#capacity-table', [
+        {key: 'phase_name', label: 'Phase Name', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'peak_sandboxes', label: 'Peak Active Sandboxes'},
+        {key: 'peak_pods', label: 'Peak Active Workload Pods'},
+        {key: 'limit', label: 'Physical Pod Capacity Limit'},
+        {key: 'ratio', label: 'Capacity Saturation Ratio', render: v =>
+            v >= 100 ? badge('danger', v.toFixed(1) + '% (Exceeded)')
+            : v >= 90 ? badge('warning', v.toFixed(1) + '% (Saturated)')
+            : badge('success', v.toFixed(1) + '% (Healthy)')}
+    ], capacityRows);
+
+    const chartData = {{ chart_data | tojson }};
+    const podLimit = {{ pod_capacity | tojson }};
+    const phases = {{ phases | tojson }};
+
+    const formattedLabels = chartData.map(d => {
+        const date = new Date(d.ts);
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    });
+    const pointTimes = chartData.map(d => new Date(d.ts).getTime());
+
+    new Chart(document.getElementById('capacityChart').getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: formattedLabels,
+            datasets: [
+                {
+                    label: 'Active Workload Pods',
+                    data: chartData.map(d => d.active_pods),
+                    borderColor: '#b91c1c',
+                    backgroundColor: '#b91c1c',
+                    borderWidth: 2.5,
+                    tension: 0.1,
+                    pointRadius: 1,
+                    fill: false
+                },
+                {
+                    label: 'Active Sandboxes',
+                    data: chartData.map(d => d.active_sandboxes),
+                    borderColor: '#1d4ed8',
+                    backgroundColor: '#1d4ed8',
+                    borderWidth: 2,
+                    tension: 0.1,
+                    pointRadius: 1,
+                    fill: false
+                },
+                {
+                    label: `Physical Pod Limit (${podLimit} Pods)`,
+                    data: Array(chartData.length).fill(podLimit),
+                    borderColor: '#b45309',
+                    borderWidth: 2,
+                    borderDash: [6, 6],
+                    pointStyle: 'none',
+                    pointRadius: 0,
+                    fill: false,
+                    tension: 0
+                }
+            ]
+        },
+        options: lineChartOptions('Active Objects Count'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+</script>
+{% endblock %}

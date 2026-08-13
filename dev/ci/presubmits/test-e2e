@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import os
-import shutil
 import subprocess
 import sys
 
@@ -38,13 +37,9 @@ class E2ETestRunner(TestRunner):
         )
 
     def run_tests(self, args):
+        # dev/tools/test-e2e writes the junit_*.xml reports straight into
+        # $ARTIFACTS, so no copy_artifacts override is needed.
         return subprocess.run([f"{self.repo_root}/dev/tools/test-e2e", "--image-prefix", args.image_prefix, "--suite", args.suite])
-
-    def copy_artifacts(self):
-        artifact_dir = os.getenv("ARTIFACTS")
-        if artifact_dir:
-            shutil.copy(f"{self.repo_root}/bin/e2e-go-junit.xml", f"{artifact_dir}/junit_go.xml")
-            shutil.copy(f"{self.repo_root}/bin/e2e-python-sdk-junit.xml", f"{artifact_dir}/junit_python_sdk.xml")
 
 if __name__ == "__main__":
     runner = E2ETestRunner()

@@ -193,8 +193,11 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     self.base_url = f"http://127.0.0.1:{local_port}"
                     logging.info(f"Tunnel ready at {self.base_url}")
                     return self.base_url
-                
-                time.sleep(0.5)
+
+                # Poll the local port at 50ms: this is a cheap localhost socket
+                # probe, and a coarser interval (e.g. 500ms) adds a uniform
+                # 0-500ms of avoidable latency to the first sandbox request.
+                time.sleep(0.05)
 
             self.close()
             raise TimeoutError("Failed to establish tunnel to Router Service.")

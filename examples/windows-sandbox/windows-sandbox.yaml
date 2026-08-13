@@ -1,0 +1,68 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: windows-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: windows-sandbox
+    spec:
+      terminationGracePeriodSeconds: 120
+      automountServiceAccountToken: false
+      containers:
+        - name: windows
+          image: dockurr/windows:6.00
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VERSION
+              value: "11"
+            - name: DISK_SIZE
+              value: "64G"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          ports:
+            - containerPort: 8006
+              name: http
+              protocol: TCP
+            - containerPort: 3389
+              name: rdp-tcp
+              protocol: TCP
+            - containerPort: 3389
+              name: rdp-udp
+              protocol: UDP
+            - containerPort: 5900
+              name: vnc
+              protocol: TCP
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /storage
+              name: storage
+            - mountPath: /dev/kvm
+              name: dev-kvm
+            - mountPath: /dev/net/tun
+              name: dev-tun
+      volumes:
+        - name: dev-kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: dev-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 64Gi

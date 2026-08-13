@@ -30,9 +30,16 @@ import (
 // graph just to make a map read.
 type Lookup interface {
 	Get(uid types.UID) (cache.Entry, bool)
+	// GetByName looks up an entry by sandbox namespace + name — the only
+	// cache path for callers that send X-Sandbox-Id without a UID.
+	GetByName(namespace, name string) (cache.Entry, bool)
 	// Invalidate evicts an entry; called by the proxy's ErrorHandler on
 	// dial-class failures so the next request doesn't retry the stale IP.
 	Invalidate(uid types.UID) bool
+	// InvalidateByName is Invalidate for name-resolved targets (no UID).
+	// Eviction is conditional on the entry still holding podIP, the IP
+	// the failed dial targeted — see the cache implementation for why.
+	InvalidateByName(namespace, name, podIP string) bool
 }
 
 // Source tags how the upstream host was picked. Returned alongside the
@@ -46,8 +53,13 @@ const (
 	// SourceCache — UID was present and matched a cache entry; we dialed
 	// the live Pod IP. The KEP-NNNN fast/secure path.
 	SourceCache Source = "cache"
-	// SourceDNS — UID was absent or cache-missed; fell back to the
-	// in-cluster DNS form <id>.<ns>.svc.<cluster-domain>:<port>.
+	// SourceCacheName — no UID (or UID missed), but the namespace/name
+	// index matched; we dialed the live Pod IP. Keeps warm-pool
+	// sandboxes (no per-sandbox Service) routable (issue #883).
+	SourceCacheName Source = "cache-name"
+	// SourceDNS — no override, and both cache lookups missed (or the
+	// cache wasn't configured); fell back to the in-cluster DNS form
+	// <id>.<ns>.svc.<cluster-domain>:<port>.
 	SourceDNS Source = "dns"
 )
 
@@ -59,7 +71,10 @@ const (
 //     used by SDKs that already know the Pod IP from creating the Sandbox.
 //  2. cache lookup by t.UID — KEP-NNNN's secure fast path. Only attempted
 //     when both cache is non-nil AND t.UID is present.
-//  3. DNS form — always works without informer cache or UID, matches
+//  3. cache lookup by namespace/name (t.Namespace + t.ID) — routes SDK
+//     traffic that carries no UID header, notably warm-pool sandboxes
+//     whose DNS form can never resolve (issue #883).
+//  4. DNS form — always works without informer cache or UID, matches
 //     the Python router's behavior.
 //
 // scheme defaults to "http" when empty. The returned Source records
@@ -81,10 +96,18 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 			src = SourceCache
 		}
 	}
+	if host == "" && lookup != nil {
+		// X-Sandbox-Id is the Sandbox CR name (== Pod name), so with the
+		// namespace it addresses the same entry the UID would have.
+		if e, ok := lookup.GetByName(t.Namespace, t.ID); ok {
+			host = e.PodIP
+			src = SourceCacheName
+		}
+	}
 	if host == "" {
 		// DNS fallback. This branch fires when there was no PodIP override
-		// and either the cache wasn't configured, the UID wasn't supplied,
-		// or the cache missed.
+		// and either the cache wasn't configured or both cache lookups
+		// missed.
 		host = t.ID + "." + t.Namespace + ".svc." + clusterDomain
 	}
 

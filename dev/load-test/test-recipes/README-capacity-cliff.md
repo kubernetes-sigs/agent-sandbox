@@ -54,9 +54,9 @@ headless Service (`service: false`) and uses no `volumeClaimTemplates`, and the 
           memory: 2Gi
   ```
 
-  Raising the workers and QPS matters even though this is not a throughput test: with the defaults
-  (`--sandbox-concurrent-workers=1` and a low API burst) you would measure the controller's rate
-  limiter, not the cluster's capacity.
+  The number of sandbox workers matters even though this is not a throughput test:
+  with the defaults (`--sandbox-concurrent-workers=100`) you would measure the controller's sandbox
+  reconcile limiter, not the cluster's capacity.
 
 ### Node capacity: kwok vs. real nodes
 

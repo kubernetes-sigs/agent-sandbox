@@ -123,7 +123,8 @@ so the simple case stays simple.
   `JsonlSource`; `SweBenchSource` (HF) in `adapters/swebench.py` (`swebench` extra).
 - **`FleetConfig`** (pydantic): `clusters: list[ClusterConfig]`, `placement`,
   `max_concurrent`, `max_warmpool_size`, `window_size` (None=auto),
-  `ready_timeout`, `template` (`TemplateSpec`), `template_name_fn`
+  `ready_timeout`, `warm_create_budget` (1000 — stage the warm fill in waves of ≤ N
+  in-flight creates; 0 = all at once), `template` (`TemplateSpec`), `template_name_fn`
   (default `r2e-img-<md5[:12]>`), `labels`.
 - **`SandboxHandle`** (`handles.py`): per claim — `task`, **`cluster`** (name +
   connection), `claim_name`, `sandbox_id`, **`hostname`** (stable in-cluster DNS),
@@ -139,14 +140,35 @@ so the simple case stays simple.
 | preflight checks | `preflight() -> dict[cluster, PreflightReport]` (raises on hard failures) |
 | compute replicas | `plan() -> FleetPlan` (per-cluster, per-image replicas + window) |
 | set templates | `ensure_templates()` (across selected clusters) |
-| pools / start warmpools | `start_warmpools(wait=True)` (distributes pools across clusters per placement+sizing) |
+| pools / start warmpools | `start_warmpools(wait=True, create_budget=None)` (distributes pools across clusters per placement+sizing; staged in ≤`warm_create_budget` in-flight-create waves) |
 | (optional) pre-pull | `prepull(wait=True)` / `prepull_delete()` (per cluster) |
 | setup | `setup()` — preflight → plan → (optional prepull) → start warm pools |
 | start claims | `acquire(task) -> SandboxHandle`, `acquire_batch(tasks) -> [SandboxHandle]` (placement-routed) |
 | return hostname list | `handles()`, `hostnames()`, `endpoints()` (cluster-qualified) |
 | teardown / delete | `release(handle)`, `release_all()`, `teardown(delete_namespace=False)` (routes to owning cluster) |
-| managed batch | `run(process_fn, strategy=None) -> [Result]` |
+| managed batch | `run(process_fn, strategy="naive", *, recycle=False, …) -> [Result]` |
+| recycle (reset-and-reuse) | `run(..., recycle=True, reset=, max_reuses=, reset_timeout=, use_session=, scale_on_hold=)` (flag, orthogonal to strategy) → `reuse_git_restore_sandbox(_async)`; `GitRestoreReset.prime/reset/recyclable`; `SandboxHandle.open_session()` (`SandboxSession`); `determinism_canary(...)` |
 | ergonomics | context manager `__enter__/__exit__` → `setup()`/`teardown()` |
+
+**Sandbox recycling** (`recycle.py`, experimental) is an **orthogonal modifier on the
+managed runner** — `run(..., recycle=True)` — not a separate execution mode or strategy
+value: the chosen warm-pool `strategy` still governs warming, while `recycle` swaps the
+task→sandbox binding to reuse one claimed sandbox across same-image tasks, resetting
+between them, so claims scale with *problems* (÷ tasks-per-image) instead of tasks. It is
+off by default (a no-op for 1:1 eval; only multi-task-per-image shapes benefit). The
+executors (`reuse_git_restore_sandbox` / `_async`) remain callable directly for control
+outside `run()`. The shipped tier is **git-restore** (`GitRestoreReset`: `git reset --hard
+pristine` + `clean -xdff` + process/`/tmp` sweep, then verify the repo is at the
+pristine SHA and clean); dirty resets **quarantine** to a fresh claim. Reset is
+**git-only by default** — the `pip freeze` env and git-config/hooks tripwires are opt-in
+(`check_env`/`check_config`), bounded otherwise by `max_reuses` + the canary. It scales
+via a **persistent exec session** (`SandboxSession`, `use_session=True`): one held-open
+`bash` stream per sandbox so task+reset cost O(sandboxes) apiserver exec connections, not
+O(tasks) — `SandboxHandle.exec()` routes through it transparently. Non-git images fall
+back to fresh-claim-per-task; exec failures quarantine rather than abort. Costlier tiers
+(env-dir restore, overlay/checkpoint restart) are deferred. `determinism_canary` is the
+correctness gate. Full design + deep-research hardening + A/B findings: notes repo
+`plans/sandbox-recycling.md`.
 
 **Two modes (both shipped):** (1) **primitives** an RL loop drives itself
 (`acquire` → use `handle.hostname/endpoint` → `release`); (2) **managed runner**

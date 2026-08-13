@@ -80,7 +80,8 @@ func main() {
 		}},
 		{"init", func() (string, error) {
 			body, err := json.Marshal(map[string]any{
-				"envVars": map[string]string{"HELLO": "envd"},
+				"envVars":     map[string]string{"HELLO": "envd"},
+				"defaultUser": "user",
 			})
 			if err != nil {
 				return "", fmt.Errorf("POST /init marshal: %w", err)

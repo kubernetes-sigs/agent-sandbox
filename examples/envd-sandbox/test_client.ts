@@ -75,7 +75,10 @@ async function main(): Promise<number> {
         const r = await fetch(`${url}/init`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ envVars: { HELLO: "envd" } }),
+          body: JSON.stringify({
+            envVars: { HELLO: "envd" },
+            defaultUser: "user",
+          }),
           signal: AbortSignal.timeout(10000),
         });
         // envd returns 204 No Content on success in --isnotfc mode.

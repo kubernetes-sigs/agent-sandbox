@@ -54,7 +54,7 @@ run_test "health" bash -c "
 run_test "init" bash -c "
   code=\$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 -X POST '${BASE_URL}/init' \
     -H 'Content-Type: application/json' \
-    -d '{\"envVars\":{\"HELLO\":\"envd\"}}')
+    -d '{\"envVars\":{\"HELLO\":\"envd\"},\"defaultUser\":\"user\"}')
   [[ \"\$code\" == '204' ]] || { echo \"expected 204, got \$code\"; exit 1; }
   echo 'init ok'
 "

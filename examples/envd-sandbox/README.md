@@ -128,15 +128,19 @@ npx tsx test_client.ts
 
 All four scripts test the same operations:
 1. **health** — `GET /health` → 204
-2. **init** — `POST /init` → 204 (initializes sandbox runtime)
+2. **init** — `POST /init` → 204 (initializes sandbox with `defaultUser: user` for subprocess execution)
 3. **files** — upload + download round-trip via `POST/GET /files`
 4. **metrics** — `GET /metrics` → JSON with system stats (`ts`, `cpu_count`, `mem_total`, etc.)
 
 ## Security Considerations
 
-> **WARNING**: envd in `--isnotfc` mode runs **without authentication** and as **root**. Do NOT expose port 49983 to a public network.
+> **WARNING**: envd in `--isnotfc` mode runs **without authentication**. Do NOT expose port 49983 to a public network.
 
-The included `sandbox-envd.yaml` applies a **default-deny ingress NetworkPolicy** that restricts access to port 49983 to pods labeled `access: envd-client`. This prevents unauthorized workloads in the cluster from executing commands or accessing files in the sandbox.
+**Security model** (following [e2b-dev design](https://github.com/e2b-dev/infra/blob/main/packages/envd/debug.Dockerfile)):
+- **envd runs as root**: Required for PTY allocation, process management, and cgroup operations.
+- **User code runs as non-root**: The `/init` request sets `defaultUser: "user"` (uid 1000), so all user-spawned processes execute as an unprivileged user. This limits blast radius if user code is malicious.
+
+The included `sandbox-envd.yaml` applies a **default-deny ingress NetworkPolicy** that restricts access to port 49983 to pods labeled `access: envd-client`. This prevents unauthorized workloads in the cluster from reaching the envd API.
 
 ### Production hardening checklist
 
@@ -146,7 +150,7 @@ The included `sandbox-envd.yaml` applies a **default-deny ingress NetworkPolicy*
   docker build --build-arg ENVD_VERSION=<commit-or-tag> -t ${IMAGE} .
   ```
 - **Token authentication**: To enable authenticated access, send an initial `POST /init` request with an `accessToken` field to bootstrap the daemon's token. Subsequent requests must include the `X-Access-Token` header. Do **not** set `E2B_ACCESS_TOKEN` as an environment variable — the token is configured via the `/init` bootstrap flow.
-- **Least-privilege user**: envd runs as root because file paths resolve relative to the user's home directory. If your use case allows it, create a non-root user and set `USER` in the Dockerfile.
+- **Non-root subprocesses**: The Dockerfile creates a `user` (uid 1000) and the test clients set `defaultUser: "user"` in `/init`. All user code runs as this unprivileged user by default.
 - **Ephemeral storage**: envd writes to the container's rootfs; pod restart wipes all state.
 
 ## Troubleshooting
@@ -156,7 +160,7 @@ The included `sandbox-envd.yaml` applies a **default-deny ingress NetworkPolicy*
 | Pod stuck in `CrashLoopBackOff` | envd cannot reach MMDS (missing `--isnotfc`) | Verify the Dockerfile CMD includes `--isnotfc` |
 | `failed to create cgroup` in logs | cgroup v2 not available in container | Ensure `--no-cgroups` flag is set in CMD |
 | `connection refused` on port 49983 | envd not yet ready | Wait for readiness probe; check `kubectl logs` |
-| File upload returns 500 | Path resolution issue | envd runs as root; use relative paths (resolved to `/root/`) |
+| File upload returns 500 | Path resolution issue | File paths resolve relative to `/home/user`; use relative paths or absolute paths under `/home/user/` |
 | Port-forward drops | Pod restarted | Re-run `kubectl port-forward` |
 
 ## Cleanup

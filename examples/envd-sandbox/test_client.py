@@ -76,7 +76,10 @@ def _build_tests() -> Tuple[str, List[Callable[[], str]]]:
     def _init() -> str:
         r = requests.post(
             f"{base_url}/init",
-            json={"envVars": {"HELLO": "envd"}},
+            json={
+                "envVars": {"HELLO": "envd"},
+                "defaultUser": "user",
+            },
             timeout=5,
         )
         # envd returns 204 No Content on success in --isnotfc mode.

@@ -60,10 +60,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /out/envd /usr/local/bin/envd
 
-# envd resolves file paths relative to the execution user's home directory
-# (default: /root). Running as root ensures file operations work correctly.
-# In production, use sandbox-router or network policies for access control.
-WORKDIR /root
+# Create a non-root user for subprocess execution.
+# Following the e2b-dev debug.Dockerfile pattern:
+#   https://github.com/e2b-dev/infra/blob/main/packages/envd/debug.Dockerfile
+#
+# Security model: envd runs as root (required for PTY, process management),
+# but user code spawned via /init's defaultUser runs as this unprivileged user.
+# This limits blast radius if user code is malicious.
+RUN useradd -ms /bin/bash user
+RUN chmod 777 -R /home/user
+
+WORKDIR /home/user
 
 # 49983 is envd's default HTTP/gRPC port.
 EXPOSE 49983

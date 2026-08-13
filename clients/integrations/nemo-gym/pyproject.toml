@@ -24,9 +24,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kubernetes-sigs/agent-sandbox/clients/integrations/nemo-gym"
+Homepage = "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/integrations/nemo-gym"
 Repository = "https://github.com/kubernetes-sigs/agent-sandbox"
-Documentation = "https://github.com/kubernetes-sigs/agent-sandbox/clients/integrations/nemo-gym"
+Documentation = "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/integrations/nemo-gym"
 
 # NeMo Gym discovers third-party sandbox providers through this entry-point group
 # (see nemo_gym/sandbox/providers/registry.py). Installing this package next to

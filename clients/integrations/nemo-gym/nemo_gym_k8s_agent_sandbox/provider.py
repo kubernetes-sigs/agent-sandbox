@@ -82,8 +82,10 @@ class AgentSandboxCreateVerificationError(SandboxCreateVerificationError):
 def _require_client() -> None:
     try:
         import k8s_agent_sandbox.async_sandbox_client  # noqa: F401
-    except ModuleNotFoundError as e:
-        raise ModuleNotFoundError(
+    except ImportError as e:
+        # ImportError, not just ModuleNotFoundError: a failed `from ... import`
+        # inside the async client module (missing [async] extras) raises the former.
+        raise ImportError(
             "The k8s-agent-sandbox async client is required for the agent_sandbox "
             "sandbox provider. Install k8s-agent-sandbox[async] (it ships with the "
             "nemo-gym-k8s-agent-sandbox distribution) before using "
@@ -321,7 +323,10 @@ class AgentSandboxProvider:
         *,
         connection: AgentSandboxConnectionConfig | Mapping[str, Any] | None = None,
         create: AgentSandboxCreateConfig | Mapping[str, Any] | None = None,
-        exec: AgentSandboxExecConfig | Mapping[str, Any] | None = None,
+        # `exec` shadows the builtin, but the parameter name IS the provider config
+        # contract: NeMo Gym passes the YAML `exec:` block by keyword, and NeMo
+        # Gym's own providers (e.g. openshell) use the same name.
+        exec: AgentSandboxExecConfig | Mapping[str, Any] | None = None,  # noqa: A002
         probe: AgentSandboxProbeConfig | Mapping[str, Any] | None = None,
         operations: AgentSandboxOperationsConfig | Mapping[str, Any] | None = None,
     ) -> None:
@@ -432,11 +437,15 @@ class AgentSandboxProvider:
                 "SandboxTemplate owns the pod command"
             )
         self._warn_unmapped_spec_fields(spec)
+        if spec.ttl_s is not None and spec.ttl_s <= 0:
+            raise AgentSandboxCreateError(f"spec.ttl_s must be > 0, got {spec.ttl_s!r}")
+        if spec.ready_timeout_s is not None and spec.ready_timeout_s <= 0:
+            raise AgentSandboxCreateError(f"spec.ready_timeout_s must be > 0, got {spec.ready_timeout_s!r}")
         options = AgentSandboxProviderOptions.from_mapping(spec.provider_options)
         warmpool = self._resolve_warmpool(spec, options)
         namespace = options.namespace or self._create_config.namespace
         ready_timeout_s = spec.ready_timeout_s or self._create_config.ready_timeout_s
-        shutdown_after_seconds = max(1, math.ceil(spec.ttl_s)) if spec.ttl_s is not None else None
+        shutdown_after_seconds = math.ceil(spec.ttl_s) if spec.ttl_s is not None else None
         # Marker label goes last so user metadata cannot clobber it.
         labels = {**{str(k): str(v) for k, v in spec.metadata.items()}, MANAGED_BY_LABEL: MANAGED_BY_VALUE}
 
@@ -445,7 +454,7 @@ class AgentSandboxProvider:
             sandbox = await client.create_sandbox(
                 warmpool,
                 namespace=namespace,
-                sandbox_ready_timeout=max(1, math.ceil(ready_timeout_s)),
+                sandbox_ready_timeout=math.ceil(ready_timeout_s),
                 labels=labels,
                 shutdown_after_seconds=shutdown_after_seconds,
                 volume_claim_templates=options.volume_claim_templates or None,
@@ -484,21 +493,29 @@ class AgentSandboxProvider:
         return handle
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
-        """Poll the readiness probe until it passes ``stable_count`` times or the deadline elapses."""
+        """Poll the readiness probe until it passes ``stable_count`` times or the deadline elapses.
+
+        The probe runs WITHOUT the cwd/env wrapping that ``exec`` applies: it tests
+        runtime reachability only, and a ``spec.workdir`` that does not exist until
+        the agent creates it must not fail an otherwise healthy sandbox.
+        """
         probe = self._probe
         if probe.command is None:
             return
+        inst: _AgentSandboxInstance = handle.raw
+        wrapped = f"{self._exec_config.exec_shell} -c {shlex.quote(probe.command)}"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + probe.deadline_s if probe.deadline_s is not None else None
         consecutive = 0
         last_detail = "no probe attempt completed"
         while True:
-            result = await self.exec(handle, probe.command, timeout_s=probe.timeout_s)
+            result = await self._run_wrapped(inst, wrapped, probe.timeout_s)
             passed = result.return_code == 0 and (
                 probe.expected_stdout is None or probe.expected_stdout in (result.stdout or "")
             )
             if passed:
                 consecutive += 1
+                last_detail = f"probe passed {consecutive}/{probe.stable_count} consecutive times"
                 if consecutive >= probe.stable_count:
                     return
             else:
@@ -522,8 +539,11 @@ class AgentSandboxProvider:
             await inst.sandbox.terminate()
         except Exception as e:
             LOGGER.warning(
-                f"Failed to delete half-created sandbox claim {inst.claim_name!r} in namespace "
-                f"{inst.namespace!r}; the claim TTL (if set) is the remaining safety net: {e}"
+                "Failed to delete half-created sandbox claim %r in namespace %r; "
+                "the claim TTL (if set) is the remaining safety net: %s",
+                inst.claim_name,
+                inst.namespace,
+                e,
             )
 
     # -------------------------------------------------------------------- exec
@@ -588,8 +608,9 @@ class AgentSandboxProvider:
         inst: _AgentSandboxInstance = handle.raw
         if user is not None:
             LOGGER.warning(
-                f"The agent_sandbox provider cannot run commands as user={user!r}; the sandbox "
-                "runtime API has no user field. Running as the pod's user."
+                "The agent_sandbox provider cannot run commands as user=%r; the sandbox "
+                "runtime API has no user field. Running as the pod's user.",
+                user,
             )
         merged_env = {str(k): str(v) for k, v in inst.env.items()}
         if env:
@@ -654,8 +675,10 @@ class AgentSandboxProvider:
             cleanup = await self._transfer_exec(inst, f"rm -f {shlex.quote(staging)}")
             if cleanup.return_code != 0:
                 LOGGER.warning(
-                    f"Failed to remove staging file {staging!r} in sandbox {inst.claim_name!r}: "
-                    f"{(cleanup.stderr or '').strip()}"
+                    "Failed to remove staging file %r in sandbox %r: %s",
+                    staging,
+                    inst.claim_name,
+                    (cleanup.stderr or "").strip(),
                 )
         target_path = Path(target_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -714,7 +737,7 @@ class AgentSandboxProvider:
                 # Transient API failure: keep polling until the deadline.
                 if not _is_runtime_failure(e):
                     raise
-                LOGGER.debug(f"get_sandbox_claim failed while waiting for {inst.claim_name!r} deletion: {e}")
+                LOGGER.debug("get_sandbox_claim failed while waiting for %r deletion: %s", inst.claim_name, e)
             if gone:
                 return
             if loop.time() >= deadline:

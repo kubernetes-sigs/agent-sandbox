@@ -93,7 +93,19 @@ PYTHON_TEST_SUITES = [
         "editable_installs": [
             (os.path.join("clients", "integrations", "deepagents"), "[test]"),
         ],
-    }
+    },
+    {
+        "name": "integrations-nemo-gym",
+        "dir": os.path.join("clients", "integrations", "nemo-gym"),
+        # The nemo-gym PyPI package (a hard dependency of this integration)
+        # requires Python >= 3.13.14, so the suite skips on older interpreters
+        # instead of failing the venv install.
+        "min_python": (3, 13, 14),
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), "[async]"),
+            (os.path.join("clients", "integrations", "nemo-gym"), "[test]"),
+        ],
+    },
 ]
 
 
@@ -124,6 +136,13 @@ def run_python_tests(repo_root, artifact_dir):
         test_dir = os.path.join(repo_root, suite["dir"])
         if not os.path.isdir(test_dir):
             print(f"WARNING: Python test directory not found, skipping: {test_dir}")
+            continue
+
+        min_python = suite.get("min_python")
+        if min_python and sys.version_info < min_python:
+            wanted = ".".join(str(part) for part in min_python)
+            running = ".".join(str(part) for part in sys.version_info[:3])
+            print(f"WARNING: Skipping {suite['name']} tests: requires Python >= {wanted}, running {running}")
             continue
 
         venv_dir = os.path.join(repo_root, "bin", f"python-venv-{suite['name']}")

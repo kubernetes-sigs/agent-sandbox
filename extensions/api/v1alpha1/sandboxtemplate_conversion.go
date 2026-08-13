@@ -1,4 +1,4 @@
-// Copyright 2025 The Kubernetes Authors.
+// Copyright 2026 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,7 +36,20 @@ func (s *SandboxTemplate) ConvertTo(dstRaw conversion.Hub) error {
 
 	// Convert Spec
 	if err := convertTemplateSpecTo(&s.Spec, &dst.Spec); err != nil {
-		return err
+		return fmt.Errorf("convert spec to v1beta1: %w", err)
+	}
+
+	// Restore v1beta1-only VolumeClaimTemplatesPolicy if present in annotations
+	if policy, ok := s.Annotations["api.agents.x-k8s.io/v1beta1-volume-claim-templates-policy"]; ok {
+		switch v1beta1.VolumeClaimTemplatesPolicy(policy) {
+		case v1beta1.VolumeClaimTemplatesPolicyDisallowed, v1beta1.VolumeClaimTemplatesPolicyAllowed, v1beta1.VolumeClaimTemplatesPolicyOverrides:
+			dst.Spec.VolumeClaimTemplatesPolicy = v1beta1.VolumeClaimTemplatesPolicy(policy)
+		default:
+			return fmt.Errorf("invalid VolumeClaimTemplatesPolicy annotation value: %q", policy)
+		}
+		if dst.Annotations != nil {
+			delete(dst.Annotations, "api.agents.x-k8s.io/v1beta1-volume-claim-templates-policy")
+		}
 	}
 
 	// Preserve the original v1alpha1 object state for lossless round-tripping
@@ -65,20 +78,20 @@ func (s *SandboxTemplate) ConvertFrom(srcRaw conversion.Hub) error {
 
 	// Convert Spec
 	if err := convertTemplateSpecFrom(&src.Spec, &s.Spec); err != nil {
-		return err
+		return fmt.Errorf("convert spec from v1beta1: %w", err)
 	}
 
-	// Restore original v1alpha1 state if present to ensure lossless conversion
-	if stateJSON, ok := s.Annotations[v1alpha1SandboxTemplateStateAnnotation]; ok {
-		// Strip the state annotation so it doesn't leak to clients and get sent back on updates
-		delete(s.Annotations, v1alpha1SandboxTemplateStateAnnotation)
+	// Strip the state annotation if present so it doesn't leak to clients and get sent back on updates
+	delete(s.Annotations, v1alpha1SandboxTemplateStateAnnotation)
 
-		var original SandboxTemplate
-		if err := json.Unmarshal([]byte(stateJSON), &original); err != nil {
-			return fmt.Errorf("failed to unmarshal v1alpha1 SandboxTemplate state: %w", err)
+	// Preserve v1beta1-only VolumeClaimTemplatesPolicy for round-tripping
+	if src.Spec.VolumeClaimTemplatesPolicy != "" {
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
 		}
-		// Since SandboxTemplate is fully compatible between versions, all fields map 1:1.
-		// We don't have any lost fields to restore manually, but the hook is kept for robustness.
+		s.Annotations["api.agents.x-k8s.io/v1beta1-volume-claim-templates-policy"] = string(src.Spec.VolumeClaimTemplatesPolicy)
+	} else if s.Annotations != nil {
+		delete(s.Annotations, "api.agents.x-k8s.io/v1beta1-volume-claim-templates-policy")
 	}
 
 	return nil
@@ -89,7 +102,7 @@ func (s *SandboxTemplate) ConvertFrom(srcRaw conversion.Hub) error {
 func convertTemplateSpecTo(src *SandboxTemplateSpec, dst *v1beta1.SandboxTemplateSpec) error {
 	// PodTemplate
 	if err := sandboxv1alpha1.ConvertPodTemplateTo(&src.PodTemplate, &dst.PodTemplate); err != nil {
-		return err
+		return fmt.Errorf("convert podTemplate to v1beta1: %w", err)
 	}
 
 	// VolumeClaimTemplates
@@ -97,7 +110,7 @@ func convertTemplateSpecTo(src *SandboxTemplateSpec, dst *v1beta1.SandboxTemplat
 		dst.VolumeClaimTemplates = make([]sandboxv1beta1.PersistentVolumeClaimTemplate, len(src.VolumeClaimTemplates))
 		for i := range src.VolumeClaimTemplates {
 			if err := sandboxv1alpha1.ConvertPVCClaimTemplateTo(&src.VolumeClaimTemplates[i], &dst.VolumeClaimTemplates[i]); err != nil {
-				return err
+				return fmt.Errorf("convert volumeClaimTemplates[%d] to v1beta1: %w", i, err)
 			}
 		}
 	} else {
@@ -129,7 +142,7 @@ func convertTemplateSpecTo(src *SandboxTemplateSpec, dst *v1beta1.SandboxTemplat
 func convertTemplateSpecFrom(src *v1beta1.SandboxTemplateSpec, dst *SandboxTemplateSpec) error {
 	// PodTemplate
 	if err := sandboxv1alpha1.ConvertPodTemplateFrom(&src.PodTemplate, &dst.PodTemplate); err != nil {
-		return err
+		return fmt.Errorf("convert podTemplate from v1beta1: %w", err)
 	}
 
 	// VolumeClaimTemplates
@@ -137,7 +150,7 @@ func convertTemplateSpecFrom(src *v1beta1.SandboxTemplateSpec, dst *SandboxTempl
 		dst.VolumeClaimTemplates = make([]sandboxv1alpha1.PersistentVolumeClaimTemplate, len(src.VolumeClaimTemplates))
 		for i := range src.VolumeClaimTemplates {
 			if err := sandboxv1alpha1.ConvertPVCClaimTemplateFrom(&src.VolumeClaimTemplates[i], &dst.VolumeClaimTemplates[i]); err != nil {
-				return err
+				return fmt.Errorf("convert volumeClaimTemplates[%d] from v1beta1: %w", i, err)
 			}
 		}
 	} else {

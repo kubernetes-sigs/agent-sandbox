@@ -33,7 +33,8 @@ def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
             kind: ClusterConfiguration
             apiServer:
               extraArgs:
-                enable-admission-plugins: "NodeRestriction,OwnerReferencesPermissionEnforcement"
+                - name: "enable-admission-plugins"
+                  value: "NodeRestriction,OwnerReferencesPermissionEnforcement"
           - |
             kind: KubeletConfiguration
             logging:

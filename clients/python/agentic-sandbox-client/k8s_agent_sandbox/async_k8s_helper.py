@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, UTC
 
 from kubernetes_asyncio import client, config, watch
 
@@ -24,14 +25,18 @@ from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
     GATEWAY_PLURAL,
     SANDBOX_API_GROUP,
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
+    CREATED_BY_LABEL,
+    TERMINAL_CLAIM_READY_REASONS,
 )
-from .exceptions import SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .utils import select_pod_ip, is_valid_ip, is_valid_gateway_hostname
 
 
 class AsyncK8sHelper:
@@ -65,16 +70,31 @@ class AsyncK8sHelper:
         annotations: dict | None = None,
         labels: dict | None = None,
         lifecycle: dict | None = None,
+        volume_claim_templates: list[dict] | None = None,
+        pod_metadata: dict | None = None,
     ):
-        """Creates a SandboxClaim custom resource."""
+        """Creates a SandboxClaim custom resource.
+
+        Args:
+            pod_metadata: Optional ``{"labels": {...}, "annotations": {...}}``
+                dict emitted as ``spec.additionalPodMetadata`` so the labels and
+                annotations propagate onto the running Sandbox Pod (as opposed to
+                ``labels``, which only land on the SandboxClaim object).
+        """
         await self._ensure_initialized()
+
+        updated_annotations = dict(annotations) if annotations else {}
+        if CLIENT_REQUEST_TIME_ANNOTATION not in updated_annotations:
+            updated_annotations[CLIENT_REQUEST_TIME_ANNOTATION] = datetime.now(UTC).isoformat()
 
         metadata = {
             "name": name,
-            "annotations": annotations or {},
+            "annotations": updated_annotations,
+            "labels": {
+                **(labels or {}),
+                CREATED_BY_LABEL: "python-client",
+            }
         }
-        if labels:
-            metadata["labels"] = labels
 
         spec = {
             "warmPoolRef": {
@@ -83,6 +103,10 @@ class AsyncK8sHelper:
         }
         if lifecycle:
             spec["lifecycle"] = lifecycle
+        if volume_claim_templates:
+            spec["volumeClaimTemplates"] = volume_claim_templates
+        if pod_metadata:
+            spec["additionalPodMetadata"] = pod_metadata
 
         manifest = {
             "apiVersion": f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}",
@@ -93,7 +117,7 @@ class AsyncK8sHelper:
         logger.info(
             f"Creating SandboxClaim '{name}' in namespace '{namespace}' using warm pool '{warmpool}'..."
         )
-        await self.custom_objects_api.create_namespaced_custom_object(
+        return await self.custom_objects_api.create_namespaced_custom_object(
             group=CLAIM_API_GROUP,
             version=CLAIM_API_VERSION,
             namespace=namespace,
@@ -101,21 +125,71 @@ class AsyncK8sHelper:
             body=manifest,
         )
 
-    async def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int) -> str:
+    async def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
         appears in the claim's status, then returns it.
+
+        Args:
+            resource_version: Optional resourceVersion to start the watch
+                from (e.g. ``metadata.resourceVersion`` of the create
+                response). Defaults to ``"0"`` — see ``_watch_claim``.
+        """
+        return await self._watch_claim(claim_name, namespace, timeout, require_ready=False,
+                                       resource_version=resource_version)
+
+    async def wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+        """Watches the SandboxClaim until it is bound to a sandbox AND its
+        Ready condition is True, then returns the sandbox name.
+
+        This is the lowest-latency ready-wait: the claim controller writes
+        ``status.sandbox.name``, ``status.sandbox.podIPs`` and the forwarded
+        Ready condition in a single status update on warm-pool adoption, so a
+        single watch on the claim observes readiness without a second watch
+        on the Sandbox resource (the claim's Ready condition is a direct
+        forward of the Sandbox's Ready condition).
+
+        Args:
+            resource_version: Optional resourceVersion to start the watch
+                from (e.g. ``metadata.resourceVersion`` of the create
+                response). Defaults to ``"0"`` — see ``_watch_claim``.
+        """
+        return await self._watch_claim(claim_name, namespace, timeout, require_ready=True,
+                                       resource_version=resource_version)
+
+    async def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
+                           resource_version: str | None = None) -> str:
+        """Shared SandboxClaim watch loop.
+
+        Returns the sandbox name once ``status.sandbox.name`` is populated;
+        when ``require_ready`` is set, additionally waits until the claim's
+        Ready condition is True.
+
+        The watch always starts from an explicit resourceVersion — the
+        claim's own (from the create response) when the caller has it, else
+        ``"0"`` — so the apiserver serves it from the watch cache. A watch
+        with UNSET resourceVersion forces a quorum etcd read to establish
+        initial state on every wait, which at high claim rates is pure
+        apiserver/etcd load on the latency path. If the supplied version has
+        been compacted away (410 Gone), the watch transparently restarts from
+        ``"0"`` (current state from the watch cache).
         """
         await self._ensure_initialized()
 
+        wait_target = "claim readiness" if require_ready else "sandbox name"
+        # Existing tests assert on the exact resolve-path message.
+        deleted_msg = (f"SandboxClaim '{claim_name}' was deleted while waiting for claim readiness"
+                       if require_ready else
+                       f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name")
         deadline = time.monotonic() + timeout
-        logger.info(f"Resolving sandbox name from claim '{claim_name}'...")
+        rv = resource_version or "0"
+        logger.info(f"Watching claim '{claim_name}' for {wait_target} (from resourceVersion={rv})...")
         while True:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
-                    f"Could not resolve sandbox name from claim "
+                    f"Could not resolve {wait_target} from claim "
                     f"'{claim_name}' within {timeout} seconds."
                 )
             w = watch.Watch()
@@ -127,18 +201,25 @@ class AsyncK8sHelper:
                     version=CLAIM_API_VERSION,
                     plural=CLAIM_PLURAL_NAME,
                     field_selector=f"metadata.name={claim_name}",
+                    resource_version=rv,
                     timeout_seconds=remaining,
                 ):
                     if event is None:
                         continue
                     if event["type"] == "DELETED":
                         raise SandboxMetadataError(
-                            f"SandboxClaim '{claim_name}' was deleted while resolving sandbox name"
+                            deleted_msg
                         )
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event["object"]
+                        # Track the last-seen resourceVersion so a stream
+                        # restart resumes instead of replaying history.
+                        seen_rv = (claim_object.get("metadata") or {}).get("resourceVersion")
+                        if seen_rv:
+                            rv = seen_rv
                         status = claim_object.get("status") or {}
-                        
+
+                        ready = False
                         for cond in status.get("conditions", []):
                             if (
                                 cond.get("type") == "Ready"
@@ -152,21 +233,48 @@ class AsyncK8sHelper:
                                 raise SandboxWarmPoolNotFoundError(
                                     f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
                                 )
+                            elif (
+                                cond.get("type") == "Ready"
+                                and cond.get("status") == "False"
+                                and cond.get("reason") in TERMINAL_CLAIM_READY_REASONS
+                            ):
+                                # The controller reported a failure it will not
+                                # retry; waiting out the timeout cannot succeed.
+                                raise SandboxClaimFailedError(
+                                    f"SandboxClaim '{claim_name}' failed with terminal reason "
+                                    f"{cond.get('reason')}: {cond.get('message', '')}"
+                                )
+                            if cond.get("type") == "Ready" and cond.get("status") == "True":
+                                ready = True
 
                         sandbox_status = status.get("sandbox", {})
                         # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
                         name = sandbox_status.get("name", "") or sandbox_status.get("Name", "")
-                        if name:
-                            logger.info(f"Resolved sandbox name '{name}' from claim status")
+                        if name and (ready or not require_ready):
+                            logger.info(
+                                f"Resolved sandbox name '{name}' from claim status"
+                                + (" (claim Ready)" if ready else "")
+                            )
                             return name
+            except client.ApiException as e:
+                if e.status == 410:
+                    # The requested resourceVersion was compacted away:
+                    # restart from the watch cache's current state.
+                    logger.info(
+                        f"Watch on claim '{claim_name}' expired (410 Gone at resourceVersion={rv}); "
+                        "restarting from current state"
+                    )
+                    rv = "0"
+                    continue
+                raise
             finally:
                 await w.close()
 
     async def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
-        Returns the first pod IP from the sandbox status when ready, or None if
-        no IPs are present (e.g. on older controllers that don't populate podIPs).
+        Returns the selected pod IP from the sandbox status when ready, or None if
+        no valid IP can be selected.
         """
         await self._ensure_initialized()
 
@@ -197,7 +305,7 @@ class AsyncK8sHelper:
                             if cond.get("type") == "Ready" and cond.get("status") == "True":
                                 logger.info(f"Sandbox {name} is ready.")
                                 pod_ips = status.get("podIPs", [])
-                                return pod_ips[0] if pod_ips else None
+                                return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
                         logger.error(f"Sandbox {name} was deleted before becoming ready.")
                         raise SandboxNotFoundError(
@@ -315,11 +423,22 @@ class AsyncK8sHelper:
                         gateway_object = event["object"]
                         status = gateway_object.get("status") or {}
                         addresses = status.get("addresses", [])
-                        if addresses:
-                            ip_address = addresses[0].get("value")
-                            if ip_address:
-                                logger.info(f"Gateway ready. IP: {ip_address}")
-                                return ip_address
+                        for address in addresses:
+                            if not isinstance(address, dict):
+                                continue
+                            ip_address = address.get("value")
+                            if not ip_address:
+                                continue
+                            
+                            if not is_valid_ip(ip_address) and not is_valid_gateway_hostname(ip_address):
+                                logger.warning(
+                                    "Gateway address rejected because %r is neither a valid IP address nor a valid gateway hostname.",
+                                    ip_address,
+                                )
+                                continue
+                                
+                            logger.info(f"Gateway ready. IP: {ip_address}")
+                            return ip_address
             finally:
                 await w.close()
 

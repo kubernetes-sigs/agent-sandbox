@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import requests
+import shlex
 import sys
 import urllib.parse
 
@@ -207,6 +208,38 @@ def test_upload(base_url):
         print(f"An error occurred during upload verification: {e}")
         sys.exit(1)
 
+def test_ml_libraries(base_url):
+    """
+    Tests that the ML libraries (pandas, scikit-learn, lightgbm) import and run
+    inside the sandbox. lightgbm in particular requires the OpenMP runtime
+    (libgomp), which is not present in the slim base image by default, so this
+    catches runtime-image regressions such as a missing libgomp.so.1.
+    """
+    url = f"{base_url}/execute"
+    script = (
+        "import pandas as pd, lightgbm as lgb; "
+        "from sklearn.linear_model import LinearRegression; "
+        "m = LinearRegression().fit([[0], [1]], [0, 1]); "
+        "print('ml-ok', int(round(m.predict([[2]])[0])))"
+    )
+    payload = {"command": f"python -c {shlex.quote(script)}"}
+
+    try:
+        print(f"\n--- Testing ML libraries ---")
+        print(f"Sending POST request to {url}")
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+
+        print("ML libraries check completed!")
+        print("Response JSON:", response.json())
+        assert response.json()["exit_code"] == 0, response.json()["stderr"]
+        assert "ml-ok 2" in response.json()["stdout"]
+        print("ML libraries imported and ran successfully!")
+
+    except (requests.exceptions.RequestException, AssertionError) as e:
+        print(f"An error occurred during ML libraries check: {e}")
+        sys.exit(1)
+
 def test_upload_path_traversal(base_url):
     """
     Tests that uploading a file with an unsafe filename is blocked.
@@ -248,3 +281,4 @@ if __name__ == "__main__":
     test_absolute_path_traversal(base_url)
     test_upload(base_url)
     test_upload_path_traversal(base_url)
+    test_ml_libraries(base_url)

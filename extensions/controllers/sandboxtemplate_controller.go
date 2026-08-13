@@ -83,14 +83,20 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// 3. Handle "Unmanaged" Opt-Out
 	if management == extensionsv1beta1.NetworkPolicyManagementUnmanaged {
-		existingNP := &networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{Name: npName, Namespace: npNamespace},
-		}
-		if err := r.Delete(ctx, existingNP); err != nil && !k8errors.IsNotFound(err) {
-			logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
-			return ctrl.Result{}, err
-		} else if err == nil {
+		existingNP := &networkingv1.NetworkPolicy{}
+		err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
+		if err == nil {
+			if !metav1.IsControlledBy(existingNP, template) {
+				logger.Info("Skipping deletion of NetworkPolicy not owned by template", "name", npName)
+				return ctrl.Result{}, nil
+			}
+			if err := r.Delete(ctx, existingNP); err != nil {
+				logger.Error(err, "Failed to clean up unmanaged NetworkPolicy")
+				return ctrl.Result{}, err
+			}
 			logger.Info("Deleted unmanaged NetworkPolicy", "name", existingNP.Name)
+		} else if !k8errors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy: %w", err)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -120,6 +126,9 @@ func (r *SandboxTemplateReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	err := r.Get(ctx, types.NamespacedName{Name: npName, Namespace: npNamespace}, existingNP)
 
 	if err == nil {
+		if !metav1.IsControlledBy(existingNP, template) {
+			return ctrl.Result{}, fmt.Errorf("refusing to update NetworkPolicy %q as it is not controlled by SandboxTemplate %q", npName, template.Name)
+		}
 		// Policy exists: Semantic DeepEqual check for drift
 		if equality.Semantic.DeepEqual(existingNP.Spec, desiredSpec) {
 			return ctrl.Result{}, nil // Perfect match, O(1) efficiency.

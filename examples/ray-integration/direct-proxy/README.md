@@ -73,7 +73,7 @@ Releases can be found here: https://github.com/kubernetes-sigs/agent-sandbox/rel
 ```bash
 export VERSION="vX.Y.Z"
 
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
 
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```

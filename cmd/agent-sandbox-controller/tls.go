@@ -53,8 +53,8 @@ func generateWebhookCerts(ctx context.Context, c client.Client, certDir string, 
 		serverPEM := secret.Data["tls.crt"]
 		serverKeyPEM := secret.Data["tls.key"]
 
-		if len(caPEM) == 0 || len(serverPEM) == 0 || len(serverKeyPEM) == 0 {
-			return nil, fmt.Errorf("shared Secret %s is missing certificate data", secretName)
+		if err := validatePEMBytes(caPEM, serverPEM, serverKeyPEM); err != nil {
+			return nil, fmt.Errorf("shared Secret %s has invalid certificate data: %w", secretName, err)
 		}
 
 		// Write to local certDir for the webhook server
@@ -179,6 +179,10 @@ func generateWebhookCerts(ctx context.Context, c client.Client, certDir string, 
 		serverPEM = secret.Data["tls.crt"]
 		serverKeyPEM = secret.Data["tls.key"]
 
+		if err := validatePEMBytes(caPEM, serverPEM, serverKeyPEM); err != nil {
+			return nil, fmt.Errorf("shared Secret %s has invalid certificate data during concurrent load: %w", secretName, err)
+		}
+
 		// Overwrite our local files with the other replica's certs
 		if err := writeCertFiles(certDir, serverPEM, serverKeyPEM); err != nil {
 			return nil, fmt.Errorf("failed to overwrite certificate files locally: %w", err)
@@ -188,6 +192,23 @@ func generateWebhookCerts(ctx context.Context, c client.Client, certDir string, 
 	}
 
 	return nil, fmt.Errorf("failed to create shared Secret: %w", err)
+}
+
+// validatePEMBytes verifies that the provided certificate slices contain valid PEM blocks.
+func validatePEMBytes(caPEM, serverPEM, serverKeyPEM []byte) error {
+	if len(caPEM) == 0 || len(serverPEM) == 0 || len(serverKeyPEM) == 0 {
+		return fmt.Errorf("missing certificate or key data")
+	}
+	if p, _ := pem.Decode(caPEM); p == nil {
+		return fmt.Errorf("invalid CA certificate PEM data")
+	}
+	if p, _ := pem.Decode(serverPEM); p == nil {
+		return fmt.Errorf("invalid server certificate PEM data")
+	}
+	if p, _ := pem.Decode(serverKeyPEM); p == nil {
+		return fmt.Errorf("invalid server private key PEM data")
+	}
+	return nil
 }
 
 // writeCertFiles writes the server certificate and key to the local certDir.
@@ -273,5 +294,56 @@ func patchCRDs(ctx context.Context, c client.Client, caPEM []byte, serviceName, 
 		setupLog.Info("Successfully patched CRD with webhook configuration", "crd", name)
 	}
 
+	return nil
+}
+
+const (
+	defaultWebhookCertName = "tls.crt"
+	defaultWebhookKeyName  = "tls.key"
+	// combinedPEMFileName is the fallback filename checked when the default
+	// cert/key pair is absent: some external certificate provisioners deliver
+	// the serving certificate and private key concatenated in one PEM file.
+	combinedPEMFileName = "cert.pem"
+)
+
+// resolveWebhookCertFiles validates that the webhook serving certificate and
+// key exist in certDir and returns the effective filenames to configure the
+// webhook server with.
+//
+// When certName/keyName are the defaults and neither file exists, it falls
+// back to a single combined PEM file (cert.pem) holding both the certificate
+// and private key blocks; the same filename is then returned for both.
+// crypto/tls supports loading a key pair whose cert and key point at the
+// same file.
+func resolveWebhookCertFiles(certDir, certName, keyName string) (string, string, error) {
+	certErr := statRegularFile(filepath.Join(certDir, certName))
+	keyErr := statRegularFile(filepath.Join(certDir, keyName))
+	if certErr == nil && keyErr == nil {
+		return certName, keyName, nil
+	}
+
+	// Fall back to a combined cert+key PEM only when the defaults were
+	// requested and both are cleanly absent (not on I/O or permission errors).
+	if certName == defaultWebhookCertName && keyName == defaultWebhookKeyName &&
+		os.IsNotExist(certErr) && os.IsNotExist(keyErr) {
+		if statRegularFile(filepath.Join(certDir, combinedPEMFileName)) == nil {
+			return combinedPEMFileName, combinedPEMFileName, nil
+		}
+	}
+
+	if certErr != nil {
+		return "", "", fmt.Errorf("webhook certificate %q: %w", filepath.Join(certDir, certName), certErr)
+	}
+	return "", "", fmt.Errorf("webhook private key %q: %w", filepath.Join(certDir, keyName), keyErr)
+}
+
+func statRegularFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
 	return nil
 }

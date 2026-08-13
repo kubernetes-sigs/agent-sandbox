@@ -16,11 +16,18 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,9 +97,9 @@ func TestGenerateWebhookCerts(t *testing.T) {
 		defer os.RemoveAll(tempDir)
 
 		// Pre-populate Secret with dummy data
-		existingCA := []byte("existing-ca-pem")
-		existingCert := []byte("existing-cert-pem")
-		existingKey := []byte("existing-key-pem")
+		existingCA := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----")
+		existingCert := []byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----")
+		existingKey := []byte("-----BEGIN EC PRIVATE KEY-----\nMIIB\n-----END EC PRIVATE KEY-----")
 
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -123,6 +130,32 @@ func TestGenerateWebhookCerts(t *testing.T) {
 		keyBytes, err := os.ReadFile(keyPath)
 		require.NoError(t, err)
 		assert.Equal(t, existingKey, keyBytes)
+	})
+
+	t.Run("returns error when existing Secret has invalid certificate data", func(t *testing.T) {
+		tempDir, err := os.MkdirTemp("", "webhook-certs-test-*")
+		require.NoError(t, err)
+		defer os.RemoveAll(tempDir)
+
+		// Pre-populate Secret with invalid PEM data
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: namespace,
+			},
+			Data: map[string][]byte{
+				"ca.crt":  []byte("invalid-ca-pem"),
+				"tls.crt": []byte("invalid-cert-pem"),
+				"tls.key": []byte("invalid-key-pem"),
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+
+		caPEM, err := generateWebhookCerts(context.Background(), fakeClient, tempDir, serviceName, namespace, clusterDomain)
+		require.Error(t, err)
+		assert.Nil(t, caPEM)
+		assert.Contains(t, err.Error(), "has invalid certificate data")
 	})
 }
 
@@ -221,5 +254,96 @@ func TestPatchCRDs(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, apiextensionsv1.NoneConverter, patchedCRD4.Spec.Conversion.Strategy)
 		assert.Nil(t, patchedCRD4.Spec.Conversion.Webhook)
+	})
+}
+
+func TestResolveWebhookCertFiles(t *testing.T) {
+	tests := []struct {
+		name     string
+		files    []string
+		dirs     []string
+		certName string
+		keyName  string
+		wantCert string
+		wantKey  string
+		wantErr  bool
+	}{
+		{name: "default pair present", files: []string{"tls.crt", "tls.key"}, certName: "tls.crt", keyName: "tls.key", wantCert: "tls.crt", wantKey: "tls.key"},
+		{name: "custom filenames present", files: []string{"server.crt", "server.key"}, certName: "server.crt", keyName: "server.key", wantCert: "server.crt", wantKey: "server.key"},
+		{name: "combined file requested explicitly for both", files: []string{"cert.pem"}, certName: "cert.pem", keyName: "cert.pem", wantCert: "cert.pem", wantKey: "cert.pem"},
+		{name: "fallback to combined file when defaults absent", files: []string{"cert.pem"}, certName: "tls.crt", keyName: "tls.key", wantCert: "cert.pem", wantKey: "cert.pem"},
+		{name: "no fallback for custom names", files: []string{"cert.pem"}, certName: "server.crt", keyName: "server.key", wantErr: true},
+		{name: "no fallback when only key is missing", files: []string{"tls.crt", "cert.pem"}, certName: "tls.crt", keyName: "tls.key", wantErr: true},
+		{name: "no fallback when only cert is missing", files: []string{"tls.key", "cert.pem"}, certName: "tls.crt", keyName: "tls.key", wantErr: true},
+		{name: "all files missing", certName: "tls.crt", keyName: "tls.key", wantErr: true},
+		{name: "cert path is a directory", dirs: []string{"tls.crt"}, files: []string{"tls.key"}, certName: "tls.crt", keyName: "tls.key", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("pem"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, d := range tc.dirs {
+				if err := os.Mkdir(filepath.Join(dir, d), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cert, key, err := resolveWebhookCertFiles(dir, tc.certName, tc.keyName)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got cert=%q key=%q", cert, key)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cert != tc.wantCert || key != tc.wantKey {
+				t.Fatalf("got (%q, %q), want (%q, %q)", cert, key, tc.wantCert, tc.wantKey)
+			}
+		})
+	}
+
+	t.Run("validates that resolved combined cert.pem parses with tls.LoadX509KeyPair", func(t *testing.T) {
+		dir := t.TempDir()
+
+		// Generate valid EC key pair and self-signed certificate
+		privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+
+		template := &x509.Certificate{
+			SerialNumber: big.NewInt(1),
+			Subject:      pkix.Name{CommonName: "localhost"},
+			NotBefore:    time.Now().Add(-1 * time.Hour),
+			NotAfter:     time.Now().Add(1 * time.Hour),
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+		}
+
+		certBytes, err := x509.CreateCertificate(rand.Reader, template, template, &privKey.PublicKey, privKey)
+		require.NoError(t, err)
+
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+		keyBytes, err := x509.MarshalECPrivateKey(privKey)
+		require.NoError(t, err)
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+
+		// Concatenate certificate and key into single cert.pem
+		combinedPEM := append(certPEM, keyPEM...)
+		certPemPath := filepath.Join(dir, "cert.pem")
+		require.NoError(t, os.WriteFile(certPemPath, combinedPEM, 0o600))
+
+		// Resolve cert files (expecting fallback to cert.pem)
+		resolvedCert, resolvedKey, err := resolveWebhookCertFiles(dir, "tls.crt", "tls.key")
+		require.NoError(t, err)
+		assert.Equal(t, "cert.pem", resolvedCert)
+		assert.Equal(t, "cert.pem", resolvedKey)
+
+		// Verify tls.LoadX509KeyPair successfully parses the single combined file
+		tlsKeyPair, err := tls.LoadX509KeyPair(filepath.Join(dir, resolvedCert), filepath.Join(dir, resolvedKey))
+		require.NoError(t, err)
+		assert.NotEmpty(t, tlsKeyPair.Certificate)
 	})
 }

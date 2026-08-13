@@ -17,7 +17,8 @@ description: >
 
 Use `sandbox.files.list()` to get the contents of a directory inside the sandbox. It returns a list of `FileEntry` objects.
 
-```python
+{{< blocks/tabs name="list-directory-contents" >}}
+  {{< blocks/tab name="Python" codelang="python" >}}
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
@@ -29,7 +30,46 @@ for entry in entries:
     print(f"{entry.name:30s} {entry.type:10s} {entry.size} bytes")
 
 sandbox.terminate()
-```
+  {{< /blocks/tab >}}
+  {{< blocks/tab name="Go" codelang="go" >}}
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// WarmPoolName must be set here too to satisfy Options.validate();
+	// CreateSandbox's own argument below is what actually gets used.
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.DeleteAll(ctx)
+
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-pool", "default")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// List the sandbox's working directory
+	entries, err := sb.Files().List(ctx, ".")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, entry := range entries {
+		fmt.Printf("%-30s %-10s %d bytes\n", entry.Name, entry.Type, entry.Size)
+	}
+}
+  {{< /blocks/tab >}}
+{{< /blocks/tabs >}}
+
 
 **Parameters:**
 
@@ -51,7 +91,9 @@ sandbox.terminate()
 
 Use `sandbox.files.exists()` to check whether a file or directory exists at a given path.
 
-```python
+
+{{< blocks/tabs name="check-if-a-path-exists" >}}
+  {{< blocks/tab name="Python" codelang="python" >}}
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
@@ -65,7 +107,52 @@ else:
     print("Config file not found")
 
 sandbox.terminate()
-```
+  {{< /blocks/tab >}}
+  {{< blocks/tab name="Go" codelang="go" >}}
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// WarmPoolName must be set here too to satisfy Options.validate();
+	// CreateSandbox's own argument below is what actually gets used.
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.DeleteAll(ctx)
+
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-pool", "default")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Check before reading
+	exists, err := sb.Files().Exists(ctx, "config.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if exists {
+		data, err := sb.Files().Read(ctx, "config.json")
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(string(data))
+	} else {
+		fmt.Println("Config file not found")
+	}
+}
+  {{< /blocks/tab >}}
+{{< /blocks/tabs >}}
+
 
 **Parameters:**
 
@@ -78,7 +165,9 @@ sandbox.terminate()
 
 ## Example: Browse a Workspace
 
-```python
+
+{{< blocks/tabs name="browse-a-workspace" >}}
+  {{< blocks/tab name="Python" codelang="python" >}}
 from k8s_agent_sandbox import SandboxClient
 
 client = SandboxClient()
@@ -96,4 +185,57 @@ def print_tree(path, indent=0):
 print_tree("/home/user")
 
 sandbox.terminate()
-```
+  {{< /blocks/tab >}}
+  {{< blocks/tab name="Go" codelang="go" >}}
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+)
+
+func printTree(ctx context.Context, sb *sandbox.Sandbox, path string, indent int) error {
+	entries, err := sb.Files().List(ctx, path)
+	if err != nil {
+		return err
+	}
+	prefix := strings.Repeat("  ", indent)
+	for _, entry := range entries {
+		if entry.Type == sandbox.FileTypeDirectory {
+			fmt.Printf("%s%s/\n", prefix, entry.Name)
+			if err := printTree(ctx, sb, path+"/"+entry.Name, indent+1); err != nil {
+				return err
+			}
+		} else {
+			fmt.Printf("%s%s\n", prefix, entry.Name)
+		}
+	}
+	return nil
+}
+
+func main() {
+	ctx := context.Background()
+
+	// WarmPoolName must be set here too to satisfy Options.validate();
+	// CreateSandbox's own argument below is what actually gets used.
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.DeleteAll(ctx)
+
+	sb, err := client.CreateSandbox(ctx, "python-sandbox-pool", "default")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := printTree(ctx, sb, ".", 0); err != nil {
+		log.Fatal(err)
+	}
+}
+  {{< /blocks/tab >}}
+{{< /blocks/tabs >}}

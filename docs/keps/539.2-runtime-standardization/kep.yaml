@@ -1,0 +1,13 @@
+title: Standardizing Sandbox Runtime Interfaces & sandboxd Hybrid Protocol
+kep-number: 539.2
+authors:
+  - "@barney-s"
+  - "@Oneimu"
+status: implementable
+creation-date: 2026-06-01
+reviewers:
+  - "@janetkuo"
+  - "@justinsb"
+approvers:
+  - "@janetkuo"
+  - "@justinsb"

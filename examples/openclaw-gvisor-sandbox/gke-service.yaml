@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: openclaw-gateway
+spec:
+  type: LoadBalancer
+  selector:
+    sandbox.users.io/openclaw-claim: openclaw-sandbox-claim
+  ports:
+    - name: gateway
+      port: 18789
+      targetPort: 18789
+      # Pinned so the IAP firewall rule (see README) doesn't need to be
+      # recreated every time the Service is reapplied. Matches the kind
+      # NodePort for consistency across environments.
+      nodePort: 30789

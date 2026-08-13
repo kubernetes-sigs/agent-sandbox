@@ -1,0 +1,29 @@
+# Extra RBAC for --authz-mode=tokenreview. system:auth-delegator is the
+# stock ClusterRole granted to kubelet / metrics-server / kube-state-
+# metrics and other components that validate caller-supplied tokens;
+# it gives `create` on tokenreviews.authentication.k8s.io and `create`
+# on subjectaccessreviews.authorization.k8s.io.
+#
+# Apply this file alongside rbac.yaml ONLY when running the router
+# with --authz-mode=tokenreview. The default (--authz-mode=allow-all)
+# does not need it, and shipping it by default would unnecessarily
+# grant tokenreview / SAR creation rights to a ServiceAccount that
+# never uses them.
+#
+#   kubectl apply -f sandbox-router/deploy/rbac.yaml
+#   kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml  # only when tokenreview is on
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-router-auth-delegator
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: default

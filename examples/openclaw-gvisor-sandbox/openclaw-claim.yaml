@@ -1,0 +1,15 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: openclaw-sandbox-claim
+spec:
+  warmPoolRef:
+    name: openclaw-warmpool
+  # Inject a claim-specific label onto the adopted pod so the Service can
+  # select it precisely. The warm-pool replenishment pod does not get this
+  # label (it's added by the claim controller at adoption time), so the
+  # Service won't route to it. The "sandbox.users.io" domain is the secure
+  # default in AllowedLabelDomains.
+  additionalPodMetadata:
+    labels:
+      sandbox.users.io/openclaw-claim: openclaw-sandbox-claim

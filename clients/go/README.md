@@ -33,6 +33,21 @@ The client operates in three modes:
 go get sigs.k8s.io/agent-sandbox/clients/go/sandbox
 ```
 
+## Versioning and Releases
+
+The Go SDK is currently published from the repository's root Go module.
+That means repository tags such as `v0.1.0` are also the SDK versions for:
+
+```bash
+go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@v0.1.0
+```
+
+To follow the most recent repository release, use:
+
+```bash
+go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
+```
+
 ## Usage Examples
 
 ### 1. Production Mode (Gateway)

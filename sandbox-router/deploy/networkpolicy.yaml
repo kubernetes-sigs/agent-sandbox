@@ -1,0 +1,88 @@
+# Example NetworkPolicy. Adjust the ingress source — most deployments have
+# the router behind a Gateway in a specific namespace; tighten the from:
+# selector to that namespace + labels to prevent direct cluster-wide ingress.
+#
+# Egress is intentionally broad because the router dials arbitrary sandbox
+# pods in tenant namespaces — narrow it via labels if your tenancy model
+# constrains which pods/namespaces are valid targets.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-router
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-router
+      app.kubernetes.io/component: sandbox-router
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  # Proxy traffic — replace this from: clause with your Gateway namespace.
+  - from:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8080
+    # Uncomment when TLS is enabled:
+    # - protocol: TCP
+    #   port: 8443
+  # Metrics scrape — restrict to your monitoring namespace.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
+  # Kubelet probes hit the pod IP directly; allow all.
+  - ports:
+    - protocol: TCP
+      port: 8081
+  egress:
+  # DNS for resolving sandbox FQDNs.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow forwarding to sandbox pods on the agreed sandbox port. Tighten
+  # via namespaceSelector/podSelector if your tenancy model permits.
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8888
+  # OTel collector (if --enable-tracing or --enable-otel-metrics). Tighten
+  # to your collector's namespace/pod selector.
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 4317
+  # Kubernetes API server — required when --cache-enabled or
+  # --authz-mode=tokenreview. The cache informer LIST/WATCHes Pods and
+  # the TokenReview authorizer POSTs to authentication.k8s.io. Without
+  # this rule, cache sync hangs and tokenreview every-request fails
+  # closed. The apiserver lives at the cluster-wide kubernetes service;
+  # NetworkPolicy can't name it directly, so we allow egress to the
+  # default namespace on the standard API port. Many clusters also
+  # accept apiserver traffic over the public LB IP — if your cluster
+  # routes that way, add an ipBlock for the LB CIDR alongside this
+  # rule. Skip this rule entirely when running with --cache-enabled=false
+  # AND --authz-mode=allow-all.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443

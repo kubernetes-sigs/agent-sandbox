@@ -1,0 +1,24 @@
+# Demo namespace and two ServiceAccounts.
+#
+# These SAs are NOT what the CiliumNetworkPolicies select on — Cilium derives a
+# pod's security identity from its LABELS (the `demo.identity` pod label set in
+# 30-sandboxes.yaml). The SAs are kept for hygiene (so pods don't run as the
+# namespace `default` SA) and as the natural anchor for Workload Identity
+# Federation if a sandbox ever needs Google Cloud API access.
+# See the README's "A note on the ServiceAccount".
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-team-a
+  namespace: sandbox-demo
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-team-b
+  namespace: sandbox-demo

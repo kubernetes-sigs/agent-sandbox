@@ -1,0 +1,13 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: ${WARM_POOL_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${WARM_POOL_NAME}
+spec:
+  # replicas is omitted so that KEDA autoscaling can control it.
+  # If specified here, any re-application of this manifest would stomp
+  # the replica count back to that value.
+  sandboxTemplateRef:
+    name: ${TEMPLATE_NAME}

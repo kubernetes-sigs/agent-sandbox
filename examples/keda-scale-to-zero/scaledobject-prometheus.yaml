@@ -1,0 +1,47 @@
+# KEDA Prometheus scaler querying GKE Managed Service for
+# Prometheus (GMP) DIRECTLY via Google's hosted Prometheus query endpoint.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-trigger-auth-gcp-credentials
+  namespace: ${NAMESPACE}
+spec:
+  podIdentity:
+    provider: gcp
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: agent-warmpool-scaledobject
+  namespace: ${NAMESPACE} # Namespace of the SandboxWarmPool
+spec:
+  scaleTargetRef:
+    apiVersion: extensions.agents.x-k8s.io/v1beta1
+    kind: SandboxWarmPool
+    name: ${WARM_POOL_NAME}
+  # True scale-to-zero. Native HPA cannot do this (it enforces minReplicas >= 1);
+  # KEDA performs the 0 -> 1 activation itself and hands 1 -> N to an HPA it manages.
+  minReplicaCount: 0
+  maxReplicaCount: 100 # Hard budget ceiling (matches the HPA example).
+  pollingInterval: 15 # Align with the 15s GMP scrape interval.
+  cooldownPeriod: 300 # Seconds at/under the activation threshold before scaling back to 0.
+  triggers:
+    - type: prometheus
+      # GCP Workload Identity. On the hosted GMP endpoint this is the ONLY supported
+      # auth — do not add authModes.
+      authenticationRef:
+        name: keda-trigger-auth-gcp-credentials
+      metadata:
+        # Google's hosted Prometheus-compatible query endpoint for GMP.
+        serverAddress: https://monitoring.googleapis.com/v1/projects/${PROJECT_ID}/location/global/prometheus
+        # Rate of sandbox claims created for this warm pool, in claims/sec.
+        query: sum(rate(agent_sandbox_claim_creation_total{exported_namespace="${NAMESPACE}", warmpool_name="${WARM_POOL_NAME}"}[1m]) >= 0) or vector(0)
+        # 1 -> N scaling math: 0.05 claims/sec per replica
+        # Note: default metricType is AverageValue => desired pool = claim_rate / 0.05
+        # = claim_rate x 20. So 1/threshold = ~20s of demand buffered as ready sandboxes; set this
+        # >= the per-sandbox replenishment time T (from agent_sandbox_creation_latency_ms).
+        # Lower threshold -> bigger pool / more headroom.
+        threshold: "0.05"
+        # 0 <-> 1 gate: any real claim activity lifts the pool off zero; it returns to zero
+        # only once the rate falls at/under this value for `cooldownPeriod`.
+        activationThreshold: "0.01"

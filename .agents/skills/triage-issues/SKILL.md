@@ -33,7 +33,7 @@ Assign each open issue a tier using, in order:
 2. **Roadmap references** — if the issue number is cited in `roadmap.md`, inherit that item's status: `⏳ In Progress` → **P1**, `📅 Planned` → **P2**, `✅ Completed` follow-ups → P2/P3.
 3. **Bug severity** — data-integrity / duplicate-resource / resource-leak bugs in the core controller → **P0/P1**. Self-labeled "Critical" → P0.
 4. **Value props** — latency / performance / scale bottlenecks skew **P1** (called out as a primary value proposition).
-5. **Security** — security/dependency issues → **P1** (tied to "Security Fixes" roadmap item).
+5. **Security** — critical security vulnerabilities / CVEs → **P0** (`priority/critical-urgent`); routine dependency/patch updates → **P1** (tied to "Security Fixes" roadmap item).
 6. **Low-signal** — empty bodies, one-line questions, "collecting use cases", pinned/frozen community threads, items marked `triage/not-reproducible`/`triage/needs-information` → **P4**. Nice-to-have features, refactors, cleanups, test scaffolding → **P3**.
 
 ## Procedure

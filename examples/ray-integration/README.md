@@ -43,7 +43,7 @@ Releases can be found here: https://github.com/kubernetes-sigs/agent-sandbox/rel
 ```bash
 export VERSION="vX.Y.Z"
 
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
 
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```
@@ -232,6 +232,6 @@ kubectl delete -f clients/python/agentic-sandbox-client/sandbox-router/gateway.y
 ```bash
 # Delete Agent Sandbox controller and extensions
 export VERSION="vX.Y.Z"
-kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
 kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 ```

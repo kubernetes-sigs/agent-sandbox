@@ -1,0 +1,96 @@
+# A Sandbox running Containarium's agent-box image: an SSH-reachable,
+# MCP-native runtime environment. The agent connects over SSH (holding
+# only an SSH key — no kube-apiserver token) and every session is pinned
+# by a forced command to the in-container `agent-box` MCP server
+# (shell_exec, read/write_file, ...) — the key can do nothing else.
+#
+# See https://github.com/FootprintAI/Containarium for the runtime, and
+# images/agent-box/Dockerfile + images/agent-box/entrypoint.sh for how
+# this image is built (dropbear, not OpenSSH; forced command). Don't want to
+# trust the published tag sight unseen? Build it yourself from the Dockerfile
+# in this directory — see the README's "Building agent-box from source". This
+# manifest applies as-is with the pinned tag below; swap in your own build by
+# overriding `image:` (e.g. `kubectl set image`, or `sed` before apply — see
+# the README).
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: containarium-ssh-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: containarium-ssh-sandbox
+    spec:
+      # Optional: uncomment to run under a hardened runtime class.
+      # runtimeClassName: gvisor
+
+      # The whole point of the SSH-based access pattern: the agent inside
+      # (or connecting to) this box never holds cluster credentials.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent-box
+          image: ghcr.io/footprintai/containarium-agent-box:v0.52.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          # No env knobs here on purpose: the image's dropbear SSH server
+          # always listens on :2222 (images/agent-box/entrypoint.sh hardcodes
+          # -p 2222) — there is no SSH_PORT or similar override.
+          ports:
+            - name: ssh
+              containerPort: 2222
+          volumeMounts:
+            # Agent workspace survives pod restarts via the PVC below.
+            - name: workspace
+              mountPath: /home/agent/workspace
+            # Public key(s) authorized to SSH into the box. Mounted as a
+            # *directory* at /etc/agent-box (not directly into ~/.ssh) —
+            # the entrypoint symlinks /etc/agent-box/authorized_keys into
+            # ~/.ssh itself and fails closed if this path is empty.
+            - name: ssh-authorized-keys
+              mountPath: /etc/agent-box
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: ssh-authorized-keys
+          secret:
+            # This box is the direct/port-forward smoke test: with no gateway in
+            # front, it authorizes the agent's key directly. The gateway boxes
+            # (gateway-demo.yaml) instead trust ONLY the gateway's upstream key,
+            # so they use a different Secret — the two paths never share one.
+            secretName: direct-box-authorized-keys
+            items:
+              - key: authorized_keys
+                path: authorized_keys
+            defaultMode: 0400
+  # Ask the controller for the headless Service: it gives the pod a stable
+  # DNS name (<sandbox>.<ns>.svc...) that the sshpiper gateway routes to.
+  service: true
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

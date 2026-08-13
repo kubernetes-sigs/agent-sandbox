@@ -1,0 +1,51 @@
+# Two agent-sandbox Sandboxes, each with a distinct identity.
+#
+# The NETWORK identity is the pod label `demo.identity` (metadata.labels): Cilium
+# derives the team-a / team-b security identity from pod labels, and that is what
+# the CiliumNetworkPolicies select on. agent-sandbox propagates podTemplate labels
+# onto the created Pod, so the label reaches Cilium.
+#
+# The ServiceAccount (spec.serviceAccountName) is a SEPARATE identity layer and is
+# NOT what Cilium keys on — it's kept for hygiene and as the anchor for Workload
+# Identity Federation if a sandbox ever needs Google Cloud API access. The token is
+# not mounted (automountServiceAccountToken: false). See the README's
+# "A note on the ServiceAccount".
+#
+# Image: alpine/git has git pre-installed, so the only egress the demo needs is
+# DNS + github (no package install). Image pulls happen on the node and are not
+# subject to the pod's egress policy.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: sandbox-team-a
+  namespace: sandbox-demo
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        demo.identity: team-a
+    spec:
+      serviceAccountName: sa-team-a
+      automountServiceAccountToken: false
+      containers:
+        - name: tools
+          image: alpine/git:latest
+          command: ["sleep", "infinity"]
+---
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: sandbox-team-b
+  namespace: sandbox-demo
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        demo.identity: team-b
+    spec:
+      serviceAccountName: sa-team-b
+      automountServiceAccountToken: false
+      containers:
+        - name: tools
+          image: alpine/git:latest
+          command: ["sleep", "infinity"]

@@ -23,7 +23,6 @@
 
 ```bash
 # Verify installations
-go version              # Go 1.19+
 make --version          # GNU Make
 python3 --version       # Python 3.13+
 docker --version        # Docker 20.10+
@@ -33,7 +32,6 @@ kubectl version --client # kubectl 1.25+
 
 ### Installation Links
 
-- [Go](https://golang.org/doc/install)
 - [Make](https://www.gnu.org/software/make/)
 - [Python 3](https://www.python.org/downloads/)
 - [Docker](https://docs.docker.com/get-docker/)

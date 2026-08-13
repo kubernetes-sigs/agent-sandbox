@@ -216,7 +216,8 @@ func TestRunPythonRuntimeSandboxClaim(testingT *testing.T) {
 	sandboxWarmpool, err := sandboxWarmpoolFromManifest(warmPoolManifest)
 	require.NoError(testingT, err)
 	sandboxWarmpool.Namespace = ns.Name
-	sandboxWarmpool.Spec.Replicas = 0
+	replicas := int32(0)
+	sandboxWarmpool.Spec.Replicas = &replicas
 	require.NoError(testingT, testContext.CreateWithCleanup(testingT.Context(), sandboxWarmpool))
 
 	// Create the sandbox claim and wait for readiness

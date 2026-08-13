@@ -21,6 +21,7 @@ Supports both kubectl-based and Helm-based upgrade paths.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +39,18 @@ V1ALPHA1_RESOURCES = """apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
 metadata:
   name: upgrade-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: upgrade-template-cold
   namespace: default
 spec:
   podTemplate:
@@ -89,8 +102,8 @@ metadata:
   namespace: default
 spec:
   sandboxTemplateRef:
-    name: upgrade-template
-  warmpool: "default" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template)
+    name: upgrade-template-cold
+  warmpool: "default" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template-cold)
 ---
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxClaim
@@ -109,8 +122,56 @@ metadata:
   namespace: default
 spec:
   sandboxTemplateRef:
+    name: upgrade-template-cold
+  warmpool: "none" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template-cold)
+---
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: upgrade-pool-warm-a1b2c
+  namespace: default
+  labels:
+    agents.x-k8s.io/warmpool: upgrade-pool-warm
+spec:
+  replicas: 1
+  podTemplate:
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: upgrade-pool-warm
+  namespace: default
+spec:
+  replicas: 1
+  sandboxTemplateRef:
     name: upgrade-template
-  warmpool: "none" # v1alpha1 syntax (converts to warmPoolRef.name: shadow-pool-upgrade-template)
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: upgrade-claim-warm
+  namespace: default
+spec:
+  sandboxTemplateRef:
+    name: upgrade-template
+  warmpool: "default"
+status:
+  sandbox:
+    name: upgrade-pool-warm-a1b2c
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: upgrade-pool-adopt
+  namespace: default
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: upgrade-template
 """
 
 def _safe_extract(tar, dest, members=None):
@@ -210,6 +271,25 @@ def cleanup_sandbox_system():
     run_cmd(["kubectl", "delete", "validatingwebhookconfiguration", "agent-sandbox-webhook", "--ignore-not-found"], check=False)
     run_cmd(["kubectl", "delete", "mutatingwebhookconfiguration", "agent-sandbox-webhook", "--ignore-not-found"], check=False)
 
+def get_manifest_filename_and_url(version):
+    """Returns the manifest filename (sandbox.yaml or manifest.yaml) and download URL for the version."""
+    ver_clean = version.lstrip("v")
+    parts = re.split(r"[-+]", ver_clean)[0].split(".")
+    is_old = False
+    try:
+        tuple_version = tuple(int(x) for x in parts[:3])
+        while len(tuple_version) < 3:
+            tuple_version += (0,)
+        if tuple_version < (0, 5, 2):
+            is_old = True
+    except ValueError:
+        pass
+
+    filename = "manifest.yaml" if is_old else "sandbox.yaml"
+    url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{version}/{filename}"
+    return filename, url
+
+
 def install_v1alpha1(method, version):
     print(f"\n=== Phase 1: Installing v1alpha1 version ({version}) using {method} ===")
     
@@ -222,7 +302,12 @@ def install_v1alpha1(method, version):
 
     if method == "kubectl":
         local_dir = os.path.join(_repo_root, "test/migration/testdata", version)
-        local_manifest = os.path.join(local_dir, "manifest.yaml")
+        local_manifest_name, manifest_url = get_manifest_filename_and_url(version)
+        local_manifest = os.path.join(local_dir, local_manifest_name)
+        if not os.path.exists(local_manifest):
+            alt_name = "sandbox.yaml" if local_manifest_name == "manifest.yaml" else "manifest.yaml"
+            if os.path.exists(os.path.join(local_dir, alt_name)):
+                local_manifest = os.path.join(local_dir, alt_name)
         local_extensions = os.path.join(local_dir, "extensions.yaml")
         
         if os.path.exists(local_manifest) and os.path.exists(local_extensions):
@@ -231,7 +316,6 @@ def install_v1alpha1(method, version):
             print(f"Applying local extensions: {local_extensions}")
             run_cmd(["kubectl", "apply", "-f", local_extensions])
         else:
-            manifest_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{version}/manifest.yaml"
             extensions_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{version}/extensions.yaml"
             print(f"Applying manifest: {manifest_url}")
             run_cmd(["kubectl", "apply", "-f", manifest_url])
@@ -284,7 +368,8 @@ def install_v1alpha1(method, version):
                 "helm", "install", "agent-sandbox", extracted_helm_path,
                 "-n", "agent-sandbox-system", "--create-namespace",
                 "--set", "namespace.create=false",
-                "--set", f"image.tag={version}"
+                "--set", f"image.tag={version}",
+                "--set", "controller.extensions=true"
             ])
         finally:
             # Clean up the downloaded and extracted files
@@ -302,6 +387,40 @@ def install_v1alpha1(method, version):
 def create_v1alpha1_objects():
     print("\n=== Phase 2: Creating v1alpha1 objects ===")
     run_cmd(["kubectl", "apply", "-f", "-"], input_data=V1ALPHA1_RESOURCES)
+    time.sleep(3)
+    
+    # Explicitly patch the Sandbox with the owner reference pointing to upgrade-claim-warm
+    # Use a retry loop to tolerate API server discovery cache lag or transient NotFound errors
+    claim_uid = ""
+    for i in range(10):
+        res = run_cmd([
+            "kubectl", "get", "sandboxclaims.extensions.agents.x-k8s.io", "upgrade-claim-warm",
+            "-n", "default", "-o", "jsonpath={.metadata.uid}"
+        ], check=False, capture_output=True)
+        if res.returncode == 0 and res.stdout.strip() != "":
+            claim_uid = res.stdout.strip()
+            break
+        print(f"Waiting for API server to serve sandboxclaim (attempt {i+1}/10)...")
+        time.sleep(1)
+    assert claim_uid != "", "Failed to get UID of upgrade-claim-warm!"
+    owner_patch = {
+        "metadata": {
+            "ownerReferences": [
+                {
+                    "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+                    "kind": "SandboxClaim",
+                    "name": "upgrade-claim-warm",
+                    "uid": claim_uid,
+                    "controller": True,
+                    "blockOwnerDeletion": True
+                }
+            ]
+        }
+    }
+    run_cmd(["kubectl", "patch", "sandbox", "upgrade-pool-warm-a1b2c", "-n", "default", "--type=merge", "-p", json.dumps(owner_patch)])
+
+    # Explicitly patch the status of upgrade-claim-warm since subresources.status drops status fields on normal apply
+    run_cmd(["kubectl", "patch", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "upgrade-claim-warm", "-n", "default", "--subresource=status", "--type=merge", "-p", '{"status":{"sandbox":{"name":"upgrade-pool-warm-a1b2c"}}}'])
     
     print("Waiting for upgrade-sandbox-running Pod to be created...")
     pod_exists = False
@@ -335,13 +454,119 @@ def create_v1alpha1_objects():
     pod_creation = pod_data["metadata"]["creationTimestamp"]
     print(f"Captured active pod info - Name: upgrade-sandbox-running, UID: {pod_uid}, CreatedAt: {pod_creation}")
     
+    print("Creating 10 SandboxClaims with assigned sandbox annotations/labels to stress-test upgrade race condition...")
+    claim_manifests = []
+    for i in range(1, 11):
+        claim_name = f"upgrade-claim-warm-flake-{i}"
+        sb_name = f"upgrade-pool-warm-f{i}"
+        claim_manifests.append(f"""apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: {claim_name}
+  namespace: default
+  annotations:
+    agents.x-k8s.io/sandbox-name: {sb_name}
+  labels:
+    agents.x-k8s.io/sandbox-name: {sb_name}
+spec:
+  sandboxTemplateRef:
+    name: upgrade-template
+  warmpool: "default"
+""")
+    run_cmd(["kubectl", "apply", "-f", "-"], input_data="\n---\n".join(claim_manifests))
+    time.sleep(2)
+
+    print("Fetching UIDs and creating 10 corresponding Sandboxes with ownerReferences...")
+    sb_manifests = []
+    for i in range(1, 11):
+        claim_name = f"upgrade-claim-warm-flake-{i}"
+        sb_name = f"upgrade-pool-warm-f{i}"
+        c_uid = run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", claim_name, "-n", "default", "-o", "jsonpath={.metadata.uid}"], capture_output=True).stdout.strip()
+        sb_manifests.append(f"""apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: {sb_name}
+  namespace: default
+  labels:
+    agents.x-k8s.io/warmpool: upgrade-pool-warm
+  ownerReferences:
+  - apiVersion: extensions.agents.x-k8s.io/v1alpha1
+    kind: SandboxClaim
+    name: {claim_name}
+    uid: {c_uid}
+    controller: true
+    blockOwnerDeletion: true
+spec:
+  replicas: 1
+  podTemplate:
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+""")
+    run_cmd(["kubectl", "apply", "-f", "-"], input_data="\n---\n".join(sb_manifests))
+    time.sleep(2)
+
+    print("Initializing status for 10 stress-test warm claims...")
+    for i in range(1, 11):
+        sb_name = f"upgrade-pool-warm-f{i}"
+        claim_name = f"upgrade-claim-warm-flake-{i}"
+        run_cmd(["kubectl", "patch", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", claim_name, "-n", "default", "--subresource=status", "--type=merge", "-p", f'{{"status":{{"sandbox":{{"name":"{sb_name}"}}}}}}'])
+
     print("Waiting for v1alpha1 claims to be bound...")
-    # Give a short sleep for claims to reconcile
-    time.sleep(10)
-    # Check claim exists and status has reconciled
+    all_bound = False
+    bound_count = 0
+    for i in range(60):
+        res = run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            try:
+                claims_data = json.loads(res.stdout).get("items", [])
+                bound_count = 0
+                for c in claims_data:
+                    if c["metadata"]["name"].startswith("upgrade-claim-warm") and c.get("status", {}).get("sandbox", {}).get("name"):
+                        bound_count += 1
+                if bound_count >= 11:
+                    print(f"All {bound_count} warm claims successfully bound!")
+                    all_bound = True
+                    break
+                if (i + 1) % 5 == 0:
+                    print(f"Waiting for warm claims to bind ({bound_count}/11 bound, attempt {i+1}/60)...")
+            except Exception as e:
+                print(f"Error checking claim bindings: {e}")
+        time.sleep(2)
+
+    if not all_bound:
+        print(f"Not all warm claims were bound in time ({bound_count}/11 bound). Dumping diagnostics:", file=sys.stderr)
+        run_cmd(["kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io,sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "-n", "default"], check=False)
+
+    assert all_bound, f"Not all warm claims were bound in time! Only {bound_count}/11 bound."
+
     run_cmd(["kubectl", "get", "sandboxclaims.v1alpha1.extensions.agents.x-k8s.io", "-n", "default"])
-    
-    return {"uid": pod_uid, "creationTimestamp": pod_creation}
+
+    # Wait for the v1alpha1 pool controller to create the warm sandbox for
+    # upgrade-pool-adopt. This sandbox carries an owner reference stamped with
+    # apiVersion extensions.agents.x-k8s.io/v1alpha1, which storage migration
+    # does not rewrite — post-upgrade warm adoption from it is validated later.
+    print("Waiting for the v1alpha1 pool controller to create a warm sandbox for upgrade-pool-adopt...")
+    adopt_sandbox_name = ""
+    for i in range(60):
+        res = run_cmd(["kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            for s in json.loads(res.stdout).get("items", []):
+                for ref in s["metadata"].get("ownerReferences", []):
+                    if ref.get("kind") == "SandboxWarmPool" and ref.get("name") == "upgrade-pool-adopt" and ref.get("controller"):
+                        adopt_sandbox_name = s["metadata"]["name"]
+                        assert ref["apiVersion"] == "extensions.agents.x-k8s.io/v1alpha1", \
+                            f"Expected the pre-upgrade warm sandbox owner reference to be v1alpha1, got {ref['apiVersion']}"
+        if adopt_sandbox_name:
+            break
+        if (i + 1) % 5 == 0:
+            print(f"Warm sandbox for upgrade-pool-adopt not created yet (attempt {i+1}/60)...")
+        time.sleep(2)
+    assert adopt_sandbox_name, "The v1alpha1 pool controller never created a warm sandbox for upgrade-pool-adopt!"
+    print(f"Captured pre-upgrade warm sandbox for adoption test: {adopt_sandbox_name}")
+
+    return {"uid": pod_uid, "creationTimestamp": pod_creation, "adopt_sandbox": adopt_sandbox_name}
 
 def upgrade_and_migrate(method, image_prefix, image_tag):
     print(f"\n=== Phase 3 & 4: Upgrading to target version & Migrating using {method} ===")
@@ -362,9 +587,9 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
     
     # Verify shadow pool was created
     print("Verifying shadow pool creation...")
-    res = run_cmd(["kubectl", "get", "sandboxwarmpool", "shadow-pool-upgrade-template", "-n", "default", "-o", "json"], capture_output=True)
+    res = run_cmd(["kubectl", "get", "sandboxwarmpool", "shadow-pool-upgrade-template-cold", "-n", "default", "-o", "json"], capture_output=True)
     shadow_pool = json.loads(res.stdout)
-    assert shadow_pool["spec"]["sandboxTemplateRef"]["name"] == "upgrade-template", "Shadow pool template mismatch!"
+    assert shadow_pool["spec"]["sandboxTemplateRef"]["name"] == "upgrade-template-cold", "Shadow pool template mismatch!"
     print("Shadow pool successfully verified!")
 
     # 3. Upgrade Controller & CRDs
@@ -386,7 +611,8 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
             "helm", "upgrade", "agent-sandbox", "./helm/",
             "-n", "agent-sandbox-system",
             "--set", "namespace.create=false",
-            "--set", "controller.extensions=true"
+            "--set", "controller.extensions=true",
+            "--set", "webhookServiceName=custom-webhook-svc"
         ]
         if image_prefix:
             repo = f"{image_prefix}agent-sandbox-controller"
@@ -395,8 +621,45 @@ def upgrade_and_migrate(method, image_prefix, image_tag):
             upgrade_cmd.extend(["--set", f"image.tag={image_tag}"])
         run_cmd(upgrade_cmd)
 
+    # Re-apply the owner reference patch and status binding to protect against the old controller having overwritten it during Phase 2
+    print("Re-applying ownerReference and status patch to secure warm claim binding...")
+    claim_uid = ""
+    for i in range(10):
+        res = run_cmd([
+            "kubectl", "get", "sandboxclaims.extensions.agents.x-k8s.io", "upgrade-claim-warm",
+            "-n", "default", "-o", "jsonpath={.metadata.uid}"
+        ], check=False, capture_output=True)
+        if res.returncode == 0 and res.stdout.strip() != "":
+            claim_uid = res.stdout.strip()
+            break
+        time.sleep(1)
+    if claim_uid != "":
+        owner_patch = {
+            "metadata": {
+                "ownerReferences": [
+                    {
+                        "apiVersion": "extensions.agents.x-k8s.io/v1alpha1",
+                        "kind": "SandboxClaim",
+                        "name": "upgrade-claim-warm",
+                        "uid": claim_uid,
+                        "controller": True,
+                        "blockOwnerDeletion": True
+                    }
+                ]
+            }
+        }
+        run_cmd(["kubectl", "patch", "sandbox", "upgrade-pool-warm-a1b2c", "-n", "default", "--type=merge", "-p", json.dumps(owner_patch)])
+        run_cmd(["kubectl", "patch", "sandboxclaim", "upgrade-claim-warm", "-n", "default", "--subresource=status", "--type=merge", "-p", '{"status":{"sandbox":{"name":"upgrade-pool-warm-a1b2c"}}}'])
+
     print("Waiting for upgraded controller deployment...")
     run_cmd(["kubectl", "rollout", "status", "deploy/agent-sandbox-controller", "-n", "agent-sandbox-system", "--timeout=180s"])
+    
+    if method == "helm":
+        res = run_cmd(["kubectl", "get", "deployment", "agent-sandbox-controller", "-n", "agent-sandbox-system", "-o", "jsonpath={.spec.template.spec.containers[0].args}"], capture_output=True)
+        args_str = res.stdout
+        assert "--webhook-service-name=custom-webhook-svc" in args_str, f"Custom webhook service name flag not wired! Got args: {args_str}"
+        assert "--webhook-namespace=agent-sandbox-system" in args_str, f"Webhook namespace flag not wired! Got args: {args_str}"
+        print("Helm custom webhook CLI flags wiring validation PASSED.")
     
     wait_for_webhook_ready()
 
@@ -433,8 +696,8 @@ def validate_migration(active_pod_info):
     
     print("Validating upgrade-claim conversion...")
     assert "warmPoolRef" in claim1["spec"], f"upgrade-claim missing warmPoolRef! spec: {claim1['spec']}"
-    assert claim1["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template", \
-        f"Expected warmPoolRef name shadow-pool-upgrade-template, got {claim1['spec']['warmPoolRef']['name']}"
+    assert claim1["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template-cold", \
+        f"Expected warmPoolRef name shadow-pool-upgrade-template-cold, got {claim1['spec']['warmPoolRef']['name']}"
     assert "agents.x-k8s.io/storage-migrated-at" in claim1["metadata"]["annotations"], \
         "upgrade-claim missing storage-migrated-at annotation!"
     print("upgrade-claim validation PASSED.")
@@ -458,11 +721,38 @@ def validate_migration(active_pod_info):
     claim_none = claim_by_name["upgrade-claim-none"]
     print("Validating upgrade-claim-none conversion...")
     assert "warmPoolRef" in claim_none["spec"], f"upgrade-claim-none missing warmPoolRef! spec: {claim_none['spec']}"
-    assert claim_none["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template", \
-        f"Expected warmPoolRef name shadow-pool-upgrade-template, got {claim_none['spec']['warmPoolRef']['name']}"
+    assert claim_none["spec"]["warmPoolRef"]["name"] == "shadow-pool-upgrade-template-cold", \
+        f"Expected warmPoolRef name shadow-pool-upgrade-template-cold, got {claim_none['spec']['warmPoolRef']['name']}"
     assert "agents.x-k8s.io/storage-migrated-at" in claim_none["metadata"]["annotations"], \
         "upgrade-claim-none missing storage-migrated-at annotation!"
     print("upgrade-claim-none validation PASSED.")
+    
+    # Validate upgrade-claim-warm: warm-started, pointed to "default" in v1alpha1 with bound sandbox upgrade-pool-warm-a1b2c,
+    # should be migrated to warmPoolRef.name: upgrade-pool-warm (derived from stripping suffix).
+    assert "upgrade-claim-warm" in claim_by_name, "upgrade-claim-warm missing!"
+    claim_warm = claim_by_name["upgrade-claim-warm"]
+    print("Validating upgrade-claim-warm conversion...")
+    assert "warmPoolRef" in claim_warm["spec"], f"upgrade-claim-warm missing warmPoolRef! spec: {claim_warm['spec']}"
+    assert claim_warm["spec"]["warmPoolRef"]["name"] == "upgrade-pool-warm", \
+        f"Expected warmPoolRef name upgrade-pool-warm, got {claim_warm['spec']['warmPoolRef']['name']}"
+    assert "agents.x-k8s.io/storage-migrated-at" in claim_warm["metadata"]["annotations"], \
+        "upgrade-claim-warm missing storage-migrated-at annotation!"
+    assert claim_warm.get("status", {}).get("sandbox", {}).get("name") == "upgrade-pool-warm-a1b2c", \
+        f"upgrade-claim-warm lost its bound sandbox during upgrade! Expected upgrade-pool-warm-a1b2c, got: {claim_warm.get('status', {}).get('sandbox', {}).get('name')}"
+    print("upgrade-claim-warm validation PASSED.")
+
+    print("Validating all 10 flake stress-test claims preserved their bound sandboxes...")
+    for i in range(1, 11):
+        claim_name = f"upgrade-claim-warm-flake-{i}"
+        claim_obj = claim_by_name.get(claim_name)
+        assert claim_obj is not None, f"Claim {claim_name} missing from migrated claims list!"
+        actual_sb = claim_obj.get("status", {}).get("sandbox", {}).get("name")
+        expected_sb = f"upgrade-pool-warm-f{i}"
+        assert actual_sb == expected_sb, \
+            f"Flake triggered! {claim_name} lost its original sandbox during upgrade. Expected {expected_sb}, got: {actual_sb}"
+        assert "agents.x-k8s.io/storage-migrated-at" in claim_obj["metadata"]["annotations"], \
+            f"{claim_name} missing storage-migrated-at annotation!"
+    print("Flake stress-test PASSED (10/10 additional warm claims survived upgrade intact without losing original sandbox).")
     
     # 2. Fetch sandboxes as JSON
     print("Checking Sandboxes...")
@@ -527,6 +817,14 @@ def validate_migration(active_pod_info):
     assert "warmPoolRef" not in c_none_v1alpha1["spec"], f"upgrade-claim-none should NOT have warmPoolRef in v1alpha1 spec! spec: {c_none_v1alpha1['spec']}"
     print("upgrade-claim-none dynamic reverse-conversion validation PASSED.")
     
+    # Validate upgrade-claim-warm: spec should be dynamically converted back to warmpool: "default"
+    assert "upgrade-claim-warm" in claims_v1alpha1_by_name, "upgrade-claim-warm missing in v1alpha1 list!"
+    c_warm_v1alpha1 = claims_v1alpha1_by_name["upgrade-claim-warm"]
+    assert "warmpool" in c_warm_v1alpha1["spec"], f"upgrade-claim-warm missing warmpool in v1alpha1 spec! spec: {c_warm_v1alpha1['spec']}"
+    assert c_warm_v1alpha1["spec"]["warmpool"] == "default", f"Expected warmpool default, got {c_warm_v1alpha1['spec']['warmpool']}"
+    assert "warmPoolRef" not in c_warm_v1alpha1["spec"], f"upgrade-claim-warm should NOT have warmPoolRef in v1alpha1 spec! spec: {c_warm_v1alpha1['spec']}"
+    print("upgrade-claim-warm dynamic reverse-conversion validation PASSED.")
+    
     # Query Sandboxes using v1alpha1 API version
     print("Checking Sandboxes via v1alpha1 endpoint...")
     res = run_cmd(["kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True)
@@ -549,6 +847,58 @@ def validate_migration(active_pod_info):
     assert "operatingMode" not in sb_running_v1alpha1["spec"], f"upgrade-sandbox-running should NOT have operatingMode in v1alpha1 spec! spec: {sb_running_v1alpha1['spec']}"
     print("upgrade-sandbox-running dynamic reverse-conversion validation PASSED.")
     
+    # 2.6 Verify a new v1beta1 SandboxClaim warm-adopts a sandbox created by
+    # the pre-upgrade (v1alpha1) pool controller. Owner references keep the
+    # apiVersion they were written with, so this exercises the group+kind
+    # matching in the adoption path (a strict v1beta1 match cold-starts
+    # instead — the regression from issue #1190).
+    print("\n=== Validation Phase: Warm adoption from a pre-upgrade pool ===")
+    adopt_sandbox = active_pod_info["adopt_sandbox"]
+
+    # Precondition: the warm sandbox still exists and its owner reference
+    # still says v1alpha1 (if migration ever rewrites owner references, this
+    # test no longer exercises the legacy path and must be reworked).
+    res = run_cmd(["kubectl", "get", "sandboxes.v1beta1.agents.x-k8s.io", adopt_sandbox, "-n", "default", "-o", "json"], capture_output=True)
+    adopt_sb = json.loads(res.stdout)
+    adopt_refs = [r for r in adopt_sb["metadata"].get("ownerReferences", []) if r.get("kind") == "SandboxWarmPool" and r.get("controller")]
+    assert adopt_refs, f"{adopt_sandbox} lost its SandboxWarmPool controller owner reference during upgrade!"
+    assert adopt_refs[0]["apiVersion"] == "extensions.agents.x-k8s.io/v1alpha1", \
+        f"Expected {adopt_sandbox} to keep its v1alpha1 owner reference after upgrade, got {adopt_refs[0]['apiVersion']} — the test precondition no longer holds."
+
+    print(f"Creating a post-upgrade v1beta1 SandboxClaim against upgrade-pool-adopt (expecting to adopt {adopt_sandbox})...")
+    post_upgrade_claim = """apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: post-upgrade-adopt-claim
+  namespace: default
+spec:
+  warmPoolRef:
+    name: upgrade-pool-adopt
+"""
+    run_cmd(["kubectl", "apply", "-f", "-"], input_data=post_upgrade_claim)
+
+    bound_sandbox = ""
+    for i in range(60):
+        res = run_cmd(["kubectl", "get", "sandboxclaims.v1beta1.extensions.agents.x-k8s.io", "post-upgrade-adopt-claim", "-n", "default", "-o", "json"], capture_output=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            bound_sandbox = json.loads(res.stdout).get("status", {}).get("sandbox", {}).get("name", "")
+            if bound_sandbox:
+                break
+        if (i + 1) % 5 == 0:
+            print(f"post-upgrade-adopt-claim not bound yet (attempt {i+1}/60)...")
+        time.sleep(2)
+
+    if bound_sandbox != adopt_sandbox:
+        print("Warm adoption from the pre-upgrade pool failed. Dumping diagnostics:", file=sys.stderr)
+        run_cmd(["kubectl", "get", "sandboxes,sandboxclaims", "-n", "default"], check=False)
+        run_cmd(["kubectl", "logs", "-n", "agent-sandbox-system", "deploy/agent-sandbox-controller", "--tail=100"], check=False)
+    assert bound_sandbox, "post-upgrade-adopt-claim was never bound to a sandbox!"
+    assert bound_sandbox != "post-upgrade-adopt-claim", \
+        "post-upgrade-adopt-claim COLD-STARTED a fresh sandbox instead of adopting the pre-upgrade warm sandbox — v1alpha1 owner references are not being matched by the adoption path (issue #1190 regression)."
+    assert bound_sandbox == adopt_sandbox, \
+        f"post-upgrade-adopt-claim bound to {bound_sandbox} instead of the pre-upgrade warm sandbox {adopt_sandbox} — the pre-upgrade sandbox was skipped or replaced."
+    print(f"post-upgrade-adopt-claim adopted {adopt_sandbox} — warm adoption from a pre-upgrade pool PASSED.")
+
     # 3. Clean up storedVersions in CRDs
     print("Pruning v1alpha1 from CRD storedVersions...")
     crds = [
@@ -564,7 +914,10 @@ def validate_migration(active_pod_info):
         
         # Verify the storedVersions has been successfully pruned to just v1beta1
         res = run_cmd(["kubectl", "get", "crd", crd, "-o", "jsonpath={.status.storedVersions}"], capture_output=True)
-        stored_versions = json.loads(res.stdout)
+        try:
+            stored_versions = json.loads(res.stdout)
+        except json.JSONDecodeError as e:
+            raise AssertionError(f"Failed to parse storedVersions for CRD {crd}. Output: {res.stdout}. Error: {e}") from e
         assert stored_versions == ["v1beta1"], f"CRD {crd} storedVersions not pruned! Got {stored_versions}"
         print(f"CRD {crd} storedVersions successfully pruned: {stored_versions}")
         
@@ -617,7 +970,12 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
     print("Step 5: Downgrading controller and CRDs to v1alpha1...")
     if method == "kubectl":
         local_dir = os.path.join(_repo_root, "test/migration/testdata", v1alpha1_version)
-        local_manifest = os.path.join(local_dir, "manifest.yaml")
+        local_manifest_name, manifest_url = get_manifest_filename_and_url(v1alpha1_version)
+        local_manifest = os.path.join(local_dir, local_manifest_name)
+        if not os.path.exists(local_manifest):
+            alt_name = "sandbox.yaml" if local_manifest_name == "manifest.yaml" else "manifest.yaml"
+            if os.path.exists(os.path.join(local_dir, alt_name)):
+                local_manifest = os.path.join(local_dir, alt_name)
         local_extensions = os.path.join(local_dir, "extensions.yaml")
         
         if os.path.exists(local_manifest) and os.path.exists(local_extensions):
@@ -626,7 +984,6 @@ def test_rollback(method, v1alpha1_version, v1alpha1_backup):
             print(f"Applying local extensions: {local_extensions}")
             run_cmd(["kubectl", "apply", "-f", local_extensions])
         else:
-            manifest_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{v1alpha1_version}/manifest.yaml"
             extensions_url = f"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{v1alpha1_version}/extensions.yaml"
             run_cmd(["kubectl", "apply", "-f", manifest_url])
             run_cmd(["kubectl", "apply", "-f", extensions_url])
@@ -761,6 +1118,14 @@ def validate_rollback():
     assert "warmPoolRef" not in claim_none["spec"], f"upgrade-claim-none should NOT have warmPoolRef! spec: {claim_none['spec']}"
     print("upgrade-claim-none rollback validation PASSED.")
     
+    # Validate upgrade-claim-warm
+    assert "upgrade-claim-warm" in claim_by_name, "upgrade-claim-warm missing!"
+    claim_warm = claim_by_name["upgrade-claim-warm"]
+    assert "warmpool" in claim_warm["spec"], f"upgrade-claim-warm missing warmpool policy! spec: {claim_warm['spec']}"
+    assert claim_warm["spec"]["warmpool"] == "default", f"Expected warmpool default, got {claim_warm['spec']['warmpool']}"
+    assert "warmPoolRef" not in claim_warm["spec"], f"upgrade-claim-warm should NOT have warmPoolRef! spec: {claim_warm['spec']}"
+    print("upgrade-claim-warm rollback validation PASSED.")
+    
     # 2. Fetch sandboxes as JSON
     print("Checking Sandboxes...")
     res = run_cmd(["kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io", "-n", "default", "-o", "json"], capture_output=True)
@@ -832,7 +1197,7 @@ def main():
         # Backup v1alpha1 resources in memory
         print("Backing up v1alpha1 resources...")
         res = run_cmd([
-            "kubectl", "get", "sandboxes,sandboxclaims,sandboxtemplates,sandboxwarmpools",
+            "kubectl", "get", "sandboxes.v1alpha1.agents.x-k8s.io,sandboxclaims.v1alpha1.extensions.agents.x-k8s.io,sandboxtemplates.v1alpha1.extensions.agents.x-k8s.io,sandboxwarmpools.v1alpha1.extensions.agents.x-k8s.io",
             "-n", "default", "-o", "yaml"
         ], capture_output=True)
         v1alpha1_backup = res.stdout

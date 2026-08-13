@@ -1,4 +1,4 @@
-// Copyright 2025 The Kubernetes Authors.
+// Copyright 2026 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -76,17 +76,8 @@ func (s *SandboxWarmPool) ConvertFrom(srcRaw conversion.Hub) error {
 		return err
 	}
 
-	// Restore original v1alpha1 state if present to ensure lossless conversion
-	if stateJSON, ok := s.Annotations[v1alpha1SandboxWarmPoolStateAnnotation]; ok {
-		// Strip the state annotation so it doesn't leak to clients and get sent back on updates
-		delete(s.Annotations, v1alpha1SandboxWarmPoolStateAnnotation)
-
-		var original SandboxWarmPool
-		if err := json.Unmarshal([]byte(stateJSON), &original); err != nil {
-			return fmt.Errorf("failed to unmarshal v1alpha1 SandboxWarmPool state: %w", err)
-		}
-		// All fields map 1:1, kept for consistency/robustness.
-	}
+	// Strip the state annotation if present so it doesn't leak to clients and get sent back on updates
+	delete(s.Annotations, v1alpha1SandboxWarmPoolStateAnnotation)
 
 	return nil
 }
@@ -94,7 +85,8 @@ func (s *SandboxWarmPool) ConvertFrom(srcRaw conversion.Hub) error {
 // Helper functions for SandboxWarmPool conversion
 
 func convertWarmPoolSpecTo(src *SandboxWarmPoolSpec, dst *v1beta1.SandboxWarmPoolSpec) error {
-	dst.Replicas = src.Replicas
+	replicas := src.Replicas
+	dst.Replicas = &replicas
 	dst.TemplateRef = v1beta1.SandboxTemplateRef{
 		Name: src.TemplateRef.Name,
 	}
@@ -111,7 +103,11 @@ func convertWarmPoolSpecTo(src *SandboxWarmPoolSpec, dst *v1beta1.SandboxWarmPoo
 }
 
 func convertWarmPoolSpecFrom(src *v1beta1.SandboxWarmPoolSpec, dst *SandboxWarmPoolSpec) error {
-	dst.Replicas = src.Replicas
+	if src.Replicas != nil {
+		dst.Replicas = *src.Replicas
+	} else {
+		dst.Replicas = 1
+	}
 	dst.TemplateRef = SandboxTemplateRef{
 		Name: src.TemplateRef.Name,
 	}

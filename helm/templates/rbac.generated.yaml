@@ -20,15 +20,12 @@ rules:
   - watch
 - apiGroups:
   - ""
+  - events.k8s.io
   resources:
-  - secrets
+  - events
   verbs:
   - create
-  - get
-  - list
   - patch
-  - update
-  - watch
 - apiGroups:
   - agents.x-k8s.io
   resources:
@@ -52,6 +49,11 @@ rules:
   - update
 - apiGroups:
   - apiextensions.k8s.io
+  resourceNames:
+  - sandboxclaims.extensions.agents.x-k8s.io
+  - sandboxes.agents.x-k8s.io
+  - sandboxtemplates.extensions.agents.x-k8s.io
+  - sandboxwarmpools.extensions.agents.x-k8s.io
   resources:
   - customresourcedefinitions
   verbs:
@@ -69,10 +71,3 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch

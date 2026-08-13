@@ -30,6 +30,9 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        - name: webhook
+          containerPort: 9443
+          protocol: TCP
         volumeMounts:
         - name: config-volume
           mountPath: /etc/sandbox-config

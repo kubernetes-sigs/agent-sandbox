@@ -1,0 +1,31 @@
+# Baseline policy for BOTH identities.
+#
+# Two effects:
+#  1. Selecting an endpoint with ANY egress rule flips it to "default-deny egress"
+#     in Cilium — so after this policy, team-a and team-b can ONLY do what is
+#     explicitly allowed (DNS here; github is added per-identity by 20-/40-).
+#  2. The L7 `rules.dns` clause routes DNS through Cilium's DNS proxy, which is
+#     what lets `toFQDNs` (in the github policies) learn the IPs behind a domain.
+#     Without this, toFQDNs cannot resolve and even the "allowed" clone fails.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: sandbox-demo
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: demo.identity
+        operator: Exists
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"

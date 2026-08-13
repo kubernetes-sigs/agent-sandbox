@@ -35,10 +35,10 @@ Before we even implement #2, I think we should decide if it is even worth having
 
 The user only provides a warm pool reference in `SandboxClaim` spec. The concept of "template" is hidden from the end-user API when claiming a sandbox. The controller looks at the specified warm pool to adopt a sandbox. 
 
-1. If the warmpool's `spec.replicas` is 0, the controller falls back to a cold start using the `spec.templateRef` configured in the warmpool. 
-2. If a user provides custom environment variables, the controller will implicitly bypass the warm pool and provision a Sandbox from scratch based on the template configured in the warmpool.
+1. If the warmpool's `spec.replicas` is 0, the controller falls back to a cold start using the `spec.sandboxTemplateRef` configured in the warmpool. 
+2. If the claim sets `spec.env` or `spec.volumeClaimTemplates`, the controller will implicitly bypass the warm pool and provision a Sandbox from scratch based on the warmpool's `spec.sandboxTemplateRef`.
 3. If the warmpool has been deleted by the cluster admin, the claim controller will throw a permanent failure error.
-4. If the warmpool's `spec.replicas` > 0 and no `spec.env` is provided by the user, the Sandbox is adopted from the warmpool specified in `spec.warmpoolRef`. 
+4. If the warmpool's `spec.replicas` > 0 and the claim sets neither `spec.env` nor `spec.volumeClaimTemplates`, the Sandbox is adopted from the warm pool referenced by the claim's `spec.warmPoolRef`. 
 
 ```go
 type SandboxClaimSpec struct {

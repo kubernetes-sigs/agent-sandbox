@@ -22,7 +22,8 @@ By extending the sandbox's FastAPI runtime, you can accept a dynamic `env` dicti
 
 This code runs **inside** the sandbox pod. The `ExecuteRequest` model is extended to accept an optional dictionary of environment variables. When a command is triggered, it safely clones the system's current environment variables, merges the incoming ones, and injects them into the `subprocess.run` call.
 
-```python
+{{< blocks/tabs name="custom-sandbox-runtime-server-side" >}}
+  {{< blocks/tab name="Python" codelang="python" >}}
 import os
 import shlex
 import string
@@ -72,7 +73,195 @@ def execute_command(req: ExecuteRequest):
             "stderr": str(e),
             "exitCode": 1
         }
-```
+  {{< /blocks/tab >}}
+  {{< blocks/tab name="Go" codelang="go" >}}
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+// --- Request / Response types (mirrors Pydantic models) ---
+
+type CommandContent struct {
+	Content string `json:"content"`
+}
+
+type ExecuteRequest struct {
+	Command struct {
+		Command CommandContent    `json:"command"`
+		Env     map[string]string `json:"env"`
+	} `json:"command"`
+}
+
+type ExecuteResponse struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
+}
+
+// --- Handlers ---
+
+func healthCheck(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": "Sandbox Runtime is active.",
+	})
+}
+
+func executeCommand(w http.ResponseWriter, r *http.Request) {
+	var req ExecuteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusOK, ExecuteResponse{Stderr: err.Error(), ExitCode: 1})
+		return
+	}
+
+	// os.environ.copy() + update with req.Command.Env
+	env := envMap()
+	for k, v := range req.Command.Env {
+		env[k] = v
+	}
+
+	// string.Template.safe_substitute — os.Expand leaves unrecognised vars intact
+	expanded := os.Expand(req.Command.Command.Content, func(key string) string {
+		if v, ok := env[key]; ok {
+			return v
+		}
+		return "$" + key // safe_substitute behaviour: leave unknown vars as-is
+	})
+
+	// shlex.split — split on whitespace, respecting quoted tokens
+	args, err := shellSplit(expanded)
+	if err != nil {
+		writeJSON(w, http.StatusOK, ExecuteResponse{Stderr: "invalid command: " + err.Error(), ExitCode: 1})
+		return
+	}
+	if len(args) == 0 {
+		writeJSON(w, http.StatusOK, ExecuteResponse{Stderr: "invalid command: empty command", ExitCode: 1})
+		return
+	}
+
+	// subprocess.run(..., timeout=120)
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = envSlice(env)
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if ok := isExitError(err, &exitErr); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+			stderr.WriteString(err.Error())
+		}
+	}
+
+	writeJSON(w, http.StatusOK, ExecuteResponse{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	})
+}
+
+// --- shlex.split (quoted-token aware, no external dependency) ---
+
+func shellSplit(s string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	inQuote := rune(0)
+
+	for _, ch := range s {
+		switch {
+		case inQuote != 0:
+			if ch == inQuote {
+				inQuote = 0
+			} else {
+				current.WriteRune(ch)
+			}
+		case ch == '\'' || ch == '"':
+			inQuote = ch
+		case ch == ' ' || ch == '\t':
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(ch)
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args, nil
+}
+
+// --- env helpers ---
+
+func envMap() map[string]string {
+	m := make(map[string]string)
+	for _, kv := range os.Environ() {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			m[kv[:i]] = kv[i+1:]
+		}
+	}
+	return m
+}
+
+func envSlice(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// --- helpers ---
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func isExitError(err error, target **exec.ExitError) bool {
+	e, ok := err.(*exec.ExitError)
+	if ok {
+		*target = e
+	}
+	return ok
+}
+
+// --- main ---
+
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", healthCheck)
+	mux.HandleFunc("POST /execute", executeCommand)
+
+	log.Println("Sandbox Runtime listening on :8888")
+	if err := http.ListenAndServe(":8888", mux); err != nil {
+		log.Fatal(err)
+	}
+}
+  {{< /blocks/tab >}}
+{{< /blocks/tabs >}}
+
+
+
 
 > Note: the rest of the Sandbox Docker image lives in the [custom-environment example source folder](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/sandbox/custom_sandbox/custom_environment/source).
 
@@ -82,7 +271,9 @@ Unlike standard command executions, this client script sends a raw JSON payload 
 
 The following example demonstrates creating a sandbox, sending a command that requires a custom environment variable (`TEST=True`), and printing the modified output.
 
-```python
+
+{{< blocks/tabs name="client-execution-workflow" >}}
+  {{< blocks/tab name="Python" codelang="python" >}}
 from k8s_agent_sandbox import SandboxClient
 
 # 1. Initialize the client
@@ -103,4 +294,109 @@ response = sandbox.commands.run(payload)
 # Because of our custom runtime logic, this will print:
 # True
 print(response)
-```
+  {{< /blocks/tab >}}
+  {{< blocks/tab name="Go" codelang="go" >}}
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+)
+
+// CommandPayload mirrors the ExecuteRequest model from the custom runtime
+// server above: Command.Content maps to {"command": {"content": "..."}}, and
+// Env injects environment variables: {"env": {"KEY": "VALUE"}}.
+type CommandPayload struct {
+	Command struct {
+		Content string `json:"content"`
+	} `json:"command"`
+	Env map[string]string `json:"env,omitempty"`
+}
+
+type CommandResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
+}
+
+// runWithEnv calls the custom runtime's /execute endpoint directly. The
+// published SDK's Commands().Run(ctx, cmd string) only accepts a plain shell
+// string, with no field for injecting per-call environment variables, so this
+// goes through the Sandbox Router (see Prerequisites) the same way the SDK's
+// own tunnel/gateway strategies do: the router proxies any request carrying
+// X-Sandbox-ID/X-Sandbox-Namespace headers straight to that sandbox's pod.
+func runWithEnv(ctx context.Context, sb *sandbox.Sandbox, namespace string, payload CommandPayload) (*CommandResult, error) {
+	body, err := json.Marshal(map[string]any{"command": payload})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://sandbox-router-svc.default.svc.cluster.local:8080/execute", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Sandbox-ID", sb.SandboxName())
+	req.Header.Set("X-Sandbox-Namespace", namespace)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("run command: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("run command: server returned status %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result CommandResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func main() {
+	ctx := context.Background()
+	namespace := "default"
+
+	// 1. Initialize the client. WarmPoolName must be set here too to satisfy
+	// Options.validate(); CreateSandbox's own argument below is what
+	// actually gets used.
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: namespace, WarmPoolName: "simple-sandbox-pool"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.DeleteAll(ctx)
+
+	// 2. Create the sandbox using your custom runtime warm pool
+	sb, err := client.CreateSandbox(ctx, "simple-sandbox-pool", namespace)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 3. Run a command and inject environment variables via the payload
+	var payload CommandPayload
+	payload.Command.Content = "echo $TEST"
+	payload.Env = map[string]string{"TEST": "True"}
+
+	result, err := runWithEnv(ctx, sb, namespace, payload)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 4. Verify the output — prints: True
+	fmt.Println(result.Stdout)
+}
+  {{< /blocks/tab >}}
+{{< /blocks/tabs >}}
+

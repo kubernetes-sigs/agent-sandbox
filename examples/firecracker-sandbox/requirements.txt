@@ -1,0 +1,6 @@
+# Minimal dependency set for the sandbox runtime.
+fastapi>=0.104.0,<1.0.0
+uvicorn>=0.24.0,<1.0.0
+h11>=0.16.0,<1.0.0
+pydantic>=2.5.0,<3.0.0
+python-multipart>=0.0.30

@@ -7,7 +7,7 @@ spec:
   operatingMode: Running
   # Configure Auto-Suspension:
   # When openclaw-auto-suspension remains idle for 30 minutes without incoming HTTP traffic,
-  # the controller transitions operatingMode to Suspended and deletes the Pod.
+  # the controller automatically terminates the Pod while preserving operatingMode as Running.
   # The workspaces-pvc persistent volume and OpenClaw identity remain intact.
   autoSuspension:
     inactivityTimeoutSeconds: 1800

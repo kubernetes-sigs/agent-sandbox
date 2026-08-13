@@ -4891,3 +4891,100 @@ func TestSandboxReconcilerManualUnsuspendResetsLastActivityTime(t *testing.T) {
 	err = client.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: "default"}, &createdPod)
 	require.NoError(t, err, "Pod must be created immediately upon manual un-suspension")
 }
+
+func TestSandboxReconcilerAutoSuspend(t *testing.T) {
+	pastTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "idle-sandbox",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				AutoSuspension: &sandboxv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: ptr.To[int32](30),
+				},
+			},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			LastActivityTime: &pastTime,
+		},
+	}
+
+	client := newFakeClient(sandbox)
+	reconciler := &SandboxReconciler{
+		Client:            client,
+		Scheme:            Scheme,
+		Tracer:            asmetrics.NewNoOp(),
+		EnableAutoSuspend: true,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "idle-sandbox", Namespace: "default"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	var updated sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), req.NamespacedName, &updated)
+	require.NoError(t, err)
+	// Spec.OperatingMode stays Running, but status condition is Suspended
+	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+	shouldSuspend, _ := reconciler.shouldSuspend(&updated)
+	assert.True(t, shouldSuspend)
+}
+
+func TestSandboxReconcilerInitializesLastActivityTime(t *testing.T) {
+	oldCreateTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "old-sandbox",
+			Namespace:         "default",
+			UID:               sandboxUID,
+			CreationTimestamp: oldCreateTime,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				AutoSuspension: &sandboxv1beta1.AutoSuspensionPolicy{
+					InactivityTimeoutSeconds: ptr.To[int32](1800),
+				},
+			},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
+					},
+				},
+			},
+		},
+	}
+
+	client := newFakeClient(sandbox)
+	reconciler := &SandboxReconciler{
+		Client:            client,
+		Scheme:            Scheme,
+		Tracer:            asmetrics.NewNoOp(),
+		EnableAutoSuspend: true,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "old-sandbox", Namespace: "default"}}
+	res, err := reconciler.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter)
+
+	var updated sandboxv1beta1.Sandbox
+	err = client.Get(t.Context(), req.NamespacedName, &updated)
+	require.NoError(t, err)
+	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
+	assert.NotNil(t, updated.Status.LastActivityTime)
+	assert.True(t, updated.Status.LastActivityTime.Time.After(oldCreateTime.Time))
+}

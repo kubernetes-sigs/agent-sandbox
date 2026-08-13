@@ -96,13 +96,9 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 			src = SourceCache
 		}
 	case lookup != nil && t.ID != "":
-		if getter, ok := lookup.(interface {
-			GetByName(namespace, name string) (cache.Entry, bool)
-		}); ok {
-			if e, ok := getter.GetByName(t.Namespace, t.ID); ok && e.PodIP != "" {
-				host = e.PodIP
-				src = SourceCacheName
-			}
+		if e, ok := lookup.GetByName(t.Namespace, t.ID); ok && e.PodIP != "" {
+			host = e.PodIP
+			src = SourceCacheName
 		}
 	}
 	if host == "" && lookup != nil {

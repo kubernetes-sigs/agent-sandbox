@@ -88,7 +88,7 @@ spec:
         args:
         - --ext-proc-bind-address=:9002
         - --http-bind-address=:8080
-        - --suspension-manager-url=http://agent-sandbox-controller.agent-sandbox-system.svc.cluster.local:8090
+        - --suspension-manager-url=http://agent-sandbox-controller-suspension.agent-sandbox-system.svc.cluster.local:8090
         - --activity-flush-interval=10s
         - --cache-enabled=true
         ports:
@@ -192,20 +192,19 @@ spec:
 
 ---
 
-# 5. Expose suspension server port :8090 on agent-sandbox-controller Service
+# 5. Dedicated Service exposing suspension server port :8090 on agent-sandbox-controller
 
 apiVersion: v1
 kind: Service
 metadata:
-  name: agent-sandbox-controller
+  name: agent-sandbox-controller-suspension
   namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
 spec:
   selector:
     app: agent-sandbox-controller
   ports:
-  - name: metrics
-    port: 8080
-    targetPort: 8080
   - name: suspension
     port: 8090
     targetPort: 8090
@@ -239,3 +238,27 @@ spec:
     ports:
     - protocol: TCP
       port: 8090
+
+---
+# Allow cluster-wide access to CRD conversion webhook (:9443), metrics (:8080), and kubelet probes (:8081)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-controller-system-traffic
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - protocol: TCP
+      port: 9443
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081

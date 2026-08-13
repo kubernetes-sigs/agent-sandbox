@@ -95,7 +95,7 @@ Apply the core CRDs and base controller, then apply the auto-suspension overlay 
 
 ```bash
 # 1. Apply core Sandbox CRDs and controller (or extensions.yaml for extensions)
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/controller.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml
 
 # 2. Enable the auto-suspension flag on the controller (appends flag cleanly for core or extensions)
 kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system \
@@ -124,12 +124,18 @@ The Agent Sandbox Helm chart manages the control-plane controller (`agent-sandbo
 
 ##### Option C: Local Development with Kind
 
-For local development and testing, you can create a kind cluster with Envoy Gateway and the auto-suspension overlay pre-installed using:
+For local development and testing with kind, install the Gateway API CRDs and Envoy Gateway prerequisites first:
 
 ```bash
+# 1. Install standard Gateway API CRDs
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+
+# 2. Install Envoy Gateway via Helm
+helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.2.0 -n envoy-gateway-system --create-namespace
+
+# 3. Deploy Agent Sandbox with auto-suspension on kind
 AUTO_SUSPENSION=true make deploy-kind
 ```
-
 ## Configuring Auto-Suspension on a Sandbox
 
 You can enable auto-suspension on any `Sandbox` by setting `.spec.autoSuspension.inactivityTimeoutSeconds` to the desired idle duration in seconds (e.g., `300` for 5 minutes, `3600` for 1 hour):
@@ -193,8 +199,8 @@ kubectl get sandbox demo-sandbox
 **Expected Output:**
 
 ```text
-NAME           READY   REASON             AGE
-demo-sandbox   False   SandboxSuspended   70s
+NAME           READY   REASON                 AGE
+demo-sandbox   False   SandboxAutoSuspended   70s
 ```
 
 You can confirm that the underlying Pod has been garbage-collected:

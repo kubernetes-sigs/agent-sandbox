@@ -371,6 +371,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				// drop the deferral clock entry for this request.
 				r.deferralClock.clear(req.NamespacedName)
 			}
+		}
 		_, requeueAfterSuspend := r.shouldSuspend(sandbox)
 		if requeueAfterSuspend > 0 {
 			if result.RequeueAfter == 0 || requeueAfterSuspend < result.RequeueAfter {

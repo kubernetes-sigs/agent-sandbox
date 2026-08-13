@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -153,20 +154,18 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if len(timestamps) > maxActivityEntries {
+		http.Error(w, fmt.Sprintf("payload exceeds maximum limit of %d activity entries", maxActivityEntries), http.StatusRequestEntityTooLarge)
+		return
+	}
+
 	type activityItem struct {
 		key   string
 		tsStr string
 	}
-	capacity := min(len(timestamps), maxActivityEntries)
-	items := make(chan activityItem, capacity)
-	count := 0
+	items := make(chan activityItem, len(timestamps))
 	for k, v := range timestamps {
-		if count >= maxActivityEntries {
-			s.log.V(4).Info("capping activity timestamp processing at maxActivityEntries", "total", len(timestamps), "limit", maxActivityEntries)
-			break
-		}
 		items <- activityItem{key: k, tsStr: v}
-		count++
 	}
 	close(items)
 
@@ -264,23 +263,7 @@ func (s *SuspensionServer) handleActivity(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusOK)
 }
 
-// validDNSLabel reports whether s is a syntactically valid DNS-1123 label (RFC 1123).
+// validDNSLabel reports whether s is a syntactically valid DNS-1123 label.
 func validDNSLabel(s string) bool {
-	if s == "" || len(s) > 63 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= '0' && c <= '9':
-		case c >= 'a' && c <= 'z':
-		case c == '-':
-			if i == 0 || i == len(s)-1 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
+	return len(validation.IsDNS1123Label(s)) == 0
 }

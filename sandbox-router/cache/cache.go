@@ -282,9 +282,6 @@ func (c *Cache) onDelete(obj any) {
 func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 	c.mu.Lock()
 	prev, existed := c.entries[uid]
-	if existed {
-		delete(c.byName, nameKey(prev.Namespace, prev.SandboxName))
-	}
 	c.entries[uid] = e
 	// Drop a stale name key only when it still points at this UID, so a
 	// newer Pod that already claimed the name is never clobbered. This

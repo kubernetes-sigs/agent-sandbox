@@ -304,7 +304,7 @@ sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-sandbox-auto-suspension.yaml
 ### 2. How OpenClaw Idles Out
 
 When no HTTP traffic arrives for 30 minutes (`.spec.autoSuspension.inactivityTimeoutSeconds: 1800`):
-- `.spec.operatingMode` automatically transitions to `Suspended` and the Pod is garbage-collected.
+- The controller automatically terminates the Pod while `.spec.operatingMode` remains `Running`.
 - The `workspaces-pvc` Persistent Volume Claim mounted at `/home/node/.openclaw/workspace` remains **100% intact**, preserving all agent workspace files, configurations, and conversation history.
 
 ### 3. Waking OpenClaw Up via Envoy Gateway (`X-Sandbox-Port: 18789`)
@@ -321,7 +321,7 @@ curl -i \
 
 When this request arrives for a suspended OpenClaw sandbox:
 1. Envoy Gateway (`ext_proc`) calls `sandbox-router:9002`, which signals `POST /v1/sandboxes/resume` to the controller (`:8090`).
-2. The controller thaws `.spec.operatingMode` to `Running` and creates a new Pod.
+2. The controller updates `status.lastActivityTime` to the current timestamp and creates a new Pod while `.spec.operatingMode` remains `Running`.
 3. `ext_proc` holds the HTTP request open until the Pod IP is registered and container port `18789` is accepting TCP connections.
 4. Envoy proxies the request directly to OpenClaw—returning a successful HTTP response on the very first request with zero connection drops.
 

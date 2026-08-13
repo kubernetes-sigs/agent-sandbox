@@ -44,115 +44,6 @@ func setupScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func TestSandboxReconcilerAutoSuspend(t *testing.T) {
-	scheme := setupScheme(t)
-
-	pastTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
-	sandbox := &agentsv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "idle-sandbox",
-			Namespace: "default",
-		},
-		Spec: agentsv1beta1.SandboxSpec{
-			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
-			Lifecycle: agentsv1beta1.Lifecycle{
-				AutoSuspension: &agentsv1beta1.AutoSuspensionPolicy{
-					InactivityTimeoutSeconds: new(int32(30)),
-				},
-			},
-			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
-				PodTemplate: agentsv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
-					},
-				},
-			},
-		},
-		Status: agentsv1beta1.SandboxStatus{
-			LastActivityTime: &pastTime,
-		},
-	}
-
-	client := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(sandbox).
-		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
-		WithObjects(sandbox).
-		Build()
-	reconciler := &SandboxReconciler{
-		Client:            client,
-		Scheme:            scheme,
-		Tracer:            asmetrics.NewNoOp(),
-		EnableAutoSuspend: true,
-	}
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "idle-sandbox", Namespace: "default"}}
-	res, err := reconciler.Reconcile(context.Background(), req)
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, res)
-
-	var updated agentsv1beta1.Sandbox
-	err = client.Get(context.Background(), req.NamespacedName, &updated)
-	require.NoError(t, err)
-	// Spec.OperatingMode stays Running, but status condition is Suspended
-	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
-	shouldSuspend, _ := reconciler.shouldSuspend(&updated)
-	assert.True(t, shouldSuspend)
-}
-
-func TestSandboxReconcilerInitializesLastActivityTime(t *testing.T) {
-	scheme := setupScheme(t)
-
-	oldCreateTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
-	sandbox := &agentsv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "old-sandbox",
-			Namespace:         "default",
-			CreationTimestamp: oldCreateTime,
-		},
-		Spec: agentsv1beta1.SandboxSpec{
-			OperatingMode: agentsv1beta1.SandboxOperatingModeRunning,
-			Lifecycle: agentsv1beta1.Lifecycle{
-				AutoSuspension: &agentsv1beta1.AutoSuspensionPolicy{
-					InactivityTimeoutSeconds: new(int32(1800)),
-				},
-			},
-			SandboxBlueprint: agentsv1beta1.SandboxBlueprint{
-				PodTemplate: agentsv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "c1", Image: "alpine"}},
-					},
-				},
-			},
-		},
-	}
-
-	client := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(sandbox).
-		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
-		WithObjects(sandbox).
-		Build()
-	reconciler := &SandboxReconciler{
-		Client:            client,
-		Scheme:            scheme,
-		Tracer:            asmetrics.NewNoOp(),
-		EnableAutoSuspend: true,
-	}
-
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "old-sandbox", Namespace: "default"}}
-	res, err := reconciler.Reconcile(context.Background(), req)
-	require.NoError(t, err)
-	assert.Positive(t, res.RequeueAfter)
-
-	var updated agentsv1beta1.Sandbox
-	err = client.Get(context.Background(), req.NamespacedName, &updated)
-	require.NoError(t, err)
-	assert.Equal(t, agentsv1beta1.SandboxOperatingModeRunning, updated.Spec.OperatingMode)
-	assert.NotNil(t, updated.Status.LastActivityTime)
-	assert.True(t, updated.Status.LastActivityTime.Time.After(oldCreateTime.Time))
-}
-
 func TestSuspensionServerResumeHandler_AdministrativelySuspended(t *testing.T) {
 	scheme := setupScheme(t)
 
@@ -396,4 +287,23 @@ func TestSuspensionServerActivityHandlerClampsFutureTimestamp(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, updated.Status.LastActivityTime)
 	assert.True(t, updated.Status.LastActivityTime.Time.Before(time.Now().Add(time.Second)), "timestamp should be clamped to current time, not year 2099")
+}
+
+func TestSuspensionServerActivityHandlerRejectsOversizedPayload(t *testing.T) {
+	scheme := setupScheme(t)
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	srv := NewSuspensionServer(client, logr.Discard())
+
+	payload := make(map[string]string)
+	nowStr := time.Now().Format(time.RFC3339)
+	for i := 0; i < maxActivityEntries+1; i++ {
+		payload[fmt.Sprintf("default/sb-%d", i)] = nowStr
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes/activity", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 }

@@ -50,7 +50,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
@@ -473,11 +472,8 @@ func main() {
 		Scheme:            mgr.GetScheme(),
 		Tracer:            instrumenter,
 		ClusterDomain:     clusterDomain,
-<<<<<<< HEAD
 		WriteBehindWindow: sandboxWriteBehindWindow,
-=======
 		EnableAutoSuspend: enableAutoSuspendAndResume,
->>>>>>> d6f6e74 (Address Janet's comments.)
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
@@ -502,7 +498,7 @@ func main() {
 				WriteTimeout:      15 * time.Second,
 				IdleTimeout:       60 * time.Second,
 			}
-			if err := mgr.Add(httpRunnable(srv, suspensionServerAddr, setupLog)); err != nil {
+			if err := mgr.Add(&suspensionServerRunnable{srv: srv, addr: suspensionServerAddr, log: setupLog}); err != nil {
 				setupLog.Error(err, "unable to add suspension server runnable")
 				os.Exit(1)
 			}
@@ -620,18 +616,26 @@ func main() {
 	}
 }
 
-func httpRunnable(srv *http.Server, addr string, log logr.Logger) manager.RunnableFunc {
-	return func(ctx context.Context) error {
-		log.Info("starting suspension REST server", "addr", addr)
-		go func() {
-			<-ctx.Done()
-			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = srv.Shutdown(shutCtx)
-		}()
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-		return nil
+type suspensionServerRunnable struct {
+	srv  *http.Server
+	addr string
+	log  logr.Logger
+}
+
+func (r *suspensionServerRunnable) NeedLeaderElection() bool {
+	return false
+}
+
+func (r *suspensionServerRunnable) Start(ctx context.Context) error {
+	r.log.Info("starting suspension REST server", "addr", r.addr)
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.srv.Shutdown(shutCtx)
+	}()
+	if err := r.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
+	return nil
 }

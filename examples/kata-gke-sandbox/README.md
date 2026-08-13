@@ -131,8 +131,8 @@ You can combine Kata VM isolation with **Auto-Suspension and Traffic-Triggered R
     ```shell
     kubectl apply -f sandbox-kata-auto-suspension.yaml
     ```
-3.  **Idle Suspension**: When no HTTP traffic reaches `kata-auto-suspension-example` for `10m`, the controller patches `.spec.operatingMode` to `Suspended` and deletes the Kata microVM Pod.
-4.  **Traffic-Triggered Resume**: When an incoming request carrying header `X-Sandbox-ID: kata-auto-suspension-example` reaches `sandbox-router`, the router transparently signals the controller to thaw the Sandbox back to `Running`, boots a fresh Kata VM, and proxies the request without dropping the connection.
+3.  **Idle Suspension**: When no HTTP traffic reaches `kata-auto-suspension-example` for `10m`, the controller automatically terminates the Kata microVM Pod while `.spec.operatingMode` remains `Running`.
+4.  **Traffic-Triggered Resume**: When an incoming request carrying header `X-Sandbox-ID: kata-auto-suspension-example` reaches `sandbox-router`, the router transparently signals the controller to update `status.lastActivityTime`, which provisions a fresh Kata VM and proxies the request without dropping the connection.
 
 # Troubleshooting
 

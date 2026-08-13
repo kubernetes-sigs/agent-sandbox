@@ -33,7 +33,6 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sync/singleflight"
 
-	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
@@ -188,12 +187,8 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 
 	var podIP string
 	if s.cache != nil && sandboxID != "" {
-		if getter, ok := s.cache.(interface {
-			GetByName(namespace, name string) (cache.Entry, bool)
-		}); ok {
-			if entry, ok := getter.GetByName(sandboxNamespace, sandboxID); ok && entry.PodIP != "" {
-				podIP = entry.PodIP
-			}
+		if entry, ok := s.cache.GetByName(sandboxNamespace, sandboxID); ok && entry.PodIP != "" {
+			podIP = entry.PodIP
 		}
 	}
 
@@ -254,17 +249,21 @@ func (s *ExtProcServer) handleRequestHeaders(ctx context.Context, headers *extpr
 
 func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, name string, port int) error {
 	if s.cache != nil {
-		if getter, ok := s.cache.(interface {
-			GetByName(namespace, name string) (cache.Entry, bool)
-		}); ok {
-			if entry, ok := getter.GetByName(namespace, name); ok && entry.PodIP != "" {
-				return nil
-			}
+		if entry, ok := s.cache.GetByName(namespace, name); ok && entry.PodIP != "" {
+			return nil
 		}
 	}
 
-	key := fmt.Sprintf("%s/%s", namespace, name)
+	key := fmt.Sprintf("%s/%s:%d", namespace, name, port)
 	_, err, _ := s.singleflightGroup.Do(key, func() (any, error) {
+		timeout := 60 * time.Second
+		if s.cfg != nil && s.cfg.DefaultResumeTimeout > 0 {
+			timeout = s.cfg.DefaultResumeTimeout
+		}
+
+		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+
 		url := strings.TrimRight(s.suspensionManagerURL, "/") + "/v1/sandboxes/resume"
 		payload := map[string]string{
 			"name":      name,
@@ -275,7 +274,7 @@ func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, nam
 			return nil, err
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+		req, err := http.NewRequestWithContext(flightCtx, http.MethodPost, url, bytes.NewReader(data))
 		if err != nil {
 			return nil, err
 		}
@@ -291,38 +290,27 @@ func (s *ExtProcServer) ensureSandboxRunning(ctx context.Context, namespace, nam
 			return nil, fmt.Errorf("resume API returned status code: %d", resp.StatusCode)
 		}
 
-		timeout := 60 * time.Second
-		if s.cfg != nil && s.cfg.DefaultResumeTimeout > 0 {
-			timeout = s.cfg.DefaultResumeTimeout
-		}
-
 		// Wait up to timeout for the Pod to become active in the informer cache
 		// AND for its target port to be reachable!
 		if s.cache != nil {
-			if getter, ok := s.cache.(interface {
-				GetByName(namespace, name string) (cache.Entry, bool)
-			}); ok {
-				deadline := time.Now().Add(timeout)
-				ready := false
-				for time.Now().Before(deadline) {
-					if entry, ok := getter.GetByName(namespace, name); ok && entry.PodIP != "" {
-						targetAddr := net.JoinHostPort(entry.PodIP, strconv.Itoa(port))
-						conn, err := net.DialTimeout("tcp", targetAddr, 200*time.Millisecond)
-						if err == nil {
-							conn.Close()
-							ready = true
-							break
-						}
-					}
-					select {
-					case <-ctx.Done():
-						return nil, ctx.Err()
-					case <-time.After(100 * time.Millisecond):
+			ready := false
+			for flightCtx.Err() == nil {
+				if entry, ok := s.cache.GetByName(namespace, name); ok && entry.PodIP != "" {
+					targetAddr := net.JoinHostPort(entry.PodIP, strconv.Itoa(port))
+					conn, err := net.DialTimeout("tcp", targetAddr, 200*time.Millisecond)
+					if err == nil {
+						conn.Close()
+						ready = true
+						break
 					}
 				}
-				if !ready {
-					return nil, fmt.Errorf("timeout (%s) waiting for resumed sandbox %s/%s to become reachable on port %d", timeout, namespace, name, port)
+				select {
+				case <-flightCtx.Done():
+				case <-time.After(100 * time.Millisecond):
 				}
+			}
+			if !ready {
+				return nil, fmt.Errorf("timeout (%s) waiting for resumed sandbox %s/%s to become reachable on port %d", timeout, namespace, name, port)
 			}
 		}
 

@@ -8,6 +8,8 @@ image:
   tag: ""  # required, eg. v0.3.10
   pullPolicy: IfNotPresent
 
+imagePullSecrets: []
+
 replicaCount: 1
 
 # podAnnotations are added to the controller pod template.

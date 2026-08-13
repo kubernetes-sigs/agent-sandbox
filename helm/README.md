@@ -80,6 +80,7 @@ The following table lists the configurable parameters and their defaults.
 | `image.tag` | Controller image tag — **required** | `""` |
 | `image.repository` | Controller image repository | `registry.k8s.io/agent-sandbox/agent-sandbox-controller` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
+| `imagePullSecrets` | List of image pull secrets to add to the Deployment | `[]` |
 | `replicaCount` | Number of controller replicas | `1` |
 | `namespace.create` | Create the namespace as part of the release | `true` |
 | `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |

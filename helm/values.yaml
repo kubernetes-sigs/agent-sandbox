@@ -86,6 +86,10 @@ containerSecurityContext: null
 # Name of the webhook service.
 webhookServiceName: agent-sandbox-webhook-service
 
+service:
+  # name sets the name of the controller Service that exposes the metrics endpoint.
+  name: agent-sandbox-controller
+
 metrics:
   # serviceMonitor creates a Prometheus Operator ServiceMonitor that scrapes the
   # controller's /metrics endpoint via the controller Service. Requires the

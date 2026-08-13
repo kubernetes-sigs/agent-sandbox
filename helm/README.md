@@ -110,6 +110,7 @@ The following table lists the configurable parameters and their defaults.
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
 | `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
 | `webhookServiceName` | Name of the conversion webhook Service | `agent-sandbox-webhook-service` |
+| `service.name` | Name of the controller Service that exposes the metrics endpoint | `agent-sandbox-controller` |
 | `metrics.serviceMonitor.enabled` | Create a Prometheus Operator `ServiceMonitor` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
 | `metrics.serviceMonitor.additionalLabels` | Extra labels on the `ServiceMonitor` (often required to match the Prometheus `serviceMonitorSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |
 | `metrics.serviceMonitor.interval` | Scrape interval | `30s` |

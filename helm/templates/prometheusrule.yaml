@@ -1,5 +1,6 @@
 {{- if .Values.metrics.prometheusRule.enabled }}
 {{- $namespace := include "agent-sandbox.namespace" . }}
+{{- $serviceName := include "agent-sandbox.serviceName" . }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -16,14 +17,14 @@ spec:
       rules:
         - alert: AgentSandboxControllerMetricsTargetsDown
           expr: |
-            absent(up{namespace="{{ $namespace }}", service="agent-sandbox-controller"}) or
-            max by (namespace, service) (up{namespace="{{ $namespace }}", service="agent-sandbox-controller"}) < 1
+            absent(up{namespace="{{ $namespace }}", service="{{ $serviceName }}"}) or
+            max by (namespace, service) (up{namespace="{{ $namespace }}", service="{{ $serviceName }}"}) < 1
           for: 5m
           labels:
             severity: warning
           annotations:
             summary: Agent Sandbox controller metrics targets are down
-            description: Prometheus has been unable to scrape any agent-sandbox-controller metrics target for 5 minutes.
+            description: Prometheus has been unable to scrape any {{ $serviceName }} metrics target for 5 minutes.
     {{- with .Values.metrics.prometheusRule.rules }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

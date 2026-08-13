@@ -211,7 +211,7 @@ type SandboxReconciler struct {
 	// observed — timestamp-only, no mutation payload; see deferredWriteClock
 	// for why this one piece of in-memory state is unavoidable and why
 	// losing it is harmless.
-	deferralClock deferredWriteClock
+	deferralClock     deferredWriteClock
 	EnableAutoSuspend bool
 }
 

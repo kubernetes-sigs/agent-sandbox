@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,11 +31,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 )
 
 func setupScheme(t *testing.T) *runtime.Scheme {
@@ -296,7 +295,7 @@ func TestSuspensionServerActivityHandlerRejectsOversizedPayload(t *testing.T) {
 
 	payload := make(map[string]string)
 	nowStr := time.Now().Format(time.RFC3339)
-	for i := 0; i < maxActivityEntries+1; i++ {
+	for i := range maxActivityEntries + 1 {
 		payload[fmt.Sprintf("default/sb-%d", i)] = nowStr
 	}
 	body, _ := json.Marshal(payload)

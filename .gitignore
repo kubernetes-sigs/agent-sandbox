@@ -22,7 +22,7 @@ temp/
 
 # TypeScript
 node_modules/
-clients/typescript/agentic-sandbox-client/dist/ 
+clients/typescript/agentic-sandbox-client/dist/
 
 # E2E test artifacts (generated during 'make test-e2e')
 test/e2e/artifacts/

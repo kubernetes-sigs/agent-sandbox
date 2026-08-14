@@ -355,8 +355,8 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 
 	// Reconcile Pod
-	pod, err := r.reconcilePod(ctx, sandbox, nameHash, wd)
-	allErrors = errors.Join(allErrors, err)
+	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash, wd)
+	allErrors = errors.Join(allErrors, podErr)
 
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
@@ -373,11 +373,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	}
 
 	// Reconcile Service
-	svc, err := r.reconcileService(ctx, sandbox, nameHash)
-	allErrors = errors.Join(allErrors, err)
+	svc, svcErr := r.reconcileService(ctx, sandbox, nameHash)
+	allErrors = errors.Join(allErrors, svcErr)
 
 	// compute and set overall conditions
-	conditions := r.computeConditions(sandbox, allErrors, svc, pod, err)
+	conditions := r.computeConditions(sandbox, allErrors, svc, pod, podErr)
 	hasFinished := false
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)

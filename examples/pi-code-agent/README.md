@@ -51,7 +51,7 @@ kubectl apply -f sandbox.yaml
 **Kind users** — load the image into the cluster before applying the manifest (or use `./run-test-kind.sh`, which does this for you):
 
 ```bash
-kind load docker-image pi-sandbox:local --name agent-sandbox
+kind load docker-image pi-sandbox:local --name "${KIND_CLUSTER_NAME:-agent-sandbox}"
 ```
 
 **Non-Kind clusters (Minikube, GKE, EKS, ...)** — `sandbox.yaml` references `pi-sandbox:local`, which is a node-local image. For clusters that cannot see your local Docker daemon, push the image to a registry and update the `image:` field in `sandbox.yaml` before applying:

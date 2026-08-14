@@ -29,22 +29,6 @@ const (
 	TemplateRefField = ".spec.sandboxTemplateRef.name"
 )
 
-// Condition types surfaced on SandboxWarmPool.status.conditions.
-const (
-	// SandboxWarmPoolConditionAvailable is True once the pool has at least its
-	// desired number of ready sandboxes. It lets automation block on the pool
-	// with `kubectl wait --for=condition=Available sandboxwarmpool/<name>`,
-	// mirroring the Deployment "Available" condition.
-	SandboxWarmPoolConditionAvailable = "Available"
-
-	// SandboxWarmPoolMinimumReplicasAvailable is the Available=True reason: the
-	// pool has at least its desired number of ready sandboxes.
-	SandboxWarmPoolMinimumReplicasAvailable = "SandboxWarmPoolMinimumReplicasAvailable"
-	// SandboxWarmPoolMinimumReplicasUnavailable is the Available=False reason:
-	// the pool has fewer ready sandboxes than desired.
-	SandboxWarmPoolMinimumReplicasUnavailable = "SandboxWarmPoolMinimumReplicasUnavailable"
-)
-
 // SandboxTemplateRef references a SandboxTemplate.
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
@@ -115,15 +99,6 @@ type SandboxWarmPoolStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-
-	// conditions represent the latest available observations of the pool's state.
-	// Known condition types are "Available".
-	// +optional
-	// +patchMergeKey=type
-	// +patchStrategy=merge
-	// +listType=map
-	// +listMapKey=type
-	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +genclient

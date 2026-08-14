@@ -29,7 +29,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -570,11 +569,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	warmPool.Status.ReadyReplicas = readyReplicas
 
-	// Surface the pool's generation and the Available condition so automation can
-	// `kubectl wait --for=condition=Available` and read pool health without
-	// inspecting individual sandboxes. Mirrors the Deployment Available condition.
+	// Surface the pool's observed generation so clients can gate on
+	// status.observedGeneration == metadata.generation before trusting the
+	// replica counts (eliminates read-after-write races on scale/spec updates).
 	warmPool.Status.ObservedGeneration = warmPool.Generation
-	meta.SetStatusCondition(&warmPool.Status.Conditions, availableCondition(warmPool, desiredReplicas, readyReplicas))
 
 	maxBatchSize := int32(r.MaxBatchSize)
 
@@ -779,26 +777,6 @@ func minNonZeroDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return min(a, b)
-}
-
-// availableCondition builds the Available condition for the pool, mirroring the
-// Deployment "Available" condition: True once the pool has at least its desired
-// number of ready sandboxes, False otherwise. A pool scaled to zero
-// (desiredReplicas == 0) reports Available=True.
-func availableCondition(warmPool *extensionsv1beta1.SandboxWarmPool, desiredReplicas, readyReplicas int32) metav1.Condition {
-	cond := metav1.Condition{
-		Type:               extensionsv1beta1.SandboxWarmPoolConditionAvailable,
-		ObservedGeneration: warmPool.Generation,
-		Message:            fmt.Sprintf("Warm pool has %d/%d ready sandboxes", readyReplicas, desiredReplicas),
-	}
-	if readyReplicas >= desiredReplicas {
-		cond.Status = metav1.ConditionTrue
-		cond.Reason = extensionsv1beta1.SandboxWarmPoolMinimumReplicasAvailable
-	} else {
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = extensionsv1beta1.SandboxWarmPoolMinimumReplicasUnavailable
-	}
-	return cond
 }
 
 // setNotProgressing tracks the pool's not-progressing state and emits a

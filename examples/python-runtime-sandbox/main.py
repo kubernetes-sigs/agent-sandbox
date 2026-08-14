@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import subprocess
 import os
 import shlex
@@ -65,12 +66,18 @@ async def execute_command(request: ExecuteRequest):
         # Split the command string into a list to safely pass to subprocess
         args = shlex.split(request.command)
         
-        # Execute the command, always from the /app directory
-        process = subprocess.run(
+        # Execute the command, always from the /app directory. Run it in a
+        # worker thread so a long-running or hung command doesn't block the
+        # event loop (and with it, the health check and file endpoints), and
+        # enforce a timeout so a runaway command can't wedge the sandbox
+        # forever.
+        process = await asyncio.to_thread(
+            subprocess.run,
             args,
             capture_output=True,
             text=True,
-            cwd="/app" 
+            cwd="/app",
+            timeout=float(os.environ.get("SANDBOX_EXEC_TIMEOUT_SECONDS", "300")),
         )
         return ExecuteResponse(
             stdout=process.stdout,

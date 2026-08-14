@@ -14,6 +14,7 @@
 
 import os
 import shlex
+import subprocess
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -61,6 +62,31 @@ def test_execute_command_success(mock_run):
     called_args, called_kwargs = mock_run.call_args
     assert called_args[0] == shlex.split("echo hello")
     assert called_kwargs["cwd"] == "/app"
+    assert called_kwargs["timeout"] == 300.0
+
+
+@patch('main.subprocess.run')
+def test_execute_command_uses_configured_timeout(mock_run):
+    mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+    with patch.dict(os.environ, {"SANDBOX_EXEC_TIMEOUT_SECONDS": "5"}):
+        response = client.post("/execute", json={"command": "echo hello"})
+
+    assert response.status_code == 200
+    called_kwargs = mock_run.call_args.kwargs
+    assert called_kwargs["timeout"] == 5.0
+
+
+@patch('main.subprocess.run')
+def test_execute_command_timeout_returns_failed_execution(mock_run):
+    mock_run.side_effect = subprocess.TimeoutExpired(cmd="sleep infinity", timeout=300)
+
+    response = client.post("/execute", json={"command": "sleep infinity"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exit_code"] == 1
+    assert "Failed to execute command" in body["stderr"]
 
 
 def test_execute_command_invalid_syntax_returns_error():

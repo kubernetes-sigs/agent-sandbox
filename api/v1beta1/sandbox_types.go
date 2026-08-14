@@ -49,8 +49,11 @@ const (
 	// SandboxReasonDependenciesNotReady indicates the Sandbox is expected to be running
 	// but its underlying dependencies are not fully provisioned or ready yet.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
-	// SandboxReasonSuspended indicates the Sandbox has been administratively suspended
-	// (i.e., intentional action by the user to suspend the Sandbox).
+	// SandboxReasonUserSuspended indicates the Sandbox has been administratively suspended by setting spec.operatingMode to Suspended.
+	SandboxReasonUserSuspended = "SandboxUserSuspended"
+	// SandboxReasonAutoSuspended indicates the Sandbox has been automatically suspended due to inactivity timeout.
+	SandboxReasonAutoSuspended = "SandboxAutoSuspended"
+	// Deprecated: Use SandboxReasonUserSuspended or SandboxReasonAutoSuspended instead.
 	SandboxReasonSuspended = "SandboxSuspended"
 
 	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
@@ -214,7 +217,11 @@ type SandboxSpec struct {
 	Lifecycle `json:",inline"`
 
 	// operatingMode specifies the desired operational state of the Sandbox.
-	// Defaults to Running if not specified.
+	// Running (Default if not specified): The sandbox should be running and able to process traffic.
+	// If AutoSuspension is configured, the controller will dynamically suspend and resume based on the
+	// configured AutoSuspension policy.
+	// Suspended: The sandbox is administratively suspended. The underlying sandbox pod is terminated.
+	// If operatingMode is set to Suspended, any configured AutoSuspension policy will be ignored.
 	// +kubebuilder:default=Running
 	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
@@ -233,6 +240,21 @@ const (
 	ShutdownPolicyRetain ShutdownPolicy = "Retain"
 )
 
+// AutoSuspensionPolicy defines the automatic suspension configuration for a Sandbox.
+// Note: Auto-suspension is an opt-in controller feature (`--enable-auto-suspend-and-resume=true`).
+// If disabled on the controller, `.spec.autoSuspension` has no effect.
+// Additionally, traffic-triggered auto-resume requires the Sandbox Router and Envoy Gateway
+// data-plane infrastructure to be deployed and active in the cluster.
+type AutoSuspensionPolicy struct {
+	// inactivityTimeoutSeconds is the duration of inactivity (no traffic) in seconds after which the sandbox is automatically suspended.
+	// Minimum value is 60 seconds (1 minute) to prevent rapid suspend/resume thrashing.
+	// Note: Has no effect unless `--enable-auto-suspend-and-resume=true` is enabled on the controller.
+	// Traffic-triggered auto-resume also requires the Sandbox Router and Envoy Gateway infrastructure to be active.
+	// +kubebuilder:validation:Minimum=60
+	// +optional
+	InactivityTimeoutSeconds *int32 `json:"inactivityTimeoutSeconds,omitempty"`
+}
+
 // Lifecycle defines the lifecycle management for the Sandbox.
 type Lifecycle struct {
 	// shutdownTime is the absolute time when the sandbox expires.
@@ -245,6 +267,13 @@ type Lifecycle struct {
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
+
+	// autoSuspension governs the automatic power-saving lifecycle (suspend and resume).
+	// This policy only takes effect when operatingMode is set to "Running".
+	// If present, the Sandbox will automatically transition to a suspended state (deleting its Pod)
+	// and resume (recreating the Pod) based on the configured policy criteria.
+	// +optional
+	AutoSuspension *AutoSuspensionPolicy `json:"autoSuspension,omitempty"`
 }
 
 // SandboxStatus defines the observed state of Sandbox.
@@ -274,6 +303,11 @@ type SandboxStatus struct {
 	// nodeName is the name of the node where the underlying pod is scheduled.
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
+
+	// lastActivityTime is the timestamp of the last observed activity (network traffic, manual un-suspension, or creation) on the sandbox.
+	// Note: Only populated and maintained when auto-suspension is enabled (`.spec.autoSuspension` configured and `--enable-auto-suspend-and-resume=true` on the controller).
+	// +optional
+	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
 }
 
 // +genclient

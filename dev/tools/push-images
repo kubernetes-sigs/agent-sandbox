@@ -156,8 +156,8 @@ def main(args):
             # root as build context (it imports the shared Go module) and
             # uses a "-go" suffix to avoid colliding with the Python router
             # image which still lives at clients/python/.../sandbox-router/.
-            go_router_dir = os.path.join(".", "sandbox-router")
-            if root == go_router_dir:
+            go_router_dir = os.path.normpath("sandbox-router")
+            if os.path.normpath(root) == go_router_dir:
                 context_dir = "."
                 service_name = "sandbox-router-go"
 

@@ -103,9 +103,11 @@ def find_and_replace_images(doc, image_prefix, image_tag):
                 print(f"{v}: replaced image with {v2}")
                 v = v2
             if v.startswith("ko://"):
-                # ko://foo/bar/command-name -> image_prefix + command-name + image_tag
-                command_name = v.split("/")[-1]
-                v2 = f"{image_prefix}{command_name}:{image_tag}"
+                if "sandbox-router" in v:
+                    v2 = f"{image_prefix}sandbox-router-go:{image_tag}"
+                else:
+                    command_name = v.split("/")[-1]
+                    v2 = f"{image_prefix}{command_name}:{image_tag}"
                 print(f"{v}: replaced image with {v2}")
                 v = v2
         return v
@@ -233,6 +235,7 @@ def process_manifests(all_docs, args):
     """
     prereq_docs = []
     extensions_docs = []
+    auto_suspension_docs = []
     other_docs = []
 
     image_prefix = utils.get_image_prefix(args)
@@ -247,6 +250,10 @@ def process_manifests(all_docs, args):
         if is_extension_file and not args.extensions:
             continue
 
+        is_auto_suspension_file = filename.startswith("auto-suspension")
+        if is_auto_suspension_file and not getattr(args, "auto_suspension", False):
+            continue
+
         # When extensions is enabled, we skip the core controller manifest because
         # it will be replaced by the one in the extensions directory.
         is_core_controller = (
@@ -258,38 +265,52 @@ def process_manifests(all_docs, args):
             continue
 
         find_and_replace_images(doc, image_prefix, image_tag)
-        append_controller_flags(doc, getattr(args, "controller_args", ""))
+        extra_flags = getattr(args, "controller_args", "") or ""
+        if getattr(args, "auto_suspension", False):
+            tokens = extra_flags.split()
+            for i, token in enumerate(tokens):
+                if token.startswith("--enable-auto-suspend-and-resume="):
+                    val = token.split("=", 1)[1].lower()
+                    if val in ("false", "0", "f", "no"):
+                        raise ValueError("--auto-suspension requires --enable-auto-suspend-and-resume=true, but --enable-auto-suspend-and-resume=false was explicitly passed in --controller-args.")
+                elif token == "--enable-auto-suspend-and-resume" and i + 1 < len(tokens):
+                    val = tokens[i+1].lower()
+                    if val in ("false", "0", "f", "no"):
+                        raise ValueError("--auto-suspension requires --enable-auto-suspend-and-resume=true, but --enable-auto-suspend-and-resume false was explicitly passed in --controller-args.")
+            if "--enable-auto-suspend-and-resume" not in extra_flags:
+                extra_flags = (extra_flags + " --enable-auto-suspend-and-resume=true").strip()
+        append_controller_flags(doc, extra_flags)
 
         if kind in ["CustomResourceDefinition", "Namespace"]:
             prereq_docs.append(doc)
         elif is_extension_file:
             extensions_docs.append(doc)
+        elif is_auto_suspension_file:
+            auto_suspension_docs.append(doc)
         else:
             other_docs.append(doc)
 
-    return prereq_docs, other_docs, extensions_docs
+    return prereq_docs, other_docs, auto_suspension_docs, extensions_docs
 
 
-def apply_manifests(prereq_docs, other_docs, extensions_docs, repo_root, apply_extensions):
+def apply_manifests(prereq_docs, other_docs, auto_suspension_docs, extensions_docs, repo_root, apply_extensions):
     """Applies the processed manifests to the cluster in the correct order.
 
     The order of application is:
     1. Prerequisites (Namespaces, CRDs)
-    2. Standard resources
-    3. Extension resources (if enabled)
-
-    Args:
-        prereq_docs (list): A list of prerequisite manifest documents.
-        other_docs (list): A list of standard manifest documents.
-        extension_docs (list): A list of extension manifest documents.
-        repo_root (str): The path to the repository root.
-        apply_extensions (bool): Whether to apply the extension manifests.
+    2. Standard resources (core controller)
+    3. Auto-suspension opt-in overlay manifests
+    4. Extension resources (if enabled)
     """
     print(f"Applying {len(prereq_docs)} prerequisite manifests (Namespace, CRDs)...")
     kubectl_apply_objects(prereq_docs, repo_root)
 
-    print(f"Applying {len(other_docs)} other manifests...")
+    print(f"Applying {len(other_docs)} standard manifests...")
     kubectl_apply_objects(other_docs, repo_root)
+
+    if auto_suspension_docs:
+        print(f"Applying {len(auto_suspension_docs)} auto-suspension opt-in manifests...")
+        kubectl_apply_objects(auto_suspension_docs, repo_root)
 
     if apply_extensions:
         print(f"Applying {len(extensions_docs)} extensions manifests...")
@@ -311,8 +332,8 @@ def main(args):
     manifests_path = os.path.join(repo_root, "k8s")
 
     all_docs = gather_manifests(manifests_path)
-    prereq_docs, other_docs, extension_docs = process_manifests(all_docs, args)
-    apply_manifests(prereq_docs, other_docs, extension_docs, repo_root, args.extensions)
+    prereq_docs, other_docs, auto_suspension_docs, extension_docs = process_manifests(all_docs, args)
+    apply_manifests(prereq_docs, other_docs, auto_suspension_docs, extension_docs, repo_root, args.extensions)
 
 
 if __name__ == "__main__":
@@ -330,6 +351,10 @@ if __name__ == "__main__":
     parser.add_argument("--extensions",
                         action="store_true",
                         help="Apply the extensions controller manifest. This flag must be set to deploy extensions.")
+    parser.add_argument("--auto-suspension",
+                        dest="auto_suspension",
+                        action="store_true",
+                        help="Apply the auto-suspension router and Envoy Gateway manifests.")
     parser.add_argument("--controller-args",
                         dest="controller_args",
                         help="Space-separated flags to pass to the controller container. Example " \

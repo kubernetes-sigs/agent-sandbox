@@ -176,15 +176,22 @@ type Config struct {
 	// Projected ServiceAccount tokens carry an aud claim that must
 	// match. Empty disables the audience check.
 	AuthzTokenReviewAudiences []string
-
-	// AuthzScopedTokenSecretFile is the path to a file holding the
-	// shared HMAC-SHA256 secret used to verify scoped tokens (see
-	// authz.ScopedTokenAuthorizer). Required when AuthzMode is
-	// scoped-token. The router never generates this secret — whoever
-	// mints tokens (typically the Sandbox controller) and the router
-	// must share it out-of-band, e.g. the same K8s Secret mounted into
-	// both.
+	// AuthzScopedTokenSecretFile is the path to a 32-byte secret key file used
+	// for verifying scoped authorization tokens.
 	AuthzScopedTokenSecretFile string
+
+	// ExtProcAddr is the address for the Envoy ext_proc gRPC listener.
+	// Empty disables ext_proc gRPC.
+	ExtProcAddr string
+	// SuspensionManagerURL is the endpoint URL of the sandbox suspension manager.
+	// Used for auto-resume signaling and activity timestamp flushing.
+	SuspensionManagerURL string
+	// ActivityFlushInterval is the interval at which accumulated activity timestamps
+	// are flushed to the suspension manager. Defaults to 60s.
+	ActivityFlushInterval time.Duration
+	// DefaultResumeTimeout is the maximum duration to wait for a suspended sandbox
+	// to become ready after a traffic-triggered resume. Defaults to 60s.
+	DefaultResumeTimeout time.Duration
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -195,6 +202,9 @@ func Defaults() Config {
 		HTTPSAddr:                 "",
 		MetricsAddr:               ":9090",
 		ProbeAddr:                 ":8081",
+		ExtProcAddr:               "",
+		ActivityFlushInterval:     60 * time.Second,
+		DefaultResumeTimeout:      60 * time.Second,
 		MTLSMode:                  MTLSOff,
 		ClusterDomain:             "cluster.local",
 		ProxyTimeout:              180 * time.Second,
@@ -261,6 +271,12 @@ func (c *Config) Validate() error {
 	}
 	if c.UpstreamRetryMaxDelay < 0 {
 		return fmt.Errorf("--upstream-retry-max-delay must be non-negative, got %s", c.UpstreamRetryMaxDelay)
+	}
+	if c.ActivityFlushInterval <= 0 {
+		return fmt.Errorf("--activity-flush-interval must be positive, got %s", c.ActivityFlushInterval)
+	}
+	if c.DefaultResumeTimeout <= 0 {
+		return fmt.Errorf("--default-resume-timeout must be positive, got %s", c.DefaultResumeTimeout)
 	}
 
 	switch c.AuthzMode {

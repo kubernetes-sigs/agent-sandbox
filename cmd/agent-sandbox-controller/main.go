@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -34,6 +35,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
+	"github.com/go-logr/logr"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/events"
@@ -108,6 +110,10 @@ func main() {
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	var suspensionServerAddr string
+	flag.StringVar(&suspensionServerAddr, "suspension-server-bind-address", ":8090", "The address the sandbox suspension REST server binds to (empty disables).")
+	var enableAutoSuspendAndResume bool
+	flag.BoolVar(&enableAutoSuspendAndResume, "enable-auto-suspend-and-resume", false, "Enable auto-suspension reconciler and traffic-triggered resume REST server for idle sandboxes.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -479,6 +485,7 @@ func main() {
 		Tracer:            instrumenter,
 		ClusterDomain:     clusterDomain,
 		WriteBehindWindow: sandboxWriteBehindWindow,
+		EnableAutoSuspend: enableAutoSuspendAndResume,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
@@ -489,6 +496,24 @@ func main() {
 			Complete(); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
 			os.Exit(1)
+		}
+	}
+
+	if enableAutoSuspendAndResume {
+		if suspensionServerAddr != "" {
+			suspensionSrv := controllers.NewSuspensionServer(mgr.GetClient(), mgr.GetLogger().WithName("suspension-server"))
+			srv := &http.Server{
+				Addr:              suspensionServerAddr,
+				Handler:           suspensionSrv.Handler(),
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      15 * time.Second,
+				IdleTimeout:       60 * time.Second,
+			}
+			if err := mgr.Add(&suspensionServerRunnable{srv: srv, addr: suspensionServerAddr, log: setupLog}); err != nil {
+				setupLog.Error(err, "unable to add suspension server runnable")
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -601,4 +626,28 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+type suspensionServerRunnable struct {
+	srv  *http.Server
+	addr string
+	log  logr.Logger
+}
+
+func (r *suspensionServerRunnable) NeedLeaderElection() bool {
+	return false
+}
+
+func (r *suspensionServerRunnable) Start(ctx context.Context) error {
+	r.log.Info("starting suspension REST server", "addr", r.addr)
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.srv.Shutdown(shutCtx)
+	}()
+	if err := r.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

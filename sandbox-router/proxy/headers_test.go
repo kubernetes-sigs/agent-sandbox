@@ -61,6 +61,16 @@ func TestParseSandboxHeaders(t *testing.T) {
 			want:    Target{ID: "my-box", Namespace: "my-ns-1", Port: DefaultSandboxPort},
 		},
 		{
+			name:    "host header matching .sandbox.local sets ID and namespace",
+			headers: map[string]string{"Host": "my-box.default.sandbox.local:8888"},
+			want:    Target{ID: "my-box", Namespace: "default", Port: DefaultSandboxPort},
+		},
+		{
+			name:     "unrelated host header without sandbox id rejected",
+			headers:  map[string]string{"Host": "myrouter.example.com"},
+			wantCode: http.StatusBadRequest,
+		},
+		{
 			name:     "missing sandbox id rejected",
 			headers:  map[string]string{},
 			wantCode: http.StatusBadRequest,

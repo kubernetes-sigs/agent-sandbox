@@ -1,0 +1,264 @@
+---
+# ==============================================================================
+# Auto-Suspension & Traffic-Triggered Resume Data-Plane Overlay
+# ==============================================================================
+#
+# - In Helm: set controller.enableAutoSuspendAndResume=true in values.yaml
+# - In deploy-kind: run `AUTO_SUSPENSION=true make deploy-kind` (injects flag automatically)
+# - In static manifests: run `kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--enable-auto-suspend-and-resume=true"}]'`
+# SECURITY NOTE: In v1beta1, port :8090 on the controller is unauthenticated.
+# A Kubernetes NetworkPolicy is automatically included at the bottom of this file
+# (#6) that restricts ingress to port :8090 exclusively to sandbox-router pods.
+# See docs/auto_suspension.md#security--access-control-8090-rest-api for details.
+# ==============================================================================
+# 0. Dedicated ServiceAccount and RBAC for sandbox-router Pod cache
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-router
+  namespace: agent-sandbox-system
+  labels:
+    app: sandbox-router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-router
+  labels:
+    app: sandbox-router
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-router
+  labels:
+    app: sandbox-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-router
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: agent-sandbox-system
+---
+# 1. sandbox-router gRPC ext_proc Deployment & Service
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: sandbox-router
+  namespace: agent-sandbox-system
+  labels:
+    app: sandbox-router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandbox-router
+  template:
+    metadata:
+      labels:
+        app: sandbox-router
+    spec:
+      serviceAccountName: sandbox-router
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: sandbox-router
+        image: ko://sigs.k8s.io/agent-sandbox/sandbox-router/cmd # placeholder value, replaced by release script
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        args:
+        - --ext-proc-bind-address=:9002
+        - --http-bind-address=:8080
+        - --suspension-manager-url=http://agent-sandbox-controller-suspension.agent-sandbox-system.svc.cluster.local:8090
+        - --activity-flush-interval=10s
+        - --cache-enabled=true
+        ports:
+        - name: ext-proc
+          containerPort: 9002
+          protocol: TCP
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: sandbox-router
+  namespace: agent-sandbox-system
+  labels:
+    app: sandbox-router
+spec:
+  selector:
+    app: sandbox-router
+  ports:
+  - name: ext-proc
+    port: 9002
+    targetPort: 9002
+    protocol: TCP
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+
+---
+
+# 2. Envoy Gateway GatewayClass, Gateway & EnvoyExtensionPolicy
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg-sandbox-gateway-class
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: sandbox-gateway
+  namespace: agent-sandbox-system
+spec:
+  gatewayClassName: eg-sandbox-gateway-class
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: All
+
+---
+
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: sandbox-ext-proc-policy
+  namespace: agent-sandbox-system
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: sandbox-gateway
+  extProc:
+  - backendRefs:
+    - group: ""
+      kind: Service
+      name: sandbox-router
+      port: 9002
+    messageTimeout: 180s
+    failOpen: false
+    processingMode:
+      request: {}
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sandbox-route
+  namespace: agent-sandbox-system
+spec:
+  parentRefs:
+  - name: sandbox-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: sandbox-router
+      port: 8080
+
+---
+
+# 5. Dedicated Service exposing suspension server port :8090 on agent-sandbox-controller
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-sandbox-controller-suspension
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  selector:
+    app: agent-sandbox-controller
+  ports:
+  - name: suspension
+    port: 8090
+    targetPort: 8090
+
+---
+# ==============================================================================
+# 6. NetworkPolicy isolating :8090 REST server on agent-sandbox-controller
+# ==============================================================================
+# Restricts incoming traffic to the unauthenticated /v1/sandboxes/resume and
+# /v1/sandboxes/activity REST server (:8090) exclusively to sandbox-router pods.
+# ==============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sandbox-router-to-controller-suspension-api
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes:
+  - Ingress
+  ingress:
+  # Restrict unauthenticated suspension API (:8090) exclusively to sandbox-router pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: sandbox-router
+    ports:
+    - protocol: TCP
+      port: 8090
+
+---
+# Allow cluster-wide access to CRD conversion webhook (:9443), metrics (:8080), and kubelet probes (:8081)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-controller-system-traffic
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - protocol: TCP
+      port: 9443
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081

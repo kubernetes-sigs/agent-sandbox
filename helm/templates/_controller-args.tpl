@@ -11,7 +11,13 @@
 {{- if hasKey .Values.controller "extensions" }}
 - --extensions={{ .Values.controller.extensions }}
 {{- end }}
-{{- if hasKey .Values.controller "enableTracing" }}
+{{- if .Values.controller.enableAutoSuspendAndResume }}
+- --enable-auto-suspend-and-resume={{ .Values.controller.enableAutoSuspendAndResume }}
+{{- end }}
+{{- if .Values.controller.suspensionServerBindAddress }}
+- --suspension-server-bind-address={{ .Values.controller.suspensionServerBindAddress }}
+{{- end }}
+{{- if .Values.controller.enableTracing }}
 - --enable-tracing={{ .Values.controller.enableTracing }}
 {{- end }}
 {{- if hasKey .Values.controller "enablePprof" }}

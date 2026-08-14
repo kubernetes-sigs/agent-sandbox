@@ -1,0 +1,24 @@
+{{- if .Values.controller.enableAutoSuspendAndResume }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-controller-system-traffic
+  namespace: {{ include "agent-sandbox.namespace" . }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "agent-sandbox.selectorLabels" . | nindent 6 }}
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow cluster-wide access to CRD conversion webhook (:9443), metrics (:8080), and kubelet probes (:8081)
+  - ports:
+    - protocol: TCP
+      port: 9443
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+{{- end }}

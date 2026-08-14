@@ -205,6 +205,27 @@ Package v1beta1 contains API Schema definitions for the agents v1beta1 API group
 
 
 
+#### AutoSuspensionPolicy
+
+
+
+AutoSuspensionPolicy defines the automatic suspension configuration for a Sandbox.
+Note: Auto-suspension is an opt-in controller feature (`--enable-auto-suspend-and-resume=true`).
+If disabled on the controller, `.spec.autoSuspension` has no effect.
+Additionally, traffic-triggered auto-resume requires the Sandbox Router and Envoy Gateway
+data-plane infrastructure to be deployed and active in the cluster.
+
+
+
+_Appears in:_
+- [Lifecycle](#lifecycle)
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `inactivityTimeoutSeconds` _integer_ | inactivityTimeoutSeconds is the duration of inactivity (no traffic) in seconds after which the sandbox is automatically suspended.<br />Minimum value is 60 seconds (1 minute) to prevent rapid suspend/resume thrashing.<br />Note: Has no effect unless `--enable-auto-suspend-and-resume=true` is enabled on the controller.<br />Traffic-triggered auto-resume also requires the Sandbox Router and Envoy Gateway infrastructure to be active. |  | Minimum: 60 <br />Optional: \{\} <br /> |
+
+
 
 
 #### EmbeddedObjectMetadata
@@ -240,6 +261,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `autoSuspension` _[AutoSuspensionPolicy](#autosuspensionpolicy)_ | autoSuspension governs the automatic power-saving lifecycle (suspend and resume).<br />This policy only takes effect when operatingMode is set to "Running".<br />If present, the Sandbox will automatically transition to a suspended state (deleting its Pod)<br />and resume (recreating the Pod) based on the configured policy criteria. |  | Optional: \{\} <br /> |
 
 
 #### PersistentVolumeClaimTemplate
@@ -376,7 +398,8 @@ _Appears in:_
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for the Sandbox workload.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the sandbox expires. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.<br />Underlying resources(Pods, Services) are always deleted on expiry. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
+| `autoSuspension` _[AutoSuspensionPolicy](#autosuspensionpolicy)_ | autoSuspension governs the automatic power-saving lifecycle (suspend and resume).<br />This policy only takes effect when operatingMode is set to "Running".<br />If present, the Sandbox will automatically transition to a suspended state (deleting its Pod)<br />and resume (recreating the Pod) based on the configured policy criteria. |  | Optional: \{\} <br /> |
+| `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox.<br />Running (Default if not specified): The sandbox should be running and able to process traffic.<br />If AutoSuspension is configured, the controller will dynamically suspend and resume based on the<br />configured AutoSuspension policy.<br />Suspended: The sandbox is administratively suspended. The underlying sandbox pod is terminated.<br />If operatingMode is set to Suspended, any configured AutoSuspension policy will be ignored. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
 
 
 #### SandboxStatus
@@ -398,6 +421,7 @@ _Appears in:_
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters. |  | Optional: \{\} <br /> |
 | `nodeName` _string_ | nodeName is the name of the node where the underlying pod is scheduled. |  | Optional: \{\} <br /> |
+| `lastActivityTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | lastActivityTime is the timestamp of the last observed activity (network traffic, manual un-suspension, or creation) on the sandbox.<br />Note: Only populated and maintained when auto-suspension is enabled (`.spec.autoSuspension` configured and `--enable-auto-suspend-and-resume=true` on the controller). |  | Optional: \{\} <br /> |
 
 
 #### ShutdownPolicy

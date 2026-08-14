@@ -63,6 +63,14 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Address for the Prometheus /metrics endpoint.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", c.ProbeAddr,
 		"Address for the /healthz and /readyz endpoints.")
+	fs.StringVar(&c.ExtProcAddr, "ext-proc-bind-address", c.ExtProcAddr,
+		"Address for the Envoy ext_proc gRPC listener (empty disables ext_proc).")
+	fs.StringVar(&c.SuspensionManagerURL, "suspension-manager-url", c.SuspensionManagerURL,
+		"Endpoint URL of the sandbox suspension manager daemon for resume signaling and activity flushing.")
+	fs.DurationVar(&c.ActivityFlushInterval, "activity-flush-interval", c.ActivityFlushInterval,
+		"Interval at which activity timestamps are flushed to suspension manager.")
+	fs.DurationVar(&c.DefaultResumeTimeout, "default-resume-timeout", c.DefaultResumeTimeout,
+		"Default maximum duration to wait for a suspended sandbox to become ready after a traffic-triggered resume.")
 
 	fs.StringVar(&c.TLSCertFile, "tls-cert-file", c.TLSCertFile,
 		"Path to the PEM-encoded server certificate.")

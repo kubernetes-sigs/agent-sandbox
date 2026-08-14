@@ -2,7 +2,7 @@
 # MUST be the repo root because the binary imports internal/ from the shared
 # Go module — dev/tools/push-images is patched to pass `--context .` for
 # this Dockerfile.
-FROM --platform=$BUILDPLATFORM golang:1.26.2 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.2 AS router-builder
 
 # Declare TARGETARCH to make it available in this build stage.
 ARG TARGETARCH
@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
 # Final image: distroless static so we ship only the binary plus minimal runtime.
 FROM gcr.io/distroless/static:nonroot
 
-COPY --from=builder /sandbox-router /sandbox-router
+COPY --from=router-builder /sandbox-router /sandbox-router
 
 # Document the default ports the binary listens on. Operators can override
 # via --http-bind-address / --https-bind-address / --metrics-bind-address /

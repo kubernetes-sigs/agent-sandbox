@@ -95,6 +95,11 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 			host = e.PodIP
 			src = SourceCache
 		}
+	case lookup != nil && t.ID != "":
+		if e, ok := lookup.GetByName(t.Namespace, t.ID); ok && e.PodIP != "" {
+			host = e.PodIP
+			src = SourceCacheName
+		}
 	}
 	if host == "" && lookup != nil {
 		// X-Sandbox-Id is the Sandbox CR name (== Pod name), so with the

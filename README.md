@@ -29,7 +29,7 @@ Key features of the `Sandbox` CRD include:
 
 *   **Stable Identity:** Each Sandbox has a stable hostname and network identity.
 *   **Persistent Storage:** Sandboxes can be configured with persistent storage that survives restarts.
-*   **Lifecycle Management:** The Sandbox controller manages the lifecycle of the pod, including creation, scheduled deletion, pausing and resuming.
+*   **Lifecycle & Auto-Suspension:** The Sandbox controller manages the lifecycle of the pod, including creation, scheduled deletion, [auto-suspension of idle sessions, and traffic-triggered resume](docs/auto_suspension.md).
 
 ### Extensions
 

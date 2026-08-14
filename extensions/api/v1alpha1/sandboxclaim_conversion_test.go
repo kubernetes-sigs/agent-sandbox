@@ -246,11 +246,28 @@ func TestSandboxClaimConversionFromHub(t *testing.T) {
 }
 
 func TestSandboxClaimConversionPreservesV1beta1OnlyFields(t *testing.T) {
+	warmPool := WarmPoolPolicy("my-pool")
+	alphaStateJSON, err := json.Marshal(&SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{"example.com/alpha": "preserved"},
+		},
+		Spec: SandboxClaimSpec{
+			TemplateRef: SandboxTemplateRef{Name: "my-pool"},
+			WarmPool:    &warmPool,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal v1alpha1 state: %v", err)
+	}
+
 	src := &v1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "my-claim",
-			Namespace:   "default",
-			Annotations: map[string]string{"example.com/preserved": "true"},
+			Name:      "my-claim",
+			Namespace: "default",
+			Annotations: map[string]string{
+				"example.com/preserved":             "true",
+				v1alpha1SandboxClaimStateAnnotation: string(alphaStateJSON),
+			},
 		},
 		Spec: v1beta1.SandboxClaimSpec{
 			WarmPoolRef: v1beta1.SandboxWarmPoolRef{Name: "my-pool"},

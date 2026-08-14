@@ -574,8 +574,14 @@ class SandboxFleet:
       return
     workers = max(1, min(len(entries), self.config.max_concurrent))
     if workers == 1 or len(entries) == 1:
+      err = None
       for e in entries:
-        self._warm_entry(e, wait, replicas_override=replicas_override)
+        try:
+          self._warm_entry(e, wait, replicas_override=replicas_override)
+        except Exception as exc:
+          err = err or exc
+      if err is not None:
+        raise err
       return
     with ThreadPoolExecutor(max_workers=workers) as ex:
       futures = [ex.submit(self._warm_entry, e, wait, replicas_override)
@@ -584,7 +590,7 @@ class SandboxFleet:
       for f in as_completed(futures):
         try:
           f.result()
-        except BaseException as exc:  # noqa: BLE001 — surface first; teardown cleans up
+        except Exception as exc:
           err = err or exc
       if err is not None:
         raise err
@@ -667,8 +673,15 @@ class SandboxFleet:
       return
     workers = max(1, min(len(entries), self.config.max_concurrent))
     if workers == 1 or len(entries) == 1:
+      err = None
       for e in entries:
-        self._unwarm_entry(e)
+        try:
+          self._unwarm_entry(e)
+        except Exception as exc:
+          logger.exception("Failed to unwarm entry: %s", exc)
+          err = err or exc
+      if err is not None:
+        raise err
       return
     with ThreadPoolExecutor(max_workers=workers) as ex:
       futures = [ex.submit(self._unwarm_entry, e) for e in entries]
@@ -676,7 +689,7 @@ class SandboxFleet:
       for f in as_completed(futures):
         try:
           f.result()
-        except BaseException as exc:  # noqa: BLE001 — surface first
+        except Exception as exc:
           logger.exception("Failed to unwarm entry: %s", exc)
           err = err or exc
       if err is not None:
@@ -694,7 +707,7 @@ class SandboxFleet:
     try:
       c.resources.delete_warmpool(entry.pool)
       pool_deleted = True
-    except BaseException as exc:  # noqa: BLE001
+    except Exception as exc:
       err = exc
 
     if pool_deleted:
@@ -706,7 +719,7 @@ class SandboxFleet:
 
     try:
       c.resources.delete_template(entry.template)
-    except BaseException as exc:  # noqa: BLE001
+    except Exception as exc:
       if err is None:
         err = exc
 
@@ -899,7 +912,6 @@ class SandboxFleet:
         return
       self._torndown = True
     self.release_all()
-    errors: list[BaseException] = []
     for c in self.registry:
       sel = c.resources.managed_selector()
       # Sweep any stray claims first (defensive: untracked/leaked claims keep
@@ -908,9 +920,8 @@ class SandboxFleet:
         claims = c.resources.list_claims(label_selector=sel)
         pools = c.resources.list_warmpools(label_selector=sel)
         tmpls = c.resources.list_templates(label_selector=sel)
-      except BaseException as exc:  # noqa: BLE001
+      except Exception as exc:
         logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
-        errors.append(exc)
         claims, pools, tmpls = [], [], []
       total_items = len(claims) + len(pools) + len(tmpls)
       if total_items > 0:
@@ -922,9 +933,8 @@ class SandboxFleet:
             for f in as_completed(claim_futs):
               try:
                 f.result()
-              except BaseException as exc:  # noqa: BLE001
+              except Exception as exc:
                 logger.exception("Failed to delete claim during teardown: %s", exc)
-                errors.append(exc)
           # Phase 2: Delete pools and templates concurrently.
           rest_futs = [ex.submit(c.resources.delete_warmpool, pool) for pool in pools]
           rest_futs.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
@@ -932,14 +942,13 @@ class SandboxFleet:
             for f in as_completed(rest_futs):
               try:
                 f.result()
-              except BaseException as exc:  # noqa: BLE001
+              except Exception as exc:
                 logger.exception("Failed to delete pool/template during teardown: %s", exc)
-                errors.append(exc)
       c.reset_counts()
       if delete_namespace:
         try:
           c.core_api.delete_namespace(c.namespace)
-        except Exception:  # noqa: BLE001
+        except Exception:
           pass
     self._obs.warm_reset()
     with self._lock:
@@ -947,8 +956,6 @@ class SandboxFleet:
       self._ondemand.clear()
     self.plan_ = None
     self._remove_teardown_hooks()
-    if errors:
-      raise errors[0]
 
   def __enter__(self) -> "SandboxFleet":
     return self.setup()

@@ -580,8 +580,8 @@ def test_teardown_concurrent_deletion_continues_on_failure(make_cluster):
   c.resources.delete_claim.side_effect = RuntimeError("failed to delete claim")
 
   f = SandboxFleet(FleetConfig(), registry=ClusterRegistry([c]))
-  with pytest.raises(RuntimeError, match="failed to delete claim"):
-    f.teardown()
+  # Teardown is best-effort and log-only to avoid masking in-flight exceptions
+  f.teardown()
 
   # delete_claim failed, but delete_warmpool and delete_template were still invoked
   c.resources.delete_claim.assert_called_once_with("claim1")
@@ -604,8 +604,7 @@ def test_teardown_multi_cluster_continues_on_cluster_failure(two_cluster_registr
   c2.resources.list_templates.return_value = ["c2-tmpl"]
 
   f = _fleet(two_cluster_registry)
-  with pytest.raises(RuntimeError, match="c1 claim error"):
-    f.teardown()
+  f.teardown()
 
   c1.resources.delete_claim.assert_called_once_with("c1-claim")
   c1.resources.delete_warmpool.assert_called_once_with("c1-pool")
@@ -635,3 +634,37 @@ def test_teardown_deletes_claims_before_pools_and_templates(make_cluster):
   assert len(claim_indices) == 2
   assert len(rest_indices) == 2
   assert max(claim_indices) < min(rest_indices)
+
+
+def test_unwarm_images_sequential_continues_on_failure(make_cluster):
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(max_concurrent=1), registry=ClusterRegistry([c]))
+  f.load_tasks(["i1", "i2"])
+  f.warm_image("i1", replicas_override=2)
+  f.warm_image("i2", replicas_override=3)
+  assert c.active_replicas == 5
+
+  c.resources.delete_warmpool.side_effect = [RuntimeError("i1 pool failure"), None]
+
+  # Sequential fallback (max_concurrent=1) must attempt all entries and raise first error
+  with pytest.raises(RuntimeError, match="i1 pool failure"):
+    f.unwarm_images(["i1", "i2"])
+
+  # i1 failed (restored in _warmed), i2 succeeded (removed and replicas released)
+  assert "i1" in f._warmed
+  assert "i2" not in f._warmed
+  assert c.active_replicas == 2
+
+
+def test_warm_entries_sequential_continues_on_failure(make_cluster):
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(max_concurrent=1), registry=ClusterRegistry([c]))
+  f.load_tasks(["i1", "i2"])
+
+  c.resources.create_warmpool.side_effect = [RuntimeError("i1 warm failure"), None]
+
+  with pytest.raises(RuntimeError, match="i1 warm failure"):
+    f.warm_images(["i1", "i2"])
+
+  # i2 was still attempted despite i1 failure
+  assert c.resources.create_warmpool.call_count == 2

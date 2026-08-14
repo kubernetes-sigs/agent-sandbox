@@ -1,0 +1,35 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Daily scale-up run: the full single-cluster leg of the
+# million-sandboxes-in-a-minute demonstration -- 200 nodes x 500
+# sandboxes/node = 100,000 sandboxes on kindnet, target window 60s
+# (~1,667/s). Ten of these clusters is the 1M/minute headline; this
+# periodic tracks the per-cluster number.
+#
+# All knobs default to the full target in the scenario itself; see
+# test/benchmarks/scenarios/scaleup-kops-gcp/run for sizing and tuning
+# rationale. Note the quota callout there: the full shape needs ~1,600
+# node vCPUs plus an 88-vCPU control plane in one zone.
+# SCALEUP_ENFORCE_TARGET flips red/green gating on the 60s window once the
+# target is consistently met.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+exec "${REPO_ROOT}/test/benchmarks/scenarios/scaleup-kops-gcp/run"

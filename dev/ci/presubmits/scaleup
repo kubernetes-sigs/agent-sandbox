@@ -1,0 +1,37 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Scale-up prove-out leg: the same per-node shape as the full
+# million-sandboxes-in-a-minute periodic (500 sandboxes/node, maxPods=512,
+# /22 pod CIDRs, kindnet) at 1/10 the node count, so it fits a normal
+# boskos project: 20 nodes x 500 = 10,000 sandboxes, same 60s target
+# window (~167/s for this leg). See
+# test/benchmarks/scenarios/scaleup-kops-gcp/run for the full rationale.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+export SCALEUP_NODE_COUNT="${SCALEUP_NODE_COUNT:-20}"
+# Create burst width scaled with the leg: 400 in-flight creates is ample
+# for ~167/s and spares the smaller control plane the full-scale burst.
+export STRESS_CREATE_CONCURRENCY="${STRESS_CREATE_CONCURRENCY:-400}"
+# The benchmark-standard control plane is plenty at 1/10 scale.
+export STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
+export STRESS_VALIDATE_WAIT="${STRESS_VALIDATE_WAIT:-10m}"
+
+exec "${REPO_ROOT}/test/benchmarks/scenarios/scaleup-kops-gcp/run"

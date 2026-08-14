@@ -1,0 +1,220 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# scaleup-kops-gcp: the single-cluster leg of the million-sandboxes-in-a-
+# minute demonstration.
+#
+# The end goal is 1,000,000 sandboxes launched in one minute across 10
+# clusters: 100,000 sandboxes per cluster in 60s, ~1,667 sustained
+# launches/s per cluster. This scenario builds ONE cluster shaped for that
+# density and launches SCALEUP_NODE_COUNT * SCALEUP_PODS_PER_NODE sandboxes
+# as fast as the pipeline allows (the test/stress fill phase: closed-loop
+# creates, then wait for every sandbox to become Ready), then reports the
+# achieved rate against the target window. Multi-cluster aggregation comes
+# later; this proves the per-cluster shape.
+#
+# Cluster shape (defaults): 200 worker nodes x maxPods=512 = 102,400 pod
+# slots, filled with 100,000 sandboxes (500 per node). Per-node pod
+# addressing comes from nodeCIDRMaskSize=22 (1,024 IPv4 addresses per node
+# out of the 100.64.0.0/10 cluster CIDR) -- kOps does not support IPv6 on
+# GCE, and the wider IPv4 mask serves the same purpose.
+#
+# CNI is kindnet: the benchmarks-kops-gcp CNI comparison showed kindnet
+# outperforming cilium on the launch path (cilium's endpoint-create rate
+# limiting and agent client QPS sit directly on pod-sandbox creation).
+#
+# The rate math that sizes this: the kindnet benchmark legs sustained
+# ~7.5 launches/s per node once node root disks moved to pd-ssd, so 200
+# nodes puts the node fleet's aggregate right at the ~1,600/s target --
+# making the control plane (apiserver/etcd/scheduler/controller) the
+# component this scenario actually interrogates. Expect the first runs to
+# find its wall well below target; that is the point of the periodic.
+#
+# Quota note: 200 x n2-standard-8 is 1,600 vCPUs (plus the control plane)
+# in us-central1 -- more than the usual boskos project allowance. Downsized
+# legs (the scaleup presubmit) fit; the full periodic needs a project with
+# raised CPU and in-use-IP quota.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# ---------------------------------------------------------------------------
+# Scale shape.
+# ---------------------------------------------------------------------------
+SCALEUP_NODE_COUNT="${SCALEUP_NODE_COUNT:-200}"
+SCALEUP_PODS_PER_NODE="${SCALEUP_PODS_PER_NODE:-500}"
+SCALEUP_MAX_PODS="${SCALEUP_MAX_PODS:-512}"
+
+# The window the whole launch must fit in for the 1M/minute story.
+SCALEUP_TARGET_SECONDS="${SCALEUP_TARGET_SECONDS:-60}"
+
+# Report-only vs gating: while we bring the number up, missing the target
+# window prints NOT MET but does not fail the job (an incomplete launch --
+# any create failed, any sandbox never Ready -- always fails). Flip to true
+# once the target is consistently met so regressions go red.
+SCALEUP_ENFORCE_TARGET="${SCALEUP_ENFORCE_TARGET:-false}"
+
+TOTAL_SANDBOXES=$(( SCALEUP_NODE_COUNT * SCALEUP_PODS_PER_NODE ))
+
+if (( SCALEUP_PODS_PER_NODE > SCALEUP_MAX_PODS - 8 )); then
+  # kindnet, kube-proxy and node-exporter live on every node too.
+  echo "SCALEUP_PODS_PER_NODE=${SCALEUP_PODS_PER_NODE} leaves no headroom under maxPods=${SCALEUP_MAX_PODS} for system daemonsets"
+  exit 1
+fi
+
+echo "======================================================="
+echo "scaleup-kops-gcp: ${TOTAL_SANDBOXES} sandboxes on 1 cluster"
+echo "  nodes:         ${SCALEUP_NODE_COUNT} x ${SCALEUP_PODS_PER_NODE} sandboxes (maxPods=${SCALEUP_MAX_PODS})"
+echo "  target window: ${SCALEUP_TARGET_SECONDS}s (~$(( TOTAL_SANDBOXES / SCALEUP_TARGET_SECONDS ))/s)"
+echo "  enforce:       ${SCALEUP_ENFORCE_TARGET}"
+echo "======================================================="
+
+# ---------------------------------------------------------------------------
+# Cluster + harness configuration, handed to the shared kops-gcp runner.
+# ---------------------------------------------------------------------------
+export CNI="${CNI:-kindnet}"
+export STRESS_NODE_COUNT="${SCALEUP_NODE_COUNT}"
+export STRESS_MAX_PODS="${SCALEUP_MAX_PODS}"
+export STRESS_NODE_CIDR_MASK_SIZE="${STRESS_NODE_CIDR_MASK_SIZE:-22}"
+
+# The 22-core control plane saturated near ~150 launches/s in the kindnet
+# benchmark era; this scenario asks for 10x that, so start from the largest
+# same-family box and let the runs tell us where the next wall is.
+export STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-88}"
+
+# 200 nodes converge slower than the benchmark's 20.
+export STRESS_VALIDATE_WAIT="${STRESS_VALIDATE_WAIT:-25m}"
+
+# Scheduler client QPS: the proven wall at this scale. The 100-node run at
+# the benchmark's 500/500 pinned the scheduler's client rate limiter (11.4s
+# mean queued wait per request) and capped ready-throughput at ~470/s.
+# ~2 scheduler requests per pod placed means the 1,667/s target needs
+# ~3,400 req/s; 4000 keeps the limiter out of the measurement.
+export STRESS_SCHEDULER_QPS="${STRESS_SCHEDULER_QPS:-4000}"
+export STRESS_SCHEDULER_BURST="${STRESS_SCHEDULER_BURST:-4000}"
+
+# APF seat budget: with the scheduler's client limiter removed, its bindings
+# queued server-side in workload-high (338k queued seconds on the 100-node
+# run at the 1600/800 baseline-to-be; the run actually ran at the 400/200
+# kubeadm defaults). 3200/1600 gives workload-high roughly 4x the seats of
+# the kubeadm defaults while apiserver CPU (38 of 88 cores at peak) has
+# room to serve them.
+export STRESS_MAX_REQUESTS_INFLIGHT="${STRESS_MAX_REQUESTS_INFLIGHT:-3200}"
+export STRESS_MAX_MUTATING_INFLIGHT="${STRESS_MAX_MUTATING_INFLIGHT:-1600}"
+
+# The e2e benchmark suite adds nothing to this scenario's signal and would
+# run against a 10x-sized cluster; skip it.
+export RUN_BENCHMARK_SUITE=false
+
+# One phase: fill = create everything closed-loop, wait for all Ready.
+export STRESS_PHASES="fill"
+export STRESS_FILL_PER_NODE="${SCALEUP_PODS_PER_NODE}"
+
+# 1,600 concurrent create workers covers the target rate even at ~1s
+# create-ack; sharded over 16 HTTP/2 connections to stay under the
+# apiserver's ~100-streams-per-connection cap (test/stress clientconns.go).
+export STRESS_CREATE_CONCURRENCY="${STRESS_CREATE_CONCURRENCY:-1600}"
+CLIENT_CONNECTIONS=$(( (STRESS_CREATE_CONCURRENCY + 99) / 100 ))
+
+# --per-sandbox-timeout is the fill stall detector (no NEW Ready for that
+#   long aborts the run) -- generous because the Ready wave trails the
+#   create wave at this scale.
+# --cleanup=false: tearing down a 100k-sandbox namespace would add many
+#   minutes; the whole cluster is deleted on exit anyway.
+export STRESS_EXTRA_ARGS="${STRESS_EXTRA_ARGS:---client-connections=${CLIENT_CONNECTIONS} --per-sandbox-timeout=15m --cleanup=false}"
+export STRESS_TIMEOUT="${STRESS_TIMEOUT:-60m}"
+
+# Controller tuning: qps=2000 + 400 workers is the empirical optimum from
+# the 100-node campaign (runs 3/4/5), and NOT for the obvious reason.
+# The client-side limiter is not (only) protecting the apiserver -- it
+# paces the reconcile loop so workqueue events coalesce: at qps=2000 a
+# sandbox launch costs ~4.3 status PATCHes; uncapped (qps=-1) it costs
+# ~7.6, with or without more workers, and the extra intermediate-state
+# PATCHes queue in APF ahead of the Ready-marking PATCH (run 4: -18%
+# throughput). Reclassifying the controller into workload-high
+# (apf-flowschema.yaml, applied via STRESS_EXTRA_MANIFESTS) helped the
+# controller's own APF wait but crowded the scheduler's lane and slowed
+# pod-ready p50 55.9s -> 68.6s (run 5: worse still). The durable fix is
+# fewer status writes per launch in the controller itself, not tuning --
+# which is what the two write-reduction windows below turn on.
+#
+# --sandbox-transitional-status-window=180s: transitional status changes
+#   (pre-Ready fills, reason churn, field fills) defer until the Ready flip,
+#   so the fast path writes status once per launch. 180s comfortably
+#   exceeds the worst observed launch tail (run 5 max e2e 148.7s), so no
+#   transitional flush fires mid-burst; shrink it as the wave compresses
+#   toward the 60s target. Material changes (Ready flips, Finished,
+#   Expired, failures) always write immediately.
+# --sandbox-write-behind-window=1s: coalesces the recoverable pod
+#   label/annotation patch (~13k requests on the 50k run).
+export CONTROLLER_ARGS="${CONTROLLER_ARGS:---kube-api-qps=2000 --kube-api-burst=4000 --sandbox-concurrent-workers=400 --sandbox-transitional-status-window=180s --sandbox-write-behind-window=1s}"
+
+"${REPO_ROOT}/test/benchmarks/scenarios/benchmarks-kops-gcp/run"
+
+# ---------------------------------------------------------------------------
+# Verdict: did the launch fit the target window? Runs only when the stress
+# run itself succeeded (set -e above). An incomplete launch always fails;
+# missing the window fails only under SCALEUP_ENFORCE_TARGET=true.
+# ---------------------------------------------------------------------------
+# The shared runner cds to REPO_ROOT, so its ARTIFACTS fallback of "." is
+# the repo root; mirror that here where we have not cd'd.
+python3 - "${ARTIFACTS:-${REPO_ROOT}}/stress-test/summary.json" "${TOTAL_SANDBOXES}" \
+  "${SCALEUP_TARGET_SECONDS}" "${SCALEUP_ENFORCE_TARGET}" <<'PYEOF'
+import json
+import sys
+
+summary_path, total, target_seconds, enforce = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), sys.argv[4] == "true"
+
+with open(summary_path) as f:
+    summary = json.load(f)
+
+fills = [p for p in summary["phases"] if p.get("kind") == "fill"]
+if not fills:
+    print("SCALEUP FAILED: no fill phase found in summary.json")
+    sys.exit(1)
+phase = fills[0]
+
+requested = phase["requested"]
+ready = phase["ready"]
+failed = phase["failed"]
+time_to_all_ready = phase.get("timeToAllReadySeconds")
+ready_throughput = phase.get("readyThroughput") or {}
+
+print("==================== SCALEUP RESULT ====================")
+print(f"sandboxes: requested={requested} ready={ready} failed={failed}")
+if ready_throughput:
+    print("ready throughput: overall={overallPerSecond:.1f}/s best10s={best10sPerSecond:.1f}/s best60s={best60sPerSecond:.1f}/s".format(**ready_throughput))
+
+if ready < requested or failed > 0 or time_to_all_ready is None:
+    print(f"SCALEUP FAILED: launch incomplete ({ready}/{requested} Ready, {failed} failed)")
+    sys.exit(1)
+
+rate = ready / time_to_all_ready
+target_rate = total / target_seconds
+met = time_to_all_ready <= target_seconds
+print(f"launched {ready:,} sandboxes to Ready in {time_to_all_ready:.1f}s = {rate:,.0f}/s")
+print(f"target: {total:,} in {target_seconds:.0f}s ({target_rate:,.0f}/s) -> {'MET' if met else 'NOT MET'}")
+print(f"projection across 10 clusters: {int(rate * 60 * 10):,} sandboxes/minute")
+print("=========================================================")
+
+if enforce and not met:
+    print("SCALEUP FAILED: target window not met (SCALEUP_ENFORCE_TARGET=true)")
+    sys.exit(1)
+PYEOF
+
+echo "scaleup-kops-gcp completed."

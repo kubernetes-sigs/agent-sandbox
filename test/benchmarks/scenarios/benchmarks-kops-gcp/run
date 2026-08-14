@@ -78,8 +78,14 @@ fi
 export IMAGE_TAG
 echo "Using image tag: ${IMAGE_TAG}"
 
-# Push images
-for image in "agent-sandbox-controller" "chrome-sandbox"; do
+# Push images. chrome-sandbox is only exercised by the e2e benchmark suite,
+# and its image build is expensive (a full chromium dependency tree, ~5
+# minutes emulated on an arm64 laptop) -- skip it when the suite is skipped.
+IMAGES_TO_PUSH=("agent-sandbox-controller")
+if [[ "${RUN_BENCHMARK_SUITE:-true}" == "true" ]]; then
+  IMAGES_TO_PUSH+=("chrome-sandbox")
+fi
+for image in "${IMAGES_TO_PUSH[@]}"; do
   echo "Pushing ${image} to ${IMAGE_PREFIX}..."
   dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images "${image}"
 done
@@ -100,7 +106,10 @@ export KOPS_STATE_STORE="gs://${BUCKET_NAME}"
 
 # Compute a relatively unique identifier for this run to allow concurrent runs
 CLUSTER_NAME="sandbox-${UNIQUE_SUFFIX}"
-ZONE="us-central1-a"
+# Overridable because zones stock out (observed: ZONE_RESOURCE_POOL_EXHAUSTED
+# for c3 in us-central1-a); pick another zone rather than another machine type
+# so results stay comparable.
+ZONE="${STRESS_ZONE:-us-central1-a}"
 
 cleanup() {
   echo "Cleaning up..."
@@ -163,6 +172,12 @@ echo "Using node count: ${STRESS_NODE_COUNT}"
 STRESS_CONTROL_PLANE_SIZE="${STRESS_CONTROL_PLANE_SIZE:-c3-standard-22}"
 echo "Using control-plane size: ${STRESS_CONTROL_PLANE_SIZE}"
 
+# Worker node size. n2-standard-8 is the benchmark baseline; scenarios that
+# trade per-node CPU for node count (or fight vCPU quota at high node
+# counts) can override.
+STRESS_NODE_SIZE="${STRESS_NODE_SIZE:-n2-standard-8}"
+echo "Using node size: ${STRESS_NODE_SIZE}"
+
 echo "Creating kOps cluster configuration..."
 # --gce-service-account=default: needed because boskos doesn't let us configure IAM permissions on the project.
 kops create cluster \
@@ -175,7 +190,7 @@ kops create cluster \
   --control-plane-count=1 \
   --control-plane-size="${STRESS_CONTROL_PLANE_SIZE}" \
   --node-count="${STRESS_NODE_COUNT}" \
-  --node-size=n2-standard-8
+  --node-size="${STRESS_NODE_SIZE}"
 
 # Spec tuning is applied as separate `kops edit cluster --set` blocks rather
 # than as flags on `kops create` above. Each knob keeps its rationale next to
@@ -266,9 +281,15 @@ kops edit cluster --name "${CLUSTER_NAME}" \
 # scheduler's kubeAPIQPS/kubeAPIBurst spec fields map to the legacy
 # --kube-api-qps/--kube-api-burst flags, which current kube-schedulers no
 # longer accept).
+# Overridable: 500/500 is comfortable at benchmark scale (20 nodes), but the
+# 100-node scaleup run pinned this exact limiter -- ~102k scheduler requests
+# queued a mean of 11.4s each in the client rate limiter while every other
+# component idled, capping cluster ready-throughput at ~470/s (the scheduler
+# spends ~2 requests per pod placed). scaleup-kops-gcp raises it via
+# STRESS_SCHEDULER_QPS/BURST.
 kops edit cluster --name "${CLUSTER_NAME}" \
-  --set cluster.spec.kubeScheduler.qps=500 \
-  --set cluster.spec.kubeScheduler.burst=500
+  --set "cluster.spec.kubeScheduler.qps=${STRESS_SCHEDULER_QPS:-500}" \
+  --set "cluster.spec.kubeScheduler.burst=${STRESS_SCHEDULER_BURST:-500}"
 
 # kubelet.kubeAPIQPS (default 50): the kubelets make multiple pod
 # status updates per pod.
@@ -285,6 +306,42 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubelet.eventQPS=5 \
   --set cluster.spec.kubelet.eventBurst=50
 
+# kubeAPIServer.maxRequestsInflight/maxMutatingRequestsInflight (defaults
+# 400/200): APF's total seat budget is derived from these two flags and
+# scales with NOTHING else - not CPU, not node count. First seen on the
+# stress-40-nodes hero run (80 nodes: the system level's kubelet traffic
+# queued while the apiserver sat at 35% CPU); the 100-node scaleup run
+# reproduced it on the launch path (scheduler bindings in workload-high
+# accumulated 338k queued seconds against the default 600-seat pool while
+# the apiserver had 50 idle cores). 1600/800 is the baseline; scaleup
+# raises further via STRESS_MAX_REQUESTS_INFLIGHT/STRESS_MAX_MUTATING_INFLIGHT.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set "cluster.spec.kubeAPIServer.maxRequestsInflight=${STRESS_MAX_REQUESTS_INFLIGHT:-1600}" \
+  --set "cluster.spec.kubeAPIServer.maxMutatingRequestsInflight=${STRESS_MAX_MUTATING_INFLIGHT:-800}"
+
+# kubelet.maxPods (default 110): pod-density scenarios (scaleup-kops-gcp
+# packs 500 sandboxes onto every node) need the kubelet cap raised.
+# Anything past ~250 pods/node also needs a wider per-node pod CIDR --
+# see STRESS_NODE_CIDR_MASK_SIZE right below; the two travel together.
+if [[ -n "${STRESS_MAX_PODS:-}" ]]; then
+  echo "Setting kubelet maxPods=${STRESS_MAX_PODS}"
+  kops edit cluster --name "${CLUSTER_NAME}" \
+    --set "cluster.spec.kubelet.maxPods=${STRESS_MAX_PODS}"
+fi
+
+# kubeControllerManager.nodeCIDRMaskSize: the per-node pod CIDR carved out
+# of the 100.64.0.0/10 cluster CIDR. The default /24 (256 addresses) caps a
+# node at ~250 pods; /22 gives 1,024 addresses per node -- enough for
+# maxPods=512 -- while still leaving room for 4,096 nodes. kindnet routes
+# node-to-node on the VMs themselves (no GCP route-table entries), so a
+# wider mask does not eat cloud route quota. (IPv6 would remove the
+# per-node address math entirely, but kOps only supports IPv6 on AWS, so
+# on GCE a wider IPv4 mask is the tool.)
+if [[ -n "${STRESS_NODE_CIDR_MASK_SIZE:-}" ]]; then
+  echo "Setting nodeCIDRMaskSize=${STRESS_NODE_CIDR_MASK_SIZE}"
+  kops edit cluster --name "${CLUSTER_NAME}" \
+    --set "cluster.spec.kubeControllerManager.nodeCIDRMaskSize=${STRESS_NODE_CIDR_MASK_SIZE}"
+fi
 
 if [[ "${CNI}" == "cilium" ]]; then
   # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the
@@ -302,7 +359,9 @@ echo "Exporting kubeconfig..."
 kops export kubeconfig --name "${CLUSTER_NAME}" --admin
 
 echo "Waiting for cluster to be ready..."
-kops validate cluster --wait 15m
+# High node counts take longer to converge; scenarios override the wait
+# (upstream #1377 raised the default to 15m).
+kops validate cluster --wait "${STRESS_VALIDATE_WAIT:-15m}"
 
 if [[ "${CNI}" == "cilium" ]]; then
   # Raise Cilium's endpoint-create API rate limit. The agent rate-limits
@@ -352,6 +411,13 @@ dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" --extensions \
 echo "Waiting for controller to be ready..."
 kubectl rollout status deployment agent-sandbox-controller --namespace agent-sandbox-system --timeout=10m
 
+# Optional extra manifests (space-separated paths), applied after the
+# controller is up. Used by scaleup-kops-gcp for its APF FlowSchema.
+for manifest in ${STRESS_EXTRA_MANIFESTS:-}; do
+  echo "Applying extra manifest ${manifest}..."
+  kubectl apply -f "${manifest}"
+done
+
 # Serve only the beta API: the mere presence of a v1alpha1 version
 # causes the kube-apiserver to build a v1alpha1 version for every resource,
 # in the informer cache, even if v1alpha1 is never used, adding unnecessary
@@ -370,10 +436,16 @@ for crd in sandboxes.agents.x-k8s.io \
   done
 done
 
-# Run the benchmarks
-echo "Running benchmarks..."
-dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
-echo "Benchmark completed successfully."
+# Run the benchmarks. Scenarios whose signal is the stress test alone
+# (e.g. scaleup-kops-gcp, where the cluster is 10x the usual size and the
+# e2e suite would just burn wall-clock on it) set RUN_BENCHMARK_SUITE=false.
+if [[ "${RUN_BENCHMARK_SUITE:-true}" == "true" ]]; then
+  echo "Running benchmarks..."
+  dev/tools/test-e2e --suite=benchmarks --image-prefix="${IMAGE_PREFIX}"
+  echo "Benchmark completed successfully."
+else
+  echo "Skipping benchmark e2e suite (RUN_BENCHMARK_SUITE=${RUN_BENCHMARK_SUITE})."
+fi
 
 
 # Run the stress test.

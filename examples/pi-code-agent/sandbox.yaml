@@ -8,6 +8,7 @@ spec:
       labels:
         sandbox: pi-code-agent
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: pi
           image: pi-sandbox:local
@@ -25,7 +26,6 @@ spec:
               mountPath: /workspace
             - name: agent-state
               mountPath: /root/.pi/agent
-      volumes: []
   volumeClaimTemplates:
     - metadata:
         name: workspace

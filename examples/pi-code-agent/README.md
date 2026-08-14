@@ -44,10 +44,24 @@ This builds the image, loads it into the Kind cluster (default name `agent-sandb
 # Build the image
 docker build -t pi-sandbox:local .
 
-# (Kind only) Load the image into the cluster
-kind load docker-image pi-sandbox:local --name agent-sandbox
-
 # Apply the Sandbox manifest
+kubectl apply -f sandbox.yaml
+```
+
+**Kind users** — load the image into the cluster before applying the manifest (or use `./run-test-kind.sh`, which does this for you):
+
+```bash
+kind load docker-image pi-sandbox:local --name agent-sandbox
+```
+
+**Non-Kind clusters (Minikube, GKE, EKS, ...)** — `sandbox.yaml` references `pi-sandbox:local`, which is a node-local image. For clusters that cannot see your local Docker daemon, push the image to a registry and update the `image:` field in `sandbox.yaml` before applying:
+
+```bash
+# Example: push to a registry you control
+docker tag pi-sandbox:local REGISTRY/pi-sandbox:0.84.1
+docker push REGISTRY/pi-sandbox:0.84.1
+
+# Edit sandbox.yaml: replace `image: pi-sandbox:local` with `image: REGISTRY/pi-sandbox:0.84.1`
 kubectl apply -f sandbox.yaml
 ```
 

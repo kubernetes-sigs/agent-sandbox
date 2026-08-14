@@ -38,9 +38,10 @@ TOC is auto-generated via `make toc-update`.
 ## Summary
 
 The SandboxClaim controller records startup metrics during reconciliation. This KEP stores Admission
-Observation, Controller Observation, and First Ready times as write-once fields in SandboxClaim
-status, alongside a true-only marker for unrecoverable First Ready times; the admission annotation
-remains the webhook-to-controller handoff. A leader-elected
+Observation, Controller Observation, and First Ready in SandboxClaim status, plus a true-only marker
+when the First Ready time cannot be recovered. v1beta1 CEL rules reject later changes or removal
+through `/status`. The admission annotation remains the webhook-to-controller handoff. A
+leader-elected
 `SandboxClaimMetricsObserver` controller records the existing Prometheus histograms through its own
 workqueue when a cache Update adds `firstReadyTime`. The Claim controller makes no
 observability-related metadata PATCHes for normal new Claims, and status retains the timing data
@@ -52,17 +53,18 @@ when the observer loses a sample.
 
 The SandboxClaim controller handles startup observability in its authoritative reconcile path:
 
-1. On the first active reconcile, it writes `controller-first-observed-at` and any trace context to
-   Claim metadata.
-2. After persisting the first `Ready=True` status, it records the three startup latency metrics.
-3. It then writes `claim-first-ready-at` in a metadata PATCH to guard against duplicate observations
-   on later Ready transitions.
+1. On the first active reconcile, it writes
+   `agents.x-k8s.io/controller-first-observed-at` (`ObservabilityAnnotation`) and any trace context
+   to Claim metadata.
+2. After persisting the first `Ready=True` status, it records four startup latency metrics.
+3. It then writes `agents.x-k8s.io/claim-first-ready-at` (`ClaimFirstReadyAnnotation`) in a metadata
+   PATCH to guard against duplicate observations on later Ready transitions.
 
-A normal Claim that reaches Ready incurs up to two observability-related metadata PATCHes.
-The second PATCH changes no Claim state. If it fails, Reconcile returns an error even though status
-persistence and metric recording have succeeded. A failure after the Ready write also leaves the
-Claim Ready without the guard, so after restart the controller records the sample again.
-Persisted status keeps the facts inspectable without a Prometheus sample.
+A Claim that reaches `Ready=True` incurs up to two metadata PATCHes for observability. If the guard
+PATCH fails, `Reconcile` returns an error, and a later reconciliation retries the PATCH. The
+controller uses the persisted condition to avoid duplicate metrics after a retry or restart, but
+may record them again if the Claim returns to `Ready=True` before the guard is stored. The startup
+status remains inspectable without a Prometheus sample.
 
 Until the [Performance](#performance) criteria are met, this KEP claims only that the proposed
 controller eliminates those writes. Effects on API server load, etcd write load, and Claim Ready
@@ -73,8 +75,12 @@ latency remain unmeasured.
 - Preserve these histograms, their labels, and their millisecond bucket behavior:
   - `agent_sandbox_claim_startup_latency_ms`
   - `agent_sandbox_claim_controller_startup_latency_ms`
+  - `agent_sandbox_client_claim_startup_latency_ms`
   - `agent_sandbox_creation_latency_ms`
-- Persist the four write-once `status.startup` fields in v1beta1.
+- Persist the four `status.startup` fields with v1beta1 CEL transition rules.
+- Preserve populated startup status through v1alpha1 `/status` updates and main-resource
+  read-modify-write requests that retain a valid carrier, without exposing the fields in the
+  deprecated v1alpha1 schema.
 - Record all First Ready latency metrics outside `SandboxClaimReconciler.Reconcile`.
 - Reduce observability-related Claim metadata PATCHes to zero on normal cold and warm-pool paths.
 - Stop persisting trace context on Claims while propagating the current Reconcile context directly
@@ -89,7 +95,7 @@ latency remain unmeasured.
 
 - Exactly-once or durable metric delivery. Prometheus observations stay process-local and
   best-effort.
-- Measuring caller-to-apiserver latency. Admission timing starts when the webhook receives the
+- Measuring caller-to-API server latency. Admission timing starts when the webhook receives the
   AdmissionReview, not when the caller sends the CREATE.
 - Removing Claim annotations used by the existing startup observability path. The `/status`
   subresource cannot update annotations, so cleanup would require separate metadata PATCHes without
@@ -150,9 +156,38 @@ best-effort consequences. Losing a metric event never changes the Claim or trigg
 
 #### API Changes
 
-Add the startup status type to v1beta1, the storage version. The deprecated v1alpha1 API keeps its
-schema. Conversion to v1alpha1 drops the fields; the Kubernetes conversion contract permits data
-loss in the older-version direction.
+Add the startup status type to v1beta1, the storage version. The deprecated v1alpha1 schema does not
+expose `status.startup`. The conversion webhook carries populated startup fields through v1alpha1 using
+`api.agents.x-k8s.io/v1alpha1-sandboxclaim-state`
+(`v1alpha1SandboxClaimStateAnnotation`).
+
+The annotation holds a JSON-serialized v1alpha1 SandboxClaim. When `status.startup` is present, the
+webhook adds it to the serialized `status` object without changing the payload's top-level shape.
+The v1alpha1 schema does not inspect or prune JSON inside an annotation value. Older conversion code
+still decodes the payload as a v1alpha1 SandboxClaim and ignores the unknown field.
+
+When converting from v1beta1 to v1alpha1, the webhook treats the v1beta1 status as authoritative,
+restores the v1alpha1-only state, and attaches a refreshed carrier to the v1alpha1 object. When
+converting from v1alpha1 to v1beta1, it converts the current v1alpha1 object, restores
+`status.startup` from the carrier, and regenerates the carrier from the current v1alpha1 object and
+the restored startup status. The webhook omits the carrier annotation from the object it serializes,
+which prevents recursive growth.
+
+The webhook rejects undecodable carriers and startup status with
+`firstReadyTimeUnavailable=false`, both terminal fields, or `firstReadyTime` without
+`controllerObservedTime`. Conversion validates current state, not writer identity or write-once
+history. The proposal adds no validating admission policy and keeps the optional admission webhook's
+`failurePolicy: Ignore`.
+
+Conversion preserves populated startup fields when a valid carrier is present. For a v1alpha1
+`/status` update, the status strategy copies metadata from the old v1alpha1 representation,
+including the carrier returned by conversion. A main-resource read-modify-write request depends on
+the client retaining the carrier. Deleting or replacing the carrier falls outside the preservation
+guarantee.
+
+The carrier is not an authorization or integrity boundary, and the conversion webhook does not
+authenticate its contents. The project accepts this because it uses startup status only for
+best-effort telemetry, not for security, billing, workload control, or strict SLO enforcement.
 
 | JSON field under `status.startup` | Go type | Meaning |
 | --- | --- | --- |
@@ -163,28 +198,32 @@ loss in the older-version direction.
 
 All three fields use `metav1.MicroTime` because the persisted values feed
 millisecond-resolution histograms. `metav1.Time` serializes JSON at whole-second precision;
-`metav1.MicroTime` retains microsecond precision across apiserver round trips. The observer
+`metav1.MicroTime` retains microsecond precision across API server round trips. The observer
 converts durations to milliseconds only after subtracting the persisted values, preserving the
 existing histogram bucket behavior.
 
-CEL transition rules enforce the API contract for every `/status` writer. Each timestamp permits a
-first write, then rejects value changes and removal. Parent and root rules prevent bypass by deleting
-an optional field, `status.startup`, or `status`. The unavailable marker permits only its first
-`true` write and cannot coexist with `firstReadyTime`.
+For v1beta1 `/status` requests, CEL permits each timestamp's first write, then rejects changes or
+removal. Parent and root rules reject removal of `status.startup` or `status`.
+`firstReadyTimeUnavailable` permits only its first `true` write and cannot coexist with
+`firstReadyTime`.
 
-The root CEL transition rule runs on every SandboxClaim update, including spec-only updates. The
-generated schema must stay within the CEL estimated cost limits. A pre-release validator test must
-record the aggregate runtime cost for both terminal states and cover spec-only and unrelated status
-updates.
+For main-resource updates, the API server restores stored status before CEL validation, so omitting
+status does not remove it. The v1beta1 root rule still runs on every update, including spec-only
+updates. v1alpha1 requests use the v1alpha1 schema and rely on the carrier for preservation.
+
+The generated schema must stay within the CEL estimated cost limits. A pre-release
+validator test must record the aggregate runtime cost for both terminal states and cover spec-only
+and unrelated status updates.
 
 A missing `firstReadyTime` means no accurate First Ready time has been persisted; a non-nil value
 records one. During migration, the existing `Ready` condition and legacy guard can
 prove that First Ready occurred even when the controller cannot recover its time.
 `firstReadyTimeUnavailable=true` records that terminal exception.
 
-Project RBAC grants `/status` write access only to the Claim controller. Administrators may grant
-that permission to other principals, which remain trusted for the first write because CEL cannot
-identify the writer. The controller maintains these lifecycle invariants:
+RBAC grants `/status` write access to the `agent-sandbox-controller` ServiceAccount; only the
+SandboxClaim controller uses it. Administrators may grant that permission to other principals,
+which remain trusted for the first write because CEL cannot identify the writer. The controller
+maintains these lifecycle invariants:
 
 - A Claim with `firstReadyTime` must also have `controllerObservedTime`.
 - The controller sets `firstReadyTimeUnavailable=true` only when legacy evidence proves that First
@@ -204,23 +243,24 @@ uses a controller-only downgrade while retaining the new CRD, as described in
 [Rollout and Compatibility](#rollout-and-compatibility).
 
 The project will not ship these fields until the [Performance](#performance) acceptance criteria are
-met. The first release adds them to v1beta1 as beta API. Once published in v1beta1, field names,
-JSON paths, types, precision, absence semantics, writer ownership, and write-once rules become
-v1beta1 compatibility commitments.
+met. The first release adds them to v1beta1 as beta API. Once published, the v1beta1 schema,
+precision, absence semantics, writer ownership, and transition rules become compatibility
+commitments.
 The project may not remove the fields or change their meaning within v1beta1. Retraction requires a
 new API version whose conversion preserves stored data, plus documented migration and deprecation
 under the [Kubernetes API deprecation policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/).
 
 #### Timestamp Ownership
 
-The SandboxClaim controller is the only project component that writes `status.startup`:
+The SandboxClaim controller owns `status.startup` updates during reconciliation:
 
 | Module | Responsibility |
 | --- | --- |
-| SandboxClaim controller | Computes and persists every `status.startup` transition. |
-| Admission webhook | Writes the CREATE-time annotation; never writes Claim status. |
-| Startup Observer | Records best-effort metrics; never writes or acknowledges delivery through Claim status. |
-| Sandbox controller | Maintains Sandbox state; never writes SandboxClaim startup status. |
+| SandboxClaim controller | Validates inputs and persists new `status.startup` transitions. |
+| Conversion webhook | Carries existing startup status between v1alpha1 and v1beta1; does not originate or authenticate a value. |
+| Admission webhook | Records the CREATE time in an annotation; does not write Claim status. |
+| Startup Observer | Records best-effort metrics without writing or acknowledging delivery through Claim status. |
+| Sandbox controller | Maintains Sandbox state without modifying SandboxClaim startup status. |
 
 #### Startup Observer
 
@@ -235,27 +275,30 @@ does not retry the request after partial emission.
 
 #### Metrics
 
-For each accepted transition, the observer derives durations from persisted timestamps, excluding
+For each accepted transition, the observer derives durations from persisted inputs, excluding
 workqueue delay:
 
 ```text
+Client Startup     = firstReadyTime - ClientAnnotation timestamp
 Admission Startup  = firstReadyTime - admissionObservedTime
 Controller Startup = firstReadyTime - controllerObservedTime
 Sandbox Creation   = Sandbox Ready lastTransitionTime - Sandbox creationTimestamp
 ```
 
+The caller supplies `agents.x-k8s.io/client-first-requested-at` (`ClientAnnotation`) as an
+RFC3339Nano timestamp. This proposal leaves the annotation unchanged.
+
 Sandbox Creation keeps its current inputs and precision: both values already come from persisted
 `metav1.Time` fields.
 
-The observer evaluates Admission Startup and Controller Startup as separate intervals. A missing or
-invalid Admission Observation skips only `agent_sandbox_claim_startup_latency_ms`. Negative
-intervals are invalid. Admission Startup and Controller Startup use 240s as their highest explicit
-bucket; Sandbox Creation uses 600s. Larger positive values remain valid in `+Inf`. A lagging source
-clock can inflate a sample, but timestamps alone cannot distinguish that skew from a real slow
-startup. Deployments must synchronize cluster clocks.
+The observer validates each Claim interval independently. A missing or invalid input skips only the
+corresponding histogram. Negative intervals are invalid. Claim intervals use 240s as their highest
+explicit bucket; Sandbox Creation uses 600s. Larger positive values remain valid in `+Inf`. A
+lagging source clock can inflate a sample, but timestamps alone cannot distinguish that skew from a
+real slow startup. Deployments must synchronize cluster clocks.
 
 The observer reads the assigned Sandbox from the manager cache to preserve each metric's existing
-label set. The two Claim histograms use only `launch_type` and `sandbox_template`; Sandbox Creation
+label set. The three Claim histograms use only `launch_type` and `sandbox_template`; Sandbox Creation
 also uses `namespace`. On a cache miss, the observer records Claim intervals with present inputs and
 non-negative durations using `launch_type="unknown"` and `sandbox_template="__unknown__"`; it skips
 Sandbox Creation latency.
@@ -263,7 +306,7 @@ Sandbox Creation latency.
 Add bounded-cardinality self-observation:
 
 - `agent_sandbox_claim_startup_observer_samples_total{metric,result}` reports per-sample outcomes.
-  `metric` is one of `admission`, `controller`, or `sandbox_creation`; `result` is one of
+  `metric` is one of `client`, `admission`, `controller`, or `sandbox_creation`; `result` is one of
   `recorded`, `missing_input`, `invalid_interval`, or `sandbox_not_found`.
 
 The self-metric uses only the fixed label values above and adds no object-derived labels. Existing
@@ -284,7 +327,7 @@ creation continues and Admission Observation remains unset.
 | --- | --- | --- | --- |
 | `agents.x-k8s.io/controller-first-observed-at` (`ObservabilityAnnotation`) | Stop writing. | Read once when initializing startup status for an existing Pending or NotReady Claim with no legacy First Ready evidence; never delete. | Replaced by `status.startup.controllerObservedTime`. |
 | `agents.x-k8s.io/claim-first-ready-at` (`ClaimFirstReadyAnnotation`) | Stop writing and backfilling. | Use as the legacy First Ready guard; never parse or delete it. | Replaced by `firstReadyTime` and `firstReadyTimeUnavailable`. |
-| `agents.x-k8s.io/webhook-first-observed-at` (`WebhookFirstObservedAtAnnotation`; currently internal `WebhookAnnotation`) | Webhook overwrites during CREATE; controller copies once. | Copy a valid value only during startup status initialization. | Retained as the admission-to-controller carrier. |
+| `agents.x-k8s.io/webhook-first-observed-at` (`WebhookAnnotation`) | Webhook overwrites during CREATE; controller copies once. | Copy a valid value only during startup status initialization. | Retained as the admission-to-controller carrier. |
 | `opentelemetry.io/trace-context` on Claim (`TraceContextAnnotation`) | Stop persisting. | Existing values may still seed legacy trace extraction; never delete. | Current Reconcile context is propagated directly to Sandbox. |
 
 `TraceContextAnnotation` remains valid on Sandbox resources.
@@ -336,9 +379,17 @@ next `Ready=True` transition. This KEP accepts the limitation under the best-eff
 
 Recommended rollout order:
 
-1. Apply regenerated CRDs containing the v1beta1 status schema.
-2. Deploy the optional webhook update.
-3. Deploy the controller and observer.
+1. Apply regenerated CRDs containing the v1beta1 status schema and transition rules.
+2. Deploy the controller image, including the conversion webhook changes, the Claim controller, and
+   the Startup Observer.
+3. Wait for all conversion webhook replicas to run the new image before relying on v1alpha1
+   round-trip preservation.
+
+During a mixed-version rollout, a v1alpha1 write served by a pre-feature conversion webhook may lose
+`status.startup` because the old webhook ignores the field in the carrier.
+
+The optional CREATE admission webhook keeps `failurePolicy: Ignore`. The proposal adds no validating
+admission policy.
 
 The controller continues to accept `--disable-claim-observability-annotations` for compatibility.
 The flag has no effect after the Claim controller stops writing its observability annotations.
@@ -357,11 +408,16 @@ add `firstReadyTime` later.
 Metric names, buckets, existing labels, and Claim startup timestamp precision remain unchanged, so
 dashboards do not need query migration. The new observer self-metrics are additive.
 
-Operators may downgrade only the controller and must retain this release's CRD schema. The current
-pre-feature controller uses optimistic merge status patches, so it ignores `status.startup` without
-deleting it; it may resume legacy annotation writes and their metadata PATCH cost. Controllers that
-replace the entire status object fall outside this guarantee. A later upgrade to the new controller
-preserves `firstReadyTime` and does not replay samples.
+Operators may downgrade the controller image while retaining this release's CRD schema. The
+pre-feature controller sends resourceVersion-guarded JSON merge patches to the v1beta1 `/status`
+subresource. Those patches omit `status.startup`, so the API server retains the field. The
+controller may resume legacy annotation writes and their metadata PATCH cost.
+
+The pre-feature conversion webhook does not preserve `status.startup` through v1alpha1, so a
+v1alpha1 read-modify-write request during the downgrade may remove the field. A v1beta1 client that
+replaces the entire status and omits a populated `status.startup` receives a validation error. The
+API server leaves the stored object unchanged. A later upgrade does not replay a sample for a
+retained `firstReadyTime`.
 
 Rolling the SandboxClaim CRD back to a schema without `status.startup` is unsupported. On a later
 object write,
@@ -378,7 +434,10 @@ with `firstReadyTimeUnavailable=true`; the observer does not replay a sample.
 | First Ready bursts can create observer backlog or delay informer dispatch. | The event handler only enqueues keys, and observer work runs on a separate queue. Release requires stable informer and Claim reconciliation throughput and a queue that drains after supported bursts. |
 | Leader failure or Claim name reuse can lose samples; multiple replicas without leader election can duplicate them. | The best-effort contract permits loss during handoff or name reuse. The observer rejects startup Add events, and supported deployments keep `--leader-elect=true`; see [Startup Observer](#startup-observer) and [Rollout and Compatibility](#rollout-and-compatibility). |
 | Clock skew makes an interval negative or inflates it. | The observer skips negative intervals; see [Metrics](#metrics) for positive skew and bucket behavior. |
-| An authorized status writer persists an incorrect timestamp first. | Treat `/status` write permission as trusted. CEL prevents later mutation but cannot identify the first writer; correction requires a versioned schema migration. |
+| An authorized v1beta1 `/status` writer persists an incorrect initial value. | Treat `/status` write permission as trusted. CEL rejects later changes submitted through v1beta1 but cannot identify the first writer. The supported correction path requires a versioned schema migration. |
+| A main-resource writer deletes or replaces the v1alpha1 conversion carrier. | The carrier is not an authorization or integrity boundary. Deletion can lose startup status, and a valid replacement can change it through v1alpha1. No validating admission policy protects the carrier; treat the result as best-effort telemetry. |
+| Carrier data cannot be decoded or violates the startup status invariants. | The webhook returns a conversion error and leaves the stored object unchanged. Recovery requires repairing the annotation through v1beta1 or removing it after accepting loss of the carried v1alpha1-only state. Tests cover conversion failures and regeneration without recursive growth. |
+| A v1alpha1 request reaches a pre-feature conversion webhook during rollout or downgrade. | During rollout, v1alpha1 round-trip preservation begins after all webhook replicas run the new image. During downgrade, v1alpha1 read-modify-write requests remain outside the guarantee until the conversion webhook is upgraded again. Treat affected startup data as best-effort telemetry. |
 | A caller supplies a false admission timestamp when the optional webhook does not run. | The webhook overwrites caller input when it runs, and the controller ignores invalid values. Treat Admission Observation as best-effort telemetry, not as input for security, billing, or strict SLOs. |
 | Rolling the CRD back can prune `status.startup` on a later object write. | Retain the new CRD during downgrade; see [Rollout and Compatibility](#rollout-and-compatibility). |
 
@@ -398,7 +457,12 @@ normal Claim status are business operations and remain unchanged.
 | Ready legacy object without guard | Metadata PATCH backfills `unknown`. | One exceptional status PATCH sets `firstReadyTimeUnavailable=true`. |
 
 For each normal new Claim, the proposed controller eliminates up to two metadata PATCHes. The
-observer adds zero apiserver reads, writes, LISTs, or WATCHes.
+observer adds zero API server reads, writes, LISTs, or WATCHes.
+
+Reusing the existing carrier adds no API server request or conversion webhook call. On each
+conversion involving v1alpha1, the webhook parses the carrier when present and regenerates it.
+Requests handled entirely as v1beta1 do not execute that logic. A stored carrier remains part of the
+v1beta1 object payload.
 
 ### Controller and Startup Observer Resource Bounds
 
@@ -407,7 +471,10 @@ observer adds zero apiserver reads, writes, LISTs, or WATCHes.
   no fixed capacity and shares manager memory.
 - Processing uses one Reconcile worker by default. Increase `MaxConcurrentReconciles` only if
   benchmarks show that cache reads and local metric calculation cannot keep up.
-- Each Claim stores at most three RFC3339 timestamps and one true-only migration marker.
+- `status.startup` stores at most three RFC3339 timestamps and one true-only migration marker. A
+  conversion through v1alpha1 adds one serialized copy of the populated fields to the existing
+  carrier. The webhook removes the carrier annotation from the embedded object before serialization,
+  so repeated conversions do not grow the payload recursively.
 - During upgrade, the controller initializes timestamps for existing Pending or NotReady Claims
   without a legacy guard. It writes the unavailable marker for Ready Claims without a guard and
   NotReady Claims with one; Ready Claims with a guard cause no write.
@@ -415,10 +482,27 @@ observer adds zero apiserver reads, writes, LISTs, or WATCHes.
 ## Testing and Acceptance Criteria
 
 - **API and validation:** Generation, unit tests, and envtest verify the `status.startup` schema in
-  v1beta1, microsecond-precision round trips, and absence semantics. The apiserver accepts first
-  writes and unrelated updates. It rejects changes to or removal of persisted timestamps, removal
-  of their parent objects, `firstReadyTimeUnavailable=false`, and
-  both terminal fields on the same Claim.
+  v1beta1, microsecond-precision round trips, and absence semantics. For v1beta1 `/status` requests,
+  the API server accepts initial writes and unrelated status updates, but rejects changes or removal
+  of persisted timestamps, removal of parent objects, `firstReadyTimeUnavailable=false`, and both
+  terminal fields together. It accepts v1beta1 main-resource updates that omit status because the
+  status strategy restores the stored value before validation. CRD generation must pass CEL
+  estimated-cost validation. A validator test records the aggregate runtime cost for both terminal
+  states.
+- **Conversion:** Unit tests cover carrier payloads with and without `status.startup` and repeated
+  round trips. They verify that v1beta1-to-v1alpha1 conversion returns a refreshed carrier,
+  v1alpha1-to-v1beta1 conversion restores startup status and the current v1alpha1-only state, and
+  the embedded object does not contain its own carrier annotation. A compatibility test decodes the
+  extended payload as a v1alpha1 SandboxClaim and confirms that code which ignores unknown JSON
+  fields still accepts it.
+
+  Envtest uses the v1alpha1 typed client for GET-and-Update and GET-and-UpdateStatus flows. A final
+  v1beta1 GET returns the original startup values when the carrier is preserved. A separate
+  UpdateStatus request omits the carrier and verifies that the status strategy retains the stored
+  startup fields. Main-resource Update tests delete and replace the carrier. Deletion and a
+  replacement that passes conversion validation are accepted because no validating admission
+  policy protects the carrier; both remain outside the preservation guarantee. Malformed JSON or
+  startup status that violates the conversion invariants returns a conversion error.
 - **Controller and migration:** Unit tests and envtest verify that cold and warm Claims persist
   startup timestamps through normal status updates without observability metadata PATCHes. Legacy
   Claims migrate lazily and idempotently without inventing timestamps or replaying completed
@@ -426,13 +510,18 @@ observer adds zero apiserver reads, writes, LISTs, or WATCHes.
   of the `Ready` and `Finished` conditions.
 - **Observer and metrics:** Tests verify that the leader-elected observer accepts only stored
   nil-to-non-nil `firstReadyTime` Updates from the shared cache, rejects startup Add events, and
-  writes no Kubernetes object. It preserves existing histogram names, buckets, and labels. Missing
-  or invalid input skips only the affected histogram.
+  writes no Kubernetes object. Tests cover all four histograms and verify their names, buckets, and
+  labels. They also verify that the observer skips only the affected histogram when an input is
+  missing or invalid.
 - **Rollout and end-to-end:** End-to-end coverage exercises cold and warm Claims with the optional
   webhook. It verifies that leader handoff does not replay completed Claims and that Claims created
-  after handoff can still produce samples. Envtest verifies that controller-only downgrade and
-  re-upgrade preserve startup status without replay, while unsupported CRD rollback demonstrates
-  field pruning and migration to `firstReadyTimeUnavailable`.
+  after handoff can still produce samples. Envtest submits a resourceVersion-guarded JSON merge
+  patch to v1beta1 `/status` that omits `status.startup`, matching the pre-feature controller, and
+  verifies that the field remains stored. A re-upgrade test verifies that a retained
+  `firstReadyTime` does not replay a sample. A compatibility test passes the extended carrier
+  through the pre-feature v1alpha1 conversion behavior and confirms that startup status is not
+  preserved. Unsupported CRD rollback demonstrates field pruning and migration to
+  `firstReadyTimeUnavailable`.
 
 ### Performance
 
@@ -469,8 +558,8 @@ so the fields enter the API with that version at Beta.
 The first release introduces the four `status.startup` fields as Beta API. The Beta milestone
 requires:
 
-- API review approval, the generated `status.startup` schema in v1beta1, conversion and CEL
-  enforcement tests, and API lint.
+- API review approval, the generated `status.startup` schema in v1beta1, conversion-carrier
+  compatibility tests, v1beta1 CEL enforcement tests, and API lint.
 - User-facing documentation that describes the API and states that the feature has no dedicated
   feature gate.
 
@@ -494,5 +583,7 @@ The fields may graduate with SandboxClaim to v1 when:
 | Record metrics in Claim reconciliation or informer callbacks | Claim reconciliation would spend latency-sensitive workers on metric delivery; informer callbacks would delay dispatch for every consumer. A separate controller isolates the work behind its own queue. |
 | Record every Ready event or replay completed status | Ready flaps would emit recovery durations, while restart or leader-handoff replay would duplicate completed samples. Prometheus histograms provide no event identity for deduplication. |
 | Keep startup timestamps in annotations | Metadata PATCHes remain, timestamps bypass API conversion and schema, and First Ready remains an implementation marker instead of lifecycle status. |
+| Add a second carrier annotation | It would add a second conversion carrier alongside the existing whole-object carrier without creating a stronger trust boundary. Extending the existing payload keeps one round-trip mechanism. |
+| Protect the carrier with validating admission | A fail-open check could not guarantee preservation. Making the check fail closed would turn best-effort telemetry into an availability dependency for main-resource SandboxClaim updates, unlike the optional CREATE webhook, which uses `failurePolicy: Ignore`. |
 | Add a `StartupObserved` condition | `firstReadyTime` already represents normal pending and observed states. The condition would duplicate them and could look like workload health; `firstReadyTimeUnavailable` covers the migration exception. |
 | Remove or make the admission annotation immutable | The CREATE admission webhook cannot write Claim status, while an UPDATE webhook would put every Claim update on the admission path for best-effort telemetry. Copy-once status uses the annotation only as a handoff. |

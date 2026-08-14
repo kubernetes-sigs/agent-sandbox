@@ -14,6 +14,7 @@
 
 import os
 import shlex
+import signal
 import subprocess
 from unittest.mock import patch, MagicMock
 
@@ -49,37 +50,68 @@ class TestGetSafePath:
             get_safe_path("foo/../../bar")
 
 
-@patch('main.subprocess.run')
-def test_execute_command_success(mock_run):
-    mock_run.return_value = MagicMock(stdout="hello\n", stderr="", returncode=0)
+def _mock_process(mock_popen, stdout="", stderr="", returncode=0, pid=1234):
+    """Configures mock_popen (a patched main.subprocess.Popen) to behave like
+    a Popen used as a context manager, and returns the inner process mock.
+    """
+    mock_process = MagicMock()
+    mock_process.communicate.return_value = (stdout, stderr)
+    mock_process.returncode = returncode
+    mock_process.pid = pid
+    mock_popen.return_value.__enter__.return_value = mock_process
+    return mock_process
 
-    response = client.post("/execute", json={"command": "echo hello"})
+
+@patch('main.subprocess.Popen')
+def test_execute_command_success(mock_popen):
+    _mock_process(mock_popen, stdout="hello\n", stderr="", returncode=0)
+
+    with patch.dict(os.environ):
+        os.environ.pop("SANDBOX_EXEC_TIMEOUT_SECONDS", None)
+        response = client.post("/execute", json={"command": "echo hello"})
 
     assert response.status_code == 200
     assert response.json() == {"stdout": "hello\n", "stderr": "", "exit_code": 0}
 
-    mock_run.assert_called_once()
-    called_args, called_kwargs = mock_run.call_args
+    mock_popen.assert_called_once()
+    called_args, called_kwargs = mock_popen.call_args
     assert called_args[0] == shlex.split("echo hello")
     assert called_kwargs["cwd"] == "/app"
-    assert called_kwargs["timeout"] == 300.0
+    assert called_kwargs["start_new_session"] is True
+    mock_popen.return_value.__enter__.return_value.communicate.assert_called_once_with(timeout=300.0)
 
 
-@patch('main.subprocess.run')
-def test_execute_command_uses_configured_timeout(mock_run):
-    mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+@patch('main.subprocess.Popen')
+def test_execute_command_uses_configured_timeout(mock_popen):
+    mock_process = _mock_process(mock_popen)
 
     with patch.dict(os.environ, {"SANDBOX_EXEC_TIMEOUT_SECONDS": "5"}):
         response = client.post("/execute", json={"command": "echo hello"})
 
     assert response.status_code == 200
-    called_kwargs = mock_run.call_args.kwargs
-    assert called_kwargs["timeout"] == 5.0
+    mock_process.communicate.assert_called_once_with(timeout=5.0)
 
 
-@patch('main.subprocess.run')
-def test_execute_command_timeout_returns_failed_execution(mock_run):
-    mock_run.side_effect = subprocess.TimeoutExpired(cmd="sleep infinity", timeout=300)
+@patch('main.subprocess.Popen')
+def test_execute_command_falls_back_to_default_on_invalid_timeout(mock_popen):
+    mock_process = _mock_process(mock_popen)
+
+    with patch.dict(os.environ, {"SANDBOX_EXEC_TIMEOUT_SECONDS": "not-a-number"}):
+        response = client.post("/execute", json={"command": "echo hello"})
+
+    assert response.status_code == 200
+    mock_process.communicate.assert_called_once_with(timeout=300.0)
+
+
+@patch('main.os.killpg')
+@patch('main.os.getpgid', return_value=4321)
+@patch('main.subprocess.Popen')
+def test_execute_command_timeout_returns_failed_execution(mock_popen, mock_getpgid, mock_killpg):
+    mock_process = _mock_process(mock_popen, pid=4321)
+    mock_process.communicate.side_effect = [
+        subprocess.TimeoutExpired(cmd="sleep infinity", timeout=300),
+        ("", ""),
+    ]
 
     response = client.post("/execute", json={"command": "sleep infinity"})
 
@@ -87,6 +119,9 @@ def test_execute_command_timeout_returns_failed_execution(mock_run):
     body = response.json()
     assert body["exit_code"] == 1
     assert "Failed to execute command" in body["stderr"]
+    assert "timed out" in body["stderr"]
+    mock_getpgid.assert_called_once_with(4321)
+    mock_killpg.assert_called_once_with(4321, signal.SIGKILL)
 
 
 def test_execute_command_invalid_syntax_returns_error():

@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+import math
+import signal
 import subprocess
 import os
 import shlex
@@ -51,6 +53,49 @@ app = FastAPI(
     version="1.0.0",
 )
 
+def _get_exec_timeout_seconds() -> float:
+    """Reads SANDBOX_EXEC_TIMEOUT_SECONDS, falling back to the 300s default
+    (with a warning) if it's unset or not a finite number greater than 0, so
+    a misconfigured value doesn't fail every /execute request.
+    """
+    raw = os.environ.get("SANDBOX_EXEC_TIMEOUT_SECONDS", "300")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+
+    if not (math.isfinite(value) and value > 0):
+        logging.warning(
+            "Ignoring invalid SANDBOX_EXEC_TIMEOUT_SECONDS=%r; using default of 300 seconds",
+            raw,
+        )
+        return 300.0
+    return value
+
+def _run_command(args: list, timeout: float) -> subprocess.CompletedProcess:
+    """Runs args as the leader of a new process group so that on timeout the
+    entire process tree can be killed, not just the direct child (matching
+    the pattern used in examples/firecracker-sandbox/main.py).
+    """
+    with subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd="/app",
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
 @app.get("/", summary="Health Check")
 async def health_check():
     """A simple health check endpoint to confirm the server is running."""
@@ -72,12 +117,9 @@ async def execute_command(request: ExecuteRequest):
         # enforce a timeout so a runaway command can't wedge the sandbox
         # forever.
         process = await asyncio.to_thread(
-            subprocess.run,
+            _run_command,
             args,
-            capture_output=True,
-            text=True,
-            cwd="/app",
-            timeout=float(os.environ.get("SANDBOX_EXEC_TIMEOUT_SECONDS", "300")),
+            _get_exec_timeout_seconds(),
         )
         return ExecuteResponse(
             stdout=process.stdout,

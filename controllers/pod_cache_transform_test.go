@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -42,6 +43,12 @@ func fullPodFixture() *corev1.Pod {
 			Containers: []corev1.Container{{
 				Name: "c", Image: "debian:latest",
 				Env: []corev1.EnvVar{{Name: "A", Value: "B"}},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+				},
+				ResizePolicy: []corev1.ContainerResizePolicy{{
+					ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired,
+				}},
 			}},
 			InitContainers: []corev1.Container{{Name: "init", Image: "busybox"}},
 			Volumes:        []corev1.Volume{{Name: "v"}},
@@ -86,6 +93,14 @@ func TestPodCacheTransform(t *testing.T) {
 	}
 
 	// Kept: the fields the controllers actually read.
+	container := pod.Spec.Containers[0]
+	if !container.Resources.Requests.Cpu().Equal(resource.MustParse("1")) {
+		t.Errorf("container resources lost: %+v", container.Resources)
+	}
+	if len(container.ResizePolicy) != 1 || container.ResizePolicy[0].ResourceName != corev1.ResourceCPU ||
+		container.ResizePolicy[0].RestartPolicy != corev1.NotRequired {
+		t.Errorf("container resizePolicy lost: %+v", container.ResizePolicy)
+	}
 	if pod.Spec.NodeName != "node-7" {
 		t.Errorf("spec.nodeName lost: %q", pod.Spec.NodeName)
 	}

@@ -1265,7 +1265,10 @@ func inPlaceResizeTargets(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) ([]i
 		if !found {
 			continue
 		}
-		target, changed := resourceResizeTarget(current.Resources, desired.Resources)
+		target, changed, unsupported := resourceResizeTarget(current.Resources, desired.Resources)
+		if unsupported != "" {
+			return nil, fmt.Sprintf("container %q %s", current.Name, unsupported)
+		}
 		if !changed {
 			continue
 		}
@@ -1278,32 +1281,42 @@ func inPlaceResizeTargets(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) ([]i
 }
 
 // resourceResizeTarget changes only CPU and memory requests/limits, leaving
-// every other resource and every non-resource Pod field untouched.
-func resourceResizeTarget(current, desired corev1.ResourceRequirements) (corev1.ResourceRequirements, bool) {
+// every other resource and every non-resource Pod field untouched. Kubernetes
+// cannot remove an existing resource through the resize subresource, so an
+// omitted desired key is reported as unsupported and preserved in the target.
+func resourceResizeTarget(current, desired corev1.ResourceRequirements) (corev1.ResourceRequirements, bool, string) {
 	target := *current.DeepCopy()
 	changed := false
 	for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
-		changed = copyResizeResource(&target.Requests, desired.Requests, resourceName) || changed
-		changed = copyResizeResource(&target.Limits, desired.Limits, resourceName) || changed
+		requestChanged, removal := copyResizeResource(&target.Requests, desired.Requests, resourceName)
+		if removal {
+			return target, false, fmt.Sprintf("cannot remove existing %s request through in-place resize", resourceName)
+		}
+		changed = requestChanged || changed
+
+		limitChanged, removal := copyResizeResource(&target.Limits, desired.Limits, resourceName)
+		if removal {
+			return target, false, fmt.Sprintf("cannot remove existing %s limit through in-place resize", resourceName)
+		}
+		changed = limitChanged || changed
 	}
-	return target, changed
+	return target, changed, ""
 }
 
-func copyResizeResource(target *corev1.ResourceList, desired corev1.ResourceList, resourceName corev1.ResourceName) bool {
+func copyResizeResource(target *corev1.ResourceList, desired corev1.ResourceList, resourceName corev1.ResourceName) (bool, bool) {
 	want, wantSet := desired[resourceName]
 	current, currentSet := (*target)[resourceName]
-	if wantSet == currentSet && (!wantSet || want.Equal(current)) {
-		return false
+	if !wantSet {
+		return false, currentSet
+	}
+	if currentSet && want.Equal(current) {
+		return false, false
 	}
 	if *target == nil {
 		*target = corev1.ResourceList{}
 	}
-	if wantSet {
-		(*target)[resourceName] = want
-	} else {
-		delete(*target, resourceName)
-	}
-	return true
+	(*target)[resourceName] = want
+	return true, false
 }
 
 func incompatibleResizePolicy(container corev1.Container, target corev1.ResourceRequirements) string {
@@ -1336,7 +1349,10 @@ func resourceListValueEqual(left, right corev1.ResourceList, resourceName corev1
 	return leftSet == rightSet && (!leftSet || leftValue.Equal(rightValue))
 }
 
-func hasRestartFreeResizePolicy(container corev1.Container, resourceName corev1.ResourceName) bool {
+// hasExplicitRestartFreeResizePolicy reports whether a container explicitly
+// declares a restart-free policy. An omitted policy is restart-free by
+// Kubernetes defaulting, but does not satisfy callers verifying policy injection.
+func hasExplicitRestartFreeResizePolicy(container corev1.Container, resourceName corev1.ResourceName) bool {
 	for _, policy := range container.ResizePolicy {
 		if policy.ResourceName == resourceName {
 			return policy.RestartPolicy != corev1.RestartContainer

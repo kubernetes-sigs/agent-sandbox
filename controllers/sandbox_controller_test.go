@@ -206,6 +206,74 @@ func TestReconcileInPlaceResourcesAllowsMissingResizePolicy(t *testing.T) {
 	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
 }
 
+func TestReconcileInPlaceResourcesRejectsResourceRemoval(t *testing.T) {
+	tests := []struct {
+		name           string
+		removeResource func(*corev1.ResourceRequirements)
+		wantMessage    string
+	}{
+		{
+			name: "CPU request",
+			removeResource: func(resources *corev1.ResourceRequirements) {
+				delete(resources.Requests, corev1.ResourceCPU)
+			},
+			wantMessage: "cannot remove existing cpu request",
+		},
+		{
+			name: "CPU limit",
+			removeResource: func(resources *corev1.ResourceRequirements) {
+				delete(resources.Limits, corev1.ResourceCPU)
+			},
+			wantMessage: "cannot remove existing cpu limit",
+		},
+		{
+			name: "memory request",
+			removeResource: func(resources *corev1.ResourceRequirements) {
+				delete(resources.Requests, corev1.ResourceMemory)
+			},
+			wantMessage: "cannot remove existing memory request",
+		},
+		{
+			name: "memory limit",
+			removeResource: func(resources *corev1.ResourceRequirements) {
+				delete(resources.Limits, corev1.ResourceMemory)
+			},
+			wantMessage: "cannot remove existing memory limit",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current := resizeResources("1", "1Gi")
+			desired := *current.DeepCopy()
+			tt.removeResource(&desired)
+			sandbox := inPlaceResizeSandbox(desired)
+			pod := inPlaceResizePod(current)
+			target, changed, unsupported := resourceResizeTarget(current, desired)
+			assert.False(t, changed)
+			assert.Contains(t, unsupported, tt.wantMessage)
+			assert.Equal(t, current, target, "an omitted resource must remain in the resize target")
+
+			patched := false
+			clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+				SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+					patched = true
+					return nil
+				},
+			})
+
+			condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+			require.NoError(t, err)
+			require.NotNil(t, condition)
+			assert.False(t, patched, "unsupported removal must not reach the Pod resize subresource")
+			assert.Equal(t, metav1.ConditionFalse, condition.Status)
+			assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, condition.Reason)
+			assert.Contains(t, condition.Message, tt.wantMessage)
+			assert.Equal(t, current, pod.Spec.Containers[0].Resources, "the live Pod resources must remain unchanged")
+		})
+	}
+}
+
 func TestReconcileInPlaceResourcesRetriesWhenPodDisappears(t *testing.T) {
 	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
 	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
@@ -290,8 +358,8 @@ func TestEnsureRestartFreeResizePoliciesPreservesExplicitRestartPolicy(t *testin
 
 	ensureRestartFreeResizePolicies(&spec)
 	require.Len(t, spec.Containers[0].ResizePolicy, 2)
-	assert.True(t, hasRestartFreeResizePolicy(spec.Containers[0], corev1.ResourceCPU))
-	assert.False(t, hasRestartFreeResizePolicy(spec.Containers[0], corev1.ResourceMemory))
+	assert.True(t, hasExplicitRestartFreeResizePolicy(spec.Containers[0], corev1.ResourceCPU))
+	assert.False(t, hasExplicitRestartFreeResizePolicy(spec.Containers[0], corev1.ResourceMemory))
 }
 
 func TestReconcilePodCreatesInPlaceSandboxWithRestartFreePolicies(t *testing.T) {
@@ -302,8 +370,8 @@ func TestReconcilePodCreatesInPlaceSandboxWithRestartFreePolicies(t *testing.T) 
 	pod, err := reconciler.reconcilePod(context.Background(), sandbox, NameHash(sandbox.Name), nil)
 	require.NoError(t, err)
 	require.NotNil(t, pod)
-	require.True(t, hasRestartFreeResizePolicy(pod.Spec.Containers[0], corev1.ResourceCPU))
-	require.True(t, hasRestartFreeResizePolicy(pod.Spec.Containers[0], corev1.ResourceMemory))
+	require.True(t, hasExplicitRestartFreeResizePolicy(pod.Spec.Containers[0], corev1.ResourceCPU))
+	require.True(t, hasExplicitRestartFreeResizePolicy(pod.Spec.Containers[0], corev1.ResourceMemory))
 }
 
 func TestComputeConditions(t *testing.T) {

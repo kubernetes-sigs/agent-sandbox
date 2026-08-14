@@ -61,7 +61,10 @@ import (
 const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
 const (
-	immediateRequeueDelay      = time.Millisecond
+	immediateRequeueDelay = time.Millisecond
+	// warmCandidateGracePeriod gives a newly created claim two seconds for a
+	// warm candidate to receive a Pod IP. This covers short IPAM delays without
+	// allowing an unavailable warm pool to postpone cold creation indefinitely.
 	warmCandidateGracePeriod   = 2 * time.Second
 	warmCandidateRetryInterval = 500 * time.Millisecond
 )

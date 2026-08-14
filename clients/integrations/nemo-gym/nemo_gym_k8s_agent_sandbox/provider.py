@@ -113,14 +113,17 @@ def _is_runtime_failure(exc: BaseException) -> bool:
     """Whether an exception came from the transport/cluster rather than caller code.
 
     Covers the HTTP path to the in-sandbox runtime (httpx), the Kubernetes API
-    (kubernetes_asyncio), and the client's SandboxError hierarchy. Bare RuntimeError
-    is included because the command executor raises it for malformed runtime
-    responses (SandboxError itself subclasses RuntimeError).
+    (kubernetes_asyncio), and the client's SandboxError hierarchy. Deliberately
+    does NOT match bare RuntimeError: a programming bug must propagate, not be
+    misclassified as a sandbox failure. The one known producer of bare
+    RuntimeError (the command executor's malformed-response error) is handled at
+    its call site in ``_run_wrapped``.
     """
     import httpx
+    from k8s_agent_sandbox.exceptions import SandboxError
     from kubernetes_asyncio.client.rest import ApiException
 
-    return isinstance(exc, (httpx.HTTPError, ApiException, ConnectionError, TimeoutError, RuntimeError))
+    return isinstance(exc, (httpx.HTTPError, ApiException, SandboxError, ConnectionError, TimeoutError))
 
 
 @dataclass(frozen=True)
@@ -582,7 +585,10 @@ class AgentSandboxProvider:
                 return SandboxExecResult(
                     stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="timeout"
                 )
-            if _is_runtime_failure(e):
+            # type(e) is checked exactly: the executor raises bare RuntimeError for
+            # malformed runtime responses, which is a sandbox failure at this call
+            # site only — RuntimeError subclasses from elsewhere still propagate.
+            if _is_runtime_failure(e) or type(e) is RuntimeError:
                 return SandboxExecResult(
                     stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
                 )

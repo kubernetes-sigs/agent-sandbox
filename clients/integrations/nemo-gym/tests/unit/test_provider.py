@@ -346,6 +346,26 @@ async def test_exec_timeout_and_runtime_failures_return_sentinel():
         await provider.exec(handle, "true")
 
 
+async def test_exec_runtime_error_scoping():
+    # Bare RuntimeError from the command executor (malformed runtime response)
+    # is a sandbox failure at the exec call site only...
+    sandbox = FakeAsyncSandbox()
+    provider = make_provider()
+    handle = make_handle(sandbox)
+
+    sandbox._commands.error = RuntimeError("Failed to decode JSON response from sandbox")
+    result = await provider.exec(handle, "true")
+    assert (result.return_code, result.error_type) == (SANDBOX_RUNTIME_RETURN_CODE, "sandbox")
+
+    # ...but RuntimeError *subclasses* from unrelated code are not swallowed.
+    class NotASandboxProblem(RuntimeError):
+        pass
+
+    sandbox._commands.error = NotASandboxProblem("programming bug")
+    with pytest.raises(NotASandboxProblem):
+        await provider.exec(handle, "true")
+
+
 async def test_exec_warns_and_ignores_user(caplog):
     sandbox = FakeAsyncSandbox()
     provider = make_provider()
@@ -443,6 +463,12 @@ async def test_status_mapping():
 
     sandbox.status_error = httpx.ConnectError("apiserver flake")
     assert await provider.status(handle) == SandboxStatus.UNKNOWN
+
+    # A bare RuntimeError outside the exec path is a programming bug: propagate,
+    # don't misreport the sandbox as UNKNOWN.
+    sandbox.status_error = RuntimeError("bug in status handling")
+    with pytest.raises(RuntimeError, match="bug in status handling"):
+        await provider.status(handle)
 
 
 async def test_close_terminates_claim_and_untracks_from_client():

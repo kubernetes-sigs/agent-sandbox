@@ -46,15 +46,14 @@ const (
 type Runtime string
 
 const (
-	// RuntimeLegacy is the python-runtime HTTP API (POST /upload,
+	// RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
 	// GET /download|list|exists/{path}, POST /execute on port 8888),
 	// reached through the sandbox-router. Default.
-	RuntimeLegacy Runtime = "legacy"
+	RuntimeLegacyPython Runtime = "legacy-python"
 	// RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
 	// REST filesystem (/v1/files/...) on port 8080 plus gRPC
-	// ProcessService on port 9090. sandboxd binds loopback-only inside
-	// the pod, so connectivity uses a port-forward directly to the
-	// sandbox pod rather than the sandbox-router.
+	// ProcessService on port 9090. The SDK connects over a pod port-forward
+	// to the sandbox pod.
 	RuntimeSandboxd Runtime = "sandboxd"
 )
 
@@ -64,11 +63,10 @@ type Options struct {
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
 	WarmPoolName string
 
-	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacy.
-	// RuntimeSandboxd requires pod port-forward connectivity: GatewayName
-	// is rejected (the router cannot reach sandboxd's loopback-only
-	// listeners). APIURL remains available as an advanced/testing escape
-	// hatch for the REST endpoint.
+	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
+	// RuntimeSandboxd connects via a pod port-forward, so GatewayName is not
+	// supported with it. APIURL remains available as an advanced/testing
+	// escape hatch for the REST endpoint.
 	Runtime Runtime
 
 	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
@@ -182,7 +180,7 @@ func (o *Options) setDefaults() {
 		o.GatewayScheme = "http"
 	}
 	if o.Runtime == "" {
-		o.Runtime = RuntimeLegacy
+		o.Runtime = RuntimeLegacyPython
 	}
 	if o.ServerPort == 0 {
 		o.ServerPort = defaultServerPort
@@ -314,12 +312,12 @@ func (o *Options) validate() error {
 	if o.ServerPort <= 0 || o.ServerPort > 65535 {
 		return fmt.Errorf("sandbox: ServerPort must be between 1 and 65535, got %d", o.ServerPort)
 	}
-	if o.Runtime != RuntimeLegacy && o.Runtime != RuntimeSandboxd {
-		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacy, RuntimeSandboxd, o.Runtime)
+	if o.Runtime != RuntimeLegacyPython && o.Runtime != RuntimeSandboxd {
+		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacyPython, RuntimeSandboxd, o.Runtime)
 	}
 	if o.Runtime == RuntimeSandboxd {
 		if o.GatewayName != "" {
-			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd binds loopback-only inside the pod, which the sandbox-router cannot reach; use the default pod port-forward mode")
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd uses pod port-forward connectivity")
 		}
 		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
 			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)

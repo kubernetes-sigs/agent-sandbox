@@ -132,6 +132,26 @@ func TestSandboxdWrite_PutsRawBody(t *testing.T) {
 	}
 }
 
+func TestSandboxdWrite_RejectsTraversal(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	for _, p := range []string{"../etc/passwd", "dir/../../etc/passwd", ".."} {
+		err := c.Write(context.Background(), p, []byte("x"))
+		if err == nil {
+			t.Errorf("Write(%q) should be rejected client-side", p)
+		}
+	}
+	if called {
+		t.Error("traversal write must not reach the server")
+	}
+}
+
 func TestSandboxdWrite_NoRouterHeaders(t *testing.T) {
 	var gotHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -92,8 +92,9 @@ coordination on shared paths must layer it themselves.
 ## Deploying as a sidecar
 
 `sandboxd` runs as a sidecar next to your (unmodified) workload container.
-The two share the workspace volume; the workload reaches `sandboxd` over pod
-loopback (enforced by `sandboxd` listening strictly on `127.0.0.1`).
+The two share the workspace volume; a co-located workload reaches `sandboxd`
+over pod-local networking (it binds `0.0.0.0` by default), and external
+clients reach it via a Service or the sandbox-router.
 
 ```yaml
 apiVersion: extensions.agents.x-k8s.io/v1beta1
@@ -231,10 +232,11 @@ fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
 
 ## Agent Sandbox SDK access
 
-The Go and Python SDKs speak sandboxd directly. Because sandboxd binds
-loopback-only inside the pod, the SDKs connect via a **port-forward straight
-to the sandbox pod** (both `:8080` and `:9090`) rather than through the
-sandbox-router — filesystem calls go over REST, `Run` goes over gRPC.
+sandboxd binds the pod network (`0.0.0.0` by default), so it is reachable like
+any other in-pod service — via a Kubernetes **Service** or the
+**sandbox-router**. The SDKs connect via a **pod port-forward** to the sandbox
+pod (both `:8080` and `:9090`): filesystem calls go over REST, `Run` goes over
+gRPC.
 
 > **Where commands run:** `ProcessService` executes commands **inside the
 > `sandboxd` container**, not the workload container. The base `sandboxd`
@@ -242,11 +244,6 @@ sandbox-router — filesystem calls go over REST, `Run` goes over gRPC.
 > `ls`, etc. out of the box; to run a language runtime (e.g. `python3`),
 > build a sandboxd image that includes it. Files written over REST land in
 > the shared `/workspace` volume, visible to both containers.
->
-> **Router limitation:** the sandbox-router cannot currently reach sandboxd
-> (it dials the pod IP and is HTTP/1.1-only, while sandboxd is loopback +
-> gRPC). Gateway/router access to sandboxd is a follow-up requiring router
-> h2c support and a non-loopback bind option.
 
 **Go** — select the runtime via `Options`:
 
@@ -278,10 +275,10 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
 
 ## Security model
 
-- **Network containment:** both ports bind to `127.0.0.1` only. External SDK
-  access currently uses a Kubernetes pod port-forward directly to sandboxd
-  (see "Agent Sandbox SDK access"); the sandbox-router cannot reach the
-  loopback listeners today.
+- **Network containment:** both ports bind `0.0.0.0` by default so the daemon
+  is reachable on the pod network (Service / sandbox-router). Containment is
+  provided by **pod isolation and NetworkPolicy**, not loopback binding; pass
+  `--listen-host=127.0.0.1` to restrict to loopback for local development.
 - **Path confinement:** every file path (and process `cwd`) is resolved with
   symlink evaluation and rejected unless it stays under `--root-dir`.
 - **Metadata hygiene:** `/v1/metadata` only serves env vars matching

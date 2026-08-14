@@ -34,16 +34,10 @@ import (
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
-// sandboxdManifest runs sandboxd as the sole container (it binds loopback,
-// which port-forward reaches from inside the pod netns). Real deployments
-// run it as a sidecar next to the workload; the daemon behavior is identical.
-//
-// This test targets a non-gVisor cluster (kind in CI). NOTE: under gVisor,
-// kubectl port-forward cannot reach the daemon's loopback listeners — a
-// known limitation tracked separately (sandboxd needs a non-loopback bind
-// option). The readiness probe uses exec rather than httpGet for the same
-// reason: a kubelet httpGet probe dials the pod IP, which cannot reach a
-// loopback-only listener.
+// sandboxdManifest runs sandboxd as the sole container. It binds 0.0.0.0
+// (the daemon default), so the kubelet httpGet readiness probe reaches
+// /v1/health and the test reaches both ports via port-forward. Real
+// deployments run it as a sidecar next to the workload; behavior is identical.
 const sandboxdManifest = `
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox
@@ -82,8 +76,9 @@ spec:
         - containerPort: 8080
         - containerPort: 9090
         readinessProbe:
-          exec:
-            command: ["/usr/local/bin/sandboxd", "-version"]
+          httpGet:
+            path: /v1/health
+            port: 8080
 `
 
 // TestRunSandboxdSandbox runs sandboxd in a Pod and exercises both surfaces:

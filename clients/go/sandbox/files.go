@@ -140,41 +140,15 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 
 	var method, endpoint, contentType string
 	var body *bytes.Reader
+	var err error
 	if f.runtime == RuntimeSandboxd {
-		if path == "" || path == "." || path == ".." || strings.HasSuffix(path, "/") {
-			err := fmt.Errorf("%s: write: %q is not a valid file path", f.errPrefix(), path)
-			recordError(span, err)
-			return err
-		}
-		// sandboxd writes are an idempotent PUT of the raw bytes; parent
-		// directories are created server-side (temp-file + rename).
-		method, endpoint, contentType = http.MethodPut, filesEndpoint(path), "application/octet-stream"
-		body = bytes.NewReader(content)
+		method, endpoint, contentType, body, err = f.sandboxdWriteReq(path, content)
 	} else {
-		base := pathpkg.Base(path)
-		if base == "." || base == ".." || base == "/" || base != path {
-			err := fmt.Errorf("%s: write: %q is not a plain filename (resolved to %q); pass only the filename, not a path with directories", f.errPrefix(), path, base)
-			recordError(span, err)
-			return err
-		}
-		var buf bytes.Buffer
-		buf.Grow(len(content) + 512)
-		writer := multipart.NewWriter(&buf)
-		part, err := writer.CreateFormFile("file", base)
-		if err != nil {
-			recordError(span, err)
-			return fmt.Errorf("%s: failed to create form file: %w", f.errPrefix(), err)
-		}
-		if _, err := part.Write(content); err != nil {
-			recordError(span, err)
-			return fmt.Errorf("%s: failed to write content: %w", f.errPrefix(), err)
-		}
-		if err := writer.Close(); err != nil {
-			recordError(span, err)
-			return fmt.Errorf("%s: failed to close multipart writer: %w", f.errPrefix(), err)
-		}
-		method, endpoint, contentType = http.MethodPost, "upload", writer.FormDataContentType()
-		body = bytes.NewReader(buf.Bytes())
+		method, endpoint, contentType, body, err = f.legacyWriteReq(path, content)
+	}
+	if err != nil {
+		recordError(span, err)
+		return err
 	}
 
 	resp, err := f.connector.SendRequest(ctx, method, endpoint, body, contentType, maxAttempts)
@@ -192,6 +166,47 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 	f.log.V(1).Info("write completed", "path", path, "size", len(content))
 	return nil
+}
+
+// sandboxdWriteReq builds the sandboxd PUT request: an idempotent write of the
+// raw bytes to /v1/files/{path}. Parent directories are created server-side.
+// Relative paths are allowed, but "." components that escape the sandbox root
+// are rejected client-side as defense in depth (sandboxd also enforces this
+// server-side via SanitizePath).
+func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
+	if path == "" || path == "." || path == ".." || strings.HasSuffix(path, "/") {
+		return "", "", "", nil, fmt.Errorf("%s: write: %q is not a valid file path", f.errPrefix(), path)
+	}
+	for _, seg := range strings.Split(path, "/") {
+		if seg == ".." {
+			return "", "", "", nil, fmt.Errorf("%s: write: %q must not contain %q path segments (escapes the sandbox root)", f.errPrefix(), path, "..")
+		}
+	}
+	return http.MethodPut, filesEndpoint(path), "application/octet-stream", bytes.NewReader(content), nil
+}
+
+// legacyWriteReq builds the python-runtime multipart upload request. The path
+// must be a plain filename (no directory separators); the whole body is
+// buffered so the request can be retried.
+func (f *Files) legacyWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
+	base := pathpkg.Base(path)
+	if base == "." || base == ".." || base == "/" || base != path {
+		return "", "", "", nil, fmt.Errorf("%s: write: %q is not a plain filename (resolved to %q); pass only the filename, not a path with directories", f.errPrefix(), path, base)
+	}
+	var buf bytes.Buffer
+	buf.Grow(len(content) + 512)
+	writer := multipart.NewWriter(&buf)
+	part, err := writer.CreateFormFile("file", base)
+	if err != nil {
+		return "", "", "", nil, fmt.Errorf("%s: failed to create form file: %w", f.errPrefix(), err)
+	}
+	if _, err := part.Write(content); err != nil {
+		return "", "", "", nil, fmt.Errorf("%s: failed to write content: %w", f.errPrefix(), err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", "", "", nil, fmt.Errorf("%s: failed to close multipart writer: %w", f.errPrefix(), err)
+	}
+	return http.MethodPost, "upload", writer.FormDataContentType(), bytes.NewReader(buf.Bytes()), nil
 }
 
 // Read downloads a file from the sandbox.

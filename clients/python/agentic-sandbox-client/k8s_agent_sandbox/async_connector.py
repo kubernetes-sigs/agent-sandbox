@@ -79,10 +79,9 @@ class AsyncSandboxConnector:
             )
         if isinstance(connection_config, SandboxdPodTunnelConnectionConfig):
             raise NotImplementedError(
-                "The async client does not yet support the sandboxd runtime "
-                "(SandboxdPodTunnelConnectionConfig): it needs a port-forward "
-                "subprocess and a gRPC channel. Use the synchronous SandboxClient "
-                "for sandboxd."
+                "The async client does not support the sandboxd runtime "
+                "(SandboxdPodTunnelConnectionConfig). Use the synchronous "
+                "SandboxClient for sandboxd."
             )
 
         self.id = sandbox_id

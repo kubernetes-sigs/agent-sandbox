@@ -1162,6 +1162,9 @@ func incompatibleResizePolicy(container corev1.Container, target corev1.Resource
 		if !resizeResourceChanged(container.Resources, target, resourceName) {
 			continue
 		}
+		// Kubernetes treats an omitted policy as NotRequired, so legacy and
+		// warm-adopted Pods remain restart-free unless they explicitly opt in
+		// to RestartContainer for the resource being changed.
 		for _, policy := range container.ResizePolicy {
 			if policy.ResourceName != resourceName {
 				continue
@@ -1169,10 +1172,6 @@ func incompatibleResizePolicy(container corev1.Container, target corev1.Resource
 			if policy.RestartPolicy == corev1.RestartContainer {
 				return fmt.Sprintf("container %q requires RestartContainer for %s", container.Name, resourceName)
 			}
-			break
-		}
-		if !hasRestartFreeResizePolicy(container, resourceName) {
-			return fmt.Sprintf("container %q was not created with a restart-free resizePolicy for %s", container.Name, resourceName)
 		}
 	}
 	return ""
@@ -1263,7 +1262,7 @@ func resourceResizeCondition(sandbox *sandboxv1beta1.Sandbox, status metav1.Cond
 }
 
 func terminalPodResizeError(err error) bool {
-	return k8serrors.IsBadRequest(err) || k8serrors.IsForbidden(err) || k8serrors.IsInvalid(err) || k8serrors.IsMethodNotSupported(err) || k8serrors.IsNotFound(err)
+	return k8serrors.IsBadRequest(err) || k8serrors.IsForbidden(err) || k8serrors.IsInvalid(err) || k8serrors.IsMethodNotSupported(err)
 }
 
 func ensureRestartFreeResizePolicies(spec *corev1.PodSpec) {

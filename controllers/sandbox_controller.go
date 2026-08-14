@@ -212,6 +212,22 @@ type SandboxReconciler struct {
 	// for why this one piece of in-memory state is unavoidable and why
 	// losing it is harmless.
 	deferralClock deferredWriteClock
+
+	// TransitionalStatusWindow, when > 0, defers TRANSITIONAL status writes
+	// (see materialStatusChange) for sandboxes younger than the window: the
+	// launch fast path then writes status once, at the Ready flip, while a
+	// sandbox that is stuck still flushes an explanatory status at age
+	// == window via RequeueAfter. Material changes (Ready flips, Suspended,
+	// Finished, terminal reasons) are always written immediately. 0 (the
+	// default) preserves the fully synchronous behavior. Gated by the
+	// --sandbox-transitional-status-window flag; anchored to
+	// metadata.creationTimestamp, so no in-memory clock is needed.
+	TransitionalStatusWindow time.Duration
+
+	// staleWrites suppresses reconcile passes that observe an informer copy
+	// older than this controller's own last write to the sandbox -- the
+	// source of no-op re-PATCHes under launch load; see staleCacheGuard.
+	staleWrites staleCacheGuard
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -242,9 +258,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if k8serrors.IsNotFound(err) {
 			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
 			r.deferralClock.clear(req.NamespacedName)
+			r.staleWrites.clear(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// The informer has not yet replayed this controller's own last write to
+	// this sandbox: every decision this pass could make would be re-derived
+	// from superseded state and every write it could issue would be a no-op
+	// the apiserver still has to serve. Skip the pass; the recorded write
+	// guarantees a watch event (hence a fresh reconcile) is on its way.
+	if r.staleWrites.stillStale(req.NamespacedName, sandbox.ResourceVersion) {
+		return ctrl.Result{}, nil
 	}
 
 	// Start Tracing Span
@@ -262,6 +288,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !sandbox.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox is being deleted")
 		r.deferralClock.clear(req.NamespacedName)
+		r.staleWrites.clear(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -274,9 +301,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 
+		rvBefore := sandbox.ResourceVersion
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
 		}
+		r.staleWrites.record(req.NamespacedName, rvBefore, sandbox.ResourceVersion)
 	}
 
 	oldStatus := sandbox.Status.DeepCopy()
@@ -288,7 +317,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if expired {
 		if !sandboxMarkedExpired(sandbox) {
 			setSandboxExpiredCondition(sandbox)
-			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+			// The Expired mark is material (terminal reason), so it is never
+			// deferred; the returned wait is always zero here.
+			if _, statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 				return ctrl.Result{}, statusUpdateErr
 			}
 			return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
@@ -334,10 +365,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if !sandboxDeleted {
-		// Update status
-		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+		// Update status. A deferred transitional write (non-zero wait)
+		// requeues the request so a stuck sandbox still flushes its status
+		// once the transitional window elapses; the requeue dedups with any
+		// pending write-behind requeue via the workqueue.
+		statusWait, statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox)
+		if statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		}
+		if statusWait > 0 && (result.RequeueAfter == 0 || statusWait < result.RequeueAfter) {
+			result.RequeueAfter = statusWait
 		}
 	}
 	// return errors seen
@@ -579,11 +617,17 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 	return ips
 }
 
-func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) error {
+// updateStatus persists sandbox.Status if it differs from oldStatus. The
+// returned duration is non-zero when a transitional change was deferred
+// under --sandbox-transitional-status-window: the caller must requeue the
+// request after that long so a stuck sandbox still flushes its status at
+// age == window (a sandbox that progresses sooner flushes earlier, riding
+// the material write its progress produces).
+func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) (time.Duration, error) {
 	logger := log.FromContext(ctx)
 
 	if apiequality.Semantic.DeepEqual(oldStatus, &sandbox.Status) {
-		return nil
+		return 0, nil
 	}
 
 	// Pod scheduling produces a status change containing nothing but the
@@ -597,7 +641,22 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	// rather than leave a Ready sandbox with a wrong or missing node name.
 	if nodeNameOnlyChange(oldStatus, &sandbox.Status) &&
 		!meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
-		return nil
+		return 0, nil
+	}
+
+	// Transitional-status gating (--sandbox-transitional-status-window):
+	// on the launch fast path nothing reads the pre-Ready status fills, so
+	// while the sandbox is younger than the window, only material changes
+	// (Ready flips, Suspended, Finished, terminal reasons; see
+	// materialStatusChange) are written immediately. The generalization of
+	// the nodeName-only deferral above: the skipped write is recomputed from
+	// informer state whenever it eventually flushes, so nothing is lost on
+	// crash or failover. A zero creationTimestamp (never set by a real
+	// apiserver) yields a huge age and thus no deferral.
+	if r.TransitionalStatusWindow > 0 && !materialStatusChange(oldStatus, &sandbox.Status) {
+		if age := time.Since(sandbox.CreationTimestamp.Time); age < r.TransitionalStatusWindow {
+			return r.TransitionalStatusWindow - age, nil
+		}
 	}
 
 	// Merge-patch (no resourceVersion precondition) the status subresource.
@@ -613,17 +672,19 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	//      pod state, so it self-heals on the next watch event and converges.
 	base := sandbox.DeepCopy()
 	base.Status = *oldStatus
+	rvBefore := sandbox.ResourceVersion
 	if err := r.Status().Patch(ctx, sandbox, client.MergeFrom(base)); err != nil {
 		if k8serrors.IsNotFound(err) {
 			// Sandbox was deleted mid-reconcile
-			return nil
+			return 0, nil
 		}
 		logger.Error(err, "Failed to patch sandbox status")
-		return err
+		return 0, err
 	}
+	r.staleWrites.record(client.ObjectKeyFromObject(sandbox), rvBefore, sandbox.ResourceVersion)
 
 	// Surface error
-	return nil
+	return 0, nil
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only
@@ -1007,9 +1068,11 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 	logger := log.FromContext(ctx)
 	patch := client.MergeFrom(sandbox.DeepCopy())
 	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
+	rvBefore := sandbox.ResourceVersion
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
 		return fmt.Errorf("failed to clear pod name annotation: %w", err)
 	}
+	r.staleWrites.record(client.ObjectKeyFromObject(sandbox), rvBefore, sandbox.ResourceVersion)
 	logger.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 	return nil
 }
@@ -1125,9 +1188,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			sandbox.Annotations = make(map[string]string)
 		}
 		sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] = podName
+		rvBefore := sandbox.ResourceVersion
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return fmt.Errorf("failed to set pod name annotation: %w", err)
 		}
+		r.staleWrites.record(client.ObjectKeyFromObject(sandbox), rvBefore, sandbox.ResourceVersion)
 
 		return nil
 	}

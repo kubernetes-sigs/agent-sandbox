@@ -82,6 +82,7 @@ func main() {
 	var sandboxWarmPoolReplenishDelay time.Duration
 	var sandboxWarmPoolMaxRefillRate float64
 	var sandboxWriteBehindWindow time.Duration
+	var sandboxTransitionalStatusWindow time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
@@ -174,6 +175,12 @@ func main() {
 			"by the previous process. Default false (annotations persisted).")
 	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
 		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
+	flag.DurationVar(&sandboxTransitionalStatusWindow, "sandbox-transitional-status-window", 0,
+		"Defer transitional Sandbox status writes (reason/message churn and field fills while no condition changes value) "+
+			"for sandboxes younger than this window: a launch that reaches Ready inside the window writes status exactly once, "+
+			"at the Ready flip, and a sandbox that is stuck still flushes an explanatory status once the window elapses. "+
+			"Material changes (condition value flips, terminal reasons like Expired/PodFailed) are always written immediately. "+
+			"0 disables deferral (every status change is written synchronously).")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -227,6 +234,11 @@ func main() {
 	if sandboxWriteBehindWindow < 0 {
 		setupLog.Error(nil, "sandbox-write-behind-window must be >= 0 (0 disables write-behind coalescing)",
 			"value", sandboxWriteBehindWindow)
+		os.Exit(1)
+	}
+	if sandboxTransitionalStatusWindow < 0 {
+		setupLog.Error(nil, "sandbox-transitional-status-window must be >= 0 (0 disables transitional-status deferral)",
+			"value", sandboxTransitionalStatusWindow)
 		os.Exit(1)
 	}
 	// A logical maximum (too much will create unnecessary load on the API server)
@@ -472,13 +484,18 @@ func main() {
 		setupLog.Info("Sandbox controller write deferral enabled (--sandbox-write-behind-window)",
 			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
 	}
+	if sandboxTransitionalStatusWindow > 0 {
+		setupLog.Info("Sandbox controller transitional-status deferral enabled (--sandbox-transitional-status-window)",
+			"window", sandboxTransitionalStatusWindow)
+	}
 
 	if err = (&controllers.SandboxReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		Tracer:            instrumenter,
-		ClusterDomain:     clusterDomain,
-		WriteBehindWindow: sandboxWriteBehindWindow,
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		Tracer:                   instrumenter,
+		ClusterDomain:            clusterDomain,
+		WriteBehindWindow:        sandboxWriteBehindWindow,
+		TransitionalStatusWindow: sandboxTransitionalStatusWindow,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)

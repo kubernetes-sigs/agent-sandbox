@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
@@ -182,6 +183,43 @@ func TestReconcileInPlaceResourcesRejectsRestartContainerPolicy(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
 	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, condition.Reason)
 	assert.Contains(t, condition.Message, "RestartContainer")
+}
+
+func TestReconcileInPlaceResourcesAllowsMissingResizePolicy(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	pod.Spec.Containers[0].ResizePolicy = nil
+
+	patched := false
+	clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			patched = true
+			return nil
+		},
+	})
+
+	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.True(t, patched)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
+}
+
+func TestReconcileInPlaceResourcesRetriesWhenPodDisappears(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			return k8serrors.NewNotFound(schema.GroupResource{Resource: "pods"}, pod.Name)
+		},
+	})
+
+	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.Error(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
 }
 
 func TestReconcileInPlaceResourcesDisabledDoesNotPatchPod(t *testing.T) {

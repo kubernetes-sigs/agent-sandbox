@@ -1,10 +1,6 @@
 .PHONY: all
 all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify verify-olm
 
-.PHONY: fix-api-docs
-fix-api-docs:
-	dev/tools/fix-api-docs
-
 .PHONY: fix-go-generate
 fix-go-generate:
 	dev/tools/fix-go-generate

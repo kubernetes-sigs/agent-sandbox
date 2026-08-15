@@ -133,7 +133,11 @@ function inspectClaimConditions(
         `SandboxTemplate requested does not exist: ${cond.message ?? "Template not found"}`,
       );
     }
-    if (cond.reason === "WarmPoolNotFound") {
+    if (
+      cond.type === "Ready" &&
+      cond.status === "False" &&
+      cond.reason === "WarmPoolNotFound"
+    ) {
       throw new SandboxWarmPoolNotFoundError(
         `SandboxWarmPool requested does not exist: ${cond.message ?? "WarmPool not found"}`,
       );

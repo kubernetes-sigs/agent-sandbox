@@ -1498,7 +1498,7 @@ describe("SandboxClient (registry)", () => {
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
-    it("does NOT throw for Ready=True/TemplateNotFound (condition type mismatch)", async () => {
+    it("does NOT throw for Ready=True/TemplateNotFound (condition status mismatch)", async () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
 
@@ -1514,6 +1514,96 @@ describe("SandboxClient (registry)", () => {
             status: {
               conditions: [
                 { type: "Ready", status: "True", reason: "TemplateNotFound" },
+              ],
+              sandbox: { name: "sandbox-ok" },
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Second watch: sandbox becomes ready
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            metadata: { name: "sandbox-ok", annotations: {} },
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("warmpool-ok");
+      expect(sandbox.sandboxName).toBe("sandbox-ok");
+    });
+
+    it("does NOT throw for Ready=True/WarmPoolNotFound (condition status mismatch)", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      // Watch fires Ready=True with reason WarmPoolNotFound — should NOT error, just continue
+      // Then immediately give the sandbox name
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: {
+              conditions: [
+                { type: "Ready", status: "True", reason: "WarmPoolNotFound" },
+              ],
+              sandbox: { name: "sandbox-ok" },
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Second watch: sandbox becomes ready
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            metadata: { name: "sandbox-ok", annotations: {} },
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const sandbox = await client.createSandbox("warmpool-ok");
+      expect(sandbox.sandboxName).toBe("sandbox-ok");
+    });
+
+    it("does NOT throw for Synced=False/WarmPoolNotFound (condition type mismatch)", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      // Watch fires a condition of a different type (Synced) with reason WarmPoolNotFound —
+      // should NOT error, just continue. Then immediately give the sandbox name.
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: {
+              conditions: [
+                {
+                  type: "Synced",
+                  status: "False",
+                  reason: "WarmPoolNotFound",
+                },
               ],
               sandbox: { name: "sandbox-ok" },
             },

@@ -95,6 +95,15 @@ func (e *warmCandidatesPendingError) Error() string {
 	return fmt.Sprintf("%d warm pool candidate(s) are awaiting observed Pod IPs", e.pendingCandidates)
 }
 
+// errSandboxAlreadyExists signals a cold-start Create that returned AlreadyExists
+// because the informer cache had not yet indexed a sandbox from an earlier pass.
+var errSandboxAlreadyExists = errors.New("sandbox already exists (cache lag)")
+
+// cacheLagRequeueDelay bounds the wait before re-checking that a just-created
+// sandbox is visible in the informer cache (a fallback for the window before
+// the Owns(&Sandbox{}) watch, the primary trigger, delivers it).
+const cacheLagRequeueDelay = 50 * time.Millisecond
+
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}
 
@@ -383,6 +392,17 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		if metricsErr != nil {
 			logger.V(1).Info("Sandboxclaim first-ready annotation patch failed; will retry on requeue", "error", metricsErr, "request", req.NamespacedName)
+		}
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil
+	}
+
+	// Cache-lag AlreadyExists: bounded requeue with nil error to reset the
+	// failure counter instead of engaging the exponential backoff (#1042).
+	if errors.Is(reconcileErr, errSandboxAlreadyExists) {
+		logger.V(4).Info("Sandbox already exists; requeueing to let cache converge", "claim", claim.Name, "error", reconcileErr)
+		requeueDelay := cacheLagRequeueDelay
+		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
+			requeueDelay = result.RequeueAfter
 		}
 		return ctrl.Result{RequeueAfter: requeueDelay}, nil
 	}
@@ -706,6 +726,15 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 				ObservedGeneration: claim.Generation,
 			}
 		}
+		if errors.Is(err, errSandboxAlreadyExists) {
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "SandboxCreatePending",
+				Message:            "Sandbox already created; waiting for cache to converge",
+				ObservedGeneration: claim.Generation,
+			}
+		}
 		if errors.Is(err, ErrInvalidMetadata) {
 			reason = "InvalidMetadata"
 			return metav1.Condition{
@@ -804,6 +833,11 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 }
 
 func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) {
+	// Cache-lag retry is a benign look-again: if status already records a
+	// sandbox Name, leave it and the conditions untouched instead of wiping them.
+	if sandbox == nil && errors.Is(err, errSandboxAlreadyExists) && claim.Status.SandboxStatus.Name != "" {
+		return
+	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
 	r.syncFinishedCondition(claim, sandbox, isClaimExpired)
@@ -1709,6 +1743,9 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	}
 
 	if err := r.Create(ctx, sandbox); err != nil {
+		if k8errors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("%w: %w", errSandboxAlreadyExists, err)
+		}
 		err = fmt.Errorf("sandbox create error: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
 		return nil, err

@@ -19,6 +19,10 @@ import re
 import subprocess
 
 
+# Where published agent-sandbox images live (see dev/tools/release).
+PUBLISHED_IMAGE_PREFIX = "registry.k8s.io/agent-sandbox/"
+
+
 # Version strings derived from git refs are interpolated unquoted into the
 # Dockerfile's `RUN go build -ldflags="...${GIT_VERSION}..."` instruction. A
 # git tag or branch containing shell metacharacters could therefore break out

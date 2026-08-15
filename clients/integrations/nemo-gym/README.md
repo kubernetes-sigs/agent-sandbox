@@ -38,7 +38,7 @@ code, no NeMo Gym fork.
 - At least one `SandboxWarmPool` whose `SandboxTemplate` runs an image serving the
   sandbox runtime REST API (`/execute`, `/upload`, `/download`, ...) on
   `connection.server_port` (default 8888). See
-  [`examples/python-runtime-sandbox`](../../../examples/python-runtime-sandbox) for the
+  [`examples/python-runtime-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/python-runtime-sandbox) for the
   reference runtime image.
 - For clients running **outside** the cluster: the sandbox router plus either a Gateway
   (`connection.mode: gateway`) or a directly reachable router URL
@@ -56,7 +56,7 @@ MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
 ng_run "+config_paths=[$AGENT, /path/to/configs/agent_sandbox.yaml, $MODEL]"
 ```
 
-See [`configs/agent_sandbox.yaml`](configs/agent_sandbox.yaml) for the annotated config.
+See [`configs/agent_sandbox.yaml`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/integrations/nemo-gym/configs/agent_sandbox.yaml) for the annotated config.
 Kubernetes API access uses standard kubeconfig / in-cluster service account resolution.
 
 ### Image -> warm pool routing

@@ -24,12 +24,12 @@ pip install nemo-gym-k8s-agent-sandbox   # alongside nemo-gym
 is all it takes for `agent_sandbox` to become a valid provider name — no registration
 code, no NeMo Gym fork.
 
-> **Python version**: this package declares `requires-python >=3.13.14`, mirroring the
-> floor that nemo-gym itself publishes on PyPI (pip/uv enforce it at resolve time, so
-> every current 3.13.x is rejected and Python 3.14+ is required in practice). The
-> upstream floor looks like a typo for `>=3.13.1`; if nemo-gym relaxes it, this
-> package's floor (and the `min_python` gate in `dev/tools/test-unit`) can be relaxed
-> to match.
+> **Python version**: this package declares `requires-python >=3.13.14`, matching the
+> floor that nemo-gym itself publishes on PyPI. pip/uv enforce that floor at resolve
+> time, so installs on earlier interpreters (including 3.13.x patch releases below
+> 3.13.14) are rejected with a nemo-gym resolution error. If nemo-gym relaxes its
+> floor, this package's floor (and the `min_python` gate in `dev/tools/test-unit`)
+> should be relaxed to match.
 
 ## Cluster prerequisites
 

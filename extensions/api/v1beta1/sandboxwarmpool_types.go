@@ -90,6 +90,15 @@ type SandboxWarmPoolStatus struct {
 	// selector is the label selector used to find the pods in the pool.
 	// +optional
 	Selector string `json:"selector,omitempty"`
+
+	// observedGeneration is the most recent generation observed by the controller.
+	// It corresponds to the SandboxWarmPool's metadata.generation, which is bumped
+	// on spec mutations such as replicas changes. Note that SandboxTemplate content
+	// changes do not bump the pool's generation, so this does not track template
+	// rollout progress.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +genclient

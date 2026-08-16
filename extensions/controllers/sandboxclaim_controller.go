@@ -58,7 +58,16 @@ import (
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
-const immediateRequeueDelay = time.Millisecond
+const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
+
+const (
+	immediateRequeueDelay = time.Millisecond
+	// warmCandidateGracePeriod gives a newly created claim two seconds for a
+	// warm candidate to receive a Pod IP. This covers short IPAM delays without
+	// allowing an unavailable warm pool to postpone cold creation indefinitely.
+	warmCandidateGracePeriod   = 2 * time.Second
+	warmCandidateRetryInterval = 500 * time.Millisecond
+)
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
 var ErrTemplateNotFound = errors.New("SandboxTemplate not found")
@@ -76,6 +85,15 @@ var ErrWarmPoolNotFound = errors.New("SandboxWarmPool not found")
 // locked adoption writes; the Ready condition surfaces it as the benign
 // AdoptionConflict reason instead of ReconcilerError.
 var errAdoptionConflict = errors.New("adoption write conflict")
+
+type warmCandidatesPendingError struct {
+	pendingCandidates int
+	retryAfter        time.Duration
+}
+
+func (e *warmCandidatesPendingError) Error() string {
+	return fmt.Sprintf("%d warm pool candidate(s) are awaiting observed Pod IPs", e.pendingCandidates)
+}
 
 var restrictedDomains = []string{"kubernetes.io", "k8s.io", "agents.x-k8s.io"}
 var exemptedMetadataKeys = []string{autoscalerSafeToEvictAnnotation}
@@ -276,6 +294,20 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	} else {
 		// Ensure Sandbox exists and is configured.
 		sandbox, reconcileErr = r.reconcileActive(ctx, claim)
+	}
+
+	// Pending warm candidates are expected transient state, not a claim failure.
+	// Return before status calculation so the grace period does not publish a
+	// misleading SandboxMissing or ReconcilerError condition.
+	var pendingWarmCandidates *warmCandidatesPendingError
+	if errors.As(reconcileErr, &pendingWarmCandidates) {
+		logger.V(4).Info("Waiting for warm pool candidates to report Pod IPs",
+			"claim", claim.Name,
+			"warmPool", claim.Spec.WarmPoolRef.Name,
+			"pendingCandidates", pendingWarmCandidates.pendingCandidates,
+			"retryAfter", pendingWarmCandidates.retryAfter,
+		)
+		return ctrl.Result{RequeueAfter: pendingWarmCandidates.retryAfter}, nil
 	}
 
 	// Update Status & Events
@@ -824,7 +856,7 @@ func ensureClaimIdentityLabels(labels map[string]string, claim *extensionsv1beta
 	return labels
 }
 
-func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, error) {
+func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, queue.SandboxKey, int, error) {
 	logger := log.FromContext(ctx)
 
 	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
@@ -833,6 +865,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	var fallbackSandbox *v1beta1.Sandbox
 	var fallbackKey queue.SandboxKey
 	var adoptingFallback bool
+	var pendingNetworkCandidates int
 
 	// Instantly returns unused keys the moment we find a valid/ready candidate!
 	defer func() {
@@ -904,9 +937,9 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			// No more candidates in our namespace. If we found an unready fallback sandbox, return it.
 			if fallbackSandbox != nil {
 				adoptingFallback = true
-				return fallbackSandbox, fallbackKey, nil
+				return fallbackSandbox, fallbackKey, pendingNetworkCandidates, nil
 			}
-			return nil, queue.SandboxKey{}, nil
+			return nil, queue.SandboxKey{}, pendingNetworkCandidates, nil
 		}
 
 		adopted := &v1beta1.Sandbox{}
@@ -919,7 +952,7 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			}
 			// For real errors, put the key back in line and error out
 			r.WarmSandboxQueue.Add(namespacedWarmPoolName, adoptedKey)
-			return nil, queue.SandboxKey{}, err
+			return nil, queue.SandboxKey{}, pendingNetworkCandidates, err
 		}
 
 		if err := verifySandboxCandidate(adopted, claim); err != nil {
@@ -932,10 +965,24 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			continue
 		}
 
+		// Missing cached PodIPs means the controller has not observed a networked
+		// backing Pod for this candidate. Non-empty cached PodIPs narrow but cannot
+		// eliminate every concurrent Pod-deletion race. Keep pending candidates in
+		// the queue for a bounded claim-side retry. Normalize NodeName from the
+		// latest Sandbox status so a stale key does not erase placement information.
+		if len(adopted.Status.PodIPs) == 0 {
+			if adopted.Status.NodeName != "" {
+				adoptedKey.NodeName = adopted.Status.NodeName
+			}
+			pendingNetworkCandidates++
+			skipped = append(skipped, adoptedKey)
+			continue
+		}
+
 		// Candidate is valid! Now check if it is Ready
 		if isSandboxReady(adopted) {
 			// Found a Ready sandbox! Adopt it immediately.
-			return adopted, adoptedKey, nil
+			return adopted, adoptedKey, pendingNetworkCandidates, nil
 		}
 
 		// Sandbox is valid but NOT Ready.
@@ -950,19 +997,23 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	}
 }
 
-func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, error) {
+func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, int, error) {
 	logger := log.FromContext(ctx)
 	namespacedWarmPoolNameForQueue := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
 	for range 3 {
-		adopted, adoptedKey, err := r.getCandidate(ctx, claim)
+		adopted, adoptedKey, pendingNetworkCandidates, err := r.getCandidate(ctx, claim)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if adopted == nil {
-			logger.Info("Failed to adopt any sandbox after checking all candidates", "claim", claim.Name)
-			return nil, nil // Warm pool is truly empty, fall completely to cold start
+			if pendingNetworkCandidates > 0 {
+				logger.V(4).Info("No network-ready warm sandbox after checking candidates", "claim", claim.Name, "pendingCandidates", pendingNetworkCandidates)
+				return nil, pendingNetworkCandidates, nil
+			}
+			logger.V(4).Info("No warm sandbox candidates available", "claim", claim.Name)
+			return nil, 0, nil // Warm pool is truly empty, fall completely to cold start
 		}
 
 		// Wrap the API logic in a closure
@@ -1038,16 +1089,16 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 		}()
 
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
 		if success {
-			return adopted, nil
+			return adopted, 0, nil
 		}
 	}
 
 	logger.Info("Failed to adopt sandbox after max retries", "claim", claim.Name)
-	return nil, nil
+	return nil, 0, nil
 }
 
 func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, adopted *v1beta1.Sandbox) error {
@@ -1768,6 +1819,17 @@ func (r *SandboxClaimReconciler) migrateLegacyAssignedSandboxLabel(ctx context.C
 	return r.Patch(ctx, claim, patch)
 }
 
+func warmCandidateRetryAfter(claim *extensionsv1beta1.SandboxClaim, now time.Time) (time.Duration, bool) {
+	if claim.CreationTimestamp.IsZero() {
+		return 0, false
+	}
+	remaining := claim.CreationTimestamp.Add(warmCandidateGracePeriod).Sub(now)
+	if remaining <= 0 {
+		return 0, false
+	}
+	return min(warmCandidateRetryInterval, remaining), true
+}
+
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
@@ -1940,12 +2002,27 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// Go to the custom queue instead of standard r.List()
-	adopted, err := r.adoptSandboxFromCandidates(ctx, claim)
+	adopted, pendingNetworkCandidates, err := r.adoptSandboxFromCandidates(ctx, claim)
 	if err != nil {
 		return nil, err
 	}
 	if adopted != nil {
 		return adopted, nil
+	}
+	if pendingNetworkCandidates > 0 {
+		if retryAfter, ok := warmCandidateRetryAfter(claim, time.Now()); ok {
+			return nil, &warmCandidatesPendingError{
+				pendingCandidates: pendingNetworkCandidates,
+				retryAfter:        retryAfter,
+			}
+		}
+		logger.Info("Warm pool candidates did not report Pod IPs within the grace period; falling back to cold creation",
+			"claim", claim.Name,
+			"warmPool", claim.Spec.WarmPoolRef.Name,
+			"pendingCandidates", pendingNetworkCandidates,
+			"gracePeriod", warmCandidateGracePeriod,
+			"reason", "warm_candidates_network_pending",
+		)
 	}
 
 	// No warm pool sandbox available; caller decides whether to create
@@ -2490,6 +2567,10 @@ func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1
 	return nil
 }
 
+// isAdoptable evaluates static ownership and validity only.
+// Transient runtime conditions (e.g., waiting for PodIPs or image pulling)
+// MUST NOT be checked here; failures in isAdoptable trigger permanent queue
+// eviction and premature claim unassignments. Transient checks belong in getCandidate.
 func isAdoptable(candidate *v1beta1.Sandbox) error {
 	if !candidate.DeletionTimestamp.IsZero() {
 		return fmt.Errorf("sandbox is deleted")

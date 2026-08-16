@@ -230,39 +230,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID / observability / first-ready annotations for active
-	// resources missing them (inline, no re-reconcile). Folding the already-Ready
-	// first-ready sentinel into this patch avoids a second write on upgrade when
-	// both the observability and flap-guard annotations are missing.
+	oldStatus := sandbox.Status.DeepCopy()
+
+	// Initialize trace ID annotation for active resources missing it.
 	tc := r.Tracer.GetTraceContext(ctx)
 	needTraceContextPatch := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
-	needObservabilityPatch := sandbox.Annotations == nil || sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] == ""
-	alreadyReady := meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-	needFirstReadyBackfill := alreadyReady &&
-		(sandbox.Annotations == nil || sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] == "")
-
-	if needTraceContextPatch || needObservabilityPatch || needFirstReadyBackfill {
+	if needTraceContextPatch {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
-		if needTraceContextPatch {
-			sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
-		}
-		if needObservabilityPatch {
-			sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
-		}
-		if needFirstReadyBackfill {
-			// Sentinel: true first-ready time is unknown (pre-upgrade or prior stamp failure).
-			sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = "unknown"
-		}
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	oldStatus := sandbox.Status.DeepCopy()
+	r.ensureSandboxFirstObservedTime(sandbox)
+
 	var err error
 	sandboxDeleted := false
 	result := ctrl.Result{}
@@ -290,12 +276,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if !sandboxDeleted {
+		r.prepareSandboxLifecycleStatus(sandbox, oldStatus)
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
-		} else if metricsErr := r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus); metricsErr != nil {
-			err = errors.Join(err, metricsErr)
+		} else {
+			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
 		}
 	}
 	// return errors seen
@@ -584,44 +571,58 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	return nil
 }
 
-// backfillFirstReadyAnnotation stamps the SandboxFirstReadyAnnotation with a
-// sentinel value when the sandbox was previously Ready but the annotation is
-// missing (e.g. a prior Patch failed). Prefer the early Reconcile patch that
-// folds this sentinel in with other missing annotations when the sandbox is
-// already Ready; this helper remains as a safety net if the early path was
-// skipped. This arms the persistent guard so that future readiness flaps are
-// highly unlikely to double-count metrics. Double counting would only happen if
-// both the original happy-path stamp and this backfill Patch fail exactly at
-// the transitions between both NotReady->Ready and Ready->NotReady, as well as
-// all reconcile cycles where it stays Ready. The sentinel "unknown" is used
-// instead of a timestamp to signal that the actual first-ready time is unknown.
-func (r *SandboxReconciler) backfillFirstReadyAnnotation(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
-	if sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] != "" {
-		return nil
+func (r *SandboxReconciler) ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) {
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	if lifecycle.FirstObservedTime != nil {
+		return
 	}
-	patch := client.MergeFrom(sandbox.DeepCopy())
-	if sandbox.Annotations == nil {
-		sandbox.Annotations = make(map[string]string)
+	now := metav1.Now()
+	lifecycle.FirstObservedTime = &now
+}
+
+func (r *SandboxReconciler) prepareSandboxLifecycleStatus(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+
+	if lifecycle.FirstObservedTime == nil {
+		now := metav1.Now()
+		lifecycle.FirstObservedTime = &now
 	}
-	sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = "unknown"
-	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		return fmt.Errorf("backfill sandbox first-ready annotation: %w", err)
+
+	if firstReadyMetricsRecorded(lifecycle) {
+		return
 	}
-	return nil
+
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+	isReady := newReady != nil && newReady.Status == metav1.ConditionTrue
+
+	if !isReady {
+		if wasReady {
+			lifecycle.FirstReadyTime = nil
+			lifecycle.FirstReadyRecordState = sandboxv1beta1.SandboxFirstReadyRecordStateRecordedUnknown
+		}
+		return
+	}
+
+	if wasReady {
+		lifecycle.FirstReadyTime = nil
+		lifecycle.FirstReadyRecordState = sandboxv1beta1.SandboxFirstReadyRecordStateRecordedUnknown
+		return
+	}
+
+	firstReadyTime := newReady.LastTransitionTime
+	if firstReadyTime.IsZero() {
+		firstReadyTime = metav1.Now()
+	}
+	lifecycle.FirstReadyTime = &firstReadyTime
+	lifecycle.FirstReadyRecordState = sandboxv1beta1.SandboxFirstReadyRecordStateRecorded
 }
 
 // recordSandboxCreationMetrics detects the first transition to Ready=True and records
-// sandbox lifecycle metrics (creation latency, ready latency). It stamps the
-// sandbox-first-ready-at annotation to prevent duplicate recording on re-Ready
-// events (e.g. readiness probe flaps). Returns an error if the annotation patch
-// fails so that the reconciler retries; the retry is safe because the status
-// already persists Ready=True, so the oldReady guard will skip metric recording.
-//
-// When the sandbox was previously Ready but the annotation is missing (e.g. a
-// prior Patch failed, or a pre-existing sandbox from before this controller
-// version), the method backfills the annotation with a sentinel value to arm the
-// persistent guard before the next readiness flap can re-record metrics.
-func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) error {
+// sandbox lifecycle metrics (creation latency, ready latency) after the durable
+// lifecycle state has already been persisted in Sandbox status.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
 	logger := log.FromContext(ctx)
 
 	// Only record on the first transition to Ready=True.
@@ -630,27 +631,19 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
 
 	if newReady == nil || newReady.Status != metav1.ConditionTrue {
-		// Not Ready yet. If the sandbox was previously Ready but the annotation
-		// is missing (prior Patch failed), backfill it now so the persistent
-		// guard is armed before the sandbox can flap back to Ready.
-		if wasReady {
-			return r.backfillFirstReadyAnnotation(ctx, sandbox)
-		}
-		return nil
+		return
 	}
 
 	if wasReady {
-		// Already Ready before this reconcile; backfill the annotation if
-		// needed (e.g. prior Patch failed, or pre-existing sandbox from before
-		// this controller version).
-		return r.backfillFirstReadyAnnotation(ctx, sandbox)
+		return
 	}
 
-	// Persistent guard: if the first-ready annotation is already set, metrics were
-	// already recorded for this Sandbox on a previous reconcile. This prevents
-	// duplicate histogram observations when readiness flaps (Ready → NotReady → Ready).
-	if sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] != "" {
-		return nil
+	lifecycle := sandbox.Status.Lifecycle
+	if lifecycle == nil || lifecycle.FirstReadyRecordState != sandboxv1beta1.SandboxFirstReadyRecordStateRecorded {
+		return
+	}
+	if firstReadyMetricsRecorded(oldStatus.Lifecycle) {
+		return
 	}
 
 	// Resolve metric labels.
@@ -669,38 +662,39 @@ func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sa
 	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType, "ownedBy", ownedBy)
 
 	// 1. Creation latency (Sandbox.CreationTimestamp → Ready.LastTransitionTime).
-	if !sandbox.CreationTimestamp.IsZero() && !newReady.LastTransitionTime.IsZero() {
-		latency := newReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-		if latency >= 0 {
-			asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
-		}
+	if !sandbox.CreationTimestamp.IsZero() && lifecycle.FirstReadyTime != nil {
+		latency := lifecycle.FirstReadyTime.Sub(sandbox.CreationTimestamp.Time)
+		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
 	}
 
-	// 2. Ready latency (observability annotation → now).
+	// 2. Ready latency (first observed timestamp → now).
 	// Use wall-clock now for the end timestamp so the controller-stamped start
 	// time retains millisecond precision. This intentionally includes the small
 	// amount of reconcile processing between the Ready transition and metric
 	// observation, rather than falling back to second-granularity condition time.
-	if observedTimeStr := sandbox.Annotations[asmetrics.SandboxObservabilityAnnotation]; observedTimeStr != "" {
-		observedTime, parseErr := time.Parse(time.RFC3339Nano, observedTimeStr)
-		if parseErr != nil {
-			logger.Error(parseErr, "Failed to parse sandbox observability annotation, skipping ready latency metric", "value", observedTimeStr)
-		} else {
-			latency := time.Since(observedTime)
-			asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
-		}
+	if lifecycle.FirstObservedTime != nil {
+		latency := time.Since(lifecycle.FirstObservedTime.Time)
+		asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
 	}
+}
 
-	// Stamp the first-ready annotation to prevent duplicate recording on re-Ready events.
-	patch := client.MergeFrom(sandbox.DeepCopy())
-	if sandbox.Annotations == nil {
-		sandbox.Annotations = make(map[string]string)
+func ensureSandboxLifecycleStatus(status *sandboxv1beta1.SandboxStatus) *sandboxv1beta1.SandboxLifecycleStatus {
+	if status.Lifecycle == nil {
+		status.Lifecycle = &sandboxv1beta1.SandboxLifecycleStatus{}
 	}
-	sandbox.Annotations[asmetrics.SandboxFirstReadyAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
-	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		return fmt.Errorf("stamp first-ready annotation: %w", err)
+	return status.Lifecycle
+}
+
+func firstReadyMetricsRecorded(lifecycle *sandboxv1beta1.SandboxLifecycleStatus) bool {
+	if lifecycle == nil {
+		return false
 	}
-	return nil
+	switch lifecycle.FirstReadyRecordState {
+	case sandboxv1beta1.SandboxFirstReadyRecordStateRecorded, sandboxv1beta1.SandboxFirstReadyRecordStateRecordedUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveOwnedBy determines the owner of a Sandbox from its controller owner reference.

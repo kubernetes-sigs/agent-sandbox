@@ -36,13 +36,6 @@ const (
 	// ObservabilityAnnotation is the annotation key for the time the controller first observed the claim.
 	ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
 
-	// SandboxObservabilityAnnotation is the annotation key for the time the controller first observed the sandbox.
-	SandboxObservabilityAnnotation = "agents.x-k8s.io/sandbox-controller-first-observed-at"
-
-	// SandboxFirstReadyAnnotation is the annotation key for the time the sandbox first reached Ready state.
-	// Used to prevent duplicate metric recording on re-Ready events (e.g. readiness probe flaps).
-	SandboxFirstReadyAnnotation = "agents.x-k8s.io/sandbox-first-ready-at"
-
 	// ClaimFirstReadyAnnotation is the annotation key for the time the SandboxClaim first reached Ready state.
 	// It is usually an RFC3339Nano timestamp, but may be ClaimFirstReadyUnknownSentinel
 	// when the controller has to backfill the guard after the original timestamp Patch fails.
@@ -210,14 +203,12 @@ func init() {
 
 // RecordClaimStartupLatency records the duration since the provided start time.
 func RecordClaimStartupLatency(startTime time.Time, launchType, templateName string) {
-	duration := float64(time.Since(startTime).Milliseconds())
-	ClaimStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+	recordLatencyDuration(ClaimStartupLatency, time.Since(startTime), launchType, templateName)
 }
 
 // RecordClaimControllerStartupLatency records the duration since the provided controller start time.
 func RecordClaimControllerStartupLatency(startTime time.Time, launchType, templateName string) {
-	duration := float64(time.Since(startTime).Milliseconds())
-	ClaimControllerStartupLatency.WithLabelValues(launchType, templateName).Observe(duration)
+	recordLatencyDuration(ClaimControllerStartupLatency, time.Since(startTime), launchType, templateName)
 }
 
 // RecordClientClaimStartupLatency records the duration since the client request time.
@@ -233,12 +224,19 @@ func RecordClientClaimStartupLatency(ctx context.Context, startTime time.Time, l
 
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.
 func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType, templateName string) {
-	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
+	recordLatencyDuration(SandboxCreationLatency, duration, namespace, launchType, templateName)
 }
 
 // RecordSandboxReadyLatency records the measured latency from controller first observation to Ready.
 func RecordSandboxReadyLatency(duration time.Duration, namespace, launchType, templateName, ownedBy string) {
-	SandboxReadyLatency.WithLabelValues(namespace, launchType, templateName, ownedBy).Observe(float64(duration.Milliseconds()))
+	recordLatencyDuration(SandboxReadyLatency, duration, namespace, launchType, templateName, ownedBy)
+}
+
+func recordLatencyDuration(histogram *prometheus.HistogramVec, duration time.Duration, labelValues ...string) {
+	if duration < 0 {
+		return
+	}
+	histogram.WithLabelValues(labelValues...).Observe(float64(duration.Milliseconds()))
 }
 
 // NormalizeCreatedBy returns the createdBy label normalized to a known allow-list

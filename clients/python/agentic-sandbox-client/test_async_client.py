@@ -11,26 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end tests for ``AsyncSandboxClient`` — the async-only guarantees.
-
-Companion to ``test_client.py``. Covers behaviour that only the async client
-can be evaluated on: real parallelism across concurrent operations, and the
-event loop staying responsive during long-running SDK calls. Neither is
-observable in the sync client or in unit tests (which mock the k8s helpers
-and return instantly).
-
-Assumes the cluster already has a ``SandboxTemplate``, a ``SandboxWarmPool``,
-and either a Sandbox Router (for --api-url) or a Gateway (for --gateway-name)
-reachable from the invoking host. Point ``--warmpool-name`` at a pool with
-either ``replicas: 0`` or ``replicas >= 4`` for a clean concurrency signal;
-mid-sized pools mix warm and cold creates in the same run and blur it.
-
-Example:
-    python test_async_client.py \\
-        --warmpool-name python-sandbox-pool \\
-        --gateway-name kind-gateway \\
-        --namespace default
-"""
 
 import argparse
 import asyncio
@@ -52,10 +32,6 @@ logging.basicConfig(
 
 
 CONCURRENCY = 3
-# The event-loop ticker samples at 20ms. On a healthy loop, gaps track that
-# interval with modest jitter (tens of ms). A sync call smuggled into the
-# async IO path would produce a single gap of hundreds of ms or more, since
-# the loop cannot service the ticker while the sync call runs.
 TICKER_INTERVAL_S = 0.02
 TICKER_GAP_LIMIT_S = 0.5
 

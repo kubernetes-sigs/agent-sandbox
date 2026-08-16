@@ -373,6 +373,10 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// Reconcile Pod
 	pod, recreateRequeue, err := r.reconcilePod(ctx, sandbox, nameHash, wd)
 	allErrors = errors.Join(allErrors, err)
+	// Keep the pod error: the Pod-derived conditions use it to tell a
+	// confirmed-absent Pod from one whose state could not be read, and the
+	// reconcileService call below reassigns err (its := only introduces svc).
+	podErr := err
 
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
@@ -393,17 +397,26 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	allErrors = errors.Join(allErrors, err)
 
 	// compute and set overall conditions
-	conditions := r.computeConditions(sandbox, allErrors, svc, pod, err)
-	hasFinished := false
+	conditions := r.computeConditions(sandbox, allErrors, svc, pod, podErr)
+	// Conditions that are only present while they apply: Finished has no
+	// meaning without a terminal pod, PodScheduled none without a pod at
+	// all. Any of these not computed this pass is removed from status.
+	// Suspended is deliberately NOT in this set: it is persistent and
+	// transitions to False rather than being removed (see #1150).
+	presentWhileApplicable := map[string]bool{
+		string(sandboxv1beta1.SandboxConditionFinished):     false,
+		string(sandboxv1beta1.SandboxConditionPodScheduled): false,
+	}
 	for _, condition := range conditions {
 		meta.SetStatusCondition(&sandbox.Status.Conditions, condition)
-		if condition.Type == string(sandboxv1beta1.SandboxConditionFinished) {
-			hasFinished = true
+		if _, ok := presentWhileApplicable[condition.Type]; ok {
+			presentWhileApplicable[condition.Type] = true
 		}
 	}
-
-	if !hasFinished {
-		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
+	for condType, present := range presentWhileApplicable {
+		if !present {
+			meta.RemoveStatusCondition(&sandbox.Status.Conditions, condType)
+		}
 	}
 
 	return recreateRequeue, allErrors
@@ -418,9 +431,69 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 		conditions = append(conditions, *finished)
 	}
 
+	if podScheduled := r.computePodScheduledCondition(sandbox, pod, podErr); podScheduled != nil {
+		conditions = append(conditions, *podScheduled)
+	}
+
 	conditions = append(conditions, r.computeReadyCondition(sandbox, err, svc, pod))
 
 	return conditions
+}
+
+// computePodScheduledCondition mirrors the backing Pod's PodScheduled
+// condition into the Sandbox so consumers can tell why a Sandbox is not
+// scheduled (Unschedulable, SchedulingGated, ...) without Pod access. The
+// Pod condition's status, reason and message are copied verbatim so future
+// scheduler reasons flow through unchanged. metav1.Condition requires a
+// non-empty reason, so an empty Pod reason maps to a fallback: PodScheduled
+// for status True (the scheduler sets no reason on success — the expected
+// case) and PodSchedulingUnknown for any other status missing a reason.
+// Returns nil when the Pod is confirmed absent: the condition is removed rather
+// than reporting a misleading False for suspended or expired sandboxes. A Pod
+// this Sandbox does not own is likewise not mirrored, so a foreign Pod holding
+// the name cannot leak its scheduling state into this Sandbox's status.
+func (r *SandboxReconciler) computePodScheduledCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) *metav1.Condition {
+	condition := &metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+		ObservedGeneration: sandbox.Generation,
+	}
+
+	// Reconciling the Pod failed, so a nil pod does not prove the Pod is gone.
+	// Report the scheduling state as unknown instead of dropping the condition,
+	// which would read as "no backing Pod" on a transient API error.
+	if pod == nil && podErr != nil {
+		condition.Status = metav1.ConditionUnknown
+		condition.Reason = sandboxv1beta1.SandboxReasonPodSchedulingUnknown
+		condition.Message = "Pod state is unknown. Pod scheduling cannot be determined"
+		return condition
+	}
+
+	if !isOwnedBySandbox(pod, sandbox) {
+		return nil
+	}
+
+	for _, podCond := range pod.Status.Conditions {
+		if podCond.Type != corev1.PodScheduled {
+			continue
+		}
+		condition.Status = metav1.ConditionStatus(podCond.Status)
+		condition.Reason = podCond.Reason
+		condition.Message = podCond.Message
+		if condition.Reason == "" {
+			if condition.Status == metav1.ConditionTrue {
+				condition.Reason = sandboxv1beta1.SandboxReasonPodScheduled
+			} else {
+				condition.Reason = sandboxv1beta1.SandboxReasonPodSchedulingUnknown
+			}
+		}
+		return condition
+	}
+
+	// Pod exists but the scheduler has not reported yet.
+	condition.Status = metav1.ConditionUnknown
+	condition.Reason = sandboxv1beta1.SandboxReasonPodSchedulingUnknown
+	condition.Message = "Pod has not reported a PodScheduled condition yet"
+	return condition
 }
 
 func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
@@ -1747,6 +1820,11 @@ func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 		Reason:             sandboxv1beta1.SandboxReasonExpired,
 		Message:            "Sandbox has expired",
 	})
+	// Expiry tears down the backing pod and skips reconcileChildResources
+	// (where PodScheduled is normally maintained), so drop the mirrored
+	// condition here or it would linger with stale pre-expiry contents.
+	// Finished, by contrast, is deliberately preserved across expiry.
+	meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionPodScheduled))
 }
 
 // sandboxMarkedExpired checks if the sandbox is already marked as expired.

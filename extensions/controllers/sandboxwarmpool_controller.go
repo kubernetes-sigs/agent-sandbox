@@ -61,9 +61,10 @@ const (
 	// of O(sandboxes-in-namespace).
 	sandboxWarmPoolLabelIndex = ".metadata.labels[" + warmPoolSandboxLabel + "]"
 
-	// warmPoolReadinessGracePeriod is how long a pool sandbox may stay
-	// non-Ready before the reconciler considers it stuck and replaces it.
-	warmPoolReadinessGracePeriod = 5 * time.Minute
+	// DefaultWarmPoolReadinessGracePeriod is how long a pool sandbox may stay
+	// non-Ready before the reconciler considers it stuck and replaces it,
+	// unless overridden via SandboxWarmPoolReconciler.ReadinessGracePeriod.
+	DefaultWarmPoolReadinessGracePeriod = 5 * time.Minute
 
 	// expectationsPendingRequeueDelay is the fallback requeue used when create
 	// or delete work is skipped because previously issued writes have not been
@@ -71,9 +72,11 @@ const (
 	// pool much sooner; this only guards against lost events.
 	expectationsPendingRequeueDelay = 30 * time.Second
 
-	// unschedulableRequeueDelay is the rate-limited retry interval for a pool
-	// holding unschedulable sandboxes instead of churning delete/create (#1215).
-	unschedulableRequeueDelay = time.Minute
+	// DefaultUnschedulableRecheckInterval is the rate-limited retry interval
+	// for a pool holding unschedulable sandboxes instead of churning
+	// delete/create (#1215), unless overridden via
+	// SandboxWarmPoolReconciler.UnschedulableRecheckInterval.
+	DefaultUnschedulableRecheckInterval = time.Minute
 
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
@@ -103,6 +106,14 @@ type SandboxWarmPoolReconciler struct {
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
+	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready
+	// before it is considered stuck (delete-and-replace, or held if its pod
+	// is unschedulable). Zero means DefaultWarmPoolReadinessGracePeriod.
+	ReadinessGracePeriod time.Duration
+	// UnschedulableRecheckInterval is the requeue interval while a pool holds
+	// unschedulable sandboxes past the readiness grace period. Zero means
+	// DefaultUnschedulableRecheckInterval.
+	UnschedulableRecheckInterval time.Duration
 	// Recorder emits pool-level Events (e.g. WarmPoolNotProgressing). May be
 	// nil (tests); all uses are nil-guarded.
 	Recorder events.EventRecorder
@@ -362,6 +373,24 @@ func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
 	return time.Now()
 }
 
+// readinessGracePeriod returns the configured readiness grace period, falling
+// back to the default for zero-value construction (tests, bare literals).
+func (r *SandboxWarmPoolReconciler) readinessGracePeriod() time.Duration {
+	if r.ReadinessGracePeriod > 0 {
+		return r.ReadinessGracePeriod
+	}
+	return DefaultWarmPoolReadinessGracePeriod
+}
+
+// unschedulableRecheckInterval returns the configured unschedulable-hold
+// requeue interval, falling back to the default for zero-value construction.
+func (r *SandboxWarmPoolReconciler) unschedulableRecheckInterval() time.Duration {
+	if r.UnschedulableRecheckInterval > 0 {
+		return r.UnschedulableRecheckInterval
+	}
+	return DefaultUnschedulableRecheckInterval
+}
+
 // exp returns the reconciler's expectations tracker.
 //
 // In production the tracker is initialized before any reconcile runs:
@@ -489,7 +518,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(sb.CreationTimestamp.Time)
-			if age <= warmPoolReadinessGracePeriod {
+			if age <= r.readinessGracePeriod() {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -499,7 +528,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// unschedulable-hold/NotProgressing signal unreachable.
 				// Requeue for the earliest grace deadline so the evaluation
 				// is deterministic.
-				if remaining := warmPoolReadinessGracePeriod - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
+				if remaining := r.readinessGracePeriod() - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
 					nextGraceDeadline = remaining
 				}
 				healthySandboxes = append(healthySandboxes, sb)
@@ -568,6 +597,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 	warmPool.Status.ReadyReplicas = readyReplicas
+
+	// Surface the pool's observed generation so clients can gate on
+	// status.observedGeneration == metadata.generation before trusting the
+	// replica counts (eliminates read-after-write races on scale/spec updates).
+	warmPool.Status.ObservedGeneration = warmPool.Generation
 
 	maxBatchSize := int32(r.MaxBatchSize)
 
@@ -739,8 +773,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	if unschedulableReplicas > 0 {
 		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
 			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
-			unschedulableReplicas, desiredReplicas, warmPoolReadinessGracePeriod))
-		requeueAfter = minNonZeroDuration(requeueAfter, unschedulableRequeueDelay)
+			unschedulableReplicas, desiredReplicas, r.readinessGracePeriod()))
+		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())
 	} else {
 		r.setNotProgressing(warmPool, poolKey, false, "")
 	}

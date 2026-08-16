@@ -53,6 +53,20 @@ const (
 	// (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"
 
+	// SandboxConditionPodScheduled mirrors the backing Pod's PodScheduled
+	// condition so consumers can see why a Sandbox is not scheduled (e.g.
+	// Unschedulable, SchedulingGated) without reading the Pod. The Pod
+	// condition's status, reason and message are copied through verbatim;
+	// the condition is absent while the Sandbox has no backing Pod.
+	SandboxConditionPodScheduled ConditionType = "PodScheduled"
+	// SandboxReasonPodScheduled indicates the backing Pod has been scheduled
+	// to a node. Used when the Pod's PodScheduled condition carries no reason
+	// of its own (the scheduler sets none on success).
+	SandboxReasonPodScheduled = "PodScheduled"
+	// SandboxReasonPodSchedulingUnknown indicates the backing Pod exists but
+	// has not reported a PodScheduled condition yet.
+	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
+
 	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
 	SandboxConditionFinished ConditionType = "Finished"
 	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.

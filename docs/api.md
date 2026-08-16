@@ -1113,6 +1113,7 @@ _Appears in:_
 | `replicas` _integer_ | replicas is the total number of sandboxes in the pool. |  | Optional: \{\} <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the total number of sandboxes in the pool that are in a ready state. |  | Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector used to find the pods in the pool. |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | observedGeneration is the most recent generation observed by the controller.<br />It corresponds to the SandboxWarmPool's metadata.generation, which is bumped<br />on spec mutations such as replicas changes. Note that SandboxTemplate content<br />changes do not bump the pool's generation, so this does not track template<br />rollout progress. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### SandboxWarmPoolUpdateStrategy

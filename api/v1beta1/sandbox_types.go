@@ -238,7 +238,9 @@ type SandboxSpec struct {
 	// Recreate: delete the controller-owned Failed pod so a new one is created;
 	// the Sandbox identity and any Sandbox-owned PVCs are retained.
 	// Combined with restartPolicy Never and a container that always exits non-zero,
-	// Recreate can recreate the Pod indefinitely; there is no backoff in this version.
+	// Recreate can recreate the Pod repeatedly; the controller applies Deployment-style
+	// in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash
+	// loop cannot hot-loop the API server. Backoff state is not persisted in status.
 	// +kubebuilder:default=Ignore
 	// +optional
 	PodFailurePolicy PodFailurePolicy `json:"podFailurePolicy,omitempty"`

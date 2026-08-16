@@ -3173,7 +3173,7 @@ func TestReconcilePod(t *testing.T) {
 				ClusterDomain: "cluster.local",
 			}
 
-			pod, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
+			pod, _, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
 			if tc.expectErr {
 				require.Error(t, err)
 				// Verify that any initially unowned Pod remains unowned (never adopted)
@@ -3240,6 +3240,45 @@ func TestReconcilePod(t *testing.T) {
 	}
 }
 
+func TestRecreateBackoffDelayDoublesAndCaps(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "sb"}
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	b := recreateBackoff{now: func() time.Time { return now }}
+
+	require.Zero(t, b.delay(key))
+
+	b.bump(key)
+	require.Equal(t, recreateBackoffBase, b.delay(key))
+
+	now = now.Add(recreateBackoffBase)
+	require.Zero(t, b.delay(key))
+
+	b.bump(key)
+	require.Equal(t, 2*recreateBackoffBase, b.delay(key))
+
+	// Advance through several bumps until the cap is hit.
+	for range 10 {
+		now = now.Add(b.delay(key))
+		b.bump(key)
+	}
+	require.Equal(t, recreateBackoffMax, b.delay(key))
+}
+
+func TestRecreateBackoffResetClearsDelay(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "sb"}
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	b := recreateBackoff{now: func() time.Time { return now }}
+
+	b.bump(key)
+	require.Equal(t, recreateBackoffBase, b.delay(key))
+
+	b.reset(key)
+	require.Zero(t, b.delay(key))
+
+	b.bump(key)
+	require.Equal(t, recreateBackoffBase, b.delay(key), "reset should restart at the base delay")
+}
+
 func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
 	sandboxName := "sandbox-name"
 	sandboxNs := "sandbox-ns"
@@ -3278,16 +3317,19 @@ func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
 	}
 
 	tracer := &mockTracer{}
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	r := SandboxReconciler{
 		Client:        newFakeClient(failedPod, sandbox),
 		Scheme:        Scheme,
 		Tracer:        tracer,
 		ClusterDomain: "cluster.local",
 	}
+	r.recreateBackoff.now = func() time.Time { return now }
 
-	pod, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
+	pod, requeueAfter, err := r.reconcilePod(t.Context(), sandbox, nameHash, nil)
 	require.NoError(t, err)
 	require.Nil(t, pod)
+	require.Equal(t, recreateBackoffBase, requeueAfter)
 	require.Contains(t, tracer.events, mockTracerEvent{
 		name: "FailedPodDeletedForRecreate",
 		attrs: map[string]string{
@@ -3304,8 +3346,16 @@ func TestReconcilePodFailurePolicyRecreateCreatesReplacement(t *testing.T) {
 	_, hasAnnotation := liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
 	require.False(t, hasAnnotation)
 
-	replacement, err := r.reconcilePod(t.Context(), liveSandbox, nameHash, nil)
+	// Create is gated by recreate backoff until the delay elapses.
+	replacement, requeueAfter, err := r.reconcilePod(t.Context(), liveSandbox, nameHash, nil)
 	require.NoError(t, err)
+	require.Nil(t, replacement)
+	require.Equal(t, recreateBackoffBase, requeueAfter)
+
+	now = now.Add(recreateBackoffBase)
+	replacement, requeueAfter, err = r.reconcilePod(t.Context(), liveSandbox, nameHash, nil)
+	require.NoError(t, err)
+	require.Zero(t, requeueAfter)
 	require.NotNil(t, replacement)
 	require.Equal(t, sandboxName, replacement.Name)
 	require.Equal(t, corev1.PodPhase(""), replacement.Status.Phase)
@@ -3422,7 +3472,7 @@ func TestReconcilePodFailurePolicyRecreatePatchBehavior(t *testing.T) {
 				ClusterDomain: "cluster.local",
 			}
 
-			pod, err := r.reconcilePod(t.Context(), tc.sandbox, nameHash, nil)
+			pod, _, err := r.reconcilePod(t.Context(), tc.sandbox, nameHash, nil)
 			require.NoError(t, err)
 			require.Nil(t, pod)
 			require.Equal(t, tc.wantPodPatches, podPatches, tc.assertionReason)
@@ -4711,7 +4761,8 @@ func TestReconcileChildResourcesSuspendedForeignPodDoesNotLeakIPOrNodeName(t *te
 	}
 
 	// Refusing to delete a foreign pod is a steady state, not an error.
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandboxObj, nil))
+	_, err := r.reconcileChildResources(t.Context(), sandboxObj, nil)
+	require.NoError(t, err)
 
 	assert.Nil(t, sandboxObj.Status.PodIPs, "foreign pod IPs must NOT leak into sandbox status")
 	assert.Empty(t, sandboxObj.Status.NodeName, "foreign pod NodeName must NOT leak into sandbox status")

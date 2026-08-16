@@ -39,6 +39,7 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 - Opt-in recovery from `PodFailed` without deleting the Sandbox or its PVCs.
 - Place the control on the Sandbox API (Claim does not manage Pods).
 - Preserve default Ignore behavior (non-breaking).
+- Bound crash-loop recreate churn with Deployment-style in-memory exponential backoff (5s…5m).
 
 ### Non-Goals
 
@@ -46,7 +47,7 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 - SandboxClaim-level passthrough of the policy.
 - Template-drift / `podTemplate` update recreation ([#612](https://github.com/kubernetes-sigs/agent-sandbox/issues/612)).
 - In-place resource resize ([#1054](https://github.com/kubernetes-sigs/agent-sandbox/issues/1054)).
-- Recreate backoff / max-retry limits in the first version.
+- Persisted recreate backoff / max-retry limits in `SandboxStatus` (Job-style status fields). In-memory backoff is in scope (see below).
 
 ## Proposal
 
@@ -60,16 +61,18 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 ```text
 reconcilePod sees existing Pod
   → if phase=Failed AND podFailurePolicy=Recreate AND owned by Sandbox
-      → Delete Pod, clear agents.x-k8s.io/pod-name annotation, return nil
-  → next reconcile: Pod missing → existing create path builds a new Pod
+      → Delete Pod, clear agents.x-k8s.io/pod-name annotation, bump in-memory backoff, return nil
+  → next reconcile: Pod missing → if recreate backoff not elapsed, skip Create and RequeueAfter
+  → once backoff elapses: existing create path builds a new Pod
   → PVCs from volumeClaimTemplates remain Sandbox-owned and are remounted
+  → when the replacement Pod reaches Running, reset in-memory backoff
 ```
 
 Expiry handling already short-circuits before child reconcile, so expired Sandboxes do not recreate Failed Pods. Suspend continues to delete the Pod for suspension and does not create while `operatingMode=Suspended`.
 
 With Recreate, `Finished` must not stick on the Failed Pod being replaced: `reconcilePod` runs before `computeFinishedCondition`, and returning a nil Pod after delete clears Finished for that reconcile.
 
-**Crash-loop tradeoff:** `Recreate` combined with `restartPolicy: Never` and a container that always exits non-zero can recreate indefinitely. Document this; backoff is deferred.
+**Crash-loop backoff (Deployment pattern):** `Recreate` combined with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly. Without delay, Owns(Pod) watch events would drive an immediate Delete→Create hot loop (workqueue rate limiting does not apply to watch `Add`s). This KEP uses the Deployment-style approach: track retry state in controller memory and gate Create with exponential backoff (5s base, doubling up to 5m), waking via `RequeueAfter`. State is lost on process restart / leader failover (at most one un-backed-off recreate burst). Persisting `failureCount` / `lastFailureTime` on `SandboxStatus` (Job pattern) is deferred.
 
 #### API Changes
 
@@ -101,12 +104,13 @@ Enum (not bool) matches project API conventions and `ShutdownPolicy`. A plain en
 - Only delete when ownership is `resourceOwnedBySandbox` and `DeletionTimestamp` is zero.
 - Refuse delete for foreign-owned pods (same logging pattern as suspend).
 - Log the recreate delete at `Info` (major lifecycle event).
-- Unit-test Ignore vs Recreate, ownership refusal, Succeeded+Recreate (no recreate), and Suspended (suspend path only).
+- Apply Deployment-style in-memory recreate backoff: bump on Failed delete, gate Create, `RequeueAfter` for the remaining delay, reset when the Pod is Running.
+- Unit-test Ignore vs Recreate, ownership refusal, Succeeded+Recreate (no recreate), Suspended (suspend path only), and recreate backoff gate/reset.
 - Optional e2e: Fail once, recreate, remount PVC with surviving data.
 
 ## Scalability
 
-Recreate adds at most one Delete + one Create per Failed Pod transition. No new watches, indexes, or unbounded status lists. Controllers that opt many sandboxes into Recreate with crashing workloads may increase Pod churn; that is an operator configuration concern, not a default-path cost.
+Recreate adds at most one Delete + one Create per Failed Pod transition after backoff elapses. No new watches, indexes, or unbounded status lists. Controllers that opt many sandboxes into Recreate with crashing workloads still generate Pod churn, but exponential backoff bounds the API QPS from a single crash-looping Sandbox.
 
 ## Alternatives
 
@@ -117,3 +121,4 @@ Recreate adds at most one Delete + one Create per Failed Pod transition. No new 
 | External cron deleting Failed pods | Works via the missing-pod path, but every consumer reimplements it. |
 | Claim `lifecycle.recreateOnPodFailure` | Claim does not manage Pods; maintainers prefer Sandbox API. |
 | Fold into a broader `updateStrategy` (#612) | Template-drift recreation is a different problem; keep Failed-pod recovery separate. |
+| Job-style backoff in `SandboxStatus` | Correct and restart-safe, but expands the API surface; deferred in favor of Deployment-style in-memory backoff for the initial version. |

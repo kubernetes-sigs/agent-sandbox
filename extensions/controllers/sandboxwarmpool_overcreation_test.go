@@ -376,7 +376,7 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		got := &sandboxv1beta1.Sandbox{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, got))
 		require.Equal(t, 0, lc.createCount(), "no replacement may be created for an unschedulable sandbox")
-		require.Equal(t, unschedulableRequeueDelay, requeueAfter)
+		require.Equal(t, DefaultUnschedulableRecheckInterval, requeueAfter)
 		// It still counts as a (non-ready) replica.
 		require.Equal(t, replicas, warmPool.Status.Replicas)
 		require.Equal(t, int32(0), warmPool.Status.ReadyReplicas)
@@ -662,14 +662,14 @@ func TestReconcilePool_YoungNotReadyArmsGraceRequeue(t *testing.T) {
 	require.NoError(t, err)
 	// Earliest deadline wins: the 4-minute-old sandbox has 1 minute of grace
 	// left. The fake clock makes this exact.
-	require.Equal(t, warmPoolReadinessGracePeriod-4*time.Minute+graceRequeueSlack, requeueAfter,
+	require.Equal(t, DefaultWarmPoolReadinessGracePeriod-4*time.Minute+graceRequeueSlack, requeueAfter,
 		"requeue must target the earliest remaining grace deadline")
 
 	// With the default jitter factor, the requeue is spread inside
 	// [base, base*(1+factor)] — never earlier than the deadline, never more
 	// than 50% beyond it.
 	graceRequeueJitterFactor = 0.5
-	jitterBase := warmPoolReadinessGracePeriod - 4*time.Minute + graceRequeueSlack
+	jitterBase := DefaultWarmPoolReadinessGracePeriod - 4*time.Minute + graceRequeueSlack
 	for range 20 {
 		rj := SandboxWarmPoolReconciler{
 			Client: newFakeClient(scheme,
@@ -777,7 +777,7 @@ func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
 	// post-grace evaluation is self-scheduled.
 	requeueAfter, err := r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
-	require.Equal(t, warmPoolReadinessGracePeriod+graceRequeueSlack, requeueAfter)
+	require.Equal(t, DefaultWarmPoolReadinessGracePeriod+graceRequeueSlack, requeueAfter)
 	select {
 	case e := <-recorder.Events:
 		t.Fatalf("no event may fire inside the grace period, got: %s", e)
@@ -793,7 +793,7 @@ func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
 	// and exactly one WarmPoolNotProgressing warning is emitted.
 	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}))
 	require.Equal(t, 0, lc.createCount())
-	require.Equal(t, unschedulableRequeueDelay, requeueAfter)
+	require.Equal(t, DefaultUnschedulableRecheckInterval, requeueAfter)
 	select {
 	case e := <-recorder.Events:
 		require.Contains(t, e, reasonWarmPoolNotProgressing)
@@ -811,6 +811,140 @@ func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
 		t.Fatalf("unexpected duplicate event while state is unchanged: %s", e)
 	default:
 	}
+}
+
+// TestReconcilePool_ConfigurableGraceAndRecheck: ReadinessGracePeriod and
+// UnschedulableRecheckInterval override the defaults (#1274). A sandbox past
+// the default 5m grace but inside a configured 10m grace must be held as
+// still-warming (not delete-and-replaced, not unschedulable-held); once past
+// the configured grace with an unschedulable pod, the hold requeue must use
+// the configured recheck interval.
+func TestReconcilePool_ConfigurableGraceAndRecheck(t *testing.T) {
+	zeroGraceJitter(t)
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	const configuredGrace = 10 * time.Minute
+	const configuredRecheck = 30 * time.Second
+	replicas := int32(1)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-1274",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+
+	// Whole-second base: metav1.Time truncates to seconds on storage round-trips.
+	base := time.Now().Truncate(time.Second)
+	controller := true
+	sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-cfg")
+	sb.UID = "uid-cfg"
+	// Age 6m at the first reconcile: past the 5m default, inside the 10m config.
+	sb.CreationTimestamp = metav1.Time{Time: base.Add(-6 * time.Minute)}
+	sb.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+	}}
+	sb.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: extensionsv1beta1.GroupVersion.String(),
+		Kind:       "SandboxWarmPool",
+		Name:       poolName,
+		UID:        warmPool.UID,
+		Controller: &controller,
+	}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: poolNamespace},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodScheduled,
+				Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable,
+			}},
+		},
+	}
+
+	current := base
+	recorder := events.NewFakeRecorder(16)
+	scheme := newTestScheme()
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb, pod))
+	r := SandboxWarmPoolReconciler{
+		Client:                       lc,
+		Scheme:                       scheme,
+		MaxBatchSize:                 sandboxCreateDeleteMaxBatchSize,
+		Recorder:                     recorder,
+		ReadinessGracePeriod:         configuredGrace,
+		UnschedulableRecheckInterval: configuredRecheck,
+		now:                          func() time.Time { return current },
+	}
+	ctx := context.Background()
+
+	// Phase 1: at age 6m the sandbox is inside the configured grace. Under
+	// the 5m default it would have been GC'd (or unschedulable-held); with
+	// the override it must be kept as still-warming, with the requeue armed
+	// for the remaining configured grace — not the recheck interval.
+	requeueAfter, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}),
+		"sandbox inside the configured grace must not be deleted")
+	require.Equal(t, 0, lc.createCount(), "no replacement may be created inside the configured grace")
+	require.Equal(t, configuredGrace-6*time.Minute+graceRequeueSlack, requeueAfter,
+		"requeue must target the remaining configured grace")
+	select {
+	case e := <-recorder.Events:
+		t.Fatalf("no event may fire inside the configured grace period, got: %s", e)
+	default:
+	}
+
+	// Phase 2: the self-scheduled requeue fires past the configured grace.
+	// The unschedulable pod now triggers the hold, re-checked at the
+	// configured interval.
+	current = current.Add(requeueAfter)
+	requeueAfter, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}),
+		"unschedulable sandbox past grace must be held, not replaced")
+	require.Equal(t, 0, lc.createCount())
+	require.Equal(t, configuredRecheck, requeueAfter,
+		"hold requeue must use the configured recheck interval")
+	select {
+	case e := <-recorder.Events:
+		require.Contains(t, e, reasonWarmPoolNotProgressing)
+		require.Contains(t, e, corev1.EventTypeWarning)
+	default:
+		t.Fatal("expected WarmPoolNotProgressing after the configured grace elapsed")
+	}
+}
+
+// TestWarmPoolDefaults pins the exported defaults behind the
+// --sandbox-warm-pool-readiness-grace-period and
+// --sandbox-warm-pool-unschedulable-recheck-interval flags. These are the
+// controller's user-visible flag defaults, so changing either is a behavioral
+// change for every existing deployment that does not set the flag: raising the
+// grace period delays replacement of stuck pool members, lowering it can GC
+// sandboxes that were merely slow to start. The assertions are deliberately
+// exact values rather than derived expressions so an accidental edit fails here
+// instead of silently shipping.
+func TestWarmPoolDefaults(t *testing.T) {
+	require.Equal(t, 5*time.Minute, DefaultWarmPoolReadinessGracePeriod,
+		"DefaultWarmPoolReadinessGracePeriod is the --sandbox-warm-pool-readiness-grace-period default; changing it alters replacement timing for every deployment that does not set the flag")
+	require.Equal(t, time.Minute, DefaultUnschedulableRecheckInterval,
+		"DefaultUnschedulableRecheckInterval is the --sandbox-warm-pool-unschedulable-recheck-interval default; changing it alters the requeue rate for pools holding unschedulable sandboxes")
+
+	// The zero value must remain the "use the default" sentinel: main.go
+	// rejects explicit non-positive flag values, so a zero field can only come
+	// from a programmatically constructed reconciler (or a test).
+	var r SandboxWarmPoolReconciler
+	require.Equal(t, DefaultWarmPoolReadinessGracePeriod, r.readinessGracePeriod(),
+		"zero ReadinessGracePeriod must fall back to the default")
+	require.Equal(t, DefaultUnschedulableRecheckInterval, r.unschedulableRecheckInterval(),
+		"zero UnschedulableRecheckInterval must fall back to the default")
 }
 
 // TestWarmPoolSandboxEventHandler_ObservesOwnedEvents covers the watch-side

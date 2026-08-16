@@ -93,6 +93,8 @@ The following table lists the configurable parameters and their defaults.
 | `controller.sandboxWarmPoolConcurrentWorkers` | Max concurrent reconciles for the SandboxWarmPool controller (extensions only) | `1` |
 | `controller.sandboxTemplateConcurrentWorkers` | Max concurrent reconciles for the SandboxTemplate controller (extensions only) | `1` |
 | `controller.sandboxWarmPoolMaxBatchSize` | Max batch size for parallel sandbox create/delete in the SandboxWarmPool controller (extensions only) | `300` |
+| `controller.sandboxWarmPoolReadinessGracePeriod` | How long a warm pool sandbox may stay non-Ready before it is considered stuck and replaced, or held if unschedulable (extensions only) | unset (controller default `5m`) |
+| `controller.sandboxWarmPoolUnschedulableRecheckInterval` | Re-check interval for pools holding unschedulable sandboxes past the readiness grace period (extensions only) | unset (controller default `1m`) |
 | `controller.enableWarmPoolEviction` | Mark pods created by a warm pool as safe to evict (extensions only) | `true` |
 | `controller.enableTracing` | Enable OpenTelemetry tracing via OTLP | `false` |
 | `controller.enablePprof` | Enable CPU profiling endpoint on the metrics server | `false` |

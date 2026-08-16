@@ -85,11 +85,11 @@ envsubst '${SANDBOX_NAMESPACE} ${SANDBOX_TEMPLATE_NAME}' \
     | kubectl apply -f -
 ```
 
-See [`extensions/examples/`](../../extensions/examples/) for additional SandboxTemplate, SandboxClaim, and SandboxWarmPool examples.
+See [`examples/warmpool-quickstart/`](../warmpool-quickstart/) for additional SandboxTemplate, SandboxClaim, and SandboxWarmPool examples.
 
 ## Step 5: Create SandboxWarmPool
 
-Create a WarmPool that references the template from Step 4 (see [`extensions/examples/sandboxwarmpool.yaml`](../../extensions/examples/sandboxwarmpool.yaml) for the base example):
+Create a WarmPool that references the template from Step 4 (see [`examples/warmpool-quickstart/sandboxwarmpool.yaml`](../warmpool-quickstart/sandboxwarmpool.yaml) for the base example):
 
 ```bash
 kubectl apply -f - <<EOF

@@ -40,7 +40,7 @@ const upperHex = "0123456789ABCDEF"
 func percentEncode(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' ||
 			c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' || c == '~' {

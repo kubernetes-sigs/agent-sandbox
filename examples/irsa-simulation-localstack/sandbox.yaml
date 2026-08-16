@@ -1,0 +1,24 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: irsa-sim-sandbox
+  namespace: irsa-sim-ns
+spec:
+  podTemplate:
+    spec:
+      serviceAccountName: irsa-sim-sa
+      containers:
+      - name: sandbox
+        image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
+        env:
+        - name: AWS_ENDPOINT_URL_STS
+          value: "http://localstack.irsa-sim-ns.svc.cluster.local:4566"
+        - name: AWS_REGION
+          value: "us-east-1"
+        volumeMounts:
+        - name: check-script
+          mountPath: /irsa-sim
+      volumes:
+      - name: check-script
+        configMap:
+          name: irsa-sim-check-script

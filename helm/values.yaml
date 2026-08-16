@@ -112,6 +112,7 @@ metrics:
     # only select PrometheusRules matching their ruleSelector, e.g.:
     #   release: kube-prometheus-stack
     additionalLabels: {}
-    # rules appends additional Prometheus rule groups after the chart's starter
-    # group. Each list item must be a full Prometheus rule group object.
-    rules: []
+    # additionalGroups appends additional Prometheus rule groups after the
+    # chart's starter group. Each list item must be a full Prometheus rule
+    # group object.
+    additionalGroups: []

@@ -117,7 +117,7 @@ The following table lists the configurable parameters and their defaults.
 | `metrics.serviceMonitor.scrapeTimeout` | Scrape timeout (omitted unless set) | `""` |
 | `metrics.prometheusRule.enabled` | Create a Prometheus Operator `PrometheusRule` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
 | `metrics.prometheusRule.additionalLabels` | Extra labels on the `PrometheusRule` (often required to match the Prometheus `ruleSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |
-| `metrics.prometheusRule.rules` | Additional Prometheus rule groups appended after the chart's starter rule group | `[]` |
+| `metrics.prometheusRule.additionalGroups` | Additional Prometheus rule groups appended after the chart's starter rule group | `[]` |
 
 ## Metrics
 

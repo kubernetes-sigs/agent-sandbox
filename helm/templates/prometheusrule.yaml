@@ -25,7 +25,7 @@ spec:
           annotations:
             summary: Agent Sandbox controller metrics targets are down
             description: Prometheus has been unable to scrape any {{ $serviceName }} metrics target for 5 minutes.
-    {{- with .Values.metrics.prometheusRule.rules }}
+    {{- with .Values.metrics.prometheusRule.additionalGroups }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 {{- end }}

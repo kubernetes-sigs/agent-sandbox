@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -139,6 +140,50 @@ func isOwnedBySandbox(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
 	return ownership == resourceOwnedBySandbox
 }
 
+// multipleSandboxPodsError reports an ownership invariant violation. It is
+// distinct from transient reconcile errors so the controller can surface a
+// stable condition without hot-looping until a Pod event changes the state.
+type multipleSandboxPodsError struct {
+	count int
+}
+
+func (e *multipleSandboxPodsError) Error() string {
+	return fmt.Sprintf("multiple Pods (%d) are controlled by this Sandbox; refusing to choose or create a Pod", e.count)
+}
+
+func asMultipleSandboxPodsError(err error) *multipleSandboxPodsError {
+	var multiplePodsErr *multipleSandboxPodsError
+	if errors.As(err, &multiplePodsErr) {
+		return multiplePodsErr
+	}
+	return nil
+}
+
+func isMultipleSandboxPodsError(err error) bool {
+	return asMultipleSandboxPodsError(err) != nil
+}
+
+// sandboxOwnedPods filters tracking-label candidates by controller owner UID.
+// The tracking label is only an index; ownership is the authoritative mapping.
+func sandboxOwnedPods(pods []corev1.Pod, sandbox *sandboxv1beta1.Sandbox) []*corev1.Pod {
+	owned := make([]*corev1.Pod, 0, len(pods))
+	for i := range pods {
+		if isOwnedBySandbox(&pods[i], sandbox) {
+			owned = append(owned, &pods[i])
+		}
+	}
+	return owned
+}
+
+func containsPod(pods []*corev1.Pod, pod *corev1.Pod) bool {
+	for _, candidate := range pods {
+		if candidate.Namespace == pod.Namespace && candidate.Name == pod.Name {
+			return true
+		}
+	}
+	return false
+}
+
 // resolvePodName returns the name of the pod associated with the given Sandbox.
 // If the sandbox has adopted a warm pool pod, the pod name is tracked in the
 // agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
@@ -184,6 +229,7 @@ func init() {
 type SandboxReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
+	Recorder      events.EventRecorder
 	Tracer        asmetrics.Instrumenter
 	ClusterDomain string
 
@@ -349,18 +395,22 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	nameHash := NameHash(sandbox.Name)
 
 	var allErrors error
+	var conditionErrors error
 
 	// Reconcile PVCs from volumeClaimTemplates
 	err := r.reconcilePVCs(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
+	conditionErrors = errors.Join(conditionErrors, err)
 
 	// Reconcile Pod
-	pod, err := r.reconcilePod(ctx, sandbox, nameHash, wd)
-	allErrors = errors.Join(allErrors, err)
-	// Keep the pod error: the Pod-derived conditions use it to tell a
-	// confirmed-absent Pod from one whose state could not be read, and the
-	// reconcileService call below reassigns err (its := only introduces svc).
-	podErr := err
+	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash, wd)
+	conditionErrors = errors.Join(conditionErrors, podErr)
+	podMappingConflict := isMultipleSandboxPodsError(podErr)
+	if podMappingConflict {
+		r.recordMultiplePodsEvent(sandbox, podErr)
+	} else {
+		allErrors = errors.Join(allErrors, podErr)
+	}
 
 	if pod == nil {
 		sandbox.Status.PodIPs = nil
@@ -376,12 +426,17 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		}
 	}
 
-	// Reconcile Service
-	svc, err := r.reconcileService(ctx, sandbox, nameHash)
-	allErrors = errors.Join(allErrors, err)
+	// Do not create or modify a routing Service while the backing Pod mapping is
+	// ambiguous. Existing Services are left untouched for an operator to inspect.
+	var svc *corev1.Service
+	if !podMappingConflict {
+		svc, err = r.reconcileService(ctx, sandbox, nameHash)
+		allErrors = errors.Join(allErrors, err)
+		conditionErrors = errors.Join(conditionErrors, err)
+	}
 
 	// compute and set overall conditions
-	conditions := r.computeConditions(sandbox, allErrors, svc, pod, podErr)
+	conditions := r.computeConditions(sandbox, conditionErrors, svc, pod, podErr)
 	// Conditions that are only present while they apply: Finished has no
 	// meaning without a terminal pod, PodScheduled none without a pod at
 	// all. Any of these not computed this pass is removed from status.
@@ -404,6 +459,17 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	}
 
 	return allErrors
+}
+
+func (r *SandboxReconciler) recordMultiplePodsEvent(sandbox *sandboxv1beta1.Sandbox, err error) {
+	if r.Recorder == nil {
+		return
+	}
+	ready := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if ready != nil && ready.Reason == sandboxv1beta1.SandboxReasonMultiplePods {
+		return
+	}
+	r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, sandboxv1beta1.SandboxReasonMultiplePods, "Reconciling", "%s", err.Error())
 }
 
 func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod, podErr error) []metav1.Condition {
@@ -530,6 +596,11 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 	}
 
 	if err != nil {
+		if multiplePodsErr := asMultipleSandboxPodsError(err); multiplePodsErr != nil {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonMultiplePods
+			readyCondition.Message = multiplePodsErr.Error()
+			return readyCondition
+		}
 		readyCondition.Reason = "ReconcilerError"
 		readyCondition.Message = "Error seen: " + err.Error()
 		return readyCondition
@@ -1107,8 +1178,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	defer end()
 
 	// List all pods carrying this sandbox's tracking label (sandboxLabel),
-	// via the cache field index registered in SetupWithManager.
-	// TODO: find a better way to make sure one sandbox has at most one pod
+	// via the cache field index registered in SetupWithManager. The label only
+	// identifies candidates; controller owner UID establishes the mapping.
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(sandbox.Namespace),
@@ -1118,9 +1189,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return nil, fmt.Errorf("pod list failed: %w", err)
 	}
 
-	if len(podList.Items) > 1 {
-		logger.Info("Multiple pods found for sandbox, this should not happen", "Sandbox", sandbox.Name, "PodCount", len(podList.Items))
-	}
+	ownedPods := sandboxOwnedPods(podList.Items, sandbox)
 
 	// Determine the pod name to look up
 	podName := resolvePodName(sandbox)
@@ -1143,6 +1212,30 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			}
 		}
 		pod = nil
+	}
+
+	// A tracked Pod may temporarily be absent from the label index (for
+	// example, a legacy adopted Pod before its metadata patch is observed).
+	// Include it in the ownership classification without double counting it.
+	if pod != nil && isOwnedBySandbox(pod, sandbox) && !containsPod(ownedPods, pod) {
+		ownedPods = append(ownedPods, pod)
+	}
+	if len(ownedPods) > 1 {
+		return nil, &multipleSandboxPodsError{count: len(ownedPods)}
+	}
+
+	// Owner UID is authoritative over the compatibility annotation. If an
+	// owned Pod survives while the annotation is missing or stale, reconcile
+	// that Pod instead of adopting or creating another one.
+	if len(ownedPods) == 1 && (pod == nil || pod.Name != ownedPods[0].Name) {
+		if podNameAnnotationExists {
+			logger.Info("Tracked Pod differs from the owned Pod, repairing mapping",
+				"trackedPodName", podName, "ownedPodName", ownedPods[0].Name)
+			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				return nil, err
+			}
+		}
+		pod = ownedPods[0].DeepCopy()
 	}
 
 	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {

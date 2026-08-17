@@ -24,6 +24,19 @@ The introduction of **`volumeClaimTemplates`** into the `SandboxTemplate` API so
 
 ---
 
+{{% alert title="Prerequisite: StorageClass" color="warning" %}}
+`volumeClaimTemplates` rely on a working [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/) in your cluster. If no `storageClassName` is specified in the template, Kubernetes uses the cluster's **default StorageClass**. Most managed Kubernetes distributions (GKE, EKS, AKS) and local development environments like KIND (which ships with the `standard` StorageClass backed by `rancher.io/local-path`) provide one out of the box.
+
+If your cluster does not have a default StorageClass, PVCs created from `volumeClaimTemplates` will remain in a `Pending` state. The PVC events will show:
+`no persistent volumes available for this claim and no storage class is set`.
+
+To check your cluster's StorageClasses, run:
+```bash
+kubectl get storageclass
+```
+The default StorageClass is marked with `(default)` in the output. If none is set, either annotate an existing StorageClass as default or explicitly set `storageClassName` in your `volumeClaimTemplates` spec.
+{{% /alert %}}
+
 ### Create a SandboxTemplate with Volume Claims
 To use a volume, you need to add the `volumeClaimTemplates` array to your `SandboxTemplate` specification and reference it in the `volumeMounts` of your container.
 

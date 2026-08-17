@@ -39,10 +39,12 @@ generate-go-docs: # Generate Go SDK reference documentation
 	sed 's/^#/##/' < $(REF_GO_PATH).tmp1 > $(REF_GO_PATH).tmp2
 	# Strip #L<line> anchors from source links: line numbers are brittle and
 	# make the generated docs go stale on every unrelated edit. Keep the
-	# file link (per reviewer request). pipefail so a tail failure does not
-	# silently overwrite the doc with partial content.
-	set -o pipefail; tail -n +2 < $(REF_GO_PATH).tmp2 | sed -E 's@(/blob/[^)# ]+)#L[0-9]+(-L[0-9]+)?@\1@g' > $(REF_GO_PATH)
-	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2
+	# file link (per reviewer request). Staged through a temp file (rather than
+	# a pipe) so a tail failure aborts the recipe instead of silently writing a
+	# partial doc -- portable across /bin/sh implementations without pipefail.
+	tail -n +2 < $(REF_GO_PATH).tmp2 > $(REF_GO_PATH).tmp3
+	sed -E 's@(/blob/[^)# ]+)#L[0-9]+(-L[0-9]+)?@\1@g' < $(REF_GO_PATH).tmp3 > $(REF_GO_PATH)
+	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2 $(REF_GO_PATH).tmp3
 
 PYDOC_MARKDOWN_VERSION := 4.8.2
 .PHONY: generate-python-docs

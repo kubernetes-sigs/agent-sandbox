@@ -34,3 +34,13 @@ spec:
             memory: "512Mi"
             ephemeral-storage: "512Mi"
       restartPolicy: "OnFailure"
+  volumeClaimTemplatesPolicy: Overrides
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: "1Gi"

@@ -61,7 +61,7 @@ export KUBECONFIG="${SCRIPT_DIR}/kubeconfig"
 export VERSION="v0.1.0"
 
 # install only the core components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
 
 # install the extensions components:
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml

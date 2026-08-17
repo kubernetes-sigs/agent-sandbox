@@ -36,6 +36,7 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 // TestWarmPoolPodExclusivity is a regression test for the 1:1 sandbox-to-pod
@@ -51,12 +52,11 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "default"},
-		Spec: extensionsv1beta1.SandboxTemplateSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "c", Image: "img"}},
-				},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "img"}},
 			},
+		}},
 		},
 	}
 
@@ -71,19 +71,18 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 					sandboxTemplateRefHash: templateHash,
 				},
 				OwnerReferences: []metav1.OwnerReference{{
-					APIVersion: "extensions.agents.x-k8s.io/v1beta1",
-					Kind:       "SandboxWarmPool",
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 					Name:       "pool",
 					UID:        warmPoolUID,
 					Controller: new(true),
 				}},
 			},
-			Spec: sandboxv1beta1.SandboxSpec{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "c", Image: "img"}},
-					},
+			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img"}},
 				},
+			}},
 			},
 			Status: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{{
@@ -92,6 +91,7 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 					Reason:             "DependenciesReady",
 					LastTransitionTime: metav1.NewTime(time.Now()),
 				}},
+				PodIPs: []string{testNetworkedPodIP},
 			},
 		}
 	}
@@ -129,8 +129,8 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	fc := builder.Build()
 
 	testQueue := queue.NewSimpleSandboxQueue()
-	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
-	testQueue.Add("pool", queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
+	testQueue.Add(queue.GetNamespacedWarmPoolName("default", "pool"), queue.SandboxKey{Namespace: "default", Name: "pool-sb-0"})
+	testQueue.Add(queue.GetNamespacedWarmPoolName("default", "pool"), queue.SandboxKey{Namespace: "default", Name: "pool-sb-1"})
 
 	reconciler := &SandboxClaimReconciler{
 		Client: fc, Scheme: scheme,
@@ -154,7 +154,7 @@ func TestWarmPoolPodExclusivity(t *testing.T) {
 	sandboxToOwners := make(map[string][]string) // sandbox name → [claim names]
 	for _, sb := range allSandboxes.Items {
 		ref := metav1.GetControllerOf(&sb)
-		if ref != nil && ref.Kind == "SandboxClaim" {
+		if utils.MatchesGroupKind(ref, extensionsv1beta1.GroupVersion.Group, extensionsv1beta1.SandboxClaimKind) {
 			sandboxToOwners[sb.Name] = append(sandboxToOwners[sb.Name], ref.Name)
 		}
 	}

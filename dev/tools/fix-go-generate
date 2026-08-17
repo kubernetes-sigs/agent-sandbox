@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import argparse
 import os
 import subprocess
 import sys
@@ -21,14 +21,65 @@ import sys
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(script_dir)
 
-from shared import headers
-
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--install-only", action="store_true")
+    args = parser.parse_args()
     # Find the repo root from the script's location
     repo_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
 
+    # Path to local bin inside the repo
+    local_bin = os.path.join(repo_root, "bin")
+    os.makedirs(local_bin, exist_ok=True)
+
+    # Tools to install with their exact versions
+    tools = [
+        ("github.com/bufbuild/buf/cmd/buf@v1.47.2", "buf"),
+        ("google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0", "protoc-gen-go"),
+        ("google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0", "protoc-gen-go-grpc"),
+    ]
+
+    # Check if we need to install/update tools by comparing against a version stamp file
+    stamp_file = os.path.join(local_bin, ".tools_stamp")
+    expected_stamp = "\n".join([import_path for import_path, _ in tools])
+    needs_install = False
+
+    if not os.path.exists(stamp_file):
+        needs_install = True
+    else:
+        with open(stamp_file, "r") as f:
+            if f.read().strip() != expected_stamp.strip():
+                needs_install = True
+
+    for _, binary_name in tools:
+        if not os.path.exists(os.path.join(local_bin, binary_name)):
+            needs_install = True
+            break
+
+    if needs_install:
+        print("Installing required code generation tools...")
+        # Configure GOBIN to install tools locally into the repo's bin directory
+        env = os.environ.copy()
+        env["GOBIN"] = local_bin
+
+        for import_path, binary_name in tools:
+            print(f"  Installing {binary_name} ({import_path.split('@')[1]})...")
+            # Running go install outside the main module context to avoid modifying go.mod
+            subprocess.check_call(["go", "install", import_path], env=env, cwd=repo_root)
+
+        with open(stamp_file, "w") as f:
+            f.write(expected_stamp + "\n")
+        print("Tools installed successfully.")
+
+    if args.install_only:
+        sys.exit(0)
+
+    # Add local bin to PATH so go generate (and buf generate) can find them
+    env = os.environ.copy()
+    env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+
     print(f"Running go generate ./... in {repo_root}")
-    subprocess.check_call(["go", "generate", "-v", "./..."], cwd=repo_root)
+    subprocess.check_call(["go", "generate", "-v", "./..."], cwd=repo_root, env=env)
 
 if __name__ == "__main__":
     main()

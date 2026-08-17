@@ -1,0 +1,15 @@
+# Google Managed Prometheus scrape config for Cilium's Hubble metrics.
+# Scrapes every Cilium agent's hubble-metrics endpoint (port 9965) and ships the
+# flow/policy/drop metrics into Cloud Monitoring (Managed Prometheus).
+apiVersion: monitoring.googleapis.com/v1
+kind: ClusterPodMonitoring
+metadata:
+  name: hubble
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  endpoints:
+    - port: hubble-metrics # named container port 9965 on the cilium agent pods
+      interval: 30s
+      path: /metrics

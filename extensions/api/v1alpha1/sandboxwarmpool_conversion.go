@@ -85,7 +85,8 @@ func (s *SandboxWarmPool) ConvertFrom(srcRaw conversion.Hub) error {
 // Helper functions for SandboxWarmPool conversion
 
 func convertWarmPoolSpecTo(src *SandboxWarmPoolSpec, dst *v1beta1.SandboxWarmPoolSpec) error {
-	dst.Replicas = src.Replicas
+	replicas := src.Replicas
+	dst.Replicas = &replicas
 	dst.TemplateRef = v1beta1.SandboxTemplateRef{
 		Name: src.TemplateRef.Name,
 	}
@@ -102,7 +103,11 @@ func convertWarmPoolSpecTo(src *SandboxWarmPoolSpec, dst *v1beta1.SandboxWarmPoo
 }
 
 func convertWarmPoolSpecFrom(src *v1beta1.SandboxWarmPoolSpec, dst *SandboxWarmPoolSpec) error {
-	dst.Replicas = src.Replicas
+	if src.Replicas != nil {
+		dst.Replicas = *src.Replicas
+	} else {
+		dst.Replicas = 1
+	}
 	dst.TemplateRef = SandboxTemplateRef{
 		Name: src.TemplateRef.Name,
 	}

@@ -20,13 +20,13 @@ from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
     SandboxConnectionConfig,
-    SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
+from .utils import select_pod_ip
 
 class Sandbox:
     """
@@ -111,16 +111,17 @@ class Sandbox:
         return None
 
     def get_pod_ip(self) -> str | None:
-        """Fetches the first pod IP from the Sandbox status.
+        """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
 
         Always queries the K8s API for the latest IP — the pod IP can change
-        after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed 
+        after a pod restart (e.g. when spec.operatingMode is set to Suspended and resumed
         via setting spec.operatingMode to Running).
-        Returns None if the controller does not populate podIPs.
+        Returns None if no valid IP can be selected.
         """
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        pod_ips = sandbox_object.get('status', {}).get('podIPs', [])
-        return pod_ips[0] if pod_ips else None
+        status_data = sandbox_object.get("status") or {}
+        pod_ips = status_data.get('podIPs', [])
+        return select_pod_ip(pod_ips)
 
     def status(self) -> tuple[str, str]:
         """
@@ -134,8 +135,8 @@ class Sandbox:
         if not sandbox_object:
             return "SandboxNotFound", "Sandbox object not found in Kubernetes."
 
-        status_data = sandbox_object.get("status", {})
-        for cond in status_data.get("conditions", []):
+        status_data = sandbox_object.get("status") or {}
+        for cond in status_data.get("conditions") or []:
             if cond.get("type") == "Ready":
                 message = cond.get("message", "")
                 if cond.get("status") == "True":
@@ -207,5 +208,3 @@ class Sandbox:
 
         # Clear after successful delete so a retry does not 404.
         self.claim_name = None
-
- 

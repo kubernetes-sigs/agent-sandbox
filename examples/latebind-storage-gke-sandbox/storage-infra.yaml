@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: master-shared-pvc
+  namespace: default
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: regional-rwx
+  resources:
+    requests: {storage: 1Ti}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: storage-node-daemon
+  namespace: default
+spec:
+  selector:
+    matchLabels: {app: storage-node-daemon}
+  template:
+    metadata:
+      labels: {app: storage-node-daemon}
+    spec:
+      nodeSelector:
+        sandbox.gke.io/runtime: gvisor
+      tolerations:
+      - key: "sandbox.gke.io/runtime"
+        operator: "Equal"
+        value: "gvisor"
+        effect: "NoSchedule"
+      containers:
+      - name: daemon
+        image: python:3.11-slim
+        securityContext: {privileged: true}
+        volumeMounts:
+        - {name: host-root, mountPath: /host-root, mountPropagation: Bidirectional}
+        - {name: master-filestore, mountPath: /mnt/master-volume}
+        command: ["python3", "-u", "-c"]
+        args:
+        - |
+          import os, json, subprocess, traceback, shutil
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+          def safe_join(base, *parts):
+            base = os.path.abspath(base)
+            path = os.path.abspath(os.path.join(base, *parts))
+            if os.path.commonpath([base, path]) != base:
+              raise ValueError(f"path escapes base directory: {path}")
+            return path
+
+          def require_segment(name, value):
+            if not value or value in {".", ".."} or value != os.path.basename(value):
+              raise ValueError(f"invalid {name}: {value!r}")
+            return value
+
+          class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+              try:
+                content_len = int(self.headers.get('Content-Length', 0))
+                data = json.loads(self.rfile.read(content_len))
+                pod_uid = require_segment('pod_uid', data['pod_uid'])
+                user_id = require_segment('user_id', data['user_id'])
+                action = data['action']
+                volume_name = require_segment('volume_name', data['volume_name'])
+                sub_dir = require_segment('sub_dir', data['sub_dir'])
+                is_readonly = data.get('is_readonly', False)
+                snapshot_id = data.get('snapshot_id')
+                if snapshot_id is not None:
+                  snapshot_id = require_segment('snapshot_id', snapshot_id)
+     
+                # Path to the local emptyDir on the host
+                parent_dir = safe_join("/host-root/var/lib/kubelet/pods", pod_uid, "volumes/kubernetes.io~empty-dir", volume_name)
+                target = safe_join(parent_dir, sub_dir)
+
+                # Logic to distinguish between resuming an agent from the latest state, or resuming from a previous snapshot in time.
+                if snapshot_id:
+                    source = safe_join("/mnt/master-volume/snapshots", snapshot_id)
+                    # Fail immediately if the requested snapshot does not exist
+                    if not os.path.exists(source):
+                        raise FileNotFoundError(f"Requested snapshot source does not exist: {source}")
+                else:
+                    source = safe_join("/mnt/master-volume/users", user_id)
+
+                if action == "bind":
+                  if not snapshot_id:
+                    os.makedirs(source, exist_ok=True)
+                  os.makedirs(target, exist_ok=True)
+
+                  # Bind mount the kernel NFS Filestore directory
+                  subprocess.run(["mount", "--bind", source, target], check=True)
+
+                  # Enforce read-only if requested
+                  if is_readonly:
+                    subprocess.run(["mount", "-o", "remount,ro,bind", target], check=True)
+                  else:
+                    subprocess.run(["chown", "-R", "1000:1000", target], check=True)
+                  
+                  # Write the signal file to the parent emptyDir (local host filesystem) 
+                  # instead of the NFS-mounted sub directory. This ensures 
+                  # the pod detects the file instantly, bypassing NFS attribute 
+                  # and negative lookup caching delays.
+                  with open(f"{parent_dir}/.ready", "w") as f: f.write("ready")
+                  msg = f"Success: Bound Filestore folder {user_id} to mount path inside of agent container"
+                elif action == "unbind":
+                  subprocess.run(["umount", "-l", target], check=True)
+                  msg = f"Success: Unbound {pod_uid}"
+
+                elif action == "delete":
+                  if os.path.exists(source):
+                    shutil.rmtree(source)
+                    if snapshot_id:
+                      msg = f"Success: Deleted snapshot {snapshot_id}"
+                    else:
+                      msg = f"Success: Deleted persistent directory for user {user_id}"
+                  else:
+                    if snapshot_id:
+                      msg = f"Snapshot {snapshot_id} does not exist."
+                    else:
+                      msg = f"Directory for user {user_id} does not exist."
+
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(msg.encode())
+              except Exception as e:
+                tb = traceback.format_exc()
+                print(f"Exception handling request:\n{tb}")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(tb.encode())
+
+          HTTPServer(('localhost', 9090), Handler).serve_forever()
+      volumes:
+      - {name: host-root, hostPath: {path: /}}
+      - name: master-filestore
+        persistentVolumeClaim:
+          claimName: master-shared-pvc # Your Filestore RWX volume claim

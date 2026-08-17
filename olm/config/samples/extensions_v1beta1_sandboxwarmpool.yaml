@@ -1,0 +1,9 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: example-warmpool
+  namespace: default
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: example-template

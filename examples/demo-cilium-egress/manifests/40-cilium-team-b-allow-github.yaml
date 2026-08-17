@@ -1,0 +1,20 @@
+# PHASE 2: allowlist identity `team-b` too.
+# Apply this after showing team-b is denied, and team-b's clone starts working
+# without touching team-a. Demonstrates additive, per-identity egress policy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: team-b-allow-github
+  namespace: sandbox-demo
+spec:
+  endpointSelector:
+    matchLabels:
+      demo.identity: team-b
+  egress:
+    - toFQDNs:
+        - matchName: github.com
+        - matchName: codeload.github.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

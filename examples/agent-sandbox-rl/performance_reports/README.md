@@ -1,29 +1,46 @@
 # Performance reports
 
-Per-run performance reports emitted by the `agent-sandbox-rl` package (the
-`RunReport` produced by `SandboxFleet.run(...)`). Each run writes two files via
-`examples/run_swebench_fleet.py` when `REPORT_DIR` is set:
+Per-run performance reports for the `agent-sandbox-rl` package (the `RunReport`
+produced by `SandboxFleet.run(...)`). Two emitters write here:
 
-```
-<strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.txt    # human-readable summary table
-<strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.json   # same data, machine-readable (report.to_dict())
-```
+- **`examples/run_swebench_fleet.py`** (when `REPORT_DIR` is set) — a single run:
+  ```text
+  <strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.txt    # human-readable summary table
+  <strategy>_<n>tasks_<YYYYMMDD-HHMMSS>.json   # same data (report.to_dict())
+  ```
+- **`tests/loadtest.py`** — a parameterized multi-strategy load test writing a
+  richer `<name>.md` (+ `.json`): parameters, **methodology**, cluster/nodes,
+  warm-pool plan, a per-stage benchmark (incl. **claim latency = time-to-sandbox**),
+  a **metric glossary**, and the full RunReport per strategy.
 
-> The one checked-in sample here has its `environment` block **redacted**
-> (`<namespace>`, `<region>`, …) — it only illustrates the format. Don't commit
-> real run reports (they embed live cluster metadata and churn); this directory is
-> for the format docs + a redacted example.
+> **One redacted sample is checked in: [`sample_rl_rollout.md`](sample_rl_rollout.md)**
+> (+ `.json`) — a `tests/loadtest.py` run in **RL instant-claim mode**
+> (`warm_per_task` + `colocate_replicas`, 10 problems × 8 rollouts) with its
+> `environment` block and image registry **scrubbed** (`<region>`, `PROJECT`, …). It
+> only illustrates the format. **Don't commit real run reports** — they embed live
+> cluster metadata and churn; everything except this sample + the READMEs is
+> gitignored here.
 
-Generate one:
+Generate reports:
 
 ```bash
 cd examples/agent-sandbox-rl
+
+# single run (run_swebench_fleet.py)
 PYTHONPATH="$(pwd)" \
 WARMPOOL_STRATEGY=sliding TASKS_LIMIT=10 MAX_CONCURRENT=5 \
 NAMESPACE=rl-tunix-swebench \
 NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool NODE_SELECTOR_VAL=e2-pool \
 REPORT_DIR="$(pwd)/performance_reports" \
 python examples/run_swebench_fleet.py
+
+# parameterized load test (tests/loadtest.py) — e.g. the RL instant-claim shape
+PYTHONPATH="$(pwd)" python tests/loadtest.py \
+  --images 10 --tasks-per-image 8 --strategies naive \
+  --warm-per-task --colocate --task-duration 15 \
+  --image-template 'REGISTRY/PROJECT/swebench-mirror/bench:img{i:03d}' \
+  --context <kube-context> --namespace <ns> \
+  --out performance_reports/myrun.md
 ```
 
 ## Anatomy of a report
@@ -77,6 +94,7 @@ python examples/run_swebench_fleet.py
 | `prepull` | *(only if enabled)* Wait for the DaemonSet that pre-pulls task images onto every node so warm pods skip the multi-GB pull. |
 | `create_warmpool` | Create the `SandboxTemplate` + `SandboxWarmPool` objects for an image pool (the API calls only, not the pull). One per pool. |
 | `wait_pool_ready` | Block until the pool reports `readyReplicas` (the pods are pulled, started, Ready). **Detected via a Kubernetes watch** — near-exact, no poll-grid rounding. This is the cold-start cost and is dominated by the image pull on a fresh node. |
+| `prefetch` | *(`pipelined` strategy only)* Wall-time spent warming the **next** window's pools in the background while the current window's tasks run. Compare it to `process`: overlap is what `pipelined` buys (it wraps the same `create_warmpool`/`wait_pool_ready` work, recorded in the background). |
 | `claim` | Acquire a sandbox for a task: create a `SandboxClaim`, resolve it to a `Sandbox`, wait Ready, build the handle. One per task. Sub-second when pools are warm. |
 | `process` | Your `process_fn` running inside the sandbox (here the SWE-bench probe: a router-free `exec`). One per task. |
 | `release` | Release a sandbox (delete its `SandboxClaim`; the controller reaps/replaces the pod). One per task. |
@@ -93,7 +111,7 @@ python examples/run_swebench_fleet.py
 | `claims` | Total `SandboxClaim`s created during the run (one per task here). |
 | `tasks NNok/MMerr` | Tasks whose `process_fn` returned (`ok`) vs raised (`err`). A per-task failure is captured, not fatal. |
 | `warm_replicas total` | Cumulative warm replicas created across the whole run (sums every pool ever warmed). |
-| `warm_replicas peak` | Max warm replicas alive **at once** — the real idle footprint. This is where strategies differ: `naive` keeps every pool warm (peak ≈ total), `sliding` bounds it to the window (peak < total), `none` ≈ the window of size-1 pools. |
+| `warm_replicas peak` | Max warm replicas alive **at once** — the real idle footprint. This is where strategies differ: `naive` keeps every pool warm (peak ≈ total), `sliding` bounds it to the window (peak < total), `pipelined` bounds it to ≤ 2 windows (one running + one prefetching), `none` ≈ the window of size-1 pools. |
 
 ## Environment block
 

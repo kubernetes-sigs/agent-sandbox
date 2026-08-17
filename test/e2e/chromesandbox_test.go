@@ -79,6 +79,16 @@ func chromeSandbox(namespace string) *sandboxv1beta1.Sandbox {
 					Name:            "chrome-sandbox",
 					Image:           imageName,
 					ImagePullPolicy: corev1.PullIfNotPresent,
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{"/chrome-sandbox-entrypoint", "probe"},
+							},
+						},
+						InitialDelaySeconds: 1,
+						PeriodSeconds:       1,
+						TimeoutSeconds:      2,
+					},
 				},
 			},
 		},

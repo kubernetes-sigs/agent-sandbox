@@ -3,7 +3,7 @@ title: "Agent Sandbox Installation"
 linkTitle: "Agent Sandbox Installation"
 weight: 2
 description: >
-  This guide shows how install Agent Sandbox resources in [Kubernetes in Docker (KinD)](https://kind.sigs.k8s.io/) and in [GKE](https://cloud.google.com/kubernetes-engine).
+  This guide shows how to install Agent Sandbox resources in [Kubernetes in Docker (KinD)](https://kind.sigs.k8s.io/) and in [GKE](https://cloud.google.com/kubernetes-engine).
 ---
 
 ## Prerequisites
@@ -33,7 +33,7 @@ description: >
    VERSION=$(curl https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r '.tag_name')
 
    # To install only the core components:
-   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
+   kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
    
    # To install the extensions components:
    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
@@ -53,6 +53,6 @@ description: >
 
 4. Create a Sandbox Template. For example the `python-runtime-sandbox`. More information about this runtime can be found [here](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/python-runtime-sandbox/).
    ```bash
-   curl -sSLO http://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/python-sandbox-template.yaml
+   curl -sSLO https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/python-sandbox-template.yaml
    kubectl apply -f python-sandbox-template.yaml
    ```

@@ -46,8 +46,25 @@ class TemplateSpec(BaseModel):
   runtime_class: str | None = None          # e.g. "gvisor"
   node_selector: dict[str, str] | None = None
   image_pull_secret: str | None = None
+  # Default IfNotPresent so a node's containerd layer cache is reused across
+  # runs/epochs (benchmark images are immutable/pinned). Set "Always" if a tag
+  # mutates and you need to re-pull each time.
+  image_pull_policy: str = "IfNotPresent"
+  # Prefer scheduling a pool's replicas onto the *same* node (soft podAffinity on
+  # the shared `sandbox=<template>` label) so only the first replica pulls the
+  # image and the rest start from the node's containerd layer cache. Soft, so it
+  # spills to other nodes instead of dead-locking when a node is full. Pairs with
+  # image_pull_policy=IfNotPresent and warm_per_task (RL "instant-claim" mode).
+  colocate_replicas: bool = False
   # Escape hatch: extra keys merged into the pod spec (e.g. tolerations).
   extra_pod_spec: dict = Field(default_factory=dict)
+
+  @field_validator("image_pull_policy")
+  @classmethod
+  def _valid_pull_policy(cls, v: str) -> str:
+    if v not in ("Always", "IfNotPresent", "Never"):
+      raise ValueError("image_pull_policy must be Always|IfNotPresent|Never")
+    return v
 
 
 class ObservabilityConfig(BaseModel):
@@ -95,12 +112,51 @@ class FleetConfig(BaseModel):
   placement: str = "image-affinity"         # round-robin|least-loaded|capacity-weighted|image-affinity
   max_concurrent: int = 1                    # concurrency budget: sizes pools AND parallelizes claims
   max_warmpool_size: int = 8                 # hard cap on replicas per image pool
+  # Warm one replica per task for each image (replicas = min(tasks_image,
+  # max_warmpool_size)) instead of concurrency-proportional sizing, so every task
+  # claims a sandbox immediately (RL "instant-claim"). Trades resources for claim
+  # latency; raise max_warmpool_size for images with more tasks than the cap.
+  warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
+  # Stage the warm fill in waves of <= this many sandbox creates in flight,
+  # waiting for each wave to reach Ready before the next. Bounds the controller's
+  # concurrent create burst (Σ pools×replicas). On controllers <= v0.5.3 this
+  # mitigates (but does NOT prevent) the SandboxWarmPool over-creation race
+  # (issue 1215; fixed in v0.5.4 by PR 1266) — those controllers still need
+  # --sandbox-warm-pool-concurrent-workers <= 10. 0 = warm all at once (old behavior).
+  warm_create_budget: int = 1000
+  # --- runaway safeguards (see plans/sdk-runaway-safeguards.md) ------------- #
+  # Circuit breaker (#1, fail-safe): abort + teardown if live sandboxes this run
+  # owns exceed the safe ceiling — min(expected × overcommit_factor,
+  # max_live_sandboxes). Keys off *intent*, so it catches accidental over-creation
+  # (runaway/orphan/#1215) not a large-but-intended run. 0/None on factor disables.
+  overcommit_factor: float = 1.5
+  max_live_sandboxes: int | None = None      # optional absolute hard ceiling
+  breaker_poll_s: float = 5.0
+  # Trip only after the ceiling is breached for this many *consecutive* polls, so a
+  # transient spike (a claim briefly double-warms before scale-down; Terminating-pod
+  # GC lag) can't tear down a healthy run on a single sample. One healthy poll resets
+  # the counter. Sustained breach = breaker_trip_polls × breaker_poll_s.
+  breaker_trip_polls: int = 3
+  # Guaranteed teardown (#4): install atexit + SIGINT/SIGTERM handlers that tear
+  # the fleet down on any exit path (orphan defense; pairs with the run-id label +
+  # reaper). Set False if the host owns signal handling.
+  install_teardown_hooks: bool = True
   template: TemplateSpec = Field(default_factory=TemplateSpec)
   template_name_prefix: str = "r2e-img-"
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))
   observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+  # Disk-aware window sizing (all optional; when avg_image_gb is None it's a no-op
+  # and sizing falls back to the concurrency-only window). node_ephemeral_gb is the
+  # usable ephemeral storage per node; disk_headroom reserves a fraction of it.
+  avg_image_gb: float | None = None
+  node_ephemeral_gb: float | None = None
+  disk_headroom: float = 0.25
+  # Node count of the target pool. Lets disk-aware window sizing use the *cluster's*
+  # usable disk (distinct images spread across nodes) instead of a single node's.
+  # None => conservative single-node bound (safe when the pool size is unknown).
+  cluster_nodes: int | None = None
 
   @field_validator("max_concurrent", "max_warmpool_size")
   @classmethod
@@ -109,11 +165,25 @@ class FleetConfig(BaseModel):
       raise ValueError("must be >= 1")
     return v
 
-  @field_validator("window_size")
+  @field_validator("avg_image_gb", "node_ephemeral_gb")
+  @classmethod
+  def _disk_positive(cls, v: float | None) -> float | None:
+    if v is not None and v <= 0:
+      raise ValueError("disk size hints must be > 0 or None")
+    return v
+
+  @field_validator("disk_headroom")
+  @classmethod
+  def _headroom_fraction(cls, v: float) -> float:
+    if not (0 <= v < 1):
+      raise ValueError("disk_headroom must be in [0, 1)")
+    return v
+
+  @field_validator("window_size", "cluster_nodes")
   @classmethod
   def _window_positive(cls, v: int | None) -> int | None:
     if v is not None and v < 1:
-      raise ValueError("window_size must be >= 1 or None (auto)")
+      raise ValueError("must be >= 1 or None")
     return v
 
   @field_validator("template_name_prefix")

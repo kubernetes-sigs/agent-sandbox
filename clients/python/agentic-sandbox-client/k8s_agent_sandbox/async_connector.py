@@ -115,7 +115,8 @@ class AsyncSandboxConnector:
                 pod_ip = await self._get_pod_ip()
                 if pod_ip:
                     self._pod_ip = pod_ip
-                    self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                    host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                    self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
                     self._pod_ip_resolved = True
                     return self._cached_pod_ip_url
             return self._dns_url
@@ -131,7 +132,8 @@ class AsyncSandboxConnector:
                 self.connection_config.gateway_namespace,
                 self.connection_config.gateway_ready_timeout,
             )
-            self._base_url = f"http://{ip_address}"
+            host = f"[{ip_address}]" if ":" in ip_address else ip_address
+            self._base_url = f"http://{host}"
         else:
             raise ValueError(
                 f"AsyncSandboxConnector does not support {type(self.connection_config).__name__}."

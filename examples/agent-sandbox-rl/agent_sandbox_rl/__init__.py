@@ -26,6 +26,13 @@ See README.md, docs/architecture.md, and docs/design.md.
 
 from . import constants
 from .adapters.swebench import SWEBENCH_PROBE, SweBenchSource, swebench_probe
+from .capacity import (
+    BenchmarkPlan,
+    ClusterCapacity,
+    plan_benchmark,
+    probe_capacity,
+    render_plan,
+)
 from .cluster import Cluster, ClusterRegistry, build_api_client
 from .config import (
     ClusterConfig,
@@ -37,13 +44,23 @@ from .config import (
 from .exceptions import (
     CapacityError,
     FleetError,
+    FleetOvercommitError,
     NoClusterAvailableError,
     PreflightError,
 )
 from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
-from .handles import SandboxHandle
+from .reaper import reap
+from .handles import SandboxHandle, SandboxSession
 from .observability import Observer, RunReport, repo_family, serve_metrics
+from .recycle import (
+    GitRestoreReset,
+    ResetBaseline,
+    ResetOutcome,
+    determinism_canary,
+    reuse_git_restore_sandbox,
+    reuse_git_restore_sandbox_async,
+)
 from .placement import (
     CapacityWeighted,
     ImageAffinity,
@@ -53,8 +70,15 @@ from .placement import (
 )
 from .preflight import PreflightReport, preflight_cluster
 from .prepull import prepull, prepull_delete
+from .registry_rewrite import make_rewriter, rewrite_image
 from .resources import Resources
-from .sizing import compute_replicas, plan, recommend_window
+from .sizing import (
+    compute_replicas,
+    plan,
+    recommend_window,
+    recommend_window_disk,
+    recommend_window_pipelined,
+)
 from .sources import JsonlSource, ListSource, Task, TaskSource, to_tasks
 from .strategies import STRATEGIES, process_parallel
 
@@ -69,7 +93,15 @@ __all__ = [
     # sizing
     "compute_replicas",
     "recommend_window",
+    "recommend_window_disk",
+    "recommend_window_pipelined",
     "plan",
+    # capacity planning
+    "probe_capacity",
+    "plan_benchmark",
+    "render_plan",
+    "ClusterCapacity",
+    "BenchmarkPlan",
     # sources
     "Task",
     "TaskSource",
@@ -97,9 +129,17 @@ __all__ = [
     "FleetPlan",
     "PlanEntry",
     "SandboxHandle",
+    "SandboxSession",
     # strategies
     "STRATEGIES",
     "process_parallel",
+    # recycling (reset-and-reuse)
+    "GitRestoreReset",
+    "ResetBaseline",
+    "ResetOutcome",
+    "reuse_git_restore_sandbox",
+    "reuse_git_restore_sandbox_async",
+    "determinism_canary",
     # observability
     "Observer",
     "RunReport",
@@ -110,11 +150,16 @@ __all__ = [
     "preflight_cluster",
     "prepull",
     "prepull_delete",
+    # registry rewrite
+    "rewrite_image",
+    "make_rewriter",
     # exceptions
     "FleetError",
     "PreflightError",
     "CapacityError",
     "NoClusterAvailableError",
+    "FleetOvercommitError",
+    "reap",
 ]
 
 __version__ = "0.1.0.dev0"

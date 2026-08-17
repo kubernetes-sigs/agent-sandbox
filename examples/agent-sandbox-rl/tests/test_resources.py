@@ -46,6 +46,117 @@ def test_ensure_template_creates_when_absent():
   assert pod["runtimeClassName"] == "gvisor"
   assert pod["nodeSelector"] == {"k": "v"}
   assert pod["imagePullSecrets"] == [{"name": "ps"}]
+  # default pull policy reuses the node layer cache across runs/epochs
+  assert pod["containers"][0]["imagePullPolicy"] == "IfNotPresent"
+
+
+def test_template_manifest_pull_policy_override():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(image_pull_policy="Always"))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert pod["containers"][0]["imagePullPolicy"] == "Always"
+
+
+def test_template_manifest_colocate_emits_pod_affinity():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(colocate_replicas=True))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  term = pod["affinity"]["podAffinity"][
+      "preferredDuringSchedulingIgnoredDuringExecution"][0]
+  assert term["weight"] == 100
+  assert term["podAffinityTerm"]["topologyKey"] == "kubernetes.io/hostname"
+  # packs replicas of THIS pool together (they share the sandbox=<template> label)
+  assert term["podAffinityTerm"]["labelSelector"]["matchLabels"] == {"sandbox": TNAME}
+
+
+def test_template_manifest_no_affinity_by_default():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec())
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  assert "affinity" not in kwargs["body"]["spec"]["podTemplate"]["spec"]
+
+
+def test_colocate_composes_with_extra_pod_spec_affinity():
+  # colocate_replicas + a user-supplied affinity (e.g. nodeAffinity) must COMPOSE,
+  # not silently clobber the colocation podAffinity via the shallow update().
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  node_aff = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+      "nodeSelectorTerms": [{"matchExpressions": [
+          {"key": "gpu", "operator": "Exists"}]}]}}}
+  r.ensure_template(IMG, TNAME, TemplateSpec(
+      colocate_replicas=True, extra_pod_spec={"affinity": node_aff}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  aff = kwargs["body"]["spec"]["podTemplate"]["spec"]["affinity"]
+  assert "nodeAffinity" in aff                 # user's affinity preserved
+  assert "podAffinity" in aff                  # colocation NOT clobbered
+
+
+def test_extra_pod_spec_empty_containers_preserves_base():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": []}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 1
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+
+
+def test_extra_pod_spec_merges_primary_container_and_appends_sidecars():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [
+      {"env": [{"name": "KEY", "value": "VAL"}]},
+      {"name": "sidecar", "image": "sidecar:v1"},
+  ]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 2
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+  assert pod["containers"][0]["env"] == [{"name": "KEY", "value": "VAL"}]
+  assert pod["containers"][1]["name"] == "sidecar"
+  assert pod["containers"][1]["image"] == "sidecar:v1"
+
+
+def test_extra_pod_spec_sidecar_only_does_not_clobber_primary():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [{"name": "sidecar", "image": "sidecar:v1"}]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 2
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+  assert pod["containers"][1]["name"] == "sidecar"
+  assert pod["containers"][1]["image"] == "sidecar:v1"
+
+
+def test_extra_pod_spec_merges_matching_container_by_name():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [
+      {"name": "agent-runtime", "resources": {"limits": {"cpu": "4"}}},
+      {"name": "logger", "image": "logger:latest"},
+  ]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert len(pod["containers"]) == 2
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["image"] == IMG
+  assert pod["containers"][0]["resources"]["requests"]["cpu"] == "250m"
+  assert pod["containers"][0]["resources"]["limits"]["cpu"] == "4"
+  assert pod["containers"][1]["name"] == "logger"
+  assert pod["containers"][1]["image"] == "logger:latest"
 
 
 def test_ensure_template_noop_when_present():
@@ -104,10 +215,40 @@ def test_validate_manifests_dry_runs_template_then_warmpool():
   assert calls[1].kwargs["dry_run"] == "All"
 
 
-def test_create_warmpool_swallows_409():
+def test_create_warmpool_reconcile_upserts_replicas_on_409():
+  # The warm path (reconcile=True) patches an existing pool (409) to the requested
+  # replica count so a reused/leftover pool converges instead of being pinned.
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.create_warmpool("pool-x", TNAME, 4, reconcile=True)  # no raise
+  _, kwargs = r.custom_api.patch_namespaced_custom_object.call_args
+  assert kwargs["name"] == "pool-x"
+  assert kwargs["plural"] == constants.WARMPOOLS_PLURAL
+  assert kwargs["body"] == {"spec": {"replicas": 4}}
+
+
+def test_create_warmpool_409_no_patch_without_reconcile():
+  # Default (the on-demand claim path): a 409 is a silent no-op, NOT a patch, so
+  # a hot reused size-1 pool isn't written to on every claim.
   r = _resources()
   r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
   r.create_warmpool("pool-x", TNAME, 1)  # no raise
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_create_warmpool_dry_run_409_does_not_patch():
+  # validation path: a 409 under dry-run must not mutate the live pool.
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.create_warmpool("pool-x", TNAME, 4, dry_run=True, reconcile=True)
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_create_warmpool_reraises_non_409():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=500)
+  with pytest.raises(client.ApiException):
+    r.create_warmpool("pool-x", TNAME, 1)
 
 
 def test_delete_swallows_404():
@@ -217,3 +358,71 @@ def test_ensure_template_swallows_409():
   r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
   r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
   assert r.ensure_template(IMG, TNAME, TemplateSpec()) is False   # no raise
+
+
+def test_deep_merge_named_lists_merges_by_name_and_appends():
+  from agent_sandbox_rl.resources import _deep_merge
+
+  base = {
+      "env": [
+          {"name": "VAR1", "value": "val1"},
+          {"name": "VAR2", "value": "val2"},
+      ],
+      "ports": [{"name": "http", "containerPort": 80}],
+  }
+  override = {
+      "env": [
+          {"name": "VAR2", "value": "val2-updated"},
+          {"name": "VAR3", "value": "val3"},
+      ],
+      "ports": [{"name": "metrics", "containerPort": 9090}],
+  }
+  merged = _deep_merge(base, override)
+  assert merged["env"] == [
+      {"name": "VAR1", "value": "val1"},
+      {"name": "VAR2", "value": "val2-updated"},
+      {"name": "VAR3", "value": "val3"},
+  ]
+  assert merged["ports"] == [
+      {"name": "http", "containerPort": 80},
+      {"name": "metrics", "containerPort": 9090},
+  ]
+
+
+def test_deep_merge_unnamed_lists_replaces():
+  from agent_sandbox_rl.resources import _deep_merge
+
+  base = {"command": ["sleep", "10"], "args": ["--verbose"]}
+  override = {"command": ["tail", "-f", "/dev/null"]}
+  merged = _deep_merge(base, override)
+  assert merged["command"] == ["tail", "-f", "/dev/null"]
+  assert merged["args"] == ["--verbose"]
+
+
+def test_extra_pod_spec_containers_non_list_raises_type_error():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  with pytest.raises(TypeError, match="extra_pod_spec\\['containers'\\] must be a list"):
+    r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": {"name": "invalid"}}))
+
+
+def test_extra_pod_spec_merges_env_vars_in_container():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  extra_containers = [
+      {
+          "name": "agent-runtime",
+          "env": [
+              {"name": "BASE_VAR", "value": "base"},
+              {"name": "EXTRA_VAR", "value": "extra"},
+          ],
+      }
+  ]
+  r.ensure_template(IMG, TNAME, TemplateSpec(extra_pod_spec={"containers": extra_containers}))
+  _, kwargs = r.custom_api.create_namespaced_custom_object.call_args
+  pod = kwargs["body"]["spec"]["podTemplate"]["spec"]
+  assert pod["containers"][0]["name"] == "agent-runtime"
+  assert pod["containers"][0]["env"] == [
+      {"name": "BASE_VAR", "value": "base"},
+      {"name": "EXTRA_VAR", "value": "extra"},
+  ]

@@ -1,0 +1,130 @@
+# sshpiper: the SSH gateway that makes the credential story complete.
+#
+# Without a gateway, reaching the box needs `kubectl port-forward` — which
+# means the client still holds a kubeconfig, and the SSH layer looks
+# redundant next to plain `kubectl exec`. With sshpiper in front, the agent
+# connects to ONE public SSH endpoint (`ssh <sandbox>@<gateway>`) over plain
+# TCP and is routed by username; no kubectl, no kubeconfig, no apiserver
+# anywhere in the agent's path.
+#
+# Two-hop credential chain (each key can do exactly one thing):
+#   agent ──(agent keypair)──▶ sshpiper ──(upstream keypair)──▶ box:2222
+#   - The agent's key is authorized in the Pipe's spec.from — good only for
+#     starting a session at the gateway under this username.
+#   - The upstream key is what the BOX authorizes — its private half lives
+#     in a Secret only the gateway reads.
+#
+# Prereqs (see README / run-test-kind.sh):
+#   kubectl apply -f https://raw.githubusercontent.com/FootprintAI/Containarium/v0.52.1/charts/containarium-k8s/crds/pipe.yaml
+#   kubectl create secret generic sshpiper-server-key   --from-file=server_key=<host key>
+#   kubectl create secret generic sshpiper-upstream-key --type=kubernetes.io/ssh-auth \
+#     --from-file=ssh-privatekey=<upstream private key>
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sshpiper
+---
+# Namespaced: the plugin watches its own namespace by default.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sshpiper
+rules:
+  - apiGroups: [sshpiper.com]
+    resources: [pipes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sshpiper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sshpiper
+subjects:
+  - kind: ServiceAccount
+    name: sshpiper
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sshpiper
+  labels:
+    app: sshpiper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sshpiper
+  template:
+    metadata:
+      labels:
+        app: sshpiper
+    spec:
+      serviceAccountName: sshpiper
+      # Match the boxes' hardened posture — the gateway runs unprivileged too.
+      # The image already ships USER sshpiper (uid 1000, nologin) and binds an
+      # unprivileged port (2222), so non-root + dropped caps need nothing extra.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sshpiper
+          # Containarium's gateway image: the pinned upstream sshpiperd release
+          # with a kubernetes-plugin entrypoint, published per Containarium
+          # release. Routes by the Pipe CRs in its own namespace.
+          image: ghcr.io/footprintai/containarium-sshpiper:v0.52.1
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: ssh
+              containerPort: 2222
+          env:
+            - name: PLUGIN
+              value: kubernetes
+            - name: SSHPIPERD_SERVER_KEY
+              value: /serverkey/ssh_host_ed25519_key
+            - name: SSHPIPERD_LOG_LEVEL
+              value: info
+          volumeMounts:
+            - name: server-key
+              mountPath: /serverkey/
+              readOnly: true
+      volumes:
+        - name: server-key
+          secret:
+            secretName: sshpiper-server-key
+            items:
+              - key: server_key
+                path: ssh_host_ed25519_key
+            defaultMode: 0400
+---
+# NodePort for kind/bare clusters; switch to LoadBalancer on cloud.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sshpiper
+spec:
+  type: NodePort
+  selector:
+    app: sshpiper
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 2222
+      nodePort: 32022

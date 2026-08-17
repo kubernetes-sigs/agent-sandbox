@@ -329,9 +329,9 @@ func TestSecureSandboxVAP(t *testing.T) {
 			sandbox := &sandboxv1beta1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
 				Spec: sandboxv1beta1.SandboxSpec{
-					PodTemplate: sandboxv1beta1.PodTemplate{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
 						Spec: *secureSpec.DeepCopy(),
-					},
+					},},
 				},
 			}
 

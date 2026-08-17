@@ -39,13 +39,11 @@ class SecureEnvironmentActor:
         
         print(f"[{self.env_id}] - Initializing GKE Sandbox Client natively In-Cluster...")
         
-        # By using SandboxInClusterConnectionConfig with `use_pod_ip=True`, we bypass 
-        # the external Gateway and internal Routers. The SDK resolves the internal K8s 
-        # pod IP of the sandbox and routes traffic directly via pod-to-pod 
-        # communication.
+        # By using SandboxInClusterConnectionConfig, we bypass the external Gateway
+        # and internal Routers. The SDK tries the internal K8s pod IP first and
+        # falls back to stable in-cluster DNS if the pod IP is not available.
         connection_config = SandboxInClusterConnectionConfig(
-            use_pod_ip=True,
-            server_port=8888 
+            server_port=8888
         )
         
         self.client = SandboxClient(connection_config=connection_config, cleanup=True)

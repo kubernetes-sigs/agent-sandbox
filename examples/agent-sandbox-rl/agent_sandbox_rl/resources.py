@@ -33,6 +33,41 @@ from .config import TemplateSpec
 logger = logging.getLogger("agent_sandbox_rl.resources")
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+  """Recursively merge override dictionary into base dictionary.
+
+  For list fields where elements are dictionaries with a 'name' key (such as
+  container env vars, volume mounts, and ports), elements are merged by name or
+  appended. Other list fields and primitive values are replaced by the override.
+  """
+  merged = dict(base)
+  for key, value in override.items():
+    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+      merged[key] = _deep_merge(merged[key], value)
+    elif isinstance(value, list) and isinstance(merged.get(key), list):
+      base_list = list(merged[key])
+      if all(isinstance(x, dict) and "name" in x for x in base_list) and all(
+          isinstance(x, dict) and "name" in x for x in value
+      ):
+        merged_list = list(base_list)
+        for item in value:
+          item_name = item.get("name")
+          match_idx = next(
+              (i for i, x in enumerate(merged_list) if x.get("name") == item_name),
+              None,
+          )
+          if match_idx is not None:
+            merged_list[match_idx] = _deep_merge(merged_list[match_idx], item)
+          else:
+            merged_list.append(dict(item))
+        merged[key] = merged_list
+      else:
+        merged[key] = value
+    else:
+      merged[key] = value
+  return merged
+
+
 class Resources:
   """Template + warm-pool lifecycle for a single cluster/namespace."""
 
@@ -55,11 +90,18 @@ class Resources:
     against the CRD schema but not persisted.
     """
     try:
-      self.custom_api.get_namespaced_custom_object(
+      existing = self.custom_api.get_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
           name=template_name)
       logger.info("SandboxTemplate '%s' already exists.", template_name)
+      # Template names are deterministic per image (r2e-img-<md5>), so a template
+      # left over from a previous/other run is reused as-is — and its pod-template
+      # labels would carry the OLD run-id, making this run's pods invisible to the
+      # circuit breaker and mis-targeted by the reaper (the #1215 safeguards).
+      # Reconcile the run/managed labels so pods this run spawns are attributed to
+      # this run.
+      self._reconcile_template_labels(template_name, existing)
       return False
     except client.ApiException as e:
       if e.status != 404:
@@ -85,6 +127,7 @@ class Resources:
         "containers": [{
             "name": "agent-runtime",
             "image": image,
+            "imagePullPolicy": template.image_pull_policy,
             "command": list(template.keepalive_command),
             "stdin": True,
             "tty": True,
@@ -100,8 +143,60 @@ class Resources:
       pod_spec["nodeSelector"] = dict(template.node_selector)
     if template.image_pull_secret:
       pod_spec["imagePullSecrets"] = [{"name": template.image_pull_secret}]
+    if template.colocate_replicas:
+      # Soft: prefer co-locating this pool's replicas (all share the
+      # `sandbox=<template>` pod label) on one node so only the first pulls the
+      # image and the rest start from the node layer cache. preferred (not
+      # required) so it spills instead of dead-locking when a node fills up.
+      pod_spec["affinity"] = {
+          "podAffinity": {
+              "preferredDuringSchedulingIgnoredDuringExecution": [{
+                  "weight": 100,
+                  "podAffinityTerm": {
+                      "labelSelector": {
+                          "matchLabels": {"sandbox": template_name}},
+                      "topologyKey": "kubernetes.io/hostname",
+                  },
+              }],
+          },
+      }
     if template.extra_pod_spec:
-      pod_spec.update(template.extra_pod_spec)
+      extra = dict(template.extra_pod_spec)
+      # Compose the escape hatch with the colocation affinity instead of letting a
+      # shallow update() clobber the whole `affinity` key: merge the two affinity
+      # blocks (extra_pod_spec wins per sub-key, e.g. its nodeAffinity is added
+      # while our podAffinity is preserved unless the user explicitly overrides it).
+      if "affinity" in extra and "affinity" in pod_spec:
+        merged_affinity = {**pod_spec["affinity"], **extra["affinity"]}
+        extra = {**extra, "affinity": merged_affinity}
+      if "containers" in extra:
+        extra_containers = extra.pop("containers")
+        if not isinstance(extra_containers, list):
+          raise TypeError(
+              f"extra_pod_spec['containers'] must be a list of container dicts, got {type(extra_containers).__name__}"
+          )
+        if "containers" in pod_spec:
+          merged_containers = list(pod_spec["containers"])
+          for extra_c in extra_containers:
+            if not isinstance(extra_c, dict):
+              continue
+            c_name = extra_c.get("name")
+            if c_name:
+              match_idx = next(
+                  (i for i, c in enumerate(merged_containers) if c.get("name") == c_name),
+                  None,
+              )
+              if match_idx is not None:
+                merged_containers[match_idx] = _deep_merge(merged_containers[match_idx], extra_c)
+              else:
+                merged_containers.append(dict(extra_c))
+            else:
+              if merged_containers:
+                merged_containers[0] = _deep_merge(merged_containers[0], extra_c)
+              else:
+                merged_containers.append(dict(extra_c))
+          pod_spec["containers"] = merged_containers
+      pod_spec.update(extra)
 
     return {
         "apiVersion": f"{constants.GROUP}/{constants.VERSION}",
@@ -113,11 +208,55 @@ class Resources:
         },
         "spec": {
             "podTemplate": {
-                "metadata": {"labels": {"sandbox": template_name}},
+                # Propagate the fleet labels (incl. the per-run RUN_ID_LABEL) onto
+                # the pod template so every sandbox POD carries them — the Sandbox
+                # controller does not copy the claim/pool run-id label onto Sandbox
+                # CRs, so pods are how a run attributes its live footprint (circuit
+                # breaker count + reaper pod sweep). `sandbox=<template>` is kept for
+                # the colocation affinity above.
+                "metadata": {"labels": {**self.labels, "sandbox": template_name}},
                 "spec": pod_spec,
             }
         },
     }
+
+  def _reconcile_template_labels(self, template_name: str, existing: dict) -> None:
+    """Patch a pre-existing template's metadata + pod-template labels up to this
+    run's labels when they differ, so a reused/leftover template doesn't attribute
+    this run's pods to a stale run-id (breaker/reaper correctness, #1215). Only
+    patches on mismatch; failures warn (the safeguards degrade, not the run).
+
+    Two concurrent runs sharing an image (same deterministic template name) take
+    turns re-labeling this template — pod attribution between their breakers/reapers
+    is last-writer-wins. Both directions are safe: a breaker under-counts and fails
+    open, and a per-run reap misses the other run's pods rather than deleting them."""
+    desired_meta = dict(self.labels)
+    desired_pod = {**self.labels, "sandbox": template_name}
+    cur_meta = ((existing.get("metadata") or {}).get("labels")) or {}
+    cur_pod = ((((existing.get("spec") or {}).get("podTemplate") or {})
+                .get("metadata") or {}).get("labels")) or {}
+    stale = (any(cur_meta.get(k) != v for k, v in desired_meta.items())
+             or any(cur_pod.get(k) != v for k, v in desired_pod.items()))
+    if not stale:
+      return
+    try:
+      # patch_namespaced_custom_object sends a JSON Merge Patch (RFC 7386;
+      # the client's only content-type for CRD patch is merge-patch+json), which
+      # merges nested objects — so this UPSERTS the managed label keys and leaves
+      # any pre-existing/operator labels on the template + podTemplate intact. It
+      # does not replace the label maps.
+      self.custom_api.patch_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
+          name=template_name,
+          body={"metadata": {"labels": desired_meta},
+                "spec": {"podTemplate": {"metadata": {"labels": desired_pod}}}})
+      logger.info("Reconciled labels on pre-existing SandboxTemplate '%s' "
+                  "(run-id refresh)", template_name)
+    except client.ApiException:
+      logger.warning("Failed to reconcile labels on SandboxTemplate '%s'; the "
+                     "circuit breaker/reaper may under-count this run's pods for "
+                     "its image", template_name, exc_info=True)
 
   def delete_template(self, template_name: str) -> None:
     self._delete(constants.TEMPLATES_PLURAL, template_name, "SandboxTemplate")
@@ -140,9 +279,17 @@ class Resources:
     }
 
   def create_warmpool(self, name: str, template_name: str,
-                      replicas: int, *, dry_run: bool = False) -> None:
+                      replicas: int, *, dry_run: bool = False,
+                      reconcile: bool = False) -> None:
     """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
-    Idempotent on 409 (already exists). ``dry_run=True`` sends ``dryRun=All``."""
+
+    Idempotent on 409 (already exists). With ``reconcile=True`` a 409 instead
+    upserts — patch ``spec.replicas`` to the requested value so a reused/leftover
+    pool converges instead of being silently pinned at its old size (which would
+    make ``wait_for_pool_ready(expected)`` hang and over-count active replicas).
+    Only the warm path needs this; the on-demand claim path leaves it ``False``
+    so a hot, repeatedly-reused size-1 pool isn't patched on every claim.
+    ``dry_run=True`` sends ``dryRun=All`` and never patches (validation only)."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
@@ -151,10 +298,16 @@ class Resources:
           dry_run="All" if dry_run else None)
       logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
     except client.ApiException as e:
-      if e.status == 409:
-        logger.info("SandboxWarmPool '%s' already exists.", name)
-      else:
+      if e.status != 409:
         raise
+      if dry_run or not reconcile:
+        logger.info("SandboxWarmPool '%s' already exists.", name)
+        return
+      logger.info("SandboxWarmPool '%s' exists; patching replicas=%d.", name, replicas)
+      self.custom_api.patch_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+          name=name, body={"spec": {"replicas": replicas}})
 
   def validate_manifests(self, sample_image: str, template: TemplateSpec,
                          *, name: str = "asrl-validate") -> None:
@@ -267,23 +420,64 @@ class Resources:
   def list_claims(self, label_selector: str | None = None) -> list[str]:
     return self._list(constants.CLAIMS_PLURAL, label_selector)
 
+  def list_sandboxes(self, label_selector: str | None = None) -> list[str]:
+    # Sandbox is in the CORE group, not extensions — pass it explicitly.
+    return self._list(constants.SANDBOXES_PLURAL, label_selector,
+                      group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION)
+
+  def count_pods(self, label_selector: str | None = None) -> int:
+    """Count pods matching ``label_selector`` in this namespace (the run's live
+    footprint) **without transferring the full pod list** — the circuit breaker
+    polls this repeatedly and the target scale is tens of thousands of pods.
+
+    Uses a ``limit=1`` list + ``metadata.remainingItemCount`` (a server-provided
+    hint) to get the total cheaply. That hint is only populated for **selector-less**
+    lists — the apiserver deliberately returns nil for any label/field predicate
+    (``PrepareContinueToken``) — and the breaker always polls with a run-id selector,
+    so beyond one page we page through in bounded chunks counting ``len(items)`` only
+    (never transferring the whole list in a single response)."""
+    kwargs = {"label_selector": label_selector} if label_selector else {}
+    resp = self.core_api.list_namespaced_pod(namespace=self.namespace, limit=1, **kwargs)
+    meta = resp.metadata
+    remaining = getattr(meta, "remaining_item_count", None)
+    if remaining is not None:
+      return len(resp.items) + remaining     # selector-less fast path
+    cont = getattr(meta, "_continue", None)
+    if not cont:
+      return len(resp.items)                 # single page holds the whole set
+    # Selector query with >1 page (no count hint): paginate. Bounds per-request
+    # payload + client memory at scale instead of one giant filtered list.
+    total = len(resp.items)
+    while cont:
+      resp = self.core_api.list_namespaced_pod(
+          namespace=self.namespace, limit=500, _continue=cont, **kwargs)
+      total += len(resp.items)
+      cont = getattr(resp.metadata, "_continue", None)
+    return total
+
   def delete_claim(self, name: str) -> None:
     self._delete(constants.CLAIMS_PLURAL, name, "SandboxClaim")
+
+  def delete_sandbox(self, name: str) -> None:
+    self._delete(constants.SANDBOXES_PLURAL, name, "Sandbox",
+                 group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION)
 
   def managed_selector(self) -> str:
     return f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}"
 
-  def _list(self, plural: str, label_selector: str | None) -> list[str]:
+  def _list(self, plural: str, label_selector: str | None, *,
+            group: str = constants.GROUP, version: str = constants.VERSION) -> list[str]:
     kwargs = {"label_selector": label_selector} if label_selector else {}
     objs = self.custom_api.list_namespaced_custom_object(
-        group=constants.GROUP, version=constants.VERSION,
+        group=group, version=version,
         namespace=self.namespace, plural=plural, **kwargs)
     return [o["metadata"]["name"] for o in objs.get("items", [])]
 
-  def _delete(self, plural: str, name: str, kind: str) -> None:
+  def _delete(self, plural: str, name: str, kind: str, *,
+              group: str = constants.GROUP, version: str = constants.VERSION) -> None:
     try:
       self.custom_api.delete_namespaced_custom_object(
-          group=constants.GROUP, version=constants.VERSION,
+          group=group, version=version,
           namespace=self.namespace, plural=plural, name=name,
           body=client.V1DeleteOptions(grace_period_seconds=0))
       logger.info("Deleted %s '%s'", kind, name)

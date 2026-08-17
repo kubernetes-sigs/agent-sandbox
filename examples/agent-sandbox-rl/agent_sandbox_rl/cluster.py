@@ -32,13 +32,22 @@ from .config import ClusterConfig, TemplateSpec
 from .resources import Resources
 
 
-def build_api_client(cfg: ClusterConfig):
-  """Build a kube ApiClient for one cluster's context (mockable in tests)."""
+def build_api_client(cfg: ClusterConfig, *, pool_maxsize: int = 1000):
+  """Build a kube ApiClient for one cluster's context (mockable in tests).
+
+  Sizes the urllib3 connection pool to ``pool_maxsize`` (default 1000). The
+  kubernetes client default (~60) throttles high-concurrency claim fan-out: a
+  500–1000-wide ``process_parallel`` otherwise serializes on the pool ("Connection
+  pool is full, discarding connection"), inflating claim latency and stalling large
+  runs. Sizing it to the concurrency budget keeps claims parallel."""
+  configuration = client.Configuration()
+  configuration.connection_pool_maxsize = pool_maxsize
   if cfg.in_cluster:
-    k8s_config.load_incluster_config()
-    return client.ApiClient()
-  return k8s_config.new_client_from_config(
-      config_file=cfg.kubeconfig, context=cfg.context)
+    k8s_config.load_incluster_config(client_configuration=configuration)
+  else:
+    k8s_config.load_kube_config(config_file=cfg.kubeconfig, context=cfg.context,
+                                client_configuration=configuration)
+  return client.ApiClient(configuration)
 
 
 class Cluster:

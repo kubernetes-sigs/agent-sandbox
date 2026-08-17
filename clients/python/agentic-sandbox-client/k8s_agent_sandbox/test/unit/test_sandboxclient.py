@@ -53,22 +53,37 @@ class TestSandboxClient(unittest.TestCase):
     @patch('uuid.uuid4')
     def test_create_sandbox_success(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'
-        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
         self.mock_k8s_helper.get_sandbox.return_value = {
             "metadata": {"annotations": {POD_NAME_ANNOTATION: "custom-pod-name"}}
         }
-        
+
         mock_sandbox_instance = MagicMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
-        
-        with patch.object(self.client, '_create_claim') as mock_create_claim, \
-             patch.object(self.client, '_wait_for_sandbox_ready') as mock_wait:
-            
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim:
+            # The create response's resourceVersion seeds the ready-wait
+            # watch so it is served from the apiserver watch cache.
+            mock_create_claim.return_value = {"metadata": {"resourceVersion": "12345"}}
+
             sandbox = self.client.create_sandbox("test-warmpool", "test-namespace")
-            
-            mock_create_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-warmpool", "test-namespace", labels=None, lifecycle=None, pod_metadata=None)
-            self.mock_k8s_helper.resolve_sandbox_name.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace", 180)
-            mock_wait.assert_called_once_with("resolved-id", "test-namespace", ANY)
+
+            mock_create_claim.assert_called_once_with(
+                "sandbox-claim-1234abcd",
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None,
+            )
+
+            # A single claim watch resolves the sandbox name AND readiness;
+            # no separate wait on the Sandbox resource. The watch starts at
+            # the created claim's resourceVersion.
+            self.mock_k8s_helper.wait_for_claim_ready.assert_called_once_with(
+                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345")
+            self.mock_k8s_helper.wait_for_sandbox_ready.assert_not_called()
             self.assertEqual(sandbox, mock_sandbox_instance)
             
             # Verify the new sandbox is tracked in the registry
@@ -78,8 +93,8 @@ class TestSandboxClient(unittest.TestCase):
     @patch('uuid.uuid4')
     def test_create_sandbox_failure_cleanup(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'
-        self.mock_k8s_helper.resolve_sandbox_name.side_effect = Exception("Timeout Error")
-        
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = Exception("Timeout Error")
+
         with patch.object(self.client, '_create_claim') as mock_create_claim:
             with self.assertRaises(Exception) as context:
                 self.client.create_sandbox("test-warmpool", "test-namespace")
@@ -208,6 +223,7 @@ class TestSandboxClient(unittest.TestCase):
                 "sandbox-claim-1234abcd", "test-warmpool", "test-namespace",
                 labels={"agent": "code-agent", "team": "platform"},
                 lifecycle=None,
+                volume_claim_templates=None,
                 pod_metadata=None,
             )
 
@@ -232,6 +248,7 @@ class TestSandboxClient(unittest.TestCase):
                 "sandbox-claim-1234abcd", "test-warmpool", "test-namespace",
                 labels=None,
                 lifecycle=None,
+                volume_claim_templates=None,
                 pod_metadata={
                     "labels": {"client-id": "tenant-a"},
                     "annotations": {"note": "owned-by-tenant-a"},
@@ -242,6 +259,54 @@ class TestSandboxClient(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.client.create_sandbox("test-warmpool", pod_labels={"bad key!": "value"})
         self.assertIn("invalid characters", str(ctx.exception))
+
+    @patch('uuid.uuid4')
+    def test_create_sandbox_with_volume_claim_templates(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        vcts = [{"metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "10Gi"}}}}]
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+
+            self.client.create_sandbox(
+                "test-warmpool",
+                "test-namespace",
+                volume_claim_templates=vcts,
+            )
+
+            mock_create_claim.assert_called_once_with(
+                "sandbox-claim-1234abcd", "test-warmpool", "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=vcts,
+                pod_metadata=None,
+            )
+
+    def test_create_claim_with_volume_claim_templates(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
+
+        vcts = [{"metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "10Gi"}}}}]
+        self.client._create_claim(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            volume_claim_templates=vcts,
+        )
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-warmpool", "test-namespace",
+            annotations={"opentelemetry.io/trace-context": "trace-data"},
+            labels=None,
+            lifecycle=None,
+            volume_claim_templates=vcts,
+            pod_metadata=None,
+        )
 
     def test_create_claim_with_labels(self):
         self.client.tracing_manager = MagicMock()
@@ -255,6 +320,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels={"agent": "code-agent"},
             lifecycle=None,
+            volume_claim_templates=None,
             pod_metadata=None,
         )
 
@@ -272,6 +338,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels=None,
             lifecycle=None,
+            volume_claim_templates=None,
             pod_metadata={"labels": {"client-id": "tenant-a"}},
         )
 
@@ -286,6 +353,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={"opentelemetry.io/trace-context": "trace-data"},
             labels=None,
             lifecycle=None,
+            volume_claim_templates=None,
             pod_metadata=None,
         )
 
@@ -398,6 +466,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=lifecycle,
+            volume_claim_templates=None,
             pod_metadata=None,
         )
 
@@ -412,6 +481,7 @@ class TestSandboxClient(unittest.TestCase):
             annotations={},
             labels=None,
             lifecycle=None,
+            volume_claim_templates=None,
             pod_metadata=None,
         )
 
@@ -611,7 +681,7 @@ class TestK8sHelperWatchNoneEvents(unittest.TestCase):
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_wait_for_sandbox_ready_returns_pod_ip(self, mock_watch_cls):
-        """wait_for_sandbox_ready returns the first pod IP when present."""
+        """wait_for_sandbox_ready returns the prioritized and normalized pod IP when present."""
         mock_watch = MagicMock()
         mock_watch_cls.return_value = mock_watch
         mock_watch.stream.return_value = [{
@@ -619,7 +689,7 @@ class TestK8sHelperWatchNoneEvents(unittest.TestCase):
             "object": {
                 "status": {
                     "conditions": [{"type": "Ready", "status": "True"}],
-                    "podIPs": ["10.244.0.5", "fd00::5"],
+                    "podIPs": ["::ffff:10.244.0.5", "fd00::5"],
                 },
             },
         }]

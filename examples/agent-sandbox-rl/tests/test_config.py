@@ -27,6 +27,10 @@ def test_defaults_single_cluster_simple():
   assert cfg.labels == constants.DEFAULT_LABELS
   assert cfg.template.keepalive_command == constants.KEEPALIVE_COMMAND
   assert cfg.template.resources.cpu == "250m"
+  # RL instant-claim levers default off (current behavior unchanged)
+  assert cfg.warm_per_task is False
+  assert cfg.template.colocate_replicas is False
+  assert cfg.cluster_nodes is None          # disk sizing conservative until pool size known
 
 
 def test_template_name_is_stable_and_prefixed():
@@ -54,6 +58,8 @@ def test_invalid_values_rejected():
     FleetConfig(max_warmpool_size=0)
   with pytest.raises(ValueError):
     FleetConfig(window_size=0)
+  with pytest.raises(ValueError):
+    FleetConfig(cluster_nodes=0)
   with pytest.raises(ValueError):
     FleetConfig(placement="bogus")
   with pytest.raises(ValueError):

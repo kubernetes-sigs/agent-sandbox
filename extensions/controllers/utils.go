@@ -49,11 +49,5 @@ func ApplySandboxSecureDefaults(template *extensionsv1beta1.SandboxTemplate, spe
 
 // SandboxTemplateRefHash encapsulates the generation of the hash for a sandbox template ref.
 func SandboxTemplateRefHash(templateRefName string) string {
-	return HashUsingSandboxTemplateRefName(templateRefName)
-}
-
-// HashUsingSandboxTemplateRefName generates the hash of a sandbox template ref, using only its name.
-// TODO: once https://github.com/kubernetes-sigs/agent-sandbox/issues/703 is fixed, deprecate this.
-func HashUsingSandboxTemplateRefName(templateRefName string) string {
 	return sandboxcontrollers.NameHash(templateRefName)
 }

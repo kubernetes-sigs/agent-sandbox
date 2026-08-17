@@ -57,7 +57,8 @@ func createSandboxWarmPool(ns *corev1.Namespace, template *extensionsv1beta1.San
 	warmPool.Name = "test-warmpool"
 	warmPool.Namespace = ns.Name
 	warmPool.Spec.TemplateRef.Name = template.Name
-	warmPool.Spec.Replicas = 1
+	replicas := int32(1)
+	warmPool.Spec.Replicas = &replicas
 	warmPool.Spec.UpdateStrategy = updateStrategy
 	return warmPool
 }

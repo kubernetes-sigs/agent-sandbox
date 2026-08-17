@@ -1,0 +1,8 @@
+linuxConfig:
+  swapConfig:
+    enabled: true
+    dedicatedLocalSsdProfile:
+      diskCount: 1
+  sysctl:
+    vm.watermark_scale_factor: "500"
+    vm.swappiness: "100"

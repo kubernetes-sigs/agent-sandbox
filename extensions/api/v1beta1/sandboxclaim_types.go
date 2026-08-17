@@ -16,6 +16,7 @@ package v1beta1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
@@ -116,6 +117,7 @@ type SandboxClaimSpec struct {
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
+	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
 	// +optional
 	AdditionalPodMetadata sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
@@ -191,5 +193,8 @@ type SandboxClaimList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&SandboxClaim{}, &SandboxClaimList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &SandboxClaim{}, &SandboxClaimList{})
+		return nil
+	})
 }

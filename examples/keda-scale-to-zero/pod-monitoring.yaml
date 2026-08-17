@@ -1,0 +1,27 @@
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: agent-sandbox-controller-monitoring
+  namespace: agent-sandbox-system # Namespace where the controller is running
+spec:
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller # Label to select the controller pods (manual install)
+  endpoints:
+  - port: 8080 # Port where metrics are exposed
+    path: /metrics # Path to the metrics endpoint
+    interval: 15s # How frequently to scrape
+---
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: agent-sandbox-controller-monitoring-helm
+  namespace: agent-sandbox-system # Namespace where the controller is running
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-sandbox # Label to select the controller pods (Helm install)
+  endpoints:
+  - port: 8080 # Port where metrics are exposed
+    path: /metrics # Path to the metrics endpoint
+    interval: 15s # How frequently to scrape

@@ -64,6 +64,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
+        real_helper.wait_for_claim_ready = MagicMock(return_value="sandbox-abc")
         real_helper.wait_for_sandbox_ready = MagicMock()
 
         before = datetime.now(timezone.utc)
@@ -110,6 +111,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
+        real_helper.wait_for_claim_ready = MagicMock(return_value="sandbox-abc")
         real_helper.wait_for_sandbox_ready = MagicMock()
 
         sandbox_client.create_sandbox("my-warmpool", "default")

@@ -1,0 +1,31 @@
+# Managed-Prometheus recording + alerting rules for egress-policy violations.
+# Evaluated by the GMP managed rule-evaluator over the ingested Hubble metrics.
+# (Delivering the alert to a channel additionally needs an Alertmanager target —
+# managed Alertmanager via OperatorConfig, or your own. See README.)
+apiVersion: monitoring.googleapis.com/v1
+kind: ClusterRules
+metadata:
+  name: sandbox-egress-violations
+spec:
+  groups:
+    - name: sandbox-egress
+      interval: 30s
+      rules:
+        # Per-(source,destination) rate of denied egress — handy for dashboards.
+        - record: sandbox:egress_policy_denied:rate5m
+          expr: |
+            sum by (source, destination) (
+              rate(hubble_policy_verdicts_total{action="dropped", direction="egress", source=~"sandbox-demo/.*"}[5m])
+            )
+        # Fire when any sandbox identity is denied egress to a destination.
+        - alert: SandboxEgressPolicyDenied
+          expr: |
+            sum by (source, destination) (
+              rate(hubble_policy_verdicts_total{action="dropped", direction="egress", source=~"sandbox-demo/.*"}[5m])
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Sandbox egress denied by network policy"
+            description: "{{ $labels.source }} was denied egress to {{ $labels.destination }} (Cilium policy verdict: dropped)."

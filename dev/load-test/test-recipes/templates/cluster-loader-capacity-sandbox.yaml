@@ -1,0 +1,34 @@
+# Minimal Sandbox for capacity testing: one pause container, Service
+# explicitly disabled, no volumeClaimTemplates, no lifecycle shutdown —
+# nothing self-deletes or exits mid-test. The pause image runs indefinitely,
+# unlike the sleep-based images in other recipes whose pods would exit (and
+# flip Ready) partway through a long capacity run.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: {{.Name}}
+  labels:
+    group: {{.Group}}
+spec:
+  service: false
+  podTemplate:
+    metadata:
+      labels:
+        group: {{.Group}}
+    spec:
+      terminationGracePeriodSeconds: 1
+      {{if eq .KwokNodes "true"}}
+      nodeSelector:
+        type: kwok
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Exists
+        effect: NoSchedule
+      {{end}}
+      containers:
+      - name: sandbox
+        image: {{.Image}}
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi

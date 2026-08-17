@@ -96,8 +96,8 @@ func TestSandboxWarmPoolConversion(t *testing.T) {
 			}
 
 			// Verify v1beta1 fields
-			if dst.Spec.Replicas != 3 {
-				t.Errorf("unexpected replicas: %d", dst.Spec.Replicas)
+			if dst.Spec.Replicas == nil || *dst.Spec.Replicas != 3 {
+				t.Errorf("unexpected replicas: %v", dst.Spec.Replicas)
 			}
 			if dst.Spec.TemplateRef.Name != "my-template" {
 				t.Errorf("unexpected template ref: %s", dst.Spec.TemplateRef.Name)

@@ -48,6 +48,19 @@ func TestSandboxShutdownTime(t *testing.T) {
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
+					Message:            "Sandbox is not suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
+				},
+				{
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,
@@ -83,6 +96,13 @@ func TestSandboxShutdownTime(t *testing.T) {
 			ServiceFQDN: "",
 			Conditions: []metav1.Condition{
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
+					Message:            "Sandbox is not suspended",
+				},
+				{
 					Type:               string(sandboxv1beta1.SandboxConditionReady),
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: 2,
@@ -114,21 +134,19 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 			Name:      "retain-finished-sandbox",
 			Namespace: ns.Name,
 		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Containers: []corev1.Container{{
-						Name:    "busybox",
-						Image:   "busybox:1.36",
-						Command: []string{"sh", "-c", "exit 0"},
-					}},
-				},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers: []corev1.Container{{
+					Name:    "busybox",
+					Image:   "busybox:1.36",
+					Command: []string{"sh", "-c", "exit 0"},
+				}},
 			},
-			Lifecycle: sandboxv1beta1.Lifecycle{
-				ShutdownTime:   &shutdown,
-				ShutdownPolicy: &policy,
-			},
+		}}, Lifecycle: sandboxv1beta1.Lifecycle{
+			ShutdownTime:   &shutdown,
+			ShutdownPolicy: &policy,
+		},
 		},
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))

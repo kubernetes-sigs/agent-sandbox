@@ -3,6 +3,7 @@ kind: SandboxTemplate
 metadata:
   name: python-sdk-test-template
 spec:
+  volumeClaimTemplatesPolicy: Allowed
   networkPolicyManagement: Managed
   networkPolicy:
     ingress:

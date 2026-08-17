@@ -114,7 +114,8 @@ class GatewayConnectionStrategy(ConnectionStrategy):
                 self.config.gateway_namespace,
                 self.config.gateway_ready_timeout
             )
-            self.base_url = f"http://{ip_address}"
+            host = f"[{ip_address}]" if ":" in ip_address else ip_address
+            self.base_url = f"http://{host}"
             return self.base_url
         except Exception:
             status = "failure"
@@ -192,8 +193,11 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     self.base_url = f"http://127.0.0.1:{local_port}"
                     logging.info(f"Tunnel ready at {self.base_url}")
                     return self.base_url
-                
-                time.sleep(0.5)
+
+                # Poll the local port at 50ms: this is a cheap localhost socket
+                # probe, and a coarser interval (e.g. 500ms) adds a uniform
+                # 0-500ms of avoidable latency to the first sandbox request.
+                time.sleep(0.05)
 
             self.close()
             raise TimeoutError("Failed to establish tunnel to Router Service.")
@@ -259,7 +263,8 @@ class InClusterConnectionStrategy(ConnectionStrategy):
                 return self._cached_pod_ip_url or self._dns_url
             pod_ip = self._get_pod_ip()
             if pod_ip:
-                self._cached_pod_ip_url = f"http://{pod_ip}:{self._server_port}"
+                host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
                 self._resolved = True
                 return self._cached_pod_ip_url
         return self._dns_url

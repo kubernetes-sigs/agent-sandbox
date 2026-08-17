@@ -1,0 +1,113 @@
+# Example Deployment for the Go sandbox-router. Tune the replica count and
+# resource requests for your tenant count and request rate — see the
+# "Scaling guidance" section of the package README.
+#
+# This example shows the plain-HTTP setup. For TLS, set --https-bind-address
+# and mount a Secret at /tls (see networkpolicy.yaml + the README's TLS section).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+spec:
+  # Minimum 2 for HA; tune up based on load test numbers.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-router
+      app.kubernetes.io/component: sandbox-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-router
+        app.kubernetes.io/component: sandbox-router
+      annotations:
+        # Tell Prometheus to scrape the metrics port if you don't use a
+        # ServiceMonitor. Adjust or remove for your environment.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: sandbox-router
+      # Spread replicas across nodes/zones so a single failure doesn't take
+      # the router fleet offline.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: sandbox-router
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: sandbox-router
+      containers:
+      - name: sandbox-router
+        # Replace with the published image. The Go router image is
+        # `sandbox-router-go` to avoid colliding with the Python router's
+        # `sandbox-router` image — see sandbox-router/README.md.
+        image: registry.k8s.io/agent-sandbox/sandbox-router-go:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - --http-bind-address=:8080
+        - --metrics-bind-address=:9090
+        - --health-probe-bind-address=:8081
+        - --cluster-domain=cluster.local
+        - --proxy-timeout=180s
+        # Retry budget for upstream dial failures; see README "Behavior on
+        # missing sandboxes".
+        - --upstream-max-retries=3
+        # KEP-NNNN: enable the Pod-IP cache so requests carrying
+        # X-Sandbox-UID dial the live PodIP and bypass DNS. Requires
+        # the ClusterRole granted in rbac.yaml. Set to false (and skip
+        # rbac.yaml) to fall back to DNS-only routing.
+        - --cache-enabled=true
+        ports:
+        - name: proxy
+          containerPort: 8080
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        - name: healthz
+          containerPort: 8081
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: healthz
+          initialDelaySeconds: 1
+          periodSeconds: 5
+          failureThreshold: 2
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+          seccompProfile:
+            type: RuntimeDefault
+      # Give in-flight requests a chance to finish before the kubelet
+      # delivers SIGKILL. The router's own --shutdown-timeout defaults to
+      # 30s; keep this slightly larger.
+      terminationGracePeriodSeconds: 45

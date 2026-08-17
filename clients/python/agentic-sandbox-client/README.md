@@ -157,27 +157,15 @@ finally:
 Use this when the client runs **inside the cluster** (for example, another pod in the same cluster).
 The client connects **directly to the sandbox runtime pod**, bypassing the sandbox router.
 
-The **default** is **cluster DNS** (`use_pod_ip=False`). Omit the argument or pass `use_pod_ip=False`
-to use it; set `use_pod_ip=True` only when you want the pod IP path.
-
-**Option A: Direct Pod IP** — `SandboxInClusterConnectionConfig(use_pod_ip=True)`
-
-- Uses the pod IP from the Sandbox status for **low-latency**, direct connections without relying on
-  cluster DNS resolution.
-
-**Option B: Cluster DNS** — `SandboxInClusterConnectionConfig(use_pod_ip=False)`
-
-- Uses a stable DNS-style endpoint (typically `http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`).
-  Prefer this when you want **stable DNS-based routing** across pod lifecycle events.
+The client first uses the pod IP reported in the Sandbox status. If the pod IP is not available
+(for example, before status is populated or when running against an older controller), it falls
+back to the stable cluster DNS endpoint:
+`http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`.
 
 ```python
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.models import SandboxInClusterConnectionConfig
 
-# Choose one connection_config (default = cluster DNS):
-#   SandboxInClusterConnectionConfig()  # same as use_pod_ip=False
-# Option A — direct pod IP (low latency):
-#   SandboxInClusterConnectionConfig(use_pod_ip=True)
 connection_config = SandboxInClusterConnectionConfig()
 
 client = SandboxClient(connection_config=connection_config)
@@ -320,6 +308,64 @@ Behavioral notes:
 - Client-side validation only checks RFC-1123 label syntax. The controller's
   domain allow-list and system-label restrictions are enforced server-side and
   are not replicated client-side.
+
+### 8. Custom Volume Claim Templates
+
+You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    volume_claim_templates=[
+        {
+            "metadata": {
+                "name": "my-volume",
+            },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": {
+                    "requests": {
+                        "storage": "1Gi",
+                    },
+                },
+            },
+        }
+    ],
+)
+```
+
+The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
+
+### 9. Startup Latency: How the SDK Waits for Readiness
+
+`create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
+API on an interval, so there is no poll-interval latency added on top of the
+controller's own claim-to-Ready time.
+
+The wait is a **single watch on the SandboxClaim**. The claim controller
+publishes the bound sandbox name (`status.sandbox.name`), the pod IPs
+(`status.sandbox.podIPs`) and the forwarded `Ready` condition in one status
+update when it adopts a warm-pool sandbox, so the first watch event that
+carries the sandbox name normally also carries `Ready=True` and
+`create_sandbox()` returns immediately. On a cold start (no warm sandbox
+available, or `env`/`volume_claim_templates` set, which force cold starts)
+the same watch simply keeps streaming claim updates until the forwarded
+`Ready` condition flips to `True`.
+
+Latency guidance:
+
+- **Do not poll** `Sandbox`/`SandboxClaim` objects with `get_*` calls in a
+  loop to detect readiness; a poll interval of `T` adds an average of `T/2`
+  (uniformly distributed 0..`T`) on top of the controller latency. Use
+  `create_sandbox()` / the claim `Ready` condition watch.
+- `sandbox_ready_timeout` (default 180s) bounds the whole wait; the watch
+  returns as soon as the claim is Ready, the timeout only caps the worst case.
+- The Kubernetes client reuses a single authenticated connection pool for
+  the watch, so no extra TLS handshakes occur on the ready path.
+- With the local-tunnel connection mode, the first request additionally pays
+  for the `kubectl port-forward` startup; the SDK probes the local port every
+  50ms while it comes up. Gateway/in-cluster modes do not have this step.
 
 ## Testing
 

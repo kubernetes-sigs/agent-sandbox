@@ -63,6 +63,13 @@ def test_template_spec_merges_cluster_overrides():
   assert base.runtime_class is None
 
 
+def test_template_spec_preserves_colocate_replicas():
+  # a pod-spec flag with no per-cluster override must survive the merge round-trip
+  c = _cluster(name="c")
+  merged = c.template_spec(TemplateSpec(colocate_replicas=True))
+  assert merged.colocate_replicas is True
+
+
 def test_capacity_gate():
   c = _cluster(name="c", max_replicas=5)
   c.active_replicas = 3

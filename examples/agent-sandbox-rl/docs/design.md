@@ -52,12 +52,14 @@ examples/agent-sandbox-rl/
     constants.py         # TEMPLATE/WARMPOOL group/version/plurals (missing from the SDK)
     resources.py         # SYNC SandboxTemplate + SandboxWarmPool CRUD + wait_for_pool_ready (watch-based, per-cluster)
     async_resources.py   # async variant
-    sizing.py            # compute_replicas, recommend_window, plan (ported)
+    sizing.py            # compute_replicas (+per_task), recommend_window(_disk/_pipelined), plan
+    capacity.py          # (added) probe_capacity + plan_benchmark + render_plan (capacity-aware planner)
+    registry_rewrite.py  # (added) rewrite_image/make_rewriter — in-region mirror redirect
     sources.py           # Task model + TaskSource protocol; ListSource, JsonlSource
     handles.py           # SandboxHandle (carries its owning Cluster + connection info)
     preflight.py         # per-cluster checks (reachable, CRDs+versions, runtimeclass, capacity, pull-secret)
     prepull.py           # optional DaemonSet image pre-pull per cluster (AppsV1Api), sync+async
-    strategies.py        # Strategy protocol + none/naive/sliding (cluster-aware, drive fleet primitives)
+    strategies.py        # Strategy protocol + none/naive/sliding/pipelined (cluster-aware, drive fleet primitives)
     fleet.py             # SandboxFleet (sync orchestrator: primitives + run())
     async_fleet.py       # AsyncSandboxFleet (parity; real concurrent claim/exec across clusters)
     exceptions.py        # FleetError, PreflightError, CapacityError, NoClusterAvailableError
@@ -95,6 +97,13 @@ examples/agent-sandbox-rl/
 - **Sizing across clusters:** the global `max_concurrent` budget is split across
   clusters by weight/capacity; per-`(cluster, image)` replicas use the existing
   `sizing.compute_replicas` on that cluster's share.
+- **Eval vs RL sizing (added):** the concurrency-proportional default fits **eval**
+  (1:1 image:task). For **RL** (G rollouts share one problem image), opt into
+  `FleetConfig.warm_per_task` (replicas = `min(tasks_image, max_warmpool_size)`, one
+  per rollout) + `TemplateSpec.colocate_replicas` (pack a pool's replicas on one node
+  via soft `podAffinity`, so only the first pulls the image). Both default off; pair
+  with `naive`/`sliding` (not `pipelined`). Rationale + measurements:
+  [eval vs RL](../README.md#eval-vs-rl--recommended-recipes).
 - **Connectivity caveat (documented, not magic):** a sandbox is reachable from
   *within its own cluster*. A single learner spanning clusters needs per-cluster
   routable endpoints (Gateway/LoadBalancer per cluster, or VPC peering/VPN), or
@@ -114,7 +123,8 @@ so the simple case stays simple.
   `JsonlSource`; `SweBenchSource` (HF) in `adapters/swebench.py` (`swebench` extra).
 - **`FleetConfig`** (pydantic): `clusters: list[ClusterConfig]`, `placement`,
   `max_concurrent`, `max_warmpool_size`, `window_size` (None=auto),
-  `ready_timeout`, `template` (`TemplateSpec`), `template_name_fn`
+  `ready_timeout`, `warm_create_budget` (1000 — stage the warm fill in waves of ≤ N
+  in-flight creates; 0 = all at once), `template` (`TemplateSpec`), `template_name_fn`
   (default `r2e-img-<md5[:12]>`), `labels`.
 - **`SandboxHandle`** (`handles.py`): per claim — `task`, **`cluster`** (name +
   connection), `claim_name`, `sandbox_id`, **`hostname`** (stable in-cluster DNS),
@@ -130,14 +140,35 @@ so the simple case stays simple.
 | preflight checks | `preflight() -> dict[cluster, PreflightReport]` (raises on hard failures) |
 | compute replicas | `plan() -> FleetPlan` (per-cluster, per-image replicas + window) |
 | set templates | `ensure_templates()` (across selected clusters) |
-| pools / start warmpools | `start_warmpools(wait=True)` (distributes pools across clusters per placement+sizing) |
+| pools / start warmpools | `start_warmpools(wait=True, create_budget=None)` (distributes pools across clusters per placement+sizing; staged in ≤`warm_create_budget` in-flight-create waves) |
 | (optional) pre-pull | `prepull(wait=True)` / `prepull_delete()` (per cluster) |
 | setup | `setup()` — preflight → plan → (optional prepull) → start warm pools |
 | start claims | `acquire(task) -> SandboxHandle`, `acquire_batch(tasks) -> [SandboxHandle]` (placement-routed) |
 | return hostname list | `handles()`, `hostnames()`, `endpoints()` (cluster-qualified) |
 | teardown / delete | `release(handle)`, `release_all()`, `teardown(delete_namespace=False)` (routes to owning cluster) |
-| managed batch | `run(process_fn, strategy=None) -> [Result]` |
+| managed batch | `run(process_fn, strategy="naive", *, recycle=False, …) -> [Result]` |
+| recycle (reset-and-reuse) | `run(..., recycle=True, reset=, max_reuses=, reset_timeout=, use_session=, scale_on_hold=)` (flag, orthogonal to strategy) → `reuse_git_restore_sandbox(_async)`; `GitRestoreReset.prime/reset/recyclable`; `SandboxHandle.open_session()` (`SandboxSession`); `determinism_canary(...)` |
 | ergonomics | context manager `__enter__/__exit__` → `setup()`/`teardown()` |
+
+**Sandbox recycling** (`recycle.py`, experimental) is an **orthogonal modifier on the
+managed runner** — `run(..., recycle=True)` — not a separate execution mode or strategy
+value: the chosen warm-pool `strategy` still governs warming, while `recycle` swaps the
+task→sandbox binding to reuse one claimed sandbox across same-image tasks, resetting
+between them, so claims scale with *problems* (÷ tasks-per-image) instead of tasks. It is
+off by default (a no-op for 1:1 eval; only multi-task-per-image shapes benefit). The
+executors (`reuse_git_restore_sandbox` / `_async`) remain callable directly for control
+outside `run()`. The shipped tier is **git-restore** (`GitRestoreReset`: `git reset --hard
+pristine` + `clean -xdff` + process/`/tmp` sweep, then verify the repo is at the
+pristine SHA and clean); dirty resets **quarantine** to a fresh claim. Reset is
+**git-only by default** — the `pip freeze` env and git-config/hooks tripwires are opt-in
+(`check_env`/`check_config`), bounded otherwise by `max_reuses` + the canary. It scales
+via a **persistent exec session** (`SandboxSession`, `use_session=True`): one held-open
+`bash` stream per sandbox so task+reset cost O(sandboxes) apiserver exec connections, not
+O(tasks) — `SandboxHandle.exec()` routes through it transparently. Non-git images fall
+back to fresh-claim-per-task; exec failures quarantine rather than abort. Costlier tiers
+(env-dir restore, overlay/checkpoint restart) are deferred. `determinism_canary` is the
+correctness gate. Full design + deep-research hardening + A/B findings: notes repo
+`plans/sandbox-recycling.md`.
 
 **Two modes (both shipped):** (1) **primitives** an RL loop drives itself
 (`acquire` → use `handle.hostname/endpoint` → `release`); (2) **managed runner**

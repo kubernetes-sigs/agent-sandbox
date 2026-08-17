@@ -1,0 +1,95 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: openclaw-template
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: openclaw-template-sandbox
+    spec:
+      runtimeClassName: gvisor
+      dnsPolicy: ClusterFirst
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      initContainers:
+        - name: init-config
+          image: ghcr.io/openclaw/openclaw:2026.3.23
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - cp /etc/openclaw-readonly/openclaw.json /etc/openclaw/openclaw.json
+          volumeMounts:
+            - name: cm-volume
+              mountPath: /etc/openclaw-readonly
+            - name: openclaw-etc-writable
+              mountPath: /etc/openclaw
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:2026.3.23
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: OPENCLAW_GATEWAY_TOKEN
+              value: "dummy-token-for-sandbox"
+            - name: OPENCLAW_CONFIG_PATH
+              value: "/etc/openclaw/openclaw.json"
+            - name: HOME                            
+              value: "/workspace" 
+            # Provider API key (required for chat to work). Create the Secret with:
+            #   kubectl create secret generic openclaw-provider-keys \
+            #     --from-literal=ANTHROPIC_API_KEY="sk-ant-..."
+            # Then uncomment the block below and re-apply this template.
+            # - name: ANTHROPIC_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: openclaw-provider-keys
+            #       key: ANTHROPIC_API_KEY
+          command:
+            - sh
+            - -c
+            - |
+              node dist/index.js gateway --bind=lan --port 18789 --allow-unconfigured --verbose
+          ports:
+            - containerPort: 18789
+            - containerPort: 18790
+          volumeMounts:
+            - mountPath: /workspace/.openclaw
+              name: workspaces-pvc
+            - mountPath: /etc/openclaw
+              name: openclaw-etc-writable
+            - mountPath: /workspace
+              name: home-dir
+      volumes:
+        - name: cm-volume
+          configMap:
+            name: openclaw-config
+        - name: openclaw-etc-writable
+          emptyDir: {}
+        - name: home-dir
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: workspaces-pvc
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 2Gi

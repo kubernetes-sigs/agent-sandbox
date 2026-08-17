@@ -1,0 +1,88 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Bare Sandbox CR running envd as the container entrypoint.
+# Uses the direct-pod pattern (agents.x-k8s.io/v1beta1) since envd is a
+# stateful daemon — pooling is not applicable.
+#
+# Security: envd in --isnotfc mode runs without authentication and as root.
+# The NetworkPolicy below restricts ingress to pods with the label
+# `access: envd-client` (e.g., the sandbox-router or an authorized client pod).
+# Adjust the podSelector to match your cluster's access control model.
+#
+# Replace ${IMAGE} via:  envsubst < sandbox-envd.yaml | kubectl apply -f -
+---
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: envd-example
+  labels:
+    example: envd-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: envd
+    spec:
+      containers:
+      - name: envd
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 49983
+          name: envd
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 49983
+          initialDelaySeconds: 1
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 49983
+          initialDelaySeconds: 3
+          periodSeconds: 10
+---
+# Default-deny ingress NetworkPolicy: only pods labeled `access: envd-client`
+# can reach the envd API port. This prevents unauthorized workloads from
+# executing commands or accessing files in the sandbox.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: envd-deny-ingress
+  labels:
+    example: envd-sandbox
+spec:
+  podSelector:
+    matchLabels:
+      sandbox: envd
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          access: envd-client
+    ports:
+    - protocol: TCP
+      port: 49983

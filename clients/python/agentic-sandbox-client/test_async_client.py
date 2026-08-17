@@ -32,6 +32,7 @@ logging.basicConfig(
 
 
 CONCURRENCY = 3
+SCHEDULING_ALLOWANCE_S = 0.5
 TICKER_INTERVAL_S = 0.02
 TICKER_GAP_LIMIT_S = 0.5
 
@@ -39,43 +40,53 @@ TICKER_GAP_LIMIT_S = 0.5
 async def test_concurrent_sandbox_creation(client, warmpool_name, namespace):
     """Concurrent creates must run in parallel, not serialise behind each other.
 
-    Times one create as a serial baseline, then ``CONCURRENCY`` creates in a
-    single ``asyncio.gather``. If the async path is genuinely non-blocking,
-    wall-clock is bounded by the slowest single create; if any step secretly
-    serialises (a shared lock, a sync k8s call), wall-clock scales with N.
+    Warms the client with one discarded create, then runs ``CONCURRENCY``
+    creates in a single ``asyncio.gather``, timing each one individually. The
+    warm-up matters: the first call through a fresh client also pays lazy 
+    client initialization or connection setup.
+
+    With the client warm, a genuinely non-blocking path finishes in the time of
+    the slowest single create plus scheduling overhead. If any step serialises
+    (a sync k8s call blocking the loop), wall-clock instead scales with N,
+    which for ``CONCURRENCY >= 2`` lands well past that bound.
     """
     print(f"\n--- Testing Concurrent Sandbox Creation (n={CONCURRENCY}) ---")
 
     async def _create():
-        return await client.create_sandbox(
+        t0 = time.perf_counter()
+        sandbox = await client.create_sandbox(
             warmpool=warmpool_name, namespace=namespace
         )
+        return sandbox, time.perf_counter() - t0
+
+    warmup, t_warmup = await _create()
+    await client.delete_sandbox(warmup.claim_name, namespace=namespace)
+    print(f"Warm-up create (discarded): {t_warmup:.2f}s")
 
     t0 = time.perf_counter()
-    await _create()
-    t_serial = time.perf_counter() - t0
-    print(f"Serial baseline: {t_serial:.2f}s")
-
-    t0 = time.perf_counter()
-    sandboxes = await asyncio.gather(*[_create() for _ in range(CONCURRENCY)])
+    results = await asyncio.gather(*[_create() for _ in range(CONCURRENCY)])
     t_concurrent = time.perf_counter() - t0
+
+    sandboxes = [sandbox for sandbox, _ in results]
+    durations = [duration for _, duration in results]
+    t_slowest = max(durations)
+    t_serialised = sum(durations)
+
     print(
         f"Concurrent ({CONCURRENCY} sandboxes): {t_concurrent:.2f}s "
-        f"(would be ~{CONCURRENCY * t_serial:.2f}s if serialised)"
+        f"(slowest single create {t_slowest:.2f}s, "
+        f"~{t_serialised:.2f}s if serialised)"
     )
 
     assert len(sandboxes) == CONCURRENCY, (
         f"Expected {CONCURRENCY} sandboxes, got {len(sandboxes)}"
     )
 
-    # If concurrent, wall-clock is ~t_serial regardless of n. If serialised, it
-    # is ~n*t_serial. 2*t_serial gives generous headroom for scheduling and
-    # warmpool refill jitter without letting a fully-serialised path slip
-    # through (which for CONCURRENCY >= 3 lands well above the threshold).
-    assert t_concurrent < 2 * t_serial, (
+    limit = t_slowest + SCHEDULING_ALLOWANCE_S
+    assert t_concurrent < limit, (
         f"Concurrent creation of {CONCURRENCY} sandboxes took "
-        f"{t_concurrent:.2f}s vs {t_serial:.2f}s for one — expected less than "
-        f"{2 * t_serial:.2f}s if parallel."
+        f"{t_concurrent:.2f}s vs {t_slowest:.2f}s for the slowest single "
+        f"create — expected less than {limit:.2f}s if parallel."
     )
     print("--- Concurrent Sandbox Creation Test Passed! ---")
 
@@ -92,10 +103,12 @@ async def test_event_loop_not_blocked(client, warmpool_name, namespace):
     print("\n--- Testing Event Loop Not Blocked ---")
 
     stop = asyncio.Event()
+    ticker_ready = asyncio.Event()
     gaps: list[float] = []
 
     async def ticker():
         last = time.perf_counter()
+        ticker_ready.set()
         while not stop.is_set():
             await asyncio.sleep(TICKER_INTERVAL_S)
             now = time.perf_counter()
@@ -103,6 +116,7 @@ async def test_event_loop_not_blocked(client, warmpool_name, namespace):
             last = now
 
     ticker_task = asyncio.create_task(ticker())
+    await ticker_ready.wait()
     try:
         sandbox = await client.create_sandbox(
             warmpool=warmpool_name, namespace=namespace

@@ -14,11 +14,12 @@
 
 # SandboxTemplate running the sandboxd portable runtime daemon (KEP-539.2)
 # as a sidecar next to an (unmodified) workload container. The two share the
-# /workspace volume; the workload reaches sandboxd over pod loopback and
-# discovers it via the SANDBOXD_* env vars.
+# /workspace volume; a co-located workload reaches sandboxd over pod-local
+# networking.
 #
-# SDK access: sandboxd binds 127.0.0.1 only, so it is not reachable through
-# the sandbox-router. External SDK clients use pod port-forward mode
+# SDK access: sandboxd binds 0.0.0.0 by default, so it is reachable on the
+# pod network like any other in-pod service (via a Service or the
+# sandbox-router). The SDKs connect over a pod port-forward
 # (Go: Runtime: RuntimeSandboxd; Python: SandboxdPodTunnelConnectionConfig).
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate

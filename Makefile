@@ -39,8 +39,9 @@ generate-go-docs: # Generate Go SDK reference documentation
 	sed 's/^#/##/' < $(REF_GO_PATH).tmp1 > $(REF_GO_PATH).tmp2
 	# Strip #L<line> anchors from source links: line numbers are brittle and
 	# make the generated docs go stale on every unrelated edit. Keep the
-	# file link (per reviewer request).
-	tail -n +2 < $(REF_GO_PATH).tmp2 | sed -E 's@(/blob/[^)# ]+)#L[0-9]+(-L[0-9]+)?@\1@g' > $(REF_GO_PATH)
+	# file link (per reviewer request). pipefail so a tail failure does not
+	# silently overwrite the doc with partial content.
+	set -o pipefail; tail -n +2 < $(REF_GO_PATH).tmp2 | sed -E 's@(/blob/[^)# ]+)#L[0-9]+(-L[0-9]+)?@\1@g' > $(REF_GO_PATH)
 	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2
 
 PYDOC_MARKDOWN_VERSION := 4.8.2

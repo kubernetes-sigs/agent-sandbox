@@ -86,10 +86,9 @@ class SandboxLocalTunnelConnectionConfig(BaseModel):
 class SandboxdPodTunnelConnectionConfig(BaseModel):
     """Configuration for the sandboxd runtime via a direct pod port-forward.
 
-    sandboxd binds loopback-only inside the pod (KEP-539.2), so it is not
-    reachable through the sandbox-router. This config port-forwards directly
-    to the sandbox pod, exposing both listeners: the Filesystem & Runtime
-    REST API and the gRPC ProcessService.
+    sandboxd (KEP-539.2) exposes two listeners: the Filesystem & Runtime REST
+    API and the gRPC ProcessService. This config port-forwards directly to the
+    sandbox pod, reaching both.
     """
     rest_port: int = 8080  # sandboxd REST filesystem port on the pod.
     grpc_port: int = 9090  # sandboxd gRPC ProcessService port on the pod.

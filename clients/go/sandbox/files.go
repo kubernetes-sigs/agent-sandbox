@@ -24,6 +24,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	pathpkg "path"
+	"slices"
 	"strings"
 	"time"
 
@@ -170,17 +171,15 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 
 // sandboxdWriteReq builds the sandboxd PUT request: an idempotent write of the
 // raw bytes to /v1/files/{path}. Parent directories are created server-side.
-// Relative paths are allowed, but "." components that escape the sandbox root
+// Relative paths are allowed, but ".." components that escape the sandbox root
 // are rejected client-side as defense in depth (sandboxd also enforces this
 // server-side via SanitizePath).
 func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
 	if path == "" || path == "." || path == ".." || strings.HasSuffix(path, "/") {
 		return "", "", "", nil, fmt.Errorf("%s: write: %q is not a valid file path", f.errPrefix(), path)
 	}
-	for _, seg := range strings.Split(path, "/") {
-		if seg == ".." {
-			return "", "", "", nil, fmt.Errorf("%s: write: %q must not contain %q path segments (escapes the sandbox root)", f.errPrefix(), path, "..")
-		}
+	if slices.Contains(strings.Split(path, "/"), "..") {
+		return "", "", "", nil, fmt.Errorf("%s: write: %q must not contain %q path segments (escapes the sandbox root)", f.errPrefix(), path, "..")
 	}
 	return http.MethodPut, filesEndpoint(path), "application/octet-stream", bytes.NewReader(content), nil
 }

@@ -351,6 +351,19 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "",
 		},
+		{
+			name:    "scoped-token without secret file",
+			mut:     func(c *Config) { c.AuthzMode = AuthzScopedToken },
+			wantErr: "authz-scoped-token-secret-file",
+		},
+		{
+			name: "valid scoped-token configuration",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+			},
+			wantErr: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

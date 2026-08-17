@@ -145,7 +145,8 @@ class RunReport:
   environment: dict = field(default_factory=dict)   # per-cluster details
 
   _ORDER = ("preflight", "plan", "prepull", "create_warmpool", "wait_pool_ready",
-            "prefetch", "claim", "process", "release", "teardown")
+            "prefetch", "claim", "process", "reset", "quarantine", "rotate",
+            "release", "teardown")
 
   def add_phase(self, name: str, dur: float) -> None:
     c = self.phases.setdefault(name, [0, 0.0, 0.0])

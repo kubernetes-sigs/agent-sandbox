@@ -111,7 +111,7 @@ The KRO reconciler reconciles `AgenticSandbox` instance and creates the followin
 * Sandbox
 * Service
 * NetworkPolicy (if enabled)
-* Ingress (if enbled)
+* Ingress (if enabled)
 
 The user/agent can access the Sandbox via the Ingress or the Service as appropriate.
 

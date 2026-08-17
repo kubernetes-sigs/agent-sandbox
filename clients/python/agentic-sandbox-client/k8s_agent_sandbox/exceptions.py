@@ -65,3 +65,13 @@ class SandboxRequestError(SandboxError):
         super().__init__(message)
         self.status_code = status_code
         self.response = response
+
+
+class SandboxClaimFailedError(SandboxError):
+    """The SandboxClaim reported a terminal Ready=False reason.
+
+    The claim controller will not retry these (e.g. InvalidMetadata,
+    VolumeClaimTemplatesError, ClaimExpired); the claim will not become
+    ready without user action, so ready-waits raise instead of waiting
+    out the timeout.
+    """

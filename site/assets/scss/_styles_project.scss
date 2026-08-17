@@ -476,6 +476,106 @@ h1.text-center {
   }
 }
 
+// --------------------------------------------------
+// Quickstart code block on homepage
+// --------------------------------------------------
+.quickstart-heading {
+  margin-top: 4rem;
+  margin-bottom: 0.75rem;
+  font-size: 2rem;
+  font-weight: 400;
+  text-align: center;
+}
+
+.quickstart-subtitle {
+  text-align: center;
+  font-size: 1.05rem;
+  font-weight: 100;
+  margin-bottom: 1.5rem;
+}
+
+.quickstart-container {
+
+  // Hug the code: width grows with content instead of a fixed box that wraps.
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto;
+  text-align: left;
+
+  // Tab bar sits flush on top of the code block.
+  .nav-tabs .nav-item .nav-link.active {
+    background: #0d1117;
+    border-bottom-color: #0d1117;
+  }
+
+  .highlight {
+    margin: 0;
+    padding: 0;
+
+    // Grow the box to the width of the code (up to the viewport).
+    width: max-content;
+    max-width: 100%;
+
+    // Square the top corners so the block connects flush to the tab bar above.
+    border-radius: 0 0 1rem 1rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 1.5rem 3rem rgba(0, 0, 0, 0.45);
+    background-color: #0d1117;
+    overflow: hidden;
+  }
+
+  pre {
+    margin: 0;
+    padding: 1.5rem 1.75rem;
+    border: 0;
+    border-radius: 0;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    background-color: #0d1117;
+    color: #e6edf3;
+    max-height: none;
+
+    // Size to the code so the box resizes with it; scroll only if wider than the viewport.
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: pre;
+  }
+
+  // Base color for any plain (non-tokenized) code text on the dark surface.
+  pre,
+  pre code,
+  .highlight code {
+    color: #e6edf3;
+  }
+
+  // Keep long lines on one line (no wrapping).
+  pre code,
+  .highlight code {
+    white-space: pre;
+    word-break: normal;
+  }
+
+  // Drop the cover's inherited text-shadow that "ghosts" the code, without
+  // touching the per-token colors from the Chroma theme.
+  pre,
+  pre *,
+  .highlight,
+  .highlight * {
+    text-shadow: none;
+  }
+}
+
+.quickstart-cta {
+  text-align: center;
+  margin-top: 1.5rem;
+
+  a {
+    font-weight: 600;
+  }
+}
+
 .video-card {
   height: 400px;
   border: 1px solid;

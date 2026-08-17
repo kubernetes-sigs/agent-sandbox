@@ -29,3 +29,9 @@ class CapacityError(FleetError):
 
 class NoClusterAvailableError(FleetError):
   """Placement could not select a cluster for a task."""
+
+
+class FleetOvercommitError(FleetError):
+  """The in-SDK circuit breaker tripped: live sandboxes exceeded the safe ceiling
+  (``overcommit_factor`` × expected, or ``max_live_sandboxes``), signalling a
+  runaway/over-creation. The fleet is torn down before this is raised."""

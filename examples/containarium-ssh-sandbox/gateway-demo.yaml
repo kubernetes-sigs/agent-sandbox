@@ -1,0 +1,188 @@
+# Two boxes behind one sshpiper gateway — the SSH username selects the box.
+#
+# `ssh box-a@<gateway>` lands in box-a; `ssh box-b@<gateway>` lands in box-b,
+# same gateway, same agent key. box-a and box-b are ordinary Sandboxes (see
+# containarium-sandbox.yaml for the field-by-field rationale); each Pipe is a
+# routing rule sshpiper reads.
+#
+# Everything here (boxes, Pipes) and the gateway (sshpiper.yaml) live in the
+# same namespace — the plugin watches its own namespace, which for this
+# example is the one you apply into (default). The Secrets a Pipe references
+# must be in that same namespace.
+#
+# Prereqs (run-test-kind.sh creates these; for manual use, see the README):
+#   - Secret containarium-ssh-key — the box's authorized_keys (the gateway
+#     upstream pubkey; the box trusts only the gateway).
+#   - Secret agent-authorized-keys — the agent's pubkey the gateway
+#     authenticates clients against (referenced by each Pipe's
+#     from.authorized_keys_secret; default data key: authorized_keys).
+#   - Secret sshpiper-upstream-key — the gateway→box private key (referenced
+#     by each Pipe's to.private_key_secret).
+#
+# Both boxes pin the published ghcr.io/footprintai/containarium-agent-box tag
+# below. To run your own build instead (see the Dockerfile in this directory
+# and the README's "Building agent-box from source"), override `image:` on
+# both boxes — e.g. `kubectl set image` after apply, or `sed` before it.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: box-a
+spec:
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: box-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent-box
+          image: ghcr.io/footprintai/containarium-agent-box:v0.52.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: ssh
+              containerPort: 2222
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/agent/workspace
+            - name: ssh-authorized-keys
+              mountPath: /etc/agent-box
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: ssh-authorized-keys
+          secret:
+            secretName: containarium-ssh-key
+            items:
+              - key: authorized_keys
+                path: authorized_keys
+            defaultMode: 0400
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: box-b
+spec:
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: box-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent-box
+          image: ghcr.io/footprintai/containarium-agent-box:v0.52.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: ssh
+              containerPort: 2222
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/agent/workspace
+            - name: ssh-authorized-keys
+              mountPath: /etc/agent-box
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: ssh-authorized-keys
+          secret:
+            secretName: containarium-ssh-key
+            items:
+              - key: authorized_keys
+                path: authorized_keys
+            defaultMode: 0400
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Route username "box-a" to box-a's pod. from = who may connect at the gateway
+# (the agent's key, from a Secret); to = where the gateway forwards and how it
+# authenticates upstream (the box's DNS name + the gateway's own key).
+apiVersion: sshpiper.com/v1beta1
+kind: Pipe
+metadata:
+  name: box-a
+spec:
+  from:
+    - username: box-a
+      authorized_keys_secret:
+        name: agent-authorized-keys
+  to:
+    # Short Service name, not a hard-coded-namespace FQDN: sshpiper resolves it
+    # through its own pod's DNS search domain, so routing stays correct in
+    # whatever namespace you apply this example into (not only "default").
+    host: box-a:2222
+    username: agent
+    private_key_secret:
+      name: sshpiper-upstream-key
+    # Demo simplification — pin the box host key via known_hosts_data in
+    # anything beyond a demo (see the README's Hardening notes).
+    ignore_hostkey: true
+---
+apiVersion: sshpiper.com/v1beta1
+kind: Pipe
+metadata:
+  name: box-b
+spec:
+  from:
+    - username: box-b
+      authorized_keys_secret:
+        name: agent-authorized-keys
+  to:
+    host: box-b:2222
+    username: agent
+    private_key_secret:
+      name: sshpiper-upstream-key
+    ignore_hostkey: true

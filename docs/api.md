@@ -365,6 +365,7 @@ _Appears in:_
 
 
 SandboxSpec defines the desired state of Sandbox.
+volumeClaimTemplates is immutable after creation.
 
 
 
@@ -561,7 +562,7 @@ _Appears in:_
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox. |  | Required: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
 | `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
-| `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
+| `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns.<br />Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 
 
@@ -928,7 +929,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `warmPoolRef` _[SandboxWarmPoolRef](#sandboxwarmpoolref)_ | warmPoolRef targets the specific pre-warmed infrastructure pool to check out from. |  | Required: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
-| `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns. |  | Optional: \{\} <br /> |
+| `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns.<br />Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
 | `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of persistent volume claims to be created for the sandbox.<br />Specifying this field forces a cold start because warm pool pods will not have these volumes. |  | Optional: \{\} <br /> |
 
@@ -1096,6 +1097,7 @@ _Appears in:_
 | `replicas` _integer_ | replicas is the total number of sandboxes in the pool. |  | Optional: \{\} <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the total number of sandboxes in the pool that are in a ready state. |  | Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector used to find the pods in the pool. |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | observedGeneration is the most recent generation observed by the controller.<br />It corresponds to the SandboxWarmPool's metadata.generation, which is bumped<br />on spec mutations such as replicas changes. Note that SandboxTemplate content<br />changes do not bump the pool's generation, so this does not track template<br />rollout progress. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### SandboxWarmPoolUpdateStrategy

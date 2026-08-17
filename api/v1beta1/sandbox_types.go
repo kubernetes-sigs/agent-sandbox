@@ -52,10 +52,19 @@ const (
 	// Running. Consumers should treat Ready as the authoritative signal and not infer the
 	// live operating state from the mere presence of this condition.
 	SandboxConditionSuspended ConditionType = "Suspended"
-	// SandboxReasonSuspendedPodTerminated indicates that the pod has been terminated.
+	// SandboxReasonSuspendedPodTerminated indicates the Suspended condition is True because the backing Pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
 	// SandboxReasonSuspendedPodNotTerminated indicates the pod has not been terminated yet.
+	// Deprecated: Use SandboxReasonSuspendedPodTerminating instead.
 	SandboxReasonSuspendedPodNotTerminated = "PodNotTerminated"
+	// SandboxReasonSuspendedPodTerminating indicates the Suspended condition is False because the backing Pod is still terminating.
+	SandboxReasonSuspendedPodTerminating = "PodTerminating"
+	// SandboxReasonSuspendedPodNotOwned indicates the Suspended condition is False because a Pod exists with the Sandbox's name but is not owned by this Sandbox.
+	SandboxReasonSuspendedPodNotOwned = "PodNotOwned"
+	// SandboxReasonNotSuspended indicates the Suspended condition is False because the Sandbox is running.
+	SandboxReasonNotSuspended = "NotSuspended"
+	// SandboxReasonSuspendedPodStateUnknown indicates the Suspended condition is Unknown because reconciling the Pod failed, so its state cannot be determined.
+	SandboxReasonSuspendedPodStateUnknown = "PodStateUnknown"
 
 	// SandboxConditionReady summarizes whether the Sandbox is fully operational and
 	// able to serve traffic. This is the observed "readiness" of the Sandbox, and is
@@ -82,6 +91,20 @@ const (
 	// suspended (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"
 
+	// SandboxConditionPodScheduled mirrors the backing Pod's PodScheduled
+	// condition so consumers can see why a Sandbox is not scheduled (e.g.
+	// Unschedulable, SchedulingGated) without reading the Pod. The Pod
+	// condition's status, reason and message are copied through verbatim;
+	// the condition is absent while the Sandbox has no backing Pod.
+	SandboxConditionPodScheduled ConditionType = "PodScheduled"
+	// SandboxReasonPodScheduled indicates the backing Pod has been scheduled
+	// to a node. Used when the Pod's PodScheduled condition carries no reason
+	// of its own (the scheduler sets none on success).
+	SandboxReasonPodScheduled = "PodScheduled"
+	// SandboxReasonPodSchedulingUnknown indicates the backing Pod exists but
+	// has not reported a PodScheduled condition yet.
+	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
+
 	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
 	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason
 	// recording which; it is absent while the Pod is still running or does not exist.
@@ -101,6 +124,8 @@ const (
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
 	// SandboxLaunchTypeLabel is the label used to track whether the Sandbox was cold-created or originated from a warm pool.
 	SandboxLaunchTypeLabel = "agents.x-k8s.io/launch-type"
+	// CreatedByLabel is the label used to track which component created the resource (e.g. client, controller, etc.).
+	CreatedByLabel = "agents.x-k8s.io/created-by"
 	// SandboxLaunchTypeCold indicates the Sandbox was cold-created.
 	SandboxLaunchTypeCold = "cold"
 	// SandboxLaunchTypeWarm indicates the Sandbox was pre-provisioned by or adopted from a SandboxWarmPool.
@@ -118,6 +143,8 @@ const (
 	SandboxAdoptableLabel = "agents.x-k8s.io/adoptable"
 	// SandboxWarmPoolLabel is the label used to track the warm pool that owns the Sandbox.
 	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
+	// SandboxTemplateRefHashLabel identifies which SandboxTemplate a Sandbox originated from.
+	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
 type PodMetadata struct {
@@ -235,6 +262,8 @@ type SandboxBlueprint struct {
 }
 
 // SandboxSpec defines the desired state of Sandbox.
+// volumeClaimTemplates is immutable after creation.
+// +kubebuilder:validation:XValidation:rule="has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates) && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates == oldSelf.volumeClaimTemplates)",message="volumeClaimTemplates is immutable"
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html

@@ -64,6 +64,12 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					Message:            "Sandbox is not suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
+				},
+				{
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: gen,
@@ -180,6 +186,12 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					Message:            "Sandbox is not suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
+				},
+				{
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,
@@ -251,6 +263,14 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminating,
 					Message:            "Pod is terminating. Sandbox is suspending",
+				},
+				{
+					// The Pod is terminating but still present and owned, so its
+					// scheduling state is still mirrored.
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
 				},
 				{
 					Type:               "Ready",
@@ -344,6 +364,12 @@ func TestSandboxPodDeletionKeepsSuspendedFalse(t *testing.T) {
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
 				Message:            "Sandbox is not suspended",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
 			},
 			{
 				Type:               "Ready",

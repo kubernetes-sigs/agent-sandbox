@@ -302,7 +302,7 @@ echo "Exporting kubeconfig..."
 kops export kubeconfig --name "${CLUSTER_NAME}" --admin
 
 echo "Waiting for cluster to be ready..."
-kops validate cluster --wait 10m
+kops validate cluster --wait 15m
 
 if [[ "${CNI}" == "cilium" ]]; then
   # Raise Cilium's endpoint-create API rate limit. The agent rate-limits

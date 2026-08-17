@@ -391,7 +391,7 @@ func TestOptions_SandboxdRejectsGateway(t *testing.T) {
 		GatewayName:  "gw",
 	}
 	opts.setDefaults()
-	if err := opts.validate(); err == nil {
+	if err := opts.validateCommon(); err == nil {
 		t.Fatal("expected validation error for RuntimeSandboxd + GatewayName")
 	}
 }
@@ -399,8 +399,8 @@ func TestOptions_SandboxdRejectsGateway(t *testing.T) {
 func TestOptions_SandboxdPortDefaults(t *testing.T) {
 	opts := Options{WarmPoolName: "wp", Runtime: RuntimeSandboxd}
 	opts.setDefaults()
-	if err := opts.validate(); err != nil {
-		t.Fatalf("validate() error: %v", err)
+	if err := opts.validateCommon(); err != nil {
+		t.Fatalf("validateCommon() error: %v", err)
 	}
 	if opts.SandboxdRESTPort != 8080 || opts.SandboxdGRPCPort != 9090 {
 		t.Errorf("unexpected port defaults: rest=%d grpc=%d", opts.SandboxdRESTPort, opts.SandboxdGRPCPort)

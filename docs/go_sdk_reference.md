@@ -524,7 +524,10 @@ Options configures a Sandbox instance.
 
 ```go
 type Options struct {
-    // WarmPoolName is the name of the SandboxWarmPool to use. Required.
+    // WarmPoolName is the name of the SandboxWarmPool to use.
+    // Required in Options before calling Open() to provision a new sandbox.
+    // Optional on Client-level Options; pass the pool name per-sandbox to
+    // CreateSandbox instead.
     // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
     WarmPoolName string
 

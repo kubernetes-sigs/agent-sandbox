@@ -1,0 +1,49 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: pi-code-agent
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: pi-code-agent
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: pi
+          image: pi-sandbox:local
+          imagePullPolicy: IfNotPresent
+          stdin: true
+          tty: true
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pi-code-agent-api-keys
+                  key: ANTHROPIC_API_KEY
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: agent-state
+              mountPath: /root/.pi/agent
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+        labels:
+          sandbox: pi-code-agent
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+    - metadata:
+        name: agent-state
+        labels:
+          sandbox: pi-code-agent
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

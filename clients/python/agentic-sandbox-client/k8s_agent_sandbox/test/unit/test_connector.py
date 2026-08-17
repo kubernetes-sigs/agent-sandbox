@@ -160,8 +160,9 @@ class TestSandboxConnectorStrategySelection(unittest.TestCase):
         )
         retry_policy = connector.session.get_adapter("http://").max_retries
 
-        self.assertNotIn("POST", retry_policy.allowed_methods)
-        self.assertIn("GET", retry_policy.allowed_methods)
+        self.assertEqual(
+            set(retry_policy.allowed_methods), {"GET", "PUT", "DELETE"}
+        )
 
     def test_selects_in_cluster_strategy(self):
         config = SandboxInClusterConnectionConfig()

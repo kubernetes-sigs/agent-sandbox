@@ -68,7 +68,9 @@ def _positive_float(raw: str) -> float:
   try:
     val = float(raw)
   except (ValueError, OverflowError):
-    raise argparse.ArgumentTypeError(f"{raw!r} is not a number")
+    # from None: the underlying ValueError is noise on a CLI arg error, and
+    # argparse prints the chain.
+    raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
   if not (val > 0) or val == float("inf"):
     raise argparse.ArgumentTypeError(f"must be a positive number of seconds, got {raw!r}")
   return val

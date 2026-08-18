@@ -26,18 +26,18 @@ from agent_sandbox_fleet.budget import hamilton_split
 
 
 def _reference_split_budget(total, weights):
-  """Verbatim copy of agent_sandbox_rl.fleet._split_budget."""
-  if not weights:
-    return {}
-  if len(weights) == 1:
-    return {next(iter(weights)): total}
-  tw = sum(weights.values())
-  ideal = {k: total * (w / tw) for k, w in weights.items()}
-  alloc = {k: int(math.floor(v)) for k, v in ideal.items()}
-  remainder = total - sum(alloc.values())
-  for k in sorted(weights, key=lambda k: ideal[k] - alloc[k], reverse=True)[:remainder]:
-    alloc[k] += 1
-  return alloc
+    """Verbatim copy of agent_sandbox_rl.fleet._split_budget."""
+    if not weights:
+        return {}
+    if len(weights) == 1:
+        return {next(iter(weights)): total}
+    tw = sum(weights.values())
+    ideal = {k: total * (w / tw) for k, w in weights.items()}
+    alloc = {k: int(math.floor(v)) for k, v in ideal.items()}
+    remainder = total - sum(alloc.values())
+    for k in sorted(weights, key=lambda k: ideal[k] - alloc[k], reverse=True)[:remainder]:
+        alloc[k] += 1
+    return alloc
 
 
 @pytest.mark.parametrize("total, weights", [
@@ -50,18 +50,18 @@ def _reference_split_budget(total, weights):
     (1000, {f"c{i}": (i + 1) * 0.7 for i in range(20)}),
 ])
 def test_matches_tomer(total, weights):
-  assert hamilton_split(total, weights) == _reference_split_budget(total, weights)
-  # Sums to exactly `total` (unless weights empty).
-  if weights:
-    assert sum(hamilton_split(total, weights).values()) == total
+    assert hamilton_split(total, weights) == _reference_split_budget(total, weights)
+    # Sums to exactly `total` (unless weights empty).
+    if weights:
+        assert sum(hamilton_split(total, weights).values()) == total
 
 
 def test_single_cluster_shortcut():
-  assert hamilton_split(42, {"only": 1.0}) == {"only": 42}
+    assert hamilton_split(42, {"only": 1.0}) == {"only": 42}
 
 
 def test_empty_weights():
-  assert hamilton_split(50, {}) == {}
+    assert hamilton_split(50, {}) == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -72,9 +72,9 @@ def test_empty_weights():
 # --------------------------------------------------------------------------- #
 
 def test_all_zero_weights_splits_evenly_instead_of_dividing_by_zero():
-  got = hamilton_split(10, {"a": 0.0, "b": 0.0, "c": 0.0})
-  assert sum(got.values()) == 10
-  assert sorted(got.values()) == [3, 3, 4]
+    got = hamilton_split(10, {"a": 0.0, "b": 0.0, "c": 0.0})
+    assert sum(got.values()) == 10
+    assert sorted(got.values()) == [3, 3, 4]
 
 
 @pytest.mark.parametrize("bad", [
@@ -84,11 +84,11 @@ def test_all_zero_weights_splits_evenly_instead_of_dividing_by_zero():
     -1.0,
 ])
 def test_rejects_non_finite_and_negative_weights(bad):
-  with pytest.raises(ValueError, match="finite"):
-    hamilton_split(10, {"a": 1.0, "b": bad})
+    with pytest.raises(ValueError, match="finite"):
+        hamilton_split(10, {"a": 1.0, "b": bad})
 
 
 def test_single_cluster_shortcut_still_validates():
-  # The len==1 fast path must not skip the check.
-  with pytest.raises(ValueError, match="finite"):
-    hamilton_split(10, {"only": float("nan")})
+    # The len==1 fast path must not skip the check.
+    with pytest.raises(ValueError, match="finite"):
+        hamilton_split(10, {"only": float("nan")})

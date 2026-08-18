@@ -31,22 +31,22 @@ def compute_replicas(
     buffer: int = 0,
     per_task: bool = False,
 ) -> int:
-  """Replicas to pre-warm for one image on one cluster.
+    """Replicas to pre-warm for one image on one cluster.
 
-  Default (concurrency-proportional):
-    clamp(round(max_concurrent * tasks_image / tasks_total),
-          1, min(tasks_image, max_pool)) + buffer
-  Then re-clamped by (tasks_image, max_pool).
+    Default (concurrency-proportional):
+      clamp(round(max_concurrent * tasks_image / tasks_total),
+            1, min(tasks_image, max_pool)) + buffer
+    Then re-clamped by (tasks_image, max_pool).
 
-  `per_task=True` warms one replica per task (RL instant-claim sizing), still
-  capped by max_pool.
-  """
-  if tasks_image <= 0:
-    return 0
-  if per_task:
-    return min(tasks_image, max_pool)
-  if tasks_total <= 0:
-    tasks_total = tasks_image
-  share = max_concurrent * tasks_image / tasks_total
-  replicas = max(1, round(share)) + max(0, buffer)
-  return int(min(replicas, tasks_image, max_pool))
+    `per_task=True` warms one replica per task (RL instant-claim sizing), still
+    capped by max_pool.
+    """
+    if tasks_image <= 0:
+        return 0
+    if per_task:
+        return min(tasks_image, max_pool)
+    if tasks_total <= 0:
+        tasks_total = tasks_image
+    share = max_concurrent * tasks_image / tasks_total
+    replicas = max(1, round(share)) + max(0, buffer)
+    return int(min(replicas, tasks_image, max_pool))

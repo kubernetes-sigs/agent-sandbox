@@ -53,22 +53,22 @@ _SIZES = (
 
 
 def parse_size(s: str) -> int:
-  s = s.strip()
-  for suf, mult in _SIZES:
-    if s.endswith(suf):
-      return int(float(s[: -len(suf)]) * mult)
-  return int(s)
+    s = s.strip()
+    for suf, mult in _SIZES:
+        if s.endswith(suf):
+            return int(float(s[: -len(suf)]) * mult)
+    return int(s)
 
 
 def make_delta(size_bytes: int) -> bytes:
-  """Produce a mock compressed weight delta of ~size_bytes.
+    """Produce a mock compressed weight delta of ~size_bytes.
 
-  Cognition reports >99% compression via tensor decomposition; here we just
-  gzip random bytes so the pipeline is realistic but the "compression" is a
-  no-op. We produce `size_bytes` of random uncompressed data and gzip it.
-  """
-  raw = secrets.token_bytes(size_bytes)
-  return gzip.compress(raw, compresslevel=1)
+    Cognition reports >99% compression via tensor decomposition; here we just
+    gzip random bytes so the pipeline is realistic but the "compression" is a
+    no-op. We produce `size_bytes` of random uncompressed data and gzip it.
+    """
+    raw = secrets.token_bytes(size_bytes)
+    return gzip.compress(raw, compresslevel=1)
 
 
 def publish_step(
@@ -79,58 +79,58 @@ def publish_step(
     size_bytes: int,
     paths: Paths | None = None,
 ) -> dict:
-  paths = paths or Paths()
-  data = make_delta(size_bytes)
-  digest = hashlib.sha256(data).hexdigest()
-  path = paths.weight_delta(version)
-  gcs.put_bytes(path, data)
-  manifest = {
-      "current_version": version,
-      "previous_version": previous,
-      "delta_path": path,
-      "delta_size_bytes": len(data),
-      "delta_sha256": digest,
-      "weight_stream": weight_stream,
-      "published_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-  }
-  gcs.put_json(paths.weight_manifest, manifest)
-  logger.info("published version=%d bytes=%d sha256=%s", version, len(data), digest[:12])
-  return manifest
+    paths = paths or Paths()
+    data = make_delta(size_bytes)
+    digest = hashlib.sha256(data).hexdigest()
+    path = paths.weight_delta(version)
+    gcs.put_bytes(path, data)
+    manifest = {
+        "current_version": version,
+        "previous_version": previous,
+        "delta_path": path,
+        "delta_size_bytes": len(data),
+        "delta_sha256": digest,
+        "weight_stream": weight_stream,
+        "published_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    gcs.put_json(paths.weight_manifest, manifest)
+    logger.info("published version=%d bytes=%d sha256=%s", version, len(data), digest[:12])
+    return manifest
 
 
 def main() -> None:
-  ap = argparse.ArgumentParser(description="Mock RL trainer — publishes weight deltas to GCS.")
-  ap.add_argument("--bucket", default=os.environ.get("FLEET_BUCKET"),
-                  help="GCS bucket (default: $FLEET_BUCKET)")
-  ap.add_argument("--stream", default="swebench-actor-v1",
-                  help="Weight stream name (must match the fleet spec)")
-  ap.add_argument("--steps", type=int, default=5, help="Number of mock optimizer steps")
-  ap.add_argument("--interval", type=float, default=10.0,
-                  help="Seconds between step publishes")
-  ap.add_argument("--delta-size", default="1MiB",
-                  help="Delta payload size, e.g. 1MiB, 512KiB, 100B")
-  ap.add_argument("--start-version", type=int, default=1)
-  ap.add_argument("--verbose", action="store_true")
-  args = ap.parse_args()
+    ap = argparse.ArgumentParser(description="Mock RL trainer — publishes weight deltas to GCS.")
+    ap.add_argument("--bucket", default=os.environ.get("FLEET_BUCKET"),
+                    help="GCS bucket (default: $FLEET_BUCKET)")
+    ap.add_argument("--stream", default="swebench-actor-v1",
+                    help="Weight stream name (must match the fleet spec)")
+    ap.add_argument("--steps", type=int, default=5, help="Number of mock optimizer steps")
+    ap.add_argument("--interval", type=float, default=10.0,
+                    help="Seconds between step publishes")
+    ap.add_argument("--delta-size", default="1MiB",
+                    help="Delta payload size, e.g. 1MiB, 512KiB, 100B")
+    ap.add_argument("--start-version", type=int, default=1)
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
 
-  logging.basicConfig(
-      level=logging.DEBUG if args.verbose else logging.INFO,
-      format="%(asctime)s %(name)s %(levelname)s %(message)s",
-  )
-  if not args.bucket:
-    ap.error("--bucket (or $FLEET_BUCKET) is required")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+    if not args.bucket:
+        ap.error("--bucket (or $FLEET_BUCKET) is required")
 
-  size = parse_size(args.delta_size)
-  gcs = GCS(args.bucket)
+    size = parse_size(args.delta_size)
+    gcs = GCS(args.bucket)
 
-  prev = args.start_version - 1
-  for i in range(args.steps):
-    v = args.start_version + i
-    publish_step(gcs, v, prev, args.stream, size)
-    prev = v
-    if i < args.steps - 1:
-      time.sleep(args.interval)
+    prev = args.start_version - 1
+    for i in range(args.steps):
+        v = args.start_version + i
+        publish_step(gcs, v, prev, args.stream, size)
+        prev = v
+        if i < args.steps - 1:
+            time.sleep(args.interval)
 
 
 if __name__ == "__main__":
-  main()
+    main()

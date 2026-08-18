@@ -22,9 +22,9 @@ from agent_sandbox_fleet.registry_rewrite import rewrite_image
 
 
 def test_an_empty_registry_is_rejected_rather_than_silently_wrong():
-  # The old behaviour built the prefix by joining registry/project/repo, so an
-  # empty registry produced "/library/ubuntu:22.04" -- syntactically not a
-  # reference, and the only symptom is an ImagePullBackOff on the cluster
-  # minutes later, on every pod of every pool in the plan.
-  with pytest.raises(ValueError, match="non-empty host"):
-    rewrite_image("ubuntu:22.04", registry="")
+    # The old behaviour built the prefix by joining registry/project/repo, so an
+    # empty registry produced "/library/ubuntu:22.04" -- syntactically not a
+    # reference, and the only symptom is an ImagePullBackOff on the cluster
+    # minutes later, on every pod of every pool in the plan.
+    with pytest.raises(ValueError, match="non-empty host"):
+        rewrite_image("ubuntu:22.04", registry="")

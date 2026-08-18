@@ -26,26 +26,26 @@ import argparse
 
 
 def positive_float(raw: str) -> float:
-  """argparse type for poll/loop intervals. Rejects <= 0, nan and inf.
+    """argparse type for poll/loop intervals. Rejects <= 0, nan and inf.
 
-  A non-positive interval turns every one of our loops into a spin: the waits
-  are ``Event.wait(interval)`` or ``max(0.0, interval - elapsed)``, both of
-  which return immediately at 0, so the loop hammers GCS and the apiserver
-  with no delay between passes.
+    A non-positive interval turns every one of our loops into a spin: the waits
+    are ``Event.wait(interval)`` or ``max(0.0, interval - elapsed)``, both of
+    which return immediately at 0, so the loop hammers GCS and the apiserver
+    with no delay between passes.
 
-  The comparison is ``not (val > 0)`` rather than ``val <= 0`` on purpose:
-  nan fails every comparison, so ``val <= 0`` is False for nan and would let
-  it through. inf is rejected separately -- it passes ``> 0`` happily and
-  produces a loop that runs one pass and then sleeps forever.
-  """
-  try:
-    val = float(raw)
-  except (ValueError, OverflowError):
-    # from None: the underlying ValueError is noise on a CLI arg error, and
-    # argparse prints the chain.
-    raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
-  if not (val > 0) or val == float("inf"):
-    raise argparse.ArgumentTypeError(
-        f"must be a positive number of seconds, got {raw!r}"
-    )
-  return val
+    The comparison is ``not (val > 0)`` rather than ``val <= 0`` on purpose:
+    nan fails every comparison, so ``val <= 0`` is False for nan and would let
+    it through. inf is rejected separately -- it passes ``> 0`` happily and
+    produces a loop that runs one pass and then sleeps forever.
+    """
+    try:
+        val = float(raw)
+    except (ValueError, OverflowError):
+        # from None: the underlying ValueError is noise on a CLI arg error, and
+        # argparse prints the chain.
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
+    if not (val > 0) or val == float("inf"):
+        raise argparse.ArgumentTypeError(
+            f"must be a positive number of seconds, got {raw!r}"
+        )
+    return val

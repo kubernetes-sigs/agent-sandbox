@@ -557,6 +557,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef defines the name of the SandboxTemplate to be used for creating a Sandbox. |  | Required: \{\} <br /> |
+| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated initializes lifecycle.shutdownTime to CreationTimestamp+TTL<br />when shutdownTime is unset.<br />A nil lifecycle is initialized with the Delete policy. If lifecycle is non-nil<br />but shutdownTime is unset, shutdownPolicy is overwritten with Delete. An explicit<br />shutdownTime is never overwritten. Once initialized, later changes to<br />ttlSecondsAfterCreated do not update shutdownTime. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
 | `warmpool` _[WarmPoolPolicy](#warmpoolpolicy)_ | warmpool specifies the warm pool policy for sandbox adoption.<br />- "none": Do not use any warm pool, always create fresh sandboxes<br />- "default": Use default behavior, select from all matching warm pools (default)<br />- A warm pool name: Select only from the specified warm pool (e.g., "fast-pool", "secure-pool") | default | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns.<br />Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict. |  | Optional: \{\} <br /> |
@@ -690,6 +691,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `replicas` _integer_ | replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. |  | Minimum: 0 <br />Required: \{\} <br /> |
+| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated limits how long the SandboxWarmPool exists after creation.<br />When set, the controller deletes the SandboxWarmPool after the TTL expires.<br />When unset, the SandboxWarmPool is not automatically reaped based on its age. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox<br />Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant. |  | Required: \{\} <br /> |
 | `updateStrategy` _[SandboxWarmPoolUpdateStrategy](#sandboxwarmpoolupdatestrategy)_ | updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes |  | Optional: \{\} <br /> |
 
@@ -925,6 +927,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `warmPoolRef` _[SandboxWarmPoolRef](#sandboxwarmpoolref)_ | warmPoolRef targets the specific pre-warmed infrastructure pool to check out from. |  | Required: \{\} <br /> |
+| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated initializes lifecycle.shutdownTime to CreationTimestamp+TTL<br />when shutdownTime is unset.<br />A nil lifecycle is initialized with the Delete policy. If lifecycle is non-nil<br />but shutdownTime is unset, shutdownPolicy is overwritten with Delete. An explicit<br />shutdownTime is never overwritten. Once initialized, later changes to<br />ttlSecondsAfterCreated do not update shutdownTime. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `lifecycle` _[Lifecycle](#lifecycle)_ | lifecycle defines when and how the SandboxClaim should be shut down. |  | Optional: \{\} <br /> |
 | `additionalPodMetadata` _[PodMetadata](#podmetadata)_ | additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.<br />Label values are limited to 63 characters and must match Kubernetes label value patterns.<br />Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict. |  | Optional: \{\} <br /> |
 | `env` _[EnvVar](#envvar) array_ | env is a list of environment variables to inject into the sandbox.<br />Please note adding this field means the Sandbox will always be cold-started from the<br />template of the warmpool. |  | Optional: \{\} <br /> |
@@ -1074,6 +1077,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `replicas` _integer_ | replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated limits how long the SandboxWarmPool exists after creation.<br />When set, the controller deletes the SandboxWarmPool after the TTL expires.<br />When unset, the SandboxWarmPool is not automatically reaped based on its age. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox<br />Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant. |  | Required: \{\} <br /> |
 | `updateStrategy` _[SandboxWarmPoolUpdateStrategy](#sandboxwarmpoolupdatestrategy)_ | updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes |  | Optional: \{\} <br /> |
 

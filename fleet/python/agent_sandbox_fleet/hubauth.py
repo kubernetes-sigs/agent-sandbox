@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.request
 from typing import Any, Callable
@@ -165,13 +166,40 @@ def load_hub_configuration(
         "talking to a hub needs the kubernetes client; `pip install kubernetes`"
     ) from e
 
+  # Resolve the file before handing it to the client. With config_file=None
+  # load_kube_config falls back to $KUBECONFIG or ~/.kube/config, and in the
+  # fleet-member pod neither exists -- the failure surfaces as a bare
+  # ConfigException naming ~/.kube/config, which reads like a mounting
+  # mistake rather than a missing flag. Worse off-cluster: the default
+  # kubeconfig is usually the operator's MEMBER-cluster context, so the
+  # publisher would happily write ClusterProfiles into the wrong apiserver.
+  #
+  # This applies to gke-metadata too. That mode replaces the credentials, not
+  # the file: the address and CA bundle still come from here.
+  path = kubeconfig or os.environ.get("KUBECONFIG") or os.path.expanduser(
+      "~/.kube/config")
+  if not os.path.exists(path):
+    raise RuntimeError(
+        f"hub kubeconfig {path!r} does not exist. Pass --hub-kubeconfig (or "
+        f"set KUBECONFIG). Note that --hub-token-source=gke-metadata still "
+        f"needs this file -- it supplies the hub's address and CA bundle, "
+        f"and only the credentials in it are ignored."
+    )
+
   cfg = k8s_client.Configuration()
   # Loaded in both modes: even when the credentials are ignored, this is what
   # resolves the context, the server URL and the CA bundle (including writing
   # certificate-authority-data out to a temp file, which is fiddly to redo).
-  k8s_config.load_kube_config(
-      config_file=kubeconfig, context=context, client_configuration=cfg,
-  )
+  try:
+    k8s_config.load_kube_config(
+        config_file=path, context=context, client_configuration=cfg,
+    )
+  except Exception as e:
+    raise RuntimeError(
+        f"could not load hub kubeconfig {path!r}"
+        + (f" (context {context!r})" if context else "")
+        + f": {e}"
+    ) from e
 
   if token_source == TOKEN_SOURCE_KUBECONFIG:
     return cfg
@@ -182,29 +210,35 @@ def load_hub_configuration(
   # so this both installs the token and keeps it fresh; assigning api_key once
   # would work for an hour and then start 401ing.
   def _refresh(configuration: Any) -> None:
-    configuration.api_key["authorization"] = provider.token()
+    # Both keys, for the same reason the prefix is set under both: the lookup
+    # is by security-scheme name with the alias only as a fallback. Writing
+    # both from inside the hook -- rather than seeding 'BearerToken' once
+    # outside it -- is what keeps this safe. A static copy would win the
+    # lookup and pin the very first token forever, reintroducing the hourly
+    # 401 the hook exists to prevent.
+    token = provider.token()
+    configuration.api_key["authorization"] = token
+    configuration.api_key["BearerToken"] = token
 
   # THE PREFIX GOES UNDER TWO KEYS, AND BOTH ARE LOAD-BEARING.
   #
   # `configuration.api_key_prefix['authorization'] = 'Bearer'` is the idiom in
   # every example you will find, and on kubernetes>=36 it is not enough. The
-  # generated client now resolves credentials by SECURITY SCHEME name:
+  # generated client resolves credentials by SECURITY SCHEME name:
   #
   #     get_api_key_with_prefix('BearerToken', alias='authorization')
   #       key    = api_key.get('BearerToken', api_key.get('authorization'))
-  #       prefix = api_key_prefix.get('BearerToken')     # <- not the alias
+  #       prefix = api_key_prefix.get('BearerToken')     # <- no alias fallback
   #
-  # so the token is still found through the alias while the prefix, looked up
-  # under the scheme name only, silently is not. The header then goes out as a
-  # bare `ya29....` with no `Bearer `, and GKE answers 401 with the same body
-  # it uses for an anonymous request -- indistinguishable, from the client,
-  # from a Workload Identity or RBAC problem. Setting both keys works on old
-  # and new clients alike.
+  # The key still resolves through the alias -- that fallback is real, see
+  # configuration.py -- but the prefix, looked up under the scheme name only,
+  # silently does not. The header then goes out as a bare `ya29....` with no
+  # `Bearer `, and GKE answers 401 with the same body it uses for an anonymous
+  # request: indistinguishable, from the client, from a Workload Identity or
+  # RBAC problem.
   #
-  # Deliberately NOT mirroring api_key itself: the refresh hook writes only
-  # 'authorization', so a copy under 'BearerToken' would take precedence in
-  # the lookup above and pin the first token forever, reintroducing the hourly
-  # expiry failure the hook exists to prevent.
+  # Setting both keys works on old and new clients alike, and costs nothing if
+  # a future release drops the alias fallback on the key as well.
   cfg.api_key_prefix["authorization"] = "Bearer"
   cfg.api_key_prefix["BearerToken"] = "Bearer"
   cfg.refresh_api_key_hook = _refresh
@@ -235,10 +269,15 @@ def _assert_bearer_header(cfg: Any) -> None:
     )
   value = entry.get("value") or ""
   if not value.startswith("Bearer "):
+    # Length only. The value IS the credential, and this RuntimeError ends up
+    # in pod logs and bug reports; even a short slice of a live OAuth token
+    # does not belong there. The length is enough to tell "empty" from
+    # "present but unprefixed", which is the only distinction the operator
+    # needs to act on.
     raise RuntimeError(
         f"the hub Authorization header would be sent without its 'Bearer ' "
-        f"prefix ({len(value)} chars, starts {value[:8]!r}). GKE rejects this "
-        f"as 401 Unauthorized, which looks exactly like a Workload Identity "
+        f"prefix ({len(value)} chars; value redacted). GKE rejects this as "
+        f"401 Unauthorized, which looks exactly like a Workload Identity "
         f"failure and is not one. api_key_prefix is probably being looked up "
         f"under a key hubauth.py does not set."
     )

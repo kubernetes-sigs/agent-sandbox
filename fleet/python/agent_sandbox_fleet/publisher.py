@@ -100,6 +100,7 @@ class ClusterProfilePublisher:
       max_replicas: int | None = None,
       status_subresource: bool = True,
       version: str = CLUSTERPROFILE_VERSION,
+      request_timeout: float | tuple[float, float] | None = (5.0, 30.0),
   ):
     self.cluster_name = cluster_name
     self._api = api
@@ -108,6 +109,15 @@ class ClusterProfilePublisher:
     # either -- but they DO produce separate managedFields entries, so a
     # version flip can silently hand ownership to a phantom second manager.
     self._version = version
+    # (connect, read). The publisher runs on a timer inside the member pod,
+    # and the hub is the one endpoint in this system that is routinely
+    # unreachable -- separate VPC, private endpoint, no master-global-access.
+    # urllib3's default is no timeout at all, so an unreachable hub parks the
+    # publish thread until the OS gives up on the SYN, which is minutes. That
+    # thread is shared with capacity collection, so the member stops
+    # publishing to GCS too -- the hub takes down the path that does not
+    # depend on it.
+    self._request_timeout = request_timeout
     self._namespace = namespace
     self._kubeconfig = kubeconfig
     self._context = context
@@ -234,6 +244,8 @@ class ClusterProfilePublisher:
         body=body,
         field_manager=self._field_manager,
     )
+    if self._request_timeout is not None:
+      kwargs["_request_timeout"] = self._request_timeout
     if self._force:
       kwargs["force"] = True
 

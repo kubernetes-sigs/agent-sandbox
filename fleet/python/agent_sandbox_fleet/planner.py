@@ -304,9 +304,14 @@ def apply(
   assignments regardless — only the inventory source is pluggable.
   """
   paths = paths or Paths()
-  gcs.put_json(paths.spec, spec.model_dump())
   provider = provider or _inventory.GCSInventory(gcs, paths)
   reg = provider.load(spec.cluster_weights)
+  # plan() before put_json(spec): it raises NoClusterAvailableError and
+  # ValueError on its own, and writing the spec first left the bucket holding
+  # a new spec generation with no matching assignments.json. show-registry
+  # reads cluster_weights out of that spec, so the fleet would then be
+  # described by a plan that was never applied.
   assn = plan(spec, reg)
+  gcs.put_json(paths.spec, spec.model_dump())
   publish(gcs, assn, paths)
   return assn

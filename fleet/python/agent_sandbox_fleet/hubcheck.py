@@ -226,8 +226,11 @@ def main(argv: list[str] | None = None) -> int:
           "negotiation has changed.")
   _ok(f"owned by {args.field_manager}")
 
+  # Drop entries with no name: a None key reaches k.startswith() below and
+  # raises AttributeError, replacing the diagnostic verdict with a traceback.
   props = {q.get("name"): q.get("value")
-           for q in (after.get("status") or {}).get("properties") or []}
+           for q in (after.get("status") or {}).get("properties") or []
+           if q.get("name")}
   print()
   print(f"  {PROP_SANDBOX_CAPACITY} = {props.get(PROP_SANDBOX_CAPACITY)}")
   print(f"  {PROP_HEARTBEAT} = {props.get(PROP_HEARTBEAT)}")

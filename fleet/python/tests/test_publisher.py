@@ -285,3 +285,44 @@ def test_round_trip_preserves_unmeasured_claims_as_none():
   ]
   reg = ClusterProfileInventory(api=_ReadBackApi([applied])).load({})
   assert reg.clusters["a"].active_claims is None
+
+
+# --------------------------------------------------------------------------- #
+# The hub call has to be bounded.
+#
+# urllib3's default is no timeout at all. The hub is the one endpoint in this
+# system that is routinely unreachable -- separate VPC, private endpoint, no
+# --enable-master-global-access -- and an unreachable hub parked this thread
+# until the OS gave up on the SYN, minutes at a time. That same thread also
+# publishes to GCS, so the hub took down the path that does not depend on it.
+# --------------------------------------------------------------------------- #
+
+def test_publish_bounds_the_hub_call_by_default():
+  api = FakeApplyApi()
+  ClusterProfilePublisher("cluster-a", api=api).publish(_report())
+  connect, read = api.status_calls[0]["_request_timeout"]
+  assert connect > 0 and read > 0
+  assert connect <= 10, "a connect timeout this long is not a timeout"
+
+
+def test_the_request_timeout_is_configurable():
+  api = FakeApplyApi()
+  pub = ClusterProfilePublisher("cluster-a", api=api, request_timeout=3.0)
+  pub.publish(_report())
+  assert api.status_calls[0]["_request_timeout"] == 3.0
+
+
+def test_the_timeout_can_be_opted_out_of():
+  # None means "do not pass the kwarg", not "pass None" -- a client that does
+  # not understand _request_timeout would choke on the latter.
+  api = FakeApplyApi()
+  pub = ClusterProfilePublisher("cluster-a", api=api, request_timeout=None)
+  pub.publish(_report())
+  assert "_request_timeout" not in api.status_calls[0]
+
+
+def test_the_timeout_also_applies_to_the_non_subresource_path():
+  api = FakeApplyApi()
+  pub = ClusterProfilePublisher("cluster-a", api=api, status_subresource=False)
+  pub.publish(_report())
+  assert "_request_timeout" in api.object_calls[0]

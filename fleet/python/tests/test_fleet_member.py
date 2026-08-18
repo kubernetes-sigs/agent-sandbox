@@ -40,6 +40,7 @@ def _bare_member(**attrs) -> FleetMember:
   fm.hub_publisher = None
   fm._last_etag = ""
   fm._last_assignment = None
+  fm._retry_pending = False
   fm._stop = threading.Event()
   for k, v in attrs.items():
     setattr(fm, k, v)
@@ -196,3 +197,93 @@ def test_publish_clusterprofile_rejects_a_missing_kubeconfig(monkeypatch,
     fleet_member.main(["--publish-clusterprofile", "--hub-kubeconfig", missing])
   err = capsys.readouterr().err
   assert "does not exist" in err
+
+
+# --------------------------------------------------------------------------- #
+# A partially-applied pass must retry itself.
+#
+# _reconcile_once short-circuits on an unchanged etag. That is the right call
+# for a pass that succeeded, and a trap for one that did not: assignments.json
+# only changes when somebody runs `fleetctl apply`, so a cluster that skipped a
+# pool -- template not applied yet, ApiException out of _ensure_warmpool --
+# would serve the wrong pool set for as long as the plan held steady. Which,
+# for a stable fleet, is forever.
+# --------------------------------------------------------------------------- #
+
+class _RecordingMember:
+  """The _reconcile_once collaborators, scripted per pool name."""
+
+  def __init__(self, missing_templates=()):
+    self.missing = set(missing_templates)
+    self.ensured: list[str] = []
+
+  def install(self, fm):
+    fm._template_exists = lambda t: t not in self.missing
+    fm._ensure_warmpool = lambda gen, pool: self.ensured.append(pool.warmpool)
+    fm._list_managed_pool_names = lambda: []
+    return self
+
+
+def _one_pool_gcs(template="tpl-a"):
+  gcs = _FakeGCS()
+  gcs.obj = (
+      ('{"generation": 1, "clusters": {"test": {"pools": ['
+       '{"warmpool": "wp-a", "template": "%s", "replicas": 1}]}}}' % template
+       ).encode(),
+      "etag-1",
+  )
+  return gcs
+
+
+def test_a_skipped_pool_is_retried_on_the_next_tick():
+  gcs = _one_pool_gcs()
+  fm = _bare_member(gcs=gcs)
+  helper = _RecordingMember(missing_templates={"tpl-a"}).install(fm)
+
+  fm._reconcile_once()
+  assert helper.ensured == [], "template was missing, nothing should be applied"
+  assert fm._retry_pending is True
+
+  # Same etag, same bytes -- the only thing that changed is the operator
+  # applying the template. Nothing rewrites assignments.json for that.
+  helper.missing.clear()
+  fm._reconcile_once()
+  assert helper.ensured == ["wp-a"], (
+      "the unchanged etag suppressed the retry; this cluster is stuck serving "
+      "the wrong pool set until somebody re-runs fleetctl apply"
+  )
+
+
+def test_an_exception_mid_pass_leaves_the_retry_armed():
+  # Not just the tidy skip path: anything thrown between the guard and the end
+  # of the method has to count as "did not finish".
+  gcs = _one_pool_gcs()
+  fm = _bare_member(gcs=gcs)
+  helper = _RecordingMember().install(fm)
+
+  def boom():
+    raise RuntimeError("apiserver said no")
+
+  fm._list_managed_pool_names = boom
+  with pytest.raises(RuntimeError):
+    fm._reconcile_once()
+  assert fm._retry_pending is True
+
+  fm._list_managed_pool_names = lambda: []
+  fm._reconcile_once()
+  assert helper.ensured == ["wp-a", "wp-a"], "the failed pass was never retried"
+
+
+def test_a_clean_pass_does_not_re_reconcile_on_every_tick():
+  # The other half of the contract. Arming the retry unconditionally would
+  # turn the etag short-circuit into dead code and put a full pool sweep on
+  # the apiserver every reconcile_interval, on every cluster in the fleet.
+  gcs = _one_pool_gcs()
+  fm = _bare_member(gcs=gcs)
+  helper = _RecordingMember().install(fm)
+
+  fm._reconcile_once()
+  fm._reconcile_once()
+  fm._reconcile_once()
+  assert helper.ensured == ["wp-a"]
+  assert fm._retry_pending is False

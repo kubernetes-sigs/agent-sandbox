@@ -34,6 +34,10 @@ spec:
     - jsonPath: .spec.replicas
       name: Desired
       type: integer
+    - jsonPath: .spec.sandboxTemplateRef.name
+      name: Template
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -75,6 +79,10 @@ spec:
             type: object
           status:
             properties:
+              observedGeneration:
+                format: int64
+                minimum: 0
+                type: integer
               readyReplicas:
                 format: int32
                 type: integer

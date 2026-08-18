@@ -709,3 +709,57 @@ def test_apply_accepts_a_positive_loop_interval():
   args = cli.build_parser().parse_args(
       ["apply", "-f", "spec.yaml", "--loop", "--loop-interval", "0.5"])
   assert args.loop_interval == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# One bad capacity report must not take the planner down.
+#
+# These objects are written by N independently-deployed member pods. A rolling
+# upgrade mid-write, a truncated object, an older member schema -- any one of
+# them used to raise straight out of GCSInventory.load(), so `fleetctl apply`
+# could place nothing anywhere. The blast radius of one sick cluster has to be
+# that cluster.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("bad,reason", [
+    ({"warmpool_depth": 3}, "no cluster field"),
+    ({"cluster": None}, "null cluster"),
+    ({"cluster": ""}, "empty cluster"),
+    ({"cluster": "b", "warmpool_depth": "many"}, "unparseable int"),
+    ({"cluster": "b", "node_pressure_score": "high"}, "unparseable float"),
+    ({"cluster": "b", "active_claims": []}, "wrong type"),
+    (["not", "an", "object"], "JSON array, not an object"),
+    ("garbage", "JSON string, not an object"),
+])
+def test_one_malformed_report_does_not_sink_the_registry(bad, reason, caplog):
+  reg = GCSInventory(FakeGCS({
+      "a": {"cluster": "a", "warmpool_depth": 5, "warmpool_ready": 5,
+            "updated_at": _now_iso()},
+      "b": bad,
+  })).load({"a": 1.0, "b": 1.0})
+
+  assert reg.clusters["a"].warmpool_depth == 5, f"healthy peer lost: {reason}"
+  # b is still present -- _stale_placeholders puts it there -- but as a stale
+  # placeholder, which is exactly "visible in show-registry, ineligible for
+  # placement" rather than a half-populated cluster the planner would trust.
+  assert "b" in reg.clusters
+  assert reg.clusters["b"] not in reg.fresh()
+
+
+def test_a_rejected_report_contributes_no_partial_state(caplog):
+  # PlannerCluster is built in one expression, so a raise while evaluating any
+  # field means the assignment into reg.clusters never ran. A later refactor to
+  # field-by-field construction would break that, and the symptom would be a
+  # cluster the planner treats as measured on the strength of whichever fields
+  # happened to parse before the bad one. Pin the outcome.
+  caplog.set_level(logging.WARNING)
+  reg = GCSInventory(FakeGCS({
+      "b": {"cluster": "b", "warmpool_depth": 4, "claim_p90_ms": "soon",
+            "updated_at": _now_iso()},
+  })).load({"b": 1.0})
+
+  assert reg.clusters["b"].warmpool_depth == 0, (
+      "a field from the rejected report survived into the placeholder"
+  )
+  assert reg.clusters["b"] not in reg.fresh()
+  assert any("skipping capacity report" in r.message for r in caplog.records)

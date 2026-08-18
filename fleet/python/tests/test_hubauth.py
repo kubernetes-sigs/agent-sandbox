@@ -1,5 +1,16 @@
 # Copyright 2026 The Kubernetes Authors.
-# Licensed under the Apache License, Version 2.0.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Hub credential tests.
 
@@ -160,6 +171,14 @@ def _install_fake_kubernetes(monkeypatch, loaded=None, configuration=None):
   import sys
   import types
 
+  # load_hub_configuration now refuses a kubeconfig path that is not there,
+  # because the silent fallback to ~/.kube/config pointed the publisher at
+  # whatever cluster the operator last used. Everything below the client
+  # boundary is already a fake, so fake the stat too rather than materialising
+  # a file the fake loader never opens. The refusal itself is covered by
+  # test_a_missing_hub_kubeconfig_is_refused_by_name, which does NOT stub this.
+  monkeypatch.setattr(hubauth.os.path, "exists", lambda p: True)
+
   client_mod = types.ModuleType("kubernetes.client")
   client_mod.Configuration = configuration or FakeConfiguration
   config_mod = types.ModuleType("kubernetes.config")
@@ -267,9 +286,11 @@ def test_a_prefixless_header_is_caught_at_startup(monkeypatch):
 
 
 def test_refresh_survives_the_scheme_keyed_lookup(monkeypatch):
-  # api_key is deliberately NOT mirrored under 'BearerToken': that copy would
-  # win the lookup and pin the first token forever, which is the hourly-expiry
-  # bug the refresh hook exists to prevent.
+  # Both api_key entries are written, and both are written FROM INSIDE the
+  # refresh hook. That distinction is the whole point: a 'BearerToken' copy
+  # seeded once outside the hook would win the scheme-keyed lookup and pin the
+  # first token forever, which is the hourly-expiry bug the hook exists to
+  # prevent. Rotating the provider below proves the copy tracks it.
   _install_fake_kubernetes(monkeypatch, configuration=SchemeKeyedConfiguration)
   provider = MutableProvider("first")
   cfg = hubauth.load_hub_configuration(
@@ -278,7 +299,10 @@ def test_refresh_survives_the_scheme_keyed_lookup(monkeypatch):
   assert _header(cfg) == "Bearer first"
   provider.current = "second"
   assert _header(cfg) == "Bearer second"
-  assert "BearerToken" not in cfg.api_key
+  assert cfg.api_key["BearerToken"] == "second", (
+      "the scheme-keyed copy went stale; it is seeded outside the refresh "
+      "hook and now pins the startup token"
+  )
 
 
 def test_gke_metadata_still_loads_the_kubeconfig_for_server_and_ca(monkeypatch):
@@ -299,8 +323,78 @@ def test_refresh_hook_picks_up_a_rotated_token(monkeypatch):
   _install_fake_kubernetes(monkeypatch)
   provider = MutableProvider("first")
   cfg = hubauth.load_hub_configuration(
+      kubeconfig="/etc/fleet-hub/kubeconfig",
       token_source="gke-metadata", token_provider=provider)
   assert cfg.api_key["authorization"] == "first"
   provider.current = "second"
   cfg.refresh_api_key_hook(cfg)
   assert cfg.api_key["authorization"] == "second"
+  assert cfg.api_key["BearerToken"] == "second"
+
+
+def test_a_missing_hub_kubeconfig_is_refused_by_name(monkeypatch, tmp_path):
+  # The old behaviour was config_file=None -> load_kube_config falls back to
+  # $KUBECONFIG or ~/.kube/config. In the member pod that is a ConfigException
+  # naming a path nobody configured; off-cluster it is worse, because the
+  # default kubeconfig usually points at a MEMBER cluster and the publisher
+  # would write ClusterProfiles into the wrong apiserver.
+  #
+  # Note this test does not stub os.path.exists -- it is checking the stat.
+  _install_fake_kubernetes(monkeypatch)
+  monkeypatch.setattr(hubauth.os.path, "exists", lambda p: False)
+  missing = str(tmp_path / "nope.yaml")
+  with pytest.raises(RuntimeError, match="does not exist"):
+    hubauth.load_hub_configuration(kubeconfig=missing)
+
+
+def test_gke_metadata_also_requires_the_kubeconfig(monkeypatch):
+  # Easy to assume the metadata source is self-sufficient. It is not: it
+  # replaces the credentials only, and the address and CA still come from the
+  # file, so the same refusal has to apply.
+  _install_fake_kubernetes(monkeypatch)
+  monkeypatch.setattr(hubauth.os.path, "exists", lambda p: False)
+  with pytest.raises(RuntimeError, match="gke-metadata still"):
+    hubauth.load_hub_configuration(
+        kubeconfig="/etc/fleet-hub/kubeconfig",
+        token_source="gke-metadata", token_provider=StubProvider(["x"]))
+
+
+def test_a_broken_kubeconfig_names_the_file_and_context(monkeypatch):
+  # A raw yaml/ConfigException from deep in the client library does not say
+  # which file it was reading, and the member mounts exactly one.
+  _install_fake_kubernetes(monkeypatch)
+  import sys
+
+  def boom(config_file=None, context=None, client_configuration=None):
+    raise ValueError("invalid configuration: no configuration has been provided")
+
+  sys.modules["kubernetes.config"].load_kube_config = boom
+  with pytest.raises(RuntimeError, match=r"/etc/fleet-hub/kubeconfig.*'hub'"):
+    hubauth.load_hub_configuration(
+        kubeconfig="/etc/fleet-hub/kubeconfig", context="hub")
+
+
+def test_a_prefixless_header_error_does_not_leak_the_token(monkeypatch):
+  # This RuntimeError lands in pod logs and gets pasted into bug reports. The
+  # value it is complaining about IS the credential.
+  class NoPrefixConfiguration(FakeConfiguration):
+    def get_api_key_with_prefix(self, identifier, alias=None):
+      if self.refresh_api_key_hook is not None:
+        self.refresh_api_key_hook(self)
+      return self.api_key.get("authorization")
+
+  _install_fake_kubernetes(monkeypatch, configuration=NoPrefixConfiguration)
+  # Deliberately NOT shaped like a real access token. git-secrets scans for the
+  # GCP access-token prefix, and a token-shaped literal in the tree trips the
+  # pre-commit hook for everyone forever. Nothing here depends on the format --
+  # only on the string being long enough to have a distinctive 8-char head.
+  secret = "FAKE-TOKEN-do-not-match-a-real-prefix"
+  with pytest.raises(RuntimeError) as excinfo:
+    hubauth.load_hub_configuration(
+        kubeconfig="/etc/fleet-hub/kubeconfig",
+        token_source="gke-metadata", token_provider=StubProvider([secret]))
+  msg = str(excinfo.value)
+  assert secret not in msg
+  # Not even a prefix of it. The old message sliced value[:8].
+  assert secret[:8] not in msg
+  assert str(len(secret)) in msg, "the length is the actionable part, keep it"

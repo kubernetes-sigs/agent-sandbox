@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from agent_sandbox_fleet.placement import PlannerCluster, PlannerRegistry
 from agent_sandbox_fleet.planner import (
     Assignments,
@@ -302,3 +304,68 @@ def test_fresh_cluster_with_no_models_is_emptied_quietly(caplog):
     assn = plan(spec, reg)
   assert assn.clusters["b"].pools == []
   assert "DROPS any warm pools" not in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# apply() must not leave the bucket describing a plan that never happened.
+# --------------------------------------------------------------------------- #
+
+class _RecordingGCS:
+  """Records put_json in call order. Enough surface for planner.apply."""
+
+  def __init__(self):
+    self.puts: list[str] = []
+
+  @property
+  def bucket_name(self):
+    return "fake-bucket"
+
+  def put_json(self, path, obj):
+    self.puts.append(path)
+
+  def list_prefix(self, prefix):
+    return []
+
+  def get_json(self, path):
+    return None
+
+
+class _StaticProvider:
+  def __init__(self, registry):
+    self._registry = registry
+
+  def load(self, weights):
+    return self._registry
+
+
+def _one_model_spec():
+  return _spec(generation=9)
+
+
+def test_apply_does_not_persist_the_spec_when_planning_fails():
+  # plan() raises NoClusterAvailableError when no cluster is fresh. Writing
+  # spec.json first left the bucket holding generation 9 with assignments.json
+  # still on the previous generation -- and show-registry reads cluster_weights
+  # out of that spec, so the fleet was then described by a plan nobody applied.
+  from agent_sandbox_fleet import planner
+  from agent_sandbox_fleet.placement import NoClusterAvailableError, PlannerRegistry
+
+  gcs = _RecordingGCS()
+  with pytest.raises(NoClusterAvailableError):
+    planner.apply(gcs, _one_model_spec(), provider=_StaticProvider(PlannerRegistry()))
+  assert gcs.puts == [], "spec.json was written for a plan that never happened"
+
+
+def test_apply_writes_the_spec_once_planning_has_succeeded():
+  # The other half: on the happy path both objects still land, and the spec
+  # is not accidentally skipped by the reordering.
+  from agent_sandbox_fleet import planner
+  from agent_sandbox_fleet.objectstore import Paths
+  from agent_sandbox_fleet.placement import PlannerCluster, PlannerRegistry
+
+  reg = PlannerRegistry()
+  reg.clusters["a"] = PlannerCluster(name="a", report_age_s=0.0)
+  gcs = _RecordingGCS()
+  planner.apply(gcs, _one_model_spec(), provider=_StaticProvider(reg))
+  paths = Paths()
+  assert set(gcs.puts) == {paths.spec, paths.assignments}

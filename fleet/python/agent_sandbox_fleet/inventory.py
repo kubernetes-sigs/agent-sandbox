@@ -237,30 +237,52 @@ class GCSInventory:
         for n in self._gcs.list_prefix(self._paths.capacity_prefix)
     }
     now = _now()
-    for r in reports.values():
+    for path, r in reports.items():
       if r is None:
         continue
-      cluster = r["cluster"]
-      reg.clusters[cluster] = PlannerCluster(
-          name=cluster,
-          weight=weights.get(cluster, 1.0),
-          warmpool_depth=int(r.get("warmpool_depth", 0)),
-          warmpool_ready=int(r.get("warmpool_ready", 0)),
-          # Absent or null stays None — same rule as pressure below.
-          active_claims=(
-              None if r.get("active_claims") is None
-              else int(r["active_claims"])
-          ),
-          claim_p90_ms=float(r.get("claim_p90_ms", 0.0)),
-          # None (or absent) means the member could not measure pressure.
-          # Do NOT coerce to 0.0 — that reads as "idle" and CapacityAware
-          # would then prefer the cluster that failed to report.
-          node_pressure_score=(
-              None if r.get("node_pressure_score") is None
-              else float(r["node_pressure_score"])
-          ),
-          report_age_s=age_seconds(r.get("updated_at"), now),
-      )
+      # One member writing a bad report must not take the whole planner down.
+      # These objects come from N independently-deployed pods; a rolling
+      # upgrade mid-write, a truncated object, or an older member schema all
+      # land here. Skipping the report leaves the cluster to
+      # _stale_placeholders(), which is exactly the "present but unusable"
+      # state we want — ineligible for placement, still visible in
+      # show-registry — rather than an unplaceable fleet.
+      if not isinstance(r, dict):
+        logger.warning("skipping capacity report %s: not a JSON object", path)
+        continue
+      cluster = r.get("cluster")
+      if not isinstance(cluster, str) or not cluster:
+        logger.warning("skipping capacity report %s: no 'cluster' field", path)
+        continue
+      try:
+        reg.clusters[cluster] = PlannerCluster(
+            name=cluster,
+            weight=weights.get(cluster, 1.0),
+            warmpool_depth=int(r.get("warmpool_depth", 0)),
+            warmpool_ready=int(r.get("warmpool_ready", 0)),
+            # Absent or null stays None — same rule as pressure below.
+            active_claims=(
+                None if r.get("active_claims") is None
+                else int(r["active_claims"])
+            ),
+            claim_p90_ms=float(r.get("claim_p90_ms", 0.0)),
+            # None (or absent) means the member could not measure pressure.
+            # Do NOT coerce to 0.0 — that reads as "idle" and CapacityAware
+            # would then prefer the cluster that failed to report.
+            node_pressure_score=(
+                None if r.get("node_pressure_score") is None
+                else float(r["node_pressure_score"])
+            ),
+            report_age_s=age_seconds(r.get("updated_at"), now),
+        )
+      except (TypeError, ValueError) as exc:
+        # No cleanup needed: PlannerCluster is built in a single expression,
+        # so a raise while evaluating any field means the assignment into
+        # reg.clusters never ran. Keep it that way -- building the object
+        # field by field would let a rejected report leave partial state
+        # behind, which the planner would then treat as measured.
+        logger.warning("skipping capacity report %s for cluster %s: %s",
+                       path, cluster, exc)
     _stale_placeholders(reg, weights)
     _log_registry(reg, f"gcs://{self._gcs.bucket_name}/{self._paths.capacity_prefix}")
     return reg

@@ -38,6 +38,11 @@ def rewrite_image(
     repo: str = "",
     only_hosts: tuple[str, ...] | None = DOCKER_HOSTS,
 ) -> str:
+  if not registry:
+    # An empty registry with empty project/repo makes prefix "" and returns
+    # "/library/ubuntu:22.04" -- not a valid reference, and the failure only
+    # shows up much later as an ImagePullBackOff on the cluster.
+    raise ValueError("registry must be a non-empty host, e.g. 'gcr.io'")
   host, rest = _split_host(image)
   effective = host or "docker.io"
   if only_hosts is not None and effective not in only_hosts:

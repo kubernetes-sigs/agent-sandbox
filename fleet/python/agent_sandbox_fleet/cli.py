@@ -37,6 +37,7 @@ import time
 import yaml
 
 from . import inventory, planner
+from .argtypes import positive_float as _positive_float
 from .objectstore import GCS, Paths
 from .resolver import (
     ClusterResolver,
@@ -56,24 +57,6 @@ def _bucket_from(args) -> str:
     sys.exit("--bucket or $FLEET_BUCKET is required")
   return b
 
-
-def _positive_float(raw: str) -> float:
-  """argparse type for intervals. Rejects <= 0, nan and inf.
-
-  A non-positive --loop-interval makes the apply loop spin: the sleep
-  computes max(0.0, interval - elapsed), so every cycle sleeps 0 and the
-  planner re-plans and rewrites assignments.json as fast as GCS will answer.
-  nan fails the > 0 comparison here, which is the intent.
-  """
-  try:
-    val = float(raw)
-  except (ValueError, OverflowError):
-    # from None: the underlying ValueError is noise on a CLI arg error, and
-    # argparse prints the chain.
-    raise argparse.ArgumentTypeError(f"{raw!r} is not a number") from None
-  if not (val > 0) or val == float("inf"):
-    raise argparse.ArgumentTypeError(f"must be a positive number of seconds, got {raw!r}")
-  return val
 
 
 def _optional_bucket(args) -> str | None:
@@ -266,11 +249,21 @@ def cmd_route(args) -> int:
   """Print which cluster hosts the given template. Solves the "new engineer
   joins and wants to know which cluster to hit" onboarding question.
   """
-  bucket = _bucket_from(args)
-
   # Choose a context-naming function so we can print a ready-to-copy
   # `gcloud get-credentials` command. If --project + --location are set,
   # use GKE naming; otherwise fall back to kind naming.
+  #
+  # A half-specified pair is an error, not a fallback: dropping silently to
+  # ctx_naming=None just omits the `gcloud container clusters get-credentials`
+  # line from the output, which reads as "this fleet has no GKE naming" rather
+  # than "you forgot a flag".
+  if bool(args.project) != bool(args.location):
+    missing = "location" if args.project else "project"
+    print(f"--project and --location must be given together (missing "
+          f"--{missing})", file=sys.stderr)
+    return 2
+
+  bucket = _bucket_from(args)
   ctx_naming = None
   if args.project and args.location:
     ctx_naming = gke_context_naming(args.project, args.location)

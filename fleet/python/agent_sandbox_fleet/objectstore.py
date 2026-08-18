@@ -67,7 +67,11 @@ class GCS:
   def __init__(self, bucket: str):
     # Lazy import so the module is loadable without google-cloud-storage;
     # only actual GCS use requires the dep.
+    from google.api_core import exceptions as gexc
     from google.cloud import storage
+    # Bound here rather than imported at module scope so the lazy-import
+    # contract above still holds for Paths-only consumers.
+    self._gexc = gexc
     self._client = storage.Client()
     self._bucket_name = bucket
     self._bucket = self._client.bucket(bucket)
@@ -84,10 +88,15 @@ class GCS:
     )
 
   def get_json(self, path: str) -> Any | None:
+    # One request, not exists()-then-download: the two calls can observe
+    # different object versions, and the miss path costs an extra round trip
+    # on every poll.
     blob = self._bucket.blob(path)
-    if not blob.exists():
+    try:
+      raw = blob.download_as_bytes()
+    except self._gexc.NotFound:
       return None
-    return json.loads(blob.download_as_bytes().decode("utf-8"))
+    return json.loads(raw.decode("utf-8"))
 
   def put_bytes(self, path: str, data: bytes, content_type: str = "application/octet-stream") -> None:
     blob = self._bucket.blob(path)
@@ -107,11 +116,31 @@ class GCS:
 
     The fleet-member's reconciler uses this to skip re-processing an unchanged
     assignments.json (compares the returned etag to the one it stored last).
-    GCS generation numbers are used as opaque etag strings — no atomic
-    conditional-GET, just cheap change detection at the caller.
+    GCS generation numbers are used as opaque etag strings. The download is
+    pinned with `if_generation_match` so the bytes and the etag always come
+    from the same generation: get_blob() and download_as_bytes() are two
+    requests, and a write landing between them would otherwise hand the
+    caller new bytes tagged with the old generation (or vice versa). The
+    fleet-member caches that etag, so a mismatched pair means it sees an
+    unchanged etag on the next tick and never re-reads the update — a cluster
+    left serving a superseded plan indefinitely.
     """
-    blob = self._bucket.get_blob(path)
-    if blob is None:
-      raise FileNotFoundError(path)
-    data = blob.download_as_bytes()
-    return data, f"gen:{blob.generation}"
+    # Re-read on 412: the object was rewritten between the metadata request
+    # and the download, so there is a newer generation to fetch. Bounded,
+    # because a bucket being written faster than we can read it should
+    # surface as an error rather than spin.
+    for _ in range(3):
+      blob = self._bucket.get_blob(path)
+      if blob is None:
+        raise FileNotFoundError(path)
+      try:
+        data = blob.download_as_bytes(if_generation_match=blob.generation)
+      except self._gexc.NotFound:
+        raise FileNotFoundError(path) from None
+      except self._gexc.PreconditionFailed:
+        continue
+      return data, f"gen:{blob.generation}"
+    raise RuntimeError(
+        f"{path} changed generation on every read attempt; the writer is "
+        "outrunning the reader"
+    )

@@ -59,6 +59,7 @@ from kubernetes.client.exceptions import ApiException
 # because fleet-member cannot run without it.
 from k8s_agent_sandbox import SandboxClient
 
+from .argtypes import positive_float
 from .objectstore import GCS, Paths
 
 log = logging.getLogger("agent_sandbox_fleet.fleet_member")
@@ -194,6 +195,9 @@ class FleetMember:
         # State tracked between reconciles.
         self._last_etag = ""
         self._last_assignment: Assignments | None = None
+        # Armed whenever a reconcile pass does not fully apply, so the etag
+        # short-circuit below does not strand a half-reconciled cluster.
+        self._retry_pending = False
         self._stop = threading.Event()
 
     # -- Lifecycle -----------------------------------------------------------
@@ -240,8 +244,21 @@ class FleetMember:
 
     def _reconcile_once(self) -> None:
         assignments, changed = self._fetch_assignments()
-        if not changed and self._last_assignment is not None:
+        # Re-run when the object changed, on the very first pass, or when the
+        # previous pass did not fully apply. Without that last clause a pass
+        # that fails partway -- a missing SandboxTemplate, an ApiException out
+        # of _list_managed_pool_names -- leaves the cluster half-reconciled
+        # and the stable etag then suppresses every retry until somebody
+        # rewrites assignments.json. At fleet scale that is a cluster silently
+        # serving the wrong pool set for as long as the plan holds steady.
+        if (not changed and self._last_assignment is not None
+                and not self._retry_pending):
             return
+
+        # Assume failure. Cleared only after every pool has been applied and
+        # every orphan deleted, so an exception anywhere between here and the
+        # end of the method leaves the retry armed.
+        self._retry_pending = True
         self._last_assignment = assignments
 
         local = assignments.clusters.get(self.cluster_name, ClusterAssignment())
@@ -282,6 +299,11 @@ class FleetMember:
                 except ApiException as e:
                     if e.status != 404:
                         log.warning("delete warmpool %s: %s", existing_name, e.reason)
+
+        # Skipped pools are a retryable condition, not a terminal one: the
+        # usual cause is a SandboxTemplate the operator has not applied yet,
+        # and once they do the next tick should pick it up on its own.
+        self._retry_pending = skipped > 0
 
         log.info(
             "assignment applied generation=%d pools_applied=%d skipped=%d",
@@ -644,8 +666,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="GCS bucket serving as the fleet hub")
     p.add_argument("--namespace", default=os.environ.get("NAMESPACE", "multi-cluster-fleet"),
                    help="Namespace where fleet-managed CRs live")
-    p.add_argument("--reconcile-interval", type=float, default=30.0)
-    p.add_argument("--capacity-interval", type=float, default=30.0)
+    # positive_float, not float: 0 or a negative turns the loop into a spin
+    # that hammers GCS and the apiserver with no delay between passes, and
+    # this file already documents apiserver concurrency as a real hazard at
+    # density.
+    p.add_argument("--reconcile-interval", type=positive_float, default=30.0)
+    p.add_argument("--capacity-interval", type=positive_float, default=30.0)
     p.add_argument(
         "--capacity-detail", choices=("full", "light"), default="full",
         help="full: also report active_claims + node_pressure_score, which "

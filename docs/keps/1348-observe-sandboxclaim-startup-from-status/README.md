@@ -179,11 +179,19 @@ The webhook rejects undecodable carriers and startup status with
 history. The proposal adds no validating admission policy and keeps the optional admission webhook's
 `failurePolicy: Ignore`.
 
-Conversion preserves populated startup fields when a valid carrier is present. For a v1alpha1
-`/status` update, the status strategy copies metadata from the old v1alpha1 representation,
-including the carrier returned by conversion. A main-resource read-modify-write request depends on
-the client retaining the carrier. Deleting or replacing the carrier falls outside the preservation
-guarantee.
+The v1beta1 write-once CEL rules do not apply to v1alpha1 requests, which the API server validates
+against the v1alpha1 schema. Preservation therefore depends on the write path:
+
+- A v1alpha1 main-resource read-modify-write preserves `status.startup` only if the request retains
+  the carrier. The main-resource update strategy restores the old v1alpha1 status but does not
+  restore annotations from the old object. Because v1alpha1 does not expose `status.startup`, a
+  request without the carrier cannot restore the stored timestamps when the API server converts it
+  to v1beta1. Such writes are outside the preservation guarantee.
+- A v1alpha1 `/status` update preserves `status.startup` even if the request omits the carrier. The
+  status strategy copies the old v1alpha1 object, including its metadata, then replaces its status
+  with the submitted status. The storage decoder has already converted the old object from v1beta1
+  to v1alpha1, so its metadata contains the refreshed carrier. The subsequent
+  v1alpha1-to-v1beta1 conversion restores `status.startup` from that carrier.
 
 The carrier is not an authorization or integrity boundary, and the conversion webhook does not
 authenticate its contents. The project accepts this because it uses startup status only for
@@ -209,7 +217,7 @@ removal. Parent and root rules reject removal of `status.startup` or `status`.
 
 For main-resource updates, the API server restores stored status before CEL validation, so omitting
 status does not remove it. The v1beta1 root rule still runs on every update, including spec-only
-updates. v1alpha1 requests use the v1alpha1 schema and rely on the carrier for preservation.
+updates.
 
 The generated schema must stay within the CEL estimated cost limits. A pre-release
 validator test must record the aggregate runtime cost for both terminal states and cover spec-only
@@ -485,10 +493,10 @@ v1beta1 object payload.
   v1beta1, microsecond-precision round trips, and absence semantics. For v1beta1 `/status` requests,
   the API server accepts initial writes and unrelated status updates, but rejects changes or removal
   of persisted timestamps, removal of parent objects, `firstReadyTimeUnavailable=false`, and both
-  terminal fields together. It accepts v1beta1 main-resource updates that omit status because the
-  status strategy restores the stored value before validation. CRD generation must pass CEL
-  estimated-cost validation. A validator test records the aggregate runtime cost for both terminal
-  states.
+  terminal fields together. It accepts v1beta1 main-resource updates that omit `status` because the
+  main-resource update strategy restores the stored `status` before validation. CRD generation must
+  pass CEL estimated-cost validation. A validator test records the aggregate runtime cost for both
+  terminal states.
 - **Conversion:** Unit tests cover carrier payloads with and without `status.startup` and repeated
   round trips. They verify that v1beta1-to-v1alpha1 conversion returns a refreshed carrier,
   v1alpha1-to-v1beta1 conversion restores startup status and the current v1alpha1-only state, and
@@ -496,13 +504,13 @@ v1beta1 object payload.
   extended payload as a v1alpha1 SandboxClaim and confirms that code which ignores unknown JSON
   fields still accepts it.
 
-  Envtest uses the v1alpha1 typed client for GET-and-Update and GET-and-UpdateStatus flows. A final
-  v1beta1 GET returns the original startup values when the carrier is preserved. A separate
-  UpdateStatus request omits the carrier and verifies that the status strategy retains the stored
-  startup fields. Main-resource Update tests delete and replace the carrier. Deletion and a
-  replacement that passes conversion validation are accepted because no validating admission
-  policy protects the carrier; both remain outside the preservation guarantee. Malformed JSON or
-  startup status that violates the conversion invariants returns a conversion error.
+  Envtest uses the v1alpha1 typed client for `Update` and `UpdateStatus`. A
+  v1beta1 GET after each write verifies that `Update` preserves
+  `status.startup` only when the request retains a valid carrier.
+  `UpdateStatus` preserves it even when the request omits the carrier. Removing
+  the carrier from an `Update` drops `status.startup`; a valid replacement
+  changes the stored startup values. Malformed JSON or startup values that
+  violate the conversion invariants return a conversion error.
 - **Controller and migration:** Unit tests and envtest verify that cold and warm Claims persist
   startup timestamps through normal status updates without observability metadata PATCHes. Legacy
   Claims migrate lazily and idempotently without inventing timestamps or replaying completed

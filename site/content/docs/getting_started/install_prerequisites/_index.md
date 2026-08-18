@@ -38,11 +38,11 @@ description: >
    # To install the extensions components:
    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 
-   # Wait until all pods are running:
+   # Wait until all agent-sandbox-controller pods are running:
    kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=90s
    ```
 
-3. Before using the client, you must deploy the `sandbox-router`. Follow these steps::
+3. Before using the client, you must deploy the `sandbox-router`. Follow these steps:
 
    > [!WARNING]
    > The command below disables router authentication. Use only for local testing.
@@ -50,7 +50,7 @@ description: >
    ```sh
    curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml | sed 's|${ROUTER_IMAGE}|us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router:latest-main|g' | sed '/ALLOW_UNAUTHENTICATED_ROUTER/{n;s/value: "false"/value: "true"/}' | kubectl -n agent-sandbox-system apply -f -
 
-   # Wait until all router pods are running: 
+   # Wait until all router pods are running:
    kubectl -n agent-sandbox-system rollout status deployment/sandbox-router-deployment --timeout=90s
    ```
 

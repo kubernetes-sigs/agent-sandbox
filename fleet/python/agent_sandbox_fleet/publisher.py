@@ -28,8 +28,8 @@ belong to the cluster manager. A member asserting its own control plane is
 healthy is worth nothing anyway — a partitioned member would happily keep
 claiming it. We publish a heartbeat instead and let the reader decide.
 
-THREE THINGS THAT WILL BITE YOU
--------------------------------
+NON-OBVIOUS BEHAVIOR OF THE PYTHON SSA PATH
+-------------------------------------------
 1. **Content type.** The Python client offers both `merge-patch+json` and
    `apply-patch+yaml` and picks the FIRST one, so a plain
    `patch_namespaced_custom_object_status(..., field_manager=...)` is a
@@ -49,10 +49,8 @@ THREE THINGS THAT WILL BITE YOU
    `deploy/`: it is preserve-unknown-fields, therefore atomic, and will
    cheerfully pass a test that the real hub would fail.
 
-3. **Conflicts are not forced by default.** If another manager already owns a
-   field we apply, the apiserver returns 409 and we surface it. `force=True`
-   silently steals ownership, which is occasionally what you want and never
-   what you want by accident.
+3. **Conflicts surface as 409 rather than being forced.** See `force` in
+   `__init__`.
 """
 
 from __future__ import annotations
@@ -123,6 +121,11 @@ class ClusterProfilePublisher:
         self._context = context
         self._token_source = token_source
         self._field_manager = field_manager
+        # Opt-in, and per publisher rather than a retry the code performs on its
+        # own. When another manager already owns a field we apply, the apiserver
+        # returns 409; that propagates. force=True takes the field instead, which
+        # is occasionally what you want and never what you want by accident -- so
+        # the caller has to say so before the write, not after seeing the error.
         self._force = force
         # A member cannot infer how many sandboxes its cluster can hold, so the
         # operator supplies it. This is what lets the planner derive weights with

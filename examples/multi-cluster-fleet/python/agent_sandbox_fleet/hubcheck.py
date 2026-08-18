@@ -22,7 +22,7 @@ WHY A SEPARATE TOOL
 Every failure mode in this path is quiet.
 
 * The member wraps publishing in try/except so a broken hub never takes down
-  the GCS path -- correct behaviour, and it means a misconfiguration shows up
+  the GCS path -- correct behavior, and it means a misconfiguration shows up
   as *nothing happening*.
 * A merge-patch accepts `field_manager` and establishes no ownership at all.
   The data lands. The object looks right. Two managers then silently trample

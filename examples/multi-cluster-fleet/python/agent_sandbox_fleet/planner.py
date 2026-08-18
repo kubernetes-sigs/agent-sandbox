@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import budget, inventory as _inventory, placement, sizing
 from .inventory import InventoryProvider
@@ -69,6 +70,18 @@ class FleetSpec(BaseModel):
   # scored placement entirely. Kills the CapacityAware ping-pong that happens
   # when models > clusters and extras oscillate on re-apply.
   min_clusters: int = Field(ge=0, default=0)
+
+  @field_validator("cluster_weights")
+  @classmethod
+  def _weights_finite(cls, v: dict[str, float]) -> dict[str, float]:
+    """Reject nan/inf/negative at spec load, where the error can name the
+    file. Without this the failure surfaces from inside hamilton_split as an
+    OverflowError with no indication of which cluster is at fault.
+    """
+    bad = {k: w for k, w in v.items() if not math.isfinite(w) or w < 0}
+    if bad:
+      raise ValueError(f"cluster_weights must be finite and >= 0; got {bad}")
+    return v
 
 
 class AssignmentPool(BaseModel):
@@ -226,9 +239,42 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
       ))
     clusters[cname] = ClusterAssignment(pools=pools)
 
-  # Ensure every registry cluster has an entry (empty pools = "drop everything")
+    # max_concurrent is a TARGET, not a hard cap, and the gap is the min-1
+    # floor in sizing.compute_replicas: every placed pool gets at least one
+    # replica, because a template assigned 0 replicas can only be served cold
+    # and the assignment is then pointless. When a cluster holds more models
+    # than its budget slice, the floor wins and the slice is exceeded. Say so
+    # rather than quietly overshooting an operator's stated ceiling.
+    planned = sum(p.replicas for p in pools)
+    if planned > mc:
+      logger.warning(
+          "cluster %s: %d replicas exceeds its budget slice of %d — %d pools "
+          "at the 1-replica floor. Raise max_concurrent (%d) or place fewer "
+          "models per cluster (min_clusters) to stay inside the budget.",
+          cname, planned, mc, len(pools), spec.max_concurrent,
+      )
+
+  # Ensure every registry cluster has an entry. Empty pools means "drop
+  # everything", and the fleet-member treats absent identically to empty, so
+  # this is also how a drain spec works.
+  #
+  # NOTE the sharp edge: `registry.clusters` includes STALE clusters, so a
+  # cluster whose capacity report went silent is assigned empty and tears its
+  # pools down as soon as its member reads the file. That is intended when the
+  # cluster is genuinely gone, but the trigger is a missing capacity report,
+  # not a missing member — a cluster whose reconcile loop is perfectly healthy
+  # and whose publish path is not will drop every warm pool it holds. Keeping
+  # the behavior (a drain has to be able to empty a cluster that is not
+  # reporting) but logging it, since the alternative is a silent teardown.
   for cname in registry.clusters:
-    clusters.setdefault(cname, ClusterAssignment(pools=[]))
+    if cname not in clusters:
+      if registry.clusters[cname].report_age_s > registry.max_report_age_s:
+        logger.warning(
+            "cluster %s has no fresh capacity report (age %.0fs) — assigning "
+            "empty, which DROPS any warm pools it currently holds",
+            cname, registry.clusters[cname].report_age_s,
+        )
+      clusters[cname] = ClusterAssignment(pools=[])
 
   now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
   return Assignments(generation=spec.generation, updated_at=now_iso, clusters=clusters)

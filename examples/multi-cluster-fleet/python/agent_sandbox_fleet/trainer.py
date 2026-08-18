@@ -42,12 +42,19 @@ from .objectstore import GCS, Paths
 
 logger = logging.getLogger("agent_sandbox_fleet.trainer")
 
-_SIZES = {"B": 1, "KiB": 1024, "MiB": 1024 * 1024, "GiB": 1024 * 1024 * 1024}
+# Longest suffix first: "MiB" must be tested before "B", or "1MiB" matches "B"
+# and float("1Mi") raises.
+_SIZES = (
+    ("GiB", 1024 * 1024 * 1024),
+    ("MiB", 1024 * 1024),
+    ("KiB", 1024),
+    ("B", 1),
+)
 
 
 def parse_size(s: str) -> int:
   s = s.strip()
-  for suf, mult in _SIZES.items():
+  for suf, mult in _SIZES:
     if s.endswith(suf):
       return int(float(s[: -len(suf)]) * mult)
   return int(s)

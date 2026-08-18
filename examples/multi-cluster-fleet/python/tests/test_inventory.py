@@ -26,6 +26,8 @@ import json
 import logging
 from dataclasses import asdict
 
+import pytest
+
 from agent_sandbox_fleet import inventory
 from agent_sandbox_fleet.inventory import (
     ClusterProfileInventory,
@@ -208,7 +210,7 @@ def test_stale_heartbeat_is_excluded():
 def test_missing_heartbeat_falls_back_to_condition_by_default():
   # The documented gap: ControlPlaneHealthy=True with an hour-old
   # lastTransitionTime still reads as live, because a condition's timestamp
-  # does not refresh. Default behaviour trusts it.
+  # does not refresh. Default behavior trusts it.
   profile = _healthy_profile("a")
   profile["status"]["properties"] = [
       p for p in profile["status"]["properties"]
@@ -308,7 +310,7 @@ def test_no_capacity_warning_when_the_operator_pinned_the_weight(caplog):
 
 
 # --------------------------------------------------------------------------- #
-# Shared behaviour across providers
+# Shared behavior across providers
 # --------------------------------------------------------------------------- #
 
 def test_named_but_missing_cluster_gets_stale_placeholder():
@@ -627,3 +629,83 @@ def test_age_seconds_handles_garbage_and_naive_timestamps():
   naive = (_dt.datetime.now(_dt.timezone.utc)
            .replace(tzinfo=None) - _dt.timedelta(seconds=30)).isoformat()
   assert 25 <= age_seconds(naive) <= 35
+
+
+# --------------------------------------------------------------------------- #
+# Untrusted ClusterProfile properties.
+#
+# Properties are free-form strings written by whatever publishes the profile.
+# float() accepts "inf" and "nan": inf wins every least-loaded comparison, nan
+# loses every one of them, and int(float("inf")) raises OverflowError rather
+# than the ValueError the obvious `except` catches — so one malformed profile
+# could take down the whole plan.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("bad", ["inf", "-inf", "Infinity", "nan", "NaN"])
+def test_non_finite_int_property_is_ignored_not_fatal(bad):
+  api = FakeCustomObjectsApi([
+      _healthy_profile("a", **{inventory.PROP_WARMPOOL_DEPTH: bad})])
+  reg = ClusterProfileInventory(api=api).load({})
+  # Degrades to the "unset" default; must not raise.
+  assert reg.clusters["a"].warmpool_depth == 0
+
+
+@pytest.mark.parametrize("bad", ["inf", "-inf", "nan"])
+def test_non_finite_float_property_is_ignored_not_fatal(bad):
+  api = FakeCustomObjectsApi([
+      _healthy_profile("a", **{inventory.PROP_NODE_PRESSURE: bad})])
+  reg = ClusterProfileInventory(api=api).load({})
+  # None, not inf/nan: unmeasured, so CapacityAware stays pressure-blind
+  # rather than ranking on a poisoned score.
+  assert reg.clusters["a"].node_pressure_score is None
+
+
+def test_garbage_property_is_still_ignored():
+  api = FakeCustomObjectsApi([
+      _healthy_profile("a", **{inventory.PROP_ACTIVE_CLAIMS: "lots"})])
+  reg = ClusterProfileInventory(api=api).load({})
+  assert reg.clusters["a"].active_claims is None
+
+
+def test_absent_claims_property_reads_as_unmeasured_not_zero():
+  # A member running --capacity-detail=light omits the property entirely.
+  profile = _healthy_profile("a")
+  profile["status"]["properties"] = [
+      p for p in profile["status"]["properties"]
+      if p["name"] != inventory.PROP_ACTIVE_CLAIMS
+  ]
+  reg = ClusterProfileInventory(api=FakeCustomObjectsApi([profile])).load({})
+  assert reg.clusters["a"].active_claims is None
+
+
+def test_gcs_report_with_null_claims_reads_as_unmeasured():
+  gcs = FakeGCS({"a": {
+      "cluster": "a",
+      "updated_at": _now_iso(5),
+      "warmpool_depth": 10,
+      "warmpool_ready": 10,
+      "active_claims": None,
+      "node_pressure_score": None,
+  }})
+  reg = GCSInventory(gcs).load({})
+  assert reg.clusters["a"].active_claims is None
+  assert reg.clusters["a"].node_pressure_score is None
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "-0.5", "nan", "inf", "abc"])
+def test_apply_rejects_a_non_positive_loop_interval(bad):
+  # The loop sleeps max(0.0, interval - elapsed), so a non-positive interval
+  # spins: it re-plans and rewrites assignments.json as fast as GCS answers.
+  from agent_sandbox_fleet import cli
+
+  with pytest.raises(SystemExit):
+    cli.build_parser().parse_args(
+        ["apply", "-f", "spec.yaml", "--loop", "--loop-interval", bad])
+
+
+def test_apply_accepts_a_positive_loop_interval():
+  from agent_sandbox_fleet import cli
+
+  args = cli.build_parser().parse_args(
+      ["apply", "-f", "spec.yaml", "--loop", "--loop-interval", "0.5"])
+  assert args.loop_interval == 0.5

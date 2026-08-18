@@ -106,11 +106,20 @@ def test_capacity_maps_onto_properties():
 
 def test_unmeasured_pressure_is_omitted_not_zeroed():
   # Publishing 0.0 would read as "idle" and CapacityAware would PREFER the
-  # cluster whose pressure calc blew up. Observed on the M2.5 fleet at 200k
+  # cluster whose pressure calc blew up. Observed on a density fleet at 200k
   # pods, where the calc failed every cycle. Omission keeps it None on read.
   pub = ClusterProfilePublisher("cluster-a", api=FakeApplyApi())
   p = _props(pub.build_body(_report(node_pressure_score=None)))
   assert inventory.PROP_NODE_PRESSURE not in p
+
+
+def test_unmeasured_claims_are_omitted_not_zeroed():
+  # Exactly the pressure rule above, applied to active_claims. 0 in-flight
+  # claims is the most attractive value LeastLoaded can see, so a member in
+  # `light` mode (or one whose SDK list failed) must not publish it.
+  pub = ClusterProfilePublisher("cluster-a", api=FakeApplyApi())
+  p = _props(pub.build_body(_report(active_claims=None)))
+  assert inventory.PROP_ACTIVE_CLAIMS not in p
 
 
 def test_capacity_and_max_replicas_are_published_when_configured():
@@ -265,3 +274,14 @@ def test_round_trip_preserves_unmeasured_pressure_as_none():
   ]
   reg = ClusterProfileInventory(api=_ReadBackApi([applied])).load({})
   assert reg.clusters["a"].node_pressure_score is None
+
+
+def test_round_trip_preserves_unmeasured_claims_as_none():
+  pub = ClusterProfilePublisher("a", api=FakeApplyApi())
+  applied = pub.publish(_report(active_claims=None))
+  applied["status"]["conditions"] = [
+      {"type": inventory.COND_CONTROL_PLANE_HEALTHY, "status": "True",
+       "lastTransitionTime": _now_iso(60)},
+  ]
+  reg = ClusterProfileInventory(api=_ReadBackApi([applied])).load({})
+  assert reg.clusters["a"].active_claims is None

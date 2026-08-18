@@ -62,3 +62,33 @@ def test_single_cluster_shortcut():
 
 def test_empty_weights():
   assert hamilton_split(50, {}) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Untrusted weights. Values reach hamilton_split from a user-authored fleet
+# spec and from ClusterProfile properties, so every one of these used to fail
+# somewhere unhelpful: all-zero divided by zero, inf/nan reached math.floor
+# and raised from inside the sort key, negatives handed out negative budgets.
+# --------------------------------------------------------------------------- #
+
+def test_all_zero_weights_splits_evenly_instead_of_dividing_by_zero():
+  got = hamilton_split(10, {"a": 0.0, "b": 0.0, "c": 0.0})
+  assert sum(got.values()) == 10
+  assert sorted(got.values()) == [3, 3, 4]
+
+
+@pytest.mark.parametrize("bad", [
+    float("inf"),
+    float("-inf"),
+    float("nan"),
+    -1.0,
+])
+def test_rejects_non_finite_and_negative_weights(bad):
+  with pytest.raises(ValueError, match="finite"):
+    hamilton_split(10, {"a": 1.0, "b": bad})
+
+
+def test_single_cluster_shortcut_still_validates():
+  # The len==1 fast path must not skip the check.
+  with pytest.raises(ValueError, match="finite"):
+    hamilton_split(10, {"only": float("nan")})

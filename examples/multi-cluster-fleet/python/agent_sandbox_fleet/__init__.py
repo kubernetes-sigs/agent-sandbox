@@ -25,10 +25,8 @@ Two ways to consume this package:
   fleet layer pick the cluster + swap kubeconfig context under the hood.
 """
 
-__version__ = "0.0.1"
-
 # Client-side facade — the public API a workload consumer imports.
-from .resolver import (  # noqa: E402  (module-level re-exports)
+from .resolver import (
     AssignmentsMissingError,
     ClusterResolver,
     ClusterUnavailableError,
@@ -41,9 +39,9 @@ from .resolver import (  # noqa: E402  (module-level re-exports)
     resolve_cluster,
 )
 
+__version__ = "0.0.1"
+
 __all__ = [
-    "__version__",
-    # Client-side
     "AssignmentsMissingError",
     "ClusterResolver",
     "ClusterUnavailableError",
@@ -51,6 +49,7 @@ __all__ = [
     "ResolvedCluster",
     "ResolverError",
     "TemplateNotAssignedError",
+    "__version__",
     "gke_context_naming",
     "kind_context_naming",
     "resolve_cluster",

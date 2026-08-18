@@ -187,6 +187,13 @@ Structure above under "Placement cycle" step 6.
 }
 ```
 
+`active_claims` and `node_pressure_score` are `null` when the member could not
+measure them — `--capacity-detail=light`, or the underlying list failed. That
+is deliberately not `0`: both fields make a cluster look *more* attractive as
+they approach zero, so a member that publishes `0` on failure would pull
+placement toward the cluster least able to serve it. Readers must treat `null`
+as unmeasured and rank it last, not as idle.
+
 ### `weights/manifest.json` (written by trainer)
 
 ```json
@@ -273,7 +280,7 @@ type WorkloadKind interface {
 Two impls would exist:
 
 - **`SandboxKind`** — reconciles `SandboxWarmPool` + `SandboxTemplate`, reads
-  `.status.replicas` + `.status.readyReplicas`. This is the behaviour the
+  `.status.replicas` + `.status.readyReplicas`. This is the behavior the
   Python fleet-member implements inline today.
 - **`SubstrateKind`** — reconciles `WorkerPool` + `ActorTemplate`. Status shape
   may differ slightly; the interface method lets substrate override.

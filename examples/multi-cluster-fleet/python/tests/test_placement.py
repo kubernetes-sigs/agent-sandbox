@@ -112,3 +112,40 @@ def test_registry_lookup_by_name():
   assert isinstance(get_placement("round-robin"), RoundRobin)
   with pytest.raises(ValueError):
     get_placement("nonsense")
+
+
+# --------------------------------------------------------------------------- #
+# active_claims=None == NOT MEASURED. Same sentinel discipline as
+# node_pressure_score: `light` capacity mode and a failed SDK list both leave
+# the field unmeasured, and 0 is the most attractive value LeastLoaded can
+# see, so an unmeasured cluster must not win the tiebreak.
+# --------------------------------------------------------------------------- #
+
+def test_least_loaded_does_not_prefer_unmeasured_over_measured():
+  reg = _reg(
+      PlannerCluster(name="broken", active_claims=None, report_age_s=1),
+      PlannerCluster(name="busy", active_claims=500, report_age_s=1),
+  )
+  # Treating None as 0 would pick "broken" — the cluster we know least about.
+  assert LeastLoaded().select("img", reg).name == "busy"
+
+
+def test_least_loaded_degrades_to_active_replicas_when_none_measured():
+  # What --capacity-detail=light advertises: nothing measured anywhere, so
+  # the first key ties across the board and active_replicas decides.
+  reg = _reg(
+      PlannerCluster(name="a", active_claims=None, warmpool_depth=9,
+                     report_age_s=1),
+      PlannerCluster(name="b", active_claims=None, warmpool_depth=1,
+                     report_age_s=1),
+  )
+  assert LeastLoaded().select("img", reg).name == "b"
+
+
+def test_least_loaded_still_ranks_measured_clusters_normally():
+  reg = _reg(
+      PlannerCluster(name="a", active_claims=10, report_age_s=1),
+      PlannerCluster(name="b", active_claims=2, report_age_s=1),
+      PlannerCluster(name="c", active_claims=None, report_age_s=1),
+  )
+  assert LeastLoaded().select("img", reg).name == "b"

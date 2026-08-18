@@ -521,9 +521,41 @@ def test_delete_reuses_the_cached_client_without_racing_the_dict():
 def test_delete_with_explicit_cluster_builds_via_resolver_naming():
   # No create first, so nothing is cached and the client must be built from
   # the resolver's context_naming.
+  #
+  # Deliberately NOT built with _fleet_client: that helper hands the resolver
+  # and the facade the same `lambda c: f"ctx-{c}"`, and the injected factory
+  # takes no arguments, so the resolved context never reaches the test. With
+  # both mappers identical and the context discarded, the assertions below
+  # would hold even if delete_sandbox never consulted the resolver at all --
+  # which is precisely the behavior this test exists to pin.
+  #
+  # So: give the resolver its own recording mapper, hand the facade a
+  # different one, and assert on what the resolver's was asked for.
   gcs = _three_cluster_gcs()
+  asked: list[str] = []
+
+  def resolver_naming(cluster: str) -> str:
+    asked.append(cluster)
+    return f"resolver-ctx-{cluster}"
+
+  resolver = ClusterResolver("test", gcs=gcs, context_naming=resolver_naming)
   built: list[FakeSDKClient] = []
-  fc = _fleet_client(gcs, built)
+
+  def factory():
+    fake = FakeSDKClient(f"c{len(built)}")
+    built.append(fake)
+    return fake
+
+  fc = FleetSandboxClient(
+      "test", context_naming=lambda c: f"facade-ctx-{c}",
+      resolver=resolver, sandbox_client_factory=factory,
+  )
+
   fc.delete_sandbox("foreign-claim", cluster="c1")
+
+  assert asked == ["c1"], (
+      "delete_sandbox did not resolve the context through the resolver's "
+      "public context_naming"
+  )
   assert len(built) == 1
   assert built[0].deleted == [("foreign-claim", "multi-cluster-fleet")]

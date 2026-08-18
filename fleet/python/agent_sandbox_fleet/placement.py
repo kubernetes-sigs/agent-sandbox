@@ -233,4 +233,6 @@ def get_placement(name: str) -> Placement:
   try:
     return _REGISTRY[name]()
   except KeyError:
-    raise ValueError(f"unknown placement '{name}'; choose from {sorted(_REGISTRY)}")
+    raise ValueError(
+        f"unknown placement '{name}'; choose from {sorted(_REGISTRY)}"
+    ) from None

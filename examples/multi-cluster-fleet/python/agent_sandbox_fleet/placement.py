@@ -53,7 +53,8 @@ class PlannerCluster:
   # Live signals published by the agent
   warmpool_depth: int = 0
   warmpool_ready: int = 0
-  active_claims: int = 0
+  # None == the member could not measure it. Distinct from 0 == no claims.
+  active_claims: int | None = None
   claim_p90_ms: float = 0.0
   # None == the member could not measure it. Distinct from 0.0 == idle.
   node_pressure_score: float | None = None
@@ -142,7 +143,14 @@ class RoundRobin:
 class LeastLoaded:
   def select(self, image: str, registry: PlannerRegistry) -> PlannerCluster:
     elig = _eligible(registry)
-    return min(elig, key=lambda c: (c.active_claims, c.active_replicas))
+    # Unmeasured (None) sorts LAST, not as zero. A cluster whose claim list
+    # failed is the one we know least about, so it must not win the tiebreak
+    # by looking perfectly idle. When nothing measured it — `light` mode, say
+    # — every cluster ties on the first key and this degrades to
+    # active_replicas, which is what --capacity-detail advertises.
+    return min(elig, key=lambda c: (c.active_claims is None,
+                                    c.active_claims or 0,
+                                    c.active_replicas))
 
 
 class CapacityWeighted:

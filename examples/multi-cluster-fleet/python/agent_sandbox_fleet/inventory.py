@@ -216,7 +216,7 @@ def _log_registry(reg: PlannerRegistry, source: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# GCS provider — the original behaviour, unchanged.
+# GCS provider — the original behavior, unchanged.
 # --------------------------------------------------------------------------- #
 
 class GCSInventory:
@@ -246,7 +246,11 @@ class GCSInventory:
           weight=weights.get(cluster, 1.0),
           warmpool_depth=int(r.get("warmpool_depth", 0)),
           warmpool_ready=int(r.get("warmpool_ready", 0)),
-          active_claims=int(r.get("active_claims", 0)),
+          # Absent or null stays None — same rule as pressure below.
+          active_claims=(
+              None if r.get("active_claims") is None
+              else int(r["active_claims"])
+          ),
           claim_p90_ms=float(r.get("claim_p90_ms", 0.0)),
           # None (or absent) means the member could not measure pressure.
           # Do NOT coerce to 0.0 — that reads as "idle" and CapacityAware
@@ -425,7 +429,8 @@ class ClusterProfileInventory:
         max_replicas=max_replicas if max_replicas and max_replicas > 0 else None,
         warmpool_depth=_int_prop(props, PROP_WARMPOOL_DEPTH) or 0,
         warmpool_ready=_int_prop(props, PROP_WARMPOOL_READY) or 0,
-        active_claims=_int_prop(props, PROP_ACTIVE_CLAIMS) or 0,
+        # Absent stays None, never 0 — see GCSInventory for why.
+        active_claims=_int_prop(props, PROP_ACTIVE_CLAIMS),
         claim_p90_ms=_float_prop(props, PROP_CLAIM_P90_MS) or 0.0,
         # Absent stays None, never 0.0 — see GCSInventory for why.
         node_pressure_score=pressure,
@@ -439,7 +444,7 @@ class ClusterProfileInventory:
 
     Deriving is the point of this provider: `cluster_weights` is a human
     multiplying node counts by hand, which is exactly what missed cluster F's
-    undersized control plane during the M2.5 run.
+    undersized control plane during a density run.
     """
     if name in weights:
       return weights[name]
@@ -533,26 +538,37 @@ def _conditions(status: dict[str, Any]) -> dict[str, dict]:
   return out
 
 
+# ClusterProfile properties are free-form strings written by whatever publishes
+# the profile, so treat them as untrusted. float() happily accepts "inf" and
+# "nan": inf would win every least-loaded comparison in placement, nan loses
+# every one of them, and int(float("inf")) raises OverflowError rather than the
+# ValueError the obvious `except` catches. Reject non-finite values here so a
+# malformed profile degrades to "unset" instead of poisoning the plan.
+def _finite(raw: str, key: str) -> float | None:
+  try:
+    val = float(raw)
+  except (ValueError, OverflowError):
+    logger.warning("property %s=%r is not a number; ignoring", key, raw)
+    return None
+  if val != val or val in (float("inf"), float("-inf")):
+    logger.warning("property %s=%r is not finite; ignoring", key, raw)
+    return None
+  return val
+
+
 def _int_prop(props: dict[str, str], key: str) -> int | None:
   raw = props.get(key)
   if raw is None or raw == "":
     return None
-  try:
-    return int(float(raw))
-  except ValueError:
-    logger.warning("property %s=%r is not a number; ignoring", key, raw)
-    return None
+  val = _finite(raw, key)
+  return None if val is None else int(val)
 
 
 def _float_prop(props: dict[str, str], key: str) -> float | None:
   raw = props.get(key)
   if raw is None or raw == "":
     return None
-  try:
-    return float(raw)
-  except ValueError:
-    logger.warning("property %s=%r is not a number; ignoring", key, raw)
-    return None
+  return _finite(raw, key)
 
 
 # --------------------------------------------------------------------------- #

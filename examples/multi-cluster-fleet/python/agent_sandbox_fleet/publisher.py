@@ -187,13 +187,18 @@ class ClusterProfilePublisher:
     put(PROP_HEARTBEAT, report.get("updated_at", ""))
     put(PROP_WARMPOOL_DEPTH, int(report.get("warmpool_depth", 0) or 0))
     put(PROP_WARMPOOL_READY, int(report.get("warmpool_ready", 0) or 0))
-    put(PROP_ACTIVE_CLAIMS, int(report.get("active_claims", 0) or 0))
     put(PROP_CLAIM_P90_MS, float(report.get("claim_p90_ms", 0.0) or 0.0))
+
+    # Same omit-don't-zero rule as pressure below: 0 in-flight claims is the
+    # most attractive value LeastLoaded can see.
+    claims = report.get("active_claims")
+    if claims is not None:
+      put(PROP_ACTIVE_CLAIMS, int(claims))
 
     # OMIT pressure when it could not be measured. Publishing 0.0 would read
     # as "completely idle" and CapacityAware would then prefer the cluster
     # that failed — the exact bug the CapacityReport docstring records from
-    # the M2.5 fleet, where the calc failed every cycle at 200k pods.
+    # a density fleet, where the calc failed every cycle at 200k pods.
     pressure = report.get("node_pressure_score")
     if pressure is not None:
       put(PROP_NODE_PRESSURE, float(pressure))

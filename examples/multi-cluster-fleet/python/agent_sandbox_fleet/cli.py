@@ -57,6 +57,23 @@ def _bucket_from(args) -> str:
   return b
 
 
+def _positive_float(raw: str) -> float:
+  """argparse type for intervals. Rejects <= 0, nan and inf.
+
+  A non-positive --loop-interval makes the apply loop spin: the sleep
+  computes max(0.0, interval - elapsed), so every cycle sleeps 0 and the
+  planner re-plans and rewrites assignments.json as fast as GCS will answer.
+  nan fails the > 0 comparison here, which is the intent.
+  """
+  try:
+    val = float(raw)
+  except (ValueError, OverflowError):
+    raise argparse.ArgumentTypeError(f"{raw!r} is not a number")
+  if not (val > 0) or val == float("inf"):
+    raise argparse.ArgumentTypeError(f"must be a positive number of seconds, got {raw!r}")
+  return val
+
+
 def _optional_bucket(args) -> str | None:
   """Bucket if one is configured, else None. Does not exit."""
   return getattr(args, "bucket", None) or os.environ.get("FLEET_BUCKET") or None
@@ -180,8 +197,11 @@ def cmd_status(args) -> int:
     c = reg.clusters[name]
     n_pools = len(assn.clusters.get(name).pools) if assn and name in assn.clusters else 0
     age = int(c.report_age_s) if c.report_age_s < 1e8 else "STALE"
+    # "-" not "0": the member reports None when it could not measure claims
+    # (light mode, or the list failed), and 0 would read as a healthy idle.
+    claims = "-" if c.active_claims is None else str(c.active_claims)
     print(fmt.format(name, str(age), c.warmpool_depth, c.warmpool_ready,
-                     c.active_claims, f"{c.claim_p90_ms:.1f}", n_pools))
+                     claims, f"{c.claim_p90_ms:.1f}", n_pools))
 
   if assn is not None:
     print(f"\nassignments generation: {assn.generation}  updated_at: {assn.updated_at}")
@@ -406,7 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
            "the 'cluster dies but no re-apply' reactivity gap.",
   )
   a.add_argument(
-      "--loop-interval", type=float, default=60.0,
+      "--loop-interval", type=_positive_float, default=60.0,
       help="Seconds between re-plans in --loop mode (default 60)",
   )
   a.add_argument(

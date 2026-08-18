@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import logging
 import os
 import signal
@@ -76,7 +77,7 @@ TEMPLATE_PLURAL = "sandboxtemplates"
 # Page size for any list that scales with cluster size. Without a limit the
 # kubernetes client materialises the WHOLE collection in memory: at 200k pods
 # that measured ~60 KB/pod in Python objects (~12 GB), which OOMed the member
-# on the M2.5 density fleet. Paging bounds peak memory to one page.
+# on a 200k-pod density fleet. Paging bounds peak memory to one page.
 PAGE_LIMIT = 1000
 
 MANAGED_LABEL = "fleet.agent-sandbox.io/managed"
@@ -121,12 +122,17 @@ class CapacityReport:
     generation_observed: int = 0
     warmpool_depth: int = 0
     warmpool_ready: int = 0
-    active_claims: int = 0
+    # None == NOT MEASURED (light mode, or the SDK list failed), which is NOT
+    # the same as 0 == no in-flight claims. Same hazard as the pressure score
+    # below: LeastLoaded ranks on active_claims first, so a cluster that
+    # publishes 0 because its list blew up wins every tiebreak and attracts
+    # the placement it is least able to serve.
+    active_claims: int | None = None
     claim_p90_ms: float = 0.0  # v2 — Prometheus scrape deferred
     # None == NOT MEASURED, which is NOT the same as 0.0 == no pressure.
     # It was 0.0-on-failure, and that is actively dangerous: a cluster whose
     # pressure calc blew up published "completely idle" and CapacityAware
-    # then preferred it. Measured on the M2.5 fleet — in `full` mode at 200k
+    # then preferred it. Measured on a density fleet — in `full` mode at 200k
     # pods the calc failed EVERY cycle (410 Gone) and reported 0.0 each time.
     node_pressure_score: float | None = None
     reported_pools: list[str] = field(default_factory=list)
@@ -161,7 +167,7 @@ class FleetMember:
         self.paths = paths or Paths()
         # Optional ClusterProfilePublisher. Additive: GCS stays the transport
         # the planner reads by default, so a broken hub degrades to exactly
-        # today's behaviour rather than taking the member down.
+        # today's behavior rather than taking the member down.
         self.hub_publisher = hub_publisher
 
         # K8s client init — in-cluster first, fall back to local kubeconfig.
@@ -214,16 +220,23 @@ class FleetMember:
     # -- Reconcile loop ------------------------------------------------------
 
     def _reconcile_loop(self) -> None:
-        """Poll assignments.json; reconcile local templates + warmpools."""
+        """Poll assignments.json; reconcile local templates + warmpools.
+
+        Same shape as _capacity_loop, and for the same reason: every pass goes
+        through the guard, INCLUDING the first. The first call used to sit
+        outside the try/except, so a startup failure -- a GCS IAM denial, an
+        apiserver error, a malformed assignments.json -- propagated out of the
+        thread and killed it. run() keeps blocking on self._stop, so the pod
+        stays 1/1 Running and Ready and never reconciles again.
+        """
         # Fire once immediately so startup doesn't wait a full interval.
-        self._reconcile_once()
-        while not self._stop.is_set():
-            if self._stop.wait(self.reconcile_interval):
-                return
+        while True:
             try:
                 self._reconcile_once()
-            except Exception:  # pragma: no cover — defensive
+            except Exception:
                 log.exception("reconcile pass failed; will retry next tick")
+            if self._stop.wait(self.reconcile_interval):
+                return
 
     def _reconcile_once(self) -> None:
         assignments, changed = self._fetch_assignments()
@@ -280,11 +293,17 @@ class FleetMember:
         try:
             obj_bytes, etag = self.gcs.get_with_etag(self.paths.assignments)
         except FileNotFoundError:
-            return Assignments(), self._last_etag != ""
+            # Drop the cached etag too. Reporting changed=True while leaving
+            # _last_etag set makes every subsequent tick report changed=True
+            # again, so the member re-reconciles to empty forever; and a later
+            # object that happens to hash back to the old etag would then be
+            # read as unchanged and silently skipped.
+            was_present = self._last_etag != ""
+            self._last_etag = ""
+            return Assignments(), was_present
         if etag == self._last_etag:
             return self._last_assignment or Assignments(), False
         self._last_etag = etag
-        import json
         raw = json.loads(obj_bytes.decode())
         clusters = {
             name: ClusterAssignment(
@@ -437,7 +456,7 @@ class FleetMember:
                 "planner cannot see this cluster",
                 self.cluster_name, ", ".join(failed))
         log.debug(
-            "capacity published depth=%d ready=%d active_claims=%d pressure=%s",
+            "capacity published depth=%d ready=%d active_claims=%s pressure=%s",
             report.warmpool_depth, report.warmpool_ready, report.active_claims,
             "unknown" if report.node_pressure_score is None
             else f"{report.node_pressure_score:.3f}",
@@ -484,7 +503,9 @@ class FleetMember:
             claims = self.sandbox_client.list_all_sandboxes(namespace=self.namespace)
             report.active_claims = len(claims)
         except Exception as e:
-            log.warning("SDK list_all_sandboxes failed; active_claims=0 (%s)", e)
+            # Leave it None. Do NOT substitute 0 — see CapacityReport.
+            log.warning("SDK list_all_sandboxes failed; active_claims "
+                        "unmeasured (%s)", e)
 
         # node_pressure_score — direct list; SDK doesn't cover it.
         report.node_pressure_score = self._node_pressure()
@@ -496,7 +517,7 @@ class FleetMember:
         Returns None when the score could not be measured. Callers MUST NOT
         substitute 0.0 — see CapacityReport.node_pressure_score.
 
-        KNOWN LIMIT, measured on the M2.5 fleet: this does not complete at
+        KNOWN LIMIT, measured on a density fleet: this does not complete at
         200k pods. Walking the pod list takes ~5 min, which is longer than the
         apiserver keeps a continue token alive, so every attempt died with
         410 Gone partway through. Restarting (below) does not help once a
@@ -615,7 +636,7 @@ def _now_iso() -> str:
 # Entrypoint
 # ----------------------------------------------------------------------------
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fleet-member")
     p.add_argument("--cluster-name", default=os.environ.get("CLUSTER_NAME"),
                    help="This agent's cluster identity — must match fleet-spec.cluster_weights")
@@ -632,9 +653,10 @@ def main() -> int:
              "warmpool depth/ready only. Use light on density runs — at 200k "
              "pods the full lists OOM the member and steal apiserver "
              "concurrency from the controller being measured. TRADE-OFF: in "
-             "light mode both fields report 0, so capacity-aware placement "
-             "goes pressure-blind (degrades to weights + ready-ratio) and "
-             "least-loaded degrades to active_replicas.",
+             "light mode both fields are reported as unmeasured (omitted, "
+             "not 0), so capacity-aware placement goes pressure-blind "
+             "(degrades to weights + ready-ratio) and least-loaded degrades "
+             "to active_replicas.",
     )
     # -- ClusterProfile publishing (SIG-Multicluster hub) ------------------- #
     # Off by default. When enabled the member ALSO applies its capacity onto
@@ -691,7 +713,7 @@ def main() -> int:
                    help="Apply to the main object instead — for fixture CRDs "
                         "that do not declare a status subresource")
     p.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     # `force=True` — critical. Without it, if any imported library
     # (google-cloud-storage, kubernetes, k8s_agent_sandbox) already attached a
@@ -714,6 +736,20 @@ def main() -> int:
 
     hub_publisher = None
     if args.publish_clusterprofile:
+        # Check the kubeconfig before building the publisher, so the error
+        # names the flag. The hub is a DIFFERENT cluster from the one this
+        # member runs in, so there is no in-cluster fallback: without a path,
+        # load_kube_config() silently falls back to ~/.kube/config and either
+        # fails deep inside the client or — worse — publishes this cluster's
+        # capacity onto whatever hub that file happens to point at.
+        if not args.hub_kubeconfig:
+            p.error("--publish-clusterprofile requires --hub-kubeconfig / "
+                    "$HUB_KUBECONFIG (the hub is a different cluster; there "
+                    "is no in-cluster fallback)")
+        if not os.path.isfile(args.hub_kubeconfig):
+            p.error(f"--hub-kubeconfig {args.hub_kubeconfig!r} does not exist "
+                    f"or is not a file")
+
         from .inventory import CLUSTERPROFILE_VERSION
         from .publisher import ClusterProfilePublisher
 

@@ -41,7 +41,7 @@ Design notes:
   multiple clusters (spread-first, min_clusters) get load-balanced.
   ``strategy="first"`` gives deterministic (sorted-by-name) placement for
   reproducible tests. ``strategy="hash"`` gives deterministic
-  per-template pinning (matches image-affinity behaviour on the client
+  per-template pinning (matches image-affinity behavior on the client
   side).
 * GCS reads retry with exponential backoff on transient errors so a
   bucket blip doesn't blow up a claim path.
@@ -292,6 +292,17 @@ class ClusterResolver:
             f"unknown strategy {strategy!r}; expected one of first, round-robin, hash"
         )
 
+    @property
+    def context_naming(self) -> ContextNaming | None:
+        """The configured cluster-name → kubeconfig-context mapper, if any.
+
+        Public so callers holding a resolver (FleetSandboxClient) can name a
+        context for a cluster they did not get from :meth:`resolve` without
+        reaching into a private attribute. A property rather than a copy on
+        the caller, so an injected resolver reports its own mapper.
+        """
+        return self._context_naming
+
     def _build_resolved(self, m: dict) -> ResolvedCluster:
         ctx = self._context_naming(m["cluster"]) if self._context_naming else None
         return ResolvedCluster(
@@ -440,7 +451,7 @@ class FleetSandboxClient:
             whole call, so N concurrent claims need N live connections per
             cluster. Below that, urllib3 opens a fresh connection per request
             instead of reusing one, and the resulting connect storm gets
-            refused by the control plane. Measured 2026-08-08 on the M2.5
+            refused by the control plane. Measured 2026-08-08 on a density
             fleet: concurrency 50 clean at 52 claims/s; concurrency 200 on
             the default pool produced ``ConnectTimeoutError`` against both
             apiservers. ``None`` leaves the client default.
@@ -532,15 +543,16 @@ class FleetSandboxClient:
             )
         # Reuse the cached client if present; otherwise build via the
         # resolver's context_naming (still requires the caller to have the
-        # kubeconfig context locally).
-        client = self._clients.get(resolved_cluster)
-        if client is None:
-            ctx = (self._resolver._context_naming(resolved_cluster)
-                   if self._resolver._context_naming else None)
-            client = self._get_or_build_client(ResolvedCluster(
-                cluster=resolved_cluster, template="", warmpool="",
-                replicas=0, image=None, generation=0, context_name=ctx,
-            ))
+        # kubeconfig context locally). Go through _get_or_build_client for
+        # both cases: it does the cache lookup under _client_lock, and an
+        # unlocked read here raced concurrent deletes against the dict every
+        # other access on this class already guards.
+        naming = self._resolver.context_naming
+        ctx = naming(resolved_cluster) if naming else None
+        client = self._get_or_build_client(ResolvedCluster(
+            cluster=resolved_cluster, template="", warmpool="",
+            replicas=0, image=None, generation=0, context_name=ctx,
+        ))
         client.delete_sandbox(claim_name, namespace=namespace or self._namespace)
         with self._claim_lock:
             self._claim_to_cluster.pop(claim_name, None)

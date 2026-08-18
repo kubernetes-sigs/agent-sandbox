@@ -481,3 +481,49 @@ def test_fleet_client_requires_context_naming_to_build():
   )
   with pytest.raises(ClusterUnavailableError, match="context_naming"):
     fc.create_sandbox("shared")
+
+
+# --------------------------------------------------------------------------- #
+# context_naming is public on the resolver.
+#
+# delete_sandbox needs to name a context for a cluster it did not get from
+# resolve(); it used to read resolver._context_naming directly. A property
+# rather than a copy on the client, so an injected resolver reports its own.
+# --------------------------------------------------------------------------- #
+
+def test_resolver_exposes_context_naming():
+  naming = kind_context_naming()
+  r = ClusterResolver("test", gcs=FakeGCS({}), context_naming=naming)
+  assert r.context_naming is naming
+  assert r.context_naming("c1") == "kind-c1"
+
+
+def test_resolver_context_naming_is_none_when_unset():
+  assert ClusterResolver("test", gcs=FakeGCS({})).context_naming is None
+
+
+def test_delete_reuses_the_cached_client_without_racing_the_dict():
+  # delete_sandbox used to read self._clients outside _client_lock, which
+  # every other access on the class guards. Going through
+  # _get_or_build_client keeps the lookup locked AND must not build a second
+  # client for a cluster already cached.
+  gcs = _three_cluster_gcs()
+  built: list[FakeSDKClient] = []
+  fc = _fleet_client(gcs, built)
+  sb = fc.create_sandbox("shared", strategy="first")
+  assert len(built) == 1
+
+  fc.delete_sandbox(sb.claim_name)
+  assert len(built) == 1, "delete built a second client instead of reusing"
+  assert built[0].deleted == [(sb.claim_name, "multi-cluster-fleet")]
+
+
+def test_delete_with_explicit_cluster_builds_via_resolver_naming():
+  # No create first, so nothing is cached and the client must be built from
+  # the resolver's context_naming.
+  gcs = _three_cluster_gcs()
+  built: list[FakeSDKClient] = []
+  fc = _fleet_client(gcs, built)
+  fc.delete_sandbox("foreign-claim", cluster="c1")
+  assert len(built) == 1
+  assert built[0].deleted == [("foreign-claim", "multi-cluster-fleet")]

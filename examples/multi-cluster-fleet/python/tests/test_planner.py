@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from agent_sandbox_fleet.placement import PlannerCluster, PlannerRegistry
 from agent_sandbox_fleet.planner import (
     Assignments,
@@ -228,3 +230,75 @@ def test_min_clusters_capped_by_available_fresh():
   # 6 pools across 3 clusters round-robin → 2 per cluster.
   counts = sorted(len(assn.clusters[f"c{i}"].pools) for i in range(3))
   assert counts == [2, 2, 2]
+
+
+# --------------------------------------------------------------------------- #
+# max_concurrent is a TARGET, not a hard cap.
+#
+# sizing.compute_replicas floors every placed pool at 1 replica — a template
+# assigned 0 replicas can only be served cold. When a cluster holds more
+# models than its budget slice, the floor wins. That is intended; the point of
+# these tests is that the overshoot is bounded, attributable, and logged
+# rather than silent.
+# --------------------------------------------------------------------------- #
+
+def test_min_one_replica_floor_can_exceed_the_budget(caplog):
+  # 6 models, budget 2, all on one cluster: the floor gives 6 replicas.
+  spec = _spec(
+      max_concurrent=2,
+      cluster_weights={"a": 1.0},
+      models=[ModelSpec(image=f"img-{i}", template_name=f"tmpl-{i}",
+                        target_tasks=10) for i in range(6)],
+  )
+  reg = PlannerRegistry()
+  reg.clusters["a"] = PlannerCluster(name="a", report_age_s=1)
+
+  with caplog.at_level(logging.WARNING):
+    assn = plan(spec, reg)
+
+  pools = assn.clusters["a"].pools
+  total = sum(p.replicas for p in pools)
+  assert all(p.replicas >= 1 for p in pools), "a placed pool must be warmable"
+  assert total == 6
+  # Bounded by the floor, not unbounded: one per pool, no more.
+  assert total == len(pools)
+  assert "exceeds its budget slice" in caplog.text
+
+
+def test_no_warning_when_the_budget_is_respected(caplog):
+  with caplog.at_level(logging.WARNING):
+    plan(_spec(), _registry())
+  assert "exceeds its budget slice" not in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Stale clusters are assigned empty, which DROPS their pools. Intended (a
+# drain has to be able to empty a cluster that is not reporting), but the
+# trigger is a missing capacity report, not a missing member — so it must be
+# logged rather than silent.
+# --------------------------------------------------------------------------- #
+
+def test_stale_cluster_is_emptied_and_the_teardown_is_logged(caplog):
+  reg = PlannerRegistry()
+  reg.clusters["a"] = PlannerCluster(name="a", report_age_s=1)
+  reg.clusters["gone"] = PlannerCluster(
+      name="gone", report_age_s=reg.max_report_age_s + 60)
+
+  with caplog.at_level(logging.WARNING):
+    assn = plan(_spec(cluster_weights={"a": 1.0, "gone": 1.0}), reg)
+
+  assert assn.clusters["gone"].pools == []
+  assert assn.clusters["a"].pools, "fresh cluster still gets the models"
+  assert "DROPS any warm pools" in caplog.text
+
+
+def test_fresh_cluster_with_no_models_is_emptied_quietly(caplog):
+  # Nothing placed on "b" (only one model, spread-first puts it on "a"), but
+  # "b" is reporting fine — that is not a teardown warning.
+  reg = _registry()
+  spec = _spec(models=[ModelSpec(image="img-1", template_name="tmpl-1",
+                                 target_tasks=5)])
+  with caplog.at_level(logging.WARNING):
+    assn = plan(spec, reg)
+  assert assn.clusters["b"].pools == []
+  assert "DROPS any warm pools" not in caplog.text

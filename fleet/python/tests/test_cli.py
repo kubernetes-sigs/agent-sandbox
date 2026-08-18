@@ -22,22 +22,22 @@ from agent_sandbox_fleet import cli
 
 
 def _route_args(**overrides):
-  base = dict(project=None, location=None, kind=False, all=False,
-              bucket="fake-bucket", template=None, json=False)
-  base.update(overrides)
-  return argparse.Namespace(**base)
+    base = dict(project=None, location=None, kind=False, all=False,
+                bucket="fake-bucket", template=None, json=False)
+    base.update(overrides)
+    return argparse.Namespace(**base)
 
 
 def test_route_rejects_project_without_location(capsys):
-  # Falling through to ctx_naming=None just omits the ready-to-copy
-  # `gcloud container clusters get-credentials` line, which reads as "this
-  # fleet has no GKE naming" rather than "you forgot a flag".
-  rc = cli.cmd_route(_route_args(project="p"))
-  assert rc == 2
-  assert "--location" in capsys.readouterr().err
+    # Falling through to ctx_naming=None just omits the ready-to-copy
+    # `gcloud container clusters get-credentials` line, which reads as "this
+    # fleet has no GKE naming" rather than "you forgot a flag".
+    rc = cli.cmd_route(_route_args(project="p"))
+    assert rc == 2
+    assert "--location" in capsys.readouterr().err
 
 
 def test_route_rejects_location_without_project(capsys):
-  rc = cli.cmd_route(_route_args(location="us-central1"))
-  assert rc == 2
-  assert "--project" in capsys.readouterr().err
+    rc = cli.cmd_route(_route_args(location="us-central1"))
+    assert rc == 2
+    assert "--project" in capsys.readouterr().err

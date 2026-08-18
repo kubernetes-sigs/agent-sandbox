@@ -24,35 +24,35 @@ import math
 
 
 def hamilton_split(total: int, weights: dict[str, float]) -> dict[str, int]:
-  """Split an integer `total` across keys by `weights` using largest-remainder
-  (Hamilton) allocation. Sums to exactly `total` (no rounding overshoot).
+    """Split an integer `total` across keys by `weights` using largest-remainder
+    (Hamilton) allocation. Sums to exactly `total` (no rounding overshoot).
 
-  Copy of `agent_sandbox_rl.fleet._split_budget`.
-  """
-  if not weights:
-    return {}
-  # Weights reach here from a user-authored spec and from ClusterProfile
-  # properties, so neither source is trusted. Every bad value below fails
-  # somewhere unhelpful otherwise: all-zero divides by zero, a negative
-  # weight hands out a negative budget, inf/nan poison `ideal` and then
-  # math.floor raises OverflowError/ValueError from inside the sort.
-  bad = {k: w for k, w in weights.items()
-         if not math.isfinite(w) or w < 0}
-  if bad:
-    raise ValueError(
-        f"cluster weights must be finite and >= 0; got {bad}"
-    )
-  if len(weights) == 1:
-    return {next(iter(weights)): total}
-  tw = sum(weights.values())
-  if tw == 0:
-    # Every active cluster weighted 0. Treat as "no preference" and split
-    # evenly rather than refusing to plan — the clusters are eligible, the
-    # operator just expressed no ranking among them.
-    return hamilton_split(total, {k: 1.0 for k in weights})
-  ideal = {k: total * (w / tw) for k, w in weights.items()}
-  alloc = {k: int(math.floor(v)) for k, v in ideal.items()}
-  remainder = total - sum(alloc.values())
-  for k in sorted(weights, key=lambda k: ideal[k] - alloc[k], reverse=True)[:remainder]:
-    alloc[k] += 1
-  return alloc
+    Copy of `agent_sandbox_rl.fleet._split_budget`.
+    """
+    if not weights:
+        return {}
+    # Weights reach here from a user-authored spec and from ClusterProfile
+    # properties, so neither source is trusted. Every bad value below fails
+    # somewhere unhelpful otherwise: all-zero divides by zero, a negative
+    # weight hands out a negative budget, inf/nan poison `ideal` and then
+    # math.floor raises OverflowError/ValueError from inside the sort.
+    bad = {k: w for k, w in weights.items()
+           if not math.isfinite(w) or w < 0}
+    if bad:
+        raise ValueError(
+            f"cluster weights must be finite and >= 0; got {bad}"
+        )
+    if len(weights) == 1:
+        return {next(iter(weights)): total}
+    tw = sum(weights.values())
+    if tw == 0:
+        # Every active cluster weighted 0. Treat as "no preference" and split
+        # evenly rather than refusing to plan — the clusters are eligible, the
+        # operator just expressed no ranking among them.
+        return hamilton_split(total, {k: 1.0 for k in weights})
+    ideal = {k: total * (w / tw) for k, w in weights.items()}
+    alloc = {k: int(math.floor(v)) for k, v in ideal.items()}
+    remainder = total - sum(alloc.values())
+    for k in sorted(weights, key=lambda k: ideal[k] - alloc[k], reverse=True)[:remainder]:
+        alloc[k] += 1
+    return alloc

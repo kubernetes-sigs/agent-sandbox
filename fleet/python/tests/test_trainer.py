@@ -44,10 +44,10 @@ GIB = 1024 * MIB
     ("  1MiB  ", MIB),  # surrounding whitespace
 ])
 def test_parse_size(text, expected):
-  assert parse_size(text) == expected
+    assert parse_size(text) == expected
 
 
 def test_parse_size_matches_the_documented_default():
-  # trainer.main()'s --delta-size default. If this raises, the trainer is
-  # unrunnable without flags.
-  assert parse_size("1MiB") == MIB
+    # trainer.main()'s --delta-size default. If this raises, the trainer is
+    # unrunnable without flags.
+    assert parse_size("1MiB") == MIB

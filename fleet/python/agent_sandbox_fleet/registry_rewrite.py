@@ -24,10 +24,10 @@ DOCKER_HOSTS = ("docker.io", "index.docker.io", "registry-1.docker.io")
 
 
 def _split_host(image: str) -> tuple[str | None, str]:
-  head = image.split("/", 1)[0]
-  if "/" in image and ("." in head or ":" in head or head == "localhost"):
-    return head, image[len(head) + 1:]
-  return None, image
+    head = image.split("/", 1)[0]
+    if "/" in image and ("." in head or ":" in head or head == "localhost"):
+        return head, image[len(head) + 1:]
+    return None, image
 
 
 def rewrite_image(
@@ -38,20 +38,20 @@ def rewrite_image(
     repo: str = "",
     only_hosts: tuple[str, ...] | None = DOCKER_HOSTS,
 ) -> str:
-  if not registry:
-    # An empty registry with empty project/repo makes prefix "" and returns
-    # "/library/ubuntu:22.04" -- not a valid reference, and the failure only
-    # shows up much later as an ImagePullBackOff on the cluster.
-    raise ValueError("registry must be a non-empty host, e.g. 'gcr.io'")
-  host, rest = _split_host(image)
-  effective = host or "docker.io"
-  if only_hosts is not None and effective not in only_hosts:
-    return image
-  name = rest.split("@", 1)[0].split(":", 1)[0]
-  if effective in DOCKER_HOSTS and "/" not in name:
-    rest = f"library/{rest}"
-  prefix = "/".join(p for p in (registry, project, repo) if p)
-  return f"{prefix}/{rest}"
+    if not registry:
+        # An empty registry with empty project/repo makes prefix "" and returns
+        # "/library/ubuntu:22.04" -- not a valid reference, and the failure only
+        # shows up much later as an ImagePullBackOff on the cluster.
+        raise ValueError("registry must be a non-empty host, e.g. 'gcr.io'")
+    host, rest = _split_host(image)
+    effective = host or "docker.io"
+    if only_hosts is not None and effective not in only_hosts:
+        return image
+    name = rest.split("@", 1)[0].split(":", 1)[0]
+    if effective in DOCKER_HOSTS and "/" not in name:
+        rest = f"library/{rest}"
+    prefix = "/".join(p for p in (registry, project, repo) if p)
+    return f"{prefix}/{rest}"
 
 
 def make_rewriter(
@@ -61,7 +61,7 @@ def make_rewriter(
     repo: str = "",
     only_hosts: tuple[str, ...] | None = DOCKER_HOSTS,
 ):
-  def _rewrite(image: str) -> str:
-    return rewrite_image(image, registry=registry, project=project, repo=repo,
-                         only_hosts=only_hosts)
-  return _rewrite
+    def _rewrite(image: str) -> str:
+        return rewrite_image(image, registry=registry, project=project, repo=repo,
+                             only_hosts=only_hosts)
+    return _rewrite

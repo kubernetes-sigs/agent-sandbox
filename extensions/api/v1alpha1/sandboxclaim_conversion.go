@@ -26,7 +26,19 @@ import (
 	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
-const v1alpha1SandboxClaimStateAnnotation = "api.agents.x-k8s.io/v1alpha1-sandboxclaim-state"
+const (
+	v1alpha1SandboxClaimStateAnnotation = "api.agents.x-k8s.io/v1alpha1-sandboxclaim-state"
+	v1beta1SandboxClaimStateAnnotation  = "api.agents.x-k8s.io/v1beta1-sandboxclaim-state"
+)
+
+type v1beta1SandboxClaimState struct {
+	// volumeClaimTemplates preserves v1beta1 claim-scoped volume templates.
+	// +optional
+	VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+	// workspaceResources preserves v1beta1 per-container resource overrides.
+	// +optional
+	WorkspaceResources []v1beta1.WorkspaceResourceOverride `json:"workspaceResources,omitempty"`
+}
 
 // ConvertTo converts this SandboxClaim to the Hub version (v1beta1).
 func (s *SandboxClaim) ConvertTo(dstRaw conversion.Hub) error {
@@ -45,6 +57,20 @@ func (s *SandboxClaim) ConvertTo(dstRaw conversion.Hub) error {
 		return err
 	}
 
+	// Restore fields that only exist in v1beta1. The spoke carries them in an
+	// opaque annotation so a read-modify-write through v1alpha1 is lossless.
+	if stateJSON, ok := s.Annotations[v1beta1SandboxClaimStateAnnotation]; ok {
+		var state v1beta1SandboxClaimState
+		if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+			return fmt.Errorf("failed to unmarshal v1beta1 SandboxClaim state: %w", err)
+		}
+		dst.Spec.VolumeClaimTemplates = state.VolumeClaimTemplates
+		dst.Spec.WorkspaceResources = state.WorkspaceResources
+		if dst.Annotations != nil {
+			delete(dst.Annotations, v1beta1SandboxClaimStateAnnotation)
+		}
+	}
+
 	// Preserve the original v1alpha1 object state for lossless round-tripping
 	if dst.Annotations == nil {
 		dst.Annotations = make(map[string]string)
@@ -52,6 +78,7 @@ func (s *SandboxClaim) ConvertTo(dstRaw conversion.Hub) error {
 	sCopy := s.DeepCopy()
 	if sCopy.Annotations != nil {
 		delete(sCopy.Annotations, v1alpha1SandboxClaimStateAnnotation)
+		delete(sCopy.Annotations, v1beta1SandboxClaimStateAnnotation)
 	}
 	stateJSON, err := json.Marshal(sCopy)
 	if err != nil {
@@ -77,6 +104,24 @@ func (s *SandboxClaim) ConvertFrom(srcRaw conversion.Hub) error {
 	// Convert Status
 	if err := convertClaimStatusFrom(&src.Status, &s.Status); err != nil {
 		return err
+	}
+
+	// Replace any stale preservation payload with the current hub-only fields.
+	if s.Annotations != nil {
+		delete(s.Annotations, v1beta1SandboxClaimStateAnnotation)
+	}
+	if len(src.Spec.VolumeClaimTemplates) > 0 || len(src.Spec.WorkspaceResources) > 0 {
+		stateJSON, err := json.Marshal(v1beta1SandboxClaimState{
+			VolumeClaimTemplates: src.Spec.VolumeClaimTemplates,
+			WorkspaceResources:   src.Spec.WorkspaceResources,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to marshal v1beta1 SandboxClaim state: %w", err)
+		}
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		s.Annotations[v1beta1SandboxClaimStateAnnotation] = string(stateJSON)
 	}
 
 	// Restore original v1alpha1 state if present to ensure lossless conversion

@@ -237,7 +237,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
           GCP_LOCATION: "us-central1"
-          GEMINI_MODEL: gemini-2.5-flash
+          GEMINI_MODEL: gemini-3.7-flash
         run: |
           pip install google-genai==1.30.0 pyopenssl==25.1.0 pyyaml==6.0.2
 

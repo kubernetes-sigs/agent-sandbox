@@ -50,7 +50,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from kubernetes import client as k8s, config as k8s_config
 from kubernetes.client.exceptions import ApiException
@@ -102,6 +102,49 @@ class AssignmentPool:
     # None or omitted from the JSON for capacity-aware / least-loaded /
     # round-robin / capacity-weighted policies.
     image: str | None = None
+
+    @classmethod
+    def from_json(cls, obj: Mapping[str, Any]) -> "AssignmentPool":
+        """Build a pool from one entry of assignments.json, ignoring unknown keys.
+
+        A dataclass __init__ raises TypeError on an unexpected keyword, so a
+        plain AssignmentPool(**obj) means any field a NEWER planner adds breaks
+        every OLDER member that reads the plan. That is the normal state of a
+        rolling update -- planner and members are separate deployments and the
+        planner is a single writer, so it is usually the one rolled first.
+
+        The failure is worse than it looks: this parse runs inside
+        _reconcile_once, whose caller catches Exception and retries next tick.
+        So the member does not crash, it does not go unready, and it does not
+        stop reporting capacity -- it just never applies another plan, while
+        logging one traceback every interval. Dropping the unknown key keeps the
+        member on the fields it does understand, which is strictly better than
+        being pinned to the last generation it could parse.
+
+        Unknown keys are logged once each, because silently ignoring a field the
+        planner meant to act on is its own kind of wrong -- the member is
+        obeying a plan it only partly understood, and the log line is the only
+        signal that a member needs upgrading. A MISSING required field still
+        raises: that is a malformed or truncated plan, not a newer one, and
+        applying half of it would be worse than retrying.
+        """
+        extra = [k for k in obj if k not in cls.__dataclass_fields__]
+        for key in extra:
+            if key not in _UNKNOWN_POOL_FIELDS:
+                _UNKNOWN_POOL_FIELDS.add(key)
+                log.warning(
+                    "assignments.json pool has unknown field %r; ignoring it. "
+                    "This member is older than the planner that wrote the plan.",
+                    key,
+                )
+        return cls(**{
+            k: v for k, v in obj.items() if k in cls.__dataclass_fields__
+        })
+
+
+# Unknown-field names already logged, so a per-tick reconcile does not emit the
+# same warning every interval for the life of the pod.
+_UNKNOWN_POOL_FIELDS: set[str] = set()
 
 
 @dataclass
@@ -329,7 +372,9 @@ class FleetMember:
         raw = json.loads(obj_bytes.decode())
         clusters = {
             name: ClusterAssignment(
-                pools=[AssignmentPool(**p) for p in body.get("pools", [])]
+                pools=[
+                    AssignmentPool.from_json(p) for p in body.get("pools", [])
+                ]
             )
             for name, body in raw.get("clusters", {}).items()
         }
@@ -410,12 +455,45 @@ class FleetMember:
         )
 
     def _list_managed_pool_names(self) -> list[str]:
-        resp = self.custom_objects.list_namespaced_custom_object(
-            group=CRD_GROUP, version=CRD_VERSION, namespace=self.namespace,
-            plural=POOL_PLURAL,
-            label_selector=f"{MANAGED_LABEL}=true",
-        )
-        return [item["metadata"]["name"] for item in resp.get("items", [])]
+        """Every managed SandboxWarmPool in the namespace, walked in pages.
+
+        Paged for the same reason as the pod walk in _node_pressure, and
+        NOT for the reason it looks like: an unbounded list is not truncated.
+        Omitting `limit` makes the apiserver return the entire collection in one
+        response, so the orphan sweep below was always complete -- it is the
+        single response that is the problem. One planner generation can assign a
+        pool per model, and the density fleet ran 500 of them per cluster; that
+        is one unbounded etcd range read plus a multi-megabyte body, every
+        reconcile tick, on the same apiserver the sandbox creates are queued
+        behind. On a starved control plane (see cluster F) it is also the shape
+        of request that times out, and a timeout here DOES skip the sweep.
+
+        Deliberately no 410-Gone restart, unlike the pod walk. That one pages
+        through six figures of objects and can outlive a compaction window; this
+        one is a few pages at worst, and if the token does expire the raised
+        ApiException leaves _retry_pending armed, so the next tick redoes the
+        whole sweep anyway. Names are materialised before any delete, so a
+        failure mid-walk cannot half-delete against a half-read list.
+        """
+        names: list[str] = []
+        cont: str | None = None
+        while True:
+            resp = self.custom_objects.list_namespaced_custom_object(
+                group=CRD_GROUP, version=CRD_VERSION, namespace=self.namespace,
+                plural=POOL_PLURAL,
+                label_selector=f"{MANAGED_LABEL}=true",
+                limit=PAGE_LIMIT,
+                _continue=cont,
+            )
+            names.extend(
+                item["metadata"]["name"] for item in resp.get("items", [])
+            )
+            # Custom objects come back as plain dicts, so this is
+            # metadata["continue"] -- not the `page.metadata._continue`
+            # attribute the typed list calls return.
+            cont = (resp.get("metadata") or {}).get("continue") or None
+            if not cont:
+                return names
 
     def _labels_for(self, pool: AssignmentPool) -> dict[str, str]:
         return {MANAGED_LABEL: "true", POOL_NAME_LABEL: pool.warmpool}

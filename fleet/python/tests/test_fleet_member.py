@@ -287,3 +287,144 @@ def test_a_clean_pass_does_not_re_reconcile_on_every_tick():
     fm._reconcile_once()
     assert helper.ensured == ["wp-a"]
     assert fm._retry_pending is False
+
+# --------------------------------------------------------------------------- #
+# _list_managed_pool_names pages.
+#
+# The bug this guards is NOT truncation -- omitting `limit` makes the apiserver
+# return the whole collection, so the sweep was complete. It is the single
+# unbounded request: one etcd range read over every managed pool in the
+# namespace plus a multi-megabyte body, every reconcile tick, on the same
+# apiserver the sandbox creates queue behind. At 500 pools per cluster on the
+# density fleet that is the shape of request a starved control plane times out
+# on -- and a timeout here DOES skip the orphan sweep.
+# --------------------------------------------------------------------------- #
+
+class _PagingCustomObjects:
+    """list_namespaced_custom_object that honours limit/_continue, like the real one."""
+
+    def __init__(self, names, page_size=None):
+        self.names = list(names)
+        self.page_size = page_size
+        self.calls: list[dict] = []
+        self.deleted: list[str] = []
+
+    def list_namespaced_custom_object(self, **kw):
+        self.calls.append(kw)
+        limit = kw.get("limit") or len(self.names) or 1
+        start = int(kw.get("_continue") or 0)
+        page = self.names[start:start + limit]
+        nxt = start + limit
+        meta = {}
+        if nxt < len(self.names):
+            meta["continue"] = str(nxt)
+        return {"items": [{"metadata": {"name": n}} for n in page],
+                "metadata": meta}
+
+    def delete_namespaced_custom_object(self, **kw):
+        self.deleted.append(kw["name"])
+
+
+def test_list_managed_pool_names_walks_every_page():
+    co = _PagingCustomObjects([f"wp-{i}" for i in range(2500)])
+    fm = _bare_member(custom_objects=co)
+
+    names = fm._list_managed_pool_names()
+
+    assert names == [f"wp-{i}" for i in range(2500)]
+    assert len(co.calls) == 3, "did not page: expected 2500 names at PAGE_LIMIT=1000"
+    assert all(c["limit"] == fleet_member.PAGE_LIMIT for c in co.calls)
+    assert [c["_continue"] for c in co.calls] == [None, "1000", "2000"]
+
+
+def test_list_managed_pool_names_bounds_a_single_request():
+    # The property that matters at fleet scale: no request ever asks for more
+    # than one page, however many pools the namespace holds.
+    co = _PagingCustomObjects([f"wp-{i}" for i in range(5000)])
+    fm = _bare_member(custom_objects=co)
+    fm._list_managed_pool_names()
+    assert all(c.get("limit") == fleet_member.PAGE_LIMIT for c in co.calls), (
+        "an unbounded list request survived; this is the one that OOMs or "
+        "times out on a loaded apiserver"
+    )
+
+
+def test_orphans_beyond_the_first_page_are_still_deleted():
+    # The behavioral consequence, end to end through _reconcile_once: a pool the
+    # plan no longer names has to be deleted no matter which page it landed on.
+    co = _PagingCustomObjects([f"wp-{i}" for i in range(1500)])
+    fm = _bare_member(gcs=_one_pool_gcs(), custom_objects=co)
+    fm._template_exists = lambda t: True
+    fm._ensure_warmpool = lambda gen, pool: None
+
+    fm._reconcile_once()
+
+    assert "wp-1200" in co.deleted, "an orphan on page 2 was never swept"
+    assert len(co.deleted) == 1500
+
+
+# --------------------------------------------------------------------------- #
+# AssignmentPool forward compatibility.
+#
+# planner and members are separate deployments, and the planner -- a single
+# writer -- is normally rolled first. AssignmentPool(**p) raised TypeError on
+# any field a newer planner added, and because _reconcile_loop catches and
+# retries, the member did not crash: it stayed 1/1 Ready, kept reporting
+# capacity, and silently never applied another plan.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _reset_unknown_field_log():
+    fleet_member._UNKNOWN_POOL_FIELDS.clear()
+    yield
+    fleet_member._UNKNOWN_POOL_FIELDS.clear()
+
+
+def _plan_with(extra_json: str) -> _FakeGCS:
+    gcs = _FakeGCS()
+    gcs.obj = (
+        ('{"generation": 9, "clusters": {"test": {"pools": ['
+         '{"warmpool": "wp-a", "template": "tpl-a", "replicas": 2%s}]}}}'
+         % extra_json).encode(),
+        "etag-new",
+    )
+    return gcs
+
+
+def test_a_newer_planner_field_does_not_wedge_the_member():
+    fm = _bare_member(gcs=_plan_with(', "priority": "high", "tolerations": []'))
+
+    assignments, changed = fm._fetch_assignments()
+
+    assert changed is True
+    pool = assignments.clusters["test"].pools[0]
+    assert (pool.warmpool, pool.template, pool.replicas) == ("wp-a", "tpl-a", 2)
+
+
+def test_known_fields_still_land():
+    fm = _bare_member(gcs=_plan_with(', "image": "img:v1", "priority": 3'))
+    assignments, _ = fm._fetch_assignments()
+    assert assignments.clusters["test"].pools[0].image == "img:v1"
+
+
+def test_an_unknown_field_is_logged_once_not_every_tick(caplog):
+    caplog.set_level("WARNING", logger="agent_sandbox_fleet.fleet_member")
+    for _ in range(5):
+        fleet_member.AssignmentPool.from_json(
+            {"warmpool": "wp-a", "template": "tpl-a", "replicas": 1,
+             "priority": "high"}
+        )
+    warnings = [r for r in caplog.records if "priority" in r.getMessage()]
+    assert len(warnings) == 1, (
+        "an ignored field must be visible, but once per pod -- not once per "
+        "pool per reconcile tick for the life of the deployment"
+    )
+
+
+def test_a_missing_required_field_still_raises():
+    # The mirror case is NOT forward compatibility. A plan without `replicas` is
+    # malformed or truncated, and applying half of it is worse than retrying.
+    with pytest.raises(TypeError):
+        fleet_member.AssignmentPool.from_json(
+            {"warmpool": "wp-a", "template": "tpl-a"}
+        )

@@ -188,6 +188,6 @@ def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
     for requirement in selector.split(","):
         key, sep, value = requirement.partition("=")
         if sep and key.strip() == SANDBOX_NAME_HASH_LABEL:
-            return value.strip()
+            return value.strip() or None
 
     return None

@@ -53,6 +53,21 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resourceNames:
+  - agent-sandbox-config
+  resources:
+  - configmaps
+  verbs:
+  - get
 
 ---
 
@@ -123,6 +138,15 @@ spec:
         - name: webhook
           containerPort: 9443
           protocol: TCP
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/sandbox-config
+          readOnly: true
+      volumes:
+      - name: config-volume
+        configMap:
+          name: agent-sandbox-config
+          optional: true
 
 ---
 

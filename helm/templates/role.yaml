@@ -22,3 +22,18 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resourceNames:
+  - agent-sandbox-config
+  resources:
+  - configmaps
+  verbs:
+  - get

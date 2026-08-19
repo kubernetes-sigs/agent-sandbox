@@ -2280,6 +2280,33 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			expectedResult: false,
 		},
 		{
+			name: "PVC retention policy omitted and explicit Delete should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+				},
+			},
+			expectedResult: true,
+		},
+		{
+			name: "PVC retention policy empty and explicit Delete should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:                          basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{},
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+				},
+			},
+			expectedResult: true,
+		},
+		{
 			name: "PVC retention policy drift should NOT match",
 			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: basePodTemplate,

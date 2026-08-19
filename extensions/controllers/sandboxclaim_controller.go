@@ -559,8 +559,8 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 					needsUpdate = true
 				}
 			}
-			if !equality.Semantic.DeepEqual(sandbox.Spec.PersistentVolumeClaimRetentionPolicy, template.Spec.PersistentVolumeClaimRetentionPolicy) {
-				sandbox.Spec.PersistentVolumeClaimRetentionPolicy = copyPersistentVolumeClaimRetentionPolicy(template.Spec.PersistentVolumeClaimRetentionPolicy)
+			if persistentVolumeClaimRetentionWhenDeleted(sandbox.Spec.PersistentVolumeClaimRetentionPolicy) != persistentVolumeClaimRetentionWhenDeleted(template.Spec.PersistentVolumeClaimRetentionPolicy) {
+				sandbox.Spec.PersistentVolumeClaimRetentionPolicy = template.Spec.PersistentVolumeClaimRetentionPolicy.DeepCopy()
 				needsUpdate = true
 			}
 
@@ -1706,7 +1706,6 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] = template.Name
 
 	sandbox.Spec.SandboxBlueprint = *template.Spec.SandboxBlueprint.DeepCopy()
-	sandbox.Spec.PersistentVolumeClaimRetentionPolicy = copyPersistentVolumeClaimRetentionPolicy(template.Spec.PersistentVolumeClaimRetentionPolicy)
 	// Merge volumeClaimTemplates from template and claim according to the template policy
 	if len(claim.Spec.VolumeClaimTemplates) > 0 {
 		resolvedVCTs, err := mergeVolumeClaimTemplates(

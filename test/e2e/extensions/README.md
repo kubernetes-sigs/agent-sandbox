@@ -31,7 +31,6 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_RUNTIME_CLASS` | *(required)* | RuntimeClass name: `default` (cluster default / runc), `gvisor`, `kata`, etc. Tests skip when unset. |
 | `SANDBOX_POOL_SIZES` | total worker CPUs | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to the cluster's total worker CPU count when unset. |
 | `SANDBOX_BATCH_CAP` | `10` | Maximum number of claims fired per batch in burst recovery. Lower values reduce controller serialization; higher values stress the reconcile loop. |
-| `SANDBOX_SETTLE_SEC` | `2` | Seconds to wait after pool fill before starting burst claims. Lets the controller work queue drain so fill-residue doesn't inflate batch 1 latencies. Set to `0` to measure raw post-fill behavior. |
 | `SANDBOX_LONGEVITY` | *(unset)* | Go duration (e.g. `2h`, `30m`) to run burst recovery in longevity mode: continuous batches with adaptive sizing until the deadline. |
 | `SANDBOX_DEBUG` | *(unset)* | Set to any non-empty value to dump scoped controller logs after each pool iteration even on success. |
 | `SANDBOX_REPORT_DIR` | `artifacts` | Base directory for CSV output and controller logs. A subdirectory is auto-created per run. |
@@ -218,7 +217,6 @@ Header metadata:
 # pool_fill_sec,12.500
 # batch_size,4
 # max_claims,16
-# settle_sec,2
 # inter_batch_delay_ms,100
 ```
 
@@ -337,12 +335,6 @@ the full (unscoped) controller log as a fallback.
 - **Multi-size lifecycle subtests**: Run `TestRuntimeClassLifecycle` at small (2)
   and half-CPU pool sizes to validate the fill → claim → refill cycle under
   moderate scheduling pressure in CI.
-- **Probe-based settle detection**: Replace the fixed `SANDBOX_SETTLE_SEC` delay
-  with a single probe claim after pool fill. If the probe latency falls within
-  the green threshold (500ms), the controller work queue is empirically drained and burst
-  can start immediately. If not, back off and retry. Eliminates both the risk of
-  starting too early (inflated baselines) and waiting too long (wasted time on
-  fast clusters).
 - **Per-pool metrics capture**: Scrape the controller's Prometheus endpoint
   (`/metrics` on port 8080) before and after each pool iteration. Save the
   delta as `metrics_<runtime>_pool<N>.prom` in the results directory. Key

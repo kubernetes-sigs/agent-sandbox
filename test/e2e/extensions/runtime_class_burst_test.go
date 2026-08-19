@@ -64,15 +64,6 @@ func workloadPodSpec(rcPtr *string, workloadSec int) corev1.PodSpec {
 	}
 }
 
-func benchSettleDuration() time.Duration {
-	if v := os.Getenv("SANDBOX_SETTLE_SEC"); v != "" {
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
-			return time.Duration(n) * time.Second
-		}
-	}
-	return 2 * time.Second
-}
-
 func benchBatchCap() int {
 	if v := os.Getenv("SANDBOX_BATCH_CAP"); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 1 {
@@ -114,6 +105,7 @@ func waitForNoPods(ctx context.Context, cl *framework.ClusterClient, namespace s
 		}
 	}
 }
+
 
 type claimRecord struct {
 	batch        int
@@ -213,13 +205,16 @@ func emitBatchSummary(cw *csv.Writer, records []claimRecord, batchFrom, batchTo 
 }
 
 // TestRuntimeClassBurstRecovery measures how a warm pool behaves under
-// sustained batch load that exceeds pool refill capacity. A single pool is
-// reused across all pool sizes — scaled from 0 to the target between subtests.
+// sustained batch load that exceeds pool refill capacity. A fresh pool is
+// created for each pool size to avoid stale controller state (expectations
+// tracker, observedGeneration) from degrading fill times across iterations.
 //
 // Before entering the subtest loop the test measures three baselines:
-// cold start (single bare sandbox), pool fill, and warm claim latency.
+// cold start (single bare sandbox), calibration pool fill, and warm claim
+// latency. The calibration pool is deleted and fully drained before the
+// main loop begins.
 //
-// Each subtest fires claims in dynamically sized batches with 100ms settle
+// Each subtest fires claims in dynamically sized batches with 100ms delay
 // between batches, stopping when ReadyReplicas ≤ 1 and at least poolSize
 // claims have been issued, or after 2×poolSize total claims.
 //
@@ -304,46 +299,38 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: workloadPodSpec(rcPtr, workloadSec)}
 	require.NoError(t, tc0.CreateWithCleanup(t.Context(), template))
 
-	zeroReplicas := int32(0)
-	pool := &extensionsv1beta1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "burst-pool",
-			Namespace: ns.Name,
-		},
-		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
-			Replicas:    &zeroReplicas,
-			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
-		},
-	}
-	require.NoError(t, tc0.CreateWithCleanup(t.Context(), pool))
-	poolID := types.NamespacedName{Name: pool.Name, Namespace: ns.Name}
-
-	settleDur := benchSettleDuration()
-
+	// Calibration: measure warm claim baseline using a temporary pool.
 	calibReplicas := int32(4)
 	if isVMRuntime(runtimeClass) && int64(calibReplicas) > cpus {
 		calibReplicas = int32(cpus)
 	}
-	baselinePoolFill(t, tc0, pool, poolID, calibReplicas, fillTimeout)
-
-	if settleDur > 0 {
-		t.Logf("[settle] waiting %s for controller to drain after calibration fill", settleDur)
-		time.Sleep(settleDur)
+	calibPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "calib-pool",
+			Namespace: ns.Name,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &calibReplicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
 	}
+	require.NoError(t, tc0.CreateWithCleanup(t.Context(), calibPool))
+	calibPoolID := types.NamespacedName{Name: calibPool.Name, Namespace: ns.Name}
+	baselinePoolFill(t, tc0, calibPool, calibPoolID, calibReplicas, fillTimeout)
 
-	warmBaseline, calibClaim := baselineWarmClaim(t, tc0, ns.Name, pool.Name)
+	warmBaseline, calibClaim := baselineWarmClaim(t, tc0, ns.Name, calibPool.Name)
 	warmColdThreshold := time.Second
 	t.Logf("[baseline] cold=%.3fs warm=%.3fs threshold=%.3fs",
 		coldBaseline.Seconds(), warmBaseline.Seconds(), warmColdThreshold.Seconds())
 
-	// Scale to 0 before entering subtest loop
+	// Delete calibration pool and wait for full cleanup.
 	require.NoError(t, tc0.Delete(t.Context(), calibClaim))
-	framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
-		p.Spec.Replicas = &zeroReplicas
-	})
-	drainCtx, drainCancel := context.WithTimeout(t.Context(), fillTimeout)
-	require.NoError(t, tc0.WaitForWarmPoolReady(drainCtx, poolID))
-	drainCancel()
+	require.NoError(t, tc0.Delete(t.Context(), calibPool))
+	calibDrainCtx, calibDrainCancel := context.WithTimeout(t.Context(), fillTimeout)
+	if err := waitForNoPods(calibDrainCtx, tc0.ClusterClient, ns.Name); err != nil {
+		t.Logf("[calibration drain] WARNING: %v", err)
+	}
+	calibDrainCancel()
 
 	batchCap := benchBatchCap()
 	calcBatchSize := func(poolSize int) int {
@@ -375,6 +362,23 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			continue
 		}
 
+		// Fresh pool per iteration: clean controller state (expectations
+		// tracker, observedGeneration, status). Reusing a pool across
+		// iterations carried stale state that degraded fill times.
+		replicas := int32(poolSize)
+		pool := &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("burst-pool-%d", poolSize),
+				Namespace: ns.Name,
+			},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas:    &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			},
+		}
+		require.NoError(t, tc0.CreateWithCleanup(t.Context(), pool))
+		poolID := types.NamespacedName{Name: pool.Name, Namespace: ns.Name}
+
 		preBatchSize := calcBatchSize(poolSize)
 		if longevity > 0 && coldBaseline > 0 {
 			preBatchSize = max(4, int(float64(poolSize)*0.3/coldBaseline.Seconds()))
@@ -386,11 +390,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		var poolFillTime time.Duration
 		if longevity > 0 {
 			minReady := int32(min(2*preBatchSize, poolSize))
-			framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
-				r := int32(poolSize)
-				p.Spec.Replicas = &r
-			})
-			t.Logf("[longevity] scaling pool to %d, waiting for %d ready replicas...", poolSize, minReady)
+			t.Logf("[longevity] filling pool to %d, waiting for %d ready replicas...", poolSize, minReady)
 			start := time.Now()
 			fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
 			require.NoError(t, tc0.WaitForWarmPoolMinReady(fillCtx, poolID, minReady))
@@ -398,17 +398,17 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			poolFillTime = time.Since(start)
 			t.Logf("[longevity] pool has %d+ ready in %.3fs (fill continues in background)", minReady, poolFillTime.Seconds())
 		} else {
-			poolFillTime = baselinePoolFill(t, tc0, pool, poolID, int32(poolSize), fillTimeout)
+			start := time.Now()
+			fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
+			require.NoError(t, tc0.WaitForWarmPoolReady(fillCtx, poolID))
+			fillCancel()
+			poolFillTime = time.Since(start)
+			t.Logf("[fill] pool-%d filled in %.3fs", poolSize, poolFillTime.Seconds())
 		}
 
 		t.Run(fmt.Sprintf("pool-%d", poolSize), func(t *testing.T) {
 			tc := framework.NewTestContext(t)
 			poolStart := time.Now()
-
-			if settleDur > 0 && longevity == 0 {
-				t.Logf("[settle] waiting %s for controller work queue to drain after fill", settleDur)
-				time.Sleep(settleDur)
-			}
 
 			tracker := newMilestoneTracker(t.Context(), t, tc.DynamicClient(), ns.Name)
 			defer tracker.Stop()
@@ -457,7 +457,6 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			} else {
 				_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
 			}
-			_ = cw.Write([]string{"# settle_sec", strconv.Itoa(int(settleDur.Seconds()))})
 			_ = cw.Write([]string{"# inter_batch_delay_ms", strconv.Itoa(int(interBatchDelay.Milliseconds()))})
 			_ = cw.Write([]string{"batch", "claim", "batch_size", "latency_sec", "timestamp", "wall_offset_sec", "ready_at_start",
 				"create_ack_ms", "adoption_ms", "schedule_ms", "runtime_ms", "propagate_ms", "e2e_ms", "is_warm"})
@@ -548,10 +547,10 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("  cold=%.3fs  warm=%.3fs  fill=%.3fs  threshold=%.3fs",
 				coldBaseline.Seconds(), warmBaseline.Seconds(), poolFillTime.Seconds(), warmColdThreshold.Seconds())
 			if longevity > 0 {
-				t.Logf("  batchSize=%d  longevity=%s  adaptive=%v  settle=%s  delay=%s",
-					batchSize, longevity, adaptiveBatch, settleDur, interBatchDelay)
+				t.Logf("  batchSize=%d  longevity=%s  adaptive=%v  delay=%s",
+					batchSize, longevity, adaptiveBatch, interBatchDelay)
 			} else {
-				t.Logf("  batchSize=%d  maxClaims=%d  settle=%s  inter_batch=%s", batchSize, maxClaims, settleDur, interBatchDelay)
+				t.Logf("  batchSize=%d  maxClaims=%d  inter_batch=%s", batchSize, maxClaims, interBatchDelay)
 			}
 			t.Logf("=======================================================================")
 
@@ -770,23 +769,24 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			}
 		})
 
-		// Scale pool to 0 and wait for all pods (including Terminating) to be gone
-		framework.MustUpdateObject(tc0.ClusterClient, pool, func(p *extensionsv1beta1.SandboxWarmPool) {
-			p.Spec.Replicas = &zeroReplicas
-		})
-		drainCtx, drainCancel := context.WithTimeout(t.Context(), fillTimeout)
-		require.NoError(t, tc0.WaitForWarmPoolReady(drainCtx, poolID))
-		drainCancel()
-
-		// Wait for all pods (including Terminating) to be fully gone before
-		// scaling to the next pool size. This ensures CPU capacity is restored,
-		// which is critical for kata where VM termination takes 5-10s per pod.
-		podDrainTimeout := time.Duration(poolSize)*10*time.Second + 30*time.Second
-		podDrainCtx, podDrainCancel := context.WithTimeout(t.Context(), podDrainTimeout)
-		t.Logf("[drain] waiting for all pods in %s to terminate (timeout %s)", ns.Name, podDrainTimeout)
-		if err := waitForNoPods(podDrainCtx, tc0.ClusterClient, ns.Name); err != nil {
-			t.Logf("[drain] WARNING: %v — proceeding anyway", err)
+		// Delete pool and all claims, then wait for full cleanup.
+		// Pool deletion cascades to unclaimed sandboxes via ownerReference.
+		// Claimed sandboxes are owned by claims (adoption transferred
+		// ownership), so delete claims explicitly too.
+		var claimList extensionsv1beta1.SandboxClaimList
+		if err := tc0.ClusterClient.List(t.Context(), &claimList, client.InNamespace(ns.Name)); err == nil {
+			for i := range claimList.Items {
+				_ = tc0.ClusterClient.Delete(t.Context(), &claimList.Items[i])
+			}
 		}
-		podDrainCancel()
+		require.NoError(t, tc0.Delete(t.Context(), pool))
+
+		drainTimeout := time.Duration(poolSize)*10*time.Second + 30*time.Second
+		drainCtx, drainCancel := context.WithTimeout(t.Context(), drainTimeout)
+		t.Logf("[drain] waiting for pods in %s to terminate (timeout %s)", ns.Name, drainTimeout)
+		if err := waitForNoPods(drainCtx, tc0.ClusterClient, ns.Name); err != nil {
+			t.Logf("[drain] WARNING: %v", err)
+		}
+		drainCancel()
 	}
 }

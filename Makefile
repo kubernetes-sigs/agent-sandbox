@@ -5,6 +5,10 @@ all: fix-go-generate fix-api-docs build lint-go lint-api test-unit toc-verify ve
 fix-go-generate:
 	dev/tools/fix-go-generate
 
+.PHONY: fix-api-docs
+fix-api-docs:
+	dev/tools/fix-api-docs
+
 .PHONY: install-gen-tools
 install-gen-tools:
 	dev/tools/fix-go-generate --install-only
@@ -59,7 +63,7 @@ LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 	-X $(VERSION_PKG).buildDate=$(BUILD_DATE)
 
 .PHONY: build
-build: build-controller build-sandbox-router
+build: build-controller build-sandbox-router build-sandboxd
 
 .PHONY: build-controller
 build-controller:
@@ -69,15 +73,21 @@ build-controller:
 build-sandbox-router:
 	go build -ldflags "$(LD_FLAGS)" -o bin/sandbox-router ./sandbox-router/cmd
 
+.PHONY: build-sandboxd
+build-sandboxd:
+	go build -ldflags "$(LD_FLAGS)" -o bin/sandboxd ./packages/sandboxd/cmd/sandboxd
+
 KIND_CLUSTER=agent-sandbox
+CONTAINER_ENGINE ?= docker
 
 .PHONY: deploy-kind
 # `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
 # `CONTROLLER_ARGS="--enable-pprof-debug --zap-log-level=debug" make deploy-kind` to deploy with custom controller flags.
 # `CONTROLLER_ONLY=true make deploy-kind` to build and push only the controller image.
+# `CONTAINER_ENGINE=podman make deploy-kind` to use podman instead of docker.
 deploy-kind:
-	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
+	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG --container-engine=${CONTAINER_ENGINE}
+	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} --container-engine=${CONTAINER_ENGINE} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
 	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
 
 .PHONY: deploy-cloud-provider-kind
@@ -131,7 +141,7 @@ fix-api:
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 
-# Default remote (can be overriden: make release-publish REMOTE=upstream ...)
+# Default remote (can be overridden: make release-publish REMOTE=upstream ...)
 REMOTE_UPSTREAM ?= upstream
 REMOTE_FORK ?= origin
 

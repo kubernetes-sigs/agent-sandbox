@@ -500,9 +500,10 @@ class SandboxFleet:
           f"over-creation; consider staging claims or a lower cap.")
     if total > 20000:
       plan.warnings.append(
-          f"warm footprint {total} is very large; deep warm can trip the warm-pool "
-          f"over-creation race (#1215) — keep the controller's "
-          f"--sandbox-warm-pool-concurrent-workers low and stage the fill.")
+          f"warm footprint {total} is very large — stage the fill "
+          f"(warm_create_budget); on controllers <= v0.5.3 deep warm can also trip "
+          f"the warm-pool over-creation race (#1215, fixed in v0.5.4 by #1266) — "
+          f"there, keep --sandbox-warm-pool-concurrent-workers low (<=10).")
     for msg in plan.warnings:
       logger.warning("plan advisory: %s", msg)
 
@@ -574,8 +575,14 @@ class SandboxFleet:
       return
     workers = max(1, min(len(entries), self.config.max_concurrent))
     if workers == 1 or len(entries) == 1:
+      err = None
       for e in entries:
-        self._warm_entry(e, wait, replicas_override=replicas_override)
+        try:
+          self._warm_entry(e, wait, replicas_override=replicas_override)
+        except Exception as exc:
+          err = err or exc
+      if err is not None:
+        raise err
       return
     with ThreadPoolExecutor(max_workers=workers) as ex:
       futures = [ex.submit(self._warm_entry, e, wait, replicas_override)
@@ -584,7 +591,7 @@ class SandboxFleet:
       for f in as_completed(futures):
         try:
           f.result()
-        except BaseException as exc:  # noqa: BLE001 — surface first; teardown cleans up
+        except Exception as exc:
           err = err or exc
       if err is not None:
         raise err
@@ -657,6 +664,69 @@ class SandboxFleet:
       raise KeyError(f"image not in plan: {image}")
     self._warm_entry(entry, wait, replicas_override=replicas_override)
 
+  def unwarm_images(self, images) -> None:
+    """Tear down a subset of images' pools + templates concurrently."""
+    plan = self.plan_ or self.plan()
+    images = list(dict.fromkeys(images))
+    resolved = [(img, plan.for_image(img)) for img in images]
+    entries = [e for _img, e in resolved if e is not None]
+    if not entries:
+      return
+    workers = max(1, min(len(entries), self.config.max_concurrent))
+    if workers == 1 or len(entries) == 1:
+      err = None
+      for e in entries:
+        try:
+          self._unwarm_entry(e)
+        except Exception as exc:
+          logger.exception("Failed to unwarm entry: %s", exc)
+          err = err or exc
+      if err is not None:
+        raise err
+      return
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+      futures = [ex.submit(self._unwarm_entry, e) for e in entries]
+      err = None
+      for f in as_completed(futures):
+        try:
+          f.result()
+        except Exception as exc:
+          logger.exception("Failed to unwarm entry: %s", exc)
+          err = err or exc
+      if err is not None:
+        raise err
+
+  def _unwarm_entry(self, entry) -> None:
+    """Tear down a single plan entry's warm pool and template, releasing replicas."""
+    with self._lock:
+      if entry.image not in self._warmed:
+        return                                 # already unwarmed — don't double-release
+      reps = self._warmed.pop(entry.image)
+    c = self.registry.get(entry.cluster)
+    pool_deleted = False
+    err = None
+    try:
+      c.resources.delete_warmpool(entry.pool)
+      pool_deleted = True
+    except Exception as exc:
+      err = exc
+
+    if pool_deleted:
+      c.release_replicas(reps)
+      self._obs.warm_remove(entry.cluster, reps)
+    else:
+      with self._lock:
+        self._warmed[entry.image] = reps
+
+    try:
+      c.resources.delete_template(entry.template)
+    except Exception as exc:
+      if err is None:
+        err = exc
+
+    if err is not None:
+      raise err
+
   def unwarm_image(self, image: str) -> None:
     """Tear down one image's pool + template. **Idempotent**: a no-op if the image
     isn't currently warmed. Two callers can legitimately unwarm the same image —
@@ -668,15 +738,7 @@ class SandboxFleet:
     entry = (self.plan_ or self.plan()).for_image(image)
     if entry is None:
       return                                   # locate the pool before mutating state
-    with self._lock:
-      if image not in self._warmed:
-        return                                 # already unwarmed — don't double-release
-      reps = self._warmed.pop(image)
-    c = self.registry.get(entry.cluster)
-    c.resources.delete_warmpool(entry.pool)
-    c.resources.delete_template(entry.template)
-    c.release_replicas(reps)
-    self._obs.warm_remove(entry.cluster, reps)
+    self._unwarm_entry(entry)
 
   def set_pool_replicas(self, image: str, replicas: int) -> None:
     """Patch an image's warm pool to ``replicas`` (scale up or down) without
@@ -702,21 +764,21 @@ class SandboxFleet:
 
   def prepull(self, wait: bool = True) -> None:
     """Pre-pull each cluster's planned images via a DaemonSet (optional)."""
-    from . import prepull as _pp
+    from .prepull import prepull as _do_prepull
     plan = self.plan_ or self.plan()
     with self._obs.phase("prepull"):
       for cname, entries in plan.by_cluster().items():
         c = self.registry.get(cname)
         ts = c.template_spec(self.config.template)
-        _pp.prepull(c, [e.image for e in entries],
+        _do_prepull(c, [e.image for e in entries],
                     node_selector=ts.node_selector,
                     image_pull_secret=ts.image_pull_secret,
                     labels=self.config.labels, wait=wait)
 
   def prepull_delete(self) -> None:
-    from . import prepull as _pp
+    from .prepull import prepull_delete as _do_prepull_delete
     for c in self.registry:
-      _pp.prepull_delete(c)
+      _do_prepull_delete(c)
 
   def setup(self, prepull: bool = False,
             create_budget: int | None = None) -> "SandboxFleet":
@@ -855,17 +917,39 @@ class SandboxFleet:
       sel = c.resources.managed_selector()
       # Sweep any stray claims first (defensive: untracked/leaked claims keep
       # their adopted sandbox alive even after the pool is gone).
-      for claim in c.resources.list_claims(label_selector=sel):
-        c.resources.delete_claim(claim)
-      for pool in c.resources.list_warmpools(label_selector=sel):
-        c.resources.delete_warmpool(pool)
-      for tmpl in c.resources.list_templates(label_selector=sel):
-        c.resources.delete_template(tmpl)
+      try:
+        claims = c.resources.list_claims(label_selector=sel)
+        pools = c.resources.list_warmpools(label_selector=sel)
+        tmpls = c.resources.list_templates(label_selector=sel)
+      except Exception as exc:
+        logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
+        claims, pools, tmpls = [], [], []
+      total_items = len(claims) + len(pools) + len(tmpls)
+      if total_items > 0:
+        workers = max(1, min(total_items, self.config.max_concurrent))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+          # Phase 1: Sweep stray claims first so adopted sandboxes aren't leaked.
+          if claims:
+            claim_futs = [ex.submit(c.resources.delete_claim, claim) for claim in claims]
+            for f in as_completed(claim_futs):
+              try:
+                f.result()
+              except Exception as exc:
+                logger.exception("Failed to delete claim during teardown: %s", exc)
+          # Phase 2: Delete pools and templates concurrently.
+          rest_futs = [ex.submit(c.resources.delete_warmpool, pool) for pool in pools]
+          rest_futs.extend(ex.submit(c.resources.delete_template, tmpl) for tmpl in tmpls)
+          if rest_futs:
+            for f in as_completed(rest_futs):
+              try:
+                f.result()
+              except Exception as exc:
+                logger.exception("Failed to delete pool/template during teardown: %s", exc)
       c.reset_counts()
       if delete_namespace:
         try:
           c.core_api.delete_namespace(c.namespace)
-        except Exception:  # noqa: BLE001
+        except Exception:
           pass
     self._obs.warm_reset()
     with self._lock:

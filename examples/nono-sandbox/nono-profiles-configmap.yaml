@@ -1,0 +1,121 @@
+# nono profiles for the example, mounted read-only into the pod.
+# Profile schema: https://nono.sh/docs (see nono-profile.schema.json).
+#
+#   agent.json - the runnable demo: scoped LLM egress, /workspace only, plus a
+#                pinned LogCLI child whose argv and Loki API access are both
+#                independently constrained.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nono-agent-profiles
+data:
+  agent.json: |
+    {
+      "meta": {
+        "name": "agent",
+        "description": "Payments SRE agent: scoped LLM egress plus a query-only LogCLI child with exact argv and L7 policy"
+      },
+      "workdir": { "access": "readwrite" },
+      "filesystem": {
+        "allow": ["/workspace"],
+        "read": ["/opt/agent"]
+      },
+      "network": {
+        "credentials": ["llm"],
+        "allow_domain": [
+          { "domain": "api.openai.com", "endpoints": [ { "method": "POST", "path": "/v1/chat/completions" } ] }
+        ],
+        "custom_credentials": {
+          "llm": {
+            "upstream": "https://api.openai.com",
+            "credential_key": "env://OPENAI_API_KEY",
+            "env_var": "OPENAI_API_KEY",
+            "inject_header": "Authorization",
+            "credential_format": "Bearer {}",
+            "endpoint_rules": [ { "method": "POST", "path": "/v1/chat/completions" } ]
+          }
+        }
+      },
+      "command_policies": {
+        "credentials": {
+          "loki": {
+            "type": "proxy",
+            "upstream": "https://nono-demo-loki:3100",
+            "credential_key": "file:///etc/nono/loki-credential/token",
+            "env_var": "LOKI_BEARER_TOKEN",
+            "base_url_env_var": "LOKI_ADDR",
+            "inject_header": "Authorization",
+            "credential_format": "Bearer {}",
+            "tls_ca": "/etc/nono/loki-tls/ca.crt"
+          }
+        },
+        "commands": {
+          "logcli": {
+            "executable": "/usr/local/bin/logcli",
+            "from": {
+              "session": {
+                "sandbox": {
+                  "network": {
+                    "allow_domain": ["nono-demo-loki"]
+                  },
+                  "credentials": [
+                    {
+                      "name": "loki",
+                      "endpoint_policy": {
+                        "default": "deny",
+                        "allow": [
+                          { "method": "GET", "path": "/loki/api/v1/query_range" }
+                        ]
+                      }
+                    }
+                  ],
+                  "environment": {
+                    "allow_vars": ["PATH", "HOME", "LANG", "LC_*", "TZ"]
+                  },
+                  "stdio": {
+                    "stdout": { "max_bytes": 65536, "on_limit": "truncate" },
+                    "stderr": { "max_bytes": 16384, "on_limit": "terminate" }
+                  }
+                },
+                "invocation_policy": {
+                  "default": "deny",
+                  "deny": [
+                    {
+                      "argv": { "prefix": ["delete"] },
+                      "reason": "the agent may query incident logs but may not manage Loki deletion requests"
+                    }
+                  ],
+                  "allow": [
+                    {
+                      "argv": {
+                        "exact": [
+                          "--quiet",
+                          "--output=raw",
+                          "query",
+                          "--since=15m",
+                          "--limit=10",
+                          "{service=\"payments\"} |= \"p99 latency\""
+                        ]
+                      }
+                    },
+                    {
+                      "argv": { "exact": ["--quiet", "labels"] }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+---
+# A stand-in for a secret the agent must NOT be able to read. Landlock denies it
+# because it is not in any filesystem grant, even though it is mounted into the pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: secret-config-demo
+data:
+  token: "this-should-be-unreadable-by-the-agent"

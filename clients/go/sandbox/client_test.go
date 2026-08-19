@@ -17,6 +17,7 @@ package sandbox
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -190,6 +191,85 @@ func TestClient_CreateSandbox_EmptyWarmPool(t *testing.T) {
 	_, err := c.CreateSandbox(context.Background(), "", "default")
 	if err == nil {
 		t.Error("expected error for empty warm pool")
+	}
+	if !strings.Contains(err.Error(), "WarmPoolName is required") {
+		t.Errorf("expected WarmPoolName required error, got: %v", err)
+	}
+}
+
+func TestClient_CreateSandbox_InvalidWarmPoolName(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	createCalled := false
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		createCalled = true
+		return false, nil, nil
+	})
+
+	_, err := c.CreateSandbox(context.Background(), "MyWarmPool", "default")
+	if err == nil {
+		t.Fatal("expected error for invalid warm pool name")
+	}
+	if !strings.Contains(err.Error(), "not a valid Kubernetes DNS subdomain name") {
+		t.Errorf("expected DNS subdomain validation error, got: %v", err)
+	}
+	if createCalled {
+		t.Error("CreateSandbox should reject invalid name before creating a claim")
+	}
+}
+
+func TestClient_GetSandbox_Reattach_WithoutClientWarmPoolName(t *testing.T) {
+	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+
+	const (
+		claimName   = "reattach-claim"
+		sandboxName = "reattach-sandbox"
+	)
+
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: sandboxName},
+			},
+		}, nil
+	})
+	agentsCS.PrependReactor("get", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, readySandbox(sandboxName), nil
+	})
+
+	opts := Options{
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		Quiet:               true,
+	}
+	opts.setDefaults()
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	c, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("NewClient() without WarmPoolName: %v", err)
+	}
+
+	sb, err := c.GetSandbox(context.Background(), claimName, "default")
+	if err != nil {
+		t.Fatalf("GetSandbox() re-attach without client WarmPoolName: %v", err)
+	}
+	if !sb.IsReady() {
+		t.Fatal("expected re-attached sandbox to be ready")
+	}
+	if sb.ClaimName() != claimName {
+		t.Errorf("expected claim %q, got %q", claimName, sb.ClaimName())
+	}
+	if sb.SandboxName() != sandboxName {
+		t.Errorf("expected sandbox %q, got %q", sandboxName, sb.SandboxName())
 	}
 }
 
@@ -526,4 +606,33 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 	if state.SandboxName != "warm-pool-sandbox-xyz" {
 		t.Errorf("expected warm-pool-sandbox-xyz, got %s", state.SandboxName)
 	}
+}
+
+func TestStampClientRequestTime(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+
+	t.Run("stamps the key when absent", func(t *testing.T) {
+		got := stampClientRequestTime(nil, now)
+		if got[clientAnnotation] != "2026-08-05T12:00:00Z" {
+			t.Errorf("expected stamped time, got %q", got[clientAnnotation])
+		}
+	})
+
+	t.Run("preserves a caller-supplied value", func(t *testing.T) {
+		caller := "2026-08-05T11:59:00Z"
+		got := stampClientRequestTime(map[string]string{clientAnnotation: caller}, now)
+		if got[clientAnnotation] != caller {
+			t.Errorf("expected caller value %q to be preserved, got %q", caller, got[clientAnnotation])
+		}
+	})
+
+	t.Run("leaves unrelated annotations intact", func(t *testing.T) {
+		got := stampClientRequestTime(map[string]string{"opentelemetry.io/trace-context": "abc"}, now)
+		if got["opentelemetry.io/trace-context"] != "abc" {
+			t.Errorf("trace-context annotation was clobbered: %v", got)
+		}
+		if got[clientAnnotation] == "" {
+			t.Error("expected client annotation to be stamped alongside existing keys")
+		}
+	})
 }

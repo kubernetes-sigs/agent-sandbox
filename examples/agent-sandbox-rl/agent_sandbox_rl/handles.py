@@ -37,11 +37,16 @@ def exec_in_pod(core_api, pod: str, namespace: str, command) -> str:
   """
   if isinstance(command, str):
     command = ["bash", "-lc", command]
-  return stream(
+  out = stream(
       core_api.connect_get_namespaced_pod_exec,
       pod, namespace, command=command,
       stderr=True, stdin=False, stdout=True, tty=False,
       _preload_content=True)
+  if out is None:
+    return ""
+  if isinstance(out, bytes):
+    return out.decode("utf-8", errors="replace")
+  return str(out)
 
 
 def _as_script(command) -> str:

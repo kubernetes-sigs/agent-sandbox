@@ -14,6 +14,7 @@
 
 import unittest
 import logging
+import prometheus_client
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch, call
 from kubernetes.client import ApiException
@@ -1132,8 +1133,11 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
                 snapshot_timestamp="2023-01-01T00:00:00Z", error_reason="", error_code=0
             )
             
+            before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_suspend_latency_ms_count', labels={'status': 'success'}) or 0.0
             result = self.sandbox.suspend(snapshot_before_suspend=True)
             
+            after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_suspend_latency_ms_count', labels={'status': 'success'}) or 0.0
+            self.assertEqual(after_count, before_count + 1.0)
             self.assertTrue(result.success)
             self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_called_once_with(
                 group=SANDBOX_API_GROUP,
@@ -1203,8 +1207,11 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             mock_list.return_value = ListSnapshotResult(success=True, snapshots=[], error_reason="", error_code=0)
             self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.return_value = {"status": "patched"}
             
+            before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_resume_latency_ms_count', labels={'status': 'success'}) or 0.0
             result = self.sandbox.resume()
             
+            after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_resume_latency_ms_count', labels={'status': 'success'}) or 0.0
+            self.assertEqual(after_count, before_count + 1.0)
             self.assertTrue(result.success)
             self.assertFalse(result.restored_from_snapshot)
             self.mock_k8s_helper.custom_objects_api.patch_namespaced_custom_object.assert_called_once_with(
@@ -1470,8 +1477,11 @@ class TestSandboxWithSnapshotSupport(unittest.TestCase):
             ]
         }
 
+        before_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_restore_latency_ms_count', labels={'status': 'success'}) or 0.0
         result = self.sandbox.restore(snapshot_uid="snap-uid-123")
-
+        
+        after_count = prometheus_client.REGISTRY.get_sample_value('sandbox_client_restore_latency_ms_count', labels={'status': 'success'}) or 0.0
+        self.assertEqual(after_count, before_count + 1.0)
         self.assertTrue(result.success)
         self.assertEqual(result.snapshot_uid, "snap-uid-123")
         self.mock_k8s_helper.patch_sandbox_claim.assert_called_once_with(

@@ -70,9 +70,20 @@ def deploy_router(tc, temp_namespace):
     print(f"Using router image: {router_image}")
 
     with open(ROUTER_YAML_PATH, "r") as f:
-        manifest = f.read().replace("${ROUTER_IMAGE}", router_image)
-        # Enable unauthenticated mode for local E2E test execution
-        manifest = manifest.replace('value: "false"', 'value: "true"')
+        docs = list(yaml.safe_load_all(f))
+
+    for doc in docs:
+        if doc and doc.get("kind") == "Deployment" and doc.get("metadata", {}).get("name") == "sandbox-router-deployment":
+            containers = doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+            for c in containers:
+                if c.get("name") == "router":
+                    c["image"] = router_image
+                    env_vars = c.get("env", [])
+                    for env_var in env_vars:
+                        if env_var.get("name") == "ALLOW_UNAUTHENTICATED_ROUTER":
+                            env_var["value"] = "true"
+
+    manifest = yaml.safe_dump_all(docs)
 
     print(f"Applying router manifest to namespace: {temp_namespace}")
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
@@ -170,6 +181,52 @@ def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_rou
 
     except Exception as e:
         pytest.fail(f"SDK test without warmpool failed: {e}")
+    finally:
+        client.delete_all()
+
+
+def test_python_sdk_annotation(tc, temp_namespace, sandbox_coldpool):
+    """Tests that the Python SDK creates SandboxClaim with correct annotation."""
+    from datetime import datetime
+    from k8s_agent_sandbox.constants import (
+        CLIENT_REQUEST_TIME_ANNOTATION,
+        CLAIM_API_GROUP,
+        CLAIM_API_VERSION,
+        CLAIM_PLURAL_NAME,
+    )
+
+    client = SandboxClient()
+    try:
+        sandbox = client.create_sandbox(
+            warmpool=sandbox_coldpool,
+            namespace=temp_namespace,
+        )
+
+        custom_objects_api = tc.get_custom_objects_api()
+        claim = custom_objects_api.get_namespaced_custom_object(
+            group=CLAIM_API_GROUP,
+            version=CLAIM_API_VERSION,
+            namespace=temp_namespace,
+            plural=CLAIM_PLURAL_NAME,
+            name=sandbox.claim_name
+        )
+
+        annotations = claim.get("metadata", {}).get("annotations", {})
+        print(f"Annotations: {annotations}")
+
+        assert CLIENT_REQUEST_TIME_ANNOTATION in annotations, f"Expected annotation '{CLIENT_REQUEST_TIME_ANNOTATION}' missing"
+
+        timestamp_str = annotations[CLIENT_REQUEST_TIME_ANNOTATION]
+        print(f"Timestamp: {timestamp_str}")
+
+        try:
+            dt = datetime.fromisoformat(timestamp_str)
+            assert dt.tzname() == 'UTC', "Timestamp should be in UTC"
+        except ValueError as e:
+            pytest.fail(f"Failed to parse timestamp '{timestamp_str}': {e}")
+
+        print("--- SandboxClaim Annotation Test Passed! ---")
+
     finally:
         client.delete_all()
 

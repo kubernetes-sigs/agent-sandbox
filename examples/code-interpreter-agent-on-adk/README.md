@@ -45,7 +45,7 @@ The guide walks you through the process of creating a simple [ADK](https://googl
    
    
    root_agent = Agent(
-       model='gemini-2.5-flash',
+       model='gemini-3.7-flash',
        name='coding_agent',
        description="Writes Python code and executes it in a sandbox.",
        instruction="You are a helpful assistant that can write Python code and execute it in the sandbox. Use the 'execute_python' tool for this purpose.",
@@ -114,7 +114,7 @@ The guide walks you through the process of creating a simple [ADK](https://googl
    func main() {
    	ctx := context.Background()
 
-   	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+   	model, err := gemini.NewModel(ctx, "gemini-3.7-flash", &genai.ClientConfig{
    		APIKey: os.Getenv("GOOGLE_API_KEY"),
    	})
    	if err != nil {

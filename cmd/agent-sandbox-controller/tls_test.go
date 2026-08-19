@@ -182,11 +182,6 @@ func TestPatchCRDs(t *testing.T) {
 						Served:  true,
 						Storage: true,
 					},
-					{
-						Name:    "v1alpha1",
-						Served:  true,
-						Storage: false,
-					},
 				},
 			},
 		}

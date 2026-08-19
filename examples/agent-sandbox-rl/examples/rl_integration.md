@@ -90,9 +90,10 @@ results = fleet.run(rollout_fn, strategy="naive", concurrency=500,
   image set); `claim_concurrency=N` staged-claims to stay under the apiserver.
 
 ### Safeguards at scale (on by default)
-Large/deep warm pools can stress the warm-pool controller
-([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)); the SDK is
-fail-safe by default:
+Large/deep warm pools can stress the warm-pool controller (on releases ≤ v0.5.3, the
+[#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215) over-creation churn —
+fixed in v0.5.4 by [#1266](https://github.com/kubernetes-sigs/agent-sandbox/pull/1266));
+the SDK is fail-safe by default:
 - **Circuit breaker** — `FleetConfig.overcommit_factor` (1.5) / `max_live_sandboxes`: if
   live sandboxes exceed the ceiling, the fleet tears down and raises `FleetOvercommitError`
   (catches accidental over-creation — runaway / orphan).
@@ -100,8 +101,8 @@ fail-safe by default:
   `atexit`/SIGINT/SIGTERM tear down on graceful exit, and **`reap(run_id=…)`** /
   `python -m agent_sandbox_rl.reaper` sweeps an **orphaned** run (SIGKILL / OOM / node loss).
 - **Staged fill/claims** — `warm_create_budget` (staged warm) + `claim_concurrency` bound
-  concurrent apiserver ops; for large deep warms also keep the controller's
-  `--sandbox-warm-pool-concurrent-workers` low (≤10).
+  concurrent apiserver ops. Controller side: `--sandbox-warm-pool-concurrent-workers=100`
+  on v0.5.4+ (validated up to 500); keep it low (≤10) only on ≤ v0.5.3 (#1215).
 
 ## Generic env wrapper (primitives)
 

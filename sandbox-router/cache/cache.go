@@ -410,7 +410,7 @@ func apiVersionInGroup(apiVersion, group string) bool {
 	if apiVersion == group {
 		return true
 	}
-	for i := 0; i < len(apiVersion); i++ {
+	for i := range len(apiVersion) {
 		if apiVersion[i] == '/' {
 			return apiVersion[:i] == group
 		}

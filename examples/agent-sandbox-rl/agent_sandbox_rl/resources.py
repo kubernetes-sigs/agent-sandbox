@@ -33,6 +33,41 @@ from .config import TemplateSpec
 logger = logging.getLogger("agent_sandbox_rl.resources")
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+  """Recursively merge override dictionary into base dictionary.
+
+  For list fields where elements are dictionaries with a 'name' key (such as
+  container env vars, volume mounts, and ports), elements are merged by name or
+  appended. Other list fields and primitive values are replaced by the override.
+  """
+  merged = dict(base)
+  for key, value in override.items():
+    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+      merged[key] = _deep_merge(merged[key], value)
+    elif isinstance(value, list) and isinstance(merged.get(key), list):
+      base_list = list(merged[key])
+      if all(isinstance(x, dict) and "name" in x for x in base_list) and all(
+          isinstance(x, dict) and "name" in x for x in value
+      ):
+        merged_list = list(base_list)
+        for item in value:
+          item_name = item.get("name")
+          match_idx = next(
+              (i for i, x in enumerate(merged_list) if x.get("name") == item_name),
+              None,
+          )
+          if match_idx is not None:
+            merged_list[match_idx] = _deep_merge(merged_list[match_idx], item)
+          else:
+            merged_list.append(dict(item))
+        merged[key] = merged_list
+      else:
+        merged[key] = value
+    else:
+      merged[key] = value
+  return merged
+
+
 class Resources:
   """Template + warm-pool lifecycle for a single cluster/namespace."""
 
@@ -126,7 +161,7 @@ class Resources:
           },
       }
     if template.extra_pod_spec:
-      extra = template.extra_pod_spec
+      extra = dict(template.extra_pod_spec)
       # Compose the escape hatch with the colocation affinity instead of letting a
       # shallow update() clobber the whole `affinity` key: merge the two affinity
       # blocks (extra_pod_spec wins per sub-key, e.g. its nodeAffinity is added
@@ -134,6 +169,33 @@ class Resources:
       if "affinity" in extra and "affinity" in pod_spec:
         merged_affinity = {**pod_spec["affinity"], **extra["affinity"]}
         extra = {**extra, "affinity": merged_affinity}
+      if "containers" in extra:
+        extra_containers = extra.pop("containers")
+        if not isinstance(extra_containers, list):
+          raise TypeError(
+              f"extra_pod_spec['containers'] must be a list of container dicts, got {type(extra_containers).__name__}"
+          )
+        if "containers" in pod_spec:
+          merged_containers = list(pod_spec["containers"])
+          for extra_c in extra_containers:
+            if not isinstance(extra_c, dict):
+              continue
+            c_name = extra_c.get("name")
+            if c_name:
+              match_idx = next(
+                  (i for i, c in enumerate(merged_containers) if c.get("name") == c_name),
+                  None,
+              )
+              if match_idx is not None:
+                merged_containers[match_idx] = _deep_merge(merged_containers[match_idx], extra_c)
+              else:
+                merged_containers.append(dict(extra_c))
+            else:
+              if merged_containers:
+                merged_containers[0] = _deep_merge(merged_containers[0], extra_c)
+              else:
+                merged_containers.append(dict(extra_c))
+          pod_spec["containers"] = merged_containers
       pod_spec.update(extra)
 
     return {

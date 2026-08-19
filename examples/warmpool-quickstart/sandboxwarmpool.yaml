@@ -1,0 +1,12 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: sandboxwarmpool-example
+  namespace: default
+spec:
+  updateStrategy:
+    type: Recreate
+  replicas: 1
+  sandboxTemplateRef:
+    # This name must exactly match the 'metadata.name' of your SandboxTemplate.
+    name: secure-datascience-template

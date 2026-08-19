@@ -8,6 +8,8 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 * `--sandbox-claim-concurrent-workers` (default: 50): The maximum number of concurrent reconciles for the SandboxClaim controller.
 * `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller.
 * `--sandbox-warm-pool-max-batch-size` (default: 300): The maximum number of sandboxes the SandboxWarmPool controller will create/delete in a single batch.
+* `--sandbox-warm-pool-readiness-grace-period` (default: `5m`): How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.
+* `--sandbox-warm-pool-unschedulable-recheck-interval` (default: `1m`): Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.
 * `--kube-api-qps` (default: -1, no client-side rate limiting): Client-side QPS limit for the Kubernetes API client.
 * `--kube-api-burst` (default: 10): The maximum burst for client-side throttling of the Kubernetes API client.
 

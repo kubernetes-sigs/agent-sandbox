@@ -80,6 +80,7 @@ The following table lists the configurable parameters and their defaults.
 | `image.tag` | Controller image tag — **required** | `""` |
 | `image.repository` | Controller image repository | `registry.k8s.io/agent-sandbox/agent-sandbox-controller` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
+| `imagePullSecrets` | List of image pull secrets (e.g. `[{name: my-secret}]`) to add to the Deployment | `[]` |
 | `replicaCount` | Number of controller replicas | `1` |
 | `namespace.create` | Create the namespace as part of the release | `true` |
 | `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |
@@ -93,6 +94,8 @@ The following table lists the configurable parameters and their defaults.
 | `controller.sandboxWarmPoolConcurrentWorkers` | Max concurrent reconciles for the SandboxWarmPool controller (extensions only) | `1` |
 | `controller.sandboxTemplateConcurrentWorkers` | Max concurrent reconciles for the SandboxTemplate controller (extensions only) | `1` |
 | `controller.sandboxWarmPoolMaxBatchSize` | Max batch size for parallel sandbox create/delete in the SandboxWarmPool controller (extensions only) | `300` |
+| `controller.sandboxWarmPoolReadinessGracePeriod` | How long a warm pool sandbox may stay non-Ready before it is considered stuck and replaced, or held if unschedulable (extensions only) | unset (controller default `5m`) |
+| `controller.sandboxWarmPoolUnschedulableRecheckInterval` | Re-check interval for pools holding unschedulable sandboxes past the readiness grace period (extensions only) | unset (controller default `1m`) |
 | `controller.enableWarmPoolEviction` | Mark pods created by a warm pool as safe to evict (extensions only) | `true` |
 | `controller.enableTracing` | Enable OpenTelemetry tracing via OTLP | `false` |
 | `controller.enablePprof` | Enable CPU profiling endpoint on the metrics server | `false` |
@@ -110,3 +113,32 @@ The following table lists the configurable parameters and their defaults.
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
 | `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
 | `webhookServiceName` | Name of the conversion webhook Service | `agent-sandbox-webhook-service` |
+| `service.name` | Name of the controller Service that exposes the metrics endpoint | `agent-sandbox-controller` |
+| `metrics.serviceMonitor.enabled` | Create a Prometheus Operator `ServiceMonitor` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
+| `metrics.serviceMonitor.additionalLabels` | Extra labels on the `ServiceMonitor` (often required to match the Prometheus `serviceMonitorSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |
+| `metrics.serviceMonitor.interval` | Scrape interval | `30s` |
+| `metrics.serviceMonitor.scrapeTimeout` | Scrape timeout (omitted unless set) | `""` |
+| `metrics.prometheusRule.enabled` | Create a Prometheus Operator `PrometheusRule` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
+| `metrics.prometheusRule.additionalLabels` | Extra labels on the `PrometheusRule` (often required to match the Prometheus `ruleSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |
+| `metrics.prometheusRule.additionalGroups` | Additional Prometheus rule groups appended after the chart's starter rule group | `[]` |
+
+## Metrics
+
+The controller serves Prometheus metrics over HTTP at `:8080/metrics` (exposed by the controller `Service` on the `metrics` port).
+
+To let the Prometheus Operator both scrape the controller and load the chart's starter alerting rule, enable the bundled `ServiceMonitor` and `PrometheusRule`:
+
+```bash
+helm install agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system \
+  --create-namespace \
+  --set image.tag=<version> \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.prometheusRule.enabled=true \
+  --set metrics.serviceMonitor.additionalLabels.release=kube-prometheus-stack \
+  --set metrics.prometheusRule.additionalLabels.release=kube-prometheus-stack
+```
+
+> **Note**: The `ServiceMonitor` and `PrometheusRule` kinds are provided by the prometheus-operator CRDs (`monitoring.coreos.com/v1`). Enabling either one without those CRDs installed will fail at apply time.
+>
+> The bundled `PrometheusRule` starter set is intentionally small and is most useful once scrape discovery is configured via the chart `ServiceMonitor` or an equivalent Prometheus configuration.

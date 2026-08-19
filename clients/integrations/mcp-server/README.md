@@ -49,6 +49,27 @@ The MCP server exposes the following tools:
     * `timeout` (int, default: 60)
   * **Returns**: Content of the file and the number of bytes read.
 
+* **`list_files`**: Lists the contents of a directory in a sandbox.
+  * **Arguments**:
+    * `sandbox_claim_name` (str)
+    * `namespace` (str)
+    * `path` (str)
+    * `timeout` (int, default: 60)
+    * `max_entries` (int, default: 1000, max: 10000) — Caps how many entries are returned.
+  * **Returns**: The directory entries (each with `name`, `size`, `type` (`file` or `directory`) and `mod_time` as a POSIX timestamp), plus `total_entries` — the full count before truncation — and `truncated`.
+  * **Note**: the response is capped at `max_entries` so that listing a directory with very many
+    entries cannot exhaust an LLM's context window. When `truncated` is `True`, narrow the path or use
+    `execute_command` for a targeted listing. The cap bounds the MCP response only; the SDK's
+    `files.list()` has already materialized the full listing before this tool sees it.
+
+* **`file_exists`**: Checks whether a file or directory exists in a sandbox.
+  * **Arguments**:
+    * `sandbox_claim_name` (str)
+    * `namespace` (str)
+    * `path` (str)
+    * `timeout` (int, default: 60)
+  * **Returns**: Whether the path exists. A missing path is a successful `exists: false` result, not an error.
+
 * **`get_sandbox_status`**: Reports the readiness of a sandbox, derived from its Kubernetes conditions. 
   * **Arguments**:
     * `sandbox_claim_name` (str)

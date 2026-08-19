@@ -26,6 +26,8 @@ from .tools import (
     execute_command,
     upload_file,
     download_file,
+    list_files,
+    file_exists,
     get_sandbox_status,
 )
 
@@ -63,7 +65,8 @@ def create_mcp_server(settings: Settings | None = None):
     mcp.add_tool(execute_command)
     mcp.add_tool(upload_file)
     mcp.add_tool(download_file)
-    mcp.add_tool(get_sandbox_status)
+    mcp.add_tool(list_files)
+    mcp.add_tool(file_exists)
 
     return mcp
 

@@ -1,0 +1,118 @@
+# The same runtime as a reusable SandboxTemplate, so it can back a SandboxWarmPool
+# or be provisioned via SandboxClaim. The runtime image and read-only profiles stay
+# homogeneous across the pool; per-claim metadata must NOT silently widen the
+# profile (see integration guide, Phase 3).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: nono-agent-template
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: nono-agent-template
+      annotations:
+        agents.x-k8s.io/nono-profile: agent
+    spec:
+      restartPolicy: Never
+      # See sandbox.yaml for the runtime-class / Landlock notes. Default runtime is
+      # used so the demo enforces on a standard kind node. Use
+      # `kubectl apply -k .` for Kata; gVisor remains pending
+      # google/gvisor#13439.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: agent
+          image: ghcr.io/example/nono-agent-runtime:latest
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          args:
+            - run
+            - --profile
+            - /etc/nono/profiles/agent.json
+            - --audit-integrity
+            - --audit-sign-key
+            - file:///etc/nono/audit-signing/private.pk8.b64
+            - --
+            - python3
+            - /opt/agent/workload.py
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nono-demo-llm-credential
+                  key: OPENAI_API_KEY
+            - name: RUST_LOG
+              value: nono_proxy::tls_intercept::handle=error,nono_proxy::reverse=error
+            - name: XDG_STATE_HOME
+              value: /var/lib/nono-state
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: nono-profiles
+              mountPath: /etc/nono/profiles
+              readOnly: true
+            - name: secret-config
+              mountPath: /etc/secret-config
+              readOnly: true
+            - name: audit-state
+              mountPath: /var/lib/nono-state
+            - name: audit-signing-key
+              mountPath: /etc/nono/audit-signing
+              readOnly: true
+            - name: loki-credential
+              mountPath: /etc/nono/loki-credential
+              readOnly: true
+            - name: loki-tls-ca
+              mountPath: /etc/nono/loki-tls
+              readOnly: true
+      volumes:
+        - name: nono-profiles
+          configMap:
+            name: nono-agent-profiles
+        - name: secret-config
+          configMap:
+            name: secret-config-demo
+        - name: audit-signing-key
+          secret:
+            secretName: nono-demo-audit-signing-key
+            defaultMode: 0440
+        - name: loki-credential
+          secret:
+            secretName: nono-demo-llm-credential
+            items:
+              - key: LOKI_TOKEN
+                path: token
+            defaultMode: 0440
+        - name: loki-tls-ca
+          secret:
+            secretName: nono-demo-loki-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+            defaultMode: 0440
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+    # Templates need one audit claim per Sandbox. Do not point concurrent claims
+    # at the runnable demo's single ReadWriteOnce PVC.
+    - metadata:
+        name: audit-state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

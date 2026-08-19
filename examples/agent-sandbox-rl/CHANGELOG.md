@@ -5,6 +5,20 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Changed (docs / guidance)
+- **Warm-pool worker guidance updated for Agent Sandbox v0.5.4**: the #1215
+  over-creation churn is fixed upstream by
+  [#1266](https://github.com/kubernetes-sigs/agent-sandbox/pull/1266)
+  (expectations-gated creates, terminating-aware counting), so the long-standing
+  "keep `--sandbox-warm-pool-concurrent-workers` ≤10" advice now applies **only to
+  controllers ≤ v0.5.3**. On v0.5.4+ the recommendation is **`100`** (validated clean
+  at `500` workers with 500 warm pools). `FleetConfig.warm_create_budget` is
+  correspondingly reframed from a required #1215 mitigation to an optional apiserver
+  burst bound. Updated: README (controller-flags table + staged-fill notes),
+  `docs/strategies.md`, `examples/rl_integration.md`, `config.py` field comment,
+  the `plan()` deep-warm advisory in `fleet.py`, and `plan_benchmark()` now emits a
+  controller-flags advisory in its rationale.
+
 Initial implementation (design phases 1–7), live-verified on GKE against Agent
 Sandbox `v0.5.0rc1` (v1beta1).
 

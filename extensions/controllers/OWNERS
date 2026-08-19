@@ -1,8 +1,10 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
 approvers:
+  - aditya-shantanu
+  - igooch
+  - barney-s
   - janetkuo
   - justinsb
-  - barney-s
+  - shruti6991
   - vicentefb
-  - igooch

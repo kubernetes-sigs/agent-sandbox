@@ -32,7 +32,7 @@ across clusters.
 
 | Requirement | Notes |
 | :--- | :--- |
-| **Python ≥ 3.10** | The package targets 3.10+. |
+| **Python ≥ 3.11** | The package targets 3.11+. |
 | **A Kubernetes cluster** | With the **Agent Sandbox** controller + **v1beta1 extensions** installed (next step). GKE, kind, or any conformant cluster. |
 | **`kubectl` + a kube context** | `agent-sandbox-rl` reads your kubeconfig; each `ClusterConfig` selects a context by name (`context=`), or uses the ambient one. |
 | **`gke-gcloud-auth-plugin`** | GKE only — must be on `PATH` (`gcloud components install gke-gcloud-auth-plugin`). |
@@ -270,13 +270,16 @@ fleet.run(process_fn, strategy="naive")          # warm everything, full depth, 
   ask the controller to create tens of thousands of replicas at once. `start_warmpools`
   fills in **waves** of ≤ `warm_create_budget` (default 1000) creates, waiting for each
   wave to be Ready before the next. Set `warm_create_budget=0` to warm all at once.
-  > ⚠️ **Staging alone is not sufficient at scale.** Current Agent Sandbox releases
-  > (≤ v0.5.2) have a warm-pool over-creation *churn* bug
-  > ([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)) that
-  > staging only *slows*. For large/deep *cold* warms, also set the controller flag
-  > **`--sandbox-warm-pool-concurrent-workers` low (≤10)** (leave sandbox/claim workers
-  > high). The RL-safe path avoids the regime entirely — **recycle** one sandbox per
-  > problem (see **Sandbox recycling** below) instead of deep-warming.
+  > **Version note:** staging bounds the controller's create burst on any version, but
+  > on releases **≤ v0.5.3** it only *mitigates* (not prevents) the warm-pool
+  > over-creation *churn* bug
+  > ([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)) — there, also
+  > set the controller flag **`--sandbox-warm-pool-concurrent-workers` low (≤10)**
+  > (leave sandbox/claim workers high). On **v0.5.4+**
+  > ([#1266](https://github.com/kubernetes-sigs/agent-sandbox/pull/1266))
+  > the bug is fixed and `100` is a good default (see the controller-flags table below).
+  > For deep warms on any version, **recycle** one sandbox per problem (see **Sandbox
+  > recycling** below) remains the lower-footprint alternative to deep-warming.
 
 > **When does this help?** Only when an image carries **more than one task**. A 1:1
 > eval sweep (one image per task — see below) gets `min(1, …) = 1` replica, so
@@ -410,9 +413,9 @@ split across pools with different pod caps.)
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
 (8), `warm_per_task` (False — one warm replica per task for instant claims),
 `window_size` (None=auto), `ready_timeout` (900), `warm_create_budget` (1000 — stage
-the warm fill in waves of ≤ N sandbox creates in flight to curb the controller's
-over-creation race; pair with a low `--sandbox-warm-pool-concurrent-workers` for
-large/deep cold warms; `0` = warm all at once), `template`
+the warm fill in waves of ≤ N sandbox creates in flight to bound the controller's
+create burst; on controllers ≤ v0.5.3 also pair with a low
+`--sandbox-warm-pool-concurrent-workers` to dodge #1215; `0` = warm all at once), `template`
 (`TemplateSpec`), `template_name_prefix` (`r2e-img-`), `labels`. Disk-aware sizing (optional):
 `avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
 (None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
@@ -606,7 +609,7 @@ the controller Deployment's container args, namespace `agent-sandbox-system`):
 | `--kube-api-burst` | `10` | n/a | **Moot while `qps=-1`** (burst is only consulted when QPS > 0). Only raise if you set a positive QPS. |
 | `--sandbox-concurrent-workers` | `100` | **`1000`** | Sandbox reconciles (claim binding → Ready) are the main serializer; match your peak concurrent sandboxes. |
 | `--sandbox-claim-concurrent-workers` | `50` | **`1000`** | Concurrent `SandboxClaim` reconciles; match peak in-flight claims. |
-| `--sandbox-warm-pool-concurrent-workers` | `1` | **`≤10`** ⚠️ | **Do _not_ raise to 1000.** High values trigger the warm-pool over-creation *churn* bug ([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215)): parallel reconciles race a stale informer cache and over-create → delete → re-create sandboxes; with lagging pod GC the pod count balloons (observed ~17K pods for an 8K target). Keep it **low (≤10; `1` fully serializes)** until #1215 is fixed upstream. Warm-pool provisioning is a one-time setup cost, so low concurrency here barely affects steady-state throughput. |
+| `--sandbox-warm-pool-concurrent-workers` | `1` | **`100`** (v0.5.4+) | On **v0.5.4+** the over-creation *churn* bug ([#1215](https://github.com/kubernetes-sigs/agent-sandbox/issues/1215), fixed by [#1266](https://github.com/kubernetes-sigs/agent-sandbox/pull/1266): expectations-gated creates, terminating-aware counting) is gone — parallel warm-pool reconciles are safe. **`100`** is a good default (fast replenishment, bounded apiserver burst); raise toward your warm width if the warm-fill wall matters (validated clean at `500` with 500 pools). **On ≤ v0.5.3 keep it low (≤10; `1` fully serializes)** — there high values race a stale informer cache and over-create → delete → re-create sandboxes (observed ~17K pods for an 8K target). |
 | `--sandbox-template-concurrent-workers` | `1` | **`1000`** | Parallel template reconciles. |
 | `--sandbox-warm-pool-max-batch-size` | `300` | **`1000`** | Parallel pod create/delete *within* one warm-pool reconcile. |
 
@@ -615,18 +618,20 @@ controller's API client is already uncapped at `qps=-1`. The **worker concurrenc
 flags are what unblock high-scale claims. Size them to your `max_concurrent`. Also
 size this package's client pool (`build_api_client` defaults the urllib3
 `connection_pool_maxsize` to 1000) to match — otherwise the driver throttles before
-the controller does. **One exception:** `--sandbox-warm-pool-concurrent-workers` — keep
-it **low (≤10)**, not 1000 (see the ⚠️ row above): warm-pool provisioning is a one-time
-setup cost, and high concurrency there triggers the #1215 over-creation churn. Pair with
-this package's staged warm fill (`FleetConfig.warm_create_budget`, default 1000).
+the controller does. **Version note:** `--sandbox-warm-pool-concurrent-workers` is
+release-gated (see the row above) — `100` on v0.5.4+ (#1266 fixed the #1215 churn;
+validated up to 500), but **≤10 on ≤ v0.5.3**. The staged warm fill
+(`FleetConfig.warm_create_budget`, default 1000) remains useful on any version to
+bound the create burst of very large/deep warms.
 
-Example patch:
+Example patch (**v0.5.4+ values** — on controllers ≤ v0.5.3 use
+`--sandbox-warm-pool-concurrent-workers=10` instead, per the table above):
 
 ```bash
 kubectl -n agent-sandbox-system patch deploy agent-sandbox-controller --type=json -p '[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-concurrent-workers=1000"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-claim-concurrent-workers=1000"},
-  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-concurrent-workers=10"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-concurrent-workers=100"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-template-concurrent-workers=1000"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--sandbox-warm-pool-max-batch-size=1000"}
 ]'

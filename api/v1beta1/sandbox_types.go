@@ -122,8 +122,6 @@ const (
 	// and its underlying resources were torn down (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 
-	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
-	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
 	// SandboxLaunchTypeLabel is the label used to track whether the Sandbox was cold-created or originated from a warm pool.

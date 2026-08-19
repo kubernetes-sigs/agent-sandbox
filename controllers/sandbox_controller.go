@@ -184,16 +184,6 @@ func containsPod(pods []*corev1.Pod, pod *corev1.Pod) bool {
 	return false
 }
 
-// resolvePodName returns the name of the pod associated with the given Sandbox.
-// If the sandbox has adopted a warm pool pod, the pod name is tracked in the
-// agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
-func resolvePodName(sandbox *sandboxv1beta1.Sandbox) string {
-	if name, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
-		return name
-	}
-	return sandbox.Name
-}
-
 // MergeVolumeClaimVolumes merges PVC-backed volumes into an existing volume
 // list, replacing any volumes with matching names. This follows StatefulSet
 // semantics where volumeClaimTemplate volumes take priority.
@@ -1143,21 +1133,6 @@ func servicePortsEqual(a, b []corev1.ServicePort) bool {
 	return true
 }
 
-// clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
-func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
-	if _, exists := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; !exists {
-		return nil
-	}
-	logger := log.FromContext(ctx)
-	patch := client.MergeFrom(sandbox.DeepCopy())
-	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
-	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		return fmt.Errorf("failed to clear pod name annotation: %w", err)
-	}
-	logger.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
-	return nil
-}
-
 // setServiceStatus updates the sandbox status with the service name and FQDN.
 func (r *SandboxReconciler) setServiceStatus(sandbox *sandboxv1beta1.Sandbox, service *corev1.Service) {
 	sandbox.Status.Service = service.Name
@@ -1191,25 +1166,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	ownedPods := sandboxOwnedPods(podList.Items, sandbox)
 
-	// Determine the pod name to look up
-	podName := resolvePodName(sandbox)
-	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
-	if podName != sandbox.Name {
-		logger.Info("Using tracked pod name from sandbox annotation", "podName", podName)
-	}
-
 	pod := &corev1.Pod{}
-	err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod)
+	err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod)
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			logger.Error(err, "Failed to get Pod")
 			return nil, fmt.Errorf("pod get failed: %w", err)
-		}
-		if podNameAnnotationExists {
-			logger.Info("Pod referenced by annotation not found, clearing annotation to recover state", "podName", podName)
-			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-				return nil, err
-			}
 		}
 		pod = nil
 	}
@@ -1222,20 +1184,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	if len(ownedPods) > 1 {
 		return nil, &multipleSandboxPodsError{count: len(ownedPods)}
-	}
-
-	// Owner UID is authoritative over the compatibility annotation. If an
-	// owned Pod survives while the annotation is missing or stale, reconcile
-	// that Pod instead of adopting or creating another one.
-	if len(ownedPods) == 1 && (pod == nil || pod.Name != ownedPods[0].Name) {
-		if podNameAnnotationExists {
-			logger.Info("Tracked Pod differs from the owned Pod, repairing mapping",
-				"trackedPodName", podName, "ownedPodName", ownedPods[0].Name)
-			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-				return nil, err
-			}
-		}
-		pod = ownedPods[0].DeepCopy()
 	}
 
 	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
@@ -1263,39 +1211,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			}
 		}
 
-		// Remove the pod name annotation from the sandbox if it exists
-		if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-			return pod, err
-		}
-
 		return pod, nil
-	}
-
-	ensurePodNameAnnotation := func(podName string) error {
-		annotatedPodName := ""
-		if sandbox.Annotations != nil {
-			annotatedPodName = sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
-		}
-
-		if annotatedPodName == podName {
-			return nil
-		}
-
-		if annotatedPodName != "" {
-			logger.Info("Skipping pod name annotation update because sandbox already tracks a different pod", "trackedPodName", annotatedPodName, "podName", podName)
-			return nil
-		}
-
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] = podName
-		if err := r.Patch(ctx, sandbox, patch); err != nil {
-			return fmt.Errorf("failed to set pod name annotation: %w", err)
-		}
-
-		return nil
 	}
 
 	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, error) {
@@ -1316,11 +1232,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			logger.V(4).Info("Refusing to adopt pod: pod is owned by a different controller",
 				"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
-
-			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-				return nil, err
-			}
-
 			return nil, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
 				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
@@ -1384,10 +1295,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 					return nil, fmt.Errorf("failed to patch pod: %w", err)
 				}
 			}
-		}
-
-		if err := ensurePodNameAnnotation(pod.Name); err != nil {
-			return nil, err
 		}
 
 		// TODO - Do we enforce (change) spec if a pod exists ?
@@ -1487,10 +1394,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		return nil, err
-	}
-
-	if err := ensurePodNameAnnotation(pod.Name); err != nil {
 		return nil, err
 	}
 
@@ -1734,10 +1637,8 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	logger := log.FromContext(ctx)
 	var allErrors error
 
-	// Delete pod only if owned by this sandbox
-	podName := resolvePodName(sandbox)
 	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, pod); err != nil {
 		if !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get pod: %w", err))
 		}

@@ -2225,9 +2225,10 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 // the SandboxClaim reconciler actually consumes: the Ready condition, the
 // Finished condition, PodIPs and ServiceFQDN (mirrored into
 // claim.Status.SandboxStatus), or the DeletionTimestamp (the claim must react
-// when its adopted Sandbox starts terminating). Only these two conditions are compared — by type, not the whole
-// slice — so churn on conditions the claim does not read (e.g. Suspended) does
-// not trigger a needless claim reconcile.
+// when its adopted Sandbox starts terminating). Of the condition slice, only
+// the Ready and Finished condition types are compared — each looked up by
+// type, not the slice as a whole — so churn on condition types the claim does
+// not read (e.g. Suspended) does not trigger a needless claim reconcile.
 //
 // Each condition is compared in full (Status, Reason, Message, ...), NOT just
 // its Status. This matters for expiry: expiry has no condition type of its own —

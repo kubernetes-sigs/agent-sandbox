@@ -1,0 +1,16 @@
+title: Auto Suspend/Resume Lifecycle for Claw-like Sandboxes
+kep-number: 968
+authors:
+  - "@tomergee"
+status: provisional
+creation-date: "2026-06-10"
+last-updated: "2026-06-10"
+stage: alpha
+reviewers:
+  - "@janetkuo"
+approvers:
+  - "@justinsb"
+see-also:
+  - "/keps/119-sandbox-suspended-state"
+  - "/keps/174-metadata-propagation"
+  - "/keps/694-kep-for-suspend-and-resume-for-beta"

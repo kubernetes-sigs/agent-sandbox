@@ -15,6 +15,7 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 | Path | What lives there |
 | --- | --- |
 | [**.agents/skills/**](.agents/skills/) | Specialized instructions for you (AI agents). See "Agent Skills" section below. |
+| [.github/instructions/](.github/instructions/) | Path-specific instructions for AI code review and Copilot. |
 | [api/v1beta1/](api/v1beta1/) | Core `Sandbox` types and kubebuilder markers. |
 | [extensions/api/v1beta1/](extensions/api/v1beta1/) | `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` types. |
 | [controllers/](controllers/) | Core `Sandbox` reconciler + tests. |

@@ -149,3 +149,33 @@ def test_least_loaded_still_ranks_measured_clusters_normally():
         PlannerCluster(name="c", active_claims=None, report_age_s=1),
     )
     assert LeastLoaded().select("img", reg).name == "b"
+
+
+# --------------------------------------------------------------------------- #
+# PlannerRegistry.__iter__ must be annotated Iterator, not Iterable.
+#
+# Runtime behavior was always correct -- iter() returns a list_iterator either
+# way. The bug is in the type: the Iterable protocol is *defined* as "has
+# __iter__ returning an Iterator", so the weaker annotation meant
+# PlannerRegistry did not formally satisfy Iterable[PlannerCluster] and any
+# caller typed against it failed to check. mypy is the real guard; this pins
+# the annotation so a future edit cannot quietly widen it back.
+# --------------------------------------------------------------------------- #
+
+def test_planner_registry_iter_is_annotated_as_an_iterator():
+    import typing
+
+    hints = typing.get_type_hints(PlannerRegistry.__iter__)
+    assert hints["return"] == typing.Iterator[PlannerCluster], (
+        f"__iter__ returns {hints['return']}; the Iterable protocol requires "
+        f"an Iterator"
+    )
+
+
+def test_planner_registry_satisfies_the_iterable_protocol_at_runtime():
+    import collections.abc
+
+    reg = _reg(PlannerCluster(name="a"), PlannerCluster(name="b"))
+    assert isinstance(reg, collections.abc.Iterable)
+    assert isinstance(iter(reg), collections.abc.Iterator)
+    assert sorted(c.name for c in reg) == ["a", "b"]

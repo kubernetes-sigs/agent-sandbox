@@ -30,7 +30,7 @@ import hashlib
 import itertools
 import threading
 from dataclasses import dataclass, field
-from typing import Iterable, Protocol
+from typing import Iterator, Protocol
 
 
 class NoClusterAvailableError(RuntimeError):
@@ -88,7 +88,12 @@ class PlannerRegistry:
     # threshold in ARCHITECTURE.md.
     max_report_age_s: float = 90.0
 
-    def __iter__(self) -> Iterable[PlannerCluster]:
+    def __iter__(self) -> Iterator[PlannerCluster]:
+        # Iterator, not Iterable: `iter()` returns an Iterator, and the Iterable
+        # protocol is *defined* as "has __iter__ returning an Iterator". The
+        # weaker annotation meant PlannerRegistry did not formally satisfy
+        # Iterable[PlannerCluster], so a caller typed against it would not
+        # type-check even though the runtime behavior was always correct.
         return iter(self.fresh())
 
     def names(self) -> list[str]:

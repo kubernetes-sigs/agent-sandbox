@@ -303,9 +303,9 @@ def test_a_clean_pass_does_not_re_reconcile_on_every_tick():
 class _PagingCustomObjects:
     """list_namespaced_custom_object that honours limit/_continue, like the real one."""
 
-    def __init__(self, names, page_size=None):
+    def __init__(self, names, make_item=None):
         self.names = list(names)
-        self.page_size = page_size
+        self._make_item = make_item or (lambda n: {"metadata": {"name": n}})
         self.calls: list[dict] = []
         self.deleted: list[str] = []
 
@@ -318,8 +318,7 @@ class _PagingCustomObjects:
         meta = {}
         if nxt < len(self.names):
             meta["continue"] = str(nxt)
-        return {"items": [{"metadata": {"name": n}} for n in page],
-                "metadata": meta}
+        return {"items": [self._make_item(n) for n in page], "metadata": meta}
 
     def delete_namespaced_custom_object(self, **kw):
         self.deleted.append(kw["name"])
@@ -428,3 +427,78 @@ def test_a_missing_required_field_still_raises():
         fleet_member.AssignmentPool.from_json(
             {"warmpool": "wp-a", "template": "tpl-a"}
         )
+
+
+# --------------------------------------------------------------------------- #
+# _collect_capacity pages the SAME collection.
+#
+# The reconcile loop was fixed and the capacity loop was not, which is the worse
+# half: capacity_interval is the more frequent of the two, and a timeout here
+# does not just skip a sweep -- the report goes unwritten, and after
+# max_report_age_s the planner ages this cluster out of placement entirely.
+# Both readers now go through _iter_managed_pools so there is one walk to get
+# right.
+# --------------------------------------------------------------------------- #
+
+def _pool_item(name):
+    gen = int(name.split("-")[1])
+    return {
+        "metadata": {
+            "name": name,
+            "annotations": {fleet_member.GENERATION_ANNOTATION: str(gen)},
+        },
+        "status": {"replicas": 2, "readyReplicas": 1},
+    }
+
+
+def test_collect_capacity_aggregates_across_pages():
+    co = _PagingCustomObjects([f"wp-{i}" for i in range(1500)],
+                              make_item=_pool_item)
+    fm = _bare_member(custom_objects=co, capacity_detail="light")
+
+    report = fm._collect_capacity()
+
+    assert len(co.calls) == 2, "capacity read the pool list in one unbounded call"
+    assert report.warmpool_depth == 3000
+    assert report.warmpool_ready == 1500
+    assert report.generation_observed == 1499
+    assert len(report.reported_pools) == 1500
+
+
+def test_collect_capacity_never_issues_an_unbounded_list():
+    co = _PagingCustomObjects([f"wp-{i}" for i in range(5000)],
+                              make_item=_pool_item)
+    fm = _bare_member(custom_objects=co, capacity_detail="light")
+    fm._collect_capacity()
+    assert all(c.get("limit") == fleet_member.PAGE_LIMIT for c in co.calls), (
+        "an unbounded pool list survived on the capacity path, which runs more "
+        "often than reconcile"
+    )
+
+
+def test_both_readers_share_one_paged_walk():
+    # The property that keeps this fixed: neither caller builds its own list
+    # request, so a future third reader cannot regress independently.
+    co = _PagingCustomObjects([f"wp-{i}" for i in range(1200)],
+                              make_item=_pool_item)
+    fm = _bare_member(custom_objects=co, capacity_detail="light")
+
+    names = fm._list_managed_pool_names()
+    report = fm._collect_capacity()
+
+    # reported_pools is sorted for a stable wire payload; the sweep keeps
+    # apiserver order. Same set, which is the invariant that matters.
+    assert sorted(names) == report.reported_pools
+    assert all(c.get("limit") == fleet_member.PAGE_LIMIT for c in co.calls)
+
+
+def test_iter_managed_pools_holds_one_page_not_the_whole_collection():
+    # A generator, not list[dict]: paging the wire and then materialising every
+    # pool body in memory would defeat the point of PAGE_LIMIT.
+    co = _PagingCustomObjects([f"wp-{i}" for i in range(2500)],
+                              make_item=_pool_item)
+    fm = _bare_member(custom_objects=co)
+
+    it = fm._iter_managed_pools()
+    next(it)
+    assert len(co.calls) == 1, "the walk ran to completion before yielding"

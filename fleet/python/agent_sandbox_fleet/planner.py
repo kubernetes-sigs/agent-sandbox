@@ -175,7 +175,12 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
     #
     # min_clusters == 0 → default mode: spread-first pre-pass (one model per
     # fresh cluster for the first N) then configured selector for extras.
-    chosen: dict[str, PlannerCluster] = {}
+    # Routing is per CLUSTER, not per model: a cluster can host several models,
+    # so the two maps below are keyed by cluster name and are what Steps 3 and 4
+    # actually consume. There used to be a third, `chosen`, keyed by
+    # model.image -- never read by anything, and latently wrong: image is
+    # Optional[str], so every model without one collided on the None key. Dead
+    # and misleading, so it is gone rather than fixed.
     per_cluster_tasks: dict[str, int] = defaultdict(int)
     per_cluster_models: dict[str, list[ModelSpec]] = defaultdict(list)
 
@@ -193,7 +198,6 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
             if rr_target_count == 0:
                 continue
             cluster = fresh_clusters[i % rr_target_count]
-            chosen[model.image] = cluster
             cluster.planned_replicas += 1
             per_cluster_tasks[cluster.name] += model.target_tasks
             per_cluster_models[cluster.name].append(model)
@@ -207,7 +211,6 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
                 # After each cluster has at least one pool, honor the configured
                 # selector (usually capacity-aware) for extras.
                 cluster = selector.select(model.image, registry)
-            chosen[model.image] = cluster
             cluster.planned_replicas += 1
             per_cluster_tasks[cluster.name] += model.target_tasks
             per_cluster_models[cluster.name].append(model)

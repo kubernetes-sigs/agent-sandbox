@@ -247,6 +247,8 @@ _Appears in:_
 
 
 PersistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created from volumeClaimTemplates.
+Set whenDeleted to Retain to preserve PVC data after Sandbox deletion; users are
+responsible for deleting retained PVCs when they are no longer needed.
 
 
 
@@ -257,7 +259,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `whenDeleted` _[PersistentVolumeClaimRetentionPolicyType](#persistentvolumeclaimretentionpolicytype)_ | whenDeleted controls whether PVCs created from volumeClaimTemplates are<br />deleted when the owning Sandbox is deleted.<br />Defaults to Delete for backward compatibility. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `whenDeleted` _[PersistentVolumeClaimRetentionPolicyType](#persistentvolumeclaimretentionpolicytype)_ | whenDeleted controls whether PVCs created from volumeClaimTemplates are<br />deleted when the owning Sandbox is deleted. When set to Retain, PVCs are<br />orphaned and survive Sandbox deletion. Defaults to Delete for backward compatibility. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 
 
 #### PersistentVolumeClaimRetentionPolicyType

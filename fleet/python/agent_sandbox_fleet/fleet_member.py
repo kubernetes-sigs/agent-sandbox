@@ -50,7 +50,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from kubernetes import client as k8s, config as k8s_config
 from kubernetes.client.exceptions import ApiException
@@ -454,28 +454,39 @@ class FleetMember:
             plural=plural, name=name, body=body,
         )
 
-    def _list_managed_pool_names(self) -> list[str]:
-        """Every managed SandboxWarmPool in the namespace, walked in pages.
+    def _iter_managed_pools(self) -> Iterator[dict[str, Any]]:
+        """Yield every managed SandboxWarmPool in the namespace, a page at a time.
 
-        Paged for the same reason as the pod walk in _node_pressure, and
-        NOT for the reason it looks like: an unbounded list is not truncated.
-        Omitting `limit` makes the apiserver return the entire collection in one
-        response, so the orphan sweep below was always complete -- it is the
-        single response that is the problem. One planner generation can assign a
-        pool per model, and the density fleet ran 500 of them per cluster; that
-        is one unbounded etcd range read plus a multi-megabyte body, every
-        reconcile tick, on the same apiserver the sandbox creates are queued
-        behind. On a starved control plane (see cluster F) it is also the shape
-        of request that times out, and a timeout here DOES skip the sweep.
+        THE only place this collection is listed. Both readers -- the orphan
+        sweep in _reconcile_once and the depth/ready rollup in _collect_capacity
+        -- go through here, because two copies of a paged walk is how one of
+        them ends up unpaged again.
+
+        Paged for the same reason as the pod walk in _node_pressure, and NOT for
+        the reason it looks like: an unbounded list is not truncated. Omitting
+        `limit` makes the apiserver return the entire collection in one
+        response, so both readers were always complete -- it is the single
+        response that is the problem. One planner generation can assign a pool
+        per model, and the density fleet ran 500 of them per cluster; that is an
+        unbounded etcd range read plus a multi-megabyte body on every reconcile
+        tick AND every capacity tick, on the same apiserver the sandbox creates
+        are queued behind. On a starved control plane (see cluster F) it is also
+        the shape of request that times out -- and a timeout DOES lose the work:
+        the orphan sweep is skipped, or the capacity report goes unwritten and
+        the planner ages this cluster out of placement entirely.
+
+        A generator, not a list, so a caller that only needs an aggregate
+        (_collect_capacity sums four scalars) holds one page rather than every
+        pool body at once. That is the whole point of PAGE_LIMIT; returning
+        list[dict] here would have paged the wire and then rebuilt the
+        unbounded allocation in memory.
 
         Deliberately no 410-Gone restart, unlike the pod walk. That one pages
         through six figures of objects and can outlive a compaction window; this
-        one is a few pages at worst, and if the token does expire the raised
-        ApiException leaves _retry_pending armed, so the next tick redoes the
-        whole sweep anyway. Names are materialised before any delete, so a
-        failure mid-walk cannot half-delete against a half-read list.
+        one is a few pages at worst, and both callers already treat a raised
+        ApiException as "this tick did not finish" -- the sweep leaves
+        _retry_pending armed, the capacity loop retries next interval.
         """
-        names: list[str] = []
         cont: str | None = None
         while True:
             resp = self.custom_objects.list_namespaced_custom_object(
@@ -485,15 +496,24 @@ class FleetMember:
                 limit=PAGE_LIMIT,
                 _continue=cont,
             )
-            names.extend(
-                item["metadata"]["name"] for item in resp.get("items", [])
-            )
+            yield from resp.get("items", [])
             # Custom objects come back as plain dicts, so this is
             # metadata["continue"] -- not the `page.metadata._continue`
             # attribute the typed list calls return.
             cont = (resp.get("metadata") or {}).get("continue") or None
             if not cont:
-                return names
+                return
+
+    def _list_managed_pool_names(self) -> list[str]:
+        """Managed pool names, fully materialised before the caller acts on them.
+
+        The orphan sweep deletes while iterating this, so it must not be lazy:
+        a generator would interleave deletes with the paged walk, and a delete
+        landing between two pages shifts the remaining items -- the classic
+        skip-every-other-element bug, except silent, since the sweep would just
+        leave some orphans behind and report success.
+        """
+        return [pool["metadata"]["name"] for pool in self._iter_managed_pools()]
 
     def _labels_for(self, pool: AssignmentPool) -> dict[str, str]:
         return {MANAGED_LABEL: "true", POOL_NAME_LABEL: pool.warmpool}
@@ -567,14 +587,11 @@ class FleetMember:
             cluster=self.cluster_name,
             updated_at=_now_iso(),
         )
-        # Warmpool depth/ready + generation_observed — read CRs directly.
-        resp = self.custom_objects.list_namespaced_custom_object(
-            group=CRD_GROUP, version=CRD_VERSION, namespace=self.namespace,
-            plural=POOL_PLURAL,
-            label_selector=f"{MANAGED_LABEL}=true",
-        )
+        # Warmpool depth/ready + generation_observed — read CRs directly, paged.
+        # This runs every capacity_interval, which is the more frequent of the
+        # two loops; see _iter_managed_pools for why it is not a bare list.
         gen_observed = 0
-        for pool in resp.get("items", []):
+        for pool in self._iter_managed_pools():
             report.reported_pools.append(pool["metadata"]["name"])
             status = pool.get("status") or {}
             report.warmpool_depth += int(status.get("replicas", 0) or 0)
@@ -588,7 +605,8 @@ class FleetMember:
         report.reported_pools.sort()
         report.generation_observed = gen_observed
 
-        # Everything above is O(pools) — 500 CRs, cheap at any density.
+        # Everything above is O(pools) — 500 CRs, and paged, so cheap at any
+        # density in both wire and memory terms.
         # Everything below is O(cluster): a full Sandbox list and a full Pod
         # list. At density that is both an OOM risk and a real load on the
         # apiserver, competing for the very APF seats a density run measures.

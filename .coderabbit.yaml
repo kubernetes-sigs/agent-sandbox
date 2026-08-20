@@ -7,7 +7,16 @@ knowledge_base:
     filePatterns:
       - "AGENTS.md"
       - ".github/copilot-instructions.md"
-      - ".github/instructions/**/*.instructions.md"
+      - files: ".github/instructions/controllers.instructions.md"
+        applyTo: "controllers/**/*.go,extensions/controllers/**/*.go,internal/**/*.go"
+      - files: ".github/instructions/api.instructions.md"
+        applyTo: "api/**/*.go,extensions/api/**/*.go"
+      - files: ".github/instructions/python-sdk.instructions.md"
+        applyTo: "clients/python/**/*"
+      - files: ".github/instructions/go-sdk.instructions.md"
+        applyTo: "clients/go/**/*"
+      - files: ".github/instructions/docs.instructions.md"
+        applyTo: "docs/**/*,site/**/*,README.md,CONTRIBUTING.md"
 
 reviews:
   request_changes_workflow: true

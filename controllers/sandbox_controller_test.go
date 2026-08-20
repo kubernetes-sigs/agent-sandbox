@@ -53,6 +53,20 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
 		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
 		WithRuntimeObjects(initialObjs...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			// The fake client has no field manager: applying the
+			// managedFields reset sentinel would store a literal empty
+			// entry and bump the pod's ResourceVersion, which the real
+			// API server does not do meaningfully here. Swallow it so
+			// tests observe the same object state as a real cluster.
+			// TestPodManagedFieldsStripped asserts the patch is issued.
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if data, err := patch.Data(obj); err == nil && string(data) == string(stripManagedFieldsPatch) {
+					return nil
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).
 		Build()
 }
 
@@ -5423,4 +5437,70 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
+}
+
+// TestPodManagedFieldsStripped verifies that creating a Pod for a Sandbox is
+// followed by exactly one managedFields-reset merge patch against that Pod
+// (the apiserver-side fast-path opt-out; see stripPodManagedFields).
+func TestPodManagedFieldsStripped(t *testing.T) {
+	sandboxName := "strip-mf"
+	sandboxNs := "strip-ns"
+	sb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       sandboxName,
+			Namespace:  sandboxNs,
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "test-container"}},
+			},
+		}}},
+	}
+
+	var strippedPods []string
+	c := fake.NewClientBuilder().
+		WithScheme(Scheme).
+		WithStatusSubresource(&sandboxv1beta1.Sandbox{}).
+		WithIndex(&corev1.Pod{}, podSandboxNameHashIndex, podSandboxNameHashIndexer).
+		WithRuntimeObjects(sb).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				data, err := patch.Data(obj)
+				if err != nil {
+					return err
+				}
+				if _, isPod := obj.(*corev1.Pod); isPod && string(data) == string(stripManagedFieldsPatch) {
+					// Record and swallow: the fake client has no field
+					// manager, so applying the reset sentinel would store a
+					// literal empty entry instead of clearing tracking.
+					strippedPods = append(strippedPods, obj.GetName())
+					return nil
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	r := SandboxReconciler{
+		Client:        c,
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+	_, err := r.Reconcile(t.Context(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, []string{sandboxName}, strippedPods,
+		"expected exactly one managedFields strip patch for the created pod")
+
+	// A second reconcile must not strip again: the pod already exists.
+	_, err = r.Reconcile(t.Context(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+	})
+	require.NoError(t, err)
+	require.Len(t, strippedPods, 1, "strip must only happen on the create path")
 }

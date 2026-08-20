@@ -21,10 +21,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -45,7 +48,7 @@ func newProcessClient(t *testing.T, rootDir string) processv1.ProcessServiceClie
 	lis := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
 	processv1.RegisterProcessServiceServer(grpcServer,
-		NewProcessServer(rootDir, processmanager.NewProcessRegistry(), 0))
+		NewProcessServer(rootDir, processmanager.NewProcessRegistry(), 0, logr.Discard()))
 	go func() { _ = grpcServer.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -352,4 +355,119 @@ func TestResizeTTYWithPTY(t *testing.T) {
 	})
 	require.NoError(t, err)
 	drainStart(t, stream)
+}
+
+// TestStart_KillsGrandchildrenOnCancel verifies that cancelling the stream
+// context terminates not just the child process but also any grandchildren,
+// preventing orphan process leaks.
+func TestStart_KillsGrandchildrenOnCancel(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Capture the grandchild PID via a temp file rather than stdout, so
+	// that parsing cannot be skipped and the PID is available regardless
+	// of when stdout events are delivered.
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	// $$ is the PID of the sh process running the command (= cmd.Process.Pid
+	// since Setpgid was set, so PGID == PID). The backgrounded sleep inherits
+	// the same process group, so a single SIGKILL to -PGID reaps both.
+	stream, err := client.Start(ctx, &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{
+			Command: []string{"sh", "-c", "echo $$ > " + pidFile + "; sleep 86400 & wait"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Receive InitEvent to ensure the process is running.
+	_ = recvInit(t, stream)
+
+	// Wait for the PID file to appear (the shell writes it immediately on
+	// entry). Polling is robust to CI scheduling delays.
+	var grandchildPID int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 0 {
+			return false
+		}
+		grandchildPID = pid
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "grandchild PID file %q never populated", pidFile)
+
+	// Cancel the context to trigger process group kill.
+	cancel()
+
+	// Wait for the stream to end. It may return EOF or a Canceled error.
+	_, err = stream.Recv()
+	require.Error(t, err)
+
+	// Wait for the grandchild to die. The kill goroutine runs asynchronously
+	// after ctx cancellation, so polling is needed to avoid a race between
+	// the client observing the stream error and the server delivering SIGKILL
+	// to the process group. 10s timeout accommodates slow CI runners.
+	require.Eventually(t, func() bool {
+		return syscall.Kill(grandchildPID, 0) == syscall.ESRCH
+	}, 10*time.Second, 50*time.Millisecond, "grandchild process %d should have been killed", grandchildPID)
+}
+
+// TestExecute_KillsGrandchildrenOnCancel verifies that cancelling the context
+// during Execute terminates the entire process group including grandchildren.
+func TestExecute_KillsGrandchildrenOnCancel(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Capture the grandchild PID via a temp file rather than stdout.
+	// Execute returns a Canceled error (and resp == nil) on cancellation,
+	// so any stdout-based PID assertion would be vacuously skipped.
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	cmd := "echo $$ > " + pidFile + "; sleep 86400"
+
+	// Start Execute in a goroutine so we can cancel mid-execution.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = client.Execute(ctx, &processv1.ExecuteRequest{
+			Config: &processv1.ProcessConfig{
+				Command: []string{"sh", "-c", cmd},
+			},
+		})
+	}()
+
+	// Wait for the PID file to appear (the shell writes it immediately on
+	// entry, well before we need to cancel). Polling avoids the race that
+	// a fixed time.Sleep introduces on loaded CI runners.
+	var grandchildPID int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 0 {
+			return false
+		}
+		grandchildPID = pid
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "grandchild PID file %q never populated", pidFile)
+
+	// Cancel the context to trigger process group kill.
+	cancel()
+
+	// Wait for Execute to return.
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not return after context cancellation")
+	}
+
+	// Wait for the grandchild to die. Polling avoids a race between
+	// Execute returning and SIGKILL propagating to the grandchild.
+	require.Eventually(t, func() bool {
+		return syscall.Kill(grandchildPID, 0) == syscall.ESRCH
+	}, 10*time.Second, 50*time.Millisecond, "grandchild process %d should have been killed", grandchildPID)
 }

@@ -78,7 +78,7 @@ func New(opts Options) (*Server, error) {
 	registry := processmanager.NewProcessRegistry()
 	return &Server{
 		registry:      registry,
-		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize),
+		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize, opts.Log),
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
 	}, nil
 }

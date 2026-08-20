@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Annotated
+from typing import Literal
 from asyncio import CancelledError
 from pydantic import (
     BaseModel,
@@ -24,7 +25,7 @@ from ..utils import get_sandbox
 
 
 class GetSandboxStatusOutputSchema(BaseModel):
-    status: str = Field(
+    status: Literal["SandboxReady", "SandboxNotReady", "SandboxNotFound"] = Field(
         description=(
             "Sandbox status string derived from Kubernetes conditions. One of "
             "'SandboxReady', 'SandboxNotReady', or 'SandboxNotFound'."

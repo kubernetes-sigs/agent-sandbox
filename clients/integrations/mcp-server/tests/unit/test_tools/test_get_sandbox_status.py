@@ -127,7 +127,7 @@ async def test_call_get_sandbox_status_tool_with_empty_condition_message(
 
 @pytest.mark.anyio
 @pytest.mark.usefixtures("mocked_servers_sandbox_client_class")
-async def test_session_id_not_found(
+async def test_sandbox_claim_not_found(
     mcp_client,
     mock_sandbox_client,
     mock_sandbox,

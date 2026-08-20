@@ -5,18 +5,8 @@ knowledge_base:
   code_guidelines:
     enabled: true
     filePatterns:
-      - "AGENTS.md"
       - ".github/copilot-instructions.md"
-      - files: ".github/instructions/controllers.instructions.md"
-        applyTo: "controllers/**/*.go,extensions/controllers/**/*.go,internal/**/*.go"
-      - files: ".github/instructions/api.instructions.md"
-        applyTo: "api/**/*.go,extensions/api/**/*.go"
-      - files: ".github/instructions/python-sdk.instructions.md"
-        applyTo: "clients/python/**/*"
-      - files: ".github/instructions/go-sdk.instructions.md"
-        applyTo: "clients/go/**/*"
-      - files: ".github/instructions/docs.instructions.md"
-        applyTo: "docs/**/*,site/**/*,README.md,CONTRIBUTING.md"
+      - "AGENTS.md"
 
 reviews:
   request_changes_workflow: true
@@ -27,6 +17,35 @@ reviews:
     - "!**/*_generated*.go"
     - "!**/zz_generated.*.go"
     - "!vendor/**"
+
+  path_instructions:
+    - path: "api/**/*.go"
+      instructions: |
+        Focus on Kubernetes CRD API conventions, kubebuilder validation markers, and backwards compatibility (v1beta1 contracts). Ensure optional fields use pointers and have clear docstrings.
+
+    - path: "extensions/api/**/*.go"
+      instructions: |
+        Focus on Kubernetes CRD API conventions and extension contract alignment (SandboxClaim, SandboxTemplate, SandboxWarmPool).
+
+    - path: "controllers/**/*.go"
+      instructions: |
+        Enforce controller-runtime best practices: idempotent Reconcile loops, context cancellation, error wrapping, event recording, never mutating primary CR specs, and verify RBAC markers. Enforce low Prometheus metric cardinality (no unbounded labels like pod names or UIDs). In Reconcile loops, reserve logger.Info/V(0) for major lifecycle events and require V(4) for routine checks or cache lookups. When modifying helpers or predicates, audit all call sites for downstream side effects.
+
+    - path: "extensions/controllers/**/*.go"
+      instructions: |
+        Enforce controller-runtime best practices: idempotent Reconcile loops, context cancellation, error wrapping, event recording, never mutating primary CR specs, and verify RBAC markers. Enforce low Prometheus metric cardinality (no unbounded labels like pod names or UIDs). In Reconcile loops, reserve logger.Info/V(0) for major lifecycle events and require V(4) for routine checks or cache lookups. When modifying helpers or predicates, audit all call sites for downstream side effects.
+
+    - path: "clients/python/agentic-sandbox-client/**/*.py"
+      instructions: |
+        Review against Python 3.11+ idioms. Enforce Pydantic models for data structures. Maintain architectural parity between sync modules and their async siblings (e.g., sandbox_client.py vs async_sandbox_client.py), avoiding unintended drift. Do not apply Go conventions here.
+
+    - path: "clients/go/**/*.go"
+      instructions: |
+        Focus on idiomatic Go client patterns, API stability, and clear examples. This is a hand-written public SDK wrapping SandboxClaim lifecycle and connectivity features. Ensure error handling is robust and the API surface remains backward-compatible.
+
+    - path: "docs/**/*.md"
+      instructions: |
+        Focus on technical accuracy, clarity, and markdown formatting. Verify that code snippets and configuration examples match current CRD definitions.
 
   auto_review:
     base_branches:

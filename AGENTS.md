@@ -15,7 +15,6 @@ Guidance for AI coding agents working in this repository. Human contributors sho
 | Path | What lives there |
 | --- | --- |
 | [**.agents/skills/**](.agents/skills/) | Specialized instructions for you (AI agents). See "Agent Skills" section below. |
-| [.github/instructions/](.github/instructions/) | Path-specific instructions for AI code review and Copilot. |
 | [api/v1beta1/](api/v1beta1/) | Core `Sandbox` types and kubebuilder markers. |
 | [extensions/api/v1beta1/](extensions/api/v1beta1/) | `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` types. |
 | [controllers/](controllers/) | Core `Sandbox` reconciler + tests. |
@@ -75,12 +74,22 @@ If you change one of these, preview the rendered output (`hugo server` from [sit
 - Prefer extending existing files over adding new ones. Do not create new top-level directories without discussion.
 - Errors: wrap with context (`fmt.Errorf("...: %w", err)`); surface meaningful conditions on the resource status rather than swallowing.
 - Concurrency: respect `context.Context` cancellation; avoid goroutines without lifetime ownership; protect shared state.
+- Spec immutability: the `spec` of the primary Custom Resource (CR) being reconciled is user-owned; never modify and save it back to the API server in the reconciler. Controllers may only update `status` of the primary CR or `spec` of secondary/target objects.
+- Label values: do not use full resource names directly in label values (must stay within Kubernetes 63-character limit; implement safe truncation or hashing in controller logic).
 - Logging: use `logr.Logger` from controller-runtime (`log.FromContext(ctx)`) with structured key/value pairs (never `fmt.Sprintf`). In Reconcile loops, reserve `logger.Info` / `V(0)` for major state changes (e.g., resource created, claim adopted) and require `V(4)` for routine steady-state checks or cache lookups.
 - Metrics cardinality & normalization: never introduce high or unbounded cardinality labels (e.g., pod names, UIDs, timestamps, raw errors). When deriving label values from dynamic input or errors, apply metrics normalization (an allowlist switch or categorizer) to map strings into a small, fixed enum.
 - Helper impact & DRY: factor repeated setup or error handling into helpers. When modifying helper predicates or error returns, audit all call sites across reconcilers to prevent downstream side effects (e.g., unexpected cache drops or queue evictions).
 - API changes are versioned (`v1beta1`). Treat any user-visible field, label, or annotation rename as a breaking change — discuss in an issue or KEP first [docs/keps/](docs/keps/).
-- Match existing kubebuilder marker style; required vs optional, default values, and validation belong on the type, not in the controller.
+- Match existing kubebuilder marker style; required vs optional, default values, and validation belong on the type, not in the controller. Use pointers for optional fields where distinguishing between zero and unset is important; prefer `conditions` instead of a `phase` enum; avoid booleans for fields that might evolve to have more states in the future.
 - When modifying CRDs, APIs, or controller logic that interacts with APIs, adhere to the guidelines in [.agents/skills/k8s-api-conventions/SKILL.md](.agents/skills/k8s-api-conventions/SKILL.md).
+
+## Go SDK conventions
+
+The Go SDK lives at [clients/go/](clients/go/) and is a hand-written public SDK wrapping `SandboxClaim` lifecycle and connectivity (Gateway, port-forward, direct).
+
+- Maintain API stability and backward compatibility for exported types and methods.
+- Provide robust error handling and clear godoc comments and examples.
+- Do not confuse with [clients/k8s/](clients/k8s/), which contains **generated** typed clientsets and should not be hand-edited.
 
 ## Python SDK conventions
 

@@ -157,7 +157,7 @@ def generate_release_notes(commits, breaking_changes, pr_descriptions, contribut
         return None
 
     project_id = os.getenv("GCP_PROJECT", "").strip()
-    location = os.getenv("GCP_LOCATION", "us-central1").strip()
+    location = os.getenv("GCP_LOCATION", "global").strip()
 
     if not project_id:
         print("⚠️ GCP_PROJECT environment variable not set. Skipping Gemini release notes.")

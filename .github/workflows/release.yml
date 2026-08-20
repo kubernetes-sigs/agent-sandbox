@@ -236,10 +236,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-          GCP_LOCATION: "us-central1"
+          GCP_LOCATION: "global"
           GEMINI_MODEL: gemini-3.7-flash
         run: |
-          pip install google-genai==1.30.0 pyopenssl==25.1.0 pyyaml==6.0.2
+          pip install "google-genai>=1.51.0" pyopenssl==25.1.0 pyyaml==6.0.2
 
           # This finally publishes the draft for your review
           make release-publish TAG="${{ needs.promote-images.outputs.new_tag }}"

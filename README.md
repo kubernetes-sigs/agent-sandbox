@@ -12,7 +12,7 @@
 
 [Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
 
-**agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes.**
+**agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes and reinforcement learning.**
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
 
@@ -205,6 +205,7 @@ Kubernetes excels at managing stateless, replicated applications (Deployments) a
 
 *   **Development Environments:** Isolated, persistent, network-accessible cloud environments for developers.
 *   **AI Agent Runtimes:** Isolated environments for executing untrusted, LLM-generated code.
+*   **Reinforcement Learning (RL) & Evaluation:** High-throughput, isolated execution sandboxes for training and evaluation loops (e.g., SWE-bench, R2E-Gym, Ray/RLlib) with low-latency warm-pool claims.
 *   **Notebooks and Research Tools:** Persistent, single-container sessions for tools like Jupyter Notebooks.
 *   **Stateful Single-Pod Services:** Hosting single-instance applications (e.g., build agents, small databases) needing a stable identity without StatefulSet overhead.
 

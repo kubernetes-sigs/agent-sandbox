@@ -32,6 +32,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**playwright-sandbox**](./playwright-sandbox): An example of running Playwright with Chromium in a sandbox for web scraping and screenshots.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
+- [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
 - [**warmpool-quickstart**](./warmpool-quickstart): Reference YAML for the three extension CRDs — SandboxTemplate, SandboxWarmPool, and SandboxClaim — including a secure template and an LLM-scoped network policy example.

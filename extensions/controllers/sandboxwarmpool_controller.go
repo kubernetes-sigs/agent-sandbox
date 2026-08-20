@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -415,7 +416,6 @@ func (r *SandboxWarmPoolReconciler) exp() *warmPoolExpectations {
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch;update
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
@@ -540,7 +540,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// loop (#1215). Hold the sandbox and retry on a rate-limited
 			// requeue instead; the scheduler will place it when capacity
 			// frees up.
-			if r.isSandboxPodUnschedulable(ctx, &sb) {
+			if r.isSandboxPodUnschedulable(&sb) {
 				unschedulableReplicas++
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
@@ -841,30 +841,32 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 
 // isSandboxPodUnschedulable reports whether the sandbox's backing pod is
 // currently unschedulable (PodScheduled=False with reason Unschedulable).
-// Missing pods or pods without a definitive PodScheduled=False/Unschedulable
-// condition report false, preserving the delete-and-replace behavior for
-// genuinely stuck sandboxes.
-func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(ctx context.Context, sb *sandboxv1beta1.Sandbox) bool {
-	// The backing pod normally shares the sandbox's name; a sandbox that
-	// adopted a warm pod tracks the pod name in an annotation (same
-	// resolution the sandbox controller uses).
-	podName := sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
-	if podName == "" {
-		podName = sb.Name
-	}
-	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod); err != nil {
+//
+// This reads the PodScheduled condition the sandbox controller mirrors onto
+// Sandbox.status, rather than fetching the Pod: the mirror copies the Pod
+// condition's status and reason verbatim, so it carries exactly the signal this
+// check needs, and the pool already has the Sandbox in hand. Sandboxes without a
+// definitive PodScheduled=False/Unschedulable condition report false, preserving
+// the delete-and-replace behavior for genuinely stuck sandboxes.
+//
+// The mirror is removed when the Pod is confirmed absent and reports Unknown on a
+// transient Pod lookup failure, so both cases fall through to false here — the
+// same outcome as the previous direct Pod read, which returned false on a failed
+// Get.
+func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
+	// A sandbox being torn down keeps its last mirrored condition until the
+	// sandbox controller reconciles the Pod's absence, so a terminating sandbox
+	// can still carry a stale Unschedulable. Treat it as not-unschedulable so the
+	// pool does not hold a slot on a sandbox that is already going away; the
+	// previous implementation got this from the Pod's DeletionTimestamp.
+	if !sb.DeletionTimestamp.IsZero() {
 		return false
 	}
-	if !pod.DeletionTimestamp.IsZero() {
+	cond := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionPodScheduled))
+	if cond == nil {
 		return false
 	}
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.PodScheduled {
-			return cond.Status == corev1.ConditionFalse && cond.Reason == corev1.PodReasonUnschedulable
-		}
-	}
-	return false
+	return cond.Status == metav1.ConditionFalse && cond.Reason == corev1.PodReasonUnschedulable
 }
 
 // resolveUpdateStrategy returns the effective update strategy for the warm pool,

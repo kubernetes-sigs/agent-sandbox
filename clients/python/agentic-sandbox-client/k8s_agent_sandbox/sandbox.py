@@ -25,7 +25,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
-from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
+from .constants import SANDBOX_NAME_HASH_LABEL
 from .utils import select_pod_ip
 
 class Sandbox:
@@ -83,11 +83,7 @@ class Sandbox:
         if self._pod_name is not None:
             return self._pod_name
 
-        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        metadata = sandbox_object.get('metadata') or {}
-        annotations = metadata.get('annotations') or {}
-        pod_name = annotations.get(POD_NAME_ANNOTATION)
-        self._pod_name = pod_name if pod_name is not None else self.sandbox_id
+        self._pod_name = self.sandbox_id
         return self._pod_name
 
 

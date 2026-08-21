@@ -65,6 +65,26 @@ This command will:
 3.  Push the image to the `kind` cluster.
 4.  Deploy the controller to the `kind` cluster.
 
+To deploy the latest **published** images from `registry.k8s.io/agent-sandbox/`
+instead of building them locally (no container build required):
+
+```sh
+make deploy-kind SKIP_BUILD=true
+```
+
+The published image tag is resolved automatically from `registry.k8s.io` at
+deploy time (the newest stable `vX.Y.Z`, so no per-release bump is needed);
+pin a specific release with `IMAGE_TAG`:
+
+```sh
+make deploy-kind SKIP_BUILD=true IMAGE_TAG=v0.5.4
+```
+
+Note that only `agent-sandbox-controller` is deployed by `deploy-kind` itself;
+any runtime images referenced by your Sandbox resources (e.g. `chrome-sandbox`,
+`python-runtime-sandbox`) must be pullable from a registry the cluster can
+reach.
+
 You can verify that the controller is running by checking the pods in the `agent-sandbox-system` namespace:
 
 ```sh

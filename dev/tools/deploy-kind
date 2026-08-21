@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Orchestrate the local kind deployment (invoked by `make deploy-kind`).
+
+Reads its configuration from environment variables — GNU make exports
+command-line variables to recipe subprocesses, so `SKIP_BUILD=true make
+deploy-kind` reaches this script with SKIP_BUILD=true — which keeps the
+Makefile completely declarative. The workflow:
+
+  1. create-kind-cluster   (always recreates the cluster)
+  2. push-images           (skipped when SKIP_BUILD=true)
+  3. deploy-to-kube        (published images when SKIP_BUILD=true)
+
+Environment:
+  SKIP_BUILD=true       deploy the latest published images from
+                        registry.k8s.io/agent-sandbox/ instead of building
+                        them locally
+  IMAGE_TAG=vX.Y.Z      pin the published image tag (SKIP_BUILD mode)
+  EXTENSIONS=true       also deploy the extensions controller and CRDs
+  CONTROLLER_ONLY=true  build and push only the controller image
+  CONTROLLER_ARGS=...   extra controller flags
+  CONTAINER_ENGINE      docker or podman (default: docker)
+  KIND_CLUSTER_NAME     cluster name (default: agent-sandbox)
+"""
+
+import importlib.util
+import os
+import subprocess
+import sys
+from importlib.machinery import SourceFileLoader
+
+from shared import utils
+
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# latest-published-tag is a small side-effect-free module; load it in-process
+# instead of spawning a subprocess (the repo's established pattern for
+# importing extensionless dev/tools scripts, see push_images_test.py).
+_loader = SourceFileLoader("latest_published_tag",
+                           os.path.join(_TOOLS_DIR, "latest-published-tag"))
+_spec = importlib.util.spec_from_loader("latest_published_tag", _loader)
+_latest_published_tag = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_latest_published_tag)
+
+
+def _env_flag(name):
+    """Treat an env var as true when it is literally "true"."""
+    return os.environ.get(name, "") == "true"
+
+
+def _run_tool(tool, *args):
+    """Run a dev/tools script from the repo root with the current interpreter."""
+    subprocess.run(
+        [sys.executable, os.path.join(_TOOLS_DIR, tool), *args],
+        cwd=utils.get_repo_root(), check=True)
+
+
+def _resolve_published_tag():
+    """Return the newest stable published tag from registry.k8s.io."""
+    try:
+        tag = _latest_published_tag.pick_latest_stable(
+            _latest_published_tag.fetch_all_tags())
+    except Exception as e:  # network or parse failures
+        sys.exit(f"error: cannot resolve the latest published image tag from "
+                 f"registry.k8s.io: {e}; pin one with IMAGE_TAG=vX.Y.Z")
+    if not tag:
+        sys.exit("error: no stable vX.Y.Z tag found on registry.k8s.io; "
+                 "pin one with IMAGE_TAG=vX.Y.Z")
+    return tag
+
+
+def main():
+    cluster = os.environ.get("KIND_CLUSTER_NAME") or "agent-sandbox"
+    container_engine = os.environ.get("CONTAINER_ENGINE", "docker")
+    skip_build = _env_flag("SKIP_BUILD")
+    extensions = _env_flag("EXTENSIONS")
+    controller_only = _env_flag("CONTROLLER_ONLY")
+    controller_args = os.environ.get("CONTROLLER_ARGS", "")
+    kubeconfig = os.path.join(utils.get_repo_root(), "bin", "KUBECONFIG")
+
+    # 1. create (recreate) the kind cluster
+    _run_tool("create-kind-cluster", "--recreate", cluster,
+              "--kubeconfig", kubeconfig, "--container-engine", container_engine)
+
+    # 2. build and load images (skipped when deploying published images)
+    if not skip_build:
+        args = ["--image-prefix=kind.local/",
+                f"--kind-cluster-name={cluster}",
+                f"--container-engine={container_engine}"]
+        if controller_only:
+            args.append("--controller-only")
+        _run_tool("push-images", *args)
+    else:
+        print("SKIP_BUILD=true: skipping image build")
+
+    # 3. deploy the manifests
+    if skip_build:
+        image_prefix = utils.PUBLISHED_IMAGE_PREFIX
+        image_tag = os.environ.get("IMAGE_TAG") or _resolve_published_tag()
+        print(f"deploying published images from {image_prefix} (tag {image_tag})")
+    else:
+        image_prefix = "kind.local/"
+        image_tag = ""
+    args = [f"--image-prefix={image_prefix}", f"--image-tag={image_tag}"]
+    if extensions:
+        args.append("--extensions")
+    if controller_args:
+        args.append(f"--controller-args={controller_args}")
+    _run_tool("deploy-to-kube", *args)
+
+
+if __name__ == "__main__":
+    main()

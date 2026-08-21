@@ -547,6 +547,86 @@ func TestHTTPHeaders_PodIPNotSet(t *testing.T) {
 	}
 }
 
+func TestHTTPHeaders_DisablePodIPRouting(t *testing.T) {
+	cases := []struct {
+		name         string
+		disable      bool
+		expectHeader bool
+	}{
+		{
+			name:         "default sends pod IP header",
+			disable:      false,
+			expectHeader: true,
+		},
+		{
+			name:         "disabled suppresses pod IP header",
+			disable:      true,
+			expectHeader: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var capturedHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				capturedHeaders = r.Header.Clone()
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+			}))
+			defer server.Close()
+
+			opts := Options{
+				WarmPoolName:        "test-warmpool",
+				Namespace:           "default",
+				APIURL:              server.URL,
+				ServerPort:          8888,
+				RequestTimeout:      5 * time.Second,
+				PerAttemptTimeout:   2 * time.Second,
+				Quiet:               true,
+				DisablePodIPRouting: tc.disable,
+			}
+			opts.K8sHelper = &K8sHelper{}
+			sb, err := New(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			sb.connector.mu.Lock()
+			sb.connector.baseURL = server.URL
+			sb.connector.sandboxID = "test-claim"
+			sb.connector.backoffScale = 0.001
+			sb.connector.mu.Unlock()
+			sb.mu.Lock()
+			sb.claimName = "test-claim"
+			sb.mu.Unlock()
+
+			sb.connector.SetPodIP("10.244.0.42")
+
+			if _, err := sb.Exists(context.Background(), "x"); err != nil {
+				t.Fatalf("Exists() error: %v", err)
+			}
+
+			mu.Lock()
+			h := capturedHeaders
+			mu.Unlock()
+			if h == nil {
+				t.Fatal("handler was never invoked; no headers captured")
+			}
+
+			if tc.expectHeader {
+				if h.Get(headerSandboxPodIP) != "10.244.0.42" {
+					t.Errorf("expected %s=10.244.0.42, got %q", headerSandboxPodIP, h.Get(headerSandboxPodIP))
+				}
+			} else {
+				if _, ok := h[http.CanonicalHeaderKey(headerSandboxPodIP)]; ok {
+					t.Errorf("expected %s to be absent, but it was present", headerSandboxPodIP)
+				}
+			}
+		})
+	}
+}
+
 func TestOperations_NonOKStatus(t *testing.T) {
 	cases := []struct {
 		name      string

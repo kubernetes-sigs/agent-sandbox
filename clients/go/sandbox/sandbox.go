@@ -110,15 +110,16 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 
 	conn := newConnector(connectorConfig{
-		Strategy:          strategy,
-		Namespace:         opts.Namespace,
-		ServerPort:        opts.ServerPort,
-		RequestTimeout:    opts.RequestTimeout,
-		PerAttemptTimeout: opts.PerAttemptTimeout,
-		HTTPTransport:     opts.HTTPTransport,
-		Log:               opts.Logger,
-		Tracer:            tracer,
-		TraceServiceName:  svcName,
+		Strategy:            strategy,
+		Namespace:           opts.Namespace,
+		ServerPort:          opts.ServerPort,
+		RequestTimeout:      opts.RequestTimeout,
+		PerAttemptTimeout:   opts.PerAttemptTimeout,
+		HTTPTransport:       opts.HTTPTransport,
+		DisablePodIPRouting: opts.DisablePodIPRouting,
+		Log:                 opts.Logger,
+		Tracer:              tracer,
+		TraceServiceName:    svcName,
 	})
 
 	// Wire tunnel's connector reference for death notifications.

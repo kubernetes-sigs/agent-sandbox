@@ -228,7 +228,8 @@ class AgentSandboxProbeConfig:
 
     A bound claim means the pod is Ready, not that the runtime HTTP server is
     accepting requests (or that a gateway route has propagated), so the provider
-    polls a cheap exec until it succeeds ``stable_count`` times.
+    polls a cheap exec until it succeeds ``stable_count`` times. ``deadline_s``
+    bounds the whole poll; ``None`` polls without a time limit.
     """
 
     command: str | None = READY_PROBE_COMMAND
@@ -510,9 +511,11 @@ class AgentSandboxProvider:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + probe.deadline_s if probe.deadline_s is not None else None
         consecutive = 0
+        attempts = 0
         last_detail = "no probe attempt completed"
         while True:
             result = await self._run_wrapped(inst, wrapped, probe.timeout_s)
+            attempts += 1
             passed = result.return_code == 0 and (
                 probe.expected_stdout is None or probe.expected_stdout in (result.stdout or "")
             )
@@ -524,9 +527,14 @@ class AgentSandboxProvider:
             else:
                 consecutive = 0
                 last_detail = f"return_code={result.return_code}, stderr={(result.stderr or '').strip()!r}"
-                if deadline is None:
-                    raise AgentSandboxCreateVerificationError(
-                        f"sandbox {handle.sandbox_id!r} failed readiness probe: {last_detail}"
+                # Without a deadline the poll can run forever; surface progress so a
+                # never-ready sandbox does not block create() silently.
+                if deadline is None and attempts % 30 == 0:
+                    LOGGER.warning(
+                        "sandbox %r readiness probe still failing after %d attempts (no deadline configured): %s",
+                        handle.sandbox_id,
+                        attempts,
+                        last_detail,
                     )
             if deadline is not None and loop.time() >= deadline:
                 raise AgentSandboxCreateVerificationError(

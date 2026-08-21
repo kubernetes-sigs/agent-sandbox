@@ -59,6 +59,7 @@ sandbox:
       command: printf agent-sandbox-ready
       expected_stdout: agent-sandbox-ready
       timeout_s: 30
+      # null = poll without a time limit (until stable_count consecutive passes).
       deadline_s: 60
       stable_count: 1
       stable_delay_s: 1.0

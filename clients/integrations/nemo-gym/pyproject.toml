@@ -14,7 +14,7 @@ classifiers = [
 ]
 dynamic = ["version"]
 # Inherited floor: this mirrors nemo-gym's PUBLISHED metadata verbatim —
-# nemo-gym 0.5.1 on PyPI declares requires-python >=3.13.14 (pip/uv reject
+# nemo-gym 0.5.0 on PyPI declares requires-python >=3.13.14 (pip/uv reject
 # 3.13.x below that micro version at resolve time). That is likely an upstream
 # typo for >=3.13.1, but declaring a looser floor here would only trade our
 # clear error for a confusing nemo-gym resolution failure. Relax this (and the

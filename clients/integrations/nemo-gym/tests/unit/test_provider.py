@@ -287,6 +287,25 @@ async def test_create_probe_waits_for_stable_count():
     assert len(commands.calls) == 3
 
 
+async def test_create_probe_without_deadline_retries_failures():
+    # deadline_s=None means no time bound, not single-attempt: a probe that fails
+    # while the runtime server is still starting must keep polling until it
+    # accumulates stable_count consecutive passes.
+    client = FakeClient()
+    commands = client.sandbox._commands
+    commands.results.extend(
+        [exec_result(exit_code=1), exec_result(stderr="connection refused", exit_code=7), exec_result(stdout="ok")]
+    )
+    provider = make_provider(
+        client,
+        create={"warmpool": "pool"},
+        probe={"command": "printf ok", "expected_stdout": "ok", "deadline_s": None, "stable_delay_s": 0},
+    )
+
+    await provider.create(SandboxSpec())
+    assert len(commands.calls) == 3
+
+
 # -------------------------------------------------------------------------- exec
 
 

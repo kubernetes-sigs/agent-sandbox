@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -39,14 +40,14 @@ import (
 // mapCommandError converts command execution errors (e.g. missing binary or
 // permission denied) into appropriate gRPC status codes (NOT_FOUND,
 // PERMISSION_DENIED) instead of generic INTERNAL error codes.
-func mapCommandError(err error, defaultCode codes.Code, msg string) error {
+func mapCommandError(err error, msg string) error {
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
 		return status.Errorf(codes.NotFound, "%s: command or path not found: %v", msg, err)
 	}
 	if errors.Is(err, fs.ErrPermission) {
 		return status.Errorf(codes.PermissionDenied, "%s: permission denied: %v", msg, err)
 	}
-	return status.Errorf(defaultCode, "%s: %v", msg, err)
+	return status.Errorf(codes.Internal, "%s: %v", msg, err)
 }
 
 // defaultStreamChunkSize is the default read buffer size for stdout/stderr
@@ -62,35 +63,47 @@ type ProcessServer struct {
 	rootDir         string
 	registry        *processmanager.ProcessRegistry
 	streamChunkSize int
+	log             logr.Logger
 }
 
 // NewProcessServer builds a ProcessServer rooted at rootDir. rootDir must be
 // non-empty. A nil registry gets a fresh one, but callers normally share the
 // daemon-wide registry so shutdown can signal every child. A non-positive
 // streamChunkSize selects the default.
-func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry, streamChunkSize int) *ProcessServer {
+func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry, streamChunkSize int, log logr.Logger) *ProcessServer {
 	if registry == nil {
 		registry = processmanager.NewProcessRegistry()
 	}
 	if streamChunkSize <= 0 {
 		streamChunkSize = defaultStreamChunkSize
 	}
+	// Default a nil/zero-value logger to Discard so that s.log.Error
+	// calls in killProcessGroupOnContextDone never panic.
+	if log.GetSink() == nil {
+		log = logr.Discard()
+	}
 	return &ProcessServer{
 		rootDir:         rootDir,
 		registry:        registry,
 		streamChunkSize: streamChunkSize,
+		log:             log,
 	}
 }
 
-// buildCommand translates a ProcessConfig into an exec.Cmd bound to ctx,
-// with env merged over the daemon environment and cwd confined to rootDir.
-func (s *ProcessServer) buildCommand(ctx context.Context, config *processv1.ProcessConfig) (*exec.Cmd, error) {
+// buildCommand translates a ProcessConfig into an exec.Cmd with env merged
+// over the daemon environment and cwd confined to rootDir.
+//
+// Unlike exec.CommandContext, this does NOT install Go's default context
+// cancellation handler (which only sends SIGKILL to the child PID). Callers
+// are responsible for killing the process group on context cancellation —
+// see killProcessGroupOnContextDone — so that grandchildren are reaped too.
+func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.ProcessConfig) (*exec.Cmd, error) {
 	if config == nil || len(config.GetCommand()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "command is required")
 	}
 
 	command := config.GetCommand()
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd := exec.Command(command[0], command[1:]...)
 
 	// A nil cmd.Env inherits the daemon environment automatically, so it is
 	// only materialized when the request adds vars. Request vars are
@@ -143,13 +156,18 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 	usePTY := req.GetPty() != nil
 	if usePTY {
+		// Bail out early if the client already disconnected — no point
+		// forking a process we would immediately have to kill.
+		if err := stream.Context().Err(); err != nil {
+			return status.FromContextError(err).Err()
+		}
 		// creack/pty sets Setsid on the child, which already places it in
 		// its own process group (pgid == pid), so process-group signalling
 		// works without Setpgid. Setting both would make fork fail with
 		// EPERM (setpgid is illegal on a session leader).
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
-			return mapCommandError(err, codes.Internal, "failed to start command with PTY")
+			return mapCommandError(err, "failed to start command with PTY")
 		}
 		proc.PTY = ptyFile
 		proc.Stdin = ptyFile
@@ -175,9 +193,15 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		cmd.Stdout, cmd.Stderr, cmd.Stdin = stdoutW, stderrW, stdinR
 		proc.Stdin = stdinW
 
+		// Bail out early if the client already disconnected.
+		if err := stream.Context().Err(); err != nil {
+			closeAll(stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW)
+			return status.FromContextError(err).Err()
+		}
+
 		if err := cmd.Start(); err != nil {
 			closeAll(stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW)
-			return mapCommandError(err, codes.Internal, "failed to start command")
+			return mapCommandError(err, "failed to start command")
 		}
 		// Process owns its write end copies; close ours so readers get EOF.
 		closeAll(stdoutW, stderrW, stdinR)
@@ -188,6 +212,11 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	// registry.
 	s.registry.Register(proc)
 	defer s.registry.Remove(pid)
+
+	// Kill the entire process group (not just the child PID) when the
+	// stream context is cancelled (client disconnects). This prevents
+	// grandchildren from becoming orphan processes.
+	s.killProcessGroupOnContextDone(stream.Context(), cmd, proc.Done)
 
 	// Set initial TTY size if requested.
 	if usePTY && req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
@@ -207,6 +236,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		go func() {
 			_ = cmd.Wait()
 			_ = proc.ClosePTY()
+			close(proc.Done) // release the cancellation watcher so it doesn't leak
 		}()
 		return status.Errorf(codes.Internal, "failed to send InitEvent: %v", err)
 	}
@@ -284,6 +314,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	}
 
 	proc.SetExitCode(exitCode)
+	closeAll(stdinW) // close stdin pipe; safe no-op if nil (PTY path)
 	close(proc.Done)
 
 	if err := stream.Send(&processv1.StartResponse{
@@ -309,15 +340,38 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
-	runErr := cmd.Run()
+	// Bail out early if the caller's context is already cancelled.
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, mapCommandError(err, "failed to execute command")
+	}
+
+	// Kill the entire process group on context cancellation. Use a local
+	// done channel since Execute does not register in the process registry.
+	execDone := make(chan struct{})
+	defer close(execDone)
+	s.killProcessGroupOnContextDone(ctx, cmd, execDone)
+
+	runErr := cmd.Wait()
 	exitCode := int32(0)
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
 			exitCode = int32(exitErr.ExitCode())
 		} else {
-			return nil, mapCommandError(runErr, codes.Internal, "failed to execute command")
+			return nil, mapCommandError(runErr, "failed to execute command")
 		}
+	}
+
+	// The command may have been killed by killProcessGroupOnContextDone
+	// because the caller's context was cancelled. Surface that as a gRPC
+	// cancellation rather than a normal (successful) response with a
+	// non-zero exit code.
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
 	}
 
 	return &processv1.ExecuteResponse{
@@ -399,4 +453,29 @@ func closeAll(files ...*os.File) {
 			_ = f.Close()
 		}
 	}
+}
+
+// killProcessGroupOnContextDone starts a goroutine that sends SIGKILL to the
+// command's process group when ctx is cancelled. This replaces the default
+// exec.CommandContext behaviour (which only kills the child PID) so that
+// grandchildren are reaped as well. The goroutine exits when ctx is done OR
+// when the process exits (done closed), whichever comes first.
+//
+// The caller must have set Setpgid (or Setsid via PTY) on the command so
+// that the child and its descendants share a process group.
+func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
+	go func() {
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+					// ESRCH means the process (group) already exited — a
+					// benign race with normal exit. Any other error is
+					// unexpected and worth surfacing.
+					s.log.Error(err, "failed to kill process group on context cancellation", "pgid", cmd.Process.Pid)
+				}
+			}
+		case <-done:
+		}
+	}()
 }

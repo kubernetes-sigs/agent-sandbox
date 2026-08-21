@@ -260,11 +260,7 @@ readyLoop:
 				}
 			}
 			if ready {
-				if name, ok := latest.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
-					s.podName = name
-				} else {
-					s.podName = latest.Name
-				}
+				s.podName = latest.Name
 				break readyLoop
 			}
 		}

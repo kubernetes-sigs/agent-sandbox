@@ -2176,46 +2176,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
-			name: "corrects stale pod-name annotation when adopting sandbox",
-			existingObjects: []client.Object{
-				template,
-				claim,
-				func() client.Object {
-					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
-					sb.Annotations = map[string]string{
-						sandboxv1beta1.SandboxPodNameAnnotation: "stale-pod-name",
-					}
-					return sb
-				}(),
-				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
-			},
-			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "pool-sb-1",
-			expectNewSandboxCreated: false,
-		},
-		{
-			name: "accepts existing correct pod-name annotation when adopting sandbox",
-			existingObjects: []client.Object{
-				template,
-				claim,
-				func() client.Object {
-					sb := createWarmPoolSandbox("pool-sb-1", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, true)
-					sb.Annotations = map[string]string{
-						sandboxv1beta1.SandboxPodNameAnnotation: "pool-sb-1",
-						"test.annotation/preserved":             "true",
-					}
-					return sb
-				}(),
-				createWarmPoolSandbox("pool-sb-2", metav1.Time{Time: metav1.Now().Add(-30 * time.Minute)}, true),
-			},
-			expectSandboxAdoption:  true,
-			expectedAdoptedSandbox: "pool-sb-1",
-			expectedAnnotations: map[string]string{
-				"test.annotation/preserved": "true",
-			},
-			expectNewSandboxCreated: false,
-		},
-		{
 			name: "resolves adoption-patch conflict on the same candidate",
 			existingObjects: []client.Object{
 				template,
@@ -2555,9 +2515,6 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 				if controllerRef == nil || controllerRef.UID != claim.UID {
 					t.Errorf("expected adopted sandbox to be controlled by claim, got %v", controllerRef)
 				}
-
-				// 4. Verify the adopted sandbox records the adopted pod name
-				require.Equal(t, adoptedSandbox.Name, adoptedSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
 
 				for key, expected := range tc.expectedAnnotations {
 					require.Equal(t, expected, adoptedSandbox.Annotations[key])
@@ -3874,20 +3831,6 @@ func TestGetLaunchType(t *testing.T) {
 				},
 			},
 			want: asmetrics.LaunchTypeWarm,
-		},
-		{
-			name: "cold launch label with pod name annotation remains cold",
-			sandbox: &sandboxv1beta1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						sandboxv1beta1.SandboxLaunchTypeLabel: sandboxv1beta1.SandboxLaunchTypeCold,
-					},
-					Annotations: map[string]string{
-						sandboxv1beta1.SandboxPodNameAnnotation: "sandbox-cold",
-					},
-				},
-			},
-			want: asmetrics.LaunchTypeCold,
 		},
 		{
 			name:    "missing launch label defaults cold",

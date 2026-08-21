@@ -71,11 +71,8 @@ func postAdoptionFixture() (*sandboxv1beta1.Sandbox, *corev1.Pod) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       wbSandbox,
 			Namespace:  wbNamespace,
-			UID:        sandboxUID,
-			Generation: 3,
-			Annotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: wbSandbox,
-			},
+			UID:             sandboxUID,
+			Generation:      3,
 			OwnerReferences: []metav1.OwnerReference{claimOwnerRef()},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{

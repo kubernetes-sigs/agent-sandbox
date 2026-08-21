@@ -128,7 +128,7 @@ so the simple case stays simple.
   (default `r2e-img-<md5[:12]>`), `labels`.
 - **`SandboxHandle`** (`handles.py`): per claim — `task`, **`cluster`** (name +
   connection), `claim_name`, `sandbox_id`, **`hostname`** (stable in-cluster DNS),
-  `pod_name` (`agents.x-k8s.io/pod-name`), `pod_ip`, `endpoint`, the SDK
+  `pod_name`, `pod_ip`, `endpoint`, the SDK
   `Sandbox` (`.commands`/`.files`), plus `.exec(cmd)` and `.release()`.
 
 ## Public API (maps to requested ops; sync `SandboxFleet` / async `AsyncSandboxFleet`)

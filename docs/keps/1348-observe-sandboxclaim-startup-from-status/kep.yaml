@@ -1,0 +1,13 @@
+title: Observe SandboxClaim startup from status events
+kep-number: 1348
+authors:
+  - "@shelwinnn"
+status: provisional
+creation-date: 2026-08-05
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also: []
+replaces: []

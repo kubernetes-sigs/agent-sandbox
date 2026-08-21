@@ -82,6 +82,3 @@ podSecurityContext: null
 #   seccompProfile:
 #     type: RuntimeDefault
 containerSecurityContext: null
-
-# Name of the webhook service.
-webhookServiceName: agent-sandbox-webhook-service

@@ -112,9 +112,8 @@ func NewHandler(o Options) *Handler {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	target, perr := ParseSandboxHeaders(r.Header, ParseOptions{
-		AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP,
-	})
+	upstreamPath := r.URL.Path
+	target, perr := h.resolveTarget(r, &upstreamPath)
 	if perr != nil {
 		WriteJSONError(w, perr)
 		return
@@ -153,7 +152,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Resolve once per request so the ErrorHandler can see which path
 	// produced the IP (cache vs DNS vs override) and invalidate the cache
 	// entry on dial-class failures. The Rewrite callback re-uses the URL.
-	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, r.URL.Path, r.URL.RawQuery, h.cache)
+	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
 	// Detect Upgrade once and reuse: the Rewrite callback uses it to
 	// decide whether to strip Origin, the timeout block below uses it
 	// to skip the per-request deadline. Same predicate, same source of
@@ -276,6 +275,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 	}
 	rp.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// resolveTarget parses the routing Target for r, preferring the path-based
+// form when --path-routing-prefix is configured and r.URL.Path matches it,
+// and falling through to X-Sandbox-* headers otherwise — byte-identical to
+// the header parsing this replaced when the prefix is unset (the default),
+// so header-only deployments are unaffected. On a path match, *upstreamPath
+// is rewritten to the portion of the path the upstream sandbox should
+// actually see (prefix/namespace/id/port stripped); left untouched for
+// header-routed requests, which carry no routing prefix to strip.
+func (h *Handler) resolveTarget(r *http.Request, upstreamPath *string) (Target, *Error) {
+	if h.cfg.PathRoutingPrefix != "" {
+		if target, rem, matched, perr := ParsePathRoute(h.cfg.PathRoutingPrefix, r.URL.Path); matched {
+			if perr != nil {
+				return Target{}, perr
+			}
+			*upstreamPath = rem
+			return target, nil
+		}
+	}
+	return ParseSandboxHeaders(r.Header, ParseOptions{AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP})
 }
 
 // isUpgradeRequest reports whether r is asking the server to switch

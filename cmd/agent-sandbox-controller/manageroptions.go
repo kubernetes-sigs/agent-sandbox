@@ -20,7 +20,6 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-// buildManagerOptions constructs the controller manager options used by main().
 func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Options, probeAddr string, enableLeaderElection bool, leaderElectionNamespace string) ctrl.Options {
 	return ctrl.Options{
 		Scheme:                  scheme,

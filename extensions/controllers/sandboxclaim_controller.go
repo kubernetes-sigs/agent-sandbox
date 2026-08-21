@@ -1244,12 +1244,6 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	if adopted.Annotations == nil {
 		adopted.Annotations = make(map[string]string)
 	}
-
-	// Ensure the adopted sandbox records its pod name before it can be observed Ready.
-	if podName := adopted.Annotations[v1beta1.SandboxPodNameAnnotation]; podName != adopted.Name {
-		adopted.Annotations[v1beta1.SandboxPodNameAnnotation] = adopted.Name
-	}
-
 	if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
 		adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 	}

@@ -267,6 +267,12 @@ def plan_benchmark(cap: ClusterCapacity, n_images: int, tasks_per_image: int = 1
             f"{tasks_per_image} tasks/image -> warm_per_task + colocate_replicas "
             f"({replicas} replicas/image, instant claims).")
 
+    rationale.append(
+        "Controller flags: --sandbox-concurrent-workers / "
+        f"--sandbox-claim-concurrent-workers >= {max_concurrent} (peak in-flight); "
+        "--sandbox-warm-pool-concurrent-workers=100 on v0.5.4+ (#1266; validated to "
+        "500), <=10 on <= v0.5.3 (#1215 over-creation churn).")
+
     return BenchmarkPlan(
         strategy=strategy, max_concurrent=max_concurrent, window_size=window_size,
         warm_per_task=warm_per_task, colocate=colocate, replicas_per_image=replicas,

@@ -21,37 +21,79 @@ import (
 )
 
 // ConditionType is a type of condition for a resource.
+//
+// Terminology: a Sandbox has two distinct notions that are easy to confuse.
+//   - "running" is a desired state expressed by the user via spec.replicas
+//     (replicas: 1 requests a running Sandbox, replicas: 0 suspends it). It says the
+//     controller should create and keep a backing Pod. It does not, by itself, mean
+//     the Pod is up yet.
+//   - "readiness" is an observed state reported by the Ready condition
+//     (see SandboxConditionReady). It becomes True only once the backing Pod is
+//     actually Running and Ready with an assigned IP (and its Service exists, if
+//     requested). Note there is deliberately no separate "Running" status
+//     condition: whether the Pod is running is subsumed by Ready (an unready Pod
+//     that is still starting reports Ready=False with reason DependenciesNotReady).
+//
+// Condition names and semantics follow the Kubernetes/Gateway API conventions for
+// status conditions (abnormal-true vs. normal-true polarity, stable reason strings,
+// observedGeneration) so consumers can reason about them uniformly. See the Gateway
+// API condition guidelines as a model:
+// https://gateway-api.sigs.k8s.io/geps/gep-1364/
 type ConditionType string
 
 func (c ConditionType) String() string { return string(c) }
 
 const (
-	// SandboxConditionSuspended indicates the sandbox is administratively suspended.
+	// SandboxConditionSuspended reports progress of an administrative suspension.
+	// It is set while the Sandbox is suspended (replicas: 0): Status is True once the
+	// backing Pod has been terminated (reason PodTerminated), and False while the Pod is
+	// still terminating (reason PodNotTerminated).
+	// Note: the controller does not currently remove this condition when the Sandbox is
+	// resumed, so a stale Suspended condition may linger after replicas returns to 1.
+	// Consumers should treat Ready as the authoritative signal and not infer the live
+	// operating state from the mere presence of this condition.
 	SandboxConditionSuspended ConditionType = "Suspended"
 	// SandboxReasonSuspendedPodTerminated indicates that the pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
 	// SandboxReasonSuspendedPodNotTerminated indicates the pod has not been terminated yet.
 	SandboxReasonSuspendedPodNotTerminated = "PodNotTerminated"
 
-	// SandboxConditionReady indicates readiness for Sandbox.
+	// SandboxConditionReady summarizes whether the Sandbox is fully operational and
+	// able to serve traffic. This is the observed "readiness" of the Sandbox, and is
+	// distinct from the desired "running" state requested via spec.replicas: a Sandbox
+	// with replicas: 1 is not Ready until its Pod actually comes up.
+	// Status is True only when the backing Pod is in the Running phase with its Pod
+	// Ready condition True and at least one pod IP assigned, and, when a Service is
+	// required, that Service exists. A Service is required when it is explicitly
+	// requested (see SandboxSpec.Service) or, for backward compatibility, when a Service
+	// already exists even though one was not explicitly requested.
+	// In all other states Status is False with a reason describing why: the Sandbox is
+	// still provisioning (DependenciesNotReady), suspended via replicas: 0
+	// (SandboxSuspended), its Pod has reached a terminal phase (PodSucceeded/PodFailed),
+	// it has expired (SandboxExpired), or the controller hit an error (ReconcilerError).
 	SandboxConditionReady ConditionType = "Ready"
-	// SandboxReasonDependenciesReady indicates the sandbox is fully operational.
+	// SandboxReasonDependenciesReady is the Ready=True reason: the Pod (and Service, if
+	// requested) are provisioned and the Pod reports Ready with an assigned IP.
 	SandboxReasonDependenciesReady = "DependenciesReady"
-	// SandboxReasonDependenciesNotReady indicates the Sandbox is expected to be running
-	// but its underlying dependencies are not fully provisioned or ready yet.
+	// SandboxReasonDependenciesNotReady is a Ready=False reason: the Sandbox is expected
+	// to be running but its underlying dependencies (Pod and/or Service) are not fully
+	// provisioned or not yet reporting Ready.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
-	// SandboxReasonSuspended indicates the Sandbox has been administratively suspended
-	// (i.e., intentional action by the user to suspend the Sandbox).
+	// SandboxReasonSuspended is a Ready=False reason: the Sandbox has been administratively
+	// suspended (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"
 
-	// SandboxConditionFinished indicates the backing Pod reached a terminal phase.
+	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
+	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason
+	// recording which; it is absent while the Pod is still running or does not exist.
 	SandboxConditionFinished ConditionType = "Finished"
 	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
 	SandboxReasonPodSucceeded = "PodSucceeded"
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
 
-	// SandboxReasonExpired indicates expired state for Sandbox.
+	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime
+	// and its underlying resources were torn down (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
@@ -146,8 +188,16 @@ type SandboxSpec struct {
 	// +optional
 	Lifecycle `json:",inline"`
 
-	// replicas is the number of desired replicas.
-	// The only allowed values are 0 and 1.
+	// replicas expresses the desired operational state of the Sandbox. The only allowed
+	// values are 0 and 1:
+	//   - 1 (default): the Sandbox should be running; the controller keeps a backing Pod
+	//     (and Service, if requested) running.
+	//   - 0: the Sandbox should be suspended; the controller terminates the backing Pod
+	//     but retains the Sandbox object and its volumes so it can later be resumed.
+	// This field declares intent only. The observed readiness of the Sandbox is reported
+	// by the Ready condition, and the progress of a suspension by the Suspended
+	// condition; a Sandbox with replicas: 1 is not Ready until its Pod is actually up
+	// (see SandboxConditionReady).
 	// Defaults to 1.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1
@@ -179,13 +229,23 @@ const (
 
 // Lifecycle defines the lifecycle management for the Sandbox.
 type Lifecycle struct {
-	// shutdownTime is the absolute time when the sandbox expires.
+	// shutdownTime is the absolute time at which the Sandbox expires. When the current
+	// time reaches shutdownTime, the controller tears down the underlying resources
+	// (Pod and Service) and then applies shutdownPolicy to the Sandbox object itself.
+	// If unset, the Sandbox never expires and lives until it is explicitly deleted.
 	// +kubebuilder:validation:Format="date-time"
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
-	// shutdownPolicy determines if the Sandbox resource itself should be deleted when it expires.
-	// Underlying resources(Pods, Services) are always deleted on expiry.
+	// shutdownPolicy determines what happens to the Sandbox object itself when it expires
+	// (i.e. when shutdownTime is reached). The underlying resources (Pod, Service) are
+	// always deleted on expiry regardless of this policy; shutdownPolicy governs only the
+	// Sandbox object:
+	//   - Retain (default): the Sandbox object is kept after its resources are torn down.
+	//     Its live status fields are cleared and a Ready=False condition with reason
+	//     SandboxExpired is set so the expiry is observable.
+	//   - Delete: the Sandbox object is deleted once its underlying resources are removed.
+	// This field has no effect while shutdownTime is unset, since the Sandbox never expires.
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
@@ -198,7 +258,10 @@ type SandboxStatus struct {
 	// +optional
 	ServiceFQDN string `json:"serviceFQDN,omitempty"`
 
-	// service is a sandbox-example
+	// service is the name of the headless Service created for this Sandbox. It is empty
+	// when no Service exists for the Sandbox (for example when spec.service is false, or
+	// unset with no pre-existing Service). See serviceFQDN for the fully qualified
+	// in-cluster DNS name of this Service.
 	// +optional
 	Service string `json:"service,omitempty"`
 
@@ -217,6 +280,9 @@ type SandboxStatus struct {
 
 	// podIPs are the IP addresses of the underlying pod.
 	// A pod may have multiple IPs in dual-stack clusters.
+	// This field is populated only while a backing pod exists. It is cleared whenever
+	// the pod is absent, for example when the Sandbox is suspended (replicas: 0) or
+	// before the pod has been created.
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
 }

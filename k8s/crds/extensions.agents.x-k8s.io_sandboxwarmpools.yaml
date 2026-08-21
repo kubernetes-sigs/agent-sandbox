@@ -63,6 +63,10 @@ spec:
             type: object
           status:
             properties:
+              observedGeneration:
+                format: int64
+                minimum: 0
+                type: integer
               readyReplicas:
                 format: int32
                 type: integer

@@ -37,7 +37,17 @@ func NameHash(objectName string) string {
 
 	// Convert the uint32 to a hexadecimal string.
 	// This results in an 8-character string (e.g., "a5b3c2d1").
-	return fmt.Sprintf("%08x", hashValue)
+	const hex = "0123456789abcdef"
+	var buf [8]byte
+	buf[0] = hex[(hashValue>>28)&0xf]
+	buf[1] = hex[(hashValue>>24)&0xf]
+	buf[2] = hex[(hashValue>>20)&0xf]
+	buf[3] = hex[(hashValue>>16)&0xf]
+	buf[4] = hex[(hashValue>>12)&0xf]
+	buf[5] = hex[(hashValue>>8)&0xf]
+	buf[6] = hex[(hashValue>>4)&0xf]
+	buf[7] = hex[hashValue&0xf]
+	return string(buf[:])
 }
 
 func simpleSandbox(ns string) *sandboxv1beta1.Sandbox {
@@ -81,6 +91,19 @@ func TestSimpleSandbox(t *testing.T) {
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
 			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
 			Conditions: []metav1.Condition{
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
+					Message:            "Sandbox is not suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
+				},
 				{
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,

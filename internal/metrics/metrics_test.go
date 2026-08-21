@@ -43,17 +43,40 @@ func TestClaimLatencyRecording(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ClaimStartupLatency.Reset()
-			ClaimStartupLatency.WithLabelValues(tc.launchType, "test-tmpl", "test-pool").Observe(1000)
+			ClaimStartupLatency.WithLabelValues(tc.launchType, "test-tmpl").Observe(1000)
 
 			if testutil.CollectAndCount(ClaimStartupLatency) != 1 {
 				t.Errorf("Expected 1 observation for ClaimStartupLatency")
 			}
 
 			ClaimControllerStartupLatency.Reset()
-			ClaimControllerStartupLatency.WithLabelValues(tc.launchType, "test-tmpl", "test-pool").Observe(1000)
+			ClaimControllerStartupLatency.WithLabelValues(tc.launchType, "test-tmpl").Observe(1000)
 
 			if testutil.CollectAndCount(ClaimControllerStartupLatency) != 1 {
 				t.Errorf("Expected 1 observation for ClaimControllerStartupLatency")
+			}
+		})
+	}
+}
+
+func TestClientClaimLatencyRecording(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		name       string
+		launchType string
+	}{
+		{"Warm", LaunchTypeWarm},
+		{"Cold", LaunchTypeCold},
+		{"Unknown", LaunchTypeUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ClientClaimStartupLatency.Reset()
+			RecordClientClaimStartupLatency(ctx, time.Now().Add(-1*time.Second), tc.launchType, "test-tmpl")
+
+			if testutil.CollectAndCount(ClientClaimStartupLatency) != 1 {
+				t.Errorf("Expected 1 observation")
 			}
 		})
 	}

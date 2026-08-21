@@ -117,6 +117,7 @@ type SandboxClaimSpec struct {
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
+	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
 	// +optional
 	AdditionalPodMetadata sandboxv1beta1.PodMetadata `json:"additionalPodMetadata,omitempty"`
 
@@ -150,8 +151,11 @@ type SandboxStatus struct {
 	// +optional
 	Name string `json:"name,omitempty"`
 
-	// podIPs are the IP addresses of the underlying pod.
-	// A pod may have multiple IPs in dual-stack clusters.
+	// podIPs are the IP addresses of the underlying pod, mirrored from the backing
+	// Sandbox's status. A pod may have multiple IPs in dual-stack clusters.
+	// This is populated only while the backing Sandbox has a running pod with assigned
+	// IPs; it is cleared whenever the pod is absent (e.g. before the pod has been
+	// created or while the Sandbox is suspended).
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
 }

@@ -209,7 +209,7 @@ func TestSandboxCollector(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								APIVersion: extensionsv1beta1.GroupVersion.String(),
-								Kind:       "SandboxClaim",
+								Kind:       extensionsv1beta1.SandboxClaimKind,
 								Name:       "my-claim",
 								UID:        "1234",
 								Controller: &trueVal,
@@ -241,9 +241,44 @@ func TestSandboxCollector(t *testing.T) {
 						OwnerReferences: []metav1.OwnerReference{
 							{
 								APIVersion: extensionsv1beta1.GroupVersion.String(),
-								Kind:       "SandboxWarmPool",
+								Kind:       extensionsv1beta1.SandboxWarmPoolKind,
 								Name:       "my-warmpool",
 								UID:        "5678",
+								Controller: &trueVal,
+							},
+						},
+					},
+					Status: sandboxv1beta1.SandboxStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(sandboxv1beta1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			expectedCount: 1,
+			expectedLabels: map[string]int{
+				"created_by:unknown expired:false launch_type:cold namespace:default owned_by:SandboxWarmPool ready_condition:true sandbox_template:unknown": 1,
+			},
+		},
+		{
+			// Owner references written by a pre-v1beta1 pool controller keep
+			// the v1alpha1 apiVersion after an in-place upgrade; the owned_by
+			// label must still attribute the sandbox to its warm pool.
+			name: "legacy v1alpha1-owned warmpool sandbox",
+			sandboxes: []runtime.Object{
+				&sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-warmpool-legacy",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "extensions.agents.x-k8s.io/v1alpha1",
+								Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+								Name:       "my-warmpool",
+								UID:        "9012",
 								Controller: &trueVal,
 							},
 						},

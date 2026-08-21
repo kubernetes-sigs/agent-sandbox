@@ -1,0 +1,15 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: kata-aks-example
+spec:
+  podTemplate:
+    spec:
+      # AKS ships this RuntimeClass on clusters with Pod Sandboxing enabled.
+      # Its scheduling nodeSelector automatically places the pod on a
+      # KataVmIsolation node pool, so no explicit nodeSelector is needed.
+      runtimeClassName: kata-vm-isolation
+      containers:
+      - name: hello-kata
+        image: busybox:1.37
+        command: ["sh", "-c", "echo 'Hello from an Agent Sandbox running in Kata on AKS!' && sleep 3600"]

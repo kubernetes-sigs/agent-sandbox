@@ -1,0 +1,267 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+openapi: "3.0.3"
+info:
+  title: sandboxd Filesystem & Runtime REST API
+  description: >
+    Stateless REST interface for sandbox file system operations and runtime metadata.
+    Part of the Agent Runtime Protocol hybrid gRPC/REST architecture defined in KEP-539.2.
+    High-performance raw file transfers (read/write) are served over HTTP REST, while interactive
+    process execution is served over gRPC on a dedicated port.
+    Compatibility & Migration Note: This specification replaces the unversioned python-runtime
+    endpoints (/upload, /download, /list, /exists) and FileEntry wire representation. Existing
+    SDK clients migrate to this versioned /v1/ surface using the dynamic endpoint discovery and
+    breaking change rollout strategy documented in KEP-539.2.
+    Security note: sandboxd listens strictly on localhost or Unix Domain Socket within the isolated
+    container network namespace and must never be exposed on public interfaces.
+  version: "v1"
+
+servers:
+  - url: http://localhost:8080/v1
+    description: sandboxd REST server (default port 8080 or Unix Domain Socket)
+
+paths:
+  /files/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema:
+          type: string
+        description: >
+          Sandbox-relative path (e.g. workspace/main.py or workspace/src/).
+          Path segments containing '/' must be URL-encoded (%2F) by clients
+          when constructing the request URL. The server decodes the full path
+          before resolving it against the sandbox root.
+
+    get:
+      summary: Read a file or list a directory
+      description: >
+        If the path points to a file, returns raw file bytes (application/octet-stream).
+        If the path points to a directory, returns a structured directory listing (application/json).
+      responses:
+        "200":
+          description: File contents or directory listing
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectoryListing"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      summary: Write or overwrite a file (Idempotent)
+      description: >
+        Atomically writes request body to the given path using a temporary file and rename strategy.
+        Parent directories are created automatically. Supports both new file creation and overwriting.
+      parameters:
+        - name: mode
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^0[0-7]{3}$"
+            default: "0644"
+          description: Octal permission bits applied to the written file (e.g. "0755" or "0644").
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "204":
+          description: File written successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    delete:
+      summary: Remove a file or directory
+      parameters:
+        - name: recursive
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: If true, recursively removes directory and all its contents.
+      responses:
+        "204":
+          description: Removed successfully
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /health:
+    get:
+      summary: Sandbox readiness and heartbeat check
+      description: >
+        Used by orchestrators and Kubernetes liveness/readiness probes to verify sandboxd is healthy.
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service unavailable or not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /metadata:
+    get:
+      summary: Runtime environment metadata
+      description: >
+        Returns workload-scoped environment configuration injected by the orchestrator
+        (e.g. sandbox ID, workspace path, resource limits).
+        Security restriction: this endpoint must only serve non-sensitive configuration.
+        Orchestrator credentials, Kubernetes API tokens, and cloud provider IAM keys must NEVER
+        be served or placed in /v1/metadata since untrusted agent code running in the sandbox
+        can query localhost.
+      responses:
+        "200":
+          description: Runtime metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetadataResponse"
+
+components:
+  schemas:
+    DirectoryListing:
+      type: object
+      required:
+        - path
+        - entries
+      properties:
+        path:
+          type: string
+          example: "/workspace"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileEntry"
+
+    FileEntry:
+      type: object
+      required:
+        - name
+        - size
+        - type
+        - modified_at
+      properties:
+        name:
+          type: string
+          example: "main.py"
+        size:
+          type: integer
+          format: int64
+          example: 1024
+        type:
+          type: string
+          enum: [file, directory]
+          example: "file"
+        modified_at:
+          type: string
+          format: date-time
+        mode:
+          type: string
+          description: Octal permission bits
+          example: "0644"
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          example: "ok"
+        uptime_seconds:
+          type: integer
+          example: 3600
+
+    MetadataResponse:
+      type: object
+      properties:
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Key-value environment variables injected by the orchestrator.
+
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          example: "PERMISSION_DENIED"
+        message:
+          type: string
+          example: "Path traversal outside sandbox root is forbidden."
+
+  responses:
+    BadRequest:
+      description: Invalid request parameters or payload
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Path escapes sandbox root or permission denied
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Path does not exist within the sandbox
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Directory not empty when recursive=false
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

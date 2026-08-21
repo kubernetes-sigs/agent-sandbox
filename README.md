@@ -8,14 +8,16 @@
 <p>
   <a href="https://github.com/kubernetes-sigs/agent-sandbox/releases"><img src="https://img.shields.io/github/v/release/kubernetes-sigs/agent-sandbox" alt="GitHub release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/Apache-2-blue.svg" alt="Apache-2.0 license"></a>
-  <a href="https://goreportcard.com/report/sigs.k8s.io/agent-sandbox"><img src="https://goreportcard.com/badge/sigs.k8s.io/agent-sandbox" alt="Go Report Card"></a>
 </p>
 
 [Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
 
-**agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes.**
+**agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes and reinforcement learning.**
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
+
+> [!NOTE]
+> **Scope:** Agent Sandbox is a *sandbox orchestrator*. It delegates low-level container isolation to secure "Sandbox Runtimes" (like gVisor or Kata Containers) by managing Pods configured to use these runtimes (via `RuntimeClass`).
 
 ## Overview
 
@@ -129,6 +131,49 @@ To interact with the agent-sandbox programmatically, you can use the Python SDK.
 
 For detailed installation and usage instructions, please refer to the [Python SDK README](clients/python/agentic-sandbox-client/README.md).
 
+### Verify Installation
+
+To check whether agent-sandbox is already installed on your cluster:
+
+```sh
+# Check for agent-sandbox CRDs
+kubectl get crd sandboxes.agents.x-k8s.io
+
+# Check for the controller deployment
+kubectl get deploy agent-sandbox-controller -n agent-sandbox-system
+```
+
+If the CRDs and controller deployment are present, agent-sandbox is installed.
+
+### Uninstallation
+
+Before uninstalling, check for any in-use resources to avoid unexpected data loss:
+
+```sh
+# Check for existing Sandbox resources across all namespaces
+kubectl get sandboxes -A
+
+# Extensions (only if installed):
+kubectl get crd sandboxclaims.extensions.agents.x-k8s.io >/dev/null 2>&1 && kubectl get sandboxclaims -A
+kubectl get crd sandboxwarmpools.extensions.agents.x-k8s.io >/dev/null 2>&1 && kubectl get sandboxwarmpools -A
+kubectl get crd sandboxtemplates.extensions.agents.x-k8s.io >/dev/null 2>&1 && kubectl get sandboxtemplates -A
+```
+
+> **Warning**: Deleting the CRDs will **cascade-delete all custom resources** of those types across all namespaces.
+
+Once you have confirmed no resources are in use (or you are prepared to lose them), uninstall by deleting the same manifest you used to install:
+
+```sh
+# Standard Install (Core + Extensions):
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
+
+# Or, if you used the Selective Install:
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
+```
+
+For Helm-based installations, see the [Helm chart README](helm/README.md#uninstallation).
+
 ## Configuration
 
 For advanced scale and concurrency tuning (e.g., API QPS and worker counts), please see the [Configuration Guide](docs/configuration.md).
@@ -152,7 +197,7 @@ spec:
 
 This will create a new Sandbox named `my-sandbox` running the image you specify. You can then access the Sandbox using its stable hostname, `my-sandbox`.
 
-For more complex examples, including how to use the extensions, please see the [examples/](examples/) and [extensions/examples/](extensions/examples/) directories.
+For more complex examples, including how to use the extensions, please see the [examples/](examples/) directory.
 
 ## Motivation
 
@@ -160,6 +205,7 @@ Kubernetes excels at managing stateless, replicated applications (Deployments) a
 
 *   **Development Environments:** Isolated, persistent, network-accessible cloud environments for developers.
 *   **AI Agent Runtimes:** Isolated environments for executing untrusted, LLM-generated code.
+*   **Reinforcement Learning (RL) & Evaluation:** High-throughput, isolated execution sandboxes for training and evaluation loops (e.g., SWE-bench, R2E-Gym, Ray/RLlib) with low-latency warm-pool claims.
 *   **Notebooks and Research Tools:** Persistent, single-container sessions for tools like Jupyter Notebooks.
 *   **Stateful Single-Pod Services:** Hosting single-instance applications (e.g., build agents, small databases) needing a stable identity without StatefulSet overhead.
 
@@ -180,6 +226,10 @@ We aim for the Sandbox to be vendor-neutral, supporting various runtimes. Key ch
 ## Roadmap
 
 The current Roadmap can be found at [roadmap.md](roadmap.md).
+
+## Security
+
+For information on the security model, trust boundaries, and mitigations of Agent Sandbox, please refer to the [Threat Model](docs/security/threat_model.md).
 
 ## Community, Discussion, Contribution, and Support
 

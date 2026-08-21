@@ -28,6 +28,7 @@ from .models import (
     SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 from .k8s_helper import K8sHelper
 from .metrics import sandbox_client_discovery_latency_ms
@@ -193,8 +194,11 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     self.base_url = f"http://127.0.0.1:{local_port}"
                     logging.info(f"Tunnel ready at {self.base_url}")
                     return self.base_url
-                
-                time.sleep(0.5)
+
+                # Poll the local port at 50ms: this is a cheap localhost socket
+                # probe, and a coarser interval (e.g. 500ms) adds a uniform
+                # 0-500ms of avoidable latency to the first sandbox request.
+                time.sleep(0.05)
 
             self.close()
             raise TimeoutError("Failed to establish tunnel to Router Service.")
@@ -230,6 +234,123 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
 
     def should_inject_router_headers(self) -> bool:
         return True
+
+class SandboxdPodTunnelStrategy(ConnectionStrategy):
+    """Port-forwards directly to the sandbox pod for the sandboxd runtime.
+
+    sandboxd binds loopback-only inside the pod (KEP-539.2), so it cannot be
+    reached through the sandbox-router. This strategy forwards both sandboxd
+    listeners from the pod: the REST filesystem port and the gRPC
+    ProcessService port. ``connect()`` returns the REST base URL; the gRPC
+    target is exposed via ``grpc_target``.
+    """
+
+    def __init__(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        config: SandboxdPodTunnelConnectionConfig,
+        get_pod_name: Callable[[], str | None] | None = None,
+    ):
+        self.sandbox_id = sandbox_id
+        self.namespace = namespace
+        self.config = config
+        self._get_pod_name = get_pod_name
+        self.port_forward_process: subprocess.Popen | None = None
+        self.base_url: str | None = None
+        self.grpc_target: str | None = None
+
+    def _get_free_port(self) -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('127.0.0.1', 0))
+            return s.getsockname()[1]
+
+    def _is_port_open(self, port: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                return True
+        except (socket.timeout, ConnectionRefusedError, OSError):
+            return False
+
+    def connect(self) -> str:
+        if (
+            self.base_url
+            and self.port_forward_process
+            and self.port_forward_process.poll() is None
+        ):
+            return self.base_url
+        if self.port_forward_process:
+            self.close()
+
+        pod_name = self._get_pod_name() if self._get_pod_name else None
+        if not pod_name:
+            raise SandboxPortForwardError(
+                "sandbox pod name not resolved yet; cannot port-forward to sandboxd"
+            )
+
+        start_time = time.monotonic()
+        status = "success"
+        try:
+            rest_local = self._get_free_port()
+            grpc_local = self._get_free_port()
+            logging.info(f"Starting sandboxd pod tunnel for {self.sandbox_id}")
+            self.port_forward_process = subprocess.Popen(
+                [
+                    "kubectl", "port-forward",
+                    f"pod/{pod_name}",
+                    f"{rest_local}:{self.config.rest_port}",
+                    f"{grpc_local}:{self.config.grpc_port}",
+                    "-n", self.namespace,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
+                if self.port_forward_process.poll() is not None:
+                    _, stderr = self.port_forward_process.communicate()
+                    raise SandboxPortForwardError(
+                        f"Tunnel crashed: {stderr.decode(errors='replace')}")
+                if self._is_port_open(rest_local) and self._is_port_open(grpc_local):
+                    self.base_url = f"http://127.0.0.1:{rest_local}"
+                    self.grpc_target = f"127.0.0.1:{grpc_local}"
+                    logging.info(
+                        f"sandboxd pod tunnel ready (rest={self.base_url}, grpc={self.grpc_target})")
+                    return self.base_url
+                time.sleep(0.05)
+            self.close()
+            raise TimeoutError("Failed to establish sandboxd pod tunnel.")
+        except Exception:
+            status = "failure"
+            raise
+        finally:
+            latency = (time.monotonic() - start_time) * 1000
+            sandbox_client_discovery_latency_ms.labels(
+                mode="sandboxd_pod_tunnel", status=status).observe(latency)
+
+    def close(self):
+        if self.port_forward_process:
+            try:
+                self.port_forward_process.terminate()
+                try:
+                    self.port_forward_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.port_forward_process.kill()
+            except Exception as e:
+                logging.error(f"Failed to stop sandboxd pod tunnel: {e}")
+            finally:
+                self.port_forward_process = None
+                self.base_url = None
+                self.grpc_target = None
+
+    def verify_connection(self):
+        if self.port_forward_process and self.port_forward_process.poll() is not None:
+            _, stderr = self.port_forward_process.communicate()
+            raise SandboxPortForwardError(
+                f"sandboxd pod tunnel crashed!\nStderr: {stderr.decode(errors='replace')}")
+
+    def should_inject_router_headers(self) -> bool:
+        return False
+
 
 class InClusterConnectionStrategy(ConnectionStrategy):
     """Provides direct in-cluster connectivity to a sandbox pod, bypassing the router.
@@ -287,6 +408,7 @@ class SandboxConnector:
         connection_config: SandboxConnectionConfig,
         k8s_helper: K8sHelper,
         get_pod_ip: Callable[[], str | None] | None = None,
+        get_pod_name: Callable[[], str | None] | None = None,
     ):
         # Parameter initialization
         self.id = sandbox_id
@@ -294,9 +416,12 @@ class SandboxConnector:
         self.connection_config = connection_config
         self.k8s_helper = k8s_helper
         self._get_pod_ip = get_pod_ip
+        self._get_pod_name = get_pod_name
         self._pod_ip: str | None = None
         self._pod_ip_resolved = False
         self._pod_ip_auth_failed = False
+        self._grpc_channel = None
+        self._grpc_channel_target: str | None = None
 
         # Connection strategy initialization
         self.strategy = self._connection_strategy()
@@ -322,11 +447,52 @@ class SandboxConnector:
             return LocalTunnelConnectionStrategy(self.id, self.namespace, self.connection_config)
         elif isinstance(self.connection_config, SandboxInClusterConnectionConfig):
             return InClusterConnectionStrategy(self.id, self.namespace, self.connection_config, self._get_pod_ip)
+        elif isinstance(self.connection_config, SandboxdPodTunnelConnectionConfig):
+            return SandboxdPodTunnelStrategy(self.id, self.namespace, self.connection_config, self._get_pod_name)
         else:
             raise ValueError("Unknown connection configuration type")
 
     def get_conn_strategy(self):
         return self.strategy
+
+    def is_sandboxd(self) -> bool:
+        """Return True when this connector speaks the sandboxd runtime API."""
+        return isinstance(self.connection_config, SandboxdPodTunnelConnectionConfig)
+
+    def grpc_channel(self):
+        """Return a lazily created gRPC channel to sandboxd's ProcessService.
+
+        The channel is plaintext: it only ever traverses the port-forward
+        tunnel to the pod's loopback listener. Requires the ``grpc`` extra.
+        """
+        if not self.is_sandboxd():
+            raise RuntimeError("grpc_channel() is only available for the sandboxd runtime")
+        target = getattr(self.strategy, "grpc_target", None)
+        if not target:
+            raise SandboxRequestError(
+                "sandboxd gRPC endpoint not connected; call connect() first")
+        # Invalidate the cached channel if the tunnel was re-established on a
+        # new local port (connect() allocates a fresh port each time), so we
+        # never return a channel pointing at a closed port.
+        if self._grpc_channel is not None:
+            if self._grpc_channel_target == target:
+                return self._grpc_channel
+            try:
+                self._grpc_channel.close()
+            except Exception:
+                pass
+            self._grpc_channel = None
+            self._grpc_channel_target = None
+        try:
+            import grpc
+        except ImportError as e:
+            raise ImportError(
+                "the sandboxd runtime requires gRPC support; install the "
+                "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
+            ) from e
+        self._grpc_channel = grpc.insecure_channel(target)
+        self._grpc_channel_target = target
+        return self._grpc_channel
 
     def connect(self) -> str:
         return self.strategy.connect()
@@ -334,6 +500,13 @@ class SandboxConnector:
     def close(self):
         self._pod_ip_resolved = False
         self._pod_ip = None
+        if self._grpc_channel is not None:
+            try:
+                self._grpc_channel.close()
+            except Exception:
+                pass
+            self._grpc_channel = None
+            self._grpc_channel_target = None
         self.strategy.close()
         if self.session:
             self.session.close()
@@ -371,6 +544,11 @@ class SandboxConnector:
             directly to the caller because requests does not consider them redirects
             and raise_for_status only raises for status codes 400 and above.
         """
+        # allowed_statuses lets a caller treat specific non-2xx codes as a
+        # normal outcome (e.g. HEAD 404 for exists()): the response is
+        # returned as-is instead of raising — which is important because the
+        # raise path also calls self.close() and tears down the connection.
+        allowed_statuses = kwargs.pop("allowed_statuses", None)
         try:
             # Establish connection (re-establishes if closed/dead)
             base_url = self.connect()
@@ -420,6 +598,11 @@ class SandboxConnector:
                     f"Redirection is not allowed (status code {response.status_code}).",
                     response=response,
                 )
+            # Return caller-tolerated statuses without raising (and thus
+            # without closing the connection). Redirects are still rejected
+            # above regardless of allowed_statuses.
+            if allowed_statuses and response.status_code in allowed_statuses:
+                return response
             response.raise_for_status()
             return response
         except SandboxPortForwardError:

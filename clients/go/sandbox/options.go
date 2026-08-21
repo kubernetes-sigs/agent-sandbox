@@ -30,6 +30,8 @@ import (
 const (
 	defaultNamespace               = "default"
 	defaultServerPort              = 8888
+	defaultSandboxdRESTPort        = 8080
+	defaultSandboxdGRPCPort        = 9090
 	defaultSandboxReadyTimeout     = 180 * time.Second
 	defaultGatewayReadyTimeout     = 180 * time.Second
 	defaultPortForwardReadyTimeout = 30 * time.Second
@@ -40,11 +42,43 @@ const (
 	defaultMaxUploadSize           = 256 << 20 // 256 MB
 )
 
+// Runtime identifies the in-sandbox runtime API the SDK speaks.
+type Runtime string
+
+const (
+	// RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
+	// GET /download|list|exists/{path}, POST /execute on port 8888),
+	// reached through the sandbox-router. Default.
+	RuntimeLegacyPython Runtime = "legacy-python"
+	// RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
+	// REST filesystem (/v1/files/...) on port 8080 plus gRPC
+	// ProcessService on port 9090. The SDK connects over a pod port-forward
+	// to the sandbox pod.
+	RuntimeSandboxd Runtime = "sandboxd"
+)
+
 // Options configures a Sandbox instance.
 type Options struct {
-	// WarmPoolName is the name of the SandboxWarmPool to use. Required.
+	// WarmPoolName is the name of the SandboxWarmPool to use.
+	// Required in Options before calling Open() to provision a new sandbox.
+	// Optional on Client-level Options; pass the pool name per-sandbox to
+	// CreateSandbox instead.
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
 	WarmPoolName string
+
+	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
+	// RuntimeSandboxd connects via a pod port-forward, so GatewayName is not
+	// supported with it. APIURL remains available as an advanced/testing
+	// escape hatch for the REST endpoint.
+	Runtime Runtime
+
+	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
+	// REST API. Only used with RuntimeSandboxd. Default: 8080.
+	SandboxdRESTPort int
+
+	// SandboxdGRPCPort is the pod port of sandboxd's gRPC ProcessService.
+	// Only used with RuntimeSandboxd. Default: 9090.
+	SandboxdGRPCPort int
 
 	// Namespace where the SandboxClaim will be created. Default: "default".
 	// Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
@@ -148,8 +182,17 @@ func (o *Options) setDefaults() {
 	if o.GatewayScheme == "" {
 		o.GatewayScheme = "http"
 	}
+	if o.Runtime == "" {
+		o.Runtime = RuntimeLegacyPython
+	}
 	if o.ServerPort == 0 {
 		o.ServerPort = defaultServerPort
+	}
+	if o.SandboxdRESTPort == 0 {
+		o.SandboxdRESTPort = defaultSandboxdRESTPort
+	}
+	if o.SandboxdGRPCPort == 0 {
+		o.SandboxdGRPCPort = defaultSandboxdGRPCPort
 	}
 	if o.SandboxReadyTimeout == 0 {
 		o.SandboxReadyTimeout = defaultSandboxReadyTimeout
@@ -201,7 +244,7 @@ func isValidDNSSubdomain(s string) bool {
 	if len(s) == 0 || len(s) > 253 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
@@ -238,7 +281,18 @@ func isValidDNSLabel(s string) bool {
 	return true
 }
 
-func (o *Options) validate() error {
+// validateWarmPoolName checks that a warm pool name is present and a valid DNS subdomain.
+func validateWarmPoolName(name string) error {
+	if name == "" {
+		return fmt.Errorf("sandbox: WarmPoolName is required")
+	}
+	if !isValidDNSSubdomain(name) {
+		return fmt.Errorf("sandbox: WarmPoolName %q is not a valid Kubernetes DNS subdomain name", name)
+	}
+	return nil
+}
+
+func (o *Options) validateCommon() error {
 	if o.APIURL != "" {
 		u, err := url.Parse(o.APIURL)
 		if err != nil {
@@ -250,12 +304,6 @@ func (o *Options) validate() error {
 		if u.Host == "" {
 			return fmt.Errorf("sandbox: APIURL %q must include a host", o.APIURL)
 		}
-	}
-	if o.WarmPoolName == "" {
-		return fmt.Errorf("sandbox: WarmPoolName is required")
-	}
-	if !isValidDNSSubdomain(o.WarmPoolName) {
-		return fmt.Errorf("sandbox: WarmPoolName %q is not a valid Kubernetes DNS subdomain name", o.WarmPoolName)
 	}
 	if !isValidDNSLabel(o.Namespace) {
 		return fmt.Errorf("sandbox: Namespace %q is not a valid Kubernetes namespace (DNS label)", o.Namespace)
@@ -271,6 +319,23 @@ func (o *Options) validate() error {
 	}
 	if o.ServerPort <= 0 || o.ServerPort > 65535 {
 		return fmt.Errorf("sandbox: ServerPort must be between 1 and 65535, got %d", o.ServerPort)
+	}
+	if o.Runtime != RuntimeLegacyPython && o.Runtime != RuntimeSandboxd {
+		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacyPython, RuntimeSandboxd, o.Runtime)
+	}
+	if o.Runtime == RuntimeSandboxd {
+		if o.GatewayName != "" {
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd uses pod port-forward connectivity")
+		}
+		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
+			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)
+		}
+		if o.SandboxdGRPCPort <= 0 || o.SandboxdGRPCPort > 65535 {
+			return fmt.Errorf("sandbox: SandboxdGRPCPort must be between 1 and 65535, got %d", o.SandboxdGRPCPort)
+		}
+		if o.SandboxdRESTPort == o.SandboxdGRPCPort {
+			return fmt.Errorf("sandbox: SandboxdRESTPort and SandboxdGRPCPort must differ (both %d)", o.SandboxdRESTPort)
+		}
 	}
 	if o.SandboxReadyTimeout <= 0 {
 		return fmt.Errorf("sandbox: SandboxReadyTimeout must be positive")

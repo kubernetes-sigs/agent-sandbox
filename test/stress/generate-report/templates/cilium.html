@@ -1,0 +1,143 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Cilium CNI - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Cilium CNI & Endpoint Rate Limiting{% endblock %}
+
+{% block content %}
+{% if cilium_available %}
+<div class="grid">
+    <div class="card chart-card">
+        <div class="card-title">endpoint-create Limiter Wait Over Time (per agent)</div>
+        <div class="chart-container">
+            <canvas id="ciliumWaitChart"></canvas>
+        </div>
+    </div>
+</div>
+<div class="grid">
+    <div class="card chart-card">
+        <div class="card-title">endpoint-create Effective Rate Limit Over Time (per agent)</div>
+        <div class="chart-container">
+            <canvas id="ciliumLimitChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">endpoint-create API Limiter by Phase</div>
+    <div class="card-desc" style="margin-bottom: 8px;">
+        The Cilium CNI plugin creates an endpoint via the agent API during every pod sandbox
+        creation, and cilium-agent rate-limits those requests (<code>api-rate-limit</code>,
+        default 0.5/s with auto-adjust). Wait is time queued in the limiter; processing is the
+        actual endpoint-create work once admitted. Limiter gauges are lifetime running values,
+        so per-phase numbers are scrape averages.
+    </div>
+    <div class="table-container">
+        <table id="cilium-limiter-table"></table>
+    </div>
+</div>
+
+<div class="card" style="margin-top: 32px;">
+    <div class="card-title">Agent API Requests by Phase</div>
+    <div class="table-container">
+        <table id="cilium-api-table"></table>
+    </div>
+</div>
+
+<div class="card" style="margin-top: 32px;">
+    <div class="card-title">Endpoint Regenerations by Phase (scope=total)</div>
+    <div class="table-container">
+        <table id="cilium-regen-table"></table>
+    </div>
+</div>
+
+<script>
+    const limiterSummary = {{ cilium_limiter_summary | tojson }};
+    renderTable('#cilium-limiter-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'wait_mean_s', label: 'Mean Wait', render: v =>
+            badge(v > 5 ? 'danger' : v > 0.5 ? 'warning' : 'success', v.toFixed(2) + 's')},
+        {key: 'wait_max_s', label: 'Max Wait', render: v => v.toFixed(1) + 's'},
+        {key: 'rate_limit', label: 'Rate Limit (req/s)', render: v => v.toFixed(2)},
+        {key: 'in_flight', label: 'Avg In-Flight', render: v => v.toFixed(1)},
+        {key: 'processing_mean_s', label: 'Mean Processing', render: v => v.toFixed(2) + 's'}
+    ], limiterSummary);
+
+    const ciliumApiOps = {{ cilium_api_ops | tojson }};
+    renderTable('#cilium-api-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'method', label: 'Method', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'path', label: 'Path', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'count_delta', label: 'Count'},
+        {key: 'avg_latency_ms', label: 'Average Latency', render: v =>
+            v > 1000 ? badge('danger', (v / 1000).toFixed(2) + 's')
+            : v > 100 ? badge('warning', v.toFixed(2) + 'ms')
+            : badge('success', v.toFixed(2) + 'ms')}
+    ], ciliumApiOps);
+
+    const ciliumRegen = {{ cilium_regen | tojson }};
+    renderTable('#cilium-regen-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'count_delta', label: 'Regenerations'},
+        {key: 'avg_ms', label: 'Average Duration', render: v =>
+            badge(v > 1000 ? 'danger' : v > 250 ? 'warning' : 'success', v.toFixed(0) + 'ms')}
+    ], ciliumRegen);
+
+    const chartData = {{ chart_data | tojson }};
+    const phases = {{ phases | tojson }};
+
+    const agents = [...new Set(chartData.map(d => d.instance))];
+    const timestamps = [...new Set(chartData.map(d => d.ts))].sort();
+    const formattedLabels = timeLabels(timestamps);
+    const pointTimes = timestamps.map(ts => new Date(ts).getTime());
+
+    function agentDatasets(field) {
+        const pointIndex = new Map(chartData.map(d => [`${d.instance}|${d.ts}`, d[field]]));
+        return agents.map((agent, idx) => lineDataset(
+            agent,
+            timestamps.map(ts => pointIndex.get(`${agent}|${ts}`) ?? null),
+            idx));
+    }
+
+    new Chart(document.getElementById('ciliumWaitChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: formattedLabels, datasets: agentDatasets('wait_mean_s') },
+        options: lineChartOptions('Mean limiter wait (seconds, lifetime gauge)'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+
+    new Chart(document.getElementById('ciliumLimitChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: formattedLabels, datasets: agentDatasets('rate_limit') },
+        options: lineChartOptions('Rate limit (creates / sec)'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+</script>
+{% else %}
+<div class="card">
+    <div class="card-title">No Cilium metrics in this run</div>
+    <div class="card-desc">
+        metrics.jsonl contains no <code>cilium-agent</code> samples. Either the cluster does not
+        run Cilium, or the agent's Prometheus endpoint is disabled — on kOps, set
+        <code>cluster.spec.networking.cilium.enablePrometheusMetrics=true</code> so the stress
+        test can scrape it (the scraper already targets port 9090).
+    </div>
+</div>
+{% endif %}
+{% endblock %}

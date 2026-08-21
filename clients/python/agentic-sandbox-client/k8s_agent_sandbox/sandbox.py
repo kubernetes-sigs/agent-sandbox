@@ -62,6 +62,7 @@ class Sandbox:
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
+            get_pod_name=self.get_pod_name,
         )
 
         # Tracer initialization
@@ -119,7 +120,8 @@ class Sandbox:
         Returns None if no valid IP can be selected.
         """
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        pod_ips = sandbox_object.get('status', {}).get('podIPs', [])
+        status_data = sandbox_object.get("status") or {}
+        pod_ips = status_data.get('podIPs', [])
         return select_pod_ip(pod_ips)
 
     def status(self) -> tuple[str, str]:
@@ -134,8 +136,8 @@ class Sandbox:
         if not sandbox_object:
             return "SandboxNotFound", "Sandbox object not found in Kubernetes."
 
-        status_data = sandbox_object.get("status", {})
-        for cond in status_data.get("conditions", []):
+        status_data = sandbox_object.get("status") or {}
+        for cond in status_data.get("conditions") or []:
             if cond.get("type") == "Ready":
                 message = cond.get("message", "")
                 if cond.get("status") == "True":
@@ -170,6 +172,10 @@ class Sandbox:
         """
         if self._is_closed:
             return
+        # Invalidate the cached pod name: a suspend/resume can bind this
+        # sandbox to a differently-named pod, and a stale name would make the
+        # next reconnect port-forward to a pod that no longer exists.
+        self._pod_name = None
         # Close client side connection
         self.connector.close()
         
@@ -207,5 +213,3 @@ class Sandbox:
 
         # Clear after successful delete so a retry does not 404.
         self.claim_name = None
-
- 

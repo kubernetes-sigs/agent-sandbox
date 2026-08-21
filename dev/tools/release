@@ -145,7 +145,7 @@ def main():
     parser.add_argument("--publish", action="store_true", help="Publish the release to GitHub.")
     parser.add_argument(
         "--model",
-        default=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        default=os.getenv("GEMINI_MODEL", "gemini-3.7-flash"),
         help="Gemini model to use for generating release notes.",
     )
     args = parser.parse_args()

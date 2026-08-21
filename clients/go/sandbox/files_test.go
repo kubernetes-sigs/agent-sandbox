@@ -223,8 +223,14 @@ func TestOperations_URLEncodesSpecialChars(t *testing.T) {
 		callOp   func(*Sandbox, string) error
 	}{
 		{"Read_spaces", "path with spaces/file.txt", "path%20with%20spaces%2Ffile.txt", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
+		{"Read_dot", ".", "%2E", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
+		{"Read_dotdot", "..", "%2E%2E", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
 		{"List_spaces", "path with spaces/dir", "path%20with%20spaces%2Fdir", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
+		{"List_dot", ".", "%2E", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
+		{"List_dotdot", "..", "%2E%2E", func(c *Sandbox, p string) error { _, err := c.List(context.Background(), p); return err }},
 		{"Exists_special", "file@special!.txt", "file%40special%21.txt", func(c *Sandbox, p string) error { _, err := c.Exists(context.Background(), p); return err }},
+		{"Exists_dot", ".", "%2E", func(c *Sandbox, p string) error { _, err := c.Exists(context.Background(), p); return err }},
+		{"Exists_dotdot", "..", "%2E%2E", func(c *Sandbox, p string) error { _, err := c.Exists(context.Background(), p); return err }},
 		{"Read_slashes", "subdir/nested/file.txt", "subdir%2Fnested%2Ffile.txt", func(c *Sandbox, p string) error { _, err := c.Read(context.Background(), p); return err }},
 	}
 	for _, tc := range cases {
@@ -236,7 +242,7 @@ func TestOperations_URLEncodesSpecialChars(t *testing.T) {
 				receivedPath = r.URL.EscapedPath()
 				switch {
 				case strings.Contains(r.URL.Path, "/list/"):
-					_ = json.NewEncoder(w).Encode([]FileEntry{})
+					_ = json.NewEncoder(w).Encode([]legacyFileEntry{})
 				case strings.Contains(r.URL.Path, "/exists/"):
 					_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true})
 				default:
@@ -256,9 +262,33 @@ func TestOperations_URLEncodesSpecialChars(t *testing.T) {
 	}
 }
 
+func TestList_DotPathDoesNotRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() == "/list/." {
+			http.Redirect(w, r, "/list/", http.StatusTemporaryRedirect)
+			return
+		}
+		if r.URL.EscapedPath() != "/list/%2E" {
+			t.Errorf("expected /list/%%2E, got %s", r.URL.EscapedPath())
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{})
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	entries, err := c.List(context.Background(), ".")
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no entries, got %d", len(entries))
+	}
+}
+
 func TestList_ParsesEntries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]FileEntry{
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{
 			{Name: "file.txt", Size: 42, Type: "file", ModTime: 1700000000.0},
 			{Name: "subdir", Size: 0, Type: "directory", ModTime: 1700000001.0},
 		})
@@ -302,7 +332,7 @@ func TestList_EmptyDirectoryReturnsEmptySlice(t *testing.T) {
 
 func TestList_UnknownFileType_Filtered(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]FileEntry{
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{
 			{Name: "good.txt", Size: 10, Type: FileTypeFile, ModTime: 1700000000.0},
 			{Name: "link.txt", Size: 10, Type: "symlink", ModTime: 1700000000.0},
 			{Name: "subdir", Size: 0, Type: FileTypeDirectory, ModTime: 1700000000.0},
@@ -325,7 +355,7 @@ func TestList_UnknownFileType_Filtered(t *testing.T) {
 
 func TestList_AllUnknownTypes_ReturnsEmptySlice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]FileEntry{
+		_ = json.NewEncoder(w).Encode([]legacyFileEntry{
 			{Name: "link1", Size: 10, Type: "symlink", ModTime: 1700000000.0},
 			{Name: "pipe1", Size: 0, Type: "pipe", ModTime: 1700000000.0},
 		})

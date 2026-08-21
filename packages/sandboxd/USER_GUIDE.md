@@ -1,0 +1,304 @@
+# sandboxd User Guide
+
+`sandboxd` is the portable sandbox runtime daemon defined by
+[KEP-539.2](../../docs/keps/539.2-runtime-standardization/README.md). It runs
+inside a sandbox pod and exposes the hybrid runtime API:
+
+```text
+sandboxd (sidecar)
+├── gRPC  127.0.0.1:9090  →  ProcessService    (streaming process I/O)
+└── HTTP  127.0.0.1:8080  →  FilesystemService (stateless file operations & runtime probes)
+```
+
+- **Process execution** is served over **gRPC** because `Start` is a
+  long-lived server-streaming RPC: `stdout`/`stderr` flow continuously until
+  the process exits.
+- **Filesystem transfers** are served over **REST** so file bytes move as raw
+  `application/octet-stream` payloads with no protobuf wrapping, and any
+  plain HTTP client works without generated stubs.
+
+Both listeners bind strictly to `localhost` inside the pod network namespace.
+They are never reachable from outside the pod without explicit proxying
+(`sandbox-router`).
+
+The specifications live in [`spec/`](spec/):
+
+| Surface | Spec |
+|---|---|
+| `ProcessService` (gRPC) | [`spec/process/v1/process.proto`](spec/process/v1/process.proto) |
+| Filesystem & Runtime REST API | [`spec/filesystem/v1/filesystem.yaml`](spec/filesystem/v1/filesystem.yaml) |
+
+## Endpoint discovery
+
+SDKs and agent code discover the endpoints through environment variables set
+on the workload container:
+
+```bash
+SANDBOXD_GRPC_ADDR=localhost:9090
+SANDBOXD_REST_ADDR=localhost:8080
+```
+
+If the variables are absent, SDKs fall back to the legacy `python-runtime`
+API, enabling a phased rollout across sandbox templates.
+
+## API summary
+
+### ProcessService (gRPC, `:9090`)
+
+| RPC | Type | Purpose |
+|---|---|---|
+| `Start` | Server stream | Run a command, stream `stdout`/`stderr` in real time until `ExitEvent`. Optional PTY. |
+| `Execute` | Unary | Run a command synchronously, return `stdout`/`stderr`/`exit_code` atomically. |
+| `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. |
+| `SendSignal` | Unary | Deliver `SIGINT`/`SIGTERM`/`SIGKILL` to the process group. |
+| `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
+
+Errors surface as standard gRPC status codes (`NOT_FOUND` for unknown
+process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,
+`FAILED_PRECONDITION` for `ResizeTTY` on a process without a PTY).
+
+### Filesystem & Runtime REST API (`:8080`)
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. |
+| `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
+| `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). Accepts raw bytes or `multipart/form-data` (`file` part). |
+| `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
+| `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
+| `GET` | `/v1/metadata` | Orchestrator-injected, non-sensitive environment variables (allowlisted by prefix, default `SANDBOX_`). |
+
+All `{path}` values are resolved against the sandbox root (`/workspace` by
+default) via symlink-aware sanitization; traversal attempts return
+`403 {"code":"PERMISSION_DENIED"}`.
+
+### Concurrency semantics
+
+Requests are handled in parallel (no server-side serialization); clients do
+not need their own locking for correctness:
+
+- **Write vs. read** — writes are atomic (temp file + rename), so a
+  concurrent reader sees either the complete previous file or the complete
+  new one, never partial content.
+- **Write vs. delete** — last operation wins: the path ends up present (new
+  content) or absent, with no torn state.
+- **Delete vs. read** — an in-flight download completes even if the file is
+  deleted mid-transfer.
+- **Concurrent writes to one path** — the last write wins atomically.
+
+There is no cross-request transaction or compare-and-swap; agents that need
+coordination on shared paths must layer it themselves.
+
+## Deploying as a sidecar
+
+`sandboxd` runs as a sidecar next to your (unmodified) workload container.
+The two share the workspace volume; a co-located workload reaches `sandboxd`
+over pod-local networking (it binds `0.0.0.0` by default), and external
+clients reach it via a Service or the sandbox-router.
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sandboxd-template
+spec:
+  podTemplate:
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: sandboxd
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
+          ports:
+            - containerPort: 8080   # REST (localhost-only; port documented for probes)
+            - containerPort: 9090   # gRPC
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        - name: workload
+          image: your-agent-image:latest
+          env:
+            - name: SANDBOXD_GRPC_ADDR
+              value: "localhost:9090"
+            - name: SANDBOXD_REST_ADDR
+              value: "localhost:8080"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workspace
+          emptyDir: {}
+```
+
+> **Note:** commands launched through `ProcessService` execute inside the
+> `sandboxd` container, with the shared `/workspace` volume as their working
+> directory — so files written by either container are visible to both.
+
+## Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--grpc-port` | `9090` | Port for the gRPC ProcessService. Always binds to `127.0.0.1`. |
+| `--rest-port` | `8080` | Port for the REST API. Always binds to `127.0.0.1`. |
+| `--root-dir` | `/workspace` | Sandbox root confining all file operations and working directories. Created if missing. |
+| `--metadata-env-prefix` | `SANDBOX_` | Env var prefix exposed on `/v1/metadata`. |
+| `--shutdown-timeout` | `10s` | Grace period for in-flight requests and child processes. |
+| `--http-idle-timeout` | `60s` | Close idle HTTP keep-alive connections after this duration. |
+| `--stream-chunk-size` | `4096` | Buffer size in bytes for streaming process stdout/stderr chunks. |
+| `--version` | | Print version info and exit. |
+
+## Talking to sandboxd
+
+### curl (REST filesystem)
+
+```bash
+# Write a file (atomic, parents auto-created)
+curl -sf -X PUT --data-binary @local.py "localhost:8080/v1/files/src/main.py?mode=0644"
+
+# Read it back
+curl -sf localhost:8080/v1/files/src/main.py
+
+# List a directory (JSON)
+curl -sf localhost:8080/v1/files/src
+
+# Existence probe
+curl -sf -I localhost:8080/v1/files/src/main.py
+
+# Delete recursively
+curl -sf -X DELETE "localhost:8080/v1/files/src?recursive=true"
+
+# Probes
+curl -sf localhost:8080/v1/health
+curl -sf localhost:8080/v1/metadata
+```
+
+### grpcurl (ProcessService)
+
+```bash
+# Synchronous execution
+grpcurl -plaintext -d '{"config":{"command":["echo","hello"]}}' \
+  localhost:9090 process.v1.ProcessService/Execute
+
+# Streaming execution: watch InitEvent → stdout chunks → ExitEvent
+grpcurl -plaintext -d '{"config":{"command":["sh","-c","for i in 1 2 3; do echo $i; sleep 1; done"]}}' \
+  localhost:9090 process.v1.ProcessService/Start
+
+# PTY execution: stty and tty only succeed with a real terminal attached,
+# so this verifies genuine PTY allocation (expect "24 80" and /dev/pts/N)
+grpcurl -plaintext \
+  -d '{"config":{"command":["sh","-c","stty size && tty"]},"pty":{"cols":80,"rows":24}}' \
+  localhost:9090 process.v1.ProcessService/Start
+```
+
+### Python
+
+```python
+import os
+
+import grpc
+import requests
+
+from process.v1 import process_pb2, process_pb2_grpc  # generated from spec/process/v1/process.proto
+
+REST = f"http://{os.environ['SANDBOXD_REST_ADDR']}/v1"
+GRPC = os.environ["SANDBOXD_GRPC_ADDR"]
+
+# Upload code over REST
+requests.put(f"{REST}/files/main.py", data=open("main.py", "rb").read()).raise_for_status()
+
+# Run it over gRPC
+channel = grpc.insecure_channel(GRPC)
+stub = process_pb2_grpc.ProcessServiceStub(channel)
+resp = stub.Execute(process_pb2.ExecuteRequest(
+    config=process_pb2.ProcessConfig(command=["python3", "main.py"])))
+print(resp.exit_code, resp.stdout.decode())
+```
+
+### Go
+
+```go
+conn, _ := grpc.NewClient(os.Getenv("SANDBOXD_GRPC_ADDR"),
+	grpc.WithTransportCredentials(insecure.NewCredentials()))
+client := processv1.NewProcessServiceClient(conn)
+resp, _ := client.Execute(ctx, &processv1.ExecuteRequest{
+	Config: &processv1.ProcessConfig{Command: []string{"python3", "main.py"}},
+})
+fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
+```
+
+## Agent Sandbox SDK access
+
+sandboxd binds the pod network (`0.0.0.0` by default), so it is reachable like
+any other in-pod service — via a Kubernetes **Service** or the
+**sandbox-router**. The SDKs connect via a **pod port-forward** to the sandbox
+pod (both `:8080` and `:9090`): filesystem calls go over REST, `Run` goes over
+gRPC.
+
+> **Where commands run:** `ProcessService` executes commands **inside the
+> `sandboxd` container**, not the workload container. The base `sandboxd`
+> image is minimal (a shell + coreutils), so `Run` can use `sh`, `cat`,
+> `ls`, etc. out of the box; to run a language runtime (e.g. `python3`),
+> build a sandboxd image that includes it. Files written over REST land in
+> the shared `/workspace` volume, visible to both containers.
+
+**Go** — select the runtime via `Options`:
+
+```go
+sb, _ := sandbox.New(ctx, sandbox.Options{
+    WarmPoolName: "my-pool",
+    Runtime:      sandbox.RuntimeSandboxd, // pod port-forward; REST + gRPC
+})
+_ = sb.Open(ctx)
+_ = sb.Write(ctx, "src/notes.txt", data)       // PUT /v1/files/...
+res, _ := sb.Run(ctx, "cat src/notes.txt")     // gRPC ProcessService.Execute
+_ = sb.Delete(ctx, "src", true)                // sandboxd-only
+```
+
+**Python** — select the runtime via the connection config:
+
+```python
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
+with client.claim("my-pool") as sandbox:
+    sandbox.files.write("src/notes.txt", data)    # PUT /v1/files/...
+    result = sandbox.commands.run("cat src/notes.txt")  # gRPC Execute
+    sandbox.files.delete("src", recursive=True)   # sandboxd-only
+```
+
+The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[grpc]`.
+
+## Security model
+
+- **Network containment:** both ports bind `0.0.0.0` by default so the daemon
+  is reachable on the pod network (Service / sandbox-router). Containment is
+  provided by **pod isolation and NetworkPolicy**, not loopback binding; pass
+  `--listen-host=127.0.0.1` to restrict to loopback for local development.
+- **Path confinement:** every file path (and process `cwd`) is resolved with
+  symlink evaluation and rejected unless it stays under `--root-dir`.
+- **Metadata hygiene:** `/v1/metadata` only serves env vars matching
+  `--metadata-env-prefix`, and names containing credential markers
+  (`TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `KEY`) are always withheld.
+  Never inject orchestrator credentials, Kubernetes API tokens, or cloud IAM
+  keys into the sandbox environment.
+- **Process hygiene:** children run in their own process groups; daemon
+  shutdown SIGTERMs them, waits a grace period, then SIGKILLs stragglers.
+
+## Local development
+
+```bash
+# Build
+make build-sandboxd
+
+# Run against a scratch workspace
+mkdir -p /tmp/ws
+bin/sandboxd --root-dir=/tmp/ws
+
+# Test
+go test ./packages/sandboxd/... -race
+```

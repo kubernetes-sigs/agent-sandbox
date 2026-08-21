@@ -25,6 +25,14 @@ This class models the response body for the `/execute` endpoint.
 - **`stderr: str`**: The standard error from the executed command.
 - **`exit_code: int`**: The exit code of the executed command.
 
+### Configuration
+
+- **`SANDBOX_EXEC_TIMEOUT_SECONDS`**: Maximum time, in seconds, a command
+  submitted to `/execute` is allowed to run before it (and any processes it
+  spawned) are killed and the request reports a failed execution. Defaults
+  to `300`. If set to a value that isn't a finite number greater than `0`,
+  the default is used instead and a warning is logged.
+
 ## Testing on a local kind cluster using agent-sandbox
 
 To test the sandbox on a local [kind](https://kind.sigs.k8s.io/) cluster, you can use the `run-test-kind.sh` script.

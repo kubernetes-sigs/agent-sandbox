@@ -42,7 +42,14 @@ type SandboxWarmPoolSpec struct {
 	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
 
-	// updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes
+	// updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is
+	// considered stale when the effective PodTemplate spec derived from the referenced
+	// SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits
+	// (annotations or labels) do not make a sandbox stale and never trigger replacement.
+	// It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox
+	// is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer
+	// manages or replaces it.
+	// Defaults to OnReplenish.
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
 }
@@ -53,10 +60,15 @@ type SandboxWarmPoolSpec struct {
 type SandboxWarmPoolUpdateStrategyType string
 
 const (
-	// RecreateSandboxWarmPoolUpdateStrategyType indicates that stale pods are deleted immediately to ensure the pool only contains fresh pods.
+	// RecreateSandboxWarmPoolUpdateStrategyType deletes stale unclaimed sandboxes immediately
+	// so the pool only holds fresh sandboxes matching the current template. Already-claimed
+	// sandboxes are never touched.
 	// Note: This applies to PodTemplate spec changes only. Changes to annotations or labels in the template do not trigger recreate.
 	RecreateSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "Recreate"
-	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale pods are only replaced when they are manually deleted or when these stale pods are adopted by sandboxclaims and hence replaced by fresh pods.
+	// OnReplenishSandboxWarmPoolUpdateStrategyType leaves stale unclaimed sandboxes in place.
+	// A stale sandbox is only replaced with a fresh one when it is manually deleted, or when it
+	// is claimed by a SandboxClaim (which removes it from the pool and triggers replenishment).
+	// Already-claimed sandboxes are never touched.
 	OnReplenishSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "OnReplenish"
 )
 

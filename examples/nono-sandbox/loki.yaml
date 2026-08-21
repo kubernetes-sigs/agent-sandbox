@@ -1,0 +1,159 @@
+# A disposable, single-binary Loki used only by the kind smoke test. It keeps
+# data on an emptyDir: the point is to give the sandboxed LogCLI a real service
+# to query, not to model a production Loki deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nono-demo-loki-config
+data:
+  config.yaml: |
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+      log_level: warn
+      http_tls_config:
+        cert_file: /etc/loki/tls/tls.crt
+        key_file: /etc/loki/tls/tls.key
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+    schema_config:
+      configs:
+        - from: 2024-01-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nono-demo-loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nono-demo-loki
+  template:
+    metadata:
+      labels:
+        app: nono-demo-loki
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        runAsNonRoot: true
+      containers:
+        - name: loki
+          image: grafana/loki:3.7.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - -config.file=/etc/loki/config.yaml
+          ports:
+            - name: http
+              containerPort: 3100
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+              scheme: HTTPS
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+              readOnly: true
+            - name: data
+              mountPath: /loki
+            - name: tls
+              mountPath: /etc/loki/tls
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: nono-demo-loki-config
+        - name: data
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: nono-demo-loki-tls
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nono-demo-loki
+spec:
+  selector:
+    app: nono-demo-loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: http
+---
+# Seed one realistic incident line through Loki's push API. This trusted setup
+# job is outside the agent Sandbox; the sandboxed LogCLI receives query-only
+# authority and cannot invoke this write endpoint.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nono-demo-loki-seed
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: seed
+          image: ghcr.io/example/nono-agent-runtime:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              endpoint=https://nono-demo-loki:3100
+              until curl -fsS --cacert /etc/loki/tls/ca.crt "${endpoint}/ready" >/dev/null; do sleep 1; done
+              timestamp="$(date +%s%N)"
+              curl -fsS --cacert /etc/loki/tls/ca.crt \
+                -X POST "${endpoint}/loki/api/v1/push" \
+                -H 'Content-Type: application/json' \
+                --data-raw "{\"streams\":[{\"stream\":{\"service\":\"payments\",\"namespace\":\"production\",\"severity\":\"warning\"},\"values\":[[\"${timestamp}\",\"payments p99 latency exceeded 900ms after checkout rollout\"]]}]}"
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/loki/tls
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: tls
+          secret:
+            secretName: nono-demo-loki-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+            defaultMode: 0440

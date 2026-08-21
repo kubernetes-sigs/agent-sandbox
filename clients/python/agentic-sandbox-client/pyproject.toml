@@ -7,7 +7,7 @@ name = "k8s-agent-sandbox"
 dynamic = ["version"]
 description = "A client library to interact with the Agentic Sandbox on Kubernetes."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
@@ -50,6 +50,13 @@ async = [
     "httpx",
     "kubernetes_asyncio<34.0.0",
 ]
+# Required for the sandboxd runtime (SandboxdPodTunnelConnectionConfig):
+# command execution runs over gRPC ProcessService. The legacy python-runtime
+# needs none of this.
+grpc = [
+    "grpcio>=1.83.0",
+    "protobuf>=7.35.1",
+]
 test = [
     "pytest",
     "pytest-xdist",
@@ -58,9 +65,9 @@ test = [
     "kubernetes_asyncio<34.0.0",
 ]
 tracing = [
-    "opentelemetry-api~=1.39.0",
-    "opentelemetry-sdk~=1.39.0",
-    "opentelemetry-exporter-otlp~=1.39.0",
+    "opentelemetry-api>=1.39,<1.42",
+    "opentelemetry-sdk>=1.39,<1.42",
+    "opentelemetry-exporter-otlp>=1.39,<1.42",
     "opentelemetry-instrumentation-requests~=0.60b0",
 ]
 

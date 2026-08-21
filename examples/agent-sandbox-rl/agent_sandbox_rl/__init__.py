@@ -44,13 +44,23 @@ from .config import (
 from .exceptions import (
     CapacityError,
     FleetError,
+    FleetOvercommitError,
     NoClusterAvailableError,
     PreflightError,
 )
 from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
-from .handles import SandboxHandle
+from .reaper import reap
+from .handles import SandboxHandle, SandboxSession
 from .observability import Observer, RunReport, repo_family, serve_metrics
+from .recycle import (
+    GitRestoreReset,
+    ResetBaseline,
+    ResetOutcome,
+    determinism_canary,
+    reuse_git_restore_sandbox,
+    reuse_git_restore_sandbox_async,
+)
 from .placement import (
     CapacityWeighted,
     ImageAffinity,
@@ -119,9 +129,17 @@ __all__ = [
     "FleetPlan",
     "PlanEntry",
     "SandboxHandle",
+    "SandboxSession",
     # strategies
     "STRATEGIES",
     "process_parallel",
+    # recycling (reset-and-reuse)
+    "GitRestoreReset",
+    "ResetBaseline",
+    "ResetOutcome",
+    "reuse_git_restore_sandbox",
+    "reuse_git_restore_sandbox_async",
+    "determinism_canary",
     # observability
     "Observer",
     "RunReport",
@@ -140,6 +158,8 @@ __all__ = [
     "PreflightError",
     "CapacityError",
     "NoClusterAvailableError",
+    "FleetOvercommitError",
+    "reap",
 ]
 
 __version__ = "0.1.0.dev0"

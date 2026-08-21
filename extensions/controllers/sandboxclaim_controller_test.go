@@ -414,6 +414,13 @@ func TestSandboxClaimReconcile(t *testing.T) {
 		Message: "Sandbox is ready",
 	}}
 	readySandbox.Status.PodIPs = []string{"10.244.0.6"}
+	readySandbox.Status.ServiceFQDN = "test-claim.default.svc.cluster.local"
+
+	// Ready sandbox with no Service: PodIPs are set but the Sandbox controller
+	// never wrote a ServiceFQDN. The claim must mirror the empty value, not
+	// fabricate or retain one.
+	readySandboxNoService := readySandbox.DeepCopy()
+	readySandboxNoService.Status.ServiceFQDN = ""
 
 	// Validation Functions
 	validateSandboxHasDefaultAutomountToken := func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate) {
@@ -446,17 +453,18 @@ func TestSandboxClaimReconcile(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name              string
-		claimToReconcile  *extensionsv1beta1.SandboxClaim
-		existingObjects   []client.Object
-		allowedDomains    []string
-		expectSandbox     bool
-		expectError       bool
-		expectedCondition metav1.Condition
-		expectedPodIPs    []string
-		validateSandbox   func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate)
-		expectDeletedNP   string // Asserts this NP is completely gone
-		expectRetainedNP  string // Asserts this NP survived the reconcile loop
+		name                string
+		claimToReconcile    *extensionsv1beta1.SandboxClaim
+		existingObjects     []client.Object
+		allowedDomains      []string
+		expectSandbox       bool
+		expectError         bool
+		expectedCondition   metav1.Condition
+		expectedPodIPs      []string
+		expectedServiceFQDN string
+		validateSandbox     func(t *testing.T, sandbox *sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate)
+		expectDeletedNP     string // Asserts this NP is completely gone
+		expectRetainedNP    string // Asserts this NP survived the reconcile loop
 	}{
 		{
 			name:             "sandbox is created when a claim is made",
@@ -533,8 +541,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
-			expectedPodIPs:  []string{"10.244.0.6"},
-			validateSandbox: validateSandboxHasDefaultAutomountToken,
+			expectedPodIPs:      []string{"10.244.0.6"},
+			expectedServiceFQDN: "test-claim.default.svc.cluster.local",
+			validateSandbox:     validateSandboxHasDefaultAutomountToken,
 		},
 		{
 			name:             "sandbox is ready",
@@ -544,8 +553,20 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			expectedCondition: metav1.Condition{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
 			},
-			expectedPodIPs:  []string{"10.244.0.6"},
-			validateSandbox: validateSandboxHasDefaultAutomountToken,
+			expectedPodIPs:      []string{"10.244.0.6"},
+			expectedServiceFQDN: "test-claim.default.svc.cluster.local",
+			validateSandbox:     validateSandboxHasDefaultAutomountToken,
+		},
+		{
+			name:             "sandbox is ready but has no service, mirrored ServiceFQDN stays empty",
+			claimToReconcile: claim,
+			existingObjects:  []client.Object{template, warmPool, readySandboxNoService},
+			expectSandbox:    true,
+			expectedCondition: metav1.Condition{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "SandboxReady", Message: "Sandbox is ready",
+			},
+			expectedPodIPs:      []string{"10.244.0.6"},
+			expectedServiceFQDN: "",
 		},
 		{
 			name: "sandbox is created with network policy enabled",
@@ -1191,6 +1212,12 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					if diff := cmp.Diff(tc.expectedPodIPs, updatedClaim.Status.SandboxStatus.PodIPs); diff != "" {
 						t.Errorf("unexpected PodIPs:\n%s", diff)
 					}
+					// Asserted unconditionally: cases with no bound sandbox (or a
+					// sandbox with no Service) expect the empty string, so a stale
+					// mirror fails the test just as a missing one does.
+					if got := updatedClaim.Status.SandboxStatus.ServiceFQDN; got != tc.expectedServiceFQDN {
+						t.Errorf("expected mirrored ServiceFQDN %q, got %q", tc.expectedServiceFQDN, got)
+					}
 				}
 				if diff := cmp.Diff(tc.expectedCondition, condition, cmp.Comparer(ignoreTimestamp)); diff != "" {
 					t.Errorf("unexpected condition:\n%s", diff)
@@ -1282,7 +1309,7 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 		sandboxNotOwned            bool // sandbox exists at statusName but belongs to a different owner
 		expectClaimDeleted         bool
 		expectSandboxDeleted       bool
-		expectSandboxStatusCleared bool // SandboxStatus.Name and PodIPs must be empty
+		expectSandboxStatusCleared bool // SandboxStatus.Name, PodIPs, and ServiceFQDN must be empty
 		expectStatus               string
 	}{
 		{
@@ -1368,6 +1395,11 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 					{APIVersion: extensionsv1beta1.GroupVersion.String(), Kind: extensionsv1beta1.SandboxClaimKind, Name: "other-claim", UID: "other-uid", Controller: func() *bool { b := true; return &b }()},
 				}
 				tc.claim.Status.SandboxStatus.Name = sandbox.Name
+				// Seed the mirrored fields so the cleared-status assertions
+				// below actually exercise the clear path (against the
+				// zero-value fixture they pass vacuously).
+				tc.claim.Status.SandboxStatus.PodIPs = []string{"10.0.0.99"}
+				tc.claim.Status.SandboxStatus.ServiceFQDN = "previous-sandbox.default.svc.cluster.local"
 			}
 
 			client := fake.NewClientBuilder().WithScheme(scheme).
@@ -1420,6 +1452,9 @@ func TestSandboxClaimCleanupPolicy(t *testing.T) {
 					}
 					if fetchedClaim.Status.SandboxStatus.PodIPs != nil {
 						t.Errorf("expected SandboxStatus.PodIPs to be nil, got %v", fetchedClaim.Status.SandboxStatus.PodIPs)
+					}
+					if fetchedClaim.Status.SandboxStatus.ServiceFQDN != "" {
+						t.Errorf("expected SandboxStatus.ServiceFQDN to be empty, got %q", fetchedClaim.Status.SandboxStatus.ServiceFQDN)
 					}
 				}
 			}
@@ -5024,8 +5059,9 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 				LastTransitionTime: metav1.Now(),
 			}},
 			SandboxStatus: extensionsv1beta1.SandboxStatus{
-				Name:   "adopted-sb",
-				PodIPs: []string{"10.1.2.3"},
+				Name:        "adopted-sb",
+				PodIPs:      []string{"10.1.2.3"},
+				ServiceFQDN: "adopted-sb.default.svc.cluster.local",
 			},
 		},
 	}
@@ -5074,7 +5110,8 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 		// The sandbox is live and Ready; informer lag on the ownership patch does not
 		// erase its status, so the stale view still carries it.
 		Status: sandboxv1beta1.SandboxStatus{
-			PodIPs: []string{"10.1.2.3"},
+			PodIPs:      []string{"10.1.2.3"},
+			ServiceFQDN: "adopted-sb.default.svc.cluster.local",
 			Conditions: []metav1.Condition{{
 				Type:               string(sandboxv1beta1.SandboxConditionReady),
 				Status:             metav1.ConditionTrue,
@@ -5133,6 +5170,9 @@ func TestSandboxClaimAdoptionCacheLagPreservesFinalizedStatus(t *testing.T) {
 	}
 	if len(updatedClaim.Status.SandboxStatus.PodIPs) != 1 || updatedClaim.Status.SandboxStatus.PodIPs[0] != "10.1.2.3" {
 		t.Errorf("expected finalized PodIPs to be preserved, got %v", updatedClaim.Status.SandboxStatus.PodIPs)
+	}
+	if updatedClaim.Status.SandboxStatus.ServiceFQDN != "adopted-sb.default.svc.cluster.local" {
+		t.Errorf("expected finalized ServiceFQDN to be preserved, got %q", updatedClaim.Status.SandboxStatus.ServiceFQDN)
 	}
 	readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	if readyCondition == nil {
@@ -6665,6 +6705,46 @@ func TestSandboxStatusRelevantChange(t *testing.T) {
 						{Type: string(sandboxv1beta1.SandboxConditionFinished), Status: metav1.ConditionTrue},
 					},
 				},
+			},
+			expected: true,
+		},
+		{
+			name: "ServiceFQDN set",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					ServiceFQDN: "sb.default.svc.cluster.local",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "ServiceFQDN changed",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					ServiceFQDN: "old-sb.default.svc.cluster.local",
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					ServiceFQDN: "new-sb.default.svc.cluster.local",
+				},
+			},
+			expected: true,
+		},
+		{
+			// The Sandbox controller clears serviceFQDN when the Service is
+			// deleted; the claim must reconcile to clear its mirror too.
+			name: "ServiceFQDN cleared",
+			oldSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{
+					ServiceFQDN: "sb.default.svc.cluster.local",
+				},
+			},
+			newSb: &sandboxv1beta1.Sandbox{
+				Status: sandboxv1beta1.SandboxStatus{},
 			},
 			expected: true,
 		},

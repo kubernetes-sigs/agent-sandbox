@@ -34,6 +34,8 @@ from .resources import (
     get_sandboxes,
 )
 
+from .probes import healthz, readyz
+
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +47,18 @@ def create_mcp_server(settings: Settings | None = None):
 
     @asynccontextmanager
     async def lifespan(server: FastMCP):
-     
+
         client = AsyncSandboxClient(
             connection_config=settings.connection,
             cleanup=False,
         )
+        # The yielded mapping reaches tools via ctx.lifespan_context but is not
+        # published on the ASGI app, so probe routes cannot read it. Stash what
+        # they need on the server object, which routes reach as
+        # request.app.state.fastmcp_server. Before this runs, /readyz correctly
+        # reports "starting".
+        server.sandbox_client = client
+        server.probe_settings = settings
         try:
             yield {"client": client, "settings": settings}
         finally:
@@ -58,7 +67,7 @@ def create_mcp_server(settings: Settings | None = None):
     mcp = FastMCP("K8sAgentSandbox", lifespan=lifespan)
 
     mcp.add_resource(get_sandboxes)
-    
+
     mcp.add_tool(create_sandbox)
     mcp.add_tool(delete_sandbox)
     mcp.add_tool(execute_command)
@@ -66,6 +75,9 @@ def create_mcp_server(settings: Settings | None = None):
     mcp.add_tool(download_file)
     mcp.add_tool(list_files)
     mcp.add_tool(file_exists)
+
+    mcp.custom_route("/healthz", methods=["GET"])(healthz)
+    mcp.custom_route("/readyz", methods=["GET"])(readyz)
 
     return mcp
 

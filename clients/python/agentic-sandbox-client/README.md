@@ -136,14 +136,26 @@ finally:
 Use this for local development or CI. The client automatically opens a secure tunnel to the
 Router Service using `kubectl`.
 
+> **Namespace note:** `router_namespace` controls *where the router service lives*
+> (default: `"agent-sandbox-system"`). This is separate from the `namespace` argument
+> passed to `create_sandbox`, which controls *where sandbox pods are scheduled*.
+> If you deployed the router into a different namespace (e.g. `"default"`), you must
+> set `router_namespace` accordingly — otherwise `kubectl port-forward` will fail with
+> `"services sandbox-router-svc not found"`.
+
 ```python
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.models import SandboxLocalTunnelConnectionConfig
 
-# Automatically tunnels to svc/sandbox-router-svc
+# Router deployed in the default agent-sandbox-system namespace:
 client = SandboxClient(
     connection_config=SandboxLocalTunnelConnectionConfig()
 )
+
+# If the router is deployed in a different namespace (e.g. "default"):
+# client = SandboxClient(
+#     connection_config=SandboxLocalTunnelConnectionConfig(router_namespace="default")
+# )
 
 sandbox = client.create_sandbox(warmpool="python-sandbox-warmpool", namespace="default")
 try:

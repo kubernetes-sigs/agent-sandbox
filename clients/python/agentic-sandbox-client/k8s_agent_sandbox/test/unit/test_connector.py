@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -24,6 +25,7 @@ from k8s_agent_sandbox.connector import (
     InClusterConnectionStrategy,
     SandboxConnector,
 )
+from k8s_agent_sandbox.exceptions import SandboxPortForwardError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -356,6 +358,99 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         mock_session.request.return_value = mock_resp
 
         connector.send_request("GET", "/execute")
+
+class TestLocalTunnelPreflightCheck(unittest.TestCase):
+    """Unit tests for LocalTunnelConnectionStrategy._preflight_check_router_service."""
+
+    def _make_strategy(self, router_namespace="agent-sandbox-system"):
+        config = SandboxLocalTunnelConnectionConfig(router_namespace=router_namespace)
+        return LocalTunnelConnectionStrategy(
+            sandbox_id="my-sandbox", namespace="default", config=config
+        )
+
+    @patch("subprocess.run")
+    def test_preflight_raises_with_namespace_when_service_not_found(self, mock_run):
+        """SandboxPortForwardError must include the searched namespace when service is absent."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stderr=b'Error from server (NotFound): services "sandbox-router-svc" not found',
+        )
+        strategy = self._make_strategy(router_namespace="my-custom-ns")
+
+        with self.assertRaises(SandboxPortForwardError) as ctx:
+            strategy._preflight_check_router_service()
+
+        error_msg = str(ctx.exception)
+        self.assertIn("my-custom-ns", error_msg)
+        self.assertIn("router_namespace", error_msg)
+
+    @patch("subprocess.run")
+    def test_preflight_raises_with_router_namespace_hint(self, mock_run):
+        """Error message must contain a hint to configure router_namespace."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stderr=b'Error from server (NotFound): services "sandbox-router-svc" not found',
+        )
+        strategy = self._make_strategy()
+
+        with self.assertRaises(SandboxPortForwardError) as ctx:
+            strategy._preflight_check_router_service()
+
+        self.assertIn("SandboxLocalTunnelConnectionConfig", str(ctx.exception))
+
+    @patch("subprocess.run")
+    def test_preflight_does_not_raise_on_transient_failure(self, mock_run):
+        """Non-definitive kubectl failures (e.g. RBAC) must not block the tunnel."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stderr=b"Error from server (Forbidden): services is forbidden",
+        )
+        strategy = self._make_strategy()
+        # Should not raise
+        strategy._preflight_check_router_service()
+
+    @patch("subprocess.run")
+    def test_preflight_does_not_raise_on_success(self, mock_run):
+        """Successful kubectl get means service exists — no exception."""
+        mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+        strategy = self._make_strategy()
+        strategy._preflight_check_router_service()
+
+    @patch("subprocess.run", side_effect=FileNotFoundError("kubectl not found"))
+    def test_preflight_does_not_raise_when_kubectl_missing(self, _mock_run):
+        """Missing kubectl binary must not block the tunnel attempt."""
+        strategy = self._make_strategy()
+        strategy._preflight_check_router_service()
+
+    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="kubectl", timeout=10))
+    def test_preflight_does_not_raise_on_timeout(self, _mock_run):
+        """A slow API server timing out the preflight check must not block the tunnel."""
+        strategy = self._make_strategy()
+        strategy._preflight_check_router_service()
+
+    @patch("subprocess.run")
+    def test_connect_error_message_includes_namespace(self, mock_run):
+        """When port-forward crashes, the error message must include router_namespace."""
+        # Pre-flight passes, then the Popen process crashes immediately.
+        mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+        strategy = self._make_strategy(router_namespace="custom-ns")
+
+        mock_proc = MagicMock()
+        # poll() returns non-None → process already exited
+        mock_proc.poll.return_value = 1
+        mock_proc.communicate.return_value = (
+            b"",
+            b'error: services "sandbox-router-svc" not found',
+        )
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            with patch.object(strategy, "_get_free_port", return_value=19876):
+                with self.assertRaises(SandboxPortForwardError) as ctx:
+                    strategy.connect()
+
+        self.assertIn("custom-ns", str(ctx.exception))
+        self.assertIn("router_namespace", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

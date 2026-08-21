@@ -2421,11 +2421,13 @@ func (r *SandboxClaimReconciler) cleanupLegacyNetworkPolicy(ctx context.Context,
 		// if the object is deleted between our Get and Delete calls.
 		if deleteErr := r.Delete(ctx, existingNP); client.IgnoreNotFound(deleteErr) != nil {
 			logger.Error(deleteErr, "Failed to clean up deprecated per-claim NetworkPolicy")
+			asmetrics.RecordChildReconcileError(claim.Namespace, asmetrics.ResourceNetworkPolicy, asmetrics.ClassifyReconcileError(deleteErr, asmetrics.ReasonDeleteFailed))
 			return deleteErr
 		}
 		logger.Info("Cleaned up deprecated per-claim NetworkPolicy in favor of shared Template policy", "name", existingNP.Name)
 	} else if !k8errors.IsNotFound(err) {
 		logger.Error(err, "Failed to check cache for deprecated per-claim NetworkPolicy")
+		asmetrics.RecordChildReconcileError(claim.Namespace, asmetrics.ResourceNetworkPolicy, asmetrics.ClassifyReconcileError(err, asmetrics.ReasonOther))
 		return err
 	}
 

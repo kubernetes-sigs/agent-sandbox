@@ -1,0 +1,9 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: ${WARMPOOL_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  replicas: ${WARMPOOL_SIZE}
+  sandboxTemplateRef:
+    name: churn-template

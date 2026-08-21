@@ -1,0 +1,11 @@
+# Custom ComputeClass: pin NAP to ${MACHINE_TYPE} so every node it auto-creates
+# (workload AND buffer nodes) is dense and uniform.
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: ${COMPUTE_CLASS}
+spec:
+  priorities:
+  - machineType: ${MACHINE_TYPE}
+  nodePoolAutoCreation:
+    enabled: true

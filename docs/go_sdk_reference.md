@@ -69,19 +69,6 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Sandbox.WriteReader>)
 
 
-### Constants
-
-<a name="PodNameAnnotation"></a>
-
-```go
-const (
-
-    // PodNameAnnotation is the annotation key on a Sandbox resource that
-    // identifies the name of the underlying pod.
-    PodNameAnnotation = "agents.x-k8s.io/pod-name"
-)
-```
-
 ### Variables
 
 <a name="AttrClaimName"></a>Span attribute keys in the sandbox.\* namespace.

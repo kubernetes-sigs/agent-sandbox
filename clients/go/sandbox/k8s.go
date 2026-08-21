@@ -443,11 +443,7 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 		state.Annotations = make(map[string]string, len(sb.Annotations))
 		maps.Copy(state.Annotations, sb.Annotations)
 	}
-	if name, ok := sb.Annotations[PodNameAnnotation]; ok {
-		state.PodName = name
-	} else {
-		state.PodName = sb.Name
-	}
+	state.PodName = sb.Name
 	state.PodIP = selectPodIP(sb.Status.PodIPs)
 	return state
 }

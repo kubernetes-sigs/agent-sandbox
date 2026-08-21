@@ -26,10 +26,6 @@ const (
 	gatewayAPIVersion = "v1"
 	gatewayPlural     = "gateways"
 
-	// PodNameAnnotation is the annotation key on a Sandbox resource that
-	// identifies the name of the underlying pod.
-	PodNameAnnotation = "agents.x-k8s.io/pod-name"
-
 	headerSandboxID        = "X-Sandbox-ID"
 	headerSandboxNamespace = "X-Sandbox-Namespace"
 	headerSandboxPort      = "X-Sandbox-Port"

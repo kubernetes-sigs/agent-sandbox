@@ -1,0 +1,112 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Topology B (no-rebuild alternative): inject the sandboxd binary into an
+# existing, tool-rich image.
+#
+# Use this when you already have an application image with the tools your agent
+# needs (npm, python, ...) and you CANNOT rebuild it. Instead of baking sandboxd
+# into a runtime image, an initContainer copies the sandboxd *binary* into a
+# shared volume, and the (unmodified) app image runs it as its command.
+#
+# Because sandboxd now runs INSIDE the app image's filesystem, ProcessService
+# commands execute there — so `npm install` finds npm in the app image. No image
+# rebuild required.
+#
+# Trade-off vs topology A: weaker isolation (agent code runs in your full app
+# image) and sandboxd runs as the container's main process (PID 1). Prefer A
+# when you can build a runtime image.
+#
+# Apply this file, then run the client example:
+#   go run ./examples/sandboxd-sandbox/client -warmpool sandboxd-warmpool -namespace default
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sandboxd-inject-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      initContainers:
+        # Copy the sandboxd binary out of the runtime image into a shared
+        # volume. This is the only place the sandboxd image is referenced;
+        # the app image below is never modified.
+        - name: install-sandboxd
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "cp /usr/local/bin/sandboxd /sandboxd-bin/sandboxd"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: sandboxd-bin
+              mountPath: /sandboxd-bin
+      containers:
+        # Your existing, unmodified application image — the one that already
+        # has the tools the agent will invoke. Only the command is overridden
+        # to launch the injected sandboxd binary.
+        - name: app
+          image: node:22-slim  # example: an image that already ships npm/node
+          imagePullPolicy: IfNotPresent
+          command:
+            - /sandboxd-bin/sandboxd
+            - --root-dir=/workspace
+            - --rest-port=8080
+            - --grpc-port=9090
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080  # REST filesystem + probes
+            - containerPort: 9090  # gRPC ProcessService
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+          volumeMounts:
+            - name: sandboxd-bin
+              mountPath: /sandboxd-bin
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: sandboxd-bin
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: sandboxd-warmpool
+  namespace: default
+spec:
+  updateStrategy:
+    type: Recreate
+  replicas: 1
+  sandboxTemplateRef:
+    name: sandboxd-inject-template

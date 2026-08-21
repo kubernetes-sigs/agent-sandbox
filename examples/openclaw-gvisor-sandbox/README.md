@@ -159,7 +159,7 @@ env var at apply time. Pull it back out of the running pod:
 
 ```bash
 SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
-POD=$(kubectl get sandbox "$SANDBOX_NAME" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD="$SANDBOX_NAME"
 kubectl exec "$POD" -- printenv OPENCLAW_GATEWAY_TOKEN
 ```
 
@@ -174,7 +174,7 @@ message. To approve without copy-pasting IDs:
 ```bash
 # 1. Get the active pod name
 SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
-POD_NAME=$(kubectl get sandbox $SANDBOX_NAME -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD_NAME="$SANDBOX_NAME"
 
 # 2. Find the pending request ID and approve it
 REQUEST_ID=$(kubectl exec $POD_NAME -- node dist/index.js devices list | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n 1)
@@ -259,7 +259,7 @@ kubectl apply -f openclaw-claim.yaml
 
 ```bash
 SANDBOX_NAME=$(kubectl get sandboxclaim openclaw-sandbox-claim -o jsonpath='{.status.sandbox.name}')
-POD=$(kubectl get sandbox "$SANDBOX_NAME" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD="$SANDBOX_NAME"
 kubectl wait --for=condition=ready pod/"$POD" --timeout=180s
 kubectl exec "$POD" -- printenv OPENCLAW_GATEWAY_TOKEN
 ```

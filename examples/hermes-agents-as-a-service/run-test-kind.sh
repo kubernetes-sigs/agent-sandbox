@@ -54,7 +54,7 @@ case "$SB" in hermes-pool-*) ;; *) fail "expected warm adoption, got sandbox '$S
 pass "claim Ready in ${ELAPSED}s, adopted $SB"
 
 echo "=== 3. write state on the PVC"
-POD=$(kubectl -n "$NS" get sandbox "$SB" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD="$SB"
 kubectl -n "$NS" exec "$POD" -- sh -c 'echo "remember me" > /opt/data/marker.txt'
 pass "marker written in $POD"
 
@@ -68,7 +68,7 @@ pass "suspended: pod gone, PVC and Service retained"
 echo "=== 5. resume and verify state survived"
 kubectl -n "$NS" patch sandbox "$SB" --type merge -p '{"spec":{"operatingMode":"Running"}}'
 kubectl -n "$NS" wait sandbox "$SB" --for=condition=Ready --timeout=180s
-POD=$(kubectl -n "$NS" get sandbox "$SB" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD="$SB"
 MARKER=$(kubectl -n "$NS" exec "$POD" -- cat /opt/data/marker.txt)
 [ "$MARKER" = "remember me" ] || fail "marker did not survive suspend/resume"
 pass "resumed: state survived on the reattached PVC"

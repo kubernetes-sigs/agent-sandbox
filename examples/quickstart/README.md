@@ -121,9 +121,9 @@ spec:
     name: python-warmpool
 EOF
 
-kubectl wait --for=condition=Ready sandbox/quickstart-test --timeout=60s
+kubectl wait --for=condition=Ready sandboxclaim/quickstart-test --timeout=60s
 
-POD_NAME="quickstart-test"
+POD_NAME=$(kubectl get sandboxclaim quickstart-test -o jsonpath='{.status.sandbox.name}')
 echo "Sandbox pod: $POD_NAME"
 
 kubectl delete sandboxclaim quickstart-test

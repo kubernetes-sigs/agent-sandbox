@@ -10,20 +10,20 @@ It supports three connectivity modes: **Gateway** (Kubernetes Gateway API), **Po
 
 ## Architecture
 
-The client operates in three modes:
+The client operates in three connectivity modes:
 
-1. **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
+1. **Gateway Mode:** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
    -> Router Service -> Sandbox Pod. The client watches the Gateway resource for an external IP.
-2. **Development (Port-Forward Mode):** Traffic flows from the Client -> SPDY tunnel -> Router
-   Service -> Sandbox Pod. Uses `client-go/tools/portforward` natively, no `kubectl` required.
-3. **Advanced / Internal Mode:** The client connects directly to a provided `APIURL`, bypassing
+2. **Port-Forward Mode:** Traffic flows from the Client -> SPDY tunnel -> Router
+   Service -> Sandbox Pod. Uses `client-go/tools/portforward` natively, no `kubectl` required (ideal for local development and CI).
+3. **Direct URL Mode:** The client connects directly to a provided `APIURL`, bypassing
    discovery. Useful for in-cluster agents or custom domains.
 
 ## Prerequisites
 
 - A running Kubernetes cluster with a valid kubeconfig (or in-cluster config). This is required even in Direct URL mode because the client creates Kubernetes clientsets for SandboxClaim lifecycle management.
 - The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
-- The **Sandbox Router** deployed in the target namespace (`sandbox-router-svc`).
+- The **Sandbox Router** deployed in the target namespace (see [sandbox-router](../../sandbox-router/README.md) and its [deployment manifests](../../sandbox-router/deploy)).
 - A `SandboxWarmPool` created in the target namespace.
 - Go 1.26+.
 
@@ -50,7 +50,7 @@ go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
 
 ## Usage Examples
 
-### 1. Production Mode (Gateway)
+### 1. Gateway Mode
 
 Use this when running against a cluster with a public Gateway IP. The client automatically
 discovers the Gateway address.
@@ -71,7 +71,7 @@ if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
 
-### 2. Developer Mode (Port-Forward)
+### 2. Port-Forward Mode
 
 Use this for local development or CI. If you omit `GatewayName` and `APIURL`, the client
 automatically establishes an SPDY port-forward tunnel to the Router Service.
@@ -89,7 +89,7 @@ if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
 
-### 3. Advanced / Internal Mode
+### 3. Direct URL Mode
 
 Use `APIURL` to bypass discovery entirely. Useful for:
 

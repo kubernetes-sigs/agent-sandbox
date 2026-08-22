@@ -549,7 +549,7 @@ type Options struct {
     // Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
     Namespace string
 
-    // GatewayName enables production mode. The client watches this Gateway resource
+    // GatewayName enables Gateway mode. The client watches this Gateway resource
     // for an external IP, then routes through the sandbox-router.
     // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
     GatewayName string
@@ -562,7 +562,7 @@ type Options struct {
     // from the Gateway's address. Default: "http".
     GatewayScheme string
 
-    // APIURL enables advanced mode. The client connects directly to this URL,
+    // APIURL enables Direct URL mode. The client connects directly to this URL,
     // bypassing gateway discovery. Takes precedence over GatewayName.
     APIURL string
 

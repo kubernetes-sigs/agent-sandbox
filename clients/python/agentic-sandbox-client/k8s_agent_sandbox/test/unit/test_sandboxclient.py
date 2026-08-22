@@ -53,7 +53,6 @@ class TestSandboxClient(unittest.TestCase):
     def test_create_sandbox_success(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'
         self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
-        self.mock_k8s_helper.get_sandbox.return_value = {}
 
         mock_sandbox_instance = MagicMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance

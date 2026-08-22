@@ -199,7 +199,7 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
     kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
     ```
 
-**For Production (via Gateway)**
+**Via Gateway**
 
 1. Get the Gateway IP:
 ```bash
@@ -225,7 +225,7 @@ curl -v -H "X-Sandbox-ID: sandbox-example" \
 
     You should see the VSCode interface load immediately.
 
-**For Local Development (via Router Tunnel)**
+**Via Router Port-Forward Tunnel**
 
 For local development, port-forward to the **Router Service** (do not port-forward to the pod directly, as it's not compatible with secure runtimes like gVisor/kata).
 

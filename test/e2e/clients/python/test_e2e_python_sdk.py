@@ -255,7 +255,7 @@ def test_python_sdk_router_mode_warmpool(
 def test_python_sdk_gateway_mode(
     tc, temp_namespace, sandbox_template, deploy_router, deploy_gateway, sandbox_coldpool
 ):
-    """Tests the Python SDK in Production mode (with Gateway and Router) without warmpool."""
+    """Tests the Python SDK in Gateway mode (with Gateway and Router) without warmpool."""
     config = SandboxGatewayConnectionConfig(
         gateway_name=GATEWAY_NAME,
         gateway_namespace=temp_namespace,
@@ -284,7 +284,7 @@ def test_python_sdk_gateway_mode_warmpool(
     sandbox_warmpool,
     deploy_gateway,
 ):
-    """Tests the Python SDK in Production mode (with gateway and router) with warmpool."""
+    """Tests the Python SDK in Gateway mode (with gateway and router) with warmpool."""
     config = SandboxGatewayConnectionConfig(
         gateway_name=GATEWAY_NAME,
         gateway_namespace=temp_namespace,

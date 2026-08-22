@@ -16,7 +16,7 @@ The client operates in three connectivity modes:
    -> Router Service -> Sandbox Pod. The client watches the Gateway resource for an external IP.
 2. **Port-Forward Mode:** Traffic flows from the Client -> SPDY tunnel -> Router
    Service -> Sandbox Pod. Uses `client-go/tools/portforward` natively, no `kubectl` required (ideal for local development and CI).
-3. **Advanced / Internal Mode:** The client connects directly to a provided `APIURL`, bypassing
+3. **Direct URL Mode:** The client connects directly to a provided `APIURL`, bypassing
    discovery. Useful for in-cluster agents or custom domains.
 
 ## Prerequisites
@@ -89,7 +89,7 @@ if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
 
-### 3. Advanced / Internal Mode
+### 3. Direct URL Mode
 
 Use `APIURL` to bypass discovery entirely. Useful for:
 

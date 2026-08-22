@@ -97,7 +97,7 @@ type Options struct {
 	// from the Gateway's address. Default: "http".
 	GatewayScheme string
 
-	// APIURL enables direct connection mode. The client connects directly to this URL,
+	// APIURL enables Direct URL mode. The client connects directly to this URL,
 	// bypassing gateway discovery. Takes precedence over GatewayName.
 	APIURL string
 

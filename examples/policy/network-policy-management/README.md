@@ -43,7 +43,11 @@ This is designed for running untrusted code safely:
 
 **Ingress (Incoming Traffic)**
 
-- **Allowed:**  Traffic is only allowed from the designated [Sandbox Router](../../../clients/python/agentic-sandbox-client/sandbox-router) (`app: sandbox-router`) residing in the `"agent-sandbox-system"` system namespace.
+- **Allowed:** Traffic is only allowed from the project's supported [Sandbox Router](../../../clients/python/agentic-sandbox-client/sandbox-router) deployments:
+  - the Python router (`app: sandbox-router`) in the `"agent-sandbox-system"` namespace;
+  - the Go router (`app.kubernetes.io/name: sandbox-router` and `app.kubernetes.io/component: sandbox-router`) in the `"default"` namespace.
+
+  Routers deployed in another namespace or with different labels must be allowed through an explicit `spec.networkPolicy`.
 
 - **Blocked:** All other internal cluster traffic and external ingress is explicitly denied.
 

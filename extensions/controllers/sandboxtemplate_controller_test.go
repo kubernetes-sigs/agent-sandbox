@@ -61,6 +61,31 @@ func assertManagedNetworkPolicySelectsTemplateBackedPod(t *testing.T, templateNa
 	}
 }
 
+func networkPolicyHasIngressPeer(t *testing.T, np *networkingv1.NetworkPolicy, namespace string, podLabels labels.Set) bool {
+	t.Helper()
+
+	namespaceLabels := labels.Set{"kubernetes.io/metadata.name": namespace}
+	for _, peer := range np.Spec.Ingress[0].From {
+		if peer.NamespaceSelector == nil || peer.PodSelector == nil {
+			continue
+		}
+
+		namespaceSelector, err := metav1.LabelSelectorAsSelector(peer.NamespaceSelector)
+		if err != nil {
+			t.Fatalf("namespace selector: %v", err)
+		}
+		podSelector, err := metav1.LabelSelectorAsSelector(peer.PodSelector)
+		if err != nil {
+			t.Fatalf("pod selector: %v", err)
+		}
+
+		if namespaceSelector.Matches(namespaceLabels) && podSelector.Matches(podLabels) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	templateDefault := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
@@ -156,16 +181,19 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if len(np.Spec.PolicyTypes) != 2 {
 					t.Errorf("Expected 2 PolicyTypes, got %d", len(np.Spec.PolicyTypes))
 				}
-				if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 1 {
-					t.Fatalf("Expected Default Ingress rule to contain exactly 1 peer source, got %d", len(np.Spec.Ingress[0].From))
+				if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 2 {
+					t.Fatalf("Expected Default Ingress rule to contain exactly 2 peer sources, got %d", len(np.Spec.Ingress[0].From))
 				}
-				peer1 := np.Spec.Ingress[0].From[0]
-				if peer1.PodSelector == nil || peer1.NamespaceSelector == nil {
-					t.Fatalf("Expected both PodSelector and NamespaceSelector to be non-nil")
+				if !networkPolicyHasIngressPeer(t, np, "agent-sandbox-system", labels.Set{
+					"app": "sandbox-router",
+				}) {
+					t.Errorf("Expected default ingress to allow the Python router in agent-sandbox-system")
 				}
-				if peer1.PodSelector.MatchLabels["app"] != "sandbox-router" ||
-					peer1.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "agent-sandbox-system" {
-					t.Errorf("Expected first Ingress peer to target sandbox-router in agent-sandbox-system namespace")
+				if !networkPolicyHasIngressPeer(t, np, "default", labels.Set{
+					"app.kubernetes.io/name":      "sandbox-router",
+					"app.kubernetes.io/component": "sandbox-router",
+				}) {
+					t.Errorf("Expected default ingress to allow the Go router in default")
 				}
 				if len(np.Spec.Egress) != 1 {
 					t.Fatalf("Expected 1 Default Egress rule, got %d", len(np.Spec.Egress))

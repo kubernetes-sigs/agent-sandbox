@@ -466,9 +466,6 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 			sandbox.Status.PodIPs = nil
 			sandbox.Status.NodeName = ""
 		}
-		if condition.Type == string(sandboxv1beta1.SandboxConditionSuspended) {
-			hasSuspended = true
-		}
 	}
 
 	// Do not create or modify a routing Service while the backing Pod mapping is
@@ -501,12 +498,6 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		if !present {
 			meta.RemoveStatusCondition(&sandbox.Status.Conditions, condType)
 		}
-	}
-
-	// Drop a stale Suspended condition once the Sandbox is no longer suspended, so
-	// it does not linger across a resume.
-	if !hasSuspended {
-		meta.RemoveStatusCondition(&sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
 	}
 
 	return allErrors
@@ -817,7 +808,7 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return err
 	}
 
-	r.recordResumeLatency(oldStatus, sandbox)
+	r.recordResumeLatency(ctx, oldStatus, sandbox)
 
 	// Surface error
 	return nil
@@ -825,9 +816,9 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 // recordResumeLatency self-times resume latency and observes the histogram when
 // a resumed Sandbox becomes Ready.
-func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) {
+func (r *SandboxReconciler) recordResumeLatency(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) {
 	key := types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}
-	logger := ctrl.Log.WithName("resume-metrics").WithValues("sandbox", key.String(), "uid", string(sandbox.UID))
+	logger := log.FromContext(ctx).WithName("resume-metrics").WithValues("sandbox", key.String(), "uid", string(sandbox.UID))
 
 	// A suspend cancels any in-flight resume timer for this Sandbox.
 	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
@@ -867,10 +858,10 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 	}
 
 	// Not yet Ready. Anchor a resume start once, only when leaving a suspended
-	// state (the prior status still carries a Suspended condition, removed later
-	// this reconcile).
-	cond := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
-	if cond != nil && cond.Status == metav1.ConditionTrue {
+	// state (Suspended condition transitions from True to False).
+	oldCond := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	newCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if oldCond != nil && oldCond.Status == metav1.ConditionTrue && newCond != nil && newCond.Status == metav1.ConditionFalse {
 		newEntry := resumeTimeEntry{timestamp: time.Now(), uid: sandbox.UID}
 		logger.V(1).Info("Seeding resume start time timer", "start_time", newEntry.timestamp.Format(time.RFC3339Nano))
 		// If a stale entry from a same-named predecessor is present (different UID),
@@ -885,6 +876,8 @@ func (r *SandboxReconciler) recordResumeLatency(oldStatus *sandboxv1beta1.Sandbo
 			}
 		}
 	}
+}
+
 // nodeNameOnlyChange reports whether the node assignment is the only
 // difference between the two statuses.
 func nodeNameOnlyChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bool {

@@ -5228,6 +5228,15 @@ func TestRecordResumeLatency(t *testing.T) {
 				Reason: sandboxv1beta1.SandboxReasonDependenciesReady,
 			})
 		}
+		suspendStatus := metav1.ConditionFalse
+		if mode == sandboxv1beta1.SandboxOperatingModeSuspended {
+			suspendStatus = metav1.ConditionTrue
+		}
+		meta.SetStatusCondition(&s.Status.Conditions, metav1.Condition{
+			Type:   string(sandboxv1beta1.SandboxConditionSuspended),
+			Status: suspendStatus,
+			Reason: "SuspendedReason",
+		})
 		return s
 	}
 	withSuspended := func() *sandboxv1beta1.SandboxStatus {
@@ -5329,7 +5338,7 @@ func TestRecordResumeLatency(t *testing.T) {
 				r.resumeStartTimes.Store(key, *tc.seed)
 			}
 
-			r.recordResumeLatency(tc.oldStatus, tc.sandbox)
+			r.recordResumeLatency(context.Background(), tc.oldStatus, tc.sandbox)
 
 			if got := testutil.CollectAndCount(asmetrics.ResumeLatency); got != tc.wantObservations {
 				t.Errorf("ResumeLatency observations = %d, want %d", got, tc.wantObservations)

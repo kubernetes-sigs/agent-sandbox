@@ -192,6 +192,7 @@ func (r *SandboxTemplateReconciler) ensureTemplateRefHashLabel(ctx context.Conte
 func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPolicySpec {
 	peers := []networkingv1.NetworkPolicyPeer{
 		{
+			// Python router deployment in the agent-sandbox-system namespace.
 			NamespaceSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"kubernetes.io/metadata.name": "agent-sandbox-system",
@@ -200,6 +201,20 @@ func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPoli
 			PodSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app": "sandbox-router",
+				},
+			},
+		},
+		{
+			// Go router deployment shipped in sandbox-router/deploy.
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"kubernetes.io/metadata.name": "default",
+				},
+			},
+			PodSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app.kubernetes.io/name":      "sandbox-router",
+					"app.kubernetes.io/component": "sandbox-router",
 				},
 			},
 		},

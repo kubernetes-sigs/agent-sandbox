@@ -2,6 +2,13 @@
 
 Drop-in starting point for running the Go sandbox-router in Kubernetes. These manifests prioritize sensible defaults over completeness — read each one and tune for your environment.
 
+The manifests deploy the router into the `default` namespace and label its Pods
+with `app.kubernetes.io/name: sandbox-router` and
+`app.kubernetes.io/component: sandbox-router`. The default `SandboxTemplate`
+NetworkPolicy allows this router identity. If you deploy the router elsewhere or
+change these labels, add a matching ingress peer to the template's explicit
+`spec.networkPolicy`.
+
 ## Files
 
 | File | What it does |

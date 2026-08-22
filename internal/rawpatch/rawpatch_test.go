@@ -122,8 +122,8 @@ func TestEquivalenceWithMergeFrom(t *testing.T) {
 	t.Run("annotations", func(t *testing.T) {
 		add := map[string]string{
 			"example.com/annotation": "pod-1",
-			"trace/context":            "00-ff-01",
-			"escape/check":             "a<b>&\"c\"\n",
+			"trace/context":          "00-ff-01",
+			"escape/check":           "a<b>&\"c\"\n",
 		}
 		modified := base.DeepCopy()
 		legacy := client.MergeFrom(base.DeepCopy())

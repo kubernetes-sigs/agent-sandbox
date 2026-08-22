@@ -5,16 +5,16 @@ sandboxes managed by the Agent Sandbox controller. It's designed to be used as a
 ensuring that sandbox resources are properly created and cleaned up.
 
 It supports a **scalable, cloud-native architecture** using Kubernetes Gateways and a specialized
-Router, while maintaining a convenient **Developer Mode** for local testing.
+Router, while maintaining a convenient **Tunnel Mode** for local testing.
 
 ## Architecture
 
-The client operates in four modes:
+The client operates in four connectivity modes:
 
-1.  **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
-    -> Router Service -> Sandbox Pod. This supports high-scale deployments.
-2.  **Development (Tunnel Mode):** Traffic flows from Localhost -> `kubectl port-forward` -> Router
-    Service -> Sandbox Pod. This requires no public IP and works on Kind/Minikube.
+1.  **Gateway Mode:** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
+    -> Router Service -> Sandbox Pod. This supports external ingress via Gateway API.
+2.  **Tunnel Mode:** Traffic flows from Localhost -> `kubectl port-forward` -> Router
+    Service -> Sandbox Pod. This requires no public IP and works on Kind/Minikube for local development.
 3.  **In-Cluster Mode:** The client connects **directly to the sandbox pod** (via pod IP or cluster
     DNS), bypassing the router. Intended for workloads running inside the cluster.
 4.  **Advanced / Internal Mode:** The client connects directly to a provided `api_url`, bypassing
@@ -28,12 +28,11 @@ The client operates in four modes:
 
 ## Setup: Deploying the Router
 
-Before using the client, you must deploy the `sandbox-router`. This is a one-time setup.
+Before using the client in Gateway Mode or Tunnel Mode, deploy the `sandbox-router` into your cluster.
 
-1.  **Build and Push the Router Image:**
+1.  **Deploy the Router:**
 
-    For both Gateway Mode and Tunnel Mode, follow the instructions in [sandbox-router](sandbox-router/README.md)
-    to build, push, and apply the router image and resources.
+    Follow the instructions in [sandbox-router](../../../sandbox-router/README.md) to deploy the router using the manifests in [sandbox-router/deploy](../../../sandbox-router/deploy).
 
 2.  **Create a Sandbox Warmpool:**
 
@@ -108,7 +107,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
 
 ## Usage Examples
 
-### 1. Production Mode (GKE Gateway)
+### 1. Gateway Mode (GKE Gateway)
 
 Use this when running against a real cluster with a public Gateway IP. The client automatically
 discovers the Gateway.
@@ -131,7 +130,7 @@ finally:
     sandbox.terminate()
 ```
 
-### 2. Developer Mode (Local Tunnel)
+### 2. Tunnel Mode (Local Port-Forward)
 
 Use this for local development or CI. The client automatically opens a secure tunnel to the
 Router Service using `kubectl`.
@@ -371,13 +370,13 @@ Latency guidance:
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).
 
-### Run in Dev Mode:
+### Run in Tunnel Mode:
 
 ```bash
 python test_client.py --namespace default
 ```
 
-### Run in Production Mode:
+### Run in Gateway Mode:
 
 ```bash
 python test_client.py --gateway-name external-http-gateway

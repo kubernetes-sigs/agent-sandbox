@@ -149,6 +149,18 @@ func TestParsePathRoute(t *testing.T) {
 			wantCode:    http.StatusBadRequest,
 		},
 		{
+			// url.PathUnescape fails on a malformed escape ("%ZZ" is not
+			// valid hex) — exercises the id branch of that error path.
+			// namespace and port share the same handling, so one case
+			// covering the mechanism is enough; this isn't a per-field
+			// property to re-verify three times over.
+			name:        "malformed percent-encoding rejected",
+			prefix:      "/router",
+			path:        "/router/test/my-box%ZZ/8080/",
+			wantMatched: true,
+			wantCode:    http.StatusBadRequest,
+		},
+		{
 			name:        "non-numeric port rejected",
 			prefix:      "/router",
 			path:        "/router/test/my-box/abc/",

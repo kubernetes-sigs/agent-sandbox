@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build integration
-
 package proxy
 
 import (
@@ -30,11 +28,11 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
-// TestIntegration_PathRoutingPreservesEncodedSlash is the end-to-end
-// regression test for the escaping bug caught in review: r.URL.Path is
-// already percent-decoded, so naively deriving the upstream remainder from
-// it would turn a request for "/router/test/my-box/8080/some%2Ffile" into
-// an upstream request for "/some/file" — two segments instead of one,
+// TestPathRoutingPreservesEncodedSlash is the end-to-end regression test
+// for the escaping bug caught in review: r.URL.Path is already
+// percent-decoded, so naively deriving the upstream remainder from it
+// would turn a request for "/router/test/my-box/8080/some%2Ffile" into an
+// upstream request for "/some/file" — two segments instead of one,
 // silently renaming whatever resource "some%2Ffile" actually named (a
 // filename containing "/", URL-encoded to keep it within a single path
 // segment, is exactly the kind of thing a browser-facing tool like
@@ -43,7 +41,15 @@ import (
 // RawPath alongside Path; this test proves the fix holds through the
 // actual httputil.ReverseProxy hop, not just the parser in isolation
 // (which pathroute_test.go already covers).
-func TestIntegration_PathRoutingPreservesEncodedSlash(t *testing.T) {
+//
+// Deliberately NOT behind the "integration" build tag, unlike its
+// siblings in this package: it needs nothing beyond two in-process
+// httptest servers, same as pathroute_test.go's table tests, and
+// dev/tools/test-unit (the only Go test job wired into CI here — there is
+// no separate integration presubmit) runs without -tags=integration. A
+// regression this specific is worth keeping under the suite that
+// actually runs.
+func TestPathRoutingPreservesEncodedSlash(t *testing.T) {
 	var (
 		mu             sync.Mutex
 		gotEscapedPath string

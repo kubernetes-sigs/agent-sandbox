@@ -25,10 +25,10 @@ import (
 // capturedLine is the last "request" log line recorded by capturingSink.
 type capturedLine struct {
 	msg        string
-	keyAndVals []interface{}
+	keyAndVals []any
 }
 
-func (c *capturedLine) value(key string) (interface{}, bool) {
+func (c *capturedLine) value(key string) (any, bool) {
 	for i := 0; i+1 < len(c.keyAndVals); i += 2 {
 		if k, ok := c.keyAndVals[i].(string); ok && k == key {
 			return c.keyAndVals[i+1], true
@@ -48,12 +48,12 @@ type capturingSink struct {
 	dst *capturedLine
 }
 
-func (s *capturingSink) Init(logr.RuntimeInfo)                  {}
-func (s *capturingSink) Enabled(int) bool                       { return true }
-func (s *capturingSink) WithName(string) logr.LogSink           { return s }
-func (s *capturingSink) WithValues(...interface{}) logr.LogSink { return s }
-func (s *capturingSink) Error(error, string, ...interface{})    {}
-func (s *capturingSink) Info(_ int, msg string, kv ...interface{}) {
+func (s *capturingSink) Init(logr.RuntimeInfo)          {}
+func (s *capturingSink) Enabled(int) bool               { return true }
+func (s *capturingSink) WithName(string) logr.LogSink   { return s }
+func (s *capturingSink) WithValues(...any) logr.LogSink { return s }
+func (s *capturingSink) Error(error, string, ...any)    {}
+func (s *capturingSink) Info(_ int, msg string, kv ...any) {
 	*s.dst = capturedLine{msg: msg, keyAndVals: kv}
 }
 

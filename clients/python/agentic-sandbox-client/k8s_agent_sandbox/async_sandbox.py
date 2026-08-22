@@ -85,7 +85,7 @@ class AsyncSandbox:
         self._sandbox_name_hash = None
 
     async def get_pod_name(self) -> str:
-        """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
+        """Returns the pod name backing this sandbox (matching the sandbox ID)."""
         if self._pod_name is not None:
             return self._pod_name
 

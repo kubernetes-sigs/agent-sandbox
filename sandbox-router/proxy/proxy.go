@@ -112,16 +112,22 @@ func NewHandler(o Options) *Handler {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	upstreamPath := r.URL.Path
-	target, perr := h.resolveTarget(r, &upstreamPath)
+	upstreamPath, upstreamRawPath := r.URL.Path, ""
+	target, perr := h.resolveTarget(r, &upstreamPath, &upstreamRawPath)
 	if perr != nil {
 		WriteJSONError(w, perr)
 		return
 	}
 
-	// Make the parsed namespace visible to the observability middleware.
+	// Make the resolved identity visible to the observability middleware.
+	// Tracing and access logging read it back from Labels rather than the
+	// request headers directly, because a path-routed request (see
+	// resolveTarget) never sets X-Sandbox-* at all — reading headers
+	// there would silently show an empty sandbox identity for every
+	// browser-facing request.
 	if labels := observability.LabelsFromContext(r.Context()); labels != nil {
 		labels.SandboxNamespace = target.Namespace
+		labels.SandboxID = target.ID
 	}
 
 	// Authorization. Implementations are expected to pull whatever
@@ -153,6 +159,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// produced the IP (cache vs DNS vs override) and invalidate the cache
 	// entry on dial-class failures. The Rewrite callback re-uses the URL.
 	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
+	if upstreamRawPath != "" {
+		// Only ever set for a path-routed request (see resolveTarget).
+		// Target.Resolve only assigns URL.Path, so without this a path-
+		// routed request carrying an encoded separator in its upstream
+		// portion (e.g. a filename containing "/", sent as "%2F") would
+		// reach the sandbox already decoded, silently renaming the
+		// resource it addresses. net/url only honors RawPath when it is
+		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
+		// resolveTarget/ParsePathRoute guarantee that pairing holds.
+		upstreamURL.RawPath = upstreamRawPath
+	}
 	// Detect Upgrade once and reuse: the Rewrite callback uses it to
 	// decide whether to strip Origin, the timeout block below uses it
 	// to skip the per-request deadline. Same predicate, same source of
@@ -278,21 +295,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveTarget parses the routing Target for r, preferring the path-based
-// form when --path-routing-prefix is configured and r.URL.Path matches it,
-// and falling through to X-Sandbox-* headers otherwise — byte-identical to
-// the header parsing this replaced when the prefix is unset (the default),
-// so header-only deployments are unaffected. On a path match, *upstreamPath
-// is rewritten to the portion of the path the upstream sandbox should
-// actually see (prefix/namespace/id/port stripped); left untouched for
-// header-routed requests, which carry no routing prefix to strip.
-func (h *Handler) resolveTarget(r *http.Request, upstreamPath *string) (Target, *Error) {
+// form when --path-routing-prefix is configured and r.URL.EscapedPath()
+// matches it, and falling through to X-Sandbox-* headers otherwise —
+// byte-identical to the header parsing this replaced when the prefix is
+// unset (the default), so header-only deployments are unaffected.
+//
+// On a path match, *upstreamPath and *upstreamRawPath are rewritten to the
+// portion of the path the upstream sandbox should actually see
+// (prefix/namespace/id/port stripped) in, respectively, decoded and
+// originally-escaped form — both are needed together to preserve an
+// encoded separator (e.g. "%2F") through to the outbound request, see
+// ParsePathRoute. Both are left untouched for header-routed requests,
+// which carry no routing prefix to strip; *upstreamRawPath in particular
+// stays "" there, exactly matching pre-path-routing behavior of never
+// setting Resolve's outbound URL.RawPath at all.
+func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *string) (Target, *Error) {
 	if h.cfg.PathRoutingPrefix != "" {
-		if target, rem, matched, perr := ParsePathRoute(h.cfg.PathRoutingPrefix, r.URL.Path); matched {
+		if route, matched, perr := ParsePathRoute(h.cfg.PathRoutingPrefix, r.URL.EscapedPath()); matched {
 			if perr != nil {
 				return Target{}, perr
 			}
-			*upstreamPath = rem
-			return target, nil
+			*upstreamPath = route.UpstreamPath
+			*upstreamRawPath = route.UpstreamRawPath
+			return route.Target, nil
 		}
 	}
 	return ParseSandboxHeaders(r.Header, ParseOptions{AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP})

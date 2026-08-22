@@ -108,6 +108,8 @@ Set `--path-routing-prefix` to give such traffic a second way in: a request whos
 
 This is strictly additive: the default is `""` (disabled), and a request whose path does not match the configured prefix falls straight through to `X-Sandbox-*` header parsing, unchanged. `X-Sandbox-Pod-IP` and `X-Sandbox-UID` have no path equivalent — both are dial-target overrides meant for SDKs that already hold cluster-internal knowledge, never for a browser tab, so path-routed requests always resolve through the DNS form or the namespace/name cache index, same as a header-routed request carrying only `X-Sandbox-ID`.
 
+Everything after `<port>` is forwarded byte-for-byte, escaping included — an encoded separator inside a single upstream path segment (e.g. a filename containing `/`, sent as `%2F`) survives the hop unchanged rather than being silently decoded into an extra segment. `sandbox_router_requests_total` labels, the access log's `sandbox_id`/`sandbox_namespace` fields, and the `sandbox.id`/`sandbox.namespace` trace attributes all reflect the resolved target regardless of whether it came from a header or from the path.
+
 ```sh
 curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
   -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \

@@ -364,6 +364,26 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "",
 		},
+		{
+			name:    "empty path routing prefix is valid (disabled)",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "" },
+			wantErr: "",
+		},
+		{
+			name:    "path routing prefix without leading slash rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "router" },
+			wantErr: "path-routing-prefix must start with",
+		},
+		{
+			name:    "path routing prefix with trailing slash rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router/" },
+			wantErr: "path-routing-prefix must not end with",
+		},
+		{
+			name:    "valid path routing prefix accepted",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router" },
+			wantErr: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

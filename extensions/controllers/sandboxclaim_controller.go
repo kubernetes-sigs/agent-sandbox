@@ -213,7 +213,7 @@ type SandboxClaimReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Start of Reconcile loop for SandboxClaim", "request", req.NamespacedName)
 	claim := &extensionsv1beta1.SandboxClaim{}
@@ -248,6 +248,10 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if !claim.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
+	}
+
+	if err := r.initializeLifecycleFromTTL(ctx, claim); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Initialize trace ID and observation time for active resources missing them.
@@ -299,7 +303,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Manage Resources based on State
 	var sandbox *v1beta1.Sandbox
-	var reconcileErr error
 
 	if claimExpired {
 		// Policy=Retain (since Delete handled above)
@@ -372,7 +375,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Determine Result
-	var result ctrl.Result
 	if !claimExpired {
 		if postExpiration {
 			result = ctrl.Result{RequeueAfter: immediateRequeueDelay}
@@ -426,6 +428,28 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	errs := errors.Join(reconcileErr, metricsErr)
 	logger.V(1).Info("End of Reconcile loop SandboxClaim", "result", result, "error", errs, "request", req.NamespacedName)
 	return result, errs
+}
+
+// initializeLifecycleFromTTL derives a lifecycle shutdown time for age-based TTL claims.
+func (r *SandboxClaimReconciler) initializeLifecycleFromTTL(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
+	if claim.Spec.TTLSecondsAfterCreated == nil || claim.CreationTimestamp.IsZero() ||
+		(claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownTime != nil) {
+		return nil
+	}
+
+	patch := client.MergeFrom(claim.DeepCopy())
+	shutdownTime := metav1.NewTime(claim.CreationTimestamp.Add(time.Duration(*claim.Spec.TTLSecondsAfterCreated) * time.Second))
+	if claim.Spec.Lifecycle == nil {
+		claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
+			ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
+			ShutdownTime:   &shutdownTime,
+		}
+	} else {
+		claim.Spec.Lifecycle.ShutdownPolicy = extensionsv1beta1.ShutdownPolicyDelete
+		claim.Spec.Lifecycle.ShutdownTime = &shutdownTime
+	}
+
+	return r.Patch(ctx, claim, patch)
 }
 
 // initializeAnnotations initializes trace ID and observation time for active resources missing them.

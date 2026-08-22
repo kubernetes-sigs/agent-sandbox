@@ -398,13 +398,13 @@ func TestClose_ToleratesAlreadyClosed(t *testing.T) {
 	}
 }
 
-func TestOpen_PodNameFallsBackToSandboxName(t *testing.T) {
+func TestOpen_PodNameMatchesSandboxName(t *testing.T) {
 	opts := defaultTestOpts()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
 
 	sb := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sb-no-annotation",
+			Name:      "test-sandbox-name",
 			Namespace: "default",
 		},
 		Status: sandboxv1beta1.SandboxStatus{
@@ -422,7 +422,7 @@ func TestOpen_PodNameFallsBackToSandboxName(t *testing.T) {
 	defer c.Close(context.Background())
 
 	if c.PodName() != c.SandboxName() {
-		t.Errorf("expected PodName to fall back to sandbox name %s, got %s", c.SandboxName(), c.PodName())
+		t.Errorf("expected PodName to match sandbox name %s, got %s", c.SandboxName(), c.PodName())
 	}
 }
 

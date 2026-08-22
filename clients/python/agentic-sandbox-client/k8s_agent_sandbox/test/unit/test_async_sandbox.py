@@ -179,10 +179,6 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
     async def test_get_pod_name(self):
         self.assertEqual(await self.sandbox.get_pod_name(), self.sandbox_id)
 
-    async def test_get_pod_name_caching(self):
-        self.assertEqual(await self.sandbox.get_pod_name(), self.sandbox_id)
-        self.assertEqual(await self.sandbox.get_pod_name(), self.sandbox_id)
-
     async def test_status_not_found(self):
         self.mock_k8s_helper.get_sandbox.return_value = None
         status, message = await self.sandbox.status()

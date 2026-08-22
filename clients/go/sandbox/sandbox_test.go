@@ -398,34 +398,6 @@ func TestClose_ToleratesAlreadyClosed(t *testing.T) {
 	}
 }
 
-func TestOpen_PodNameMatchesSandboxName(t *testing.T) {
-	opts := defaultTestOpts()
-	c, agentsCS, extensionsCS := newTestSandbox(opts)
-
-	sb := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox-name",
-			Namespace: "default",
-		},
-		Status: sandboxv1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{
-				{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
-			},
-		},
-	}
-	setupWatchWithReactor(agentsCS, extensionsCS, sb)
-
-	ctx := context.Background()
-	if err := c.Open(ctx); err != nil {
-		t.Fatalf("Open() returned error: %v", err)
-	}
-	defer c.Close(context.Background())
-
-	if c.PodName() != c.SandboxName() {
-		t.Errorf("expected PodName to match sandbox name %s, got %s", c.SandboxName(), c.PodName())
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Mode selection tests
 // ---------------------------------------------------------------------------

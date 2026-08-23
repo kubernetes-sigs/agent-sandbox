@@ -145,7 +145,18 @@ class TestSandbox(unittest.TestCase):
         self.assertIs(callback.__self__, sandbox)
         self.assertIs(callback.__func__, Sandbox.get_pod_ip)
 
-    def test_get_pod_name(self):
+    def test_get_pod_name_with_annotation(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "metadata": {
+                "annotations": {
+                    'agents.x-k8s.io/pod-name': "annotated-pod-name"
+                }
+            }
+        }
+        self.assertEqual(self.sandbox.get_pod_name(), "annotated-pod-name")
+
+    def test_get_pod_name_fallback(self):
+        self.mock_k8s_helper.get_sandbox.return_value = None
         self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
 
     def test_status_not_found(self):
@@ -291,6 +302,11 @@ class TestSandbox(unittest.TestCase):
             }
         }
         self.assertEqual(self.sandbox.get_pod_ip(), "10.244.0.42")
+
+    def test_get_pod_ip_returns_none_when_missing(self):
+        """Tests that get_pod_ip returns None when status is empty or podIPs is missing."""
+        self.mock_k8s_helper.get_sandbox.return_value = {"status": {}}
+        self.assertIsNone(self.sandbox.get_pod_ip())
 
 
 class TestSandboxTerminateIdempotent(unittest.TestCase):

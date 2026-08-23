@@ -176,8 +176,33 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
             "custom-tracer",
         )
 
-    async def test_get_pod_name(self):
+    async def test_get_pod_name_with_annotation(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "metadata": {
+                "annotations": {
+                    "agents.x-k8s.io/pod-name": "annotated-pod-name",
+                },
+            },
+        }
+        self.assertEqual(await self.sandbox.get_pod_name(), "annotated-pod-name")
+
+    async def test_get_pod_name_fallback(self):
+        self.mock_k8s_helper.get_sandbox.return_value = None
         self.assertEqual(await self.sandbox.get_pod_name(), self.sandbox_id)
+
+    async def test_get_pod_name_caching(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "metadata": {
+                "annotations": {
+                    "agents.x-k8s.io/pod-name": "cached-pod-name",
+                },
+            },
+        }
+        self.assertEqual(await self.sandbox.get_pod_name(), "cached-pod-name")
+
+        self.mock_k8s_helper.get_sandbox.reset_mock()
+        self.assertEqual(await self.sandbox.get_pod_name(), "cached-pod-name")
+        self.mock_k8s_helper.get_sandbox.assert_not_awaited()
 
     async def test_status_not_found(self):
         self.mock_k8s_helper.get_sandbox.return_value = None

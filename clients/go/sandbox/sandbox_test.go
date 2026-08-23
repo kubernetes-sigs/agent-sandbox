@@ -268,7 +268,7 @@ func TestOpen_CreatesClaimAndBecomesReady(t *testing.T) {
 	if !c.IsReady() {
 		t.Error("expected IsReady()=true after Open")
 	}
-	expectedPod := c.ClaimName()
+	expectedPod := c.SandboxName()
 	if c.PodName() != expectedPod {
 		t.Errorf("expected PodName=%s, got %s", expectedPod, c.PodName())
 	}

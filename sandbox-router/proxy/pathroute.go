@@ -128,12 +128,14 @@ func ParsePathRoute(prefix, escapedPath string) (route PathRoute, matched bool, 
 	decodedRemainder, err := url.PathUnescape(rawRemainder)
 	if err != nil {
 		// Malformed escaping this deep in the path isn't this router's
-		// business to reject — forward it as-is and let the upstream
-		// sandbox decide. RawPath stays authoritative regardless: per
-		// net/url's EscapedPath doc, RawPath is only honored when it is
-		// a valid encoding of Path, so a mismatched Path here (the raw
-		// text instead of a real decode) never actually gets used for
-		// serialization — it's best-effort only, not load-bearing.
+		// business to reject — let the upstream sandbox see it and decide.
+		// This is NOT a byte-for-byte passthrough, though: rawRemainder
+		// isn't validly encoded, so url.URL.EscapedPath() can't use
+		// UpstreamRawPath as-is (per its own doc, RawPath is only honored
+		// when it decodes back to Path) and falls back to re-escaping
+		// UpstreamPath from scratch instead — so a literal "%" the client
+		// sent gets percent-encoded itself. A client-sent ".../my-box%ZZ"
+		// reaches the upstream as ".../my-box%25ZZ", not "%ZZ" unchanged.
 		decodedRemainder = rawRemainder
 	}
 

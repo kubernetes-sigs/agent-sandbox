@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"sync"
 	"time"
@@ -556,6 +557,13 @@ func (s *Sandbox) Run(ctx context.Context, command string, opts ...CallOption) (
 }
 func (s *Sandbox) Write(ctx context.Context, path string, content []byte, opts ...CallOption) error {
 	return s.files.Write(ctx, path, content, opts...)
+}
+
+// WriteReader streams content from an io.Reader without buffering the entire
+// payload. Streaming uploads use a single request attempt because a generic
+// reader cannot be replayed safely.
+func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
+	return s.files.WriteReader(ctx, path, content, opts...)
 }
 func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
 	return s.files.Read(ctx, path, opts...)

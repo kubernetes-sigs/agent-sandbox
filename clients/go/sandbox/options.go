@@ -134,8 +134,9 @@ type Options struct {
 	// fixed 8 MB internal limit. Default: 256 MB.
 	MaxDownloadSize int64
 
-	// MaxUploadSize is the maximum content size for Write(). Content
-	// exceeding this limit is rejected before any network I/O. Default: 256 MB.
+	// MaxUploadSize is the maximum content size for Write() and WriteReader().
+	// Write rejects oversized content before network I/O; WriteReader enforces
+	// the limit while streaming. Default: 256 MB.
 	MaxUploadSize int64
 
 	// Logger for structured logging. Defaults to stderr at INFO level.

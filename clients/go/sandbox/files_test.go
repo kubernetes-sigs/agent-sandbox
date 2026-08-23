@@ -901,6 +901,243 @@ func TestWrite_RetryOnServerError(t *testing.T) {
 	}
 }
 
+type chunkReader struct {
+	data []byte
+	max  int
+}
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(r.data), min(len(p), r.max))
+	copy(p, r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
+}
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) { return 0, errors.New("reader failed") }
+
+type readSizeRecorder struct {
+	remaining int
+	maxRead   int
+	reads     int
+}
+
+func (r *readSizeRecorder) Read(p []byte) (int, error) {
+	r.reads++
+	r.maxRead = max(r.maxRead, len(p))
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.remaining)
+	for i := range n {
+		p[i] = 'x'
+	}
+	r.remaining -= n
+	return n, nil
+}
+
+func TestUploadLimitReader_BoundedChunks(t *testing.T) {
+	source := &readSizeRecorder{remaining: 2*maxStreamingUploadChunkSize + 1}
+	limited := &uploadLimitReader{
+		reader:    source,
+		remaining: int64(source.remaining),
+		maxUpload: int64(source.remaining),
+	}
+	if _, err := io.ReadAll(limited); err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if source.maxRead > maxStreamingUploadChunkSize {
+		t.Errorf("largest source read = %d, want at most %d", source.maxRead, maxStreamingUploadChunkSize)
+	}
+	if source.reads < 3 {
+		t.Errorf("source reads = %d, want at least 3", source.reads)
+	}
+}
+
+func TestWriteReader_LegacyMultipartUpload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Errorf("MultipartReader() error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		part, err := mr.NextPart()
+		if err != nil {
+			t.Errorf("NextPart() error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			t.Errorf("ReadAll() error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if string(data) != "streamed payload" {
+			t.Errorf("payload = %q, want %q", data, "streamed payload")
+		}
+		if got := part.FileName(); got != "stream.txt" {
+			t.Errorf("filename = %q, want stream.txt", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	err := c.WriteReader(context.Background(), "stream.txt", &chunkReader{data: []byte("streamed payload"), max: 2})
+	if err != nil {
+		t.Fatalf("WriteReader() error: %v", err)
+	}
+}
+
+func TestWriteReader_SandboxdRawUpload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.EscapedPath() != "/v1/files/dir%2Fstream.txt" {
+			t.Errorf("request = %s %s, want PUT /v1/files/dir%%2Fstream.txt", r.Method, r.URL.EscapedPath())
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll() error: %v", err)
+		}
+		if string(data) != "streamed payload" {
+			t.Errorf("payload = %q, want %q", data, "streamed payload")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.files.runtime = RuntimeSandboxd
+	if err := c.WriteReader(context.Background(), "dir/stream.txt", strings.NewReader("streamed payload")); err != nil {
+		t.Fatalf("WriteReader() error: %v", err)
+	}
+}
+
+func TestWriteReader_DefaultsToSingleAttempt(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	err := c.WriteReader(context.Background(), "stream.txt", strings.NewReader("payload"))
+	if err == nil {
+		t.Fatal("expected server error")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected one request attempt, got %d", got)
+	}
+}
+
+func TestWriteReader_PreservesPathValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		runtime Runtime
+		path    string
+		want    string
+	}{
+		{name: "legacy directory", runtime: RuntimeLegacyPython, path: "dir/file.txt", want: "not a plain filename"},
+		{name: "sandboxd traversal", runtime: RuntimeSandboxd, path: "dir/../file.txt", want: "must not contain"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newReadyTestSandbox("http://unused")
+			c.files.runtime = tt.runtime
+			err := c.WriteReader(context.Background(), tt.path, strings.NewReader("payload"))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestWriteReader_RejectsRetries(t *testing.T) {
+	c := newReadyTestSandbox("http://unused")
+	err := c.WriteReader(context.Background(), "stream.txt", strings.NewReader("payload"), WithMaxAttempts(2))
+	if err == nil || !strings.Contains(err.Error(), "streaming uploads do not support retries") {
+		t.Fatalf("expected retry rejection, got %v", err)
+	}
+}
+
+func TestWriteReader_NilReader(t *testing.T) {
+	c := newReadyTestSandbox("http://unused")
+	err := c.WriteReader(context.Background(), "stream.txt", nil)
+	if err == nil || !strings.Contains(err.Error(), "content reader must not be nil") {
+		t.Fatalf("expected nil reader rejection, got %v", err)
+	}
+}
+
+func TestWriteReader_ReaderError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	err := c.WriteReader(context.Background(), "stream.txt", errorReader{})
+	if err == nil || !strings.Contains(err.Error(), "reader failed") {
+		t.Fatalf("expected reader error, got %v", err)
+	}
+}
+
+func TestWriteReader_ExceedsMaxUploadSize(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.files.maxUpload = 4
+	err := c.WriteReader(context.Background(), "stream.txt", strings.NewReader("12345"))
+	if err == nil || !strings.Contains(err.Error(), "exceeds MaxUploadSize") {
+		t.Fatalf("expected upload size error, got %v", err)
+	}
+}
+
+func TestWriteReader_ExactMaxUploadSize(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mr, err := r.MultipartReader()
+		if err != nil {
+			t.Errorf("MultipartReader() error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		part, err := mr.NextPart()
+		if err != nil {
+			t.Errorf("NextPart() error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			t.Errorf("ReadAll() error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if string(data) != "1234" {
+			t.Errorf("payload = %q, want 1234", data)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.files.maxUpload = 4
+	if err := c.WriteReader(context.Background(), "stream.txt", strings.NewReader("1234")); err != nil {
+		t.Fatalf("WriteReader() error at exact limit: %v", err)
+	}
+}
+
 // --- ErrRetriesExhausted wrapping ---
 
 func TestRetry_AllExhausted_WrapsErrRetriesExhausted(t *testing.T) {

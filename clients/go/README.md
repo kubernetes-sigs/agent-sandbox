@@ -128,6 +128,14 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{
 // Paths like "dir/script.py" are rejected with an error.
 err := sb.Write(ctx, "script.py", []byte("print('hello')"))
 
+// Stream a large file without buffering it in memory. Streaming uploads use
+// one request attempt because an io.Reader cannot generally be replayed.
+// (The example requires imports for os and log.)
+file, err := os.Open("model.bin")
+if err != nil { log.Fatal(err) }
+defer file.Close()
+err = sb.WriteReader(ctx, "model.bin", file)
+
 // Read a file
 data, err := sb.Read(ctx, "script.py")
 
@@ -191,6 +199,8 @@ result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute)
 
 File operations (`Read`, `Write`, `List`, `Exists`) are automatically retried (up to
 6 attempts) on 500/502/503/504 responses and connection errors with exponential backoff.
+`WriteReader` streams from an `io.Reader` with a single request attempt because a
+reader cannot generally be replayed safely after a partial upload.
 
 **Important:** `Run()` defaults to a single attempt (no retries) because command
 execution is not idempotent. Use `WithMaxAttempts` to opt in to retries for
@@ -237,7 +247,7 @@ if err := client.Open(ctx); err != nil { ... }
 | `CleanupTimeout` | 30 s | Claim deletion during rollback / Close |
 | `RequestTimeout` | 180 s | Total timeout per SDK method call (Run, Read, …) |
 | `PerAttemptTimeout` | 60 s | Time to receive response headers per attempt |
-| `MaxUploadSize` | 256 MB | Maximum content size for `Write()` |
+| `MaxUploadSize` | 256 MB | Maximum content size for `Write()` and `WriteReader()` |
 | `MaxDownloadSize` | 256 MB | Maximum response body size for `Read()` |
 
 ## Port-Forward Recovery

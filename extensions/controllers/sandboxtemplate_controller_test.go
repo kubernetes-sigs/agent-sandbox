@@ -61,8 +61,12 @@ func assertManagedNetworkPolicySelectsTemplateBackedPod(t *testing.T, templateNa
 	}
 }
 
+// networkPolicyHasIngressPeer reports whether the policy allows the given pod labels in a namespace.
 func networkPolicyHasIngressPeer(t *testing.T, np *networkingv1.NetworkPolicy, namespace string, podLabels labels.Set) bool {
 	t.Helper()
+	if len(np.Spec.Ingress) == 0 {
+		return false
+	}
 
 	namespaceLabels := labels.Set{"kubernetes.io/metadata.name": namespace}
 	for _, peer := range np.Spec.Ingress[0].From {
@@ -86,6 +90,8 @@ func networkPolicyHasIngressPeer(t *testing.T, np *networkingv1.NetworkPolicy, n
 	return false
 }
 
+// TestSandboxTemplateReconcileNetworkPolicy verifies managed and unmanaged
+// NetworkPolicy reconciliation, including both supported router identities.
 func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 	templateDefault := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
@@ -181,8 +187,11 @@ func TestSandboxTemplateReconcileNetworkPolicy(t *testing.T) {
 				if len(np.Spec.PolicyTypes) != 2 {
 					t.Errorf("Expected 2 PolicyTypes, got %d", len(np.Spec.PolicyTypes))
 				}
-				if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 2 {
-					t.Fatalf("Expected Default Ingress rule to contain exactly 2 peer sources, got %d", len(np.Spec.Ingress[0].From))
+				if len(np.Spec.Ingress) != 1 {
+					t.Fatalf("Expected exactly 1 default ingress rule, got %d", len(np.Spec.Ingress))
+				}
+				if len(np.Spec.Ingress[0].From) != 2 {
+					t.Fatalf("Expected default ingress rule to contain exactly 2 peer sources, got %d", len(np.Spec.Ingress[0].From))
 				}
 				if !networkPolicyHasIngressPeer(t, np, "agent-sandbox-system", labels.Set{
 					"app": "sandbox-router",

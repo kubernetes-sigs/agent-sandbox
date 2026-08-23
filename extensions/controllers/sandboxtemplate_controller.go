@@ -205,7 +205,9 @@ func buildDefaultNetworkPolicySpec(templateName string) networkingv1.NetworkPoli
 			},
 		},
 		{
-			// Go router deployment shipped in sandbox-router/deploy.
+			// Go router deployment shipped in sandbox-router/deploy. This reference
+			// identity assumes Pod creation is restricted in the default namespace;
+			// shared or multi-tenant clusters should use an explicit policy instead.
 			NamespaceSelector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"kubernetes.io/metadata.name": "default",

@@ -155,7 +155,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         except (socket.timeout, ConnectionRefusedError):
             return False
 
-    def _preflight_check_router_service(self):
+    def _preflight_check_router_service(self) -> None:
         """Validates the router service exists in the configured namespace before port-forwarding.
 
         Raises SandboxPortForwardError with namespace context and a remediation hint if the

@@ -3,6 +3,7 @@
 <!-- toc -->
 - [Summary](#summary)
 - [Motivation](#motivation)
+  - [The production viability question](#the-production-viability-question)
   - [Goals](#goals)
   - [Non-Goals](#non-goals)
 - [Proposal](#proposal)
@@ -15,10 +16,10 @@
   - [Test Plan](#test-plan)
   - [Upgrade / Downgrade Strategy](#upgrade--downgrade-strategy)
 - [Alternatives Considered](#alternatives-considered)
-  - [1. Change the Global Default to Delete - *Rejected*](#1-change-the-global-default-to-delete---rejected)
-  - [2. Controller-Side Injection on Every Reconcile - *Rejected*](#2-controller-side-injection-on-every-reconcile---rejected)
-  - [3. Mutating Admission Webhook - *Deferred*](#3-mutating-admission-webhook---deferred)
-  - [4. Place claimDefaults on SandboxTemplate - *Rejected*](#4-place-claimdefaults-on-sandboxtemplate---rejected)
+  - [1. Change the Global Default to Delete - <em>Rejected</em>](#1-change-the-global-default-to-delete---rejected)
+  - [2. Controller-Side Injection on Every Reconcile - <em>Rejected</em>](#2-controller-side-injection-on-every-reconcile---rejected)
+  - [3. Mutating Admission Webhook - <em>Deferred</em>](#3-mutating-admission-webhook---deferred)
+  - [4. Place claimDefaults on SandboxTemplate - <em>Rejected</em>](#4-place-claimdefaults-on-sandboxtemplate---rejected)
 - [Scalability](#scalability)
 <!-- /toc -->
 

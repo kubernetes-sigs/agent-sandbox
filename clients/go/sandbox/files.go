@@ -162,7 +162,9 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 
 // WriteReader uploads content read from content without buffering the entire
 // payload in memory. Streaming uploads use a single request attempt because a
-// generic io.Reader cannot be replayed safely after a partial request.
+// generic io.Reader cannot be replayed safely after a partial request. Passing
+// WithMaxAttempts with a value greater than 1 returns an error; it is not
+// silently reduced to a single attempt.
 //
 // With the legacy runtime, path must be a plain filename. The sandboxd runtime
 // accepts relative paths and creates parent directories automatically. For an

@@ -561,7 +561,8 @@ func (s *Sandbox) Write(ctx context.Context, path string, content []byte, opts .
 
 // WriteReader streams content from an io.Reader without buffering the entire
 // payload. Streaming uploads use a single request attempt because a generic
-// reader cannot be replayed safely.
+// reader cannot be replayed safely. Passing WithMaxAttempts with a value
+// greater than 1 returns an error; it is not silently reduced to one attempt.
 func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
 	return s.files.WriteReader(ctx, path, content, opts...)
 }

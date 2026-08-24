@@ -136,7 +136,9 @@ err := sb.Write(ctx, "script.py", []byte("print('hello')"))
 file, err := os.Open("model.bin")
 if err != nil { log.Fatal(err) }
 defer file.Close()
-err = sb.WriteReader(ctx, "model.bin", file)
+if err := sb.WriteReader(ctx, "model.bin", file); err != nil {
+    log.Fatal(err)
+}
 
 // Read a file
 data, err := sb.Read(ctx, "script.py")
@@ -202,7 +204,9 @@ result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute)
 File operations (`Read`, `Write`, `List`, `Exists`) are automatically retried (up to
 6 attempts) on 500/502/503/504 responses and connection errors with exponential backoff.
 `WriteReader` streams from an `io.Reader` with a single request attempt because a
-reader cannot generally be replayed safely after a partial upload.
+reader cannot generally be replayed safely after a partial upload. Passing
+`WithMaxAttempts(n)` with `n > 1` returns an error rather than silently reducing
+the operation to a single attempt.
 
 **Important:** `Run()` defaults to a single attempt (no retries) because command
 execution is not idempotent. Use `WithMaxAttempts` to opt in to retries for

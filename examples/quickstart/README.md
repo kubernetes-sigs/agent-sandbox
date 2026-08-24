@@ -133,7 +133,7 @@ kubectl delete sandboxclaim quickstart-test
 
 The WarmPool creates pre-warmed **Sandbox** resources that are ready to be claimed:
 
-1. **WarmPool creates sandboxes directly** with label `agents.x-k8s.io/warm-pool=<hash>`
+1. **WarmPool creates sandboxes directly** with label `agents.x-k8s.io/warm-pool-sandbox=<hash>`
 2. When you create a **SandboxClaim**, the controller claims a sandbox from the pool
 3. The claimed sandbox's backing pod name matches the sandbox name
 4. **WarmPool automatically creates a replacement sandbox** to maintain replica count

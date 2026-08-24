@@ -2622,7 +2622,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
 						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "victim-pod",
-						"other-annotation":                      "keep-me",
+						"other-annotation": "keep-me",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2673,7 +2673,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
 						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "unowned-pod",
-						"other-annotation":                      "keep-me",
+						"other-annotation": "keep-me",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2717,7 +2717,7 @@ func TestReconcilePod(t *testing.T) {
 					UID:       sandboxUID,
 					Annotations: map[string]string{
 						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "owned-pod",
-						"other-annotation":                      "keep-me",
+						"other-annotation": "keep-me",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2727,7 +2727,7 @@ func TestReconcilePod(t *testing.T) {
 			wantPodDeleting: true,
 			expectErr:       false,
 			wantSandboxAnnotations: map[string]string{
-				"other-annotation":                      "keep-me",
+				"other-annotation": "keep-me",
 				sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "owned-pod",
 			},
 		},
@@ -2791,7 +2791,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
 						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "annotated-pod-name",
-						"other-annotation":                      "other-value",
+						"other-annotation": "other-value",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2881,7 +2881,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 			},
 		},
-{
+		{
 			name: "refuses to adopt unowned pod that lacks pool authorization label",
 			initialObjs: []runtime.Object{
 				&corev1.Pod{
@@ -3216,7 +3216,7 @@ func TestReconcilePodRecoversOwnedPodWhenTrackedPodIsMissing(t *testing.T) {
 
 	liveSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sandbox), liveSandbox))
-	assert.Equal(t, survivor, liveSandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation])
+	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation])
 }
 
 func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
@@ -3282,7 +3282,7 @@ func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
 
 	liveSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sandbox), liveSandbox))
-	assert.Equal(t, survivor, liveSandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation])
+	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation])
 }
 
 func TestReconcilePodFailsClosedForMultipleOwnedPods(t *testing.T) {

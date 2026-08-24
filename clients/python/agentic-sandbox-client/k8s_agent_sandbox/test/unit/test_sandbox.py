@@ -303,6 +303,7 @@ class TestSandbox(unittest.TestCase):
         }
         self.assertEqual(self.sandbox.get_pod_ip(), "10.244.0.42")
 
+
 class TestSandboxTerminateIdempotent(unittest.TestCase):
     """`Sandbox.terminate()` must be idempotent — a second call must not
     issue a redundant DELETE."""

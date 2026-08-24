@@ -37,8 +37,14 @@ generate-go-docs: # Generate Go SDK reference documentation
 		--repository.path "/" \
 		./clients/go/sandbox/... > $(REF_GO_PATH).tmp1
 	sed 's/^#/##/' < $(REF_GO_PATH).tmp1 > $(REF_GO_PATH).tmp2
-	tail -n +2 < $(REF_GO_PATH).tmp2 > $(REF_GO_PATH)
-	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2
+	# Strip #L<line> anchors from source links: line numbers are brittle and
+	# make the generated docs go stale on every unrelated edit. Keep the
+	# file link (per reviewer request). Staged through a temp file (rather than
+	# a pipe) so a tail failure aborts the recipe instead of silently writing a
+	# partial doc -- portable across /bin/sh implementations without pipefail.
+	tail -n +2 < $(REF_GO_PATH).tmp2 > $(REF_GO_PATH).tmp3
+	sed -E 's@(/blob/[^)# ]+)#L[0-9]+(-L[0-9]+)?@\1@g' < $(REF_GO_PATH).tmp3 > $(REF_GO_PATH)
+	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2 $(REF_GO_PATH).tmp3
 
 PYDOC_MARKDOWN_VERSION := 4.8.2
 .PHONY: generate-python-docs
@@ -146,7 +152,7 @@ REMOTE_UPSTREAM ?= upstream
 REMOTE_FORK ?= origin
 
 # Gemini model for release notes generation
-GEMINI_MODEL ?= gemini-2.5-flash
+GEMINI_MODEL ?= gemini-3.7-flash
 
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
@@ -156,7 +162,7 @@ release-promote:
 	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK} $(if $(filter true,$(SKIP_TAGGING)),--skip-tagging) $(if $(filter true,$(ONLY_TAGGING)),--only-tagging)
 
 # Publish a draft release to GitHub
-# Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-2.5-flash
+# Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-3.7-flash
 .PHONY: release-publish
 release-publish: install-gen-tools
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-publish TAG=vX.Y.Z)"; exit 1; fi

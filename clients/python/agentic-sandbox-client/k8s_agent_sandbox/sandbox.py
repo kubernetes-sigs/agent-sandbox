@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import atexit
 import logging
-import requests
-from .trace_manager import create_tracer_manager, trace_span, trace
+from .trace_manager import create_tracer_manager
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
@@ -25,8 +23,9 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
-from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
-from .utils import select_pod_ip
+from .constants import POD_NAME_ANNOTATION
+from .utils import select_pod_ip, extract_sandbox_name_hash
+
 
 class Sandbox:
     """
@@ -62,6 +61,7 @@ class Sandbox:
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
+            get_pod_name=self.get_pod_name,
         )
 
         # Tracer initialization
@@ -100,15 +100,11 @@ class Sandbox:
             return self._sandbox_name_hash
 
         sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        status = sandbox_object.get('status') or {}
-        selector = status.get('selector') or ""
-        if "=" in selector:
-            key, value = selector.split("=")
-            if key == SANDBOX_NAME_HASH_LABEL:
-                self._sandbox_name_hash = value
-                return value
-                
-        return None
+        sandbox_name_hash = extract_sandbox_name_hash(sandbox_object)
+        if sandbox_name_hash:
+            self._sandbox_name_hash = sandbox_name_hash
+
+        return sandbox_name_hash
 
     def get_pod_ip(self) -> str | None:
         """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
@@ -171,6 +167,10 @@ class Sandbox:
         """
         if self._is_closed:
             return
+        # Invalidate the cached pod name: a suspend/resume can bind this
+        # sandbox to a differently-named pod, and a stale name would make the
+        # next reconnect port-forward to a pod that no longer exists.
+        self._pod_name = None
         # Close client side connection
         self.connector.close()
         
@@ -192,10 +192,10 @@ class Sandbox:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 
-        This method is idempotent. Calling ``terminate()`` repeatedly after a
-        successful deletion is a safe no-op. If the remote infrastructure has
-        already been removed, subsequent calls will handle the API 404 gracefully
-        rather than raising an error.
+        This method is idempotent. After a successful delete, ``claim_name`` is
+        cleared so later calls are a local no-op and do not issue another DELETE.
+        If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
+        404 as success rather than raising.
         """
         # Close the client side connection and trace manager lifecycle
         self.close_connection()
@@ -206,5 +206,5 @@ class Sandbox:
 
         self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
-        # Clear after successful delete so a retry does not 404.
+        # Clear only after success so a failed delete can be retried.
         self.claim_name = None

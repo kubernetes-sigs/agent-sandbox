@@ -226,7 +226,7 @@ data:
         "        return f\"Execution successful:\\n[stdout]: {stdout}\"\n",
         "\n",
         "model = ChatGoogleGenerativeAI(\n",
-        "    model=\"gemini-2.5-flash\",\n",
+        "    model=\"gemini-3.7-flash\",\n",
         "    temperature=0,\n",
         "    max_tokens=None,\n",
         "    timeout=None,\n",

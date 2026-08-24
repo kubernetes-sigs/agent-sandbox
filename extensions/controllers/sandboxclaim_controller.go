@@ -389,8 +389,8 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			logger.V(1).Info("SandboxTemplate of the warmpool not found yet, will retry", "warmPool", claim.Spec.WarmPoolRef.Name, "error", reconcileErr)
 		}
 
-		// TODO: This 1-minute requeue creates a latency regression vs an immediate watch trigger.
-		// Consider adding a lightweight SandboxTemplate -> claims map watch to reconcile promptly.
+		// The dependency watches normally trigger an immediate retry. Keep this
+		// delayed requeue as a fallback for missed watch events or cache lag.
 		requeueDelay := 1 * time.Minute
 		if result.RequeueAfter > 0 && result.RequeueAfter < requeueDelay {
 			requeueDelay = result.RequeueAfter
@@ -824,6 +824,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 	// Forward the condition from Sandbox Status
 	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == string(v1beta1.SandboxConditionReady) {
+			condition.ObservedGeneration = claim.Generation
 			return condition
 		}
 	}
@@ -907,6 +908,45 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	var fallbackKey queue.SandboxKey
 	var adoptingFallback bool
 	var pendingNetworkCandidates int
+
+	// Lazily resolve, at most once, whether the claim's warm pool uses the Recreate strategy and,
+	// if so, the blueprint hash a current sandbox must carry. The strategy lives on the
+	// SandboxWarmPool spec (not on the pooled Sandboxes), so we read it directly from the pool the
+	// claim references. Under Recreate the pool must only serve sandboxes reflecting the current
+	// template; during an in-place template update stale sandboxes are still being deleted, so a
+	// candidate whose blueprint hash no longer matches must be rejected (issue #764). We compute
+	// the same blueprint hash the pool's staleness check uses (SandboxTemplateHashLabel) so both
+	// sides agree on what "stale under Recreate" means. We also keep the resolved SandboxTemplate so
+	// that, on a hash-label mismatch, we can fall back to the same semantic blueprint comparison the
+	// pool controller uses (see isSandboxStale): a candidate whose hash label is missing or differs
+	// but whose blueprint is semantically identical to the template is kept (not deleted/recreated)
+	// by the pool, so the claim must treat it as fresh too — otherwise a Recreate pool full of
+	// pre-label sandboxes becomes permanently unadoptable after a controller upgrade. OnReplenish
+	// deliberately keeps adopting stale sandboxes, so it never pays the SandboxTemplate lookup below.
+	var expectedBlueprintHash string
+	var expectedTemplate *extensionsv1beta1.SandboxTemplate
+	var isRecreate bool
+	var recreateResolveErr error
+	var recreateResolved bool
+	resolveRecreate := func() (bool, string, *extensionsv1beta1.SandboxTemplate, error) {
+		if !recreateResolved {
+			recreateResolved = true
+			warmPool, err := r.getWarmPool(ctx, claim)
+			if err != nil {
+				recreateResolveErr = err
+			} else if resolveUpdateStrategy(warmPool) == extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType {
+				isRecreate = true
+				template, err := r.getTemplateForWarmPool(ctx, claim.Namespace, warmPool)
+				if err != nil {
+					recreateResolveErr = err
+				} else {
+					expectedTemplate = template
+					expectedBlueprintHash, recreateResolveErr = computeSandboxBlueprintHash(template)
+				}
+			}
+		}
+		return isRecreate, expectedBlueprintHash, expectedTemplate, recreateResolveErr
+	}
 
 	// Instantly returns unused keys the moment we find a valid/ready candidate!
 	defer func() {
@@ -1003,6 +1043,37 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			if errors.Is(err, ErrCrossNamespaceAdoption) {
 				skipped = append(skipped, adoptedKey)
 			}
+			continue
+		}
+
+		// Enforce blueprint version consistency only under the Recreate strategy (issue #764).
+		recreate, expectedHash, expectedTemplate, err := resolveRecreate()
+		if err != nil {
+			// We cannot determine the pool's strategy or compute the expected hash. This is likely
+			// a transient lookup error and the candidate may well be fresh, so requeue it rather
+			// than draining it from the pool; but do not adopt it here, since under a possibly
+			// Recreate pool adopting an unverified pod risks handing out a stale version. The claim
+			// retries or cold starts instead. A candidate whose backing Pod has not been observed
+			// yet (no cached PodIPs) is also a pending-network candidate, so count it the same way
+			// the observation check below does to keep the caller's retry accounting consistent.
+			logger.V(1).Info("Requeuing candidate: unable to resolve warm pool update strategy", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "error", err.Error())
+			if len(adopted.Status.PodIPs) == 0 {
+				pendingNetworkCandidates++
+			}
+			skipped = append(skipped, adoptedKey)
+			continue
+		}
+		// Under Recreate, mirror the pool controller's isSandboxStale semantics: a hash-label match
+		// means fresh, but a missing/mismatched hash label falls back to the same semantic blueprint
+		// comparison rather than being treated as stale outright. Only drop the candidate when the
+		// blueprint also differs semantically. Dropping without requeue is safe there because such a
+		// candidate is genuinely stale, so the pool controller is deleting it and will enqueue a
+		// fresh replacement via the Sandbox watch. Conversely, a semantically-identical candidate is
+		// kept by the pool, so we must adopt it here instead of cold-starting against a "full" pool.
+		if recreate &&
+			adopted.Labels[v1beta1.SandboxTemplateHashLabel] != expectedHash &&
+			!compareSandboxBlueprint(expectedTemplate, &adopted.Spec.SandboxBlueprint) {
+			logger.V(1).Info("Skipping stale candidate under Recreate strategy", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
 			continue
 		}
 
@@ -2094,18 +2165,29 @@ func (r *SandboxClaimReconciler) initializeSandboxLaunchTypeLabel(ctx context.Co
 	return r.Patch(ctx, sandbox, patch)
 }
 
-func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*extensionsv1beta1.SandboxTemplate, error) {
+func (r *SandboxClaimReconciler) getWarmPool(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*extensionsv1beta1.SandboxWarmPool, error) {
 	warmPool := &extensionsv1beta1.SandboxWarmPool{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.WarmPoolRef.Name}, warmPool); err != nil {
 		if k8errors.IsNotFound(err) {
-			return nil, ErrWarmPoolNotFound
+			return nil, fmt.Errorf("SandboxWarmPool %q not found: %w", claim.Spec.WarmPoolRef.Name, ErrWarmPoolNotFound)
 		}
 		return nil, fmt.Errorf("failed to get sandbox warm pool %q: %w", claim.Spec.WarmPoolRef.Name, err)
 	}
+	return warmPool, nil
+}
 
+func (r *SandboxClaimReconciler) getTemplate(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*extensionsv1beta1.SandboxTemplate, error) {
+	warmPool, err := r.getWarmPool(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	return r.getTemplateForWarmPool(ctx, claim.Namespace, warmPool)
+}
+
+func (r *SandboxClaimReconciler) getTemplateForWarmPool(ctx context.Context, namespace string, warmPool *extensionsv1beta1.SandboxWarmPool) (*extensionsv1beta1.SandboxTemplate, error) {
 	template := &extensionsv1beta1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: claim.Namespace,
+			Namespace: namespace,
 			Name:      warmPool.Spec.TemplateRef.Name,
 		},
 	}
@@ -2205,20 +2287,85 @@ func (r *SandboxClaimReconciler) mapWarmPoolToClaims(ctx context.Context, obj cl
 		log.FromContext(ctx).Error(fmt.Errorf("unexpected object type %T", obj), "expected SandboxWarmPool in watch map function")
 		return nil
 	}
-	var claims extensionsv1beta1.SandboxClaimList
-	if err := r.List(ctx, &claims, client.InNamespace(warmPool.Namespace), client.MatchingFields{extensionsv1beta1.WarmPoolRefField: warmPool.Name}); err != nil {
+
+	claims, err := r.listClaimsForWarmPool(ctx, warmPool)
+	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to list SandboxClaims for SandboxWarmPool", "namespace", warmPool.Namespace, "name", warmPool.Name)
 		return nil
 	}
-	requests := make([]ctrl.Request, 0, len(claims.Items))
-	for i := range claims.Items {
-		claim := &claims.Items[i]
+
+	requests := make([]ctrl.Request, 0, len(claims))
+	for i := range claims {
+		claim := &claims[i]
 		if claim.Status.SandboxStatus.Name != "" || !claim.DeletionTimestamp.IsZero() {
 			continue
 		}
 		requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}})
 	}
 	return requests
+}
+
+func (r *SandboxClaimReconciler) listClaimsForWarmPool(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool) ([]extensionsv1beta1.SandboxClaim, error) {
+	var claims extensionsv1beta1.SandboxClaimList
+	if err := r.List(ctx, &claims, client.InNamespace(warmPool.Namespace), client.MatchingFields{extensionsv1beta1.WarmPoolRefField: warmPool.Name}); err != nil {
+		return nil, err
+	}
+	return claims.Items, nil
+}
+
+// mapSandboxTemplateToClaims maps a newly created SandboxTemplate to
+// SandboxClaims whose referenced SandboxWarmPool uses that template. The
+// TemplateRefField index is registered by SandboxWarmPoolReconciler before the
+// manager starts. Unlike pool events, template creation also wakes bound claims:
+// they can be waiting on a missing template to validate and propagate metadata.
+func (r *SandboxClaimReconciler) mapSandboxTemplateToClaims(ctx context.Context, obj client.Object) []ctrl.Request {
+	template, ok := obj.(*extensionsv1beta1.SandboxTemplate)
+	if !ok {
+		log.FromContext(ctx).Error(fmt.Errorf("unexpected object type %T", obj), "expected SandboxTemplate in watch map function")
+		return nil
+	}
+
+	var warmPools extensionsv1beta1.SandboxWarmPoolList
+	if err := r.List(ctx, &warmPools, client.InNamespace(template.Namespace), client.MatchingFields{extensionsv1beta1.TemplateRefField: template.Name}); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list SandboxWarmPools for SandboxTemplate", "namespace", template.Namespace, "name", template.Name)
+		return nil
+	}
+
+	seen := make(map[types.NamespacedName]struct{})
+	var requests []ctrl.Request
+	for i := range warmPools.Items {
+		warmPool := &warmPools.Items[i]
+		claims, err := r.listClaimsForWarmPool(ctx, warmPool)
+		if err != nil {
+			log.FromContext(ctx).Error(err, "failed to list SandboxClaims for SandboxWarmPool", "namespace", warmPool.Namespace, "name", warmPool.Name)
+			continue
+		}
+		for j := range claims {
+			claim := &claims[j]
+			if !claim.DeletionTimestamp.IsZero() {
+				continue
+			}
+			key := types.NamespacedName{Namespace: claim.Namespace, Name: claim.Name}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			requests = append(requests, ctrl.Request{NamespacedName: key})
+		}
+	}
+	return requests
+}
+
+// sandboxTemplateCreatePredicate admits only template create events. Template
+// updates are handled by warm-pool rollout semantics and must not fan out to
+// claims through this latency-oriented watch.
+func sandboxTemplateCreatePredicate() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return true },
+		UpdateFunc:  func(event.UpdateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
 }
 
 // sandboxStatusRelevantChange reports whether a Sandbox update changed a field
@@ -2320,8 +2467,11 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 			// ErrWarmPoolNotFound / ErrTemplateNotFound.
 			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
-		// TODO: Keep a lightweight SandboxTemplate -> claims map watch to promptly reconcile
-		// claims when a missing template is created, instead of relying on the 1-minute fallback.
+		Watches(
+			&extensionsv1beta1.SandboxTemplate{},
+			handler.EnqueueRequestsFromMapFunc(r.mapSandboxTemplateToClaims),
+			builder.WithPredicates(sandboxTemplateCreatePredicate()),
+		).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
 }

@@ -64,27 +64,26 @@ func assertManagedNetworkPolicySelectsTemplateBackedPod(t *testing.T, templateNa
 // networkPolicyHasIngressPeer reports whether the policy allows the given pod labels in a namespace.
 func networkPolicyHasIngressPeer(t *testing.T, np *networkingv1.NetworkPolicy, namespace string, podLabels labels.Set) bool {
 	t.Helper()
-	if len(np.Spec.Ingress) == 0 {
-		return false
-	}
 
 	namespaceLabels := labels.Set{"kubernetes.io/metadata.name": namespace}
-	for _, peer := range np.Spec.Ingress[0].From {
-		if peer.NamespaceSelector == nil || peer.PodSelector == nil {
-			continue
-		}
+	for _, ingressRule := range np.Spec.Ingress {
+		for _, peer := range ingressRule.From {
+			if peer.NamespaceSelector == nil || peer.PodSelector == nil {
+				continue
+			}
 
-		namespaceSelector, err := metav1.LabelSelectorAsSelector(peer.NamespaceSelector)
-		if err != nil {
-			t.Fatalf("namespace selector: %v", err)
-		}
-		podSelector, err := metav1.LabelSelectorAsSelector(peer.PodSelector)
-		if err != nil {
-			t.Fatalf("pod selector: %v", err)
-		}
+			namespaceSelector, err := metav1.LabelSelectorAsSelector(peer.NamespaceSelector)
+			if err != nil {
+				t.Fatalf("namespace selector: %v", err)
+			}
+			podSelector, err := metav1.LabelSelectorAsSelector(peer.PodSelector)
+			if err != nil {
+				t.Fatalf("pod selector: %v", err)
+			}
 
-		if namespaceSelector.Matches(namespaceLabels) && podSelector.Matches(podLabels) {
-			return true
+			if namespaceSelector.Matches(namespaceLabels) && podSelector.Matches(podLabels) {
+				return true
+			}
 		}
 	}
 	return false

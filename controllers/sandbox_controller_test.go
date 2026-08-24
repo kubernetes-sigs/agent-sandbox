@@ -1580,7 +1580,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			// Reconciling an existing pod must not write the pod name annotation on the Sandbox to prevent a second write
+			// Reconciling an existing pod must not write the pod name annotation on the Sandbox as it is no longer written by the controller.
 			wantSandboxAnnotations: map[string]string{},
 		},
 		{
@@ -1704,6 +1704,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
+			// Reconciling an existing pod must not write the pod name annotation on the Sandbox as it is no longer written by the controller.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "drops user-supplied system-reserved labels and annotations to prevent hijacking",

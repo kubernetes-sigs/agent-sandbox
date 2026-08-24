@@ -27,7 +27,7 @@ const (
 	gatewayPlural     = "gateways"
 
 	// PodNameAnnotation is the deprecated annotation key on a Sandbox resource that identifies the name of the underlying pod.
-	// Deprecated: The pod name is now equal to its Sandbox's name and the controller does not write this annotation.
+	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
 	PodNameAnnotation = "agents.x-k8s.io/pod-name"
 
 	headerSandboxID        = "X-Sandbox-ID"

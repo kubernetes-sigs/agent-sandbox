@@ -34,6 +34,7 @@ import (
 
 const maxErrorBodySize = 512            // limits untrusted server content in error chains
 const maxMetadataResponseSize = 8 << 20 // 8 MB; bounds List/Exists JSON decode
+// maxStreamingUploadChunkSize matches io.Copy's default buffer and bounds each source read.
 const maxStreamingUploadChunkSize = 32 << 10
 
 const upperHex = "0123456789ABCDEF"
@@ -251,6 +252,9 @@ type uploadLimitReader struct {
 }
 
 func (r *uploadLimitReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if r.remaining > 0 {
 		if len(p) > maxStreamingUploadChunkSize {
 			p = p[:maxStreamingUploadChunkSize]

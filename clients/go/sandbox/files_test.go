@@ -958,6 +958,23 @@ func TestUploadLimitReader_BoundedChunks(t *testing.T) {
 	}
 }
 
+func TestUploadLimitReader_EmptyBuffer(t *testing.T) {
+	source := &readSizeRecorder{remaining: 1}
+	limited := &uploadLimitReader{
+		reader:    source,
+		remaining: int64(source.remaining),
+		maxUpload: int64(source.remaining),
+	}
+
+	n, err := limited.Read(nil)
+	if n != 0 || err != nil {
+		t.Fatalf("Read(nil) = (%d, %v), want (0, nil)", n, err)
+	}
+	if source.reads != 0 {
+		t.Fatalf("source reads = %d, want 0", source.reads)
+	}
+}
+
 func TestWriteReader_LegacyMultipartUpload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ContentLength != -1 {

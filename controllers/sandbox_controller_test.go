@@ -1580,6 +1580,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
+			// Reconciling an existing pod must not write the pod name annotation on the Sandbox to prevent a second write
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "persists owner reference when adopting unowned pod whose labels are already correct",

@@ -5,11 +5,11 @@
 # your cluster's Gateway API controller:
 #
 #   Istio (any cluster):          istio
-#   GKE (managed L7 LB):         gke-l7-global-external-managed
+#   GKE (managed L7 LB):          gke-l7-global-external-managed
 #   KinD (local dev):             cloud-provider-kind
 #   Envoy Gateway:                eg
 #
-# The default below uses Istio, which works on any conformant Kubernetes cluster
+# The default below uses Istio, which works on clusters where Istio is installed.
 # (managed or self-hosted). See README.md for installation instructions.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway

@@ -89,6 +89,9 @@ Gateway API controller — e.g. Istio, GKE built-in, Envoy Gateway; edit
 
 ```bash
 kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
+
+# GKE only: apply the HealthCheckPolicy
+kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/gateway-gke-healthcheck.yaml
 ```
 
 ## When to Use Kata Containers

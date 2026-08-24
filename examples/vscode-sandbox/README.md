@@ -203,14 +203,8 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
     Edit `spec.gatewayClassName` in the YAML to match your environment — see the
     comments in `gateway.yaml` for options.
     ```bash
-<<<<<<< HEAD
-    # Deploys Gateway, HTTPRoute, and (GKE-only) HealthCheckPolicy
+    # (GKE-only) Deploys Gateway, HTTPRoute, and HealthCheckPolicy
     kubectl apply -f ../../sandbox-router/deploy/examples/gateway-gke.yaml
-=======
-    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
-    # GKE only: apply the HealthCheckPolicy
-    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/gateway-gke-healthcheck.yaml
->>>>>>> 43c897a (apply coderabbit feedback)
     ```
 
 **Via Gateway**

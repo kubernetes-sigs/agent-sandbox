@@ -26,7 +26,7 @@ SANDBOX_API_VERSION = "v1beta1"
 SANDBOX_PLURAL_NAME = "sandboxes"
 
 CLIENT_REQUEST_TIME_ANNOTATION = "agents.x-k8s.io/client-first-requested-at"
-# Deprecated: The pod name is now equal to its Sandbox's name and the controller does not write or read this annotation.
+# Deprecated: The pod name is now equal to its Sandbox's name and the controller does not write this annotation.
 POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 CREATED_BY_LABEL = "agents.x-k8s.io/created-by"
 PODSNAPSHOT_POD_NAME_ANNOTATION = "podsnapshot.gke.io/origin-pod"

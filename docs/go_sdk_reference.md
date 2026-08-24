@@ -77,7 +77,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 const (
 
     // PodNameAnnotation is the deprecated annotation key on a Sandbox resource that identifies the name of the underlying pod.
-    // Deprecated: The pod name is now equal to its Sandbox's name and the controller does not write or read this annotation.
+    // Deprecated: The pod name is now equal to its Sandbox's name and the controller does not write this annotation.
     PodNameAnnotation = "agents.x-k8s.io/pod-name"
 )
 ```

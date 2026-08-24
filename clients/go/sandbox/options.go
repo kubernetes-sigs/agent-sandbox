@@ -175,7 +175,8 @@ type Options struct {
 	// pod IP is available. Use in environments with strict network policies,
 	// service meshes, or secure overlays where direct pod-to-pod IP routing is
 	// restricted but service-based DNS routing works correctly.
-	// Default: false (pod IP routing enabled when a pod IP is present).
+	// Note: this only affects router-based transports that send X-Sandbox-* headers.
+	// Default: false (header is sent when router headers are enabled and a pod IP is present).
 	DisablePodIPRouting bool
 }
 

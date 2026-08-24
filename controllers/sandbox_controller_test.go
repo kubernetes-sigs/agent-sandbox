@@ -1704,7 +1704,7 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			// Reconciling an existing pod must not write the pod name annotation on the Sandbox as it is no longer written by the controller.
+			// Reconciling a new pod must not write the pod name annotation on the Sandbox as it is no longer written by the controller.
 			wantSandboxAnnotations: map[string]string{},
 		},
 		{

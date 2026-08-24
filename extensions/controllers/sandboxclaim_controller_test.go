@@ -1212,12 +1212,13 @@ func TestSandboxClaimReconcile(t *testing.T) {
 					if diff := cmp.Diff(tc.expectedPodIPs, updatedClaim.Status.SandboxStatus.PodIPs); diff != "" {
 						t.Errorf("unexpected PodIPs:\n%s", diff)
 					}
-					// Asserted unconditionally: cases with no bound sandbox (or a
-					// sandbox with no Service) expect the empty string, so a stale
-					// mirror fails the test just as a missing one does.
-					if got := updatedClaim.Status.SandboxStatus.ServiceFQDN; got != tc.expectedServiceFQDN {
-						t.Errorf("expected mirrored ServiceFQDN %q, got %q", tc.expectedServiceFQDN, got)
-					}
+
+				}
+				// Asserted unconditionally: cases with no bound sandbox (or a
+				// sandbox with no Service) expect the empty string, so a stale
+				// mirror fails the test just as a missing one does.
+				if got := updatedClaim.Status.SandboxStatus.ServiceFQDN; got != tc.expectedServiceFQDN {
+					t.Errorf("expected mirrored ServiceFQDN %q, got %q", tc.expectedServiceFQDN, got)
 				}
 				if diff := cmp.Diff(tc.expectedCondition, condition, cmp.Comparer(ignoreTimestamp)); diff != "" {
 					t.Errorf("unexpected condition:\n%s", diff)

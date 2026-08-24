@@ -117,7 +117,7 @@ func TestResumeLatencyRecording(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ResumeLatency.Reset()
-			RecordResumeLatency(time.Now().Add(-2*time.Second), "default", "test-tmpl", tc.launchType)
+			RecordResumeLatency(2*time.Second, "default", "test-tmpl", tc.launchType)
 
 			if testutil.CollectAndCount(ResumeLatency) != 1 {
 				t.Errorf("Expected 1 observation for ResumeLatency")

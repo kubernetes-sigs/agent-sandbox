@@ -827,6 +827,27 @@ func (r *SandboxReconciler) recordResumeLatency(ctx context.Context, oldStatus *
 		return
 	}
 
+	// Not yet Ready, or becoming Ready in this exact reconcile.
+	// Anchor a resume start once, only when leaving a suspended
+	// state (Suspended condition transitions from True to False).
+	oldCond := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	newCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if oldCond != nil && oldCond.Status == metav1.ConditionTrue && newCond != nil && newCond.Status == metav1.ConditionFalse {
+		newEntry := resumeTimeEntry{timestamp: time.Now(), uid: sandbox.UID}
+		logger.V(1).Info("Seeding resume start time timer", "start_time", newEntry.timestamp.Format(time.RFC3339Nano))
+		// If a stale entry from a same-named predecessor is present (different UID),
+		// overwrite it so this resume is timed from a fresh start rather than being
+		// blocked by LoadOrStore keeping the old value.
+		if existing, loaded := r.resumeStartTimes.LoadOrStore(key, newEntry); loaded {
+			if existing.uid != sandbox.UID {
+				logger.V(2).Info("Overwriting stale resume start time timer with new start time", "old_uid", string(existing.uid), "new_uid", string(newEntry.uid))
+				r.resumeStartTimes.Store(key, newEntry)
+			} else {
+				logger.V(2).Info("Resume start time timer already seeded for this UID", "start_time", existing.timestamp.Format(time.RFC3339Nano))
+			}
+		}
+	}
+
 	readyType := string(sandboxv1beta1.SandboxConditionReady)
 	if meta.IsStatusConditionTrue(sandbox.Status.Conditions, readyType) {
 		// Ready: record a resume only if we anchored one (i.e. it followed a suspend).
@@ -846,8 +867,9 @@ func (r *SandboxReconciler) recordResumeLatency(ctx context.Context, oldStatus *
 				if launchType == "" {
 					launchType = asmetrics.LaunchTypeUnknown
 				}
-				logger.V(2).Info("Recording resume latency metric!", "template", templateName, "launchType", launchType, "duration_ms", time.Since(entry.timestamp).Milliseconds())
-				asmetrics.RecordResumeLatency(entry.timestamp, sandbox.Namespace, templateName, launchType)
+				duration := time.Since(entry.timestamp)
+				logger.V(2).Info("Recording resume latency metric!", "template", templateName, "launchType", launchType, "duration_ms", duration.Milliseconds())
+				asmetrics.RecordResumeLatency(duration, sandbox.Namespace, templateName, launchType)
 			} else {
 				logger.V(2).Info("Ready condition observed but entry UID mismatched", "entry_uid", string(entry.uid))
 			}
@@ -855,26 +877,6 @@ func (r *SandboxReconciler) recordResumeLatency(ctx context.Context, oldStatus *
 			logger.V(2).Info("Ready condition observed but no resume timer entry found in map")
 		}
 		return
-	}
-
-	// Not yet Ready. Anchor a resume start once, only when leaving a suspended
-	// state (Suspended condition transitions from True to False).
-	oldCond := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
-	newCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
-	if oldCond != nil && oldCond.Status == metav1.ConditionTrue && newCond != nil && newCond.Status == metav1.ConditionFalse {
-		newEntry := resumeTimeEntry{timestamp: time.Now(), uid: sandbox.UID}
-		logger.V(1).Info("Seeding resume start time timer", "start_time", newEntry.timestamp.Format(time.RFC3339Nano))
-		// If a stale entry from a same-named predecessor is present (different UID),
-		// overwrite it so this resume is timed from a fresh start rather than being
-		// blocked by LoadOrStore keeping the old value.
-		if existing, loaded := r.resumeStartTimes.LoadOrStore(key, newEntry); loaded {
-			if existing.uid != sandbox.UID {
-				logger.V(2).Info("Overwriting stale resume start time timer with new start time", "old_uid", string(existing.uid), "new_uid", string(newEntry.uid))
-				r.resumeStartTimes.Store(key, newEntry)
-			} else {
-				logger.V(2).Info("Resume start time timer already seeded for this UID", "start_time", existing.timestamp.Format(time.RFC3339Nano))
-			}
-		}
 	}
 }
 

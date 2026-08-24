@@ -223,10 +223,9 @@ func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType,
 	SandboxCreationLatency.WithLabelValues(namespace, launchType, templateName).Observe(float64(duration.Milliseconds()))
 }
 
-// RecordResumeLatency records the duration since the provided resume-start time.
-func RecordResumeLatency(startTime time.Time, namespace, templateName, launchType string) {
-	duration := float64(time.Since(startTime).Milliseconds())
-	ResumeLatency.WithLabelValues(namespace, templateName, launchType).Observe(duration)
+// RecordResumeLatency records the provided duration for a Sandbox resume.
+func RecordResumeLatency(duration time.Duration, namespace, templateName, launchType string) {
+	ResumeLatency.WithLabelValues(namespace, templateName, launchType).Observe(float64(duration.Milliseconds()))
 }
 
 // NormalizeCreatedBy returns the createdBy label normalized to a known allow-list

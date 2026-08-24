@@ -25,7 +25,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/client_golang/prometheus"
+	io_prometheus_client "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -5340,7 +5341,24 @@ func TestRecordResumeLatency(t *testing.T) {
 
 			r.recordResumeLatency(context.Background(), tc.oldStatus, tc.sandbox)
 
-			if got := testutil.CollectAndCount(asmetrics.ResumeLatency); got != tc.wantObservations {
+			// Helper to extract the sample count of a histogram vec
+			histogramObservationCount := func(vec *prometheus.HistogramVec) int {
+				ch := make(chan prometheus.Metric)
+				go func() {
+					vec.Collect(ch)
+					close(ch)
+				}()
+				var count int
+				for m := range ch {
+					pb := &io_prometheus_client.Metric{}
+					if err := m.Write(pb); err == nil {
+						count += int(pb.GetHistogram().GetSampleCount())
+					}
+				}
+				return count
+			}
+
+			if got := histogramObservationCount(asmetrics.ResumeLatency); got != tc.wantObservations {
 				t.Errorf("ResumeLatency observations = %d, want %d", got, tc.wantObservations)
 			}
 			entry, ok := r.resumeStartTimes.Load(key)

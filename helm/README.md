@@ -53,7 +53,7 @@ helm upgrade agent-sandbox ./helm/ \
 
 ### Upgrading from v1alpha1
 
-Support for the `v1alpha1` API has been removed. If you are upgrading from an older release that uses `v1alpha1`, you must upgrade to a `v0.5.x` release and run the storage migration first. See [`docs/api-migration-guide.md`](../docs/api-migration-guide.md) for details.
+Support for the `v1alpha1` API has been removed. If you are upgrading from an older release that uses `v1alpha1`, you must upgrade to a `v0.5.x` release and run the storage migration first. Note that this upgrade inverts the general order above: you must apply the `v1beta1` CRDs **before** running `helm upgrade` to prevent conversion errors during webhook service teardown. See the [Helm Upgrade Ordering section in `docs/api-migration-guide.md`](../docs/api-migration-guide.md#helm-upgrade-ordering) for the full sequence.
 
 ## Uninstallation
 

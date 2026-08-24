@@ -6,7 +6,7 @@ If your cluster still has `v1alpha1`-serialized resources in etcd or if you are 
 
 ## Migration Steps
 
-1. **Upgrade to `v0.5.x` first**: Upgrade your installation to the latest `v0.5.x` release.
+1. **Upgrade to `v0.5.x` first**: Upgrade your installation to a `v0.5.x` release.
 2. **Run the v0.5 migration**: Follow the [v0.5.x API migration guide](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.2/docs/api-migration-guide.md) to migrate all existing resources to `v1beta1` and prune legacy `storedVersions`.
 3. **Pre-upgrade check**: Before upgrading from `v0.5.x` to `v1.0.0`, verify that every agent-sandbox CustomResourceDefinition reports only `v1beta1` in `status.storedVersions`:
    ```bash

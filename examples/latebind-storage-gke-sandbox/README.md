@@ -281,7 +281,7 @@ Success: Bound Filestore folder user-111 to mount path inside of agent container
 
 ### Securing the Running Pod with a Dynamic Finalizer
 
-While we statically declared a finalizer on the SandboxClaim in [Submit a SandboxClaim](#submit-a-sandbox-claim), we must also place a finalizer on the `SandboxWarmPool` Pods that are bound to `SandboxClaim`s. [Kubernetes does not support](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/api/v1beta1/sandbox_types.go#L124-L127) defining static finalizers inside a `SandboxTemplate`'s `podTemplate.spec` block. Therefore, the orchestrator must dynamically apply the finalizer to the running Pod immediately after the storage is successfully bound. This establishes a secure 1:1 mapping between the bound storage and the pod lifecycle, ensuring that the pod cannot be deleted until the host-level mount is safely decoupled.
+While we statically declared a finalizer on the SandboxClaim in [Submit a SandboxClaim](#submit-a-sandbox-claim), we must also place a finalizer on the `SandboxWarmPool` Pods that are bound to `SandboxClaim`s. [Kubernetes does not support](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.4/api/v1beta1/sandbox_types.go#L136-L144) defining static finalizers inside a `SandboxTemplate`'s `podTemplate.spec` block. Therefore, the orchestrator must dynamically apply the finalizer to the running Pod immediately after the storage is successfully bound. This establishes a secure 1:1 mapping between the bound storage and the pod lifecycle, ensuring that the pod cannot be deleted until the host-level mount is safely decoupled.
 
 Execute the following commands to dynamically patch the pod-level finalizer:
 

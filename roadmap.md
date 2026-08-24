@@ -80,8 +80,8 @@ Advanced ingress/egress isolation, lifecycle state retention, and security contr
 
 Audit trails, custom telemetry, reliability, and automated regression testing.
 
-*   **Alpha to Beta API Versioning** `⏳ In Progress`
-    *   `v1beta1` API types now exist alongside `v1alpha1` across all CRDs, and `v1alpha1` is marked deprecated. Remaining work: finish migrating clients/docs/examples fully to `v1beta1` and remove `v1alpha1` once the deprecation window closes.
+*   **Alpha to Beta API Versioning** `✅ Done`
+    *   `v1beta1` is the exclusive served API version across all CRDs. Legacy `v1alpha1` types, conversion webhooks, and migration harnesses have been removed.
 *   **Security Fixes** `⏳ In Progress`
     *   Maintain active patching cycles for third-party dependencies and container base image security.
 *   **CI for PodSnapshot & AgentSandbox Regression Prevention** `⏳ In Progress`

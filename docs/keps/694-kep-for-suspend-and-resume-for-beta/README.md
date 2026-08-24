@@ -55,7 +55,7 @@ This approach introduces a strongly-typed Enum (`spec.operatingMode: Running | S
 To implement Suspend and Resume, the following alternatives were considered:
 
 #### 1. API Aggregation Server (True Custom Subresources) - *Rejected*
-Instead of using standard CRDs, we could build and deploy a custom API Aggregation Server (using the `apiregistration.k8s.io` API) to support native HTTP endpoints like `POST /apis/agents.x-k8s.io/v1alpha1/namespaces/default/sandboxes/dev-42/suspend`.
+Instead of using standard CRDs, we could build and deploy a custom API Aggregation Server (using the `apiregistration.k8s.io` API) to support native HTTP endpoints like `POST /apis/agents.x-k8s.io/v1beta1/namespaces/default/sandboxes/dev-42/suspend`.
 * **Pros:** Offers a completely native, secure, and clean API. Enables fine-grained RBAC specifically for the `/suspend` action.
 * **Cons:** Introduces massive operational complexity. Requires maintaining an active API Aggregator Pod, managing custom TLS certificates, and handling etcd storage manually.
 

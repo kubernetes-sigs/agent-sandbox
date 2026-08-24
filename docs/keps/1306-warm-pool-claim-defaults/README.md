@@ -33,24 +33,27 @@ adoption time. Claims that set their own `Lifecycle` are never modified.
 
 ## Motivation
 
-`SandboxClaim` defaults to `ShutdownPolicy: Retain` (set via
-`+kubebuilder:default=Retain` on the `ShutdownPolicy` field). Retain was
-chosen so that expired claims preserve their historical record for auditing
-and debugging. This default is safe for interactive notebooks and developer
-environments.
+`SandboxClaim.Spec.Lifecycle` is an optional pointer field. When omitted
+(nil), the claim has **no lifecycle management at all** — no expiration, no
+TTL, no automatic cleanup. The controller's `checkExpiration` returns early
+for nil Lifecycle (`sandboxclaim_controller.go:477-479`). If a `Lifecycle` is
+set, its `ShutdownPolicy` defaults to `Retain` (via `+kubebuilder:default`),
+which preserves the claim object after expiration for auditing. Both behaviors
+— nil Lifecycle and explicit Retain — are safe for interactive notebooks and
+developer environments where claims are manually managed.
 
 However, warm pool claims are ephemeral by definition. An agent creates a
-claim, executes code, and discards it. With `Retain`:
+claim, executes code, and discards it. Without a lifecycle:
 
 - **Zombie VMs accumulate.** A completed Kata claim holds real hypervisor
   processes, CPU, and memory until explicitly deleted. If the SDK client
   crashes without calling `Close()`, the claim and its VM live forever.
 - **Pool starvation under sustained load.** On a 30-replica kata-qemu pool
-  with 3-minute sustained burst, Retain causes ready replicas to drop from
-  27/30 to 0/30 after ~90 claims. All 30 vCPUs are consumed by retained VMs
-  that will never be reclaimed ([benchmark data][1306]).
+  with 3-minute sustained burst, nil-lifecycle claims cause ready replicas to
+  drop from 27/30 to 0/30 after ~90 claims. All 30 vCPUs are consumed by
+  uncollected VMs that will never be reclaimed ([benchmark data][1306]).
 - **runc masks the problem.** A completed runc container releases cgroups
-  immediately, so the Retain default causes object accumulation but not
+  immediately, so the nil-lifecycle default causes object accumulation but not
   resource exhaustion. Kata VMs hold real hypervisor processes and memory;
   GPU-attached pods hold device allocations. These resources are not
   reclaimed until the pod is explicitly deleted.
@@ -139,7 +142,7 @@ Without a mechanism for pool operators to enforce claim cleanup, **VM-backed
 warm pools are not viable in production.** The issue is not theoretical:
 
 - Benchmark data on a 30-replica kata-qemu pool shows pool starvation after
-  ~90 claims under sustained load with Retain policy ([#1306][1306]).
+  ~90 claims under sustained load with nil-lifecycle claims ([#1306][1306]).
 - Every SDK crash, network partition, or agent that omits `Close()` leaves a
   VM running indefinitely — consuming real CPU, memory, and hypervisor
   processes.
@@ -268,10 +271,18 @@ type ClaimDefaults struct {
 }
 ```
 
-The `Lifecycle` type is already defined in `extensions/api/v1beta1/types.go`
-and reused here. It carries the same kubebuilder validation markers
-(`ShutdownPolicy` enum, `TTLSecondsAfterFinished` minimum, `ShutdownTime`
-format).
+The `Lifecycle` type is already defined in
+`extensions/api/v1beta1/sandboxclaim_types.go` and reused here. It carries
+the same kubebuilder validation markers (`ShutdownPolicy` enum,
+`TTLSecondsAfterFinished` minimum).
+
+**Note:** `Lifecycle` also includes a `ShutdownTime` field (absolute
+timestamp). `ShutdownTime` is **not recommended** in `claimDefaults` because
+all adopted claims would share the same absolute deadline — claims adopted
+after that time would expire immediately. Implementers should add a
+validating webhook or CEL rule rejecting `ShutdownTime` in `claimDefaults`.
+Only `ShutdownPolicy` and `TTLSecondsAfterFinished` are meaningful as pool-
+level defaults.
 
 ### Controller Implementation
 
@@ -339,9 +350,15 @@ func (r *SandboxClaimReconciler) retryAdoptionWithDefaults(
 
 **Why this is create-time only:**
 
-1. Adoption happens exactly once per claim. The `AssignedSandboxNameAnnotation`
+1. Adoption normally happens once per claim. The `AssignedSandboxNameAnnotation`
    is set during adoption and checked before re-entering the adoption path.
-   Once set, the claim never re-enters `adoptSandboxFromCandidates`.
+   However, if the assigned sandbox is lost (deleted, not found, or owned by
+   another claim), the controller removes the annotation
+   (`removeAssignedSandboxReference`) and the claim re-enters adoption. On
+   re-adoption, the nil check (`fresh.Spec.Lifecycle == nil`) prevents
+   re-injection if the previous adoption already persisted a lifecycle — the
+   injected lifecycle survives annotation removal because only annotations and
+   labels are cleared, not spec fields.
 2. The `r.Update` at this point is a full-object PUT. The lifecycle is persisted
    to the API server atomically with the adoption annotation.
 3. On conflict retry (`retryAdoptionWithDefaults`), the claim is re-read fresh
@@ -371,24 +388,32 @@ expected to set lifecycle directly.
 
 v1beta1 is the storage version. v1alpha1 has no `ClaimDefaults` field.
 
-**v1beta1 → v1alpha1 (`ConvertFrom`):**
+The existing conversion already preserves v1alpha1-only state: `ConvertTo`
+(v1alpha1 → v1beta1) serializes the full v1alpha1 object into a
+`v1alpha1SandboxWarmPoolStateAnnotation` on the v1beta1 object, and
+`ConvertFrom` (v1beta1 → v1alpha1) strips it. This handles the v1alpha1 →
+v1beta1 → v1alpha1 direction.
 
-Serialize `ClaimDefaults` into a state-preservation annotation on the v1alpha1
-object (e.g., `api.agents.x-k8s.io/v1beta1-sandboxwarmpool-state`). This
-follows the existing pattern used by `SandboxClaim` conversion
-(`v1alpha1SandboxClaimStateAnnotation`).
+For the reverse direction (v1beta1 → v1alpha1 → v1beta1), `ClaimDefaults`
+must survive the round-trip. The spec-level helpers (`convertWarmPoolSpecFrom`
+/ `convertWarmPoolSpecTo`) only receive `*SandboxWarmPoolSpec` and cannot
+access annotations, so the preservation must happen at the **object level**
+in `ConvertFrom` and `ConvertTo`:
 
-**v1alpha1 → v1beta1 (`ConvertTo`):**
+**v1beta1 → v1alpha1 (`ConvertFrom`):** After `convertWarmPoolSpecFrom`,
+serialize `src.Spec.ClaimDefaults` (if non-nil) into a new annotation on the
+v1alpha1 object (e.g., `api.agents.x-k8s.io/v1beta1-sandboxwarmpool-state`).
+This mirrors the existing pattern but in the reverse direction.
 
-If the state annotation is present, deserialize and restore `ClaimDefaults`
-on the v1beta1 object.
+**v1alpha1 → v1beta1 (`ConvertTo`):** After `convertWarmPoolSpecTo`, check
+the v1alpha1 object for the v1beta1 state annotation. If present, deserialize
+and restore `ClaimDefaults` on the v1beta1 `Spec`. Strip the annotation from
+the v1beta1 object so it does not leak.
 
-This ensures lossless round-tripping: a v1beta1 pool with `claimDefaults` read
-via v1alpha1 and written back via v1alpha1 retains the field.
-
-Changes in `extensions/api/v1alpha1/sandboxwarmpool_conversion.go`:
-- `convertWarmPoolSpecFrom`: serialize `src.Spec.ClaimDefaults` into annotation
-- `convertWarmPoolSpecTo`: restore from annotation if present
+This ensures lossless round-tripping in both directions: a v1beta1 pool with
+`claimDefaults` read via v1alpha1 and written back retains the field, and a
+v1beta1-originated pool updated through the v1alpha1 API preserves
+`ClaimDefaults`.
 
 ### Test Plan
 
@@ -400,14 +425,14 @@ Changes in `extensions/api/v1alpha1/sandboxwarmpool_conversion.go`:
 | `warm + explicit Retain + claimDefaults` | Pool has `Delete+TTL=0` defaults, claim has explicit `Retain` | Claim lifecycle unchanged. Pool defaults ignored. |
 | `warm + nil lifecycle + no claimDefaults` | Pool has no `claimDefaults`, claim has `Lifecycle: nil` | Claim adopted with `Lifecycle: nil`. Behavior identical to today. |
 | `warm + nil lifecycle + pool not found` | Pool deleted before adoption completes | Existing `ErrWarmPoolNotFound` handling. No crash. |
-| `non-warm claim + nil lifecycle` | Claim creates sandbox directly (no pool) | Lifecycle remains nil. `claimDefaults` not consulted. |
+| `cold fallback + nil lifecycle` | No ready candidate in pool, claim falls through to `createSandbox` | Lifecycle remains nil. `claimDefaults` not applied on the cold path. |
 
 **Conversion tests** (`extensions/api/v1alpha1/sandboxwarmpool_conversion_test.go`):
 
 | Test case | Expected |
 |-----------|----------|
 | Round-trip with `ClaimDefaults` populated | v1beta1 → v1alpha1 → v1beta1 preserves `ClaimDefaults` via state annotation |
-| Round-trip with `ClaimDefaults` nil | No annotation added. Identical to current behavior. |
+| Round-trip with `ClaimDefaults` nil | No v1beta1 state annotation on the v1alpha1 object. Restored v1beta1 has nil `ClaimDefaults`. Identical to current behavior. |
 
 **E2E tests** (if appropriate for scope):
 

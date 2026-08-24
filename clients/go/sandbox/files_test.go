@@ -960,6 +960,12 @@ func TestUploadLimitReader_BoundedChunks(t *testing.T) {
 
 func TestWriteReader_LegacyMultipartUpload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength != -1 {
+			t.Errorf("ContentLength = %d, want -1 for streaming upload", r.ContentLength)
+		}
+		if len(r.TransferEncoding) != 1 || r.TransferEncoding[0] != "chunked" {
+			t.Errorf("TransferEncoding = %v, want [chunked]", r.TransferEncoding)
+		}
 		mr, err := r.MultipartReader()
 		if err != nil {
 			t.Errorf("MultipartReader() error: %v", err)
@@ -1090,17 +1096,34 @@ func TestWriteReader_ReaderError(t *testing.T) {
 }
 
 func TestWriteReader_ExceedsMaxUploadSize(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+	tests := []struct {
+		name       string
+		runtime    Runtime
+		path       string
+		wantMethod string
+	}{
+		{name: "legacy multipart", runtime: RuntimeLegacyPython, path: "stream.txt", wantMethod: http.MethodPost},
+		{name: "sandboxd raw PUT", runtime: RuntimeSandboxd, path: "dir/stream.txt", wantMethod: http.MethodPut},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tt.wantMethod {
+					t.Errorf("method = %s, want %s", r.Method, tt.wantMethod)
+				}
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
 
-	c := newReadyTestSandbox(server.URL)
-	c.files.maxUpload = 4
-	err := c.WriteReader(context.Background(), "stream.txt", strings.NewReader("12345"))
-	if err == nil || !strings.Contains(err.Error(), "exceeds MaxUploadSize") {
-		t.Fatalf("expected upload size error, got %v", err)
+			c := newReadyTestSandbox(server.URL)
+			c.files.runtime = tt.runtime
+			c.files.maxUpload = 4
+			err := c.WriteReader(context.Background(), tt.path, strings.NewReader("12345"))
+			if err == nil || !strings.Contains(err.Error(), "exceeds MaxUploadSize") {
+				t.Fatalf("expected upload size error, got %v", err)
+			}
+		})
 	}
 }
 

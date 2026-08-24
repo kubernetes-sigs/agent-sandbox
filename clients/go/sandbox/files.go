@@ -168,7 +168,9 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 // accepts relative paths and creates parent directories automatically. For an
 // unknown-length reader, MaxUploadSize is enforced while the request is being
 // streamed; the server may therefore receive a prefix before an oversized
-// upload is rejected.
+// upload is rejected. Legacy streaming uploads use HTTP chunked transfer
+// encoding, so compatible runtimes and proxies must accept streaming request
+// bodies without a Content-Length header.
 func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
 	defer f.trackOp()()
 	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)

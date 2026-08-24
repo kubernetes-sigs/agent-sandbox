@@ -565,6 +565,7 @@ func (s *Sandbox) Write(ctx context.Context, path string, content []byte, opts .
 func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
 	return s.files.WriteReader(ctx, path, content, opts...)
 }
+
 func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
 	return s.files.Read(ctx, path, opts...)
 }

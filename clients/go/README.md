@@ -130,6 +130,8 @@ err := sb.Write(ctx, "script.py", []byte("print('hello')"))
 
 // Stream a large file without buffering it in memory. Streaming uploads use
 // one request attempt because an io.Reader cannot generally be replayed.
+// Legacy runtime uploads use HTTP chunked transfer encoding, so the runtime
+// and any proxy in front of it must accept requests without Content-Length.
 // (The example requires imports for os and log.)
 file, err := os.Open("model.bin")
 if err != nil { log.Fatal(err) }

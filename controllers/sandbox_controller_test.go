@@ -1732,6 +1732,7 @@ func TestReconcilePod(t *testing.T) {
 							// Attacker attempts to hijack another Sandbox's routing label
 							// and to spoof an extensions-prefixed system label.
 							"agents.x-k8s.io/sandbox-name-hash":          "malicious-hijacked-hash",
+							extensionsv1beta1.SandboxIDLabel:             "malicious-claim-uid",
 							"extensions.agents.x-k8s.io/warm-pool-spoof": "evil",
 							"custom-label": "label-val",
 						},
@@ -2202,6 +2203,114 @@ func TestReconcilePod(t *testing.T) {
 						"agents.x-k8s.io/sandbox-name-hash":        nameHash,
 						"custom-label":                             "label-val",
 						sandboxv1beta1.SandboxTemplateRefHashLabel: "da1fd924",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+		},
+		{
+			name: "propagates claim UID label from Sandbox labels to new Pod",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						extensionsv1beta1.SandboxIDLabel: "claim-uid",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						extensionsv1beta1.SandboxIDLabel:    "claim-uid",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+		},
+		{
+			name: "adds claim UID label to existing Pod during reconciliation",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							"custom-label":                      "label-val",
+						},
+						Annotations: map[string]string{
+							"agents.x-k8s.io/propagated-labels": "custom-label",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						extensionsv1beta1.SandboxIDLabel: "claim-uid",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						extensionsv1beta1.SandboxIDLabel:    "claim-uid",
 					},
 					Annotations: map[string]string{
 						"agents.x-k8s.io/propagated-labels": "custom-label",

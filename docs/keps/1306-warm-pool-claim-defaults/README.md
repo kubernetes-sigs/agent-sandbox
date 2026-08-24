@@ -134,7 +134,7 @@ claim, executes code, and discards it. Without a lifecycle:
   retains network access, mounted secrets, and service account tokens (if
   enabled). The [threat model](../../security/threat_model.md) identifies
   untrusted LLM-generated code as the primary threat vector. Zombie
-  sandboxes are unnecessary attack surface that `Delete + TTL=0` eliminates.
+  sandboxes are unnecessary attack surface that `Delete + TTL` eliminates.
 
 ### The production viability question
 
@@ -214,11 +214,11 @@ spec:
   claimDefaults:
     lifecycle:
       shutdownPolicy: Delete
-      ttlSecondsAfterFinished: 0
+      ttlSecondsAfterFinished: 10
 ```
 
 Any `SandboxClaim` targeting `kata-agent-pool` with `Lifecycle: nil` will
-inherit `Delete + TTL=0`. A claim that explicitly sets `Retain` keeps its
+inherit `Delete + TTL=10s`. A claim that explicitly sets `Retain` keeps its
 setting.
 
 **Story 2: Developer using the default pool for debugging**
@@ -241,7 +241,7 @@ clients that forget, not an override for clients that choose.
 | Operator adds `claimDefaults` to a pool with existing `Lifecycle: nil` claims whose workloads have finished | Defaults are applied **only during adoption** (create-time). Existing claims are already adopted and never re-enter the adoption path. No retroactive deletion. |
 | `claimDefaults` lost during v1alpha1 round-trip | State-preservation annotation on the v1alpha1 object stores the serialized `ClaimDefaults`, restored on conversion back to v1beta1. Covered by round-trip test. |
 | Confusion about which lifecycle applies | The claim's `Spec.Lifecycle` is always the source of truth. `claimDefaults` is copied into it at creation — after adoption, `kubectl get sandboxclaim -o yaml` shows the effective lifecycle directly. No indirection. |
-| Suspended sandbox auto-deleted by injected TTL | `TTLSecondsAfterFinished` counts from workload completion, not from adoption. A sandbox in `operatingMode: Suspended` ([KEP-694][694]) is intentionally on hold — it has not finished. The expiration controller (`checkExpiration`) must treat `Suspended` as a non-terminal state and not start the TTL clock. This is KEP-694's responsibility; `claimDefaults` only sets the values, it does not alter expiration semantics. |
+| Transient `Finished` during suspension could start TTL | When a sandbox is suspended ([KEP-694][694]), the controller deletes the pod. During pod termination, containers that exit non-zero briefly produce a `PodFailed` phase, which `computeFinishedCondition` reflects as `Finished: True` on the sandbox. This condition is **transient** — once the pod is fully removed, the sandbox controller drops `Finished` from the conditions array, and the claim controller mirrors the removal. With `TTL=0`, the claim could theoretically be expired and deleted during the 1-2 second race window before the transient condition is cleaned up. `TTL=10` eliminates this: the 10-second grace period far exceeds the pod termination window, so the transient `Finished` is always cleaned up before expiry fires. The 10-second delay has zero practical impact on resource leak prevention — the problem being solved is VMs running for hours/days, not seconds. |
 
 ## Design Details
 
@@ -421,8 +421,8 @@ v1beta1-originated pool updated through the v1alpha1 API preserves
 
 | Test case | Setup | Expected |
 |-----------|-------|----------|
-| `warm + nil lifecycle + claimDefaults` | Pool has `Delete+TTL=0` defaults, claim has `Lifecycle: nil` | Claim adopted with `Delete+TTL=0` lifecycle. `kubectl get claim` shows lifecycle. |
-| `warm + explicit Retain + claimDefaults` | Pool has `Delete+TTL=0` defaults, claim has explicit `Retain` | Claim lifecycle unchanged. Pool defaults ignored. |
+| `warm + nil lifecycle + claimDefaults` | Pool has `Delete+TTL=10` defaults, claim has `Lifecycle: nil` | Claim adopted with `Delete+TTL=10` lifecycle. `kubectl get claim` shows lifecycle. |
+| `warm + explicit Retain + claimDefaults` | Pool has `Delete+TTL=10` defaults, claim has explicit `Retain` | Claim lifecycle unchanged. Pool defaults ignored. |
 | `warm + nil lifecycle + no claimDefaults` | Pool has no `claimDefaults`, claim has `Lifecycle: nil` | Claim adopted with `Lifecycle: nil`. Behavior identical to today. |
 | `warm + nil lifecycle + pool not found` | Pool deleted before adoption completes | Existing `ErrWarmPoolNotFound` handling. No crash. |
 | `cold fallback + nil lifecycle` | No ready candidate in pool, claim falls through to `createSandbox` | Lifecycle remains nil. `claimDefaults` not applied on the cold path. |
@@ -436,7 +436,7 @@ v1beta1-originated pool updated through the v1alpha1 API preserves
 
 **E2E tests** (if appropriate for scope):
 
-- Create pool with `claimDefaults.lifecycle: Delete+TTL=0`, create claim with
+- Create pool with `claimDefaults.lifecycle: Delete+TTL=10`, create claim with
   nil lifecycle, verify claim auto-deletes after workload finishes.
 
 ### Upgrade / Downgrade Strategy

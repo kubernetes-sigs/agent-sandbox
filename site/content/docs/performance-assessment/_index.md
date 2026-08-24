@@ -339,6 +339,7 @@ The controller exposes all metrics at its `/metrics` endpoint; a Prometheus `Ser
 
 ## See Also
 
+- [Controller Metrics Reference]({{< ref "/docs/metrics" >}}) — every metric family the controller exposes, with types, labels, and availability conditions
 - [Configuration reference](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md) — full flag reference for the controller
 - [Running tests](../contribution-guidelines/testing/) — unit, integration and e2e test commands
 - [ClusterLoader2 getting started](https://github.com/kubernetes/perf-tests/blob/master/clusterloader2/docs/GETTING_STARTED.md)

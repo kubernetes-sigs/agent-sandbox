@@ -152,8 +152,7 @@ func (e *multipleSandboxPodsError) Error() string {
 }
 
 func asMultipleSandboxPodsError(err error) *multipleSandboxPodsError {
-	var multiplePodsErr *multipleSandboxPodsError
-	if errors.As(err, &multiplePodsErr) {
+	if multiplePodsErr, ok := errors.AsType[*multipleSandboxPodsError](err); ok {
 		return multiplePodsErr
 	}
 	return nil

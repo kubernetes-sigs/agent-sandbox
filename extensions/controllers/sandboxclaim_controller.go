@@ -313,8 +313,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Pending warm candidates are expected transient state, not a claim failure.
 	// Return before status calculation so the grace period does not publish a
 	// misleading SandboxMissing or ReconcilerError condition.
-	var pendingWarmCandidates *warmCandidatesPendingError
-	if errors.As(reconcileErr, &pendingWarmCandidates) {
+	if pendingWarmCandidates, ok := errors.AsType[*warmCandidatesPendingError](reconcileErr); ok {
 		logger.V(4).Info("Waiting for warm pool candidates to report Pod IPs",
 			"claim", claim.Name,
 			"warmPool", claim.Spec.WarmPoolRef.Name,

@@ -236,8 +236,7 @@ func (s *promScraper) scrapeOne(ctx context.Context, src promSource) error {
 		// Component metrics endpoints often return non-Status error bodies,
 		// which client-go reports as just "unknown"; include the HTTP code
 		// and body so failures (401/403 vs 503) are distinguishable in CI.
-		var statusErr *apierrors.StatusError
-		if errors.As(err, &statusErr) {
+		if statusErr, ok := errors.AsType[*apierrors.StatusError](err); ok {
 			return fmt.Errorf("HTTP %d: %s (%w)", statusErr.Status().Code, strings.TrimSpace(string(raw)), err)
 		}
 		return err

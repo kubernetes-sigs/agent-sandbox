@@ -325,8 +325,7 @@ func (s *Sandbox) ExecCommand(ctx context.Context, opts tools.ExecCommandOptions
 
 	exitCode := 0
 	if err != nil {
-		var exitErr exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[exec.ExitError](err); ok {
 			exitCode = exitErr.ExitStatus()
 		} else {
 			return nil, fmt.Errorf("kubernetes exec failed: %w", err)

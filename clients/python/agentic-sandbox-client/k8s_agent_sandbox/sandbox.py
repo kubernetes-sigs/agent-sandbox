@@ -23,6 +23,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
+from .constants import POD_NAME_ANNOTATION
 from .utils import select_pod_ip, extract_sandbox_name_hash
 
 
@@ -78,11 +79,15 @@ class Sandbox:
         self._sandbox_name_hash = None
         
     def get_pod_name(self) -> str:
-        """Returns the pod name backing this sandbox (matching the sandbox ID)."""
+        """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
         if self._pod_name is not None:
             return self._pod_name
 
-        self._pod_name = self.sandbox_id
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        metadata = sandbox_object.get('metadata') or {}
+        annotations = metadata.get('annotations') or {}
+        pod_name = annotations.get(POD_NAME_ANNOTATION)
+        self._pod_name = pod_name if pod_name is not None else self.sandbox_id
         return self._pod_name
 
 

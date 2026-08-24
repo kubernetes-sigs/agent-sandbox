@@ -845,8 +845,16 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // condition report false, preserving the delete-and-replace behavior for
 // genuinely stuck sandboxes.
 func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(ctx context.Context, sb *sandboxv1beta1.Sandbox) bool {
+	// The backing pod normally shares the sandbox's name; a sandbox that
+	// adopted a warm pod tracks the pod name in an annotation (same
+	// resolution the sandbox controller uses).
+	podName := sb.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation]
+	if podName == "" {
+		podName = sb.Name
+	}
+
 	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}, pod); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod); err != nil {
 		return false
 	}
 	if !pod.DeletionTimestamp.IsZero() {

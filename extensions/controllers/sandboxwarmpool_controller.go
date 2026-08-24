@@ -848,7 +848,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(ctx context.Contex
 	// The backing pod normally shares the sandbox's name; a sandbox that
 	// adopted a warm pod tracks the pod name in an annotation (same
 	// resolution the sandbox controller uses).
-	podName := sb.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation]
+	podName := sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
 	if podName == "" {
 		podName = sb.Name
 	}

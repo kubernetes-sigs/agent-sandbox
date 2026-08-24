@@ -188,7 +188,7 @@ func containsPod(pods []*corev1.Pod, pod *corev1.Pod) bool {
 // pod before the refactor to make the warm pool create full Sandbox CRs may still carry the agents.x-k8s.io/pod-name
 // annotation which holds the Pod's real name. Otherwise, the Pod name is the same as the Sandbox name.
 func resolvePodName(sandbox *sandboxv1beta1.Sandbox) string {
-	if name, ok := sandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation]; ok && name != "" {
+	if name, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
 		return name
 	}
 	return sandbox.Name
@@ -1154,12 +1154,12 @@ func servicePortsEqual(a, b []corev1.ServicePort) bool {
 
 // clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
 func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
-	if _, exists := sandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation]; !exists {
+	if _, exists := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; !exists {
 		return nil
 	}
 	logger := log.FromContext(ctx)
 	patch := client.MergeFrom(sandbox.DeepCopy())
-	delete(sandbox.Annotations, sandboxv1beta1.DeprecatedSandboxPodNameAnnotation)
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
 		return fmt.Errorf("failed to clear pod name annotation: %w", err)
 	}
@@ -1202,7 +1202,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	// Determine the pod name to look up
 	podName := resolvePodName(sandbox)
-	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation]
+	_, podNameAnnotationExists := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
 	if podName != sandbox.Name {
 		logger.Info("Using tracked pod name from sandbox annotation", "podName", podName)
 	}

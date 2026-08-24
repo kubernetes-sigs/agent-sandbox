@@ -512,12 +512,12 @@ func TestResolvePodName(t *testing.T) {
 		},
 		{
 			name:        "annotation present but empty",
-			annotations: map[string]string{sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: ""},
+			annotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: ""},
 			wantPodName: "my-sandbox",
 		},
 		{
 			name:        "annotation present with warm pool pod name",
-			annotations: map[string]string{sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "warmpool-abc-xyz"},
+			annotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "warmpool-abc-xyz"},
 			wantPodName: "warmpool-abc-xyz",
 		},
 	}
@@ -1136,7 +1136,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			sandboxAnnotations: map[string]string{
-				sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "warmpool-abc-xyz",
+				sandboxv1beta1.SandboxPodNameAnnotation: "warmpool-abc-xyz",
 			},
 			sandboxSpec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
 				Spec: corev1.PodSpec{
@@ -2524,7 +2524,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 					Annotations: map[string]string{
-						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "adopted-pod-name",
+						sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
@@ -2621,8 +2621,8 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "victim-pod",
-						"other-annotation": "keep-me",
+						sandboxv1beta1.SandboxPodNameAnnotation: "victim-pod",
+						"other-annotation":                      "keep-me",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2672,8 +2672,8 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "unowned-pod",
-						"other-annotation": "keep-me",
+						sandboxv1beta1.SandboxPodNameAnnotation: "unowned-pod",
+						"other-annotation":                      "keep-me",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2716,8 +2716,8 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 					Annotations: map[string]string{
-						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "owned-pod",
-						"other-annotation": "keep-me",
+						sandboxv1beta1.SandboxPodNameAnnotation: "owned-pod",
+						"other-annotation":                      "keep-me",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2727,8 +2727,8 @@ func TestReconcilePod(t *testing.T) {
 			wantPodDeleting: true,
 			expectErr:       false,
 			wantSandboxAnnotations: map[string]string{
-				"other-annotation": "keep-me",
-				sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "owned-pod",
+				"other-annotation":                      "keep-me",
+				sandboxv1beta1.SandboxPodNameAnnotation: "owned-pod",
 			},
 		},
 		{
@@ -2760,7 +2760,7 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "foreign-pod",
+						sandboxv1beta1.SandboxPodNameAnnotation: "foreign-pod",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
@@ -2790,8 +2790,8 @@ func TestReconcilePod(t *testing.T) {
 					Name:      sandboxName,
 					Namespace: sandboxNs,
 					Annotations: map[string]string{
-						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "annotated-pod-name",
-						"other-annotation": "other-value",
+						sandboxv1beta1.SandboxPodNameAnnotation: "annotated-pod-name",
+						"other-annotation":                      "other-value",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{
@@ -2901,7 +2901,7 @@ func TestReconcilePod(t *testing.T) {
 					Namespace: sandboxNs,
 					UID:       sandboxUID,
 					Annotations: map[string]string{
-						sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "adopted-pod-name",
+						sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name",
 					},
 				},
 				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
@@ -2913,7 +2913,7 @@ func TestReconcilePod(t *testing.T) {
 			},
 			wantPod:                nil,
 			expectErr:              true,
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "adopted-pod-name"},
+			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: "adopted-pod-name"},
 		},
 		{
 			name:        "propagates and normalizes created-by label value go-client",
@@ -3139,7 +3139,7 @@ func TestReconcilePod(t *testing.T) {
 						// When wantPod is nil and no error expected, verify pod doesn't exist
 						livePod := &corev1.Pod{}
 						podName := sandboxName
-						if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation]; exists && annotatedPod != "" {
+						if annotatedPod, exists := tc.sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; exists && annotatedPod != "" {
 							podName = annotatedPod
 						}
 						err = r.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: sandboxNs}, livePod)
@@ -3176,7 +3176,7 @@ func TestReconcilePodRecoversOwnedPodWhenTrackedPodIsMissing(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 			Annotations: map[string]string{
-				sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: "warm-pod-missing",
+				sandboxv1beta1.SandboxPodNameAnnotation: "warm-pod-missing",
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
@@ -3216,7 +3216,7 @@ func TestReconcilePodRecoversOwnedPodWhenTrackedPodIsMissing(t *testing.T) {
 
 	liveSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sandbox), liveSandbox))
-	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation])
+	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
 }
 
 func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
@@ -3234,7 +3234,7 @@ func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
 			Namespace: sandboxNs,
 			UID:       sandboxUID,
 			Annotations: map[string]string{
-				sandboxv1beta1.DeprecatedSandboxPodNameAnnotation: staleTarget,
+				sandboxv1beta1.SandboxPodNameAnnotation: staleTarget,
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
@@ -3282,7 +3282,7 @@ func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
 
 	liveSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sandbox), liveSandbox))
-	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.DeprecatedSandboxPodNameAnnotation])
+	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
 }
 
 func TestReconcilePodFailsClosedForMultipleOwnedPods(t *testing.T) {

@@ -51,7 +51,6 @@ func (t *RunCommand) Run(ctx context.Context, sandbox Sandbox) (llm.Message, err
 	log := klog.FromContext(ctx)
 
 	log.Info("executing command in sandbox", "command", t.Command)
-	// TODO: Add a timeout to the tool execution?
 	res, err := sandbox.ExecCommand(ctx, ExecCommandOptions{
 		Command: []string{"sh", "-c", t.Command},
 	})

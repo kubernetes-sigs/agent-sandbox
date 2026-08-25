@@ -96,7 +96,6 @@ default pool logs a warning (the pool's template decides the real image).
 | `metadata` | SandboxClaim labels (must satisfy Kubernetes label syntax) |
 | `resources` | **Ignored with a warning** — resources come from the SandboxTemplate |
 | `entrypoint` | **Unsupported** (create error) — the template owns the pod command |
-| `ports` | **Ignored with a warning** — no `SupportsSandboxEndpoint` yet |
 | `exec(user=...)` | **Ignored with a warning** — the runtime API runs as the pod user |
 
 Implementation notes:

@@ -416,12 +416,6 @@ class AgentSandboxProvider:
                 "from the warm pool's SandboxTemplate.",
                 ", ".join(ignored),
             )
-        if spec.ports:
-            LOGGER.warning(
-                "spec.ports=%s is ignored: the agent_sandbox provider does not resolve service "
-                "endpoints yet (SupportsSandboxEndpoint is not implemented).",
-                list(spec.ports),
-            )
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Claim a sandbox from a warm pool, wait for the bind, then probe exec readiness.

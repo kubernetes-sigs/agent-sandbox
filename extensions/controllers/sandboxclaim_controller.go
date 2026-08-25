@@ -1824,12 +1824,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		if k8errors.IsAlreadyExists(err) {
 			liveSandbox := &v1beta1.Sandbox{}
 			if readErr := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(sandbox), liveSandbox); readErr != nil {
-				logger.V(1).Info("Authoritative read after AlreadyExists failed; falling back to bounded requeue", "sandbox", sandbox.Name, "error", readErr.Error())
-				return nil, fmt.Errorf("%w: %w", errSandboxAlreadyExists, err)
+				logger.V(1).Info("Authoritative read after AlreadyExists failed; falling back to bounded requeue", "claim", claim.Name, "sandbox", sandbox.Name, "error", readErr)
+				return nil, fmt.Errorf("%w: %w (authoritative read failed: %w)", errSandboxAlreadyExists, err, readErr)
 			}
 			if !metav1.IsControlledBy(liveSandbox, claim) {
 				collisionErr := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", liveSandbox.Name, claim.Name)
-				logger.Error(collisionErr, "Sandbox controller mismatch")
+				logger.Error(collisionErr, "Sandbox controller mismatch", "claim", claim.Name, "sandbox", liveSandbox.Name)
 				return nil, collisionErr
 			}
 			logger.V(4).Info("Recovered just-created sandbox via authoritative read after AlreadyExists", "claim", claim.Name, "sandbox", liveSandbox.Name)

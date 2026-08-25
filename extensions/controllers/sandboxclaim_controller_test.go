@@ -8217,7 +8217,7 @@ func TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead(t *testing.T) {
 
 	result, err := reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	require.NotEqual(t, cacheLagRequeueDelay, result.RequeueAfter, "in-pass recovery must not fall back to the cache-lag requeue")
+	require.Zero(t, result.RequeueAfter, "in-pass recovery must not fall back to the cache-lag requeue or any other delay")
 
 	// The claim binds to the pre-existing sandbox in the first pass.
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
@@ -8318,4 +8318,104 @@ func TestCreateSandboxAlreadyExistsNameCollisionIsTerminal(t *testing.T) {
 	updatedClaim := &extensionsv1beta1.SandboxClaim{}
 	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
 	require.Empty(t, updatedClaim.Status.SandboxStatus.Name, "claim must not bind to a sandbox it does not control")
+}
+
+// TestCreateSandboxAlreadyExistsAuthoritativeReadFailure verifies the fallback
+// when a CONFIGURED APIReader fails after an AlreadyExists: createSandbox must
+// keep the cache-lag sentinel, the original AlreadyExists, and the read error
+// all identifiable in the error chain, and Reconcile must convert the sentinel
+// into the bounded cacheLagRequeueDelay requeue with a nil error.
+func TestCreateSandboxAlreadyExistsAuthoritativeReadFailure(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "already-exists-read-failure-claim"
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	// Pre-create the sandbox owned by this claim to simulate a previous successful create.
+	existingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxClaim",
+				Name:       claimName,
+				UID:        "claim-uid",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, warmPool, template, existingSandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == claimName {
+					return k8errors.NewNotFound(
+						schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+						key.Name,
+					)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	// The APIReader is configured but unhealthy: every read fails with a
+	// distinguishable sentinel.
+	readFailure := errors.New("authoritative reader unavailable")
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+				return readFailure
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	// Direct createSandbox call: the full error chain must stay inspectable.
+	_, err := reconciler.createSandbox(context.Background(), claim.DeepCopy(), template)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errSandboxAlreadyExists, "sentinel must survive for the bounded-requeue conversion")
+	require.ErrorIs(t, err, readFailure, "read failure cause must stay identifiable via errors.Is")
+	require.True(t, k8errors.IsAlreadyExists(err), "original AlreadyExists must stay identifiable")
+
+	// Reconcile-level: the sentinel converts to the bounded requeue with nil error.
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+	result, reconcileErr := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, reconcileErr, "sentinel should be converted to nil error")
+	require.Equal(t, cacheLagRequeueDelay, result.RequeueAfter, "expected bounded requeue delay when the authoritative read fails")
 }

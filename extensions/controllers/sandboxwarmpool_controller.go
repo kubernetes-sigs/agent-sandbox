@@ -540,7 +540,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// loop (#1215). Hold the sandbox and retry on a rate-limited
 			// requeue instead; the scheduler will place it when capacity
 			// frees up.
-			if r.isSandboxPodUnschedulable(&sb) {
+			if isSandboxPodUnschedulable(&sb) {
 				unschedulableReplicas++
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
@@ -849,16 +849,29 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // definitive PodScheduled=False/Unschedulable condition report false, preserving
 // the delete-and-replace behavior for genuinely stuck sandboxes.
 //
+// Only Unschedulable is a hold signal. The mirror carries every scheduler reason
+// verbatim, but any other False reason (SchedulingGated, for instance) is a state
+// the scheduler is expected to resolve on its own, so it falls through to the
+// stuck-sandbox path exactly as it did before. Widening the set of hold reasons is
+// a deliberate behavioral decision, not something this should infer.
+//
 // The mirror is removed when the Pod is confirmed absent and reports Unknown on a
 // transient Pod lookup failure, so both cases fall through to false here — the
 // same outcome as the previous direct Pod read, which returned false on a failed
 // Get.
-func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
+func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	// A sandbox being torn down keeps its last mirrored condition until the
 	// sandbox controller reconciles the Pod's absence, so a terminating sandbox
 	// can still carry a stale Unschedulable. Treat it as not-unschedulable so the
-	// pool does not hold a slot on a sandbox that is already going away; the
-	// previous implementation got this from the Pod's DeletionTimestamp.
+	// pool does not hold a slot on a sandbox that is already going away.
+	//
+	// This is the Sandbox's DeletionTimestamp, not the Pod's, so it is not a
+	// like-for-like replacement of the previous check: a Pod can be deleting while
+	// its Sandbox is not (the suspend path deliberately keeps reporting the
+	// deleting Pod). In that window this reports the last mirrored value, so a
+	// stale Unschedulable holds the sandbox until the sandbox controller updates
+	// or removes the mirror. Holding a suspending sandbox is the safer error --
+	// the alternative is GC'ing it as "stuck" mid-suspend.
 	if !sb.DeletionTimestamp.IsZero() {
 		return false
 	}

@@ -485,10 +485,86 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		sb.DeletionTimestamp = &now
 		sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
 
-		r := SandboxWarmPoolReconciler{Scheme: newTestScheme()}
-		require.False(t, r.isSandboxPodUnschedulable(sb),
+		require.False(t, isSandboxPodUnschedulable(sb),
 			"a terminating sandbox must not be treated as unschedulable-and-held")
 	})
+}
+
+// TestIsSandboxPodUnschedulable pins the decision table of the mirrored-condition
+// read directly, independent of reconcilePool. Only PodScheduled=False with reason
+// Unschedulable is a hold signal: a missing condition and an Unknown status are the
+// two shapes the mirror uses for "Pod absent" and "Pod state unknown", and any
+// other False reason (SchedulingGated) is a state the scheduler resolves itself, so
+// all of them must fall through to the stuck-sandbox path.
+func TestIsSandboxPodUnschedulable(t *testing.T) {
+	deleting := metav1.Now()
+
+	cond := func(status metav1.ConditionStatus, reason string) []metav1.Condition {
+		return []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             status,
+			Reason:             reason,
+			LastTransitionTime: metav1.Now(),
+		}}
+	}
+
+	tests := []struct {
+		name       string
+		conditions []metav1.Condition
+		deleting   bool
+		want       bool
+	}{
+		{
+			name:       "no PodScheduled condition (mirror removed: Pod confirmed absent)",
+			conditions: nil,
+			want:       false,
+		},
+		{
+			name:       "other conditions but no PodScheduled",
+			conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "NotReady", LastTransitionTime: metav1.Now()}},
+			want:       false,
+		},
+		{
+			name:       "Unknown (transient Pod lookup failure)",
+			conditions: cond(metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonPodSchedulingUnknown),
+			want:       false,
+		},
+		{
+			name:       "True/PodScheduled (scheduled fine; stuck for another reason)",
+			conditions: cond(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled),
+			want:       false,
+		},
+		{
+			name:       "False/SchedulingGated (scheduler resolves this itself)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulingGated),
+			want:       false,
+		},
+		{
+			name:       "False/Unschedulable (the hold signal)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			want:       true,
+		},
+		{
+			name:       "deleting sandbox with a stale False/Unschedulable",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			deleting:   true,
+			want:       false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
+				Status:     sandboxv1beta1.SandboxStatus{Conditions: tc.conditions},
+			}
+			if tc.deleting {
+				sb.DeletionTimestamp = &deleting
+				sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
+			}
+			require.Equal(t, tc.want, isSandboxPodUnschedulable(sb))
+		})
+	}
 }
 
 // phantomListClient wraps the fake client to model the opposite staleness of

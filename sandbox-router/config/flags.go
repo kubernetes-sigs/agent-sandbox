@@ -179,7 +179,9 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"--authz-cookie-samesite=none.")
 	stringSliceVar(fs, &c.AuthzCookieAllowedOrigins, "authz-cookie-allowed-origins",
 		"Comma-separated allowlist of scheme://host[:port] Origins permitted "+
-			"to open a protocol upgrade authorized by --authz-cookie-name. "+
+			"to make a cookie-authenticated request authorized by "+
+			"--authz-cookie-name — any request, not just protocol upgrades, "+
+			"though a WebSocket handshake is the case this exists for. "+
 			"Same-origin requests are always allowed regardless of this "+
 			"list; a request with no Origin header is let through here since "+
 			"there is nothing for this check to inspect. Only checked when "+

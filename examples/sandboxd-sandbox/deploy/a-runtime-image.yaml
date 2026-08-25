@@ -18,8 +18,9 @@
 # ProcessService commands run inside THIS container's filesystem. Whatever
 # tools the agent invokes (python3, node, git, ...) must exist in this image.
 #
-# The base sandboxd image ships a minimal (busybox) toolset. To add tools,
-# build your own image FROM the sandboxd image, e.g.:
+# The base sandboxd image (debian:bookworm-slim) ships a shell and coreutils
+# but no language runtimes. To add tools, build your own image FROM the
+# sandboxd image, e.g.:
 #
 #     FROM us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
 #     USER root

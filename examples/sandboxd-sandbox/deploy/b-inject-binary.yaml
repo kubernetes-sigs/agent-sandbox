@@ -28,6 +28,13 @@
 # image) and sandboxd runs as the container's main process (PID 1). Prefer A
 # when you can build a runtime image.
 #
+# PID 1 caveat: sandboxd reaps the processes it starts, but as PID 1 it also
+# inherits any orphaned grandchildren (e.g. daemons forked by a command), and
+# it does not run a general zombie reaper. For long-lived sandboxes whose
+# commands fork background processes, prefer topology A, or use an image
+# that ships a minimal init (e.g. tini) and set it as the command with
+# sandboxd as its child.
+#
 # Apply this file, then run the client example:
 #   go run ./examples/sandboxd-sandbox/client -warmpool sandboxd-warmpool -namespace default
 apiVersion: extensions.agents.x-k8s.io/v1beta1

@@ -48,14 +48,15 @@ func main() {
 	namespace := flag.String("namespace", "default", "Namespace of the warm pool / sandbox.")
 	path := flag.String("file", "greeting.txt", "File path (relative to /workspace) to write and read back.")
 	content := flag.String("content", "hello from the sandboxd SDK example\n", "Content to write to the file.")
+	extraCmd := flag.String("cmd", "", "Optional extra command to exec in the sandbox (e.g. 'npm --version' to check which topology you're on).")
 	flag.Parse()
 
-	if err := run(*warmPool, *namespace, *path, *content); err != nil {
+	if err := run(*warmPool, *namespace, *path, *content, *extraCmd); err != nil {
 		log.Fatalf("example failed: %v", err)
 	}
 }
 
-func run(warmPool, namespace, path, content string) error {
+func run(warmPool, namespace, path, content, extraCmd string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -89,13 +90,28 @@ func run(warmPool, namespace, path, content string) error {
 	fmt.Printf("wrote %d bytes to %s\n", len(content), path)
 
 	// 3. Exec a command over the gRPC ProcessService and grab its output.
-	result, err := sb.Run(ctx, "cat "+path)
+	// Run passes the command through `sh -c`, so quote anything interpolated.
+	result, err := sb.Run(ctx, fmt.Sprintf("cat %q", path))
 	if err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
 	fmt.Printf("run: exit=%d\nstdout: %s", result.ExitCode, result.Stdout)
 	if result.Stderr != "" {
 		fmt.Printf("stderr: %s", result.Stderr)
+	}
+
+	// 3b. Optionally exec an extra command — handy for checking which
+	// topology you're on (e.g. -cmd 'npm --version' succeeds under the
+	// binary-injection topology, fails in the base runtime image).
+	if extraCmd != "" {
+		extra, err := sb.Run(ctx, extraCmd)
+		if err != nil {
+			return fmt.Errorf("run %q: %w", extraCmd, err)
+		}
+		fmt.Printf("cmd %q: exit=%d\nstdout: %s", extraCmd, extra.ExitCode, extra.Stdout)
+		if extra.Stderr != "" {
+			fmt.Printf("stderr: %s", extra.Stderr)
+		}
 	}
 
 	// 4. Read the file back over REST to confirm the round trip.

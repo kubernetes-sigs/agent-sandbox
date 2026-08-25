@@ -36,11 +36,12 @@ Flags:
 | `-namespace` | `default`           | Namespace of the warm pool / sandbox |
 | `-file`      | `greeting.txt`      | Path (relative to `/workspace`) to write and read back |
 | `-content`   | `hello from …`      | Content to write |
+| `-cmd`       | *(empty)*           | Optional extra command to exec — e.g. `'npm --version'` to [verify which deployment topology you're on](../deploy/README.md#verify-which-topology-you-have) |
 
 ## Expected output
 
 ```
-created sandbox "sandboxd-xxxxx" (claim "sandboxd-warmpool-xxxxx")
+created sandbox "sandboxd-warmpool-xxxxx" (claim "sandbox-claim-xxxxx")
 wrote 36 bytes to greeting.txt
 run: exit=0
 stdout: hello from the sandboxd SDK example
@@ -49,9 +50,12 @@ read back 36 bytes, content matches
 
 ## Notes
 
-- Commands run through `ProcessService` execute **inside the `sandboxd`
-  container**, with `/workspace` as the working directory. Files written over
-  REST land in that same shared volume, which is why `cat greeting.txt` sees the
-  file the SDK just wrote.
-- The base `sandboxd` image ships a minimal (busybox) toolset. To run a language
-  runtime (e.g. `python3`), build a sandboxd image that includes it.
+- Commands run through `ProcessService` execute **inside the container running
+  `sandboxd`** (see [deployment topologies](../deploy/README.md)), with
+  `/workspace` as the working directory. Files written over REST land in that
+  same volume, which is why `cat greeting.txt` sees the file the SDK just
+  wrote.
+- The base `sandboxd` image (`debian:bookworm-slim`) ships a shell and
+  coreutils but no language runtimes. To run one (e.g. `python3`), build a
+  sandboxd image that includes it, or use the binary-injection topology
+  (`../deploy/b-inject-binary.yaml`).

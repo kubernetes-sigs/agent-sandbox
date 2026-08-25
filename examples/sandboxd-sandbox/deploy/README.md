@@ -61,4 +61,22 @@ Then run the SDK example against it — the client code is identical either way:
 $ go run ./examples/sandboxd-sandbox/client -warmpool sandboxd-warmpool -namespace default
 ```
 
+## Verify which topology you have
+
+The litmus test is a tool that exists in the app image but not in the base
+sandboxd image — e.g. `npm` with B's `node:22-slim`:
+
+```console
+$ go run ./examples/sandboxd-sandbox/client -warmpool sandboxd-warmpool \
+    -namespace default -cmd 'npm --version'
+```
+
+- Under **B**, this prints the npm version with `exit=0`: the command executed
+  inside the app image, whose tools are all available — with no image rebuild.
+- Under **A**, it reports `exit=127` with `npm: not found` on stderr: the
+  shared `/workspace` volume carries files, not the neighboring image's
+  binaries, so only tools baked into the runtime image are reachable.
+
+That pair of results *is* the mental model above, observed live.
+
 See [`../client/README.md`](../client/README.md) for the client walkthrough.

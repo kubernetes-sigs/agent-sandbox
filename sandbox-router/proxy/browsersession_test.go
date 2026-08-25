@@ -34,8 +34,11 @@ import (
 
 // bootstrapServer builds a router with the browser-session cookie
 // feature enabled against a scoped-token authorizer, and returns it
-// alongside the secret and a valid token for (namespace, id, port).
-func bootstrapServer(t *testing.T, namespace, id string, port int) (*httptest.Server, []byte, string) {
+// alongside the secret and a valid token for (namespace, id). The
+// caller supplies the port itself as part of the request URL it
+// builds — MintScopedToken doesn't bind one, so there's nothing for
+// this helper to do with it.
+func bootstrapServer(t *testing.T, namespace, id string) (*httptest.Server, []byte, string) {
 	t.Helper()
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	tok, err := authz.MintScopedToken(secret, namespace, id, time.Minute)
@@ -82,7 +85,7 @@ func noRedirectClient() *http.Client {
 }
 
 func TestBootstrapCookie_SetsSessionCookieAndRedirects(t *testing.T) {
-	router, _, tok := bootstrapServer(t, "team", "box-a", 8080)
+	router, _, tok := bootstrapServer(t, "team", "box-a")
 	defer router.Close()
 
 	resp, err := noRedirectClient().Get(router.URL + "/router/team/box-a/8080/workbench?foo=bar&token=" + tok)
@@ -144,7 +147,7 @@ func TestBootstrapCookie_SetsSessionCookieAndRedirects(t *testing.T) {
 // the client's original ordering and encoding of every OTHER param,
 // not just the one being removed.
 func TestBootstrapCookie_RedirectPreservesQueryEncodingAndOrder(t *testing.T) {
-	router, _, tok := bootstrapServer(t, "team", "box-a", 8080)
+	router, _, tok := bootstrapServer(t, "team", "box-a")
 	defer router.Close()
 
 	// "z" before "token" before "a": alphabetical re-sorting (what
@@ -188,7 +191,7 @@ func TestBootstrapCookie_RedirectPreservesQueryEncodingAndOrder(t *testing.T) {
 // all), which would otherwise deny the request for an unrelated reason
 // and produce a false pass.
 func TestBootstrapCookie_HeaderRoutedRequestNotBootstrapped(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
@@ -305,7 +308,7 @@ func TestCookieStripping_MultipleCookieHeaderLines(t *testing.T) {
 }
 
 func TestBootstrapCookie_InvalidTokenSetsNoCookie(t *testing.T) {
-	router, _, _ := bootstrapServer(t, "team", "box-a", 8080)
+	router, _, _ := bootstrapServer(t, "team", "box-a")
 	defer router.Close()
 
 	resp, err := noRedirectClient().Get(router.URL + "/router/team/box-a/8080/workbench?token=garbage")
@@ -323,7 +326,7 @@ func TestBootstrapCookie_InvalidTokenSetsNoCookie(t *testing.T) {
 }
 
 func TestBootstrapCookie_TokenScopedToOtherSandboxSetsNoCookie(t *testing.T) {
-	router, secret, _ := bootstrapServer(t, "team", "box-a", 8080)
+	router, secret, _ := bootstrapServer(t, "team", "box-a")
 	defer router.Close()
 
 	otherTok, err := authz.MintScopedToken(secret, "team", "box-b", time.Minute)

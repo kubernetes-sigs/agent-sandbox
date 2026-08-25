@@ -252,10 +252,7 @@ func stripQueryParam(rawQuery, param string) string {
 	kept := make([]string, 0, len(pairs))
 	changed := false
 	for _, p := range pairs {
-		key := p
-		if i := strings.IndexByte(p, '='); i >= 0 {
-			key = p[:i]
-		}
+		key, _, _ := strings.Cut(p, "=")
 		if decoded, err := url.QueryUnescape(key); err == nil && decoded == param {
 			changed = true
 			continue
@@ -281,10 +278,7 @@ func stripCookieFromHeader(header, name string) string {
 	kept := make([]string, 0, len(parts))
 	for _, p := range parts {
 		trimmed := strings.TrimSpace(p)
-		key := trimmed
-		if i := strings.IndexByte(trimmed, '='); i >= 0 {
-			key = trimmed[:i]
-		}
+		key, _, _ := strings.Cut(trimmed, "=")
 		if key == name {
 			continue
 		}

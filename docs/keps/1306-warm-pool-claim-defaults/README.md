@@ -27,9 +27,10 @@
 
 Add an optional `claimDefaults` field to `SandboxWarmPoolSpec` that lets pool
 operators declare default lifecycle settings for claims. When a `SandboxClaim`
-with `Lifecycle: nil` is adopted from a pool that has `claimDefaults.lifecycle`
-configured, the controller copies the pool's lifecycle into the claim at
-adoption time. Claims that set their own `Lifecycle` are never modified.
+with `Lifecycle: nil` targets a pool that has `claimDefaults.lifecycle`
+configured, the controller copies the pool's lifecycle into the claim — both
+on warm adoption and cold fallback (pool exhaustion). Claims that set their
+own `Lifecycle` are never modified.
 
 ## Motivation
 
@@ -179,7 +180,8 @@ the same workaround.
 
 1. Let pool operators declare default `Lifecycle` settings for claims targeting
    their pool, without changing the global `SandboxClaim` default.
-2. Apply defaults only at claim creation time (adoption), never retroactively.
+2. Apply defaults at claim creation time (warm adoption or cold fallback),
+   never retroactively.
 3. Preserve explicit claim-level `Lifecycle` settings — no silent override.
 4. Ensure the field survives v1alpha1 ↔ v1beta1 conversion round-trips.
 
@@ -238,7 +240,7 @@ clients that forget, not an override for clients that choose.
 
 | Risk | Mitigation |
 |------|------------|
-| Operator adds `claimDefaults` to a pool with existing `Lifecycle: nil` claims whose workloads have finished | Defaults are applied **only during adoption** (create-time). Existing claims are already adopted and never re-enter the adoption path. No retroactive deletion. |
+| Operator adds `claimDefaults` to a pool with existing `Lifecycle: nil` claims whose workloads have finished | Defaults are applied **only at claim creation** (warm adoption or cold fallback). Existing claims are already bound and never re-enter the creation path. No retroactive deletion. |
 | `claimDefaults` lost during v1alpha1 round-trip | State-preservation annotation on the v1alpha1 object stores the serialized `ClaimDefaults`, restored on conversion back to v1beta1. Covered by round-trip test. |
 | Confusion about which lifecycle applies | The claim's `Spec.Lifecycle` is always the source of truth. `claimDefaults` is copied into it at creation — after adoption, `kubectl get sandboxclaim -o yaml` shows the effective lifecycle directly. No indirection. |
 | Transient `Finished` during suspension could start TTL | When a sandbox is suspended ([KEP-694][694]), the controller deletes the pod. During pod termination, containers that exit non-zero briefly produce a `PodFailed` phase, which `computeFinishedCondition` reflects as `Finished: True` on the sandbox. This condition is **transient** — once the pod is fully removed, the sandbox controller drops `Finished` from the conditions array, and the claim controller mirrors the removal. With `TTL=0`, the claim could theoretically be expired and deleted during the 1-2 second race window before the transient condition is cleaned up. `TTL=10` eliminates this: the 10-second grace period far exceeds the pod termination window, so the transient `Finished` is always cleaned up before expiry fires. The 10-second delay has zero practical impact on resource leak prevention — the problem being solved is VMs running for hours/days, not seconds. |
@@ -256,13 +258,13 @@ type SandboxWarmPoolSpec struct {
 
     // claimDefaults specifies default values applied to SandboxClaims that
     // target this pool and do not set the corresponding fields themselves.
-    // Defaults are applied at claim creation time (during adoption) and are
-    // not retroactively applied to existing claims.
+    // Defaults are applied at claim creation time (warm adoption or cold
+    // fallback) and are not retroactively applied to existing claims.
     // +optional
     ClaimDefaults *ClaimDefaults `json:"claimDefaults,omitempty"`
 }
 
-// ClaimDefaults defines default values for SandboxClaims adopted from a pool.
+// ClaimDefaults defines default values for SandboxClaims targeting a pool.
 type ClaimDefaults struct {
     // lifecycle specifies the default lifecycle for claims with nil Lifecycle.
     // If the claim sets its own Lifecycle, this field is ignored.
@@ -276,11 +278,23 @@ The `Lifecycle` type is already defined in
 the same kubebuilder validation markers (`ShutdownPolicy` enum,
 `TTLSecondsAfterFinished` minimum).
 
-**Note:** `Lifecycle` also includes a `ShutdownTime` field (absolute
-timestamp). `ShutdownTime` is **not recommended** in `claimDefaults` because
-all adopted claims would share the same absolute deadline — claims adopted
-after that time would expire immediately. Implementers should add a
-validating webhook or CEL rule rejecting `ShutdownTime` in `claimDefaults`.
+**`ShutdownTime` validation:** `Lifecycle` also includes a `ShutdownTime`
+field (absolute timestamp). An absolute deadline in `claimDefaults` would be
+shared by all adopted claims — claims adopted after that time would expire
+immediately. To prevent this, `ClaimDefaults` includes a CEL validation rule
+that rejects `ShutdownTime`:
+
+```go
+// ClaimDefaults defines default values for SandboxClaims targeting a pool.
+// +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.shutdownTime)",message="shutdownTime is not allowed in claimDefaults; use ttlSecondsAfterFinished instead"
+type ClaimDefaults struct {
+    // lifecycle specifies the default lifecycle for claims with nil Lifecycle.
+    // If the claim sets its own Lifecycle, this field is ignored.
+    // +optional
+    Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+}
+```
+
 Only `ShutdownPolicy` and `TTLSecondsAfterFinished` are meaningful as pool-
 level defaults.
 
@@ -289,23 +303,14 @@ level defaults.
 The injection point is `adoptSandboxFromCandidates` in
 `extensions/controllers/sandboxclaim_controller.go`, immediately before the
 `r.Update(ctx, claim)` call that records the `AssignedSandboxName` annotation
-(line ~1143). This is the single atomic write during adoption:
+(line ~1143). The pool object is already resolved earlier in the adoption
+path (to find warm candidates), so it is passed into this function — no
+second lookup, no risk of a transient cache miss silently skipping defaults:
 
 ```go
-// Resolve pool's claimDefaults once, before the adoption write.
-var poolLifecycle *extensionsv1beta1.Lifecycle
-if claim.Spec.Lifecycle == nil {
-    pool := &extensionsv1beta1.SandboxWarmPool{}
-    poolKey := types.NamespacedName{
-        Name:      claim.Spec.WarmPoolRef.Name,
-        Namespace: claim.Namespace,
-    }
-    if err := r.Get(ctx, poolKey, pool); err == nil {
-        if pool.Spec.ClaimDefaults != nil && pool.Spec.ClaimDefaults.Lifecycle != nil {
-            poolLifecycle = pool.Spec.ClaimDefaults.Lifecycle.DeepCopy()
-        }
-    }
-}
+// Extract pool's claimDefaults. The pool object was already resolved
+// by the caller to find warm candidates — no re-fetch needed.
+poolLifecycle := resolvePoolLifecycle(pool, claim)
 
 // Apply lifecycle default before the adoption annotation write.
 if poolLifecycle != nil {
@@ -321,6 +326,20 @@ if err := r.Update(ctx, claim); err != nil {
     if retryErr := r.retryAdoptionWithDefaults(ctx, claim, adopted.Name, poolLifecycle); retryErr != nil {
         // ...existing retry-failure handling...
     }
+}
+```
+
+```go
+// resolvePoolLifecycle returns the pool's default lifecycle if the claim
+// has no lifecycle of its own. Returns nil if either side is unset.
+func resolvePoolLifecycle(pool *extensionsv1beta1.SandboxWarmPool, claim *extensionsv1beta1.SandboxClaim) *extensionsv1beta1.Lifecycle {
+    if claim.Spec.Lifecycle != nil {
+        return nil
+    }
+    if pool.Spec.ClaimDefaults != nil && pool.Spec.ClaimDefaults.Lifecycle != nil {
+        return pool.Spec.ClaimDefaults.Lifecycle.DeepCopy()
+    }
+    return nil
 }
 ```
 
@@ -350,17 +369,14 @@ func (r *SandboxClaimReconciler) retryAdoptionWithDefaults(
 
 **Why this is create-time only:**
 
-1. Adoption normally happens once per claim. The `AssignedSandboxNameAnnotation`
-   is set during adoption and checked before re-entering the adoption path.
-   However, if the assigned sandbox is lost (deleted, not found, or owned by
-   another claim), the controller removes the annotation
-   (`removeAssignedSandboxReference`) and the claim re-enters adoption. On
-   re-adoption, the nil check (`fresh.Spec.Lifecycle == nil`) prevents
-   re-injection if the previous adoption already persisted a lifecycle — the
-   injected lifecycle survives annotation removal because only annotations and
-   labels are cleared, not spec fields.
+1. Lifecycle injection happens once per claim — on the first write that binds
+   the claim to a sandbox (warm adoption or cold creation). The nil check
+   (`claim.Spec.Lifecycle == nil`) prevents re-injection: once a lifecycle is
+   persisted, it survives annotation removal and re-adoption because only
+   annotations and labels are cleared, not spec fields.
 2. The `r.Update` at this point is a full-object PUT. The lifecycle is persisted
-   to the API server atomically with the adoption annotation.
+   to the API server atomically with the adoption annotation (warm path) or
+   sandbox creation (cold path).
 3. On conflict retry (`retryAdoptionWithDefaults`), the claim is re-read fresh
    from the API server. The retry callback re-applies both the annotation and
    the lifecycle default (if the fresh object still has `Lifecycle: nil`). The
@@ -370,19 +386,35 @@ func (r *SandboxClaimReconciler) retryAdoptionWithDefaults(
    2 `r.Update` and 8 `r.Patch` call sites on claims modify only annotations,
    labels, or the status subresource.
 
-**Pool lookup cost:**
+**Pool object reuse:**
 
-The pool is already cached by the informer. The `r.Get` reads from the local
-cache, not the API server. The adoption path already performs multiple cache
-reads (sandbox lookup, template lookup), so one additional read is negligible.
+The pool object is already resolved in both paths — to find warm candidates
+(adoption) or to look up the template (cold creation). `resolvePoolLifecycle`
+receives the already-fetched pool; no additional cache read is needed.
 
-**Bare sandbox creation (non-warm-pool):**
+**Cold fallback (pool exhaustion):**
 
-When a claim creates a sandbox directly (pool has 0 replicas or the claim
-bypasses the pool), the `createSandbox` path does not call `r.Update` on the
-claim. `claimDefaults` does not apply in this path, which is correct: bare
-creation is an explicit, operator-controlled flow where the claim author is
-expected to set lifecycle directly.
+When no warm candidate is available (pool exhausted under sustained load),
+the claim falls through to `createSandbox`. This is exactly the scenario
+from the Motivation section where nil-lifecycle claims cause pool starvation.
+Defaults must apply here too — otherwise the leak persists when it matters
+most. The `createSandbox` path already resolves the pool via `WarmPoolRef`;
+`resolvePoolLifecycle` is called before the sandbox creation write, and the
+lifecycle is persisted to the claim atomically via `r.Update`:
+
+```go
+// Cold fallback: apply pool defaults before creating a new sandbox.
+poolLifecycle := resolvePoolLifecycle(pool, claim)
+if poolLifecycle != nil {
+    claim.Spec.Lifecycle = poolLifecycle.DeepCopy()
+}
+// ...proceed with sandbox creation and claim update...
+```
+
+Defaults key off `WarmPoolRef` (the claim's declared pool affinity), not the
+adoption path. Whether a claim gets a pre-warmed sandbox or a cold-started
+one is an implementation detail — the pool operator's cleanup policy applies
+either way.
 
 ### Version Conversion (v1alpha1)
 
@@ -425,7 +457,9 @@ v1beta1-originated pool updated through the v1alpha1 API preserves
 | `warm + explicit Retain + claimDefaults` | Pool has `Delete+TTL=10` defaults, claim has explicit `Retain` | Claim lifecycle unchanged. Pool defaults ignored. |
 | `warm + nil lifecycle + no claimDefaults` | Pool has no `claimDefaults`, claim has `Lifecycle: nil` | Claim adopted with `Lifecycle: nil`. Behavior identical to today. |
 | `warm + nil lifecycle + pool not found` | Pool deleted before adoption completes | Existing `ErrWarmPoolNotFound` handling. No crash. |
-| `cold fallback + nil lifecycle` | No ready candidate in pool, claim falls through to `createSandbox` | Lifecycle remains nil. `claimDefaults` not applied on the cold path. |
+| `cold fallback + nil lifecycle + claimDefaults` | No ready candidate in pool, claim falls through to `createSandbox`. Pool has `Delete+TTL=10` defaults. | Claim created with `Delete+TTL=10` lifecycle. Same defaults as warm path. |
+| `cold fallback + explicit Retain + claimDefaults` | No ready candidate, pool has `Delete+TTL=10` defaults, claim has explicit `Retain` | Claim lifecycle unchanged. Pool defaults ignored. |
+| `cold fallback + nil lifecycle + no claimDefaults` | No ready candidate, pool has no `claimDefaults` | Claim created with `Lifecycle: nil`. Behavior identical to today. |
 
 **Conversion tests** (`extensions/api/v1alpha1/sandboxwarmpool_conversion_test.go`):
 
@@ -537,12 +571,13 @@ pools created from the same template share the same claim defaults.
 
 ## Scalability
 
-- **No additional API calls per reconcile.** The pool `r.Get` during adoption
-  reads from the local informer cache. Adoption already performs multiple
-  cache reads; one additional read is negligible.
+- **No additional API calls per reconcile.** The pool object is already
+  resolved in both the warm adoption and cold fallback paths.
+  `resolvePoolLifecycle` receives the already-fetched pool — zero additional
+  cache reads.
 - **No additional watches.** The claim controller already watches
   `SandboxWarmPool` objects for adoption routing.
-- **No impact on non-warm-pool claims.** The injection is gated on the
-  adoption path, which is only entered for warm pool claims.
+- **No impact on non-warm-pool claims.** The injection applies only to claims
+  targeting a warm pool via `WarmPoolRef`.
 - **No impact on existing pools.** Pools without `claimDefaults` behave
   identically to today. The nil check short-circuits immediately.

@@ -13,11 +13,16 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 | `service.yaml` | Cluster-IP service named `sandbox-router-svc` (preserves the Python router's name — existing Gateway/HTTPRoute resources work unchanged). |
 | `pdb.yaml` | Prevents voluntary disruptions from taking the whole fleet offline. |
 | `networkpolicy.yaml` | Locks down ingress to proxy/metrics/probe ports; egress to DNS, sandbox port, OTel collector. **Tighten the selectors for your tenancy model.** |
+| `examples/gateway-gke.yaml` | Optional GKE Gateway, HTTPRoute, and HealthCheckPolicy for external ingress in front of `sandbox-router-svc`. |
 
 ## Apply
 
 ```sh
+# Core router components
 kubectl apply -f sandbox-router/deploy/
+
+# Optional: GKE Gateway API ingress
+kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
 ```
 
 ## Things to change before production

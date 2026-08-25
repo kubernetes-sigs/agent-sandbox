@@ -196,7 +196,7 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
     If you need external access via a Public IP (GKE), apply the Gateway configuration.
     ```bash
     # Deploys Gateway, HTTPRoute, and HealthCheckPolicy
-    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
+    kubectl apply -f ../../sandbox-router/deploy/examples/gateway-gke.yaml
     ```
 
 **Via Gateway**

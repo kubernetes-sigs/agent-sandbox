@@ -105,10 +105,13 @@ PYTHON_TEST_SUITES = [
     {
         "name": "integrations-nemo-gym",
         "dir": os.path.join("clients", "integrations", "nemo-gym"),
-        # The nemo-gym PyPI package (a hard dependency of this integration)
-        # requires Python >= 3.13.14, so the suite skips on older interpreters
-        # instead of failing the venv install.
-        "min_python": (3, 13, 14),
+        # The integration itself needs Python >= 3.13. nemo-gym publishes
+        # requires-python >=3.13.14 — no released 3.13.x satisfies that (3.14+
+        # does) — so pre-install it past its floor; the editable install below
+        # then sees the requirement already satisfied. Drop the pre_install
+        # when nemo-gym relaxes its floor.
+        "min_python": (3, 13),
+        "pre_installs": [["--ignore-requires-python", "nemo-gym>=0.5.0"]],
         "editable_installs": [
             (os.path.join("clients", "python", "agentic-sandbox-client"), "[async]"),
             (os.path.join("clients", "integrations", "nemo-gym"), "[test]"),
@@ -169,6 +172,13 @@ def run_python_tests(repo_root, artifact_dir):
         env = os.environ.copy()
         if not os.environ.get("PIP_EXTRA_INDEX_URL"):
             env.pop("PIP_EXTRA_INDEX_URL", None)
+
+        # Pre-installs run before editable installs so the resolver sees these
+        # requirements as already satisfied (e.g. forcing a package past a broken
+        # published requires-python floor).
+        for pre_install_args in suite.get("pre_installs", []):
+            subprocess.check_call(
+                [venv_pip, "install", "--quiet", *pre_install_args], env=env)
 
         req_name = suite.get("requirements")
         req_file = os.path.join(test_dir, req_name) if req_name else None

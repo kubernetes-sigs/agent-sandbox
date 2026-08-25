@@ -346,6 +346,10 @@ class AgentSandboxProvider:
         self._client: Any = None
         self._client_lock = asyncio.Lock()
         self._closed = False
+        # RL runs call create() once per rollout with near-identical specs; these
+        # dedup the advisory warnings below to once per distinct cause.
+        self._warned_default_pool_images: set[str] = set()
+        self._warned_ignored_resources: set[tuple[str, ...]] = set()
 
     async def _get_client(self) -> Any:
         if self._closed:
@@ -356,22 +360,15 @@ class AgentSandboxProvider:
             if self._closed:
                 raise RuntimeError("agent_sandbox provider is closed")
             if self._client is None:
-                import inspect
-
                 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 
-                kwargs: dict[str, Any] = {"connection_config": self._connection.build()}
-                # The `cleanup` parameter landed after v0.5.4 (#859). Released clients
-                # without it never register the atexit hook, which is exactly the
-                # atexit_cleanup=False behavior; only an explicit opt-in needs it.
-                if "cleanup" in inspect.signature(AsyncSandboxClient.__init__).parameters:
-                    kwargs["cleanup"] = self._operations.atexit_cleanup
-                elif self._operations.atexit_cleanup:
-                    raise RuntimeError(
-                        "operations.atexit_cleanup=true requires a k8s-agent-sandbox release "
-                        "with AsyncSandboxClient(cleanup=...) support"
-                    )
-                self._client = AsyncSandboxClient(**kwargs)
+                self._client = AsyncSandboxClient(
+                    connection_config=self._connection.build(),
+                    # Always pass explicitly: the client's own default flipped from
+                    # False (0.5.0) to True (0.5.1), and the provider's contract is
+                    # atexit_cleanup regardless of the installed client version.
+                    cleanup=self._operations.atexit_cleanup,
+                )
             return self._client
 
     # ------------------------------------------------------------------ create
@@ -384,7 +381,8 @@ class AgentSandboxProvider:
             if pool:
                 return pool
         if self._create_config.warmpool:
-            if spec.image:
+            if spec.image and spec.image not in self._warned_default_pool_images:
+                self._warned_default_pool_images.add(spec.image)
                 LOGGER.warning(
                     "spec.image=%r has no create.image_warmpools entry; using the default warm pool "
                     "%r, whose SandboxTemplate decides the actual image.",
@@ -410,7 +408,8 @@ class AgentSandboxProvider:
             )
             if value is not None
         ]
-        if ignored:
+        if ignored and tuple(ignored) not in self._warned_ignored_resources:
+            self._warned_ignored_resources.add(tuple(ignored))
             LOGGER.warning(
                 "%s resource requests are not mapped by the agent_sandbox provider; resources come "
                 "from the warm pool's SandboxTemplate.",

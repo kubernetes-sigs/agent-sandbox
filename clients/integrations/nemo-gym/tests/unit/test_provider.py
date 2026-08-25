@@ -202,6 +202,26 @@ async def test_create_without_any_warmpool_raises():
         await provider.create(SandboxSpec(image="img:1"))
 
 
+async def test_create_advisory_warnings_dedup_across_rollouts(caplog):
+    # An RL run calls create() once per rollout with near-identical specs; the
+    # default-pool and ignored-resources warnings must fire once per distinct
+    # cause, not once per create.
+    client = FakeClient()
+    provider = make_provider(client, create={"warmpool": "default-pool"})
+    spec = SandboxSpec(image="unmapped:latest", resources={"cpu": 2})
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym_k8s_agent_sandbox.provider"):
+        await provider.create(spec)
+        await provider.create(spec)
+        await provider.create(SandboxSpec(image="other:latest", resources={"gpu": 1}))
+
+    pool_warnings = [r for r in caplog.records if "image_warmpools" in r.message]
+    resource_warnings = [r for r in caplog.records if "resource requests" in r.message]
+    # Once per distinct image / distinct ignored-resource set, not per create.
+    assert len(pool_warnings) == 2
+    assert len(resource_warnings) == 2
+
+
 async def test_create_rejects_entrypoint():
     provider = make_provider(create={"warmpool": "pool"})
     with pytest.raises(AgentSandboxCreateError, match="entrypoint"):

@@ -1,4 +1,7 @@
 # A Gateway to create an endpoint for external HTTP traffic on GKE.
+# Note: This example uses `namespace: default` and limits routes to the `Same` namespace.
+# The sandbox-router Service must either be in this same namespace, or you must
+# configure cross-namespace Gateway API wiring (e.g. ReferenceGrant).
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:

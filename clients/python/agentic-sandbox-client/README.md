@@ -32,7 +32,7 @@ Before using the client in Gateway Mode or Tunnel Mode, deploy the `sandbox-rout
 
 1.  **Deploy the Router:**
 
-    Follow the instructions in [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) to deploy the router using the manifests in [sandbox-router/deploy](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy).
+    Follow the instructions in [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) to deploy the router using the manifests in [sandbox-router/deploy](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy). *(Note: If you installed a specific client release tag, replace `main` in these URLs with the corresponding tag.)*
 
 2.  **Create a Sandbox Warmpool:**
 

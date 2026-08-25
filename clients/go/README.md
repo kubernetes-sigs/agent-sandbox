@@ -23,7 +23,7 @@ The client operates in three connectivity modes:
 
 - A running Kubernetes cluster with a valid kubeconfig (or in-cluster config). This is required even in Direct URL mode because the client creates Kubernetes clientsets for SandboxClaim lifecycle management.
 - The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
-- The **Sandbox Router** deployed in the target namespace (see [sandbox-router](../../sandbox-router/README.md) and its [deployment manifests](../../sandbox-router/deploy)).
+- The **Sandbox Router** deployed in the target namespace (see [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/README.md) and its [deployment manifests](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy)). *(Note: If you are using a specific tagged release, replace `main` in these URLs with your version tag.)*
 - A `SandboxWarmPool` created in the target namespace.
 - Go 1.26+.
 

@@ -96,8 +96,11 @@ spec:
               path: /v1/health
               port: 8080
           volumeMounts:
+            # Read-only: sandboxed commands must not be able to replace the
+            # injected binary (it would run on the next container restart).
             - name: sandboxd-bin
               mountPath: /sandboxd-bin
+              readOnly: true
             - name: workspace
               mountPath: /workspace
       volumes:

@@ -76,9 +76,13 @@ func run(warmPool, namespace, path, content, extraCmd string) error {
 	}
 	fmt.Printf("created sandbox %q (claim %q)\n", sb.SandboxName(), sb.ClaimName())
 
-	// Always tear the sandbox down on exit so the example leaves nothing behind.
+	// Always tear the sandbox down on exit so the example leaves nothing
+	// behind. Cleanup is detached from ctx (which may already be cancelled)
+	// but bounded so a stalled deletion cannot block process exit forever.
 	defer func() {
-		if err := client.DeleteSandbox(context.Background(), sb.ClaimName(), namespace); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := client.DeleteSandbox(cleanupCtx, sb.ClaimName(), namespace); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to delete sandbox %q: %v\n", sb.ClaimName(), err)
 		}
 	}()
@@ -94,6 +98,12 @@ func run(warmPool, namespace, path, content, extraCmd string) error {
 	result, err := sb.Run(ctx, fmt.Sprintf("cat %q", path))
 	if err != nil {
 		return fmt.Errorf("run: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("cat %q exited with code %d: %s", path, result.ExitCode, result.Stderr)
+	}
+	if result.Stdout != content {
+		return fmt.Errorf("command output mismatch: got %q, want %q", result.Stdout, content)
 	}
 	fmt.Printf("run: exit=%d\nstdout: %s", result.ExitCode, result.Stdout)
 	if result.Stderr != "" {

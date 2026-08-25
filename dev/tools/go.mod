@@ -241,6 +241,6 @@ require (
 	mvdan.cc/gofumpt v0.11.0 // indirect
 	mvdan.cc/unparam v0.0.0-20260818115549-3f964bcb5673 // indirect
 	sigs.k8s.io/controller-runtime/tools/setup-envtest v0.24.1 // indirect
-	sigs.k8s.io/kube-api-linter v0.0.0-20260518104151-5ebe05f9440b // indirect
+	sigs.k8s.io/kube-api-linter v0.0.0-20260716143926-092fe0c72997 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )

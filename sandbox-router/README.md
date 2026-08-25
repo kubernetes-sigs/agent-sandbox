@@ -108,6 +108,8 @@ Set `--path-routing-prefix` to give such traffic a second way in: a request whos
 
 This is strictly additive: the default is `""` (disabled), and a request whose path does not match the configured prefix falls straight through to `X-Sandbox-*` header parsing, unchanged. `X-Sandbox-Pod-IP` and `X-Sandbox-UID` have no path equivalent — both are dial-target overrides meant for SDKs that already hold cluster-internal knowledge, never for a browser tab, so path-routed requests always resolve through the DNS form or the namespace/name cache index, same as a header-routed request carrying only `X-Sandbox-ID`.
 
+**Enabling this flag claims the entire URL namespace under the prefix.** The fallback above only applies to a path that doesn't start with the prefix at all. Once a request's path *does* match, it is committed to path-based routing and stays there — a malformed one (missing the port segment, an invalid namespace or ID, and so on) gets a `400` from `ParsePathRoute` directly and is **not** retried against `X-Sandbox-*` headers, even if the caller happened to also send them. Pick a prefix no real application route inside a sandbox needs to answer under, for exactly this reason.
+
 Everything after `<port>` is forwarded byte-for-byte, escaping included — an encoded separator inside a single upstream path segment (e.g. a filename containing `/`, sent as `%2F`) survives the hop unchanged rather than being silently decoded into an extra segment. `sandbox_router_requests_total` labels, the access log's `sandbox_id`/`sandbox_namespace` fields, and the `sandbox.id`/`sandbox.namespace` trace attributes all reflect the resolved target regardless of whether it came from a header or from the path.
 
 ```sh

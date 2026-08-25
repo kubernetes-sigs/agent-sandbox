@@ -102,7 +102,11 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"terminal, a dev server's HMR socket) through this router via a "+
 			"path it can put in a plain URL. A request whose path does not "+
 			"match this prefix falls straight through to header-based "+
-			"routing.")
+			"routing — but this claims the whole URL namespace under the "+
+			"prefix: once a path DOES match, it stays on the path-routing "+
+			"path even if it's otherwise malformed (bad namespace/id/port), "+
+			"and is never retried against headers. Pick a prefix no real "+
+			"in-sandbox route needs to answer under.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+

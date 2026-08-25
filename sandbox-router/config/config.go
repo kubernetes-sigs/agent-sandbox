@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // MTLSMode controls how the router validates client certificates on incoming
@@ -287,6 +288,19 @@ func (c *Config) Validate() error {
 		}
 		if strings.HasSuffix(c.PathRoutingPrefix, "/") {
 			return fmt.Errorf("--path-routing-prefix must not end with \"/\", got %q", c.PathRoutingPrefix)
+		}
+		// A prefix containing whitespace or control characters is
+		// almost certainly a copy-paste or shell-quoting mistake (a
+		// trailing newline from a config template, a stray tab) rather
+		// than an intentional value — nothing legitimate needs one here,
+		// and letting it through would make ParsePathRoute's prefix match
+		// silently fail against every real request while giving no hint
+		// why. Reject it at startup, where it is loud, instead of at
+		// request time, where it isn't.
+		if strings.ContainsFunc(c.PathRoutingPrefix, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r)
+		}) {
+			return fmt.Errorf("--path-routing-prefix must not contain whitespace or control characters, got %q", c.PathRoutingPrefix)
 		}
 	}
 	if c.UpstreamMaxRetries < 0 {

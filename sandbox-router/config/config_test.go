@@ -384,6 +384,36 @@ func TestValidate(t *testing.T) {
 			mut:     func(c *Config) { c.PathRoutingPrefix = "/router" },
 			wantErr: "",
 		},
+		{
+			name:    "path routing prefix with an embedded space rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/my router" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with a leading tab rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "\t/router" },
+			wantErr: "path-routing-prefix must start with",
+		},
+		{
+			name:    "path routing prefix with an embedded tab rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/rou\tter" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with a trailing newline rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router\n" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with a control character rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/rou\x00ter" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with hyphens and multiple segments accepted",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/sandbox-router/browser" },
+			wantErr: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

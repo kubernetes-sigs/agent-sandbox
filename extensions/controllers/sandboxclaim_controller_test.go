@@ -8132,3 +8132,190 @@ func TestCreateSandboxToleratesAlreadyExists(t *testing.T) {
 	require.NotNil(t, readyCond, "expected Ready condition after cache converged")
 	require.NotEqual(t, "SandboxCreatePending", readyCond.Reason, "expected pending reason to clear once cache converged")
 }
+
+// TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead verifies that an
+// AlreadyExists from a cold-start Create is resolved in the same pass: the
+// APIReader read-back returns the live sandbox even though the informer cache
+// never converges, so the claim binds immediately with no cache-lag requeue.
+func TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "already-exists-live-read-claim"
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	// Pre-create the sandbox owned by this claim to simulate a previous successful create.
+	existingSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxClaim",
+				Name:       claimName,
+				UID:        "claim-uid",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	// The cache never converges in this test: every cached sandbox Get stays
+	// NotFound, so recovery can only come from the authoritative read.
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, warmPool, template, existingSandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == claimName {
+					return k8errors.NewNotFound(
+						schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+						key.Name,
+					)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(existingSandbox.DeepCopy()).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.NotEqual(t, cacheLagRequeueDelay, result.RequeueAfter, "in-pass recovery must not fall back to the cache-lag requeue")
+
+	// The claim binds to the pre-existing sandbox in the first pass.
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Equal(t, claimName, updatedClaim.Status.SandboxStatus.Name, "claim should bind to the live-read sandbox in the same pass")
+
+	readyCond := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCond, "expected Ready condition after in-pass recovery")
+	require.NotEqual(t, "SandboxCreatePending", readyCond.Reason, "in-pass recovery must not report SandboxCreatePending")
+}
+
+// TestCreateSandboxAlreadyExistsNameCollisionIsTerminal verifies that when the
+// authoritative read-back shows the existing sandbox is NOT controlled by the
+// claim, the pass reports the collision instead of adopting it or retrying on
+// the cache-lag sentinel.
+func TestCreateSandboxAlreadyExistsNameCollisionIsTerminal(t *testing.T) {
+	scheme := newScheme(t)
+	claimName := "already-exists-collision-claim"
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default", UID: "claim-uid"},
+		Spec: extensionsv1beta1.SandboxClaimSpec{
+			WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"},
+		},
+	}
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	// A sandbox with the claim's name but controlled by a DIFFERENT claim.
+	foreignSandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "extensions.agents.x-k8s.io/v1beta1",
+				Kind:       "SandboxClaim",
+				Name:       "some-other-claim",
+				UID:        "other-claim-uid",
+				Controller: ptr.To(true), // nolint:modernize
+			}},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app", Image: "test"}},
+			},
+		}}},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, warmPool, template, foreignSandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == claimName {
+					return k8errors.NewNotFound(
+						schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+						key.Name,
+					)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(foreignSandbox.DeepCopy()).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claimName, Namespace: "default"}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.Error(t, err, "a name collision must surface as an error, not be adopted")
+	require.ErrorContains(t, err, "is not controlled by claim")
+	require.NotErrorIs(t, err, errSandboxAlreadyExists, "collision must not be classified as benign cache lag")
+
+	// The claim must not bind to the foreign sandbox.
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, updatedClaim))
+	require.Empty(t, updatedClaim.Status.SandboxStatus.Name, "claim must not bind to a sandbox it does not control")
+}

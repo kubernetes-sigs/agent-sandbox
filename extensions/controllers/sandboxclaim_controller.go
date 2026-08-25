@@ -66,7 +66,7 @@ const (
 	// warm candidate to receive a Pod IP. This covers short IPAM delays without
 	// allowing an unavailable warm pool to postpone cold creation indefinitely.
 	warmCandidateGracePeriod   = 2 * time.Second
-	warmCandidateRetryInterval = 500 * time.Millisecond
+	warmCandidateRetryInterval = 100 * time.Millisecond
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -1822,7 +1822,18 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	if err := r.Create(ctx, sandbox); err != nil {
 		if k8errors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("%w: %w", errSandboxAlreadyExists, err)
+			liveSandbox := &v1beta1.Sandbox{}
+			if readErr := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(sandbox), liveSandbox); readErr != nil {
+				logger.V(1).Info("Authoritative read after AlreadyExists failed; falling back to bounded requeue", "sandbox", sandbox.Name, "error", readErr.Error())
+				return nil, fmt.Errorf("%w: %w", errSandboxAlreadyExists, err)
+			}
+			if !metav1.IsControlledBy(liveSandbox, claim) {
+				collisionErr := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", liveSandbox.Name, claim.Name)
+				logger.Error(collisionErr, "Sandbox controller mismatch")
+				return nil, collisionErr
+			}
+			logger.V(4).Info("Recovered just-created sandbox via authoritative read after AlreadyExists", "claim", claim.Name, "sandbox", liveSandbox.Name)
+			return liveSandbox, nil
 		}
 		err = fmt.Errorf("sandbox create error: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)

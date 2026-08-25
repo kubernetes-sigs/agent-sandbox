@@ -165,7 +165,7 @@ For every inbound request, the proxy resolves the upstream in this order: explic
 
 ## Authorization
 
-The router runs every request through an `authz.Authorizer` after header parsing and before resolving the upstream. The default — and the only one wired by `main.go` today — is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded.
+The router runs every request through an `authz.Authorizer` after header parsing and before resolving the upstream. The default is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded. Two other built-in authorizers — TokenReview and scoped-token, both described below — are selectable via `--authz-mode`.
 
 The `Authorizer` interface is intentionally simple:
 
@@ -187,7 +187,7 @@ Flags:
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--authz-mode` | `allow-all` | `allow-all` or `tokenreview`. |
+| `--authz-mode` | `allow-all` | `allow-all`, `tokenreview`, or `scoped-token`. |
 | `--authz-tokenreview-ttl` | `30s` | Cache TTL for both positive and negative decisions. |
 | `--authz-tokenreview-cache-size` | `2048` | LRU bound. |
 | `--authz-tokenreview-require-token` | `false` | When false, tokenless requests pass (transitional). When true, missing token → 401. |
@@ -211,6 +211,49 @@ Flags:
 | `--authz-scoped-token-secret-file` | `""` | Path to a file holding the shared HMAC-SHA256 secret. Required when `--authz-mode=scoped-token`; must match whatever minted the tokens (e.g. the same K8s Secret mounted into the controller and the router). At least 32 bytes after whitespace trimming (`authz.MinScopedTokenSecretLen`) — every observed token is an offline brute-force oracle for this secret, so short values are refused at startup. Minter and verifier both trim surrounding whitespace, so a trailing newline in the mounted file is harmless. |
 
 **Follow-up, not in this change.** Nothing here mints tokens automatically at Sandbox creation or rotates the shared secret without a restart — both are natural next steps once a controller-side minting story is agreed, tracked alongside the per-sandbox-authorization follow-up on TokenReview above.
+
+### Browser-session credentials
+
+Both authorizers above check `Authorization: Bearer <token>` (via `authz.BearerTokenFromRequest`) — which is exactly the gap [Browser-facing traffic: path-based routing](#browser-facing-traffic-path-based-routing) already documents for routing, applied to authorization instead. A top-level navigation, an `<iframe src>`, and a WebSocket handshake have no API for setting *any* request header — this isn't specific to `Authorization` being unusual; `fetch`/`XMLHttpRequest` can set it freely, but none of the three request types a browser actually needs for this router (opening an editor tab, embedding a dev-server preview, opening a terminal WebSocket) go through `fetch`. So `--path-routing-prefix` alone gets a browser to the right sandbox, but leaves it unable to present a `tokenreview` or `scoped-token` credential at all — the deployment is stuck on `allow-all` for that traffic.
+
+A cookie is the one credential channel a browser attaches automatically to every request toward an origin — including a WebSocket handshake, which is not subject to the Same-Origin Policy the way a `fetch` is. Set `--authz-cookie-name` (and, to actually get the cookie set, `--authz-cookie-query-param`) to let `TokenFromRequest` additionally accept a credential from a cookie or a URL query parameter, in this order: `Authorization` header, then query parameter, then cookie.
+
+**The bootstrap.** A page cannot set a cookie for another origin itself, so the very first request still needs the credential somewhere a browser *can* put it: the URL. A `GET`/`HEAD`, non-upgrade request presenting a valid credential via `--authz-cookie-query-param` gets it set as a cookie — scoped by `Path` to exactly `<path-routing-prefix>/<namespace>/<id>/<port>/`, so a browser never attaches sandbox A's cookie to a request under sandbox B's path — and is redirected (`302`) to the same URL with the parameter stripped. This collapses the credential's time in the URL, browser history, and any `Referer` a sub-resource load might send, to a single request. Every request after that — including the WebSocket handshake a web IDE's terminal or a dev server's HMR client opens — relies on the cookie instead:
+
+```sh
+# First load: token travels once, in the URL.
+curl -i 'http://sandbox-router-svc:8080/router/team/my-sandbox/8080/?token=v1.xxx.yyy'
+# -> 302, Set-Cookie: sid=v1.xxx.yyy; Path=/router/team/my-sandbox/8080/; HttpOnly; Secure; SameSite=Lax
+#    Location: http://sandbox-router-svc:8080/router/team/my-sandbox/8080/
+
+# Every later request, including a WebSocket handshake: the browser
+# attaches the cookie on its own, no client-side code involved.
+curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  -H 'Cookie: sid=v1.xxx.yyy' \
+  'http://sandbox-router-svc:8080/router/team/my-sandbox/8080/'
+# -> 101 Switching Protocols
+```
+
+A missing or invalid credential on the bootstrap request behaves exactly like a missing or invalid one anywhere else — 401/403, no `Set-Cookie` — nothing about the redirect is trusted on its own.
+
+**`SameSite` — read this before choosing a value.** `SameSite` compares the registrable domain (eTLD+1), not the origin: a page on `atenea.example.com` embedding an iframe served from `sandboxes.example.com` is a **different origin but the same site**, and `SameSite=Lax` (the default) covers it without requiring HTTPS. Only a genuinely cross-site deployment — integrator and router on unrelated registrable domains — needs `SameSite=None`, and that requires `Secure` (browsers refuse to set a `SameSite=None` cookie without it — incompatible with `--authz-cookie-insecure`); some browsers additionally block a `SameSite=None` cookie outright as third-party, which no flag on this router can work around. Prefer a same-site deployment if you have the choice.
+
+**The Origin allowlist is not optional in this mode.** A cookie is an ambient credential: unlike a header or a query parameter, the browser attaches it to a request that any page — including one an attacker controls — initiated, and this is *not* hypothetical for a WebSocket handshake specifically, which the Same-Origin Policy does not cover the way it covers `fetch` (this is the well-known Cross-Site WebSocket Hijacking class of bug). The router cannot lean on the upstream sandbox to catch a bad `Origin` either, since it strips `Origin` on upgrade requests for code-server's benefit (see [WebSockets and other protocol upgrades](#websockets-and-other-protocol-upgrades) above). So whenever the credential that authorized a request came from the cookie, the router separately checks the request's `Origin` against `--authz-cookie-allowed-origins` — *before* calling into the `Authorizer` at all — and rejects with 403 if it isn't allowed. A same-origin request is always allowed regardless of the list; a request with no `Origin` header at all is let through this specific check, since browsers reliably send `Origin` on exactly the requests it exists to gate (every WebSocket handshake, every genuinely cross-site request) and there is nothing here to inspect otherwise. Header- and query-sourced credentials are exempt from this check entirely — a third-party page cannot forge either.
+
+**Interaction with the scoped-token authorizer's routing-override check.** `ScopedTokenAuthorizer` rejects any request carrying `X-Sandbox-Pod-IP` or `X-Sandbox-UID` (see above) — for a path-routed request those headers are already inert, since `ParsePathRoute` never populates them, so this fails closed on a browser request that (unusually) sends either header rather than ever creating an actual bypass. Worth knowing about, not something you need to work around.
+
+Flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--authz-cookie-name` | `""` (disabled) | Name of the session cookie. Requires `--path-routing-prefix` and an `--authz-mode` other than `allow-all`. |
+| `--authz-cookie-query-param` | `""` | Name of the URL query parameter that bootstraps the cookie above. Requires `--authz-cookie-name`. |
+| `--authz-cookie-samesite` | `lax` | `lax`, `strict`, or `none` — see the `SameSite` note above. |
+| `--authz-cookie-insecure` | `false` | Omit `Secure` from the cookie. Local development over plain HTTP only; incompatible with `--authz-cookie-samesite=none`. |
+| `--authz-cookie-allowed-origins` | `""` | Comma-separated `scheme://host[:port]` allowlist checked against `Origin` whenever the credential came from the cookie. Same-origin is always allowed regardless. |
+
+No `Max-Age`/`Expires` is ever set — the cookie lives for the browser session, and the underlying token still carries its own expiry. When it lapses, the browser needs a fresh bootstrap URL; there is no silent renewal.
 
 ## TLS / mTLS
 

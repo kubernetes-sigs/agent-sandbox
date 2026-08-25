@@ -17,7 +17,7 @@ The client operates in four connectivity modes:
     Service -> Sandbox Pod. This requires no public IP and works on Kind/Minikube for local development.
 3.  **In-Cluster Mode:** The client connects **directly to the sandbox pod** (via pod IP or cluster
     DNS), bypassing the router. Intended for workloads running inside the cluster.
-4.  **Advanced / Internal Mode:** The client connects directly to a provided `api_url`, bypassing
+4.  **Direct URL Mode:** The client connects directly to a provided `api_url`, bypassing
     discovery. This is useful when connecting through a custom domain or a manually specified router URL.
 
 ## Prerequisites
@@ -32,12 +32,12 @@ Before using the client in Gateway Mode or Tunnel Mode, deploy the `sandbox-rout
 
 1.  **Deploy the Router:**
 
-    Follow the instructions in [sandbox-router](../../../sandbox-router/README.md) to deploy the router using the manifests in [sandbox-router/deploy](../../../sandbox-router/deploy).
+    Follow the instructions in [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) to deploy the router using the manifests in [sandbox-router/deploy](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy).
 
 2.  **Create a Sandbox Warmpool:**
 
     Ensure a `SandboxWarmPool` exists in your target namespace. The test_client.py
-    uses the [python-runtime-sandbox](../../../examples/python-runtime-sandbox/) image.
+    uses the [python-runtime-sandbox](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/python-runtime-sandbox) image.
 
     ```bash
     kubectl apply -f python-sandbox-warmpool.yaml
@@ -176,7 +176,7 @@ finally:
     sandbox.terminate()
 ```
 
-### 4. Advanced / Internal Mode
+### 4. Direct URL Mode
 
 Use `SandboxDirectConnectionConfig` to bypass discovery entirely. Useful for:
 

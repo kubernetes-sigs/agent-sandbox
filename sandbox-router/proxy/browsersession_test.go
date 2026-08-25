@@ -32,16 +32,26 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
+// bootstrapNamespace and bootstrapID are the (namespace, id) every
+// bootstrapServer-backed test mints its token for and addresses in its
+// request URLs — a shared pair rather than parameters, since every
+// caller used the same two literals anyway (golangci-lint's unparam
+// flagged exactly that).
+const (
+	bootstrapNamespace = "team"
+	bootstrapID        = "box-a"
+)
+
 // bootstrapServer builds a router with the browser-session cookie
 // feature enabled against a scoped-token authorizer, and returns it
-// alongside the secret and a valid token for (namespace, id). The
-// caller supplies the port itself as part of the request URL it
-// builds — MintScopedToken doesn't bind one, so there's nothing for
-// this helper to do with it.
-func bootstrapServer(t *testing.T, namespace, id string) (*httptest.Server, []byte, string) {
+// alongside the secret and a valid token for (bootstrapNamespace,
+// bootstrapID). The caller supplies the port itself as part of the
+// request URL it builds — MintScopedToken doesn't bind one, so there's
+// nothing for this helper to do with it.
+func bootstrapServer(t *testing.T) (*httptest.Server, []byte, string) {
 	t.Helper()
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	tok, err := authz.MintScopedToken(secret, namespace, id, time.Minute)
+	tok, err := authz.MintScopedToken(secret, bootstrapNamespace, bootstrapID, time.Minute)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -85,7 +95,7 @@ func noRedirectClient() *http.Client {
 }
 
 func TestBootstrapCookie_SetsSessionCookieAndRedirects(t *testing.T) {
-	router, _, tok := bootstrapServer(t, "team", "box-a")
+	router, _, tok := bootstrapServer(t)
 	defer router.Close()
 
 	resp, err := noRedirectClient().Get(router.URL + "/router/team/box-a/8080/workbench?foo=bar&token=" + tok)
@@ -147,7 +157,7 @@ func TestBootstrapCookie_SetsSessionCookieAndRedirects(t *testing.T) {
 // the client's original ordering and encoding of every OTHER param,
 // not just the one being removed.
 func TestBootstrapCookie_RedirectPreservesQueryEncodingAndOrder(t *testing.T) {
-	router, _, tok := bootstrapServer(t, "team", "box-a")
+	router, _, tok := bootstrapServer(t)
 	defer router.Close()
 
 	// "z" before "token" before "a": alphabetical re-sorting (what
@@ -308,7 +318,7 @@ func TestCookieStripping_MultipleCookieHeaderLines(t *testing.T) {
 }
 
 func TestBootstrapCookie_InvalidTokenSetsNoCookie(t *testing.T) {
-	router, _, _ := bootstrapServer(t, "team", "box-a")
+	router, _, _ := bootstrapServer(t)
 	defer router.Close()
 
 	resp, err := noRedirectClient().Get(router.URL + "/router/team/box-a/8080/workbench?token=garbage")
@@ -326,7 +336,7 @@ func TestBootstrapCookie_InvalidTokenSetsNoCookie(t *testing.T) {
 }
 
 func TestBootstrapCookie_TokenScopedToOtherSandboxSetsNoCookie(t *testing.T) {
-	router, secret, _ := bootstrapServer(t, "team", "box-a")
+	router, secret, _ := bootstrapServer(t)
 	defer router.Close()
 
 	otherTok, err := authz.MintScopedToken(secret, "team", "box-b", time.Minute)

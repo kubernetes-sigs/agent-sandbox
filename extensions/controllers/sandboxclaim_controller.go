@@ -968,12 +968,9 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 		// Wrap the API logic in a closure
 		success, err := func() (bool, error) {
-			poolName := "none"
-			if wpName := getWarmPoolName(adopted); wpName != "" {
-				poolName = wpName
-			}
+			poolName := getWarmPoolName(adopted)
 
-			logger.Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
+			logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
 			// Update claim to record adoption (optimistic lock)
 			if claim.Annotations == nil {

@@ -39,10 +39,13 @@ Starting in **v1.0.0**, `v1alpha1` support and conversion webhooks are removed. 
 > **InstallPlan Failure Behavior**: If an OLM upgrade is attempted before `storedVersions` is pruned, the Kubernetes apiserver rejects the CRD update and the upgrade does not proceed. In OperatorHub UI, this may appear generically as "install failed" (with the root rejection message visible in the `Subscription` status conditions). Once you patch `storedVersions`, re-trigger or approve the `InstallPlan` if it does not converge on its own.
 
 > [!NOTE]
-> **Automatic Cleanup**: Unlike standard `kubectl apply` upgrades, OLM automatically garbage-collects legacy webhook `Service` and namespaced `Role`/`RoleBinding` objects when the previous CSV is replaced. `Secret/agent-sandbox-webhook-certs` is the exception — the controller created it at runtime with no owner reference, so OLM has no ownership link to it. Delete it manually:
+> **Post-Upgrade Cleanup**: OLM automatically garbage-collects the legacy CSV-managed namespaced `Role` and `RoleBinding` objects when the previous CSV is replaced. However, `Service/agent-sandbox-webhook-service` and `Secret/agent-sandbox-webhook-certs` are not automatically pruned during CSV upgrade and should be deleted manually:
 >
 > ```bash
-> kubectl delete -n agent-sandbox-system secret/agent-sandbox-webhook-certs --ignore-not-found
+> kubectl delete -n agent-sandbox-system \
+>   svc/agent-sandbox-webhook-service \
+>   secret/agent-sandbox-webhook-certs \
+>   --ignore-not-found
 > ```
 
 ## Maintaining operator manifests

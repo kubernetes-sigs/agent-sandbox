@@ -1,6 +1,6 @@
 # Sandbox Router (Python Reference Implementation)
 
-> **Note:** A production-ready [Go Sandbox Router](../../../../sandbox-router/README.md) is now the recommended deployment. It is a drop-in replacement that preserves the same HTTP header contract and adds TLS, metrics, tracing, retries, and graceful shutdown. This Python implementation is retained for reference until its deprecation is formalized.
+> **Note:** The [Go Sandbox Router](../../../../sandbox-router/README.md) is now the recommended deployment. It is a drop-in replacement that preserves the same HTTP header contract and adds TLS, metrics, tracing, retries, and graceful shutdown. This Python implementation is retained for reference until its deprecation is formalized.
 
 The Sandbox Router is a lightweight, asynchronous reverse proxy designed to provide scalable and
 dynamic access to thousands of ephemeral agent sandboxes running in a Kubernetes cluster. It acts as

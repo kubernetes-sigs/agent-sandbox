@@ -34,8 +34,6 @@ import (
 
 const maxErrorBodySize = 512            // limits untrusted server content in error chains
 const maxMetadataResponseSize = 8 << 20 // 8 MB; bounds List/Exists JSON decode
-// maxStreamingUploadChunkSize matches io.Copy's default buffer and bounds each source read.
-const maxStreamingUploadChunkSize = 32 << 10
 
 const upperHex = "0123456789ABCDEF"
 
@@ -191,6 +189,12 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 		recordError(span, err)
 		return err
 	}
+	// A zero value means "use the operation default" to the connector. A
+	// generic reader cannot be replayed safely, so streaming uploads always
+	// normalize the default to one attempt.
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
 
 	var method, endpoint, contentType string
 	var body io.Reader
@@ -215,7 +219,7 @@ func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader,
 		}
 	}
 
-	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, 1, span); err != nil {
+	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, maxAttempts, span); err != nil {
 		return err
 	}
 	f.log.V(1).Info("streaming write completed", "path", path)
@@ -256,9 +260,6 @@ func (r *uploadLimitReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	if r.remaining > 0 {
-		if len(p) > maxStreamingUploadChunkSize {
-			p = p[:maxStreamingUploadChunkSize]
-		}
 		if int64(len(p)) > r.remaining {
 			p = p[:r.remaining]
 		}

@@ -940,21 +940,23 @@ func (r *readSizeRecorder) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func TestUploadLimitReader_BoundedChunks(t *testing.T) {
-	source := &readSizeRecorder{remaining: 2*maxStreamingUploadChunkSize + 1}
+func TestUploadLimitReader_UsesCallerBuffer(t *testing.T) {
+	source := &readSizeRecorder{remaining: 64 << 10}
 	limited := &uploadLimitReader{
 		reader:    source,
 		remaining: int64(source.remaining),
 		maxUpload: int64(source.remaining),
 	}
-	if _, err := io.ReadAll(limited); err != nil {
-		t.Fatalf("ReadAll() error: %v", err)
+	buf := make([]byte, source.remaining)
+	n, err := limited.Read(buf)
+	if err != nil {
+		t.Fatalf("Read() error: %v", err)
 	}
-	if source.maxRead > maxStreamingUploadChunkSize {
-		t.Errorf("largest source read = %d, want at most %d", source.maxRead, maxStreamingUploadChunkSize)
+	if n != len(buf) {
+		t.Fatalf("Read() bytes = %d, want %d", n, len(buf))
 	}
-	if source.reads < 3 {
-		t.Errorf("source reads = %d, want at least 3", source.reads)
+	if source.maxRead != len(buf) {
+		t.Errorf("largest source read = %d, want %d", source.maxRead, len(buf))
 	}
 }
 

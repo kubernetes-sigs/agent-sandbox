@@ -1,0 +1,245 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package proxy
+
+import (
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
+)
+
+// cookieLocations derives the authz.TokenLocations the configured
+// Authorizer was (or should have been) built with from cfg. The zero
+// value — returned whenever AuthzCookieName is unset, the default —
+// makes authz.TokenFromRequest behave exactly like
+// authz.BearerTokenFromRequest, so a deployment that hasn't opted into
+// this feature is unaffected by anything in this file.
+func cookieLocations(cfg *config.Config) authz.TokenLocations {
+	if cfg.AuthzCookieName == "" {
+		return authz.TokenLocations{}
+	}
+	return authz.TokenLocations{
+		QueryParam: cfg.AuthzCookieQueryParam,
+		CookieName: cfg.AuthzCookieName,
+	}
+}
+
+// credentialSource reports which part of r a credential was found in,
+// using the same locations the configured Authorizer checks. It exists
+// so ServeHTTP can apply the cookie-only Origin-allowlist check (see
+// isAllowedOrigin) BEFORE calling Authorize, without changing the
+// authz.Authorizer interface — which authorizes or denies, but never
+// reports where the credential it used came from.
+func (h *Handler) credentialSource(r *http.Request) authz.TokenSource {
+	_, src, ok := authz.TokenFromRequest(r, cookieLocations(h.cfg))
+	if !ok {
+		return ""
+	}
+	return src
+}
+
+// isAllowedOrigin reports whether origin — the raw Origin header value,
+// possibly empty — may carry a cookie-sourced credential toward host
+// (the request's Host) under allowed.
+//
+// An empty origin is let through: there is nothing here for this check
+// to inspect, and browsers reliably send Origin on exactly the requests
+// this check exists to gate (every WebSocket handshake, and any
+// cross-site fetch/XHR/form submission) — a same-origin plain GET
+// navigation is the common case that omits it, and that case needs no
+// gating in the first place.
+//
+// A same-origin request — origin's host equals host — is always
+// allowed regardless of the allowlist; only a genuinely cross-site
+// Origin is checked against it. The comparison is host-only, ignoring
+// scheme, mirroring code-server's own ensureOrigin check (Origin ==
+// Host) rather than a strict same-origin comparison — the router may
+// sit behind a TLS-terminating load balancer with no reliable signal
+// of the scheme the browser actually used.
+func isAllowedOrigin(origin, host string, allowed []string) bool {
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(u.Host, host) {
+		return true
+	}
+	for _, a := range allowed {
+		if strings.EqualFold(a, origin) {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeBootstrapCookie implements the browser-session bootstrap: a
+// GET/HEAD, non-upgrade request whose credential was found in the URL
+// query parameter (Config.AuthzCookieQueryParam) — already proven valid
+// by the caller's successful Authorize call — gets that credential set
+// as a cookie scoped to exactly this sandbox, and is redirected to the
+// same URL with the parameter stripped. It reports whether it wrote a
+// response; when true, the caller must not proxy the request any
+// further.
+//
+// This exists because a browser cannot set a request header at all for
+// a top-level navigation, an <iframe src>, or a WebSocket handshake —
+// the query parameter is the only place the FIRST such request can
+// carry a credential. Every request after this one relies on the
+// cookie instead, which a browser attaches automatically to any request
+// under the cookie's Path, including a WebSocket handshake.
+//
+// Redirecting immediately, rather than also serving the original
+// request's content, is deliberate: it collapses the window during
+// which the credential sits in the URL to a single request, so it never
+// lands in browser history or in a Referer header a subsequently loaded
+// sub-resource might send.
+func (h *Handler) maybeBootstrapCookie(w http.ResponseWriter, r *http.Request, target Target, credSrc authz.TokenSource, upgrade bool) bool {
+	if h.cfg.AuthzCookieName == "" || credSrc != authz.TokenSourceQuery {
+		return false
+	}
+	if upgrade {
+		// A WebSocket handshake is technically a GET, but a browser's
+		// WebSocket constructor does not follow redirects, so it cannot
+		// be bootstrapped this way — it must already be relying on a
+		// cookie set by an earlier plain-HTTP bootstrap on the same
+		// page. Nothing in a real browser flow presents a query-sourced
+		// credential on an upgrade request; if one somehow does, it is
+		// let through (Authorize already ran) without a cookie.
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		// Redirecting away from a request that might carry a body (a
+		// POST, say) would silently drop it. Nothing in a real browser
+		// flow presents the bootstrap parameter on such a request
+		// either; let it through without a cookie, same as the upgrade
+		// case above.
+		return false
+	}
+	token := r.URL.Query().Get(h.cfg.AuthzCookieQueryParam)
+	if token == "" {
+		return false
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:  h.cfg.AuthzCookieName,
+		Value: token,
+		// Scoped to exactly the sandbox this token authorized: the
+		// path-routing prefix plus (namespace, id, port). A cookie
+		// minted for one sandbox's path is never attached by the
+		// browser to a request under a different sandbox's path, so
+		// the browser itself enforces per-sandbox isolation before the
+		// router's own per-request check ever runs.
+		Path:     bootstrapCookiePath(h.cfg.PathRoutingPrefix, target),
+		HttpOnly: true,
+		Secure:   !h.cfg.AuthzCookieInsecure,
+		SameSite: sameSiteFor(h.cfg.AuthzCookieSameSite),
+		// No Max-Age/Expires: a session cookie. The token still carries
+		// its own expiry; once that lapses, the browser needs a fresh
+		// bootstrap URL rather than a silent renewal this router has no
+		// safe way to grant on its own.
+	})
+
+	redirectURL := *r.URL
+	q := redirectURL.Query()
+	q.Del(h.cfg.AuthzCookieQueryParam)
+	redirectURL.RawQuery = q.Encode()
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
+	return true
+}
+
+// bootstrapCookiePath builds the cookie Path that scopes a bootstrapped
+// credential to exactly one sandbox: <prefix>/<namespace>/<id>/<port>/.
+// This is the same shape ParsePathRoute expects on the way in, so the
+// browser only ever attaches the cookie to requests already addressed
+// to this same (namespace, id, port).
+func bootstrapCookiePath(prefix string, target Target) string {
+	return prefix + "/" + target.Namespace + "/" + target.ID + "/" + strconv.Itoa(target.Port) + "/"
+}
+
+// sameSiteFor maps the operator-facing enum to the net/http constant.
+func sameSiteFor(s config.CookieSameSite) http.SameSite {
+	switch s {
+	case config.CookieSameSiteStrict:
+		return http.SameSiteStrictMode
+	case config.CookieSameSiteNone:
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteLaxMode
+	}
+}
+
+// stripQueryParam removes every "key=value" pair whose key decodes to
+// param from a raw (still-encoded) query string, leaving the encoding
+// and relative order of every other pair untouched. Returns rawQuery
+// unchanged — the same string, not a rebuilt equivalent — whenever
+// param is empty or not present, so a deployment that hasn't set
+// --authz-cookie-query-param sees byte-identical output to before this
+// function existed.
+func stripQueryParam(rawQuery, param string) string {
+	if param == "" || rawQuery == "" {
+		return rawQuery
+	}
+	pairs := strings.Split(rawQuery, "&")
+	kept := make([]string, 0, len(pairs))
+	changed := false
+	for _, p := range pairs {
+		key := p
+		if i := strings.IndexByte(p, '='); i >= 0 {
+			key = p[:i]
+		}
+		if decoded, err := url.QueryUnescape(key); err == nil && decoded == param {
+			changed = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if !changed {
+		return rawQuery
+	}
+	return strings.Join(kept, "&")
+}
+
+// stripCookieFromHeader removes exactly the cookie named name from a
+// Cookie header value, leaving any other cookies the client sent (a
+// sandbox's own app, e.g. code-server, sets its own) untouched. Returns
+// "" when nothing remains, so the caller can delete the header entirely
+// rather than forward an empty one.
+func stripCookieFromHeader(header, name string) string {
+	if header == "" || name == "" {
+		return header
+	}
+	parts := strings.Split(header, ";")
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		key := trimmed
+		if i := strings.IndexByte(trimmed, '='); i >= 0 {
+			key = trimmed[:i]
+		}
+		if key == name {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	return strings.Join(kept, "; ")
+}

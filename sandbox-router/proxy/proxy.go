@@ -130,6 +130,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		labels.SandboxID = target.ID
 	}
 
+	// Detect Upgrade once, ahead of authorization: the browser-session
+	// bootstrap below and the Rewrite callback further down both need
+	// it, and computing it in one place keeps them from disagreeing if
+	// the predicate ever changes.
+	upgrade := isUpgradeRequest(r)
+
+	// Cross-Site WebSocket Hijacking guard. A cookie is an ambient
+	// credential — unlike a header or a query parameter, the browser
+	// attaches it to a request an attacker's page initiated, and a
+	// WebSocket handshake in particular is not subject to the
+	// Same-Origin Policy the way a fetch is. This runs BEFORE Authorize
+	// (a forged cross-site request should never reach the authorizer,
+	// let alone cost a TokenReview API call) and before the Rewrite
+	// callback below strips Origin for upgrades. Header- and
+	// query-sourced credentials are exempt: a third-party page cannot
+	// forge either one.
+	credSrc := h.credentialSource(r)
+	if credSrc == authz.TokenSourceCookie {
+		origin := r.Header.Get("Origin")
+		if !isAllowedOrigin(origin, r.Host, h.cfg.AuthzCookieAllowedOrigins) {
+			observability.LoggerFromContext(r.Context(), h.log).Info("authorization denied: origin not allowed for cookie-authenticated request",
+				"sandbox", target.ID,
+				"namespace", target.Namespace,
+				"origin", origin,
+			)
+			if h.metrics != nil {
+				h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
+			}
+			WriteJSONError(w, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
+			return
+		}
+	}
+
 	// Authorization. Implementations are expected to pull whatever
 	// credential they need (TLS cert, Bearer token, custom header) off
 	// the request and either allow or return one of the sentinel
@@ -154,11 +187,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "allow").Inc()
 	}
 
+	// Browser-session bootstrap: this request just proved (via the
+	// Authorize call above) that it holds a valid credential presented
+	// through the query parameter. Set it as a cookie scoped to this
+	// sandbox and redirect, so every later request — including a
+	// WebSocket handshake, which cannot carry a header and, in any real
+	// browser flow, never carries this query parameter either — relies
+	// on the cookie a browser attaches automatically.
+	if h.maybeBootstrapCookie(w, r, target, credSrc, upgrade) {
+		return
+	}
+
 	target0 := target // capture for closures
+	outboundRawQuery := r.URL.RawQuery
+	if h.cfg.AuthzCookieQueryParam != "" {
+		// Never forward the bootstrap credential to the sandbox itself.
+		// In practice this only fires for the non-GET/HEAD and upgrade
+		// edge cases maybeBootstrapCookie declines to redirect — the
+		// normal flow already returned above.
+		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
+	}
 	// Resolve once per request so the ErrorHandler can see which path
 	// produced the IP (cache vs DNS vs override) and invalidate the cache
 	// entry on dial-class failures. The Rewrite callback re-uses the URL.
-	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
+	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, outboundRawQuery, h.cache)
 	if upstreamRawPath != "" {
 		// Only ever set for a path-routed request (see resolveTarget).
 		// Target.Resolve only assigns URL.Path, so without this a path-
@@ -170,11 +222,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// resolveTarget/ParsePathRoute guarantee that pairing holds.
 		upstreamURL.RawPath = upstreamRawPath
 	}
-	// Detect Upgrade once and reuse: the Rewrite callback uses it to
-	// decide whether to strip Origin, the timeout block below uses it
-	// to skip the per-request deadline. Same predicate, same source of
-	// truth — easier to keep them in sync.
-	upgrade := isUpgradeRequest(r)
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = upstreamURL
@@ -189,6 +236,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Bearer-protected service. Matches the Python router, which
 			// strips Authorization right next to Host.
 			pr.Out.Header.Del("Authorization")
+			// Likewise, never forward our own session cookie — it is as
+			// much a credential as the Authorization header above. Any
+			// other cookie the client sent (e.g. one of code-server's
+			// own) passes through untouched.
+			if h.cfg.AuthzCookieName != "" {
+				if v := pr.Out.Header.Get("Cookie"); v != "" {
+					if stripped := stripCookieFromHeader(v, h.cfg.AuthzCookieName); stripped == "" {
+						pr.Out.Header.Del("Cookie")
+					} else {
+						pr.Out.Header.Set("Cookie", stripped)
+					}
+				}
+			}
 			// SetXForwarded uses Set() for Host + Proto (overwrites,
 			// safe) but APPENDS to any existing X-Forwarded-For — so a
 			// client-supplied "X-Forwarded-For: 1.2.3.4" would land

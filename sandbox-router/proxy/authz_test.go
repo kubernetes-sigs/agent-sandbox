@@ -20,14 +20,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
@@ -159,6 +162,77 @@ func TestAuthzDenialMapsToStatus(t *testing.T) {
 			}
 			if req0.bearer != "test-token" {
 				t.Fatalf("Authorize should see bearer token, got %q", req0.bearer)
+			}
+		})
+	}
+}
+
+// TestAuthzRunsForPathRoutedRequests closes a gap that existed
+// alongside --path-routing-prefix from its introduction: every
+// existing authz test up to this one is header-routed, and every
+// existing path-routing test uses the nil-Authorizer (AllowAll)
+// default, so nothing exercised the combination — a path-routed
+// request reaching Authorize with the (namespace, id) ParsePathRoute
+// extracted from the URL, and a denial there mapping to the same HTTP
+// status a header-routed denial would.
+func TestAuthzRunsForPathRoutedRequests(t *testing.T) {
+	cases := []struct {
+		name       string
+		denyErr    error
+		wantStatus int
+	}{
+		{"allow", nil, http.StatusNoContent},
+		{"unauthenticated → 401", authz.ErrUnauthenticated, http.StatusUnauthorized},
+		{"forbidden → 403", authz.ErrForbidden, http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer backend.Close()
+
+			backendURL, err := url.Parse(backend.URL)
+			if err != nil {
+				t.Fatalf("parse backend URL: %v", err)
+			}
+			// A path-routed Target never carries a UID or PodIP override
+			// (see ParsePathRoute) — it only becomes dialable here via
+			// the namespace/name cache index, same as
+			// TestPathRoutingPreservesEncodedSlash.
+			lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+				"any-uid": {PodIP: backendURL.Hostname(), Namespace: "team-a", SandboxName: "sandbox-7"},
+			}}
+
+			cfg := config.Defaults()
+			cfg.AllowLoopbackPodIP = true
+			cfg.ProxyTimeout = 2 * time.Second
+			cfg.UpstreamMaxRetries = 0
+			cfg.PathRoutingPrefix = "/router"
+			a := &recordingAuthz{err: tc.denyErr}
+			router := httptest.NewServer(NewHandler(Options{
+				Config:     &cfg,
+				Cache:      lookup,
+				Authorizer: a,
+				Logger:     logr.Discard(),
+			}))
+			defer router.Close()
+
+			resp, err := http.Get(router.URL + "/router/team-a/sandbox-7/" + backendURL.Port() + "/x")
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status: got %d want %d", resp.StatusCode, tc.wantStatus)
+			}
+
+			calls := a.snapshot()
+			if len(calls) != 1 {
+				t.Fatalf("expected exactly one Authorize call, got %d", len(calls))
+			}
+			if calls[0].ns != "team-a" || calls[0].sandbox != "sandbox-7" {
+				t.Fatalf("Authorize got (ns=%q, sandbox=%q) from the path, want (team-a, sandbox-7)", calls[0].ns, calls[0].sandbox)
 			}
 		})
 	}

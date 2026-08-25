@@ -21,7 +21,9 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 # Core router components
 kubectl apply -f sandbox-router/deploy/
 
-# Optional: GKE Gateway API ingress
+# Optional: GKE Gateway API ingress.
+# Note: GKE Standard clusters require Gateway API to be explicitly enabled
+# using --gateway-api=standard. GKE Autopilot enables it by default.
 kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
 ```
 

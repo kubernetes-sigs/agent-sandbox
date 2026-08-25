@@ -100,11 +100,12 @@ const (
 	TokenSourceHeader TokenSource = "header"
 	// TokenSourceQuery means the credential came from a URL query
 	// parameter. This exists solely to bootstrap TokenSourceCookie (see
-	// proxy.BrowserSessionOptions): a browser cannot set a request
-	// header at all for a top-level navigation, an <iframe src>, or a
-	// WebSocket handshake, so the very first request has to carry the
-	// credential somewhere a browser *can* put it — the URL — before a
-	// cookie exists to carry it afterward.
+	// the router's "Browser-session credentials" README section, and
+	// proxy.Handler's browser-session bootstrap): a browser cannot set
+	// a request header at all for a top-level navigation, an
+	// <iframe src>, or a WebSocket handshake, so the very first request
+	// has to carry the credential somewhere a browser *can* put it —
+	// the URL — before a cookie exists to carry it afterward.
 	TokenSourceQuery TokenSource = "query"
 	// TokenSourceCookie means the credential came from a cookie. Unlike
 	// the header and query sources, a cookie is sent automatically by

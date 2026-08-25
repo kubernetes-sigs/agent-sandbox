@@ -54,9 +54,26 @@ func (h *Handler) credentialSource(r *http.Request) authz.TokenSource {
 	return src
 }
 
+// requestOrigin builds the router's own canonical origin for r, in the
+// same scheme://host shape a browser's Origin header uses. Scheme is
+// derived from whether the connection this request arrived on is TLS
+// (r.TLS != nil for the router's own --https-bind-address listener),
+// not guessed from a client-supplied header — a deployment behind a
+// TLS-terminating load balancer that forwards the real scheme needs to
+// set that up as trusted infrastructure, not something this function
+// takes on faith from the request itself.
+func requestOrigin(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
 // isAllowedOrigin reports whether origin — the raw Origin header value,
-// possibly empty — may carry a cookie-sourced credential toward host
-// (the request's Host) under allowed.
+// possibly empty — may carry a cookie-sourced credential toward
+// selfOrigin (this router's own canonical origin, from requestOrigin)
+// under allowed.
 //
 // An empty origin is let through: there is nothing here for this check
 // to inspect, and browsers reliably send Origin on exactly the requests
@@ -65,30 +82,51 @@ func (h *Handler) credentialSource(r *http.Request) authz.TokenSource {
 // navigation is the common case that omits it, and that case needs no
 // gating in the first place.
 //
-// A same-origin request — origin's host equals host — is always
-// allowed regardless of the allowlist; only a genuinely cross-site
-// Origin is checked against it. The comparison is host-only, ignoring
-// scheme, mirroring code-server's own ensureOrigin check (Origin ==
-// Host) rather than a strict same-origin comparison — the router may
-// sit behind a TLS-terminating load balancer with no reliable signal
-// of the scheme the browser actually used.
-func isAllowedOrigin(origin, host string, allowed []string) bool {
+// A request whose Origin exactly matches selfOrigin — scheme AND host —
+// is always allowed regardless of the allowlist; only a genuinely
+// different Origin is checked against it. The match is NOT host-only:
+// http://host and https://host are different origins, and treating
+// them as interchangeable would let a plain-HTTP origin ride a
+// Secure, SameSite=None cookie meant only for the HTTPS side of a
+// deployment that (unusually, but the config allows it) serves both
+// schemes on the same host.
+//
+// Both sides are compared after normalizeOrigin: a real browser never
+// includes a scheme's default port in the Origin header it sends, so
+// an allowlist entry (or a --https-bind-address serving on :443)
+// written with an explicit ":443"/":80" would otherwise never match
+// anything a browser actually sends.
+func isAllowedOrigin(origin, selfOrigin string, allowed []string) bool {
 	if origin == "" {
 		return true
 	}
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
-	}
-	if strings.EqualFold(u.Host, host) {
+	normOrigin := normalizeOrigin(origin)
+	if strings.EqualFold(normOrigin, normalizeOrigin(selfOrigin)) {
 		return true
 	}
 	for _, a := range allowed {
-		if strings.EqualFold(a, origin) {
+		if strings.EqualFold(normalizeOrigin(a), normOrigin) {
 			return true
 		}
 	}
 	return false
+}
+
+// normalizeOrigin strips a scheme's default port (":80" for http,
+// ":443" for https) from a scheme://host[:port] origin string, so
+// "https://example.com" and "https://example.com:443" compare equal.
+// Returns o unchanged if it doesn't parse as a URL at all — callers
+// still get a deterministic (non-matching, since a malformed string
+// won't equal a well-formed one) comparison rather than a panic.
+func normalizeOrigin(o string) string {
+	u, err := url.Parse(o)
+	if err != nil {
+		return o
+	}
+	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
+		return u.Scheme + "://" + u.Hostname()
+	}
+	return o
 }
 
 // maybeBootstrapCookie implements the browser-session bootstrap: a
@@ -112,8 +150,16 @@ func isAllowedOrigin(origin, host string, allowed []string) bool {
 // which the credential sits in the URL to a single request, so it never
 // lands in browser history or in a Referer header a subsequently loaded
 // sub-resource might send.
-func (h *Handler) maybeBootstrapCookie(w http.ResponseWriter, r *http.Request, target Target, credSrc authz.TokenSource, upgrade bool) bool {
-	if h.cfg.AuthzCookieName == "" || credSrc != authz.TokenSourceQuery {
+//
+// pathRouted must be true only when resolveTarget actually matched
+// r against --path-routing-prefix. Without that gate, a header-routed
+// request that happens to carry the bootstrap query parameter (nothing
+// stops a header-based SDK caller from also setting it, deliberately or
+// not) would get redirected to a cookie whose Path can never match a
+// header-routed URL — stripping the only credential the retried
+// request had, with no way to get it back.
+func (h *Handler) maybeBootstrapCookie(w http.ResponseWriter, r *http.Request, target Target, credSrc authz.TokenSource, upgrade, pathRouted bool) bool {
+	if h.cfg.AuthzCookieName == "" || credSrc != authz.TokenSourceQuery || !pathRouted {
 		return false
 	}
 	if upgrade {
@@ -159,9 +205,12 @@ func (h *Handler) maybeBootstrapCookie(w http.ResponseWriter, r *http.Request, t
 	})
 
 	redirectURL := *r.URL
-	q := redirectURL.Query()
-	q.Del(h.cfg.AuthzCookieQueryParam)
-	redirectURL.RawQuery = q.Encode()
+	// Reuse stripQueryParam rather than Query()+Encode(): the latter
+	// resorts every surviving parameter alphabetically and re-escapes
+	// each one, which can change a client's own encoding of a value it
+	// never asked to have touched. This is exactly the byte-for-byte
+	// preservation stripQueryParam exists for elsewhere in this file.
+	redirectURL.RawQuery = stripQueryParam(r.URL.RawQuery, h.cfg.AuthzCookieQueryParam)
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
 	return true

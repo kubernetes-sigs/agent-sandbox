@@ -15,14 +15,20 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
@@ -132,6 +138,172 @@ func TestBootstrapCookie_SetsSessionCookieAndRedirects(t *testing.T) {
 	}
 }
 
+// TestBootstrapCookie_RedirectPreservesQueryEncodingAndOrder guards
+// against rebuilding the redirect query string via url.Values.Encode(),
+// which sorts keys alphabetically and re-escapes every value — losing
+// the client's original ordering and encoding of every OTHER param,
+// not just the one being removed.
+func TestBootstrapCookie_RedirectPreservesQueryEncodingAndOrder(t *testing.T) {
+	router, _, tok := bootstrapServer(t, "team", "box-a", 8080)
+	defer router.Close()
+
+	// "z" before "token" before "a": alphabetical re-sorting (what
+	// url.Values.Encode() would do) would reorder this to "a=2&z=1".
+	// "space+tab" is percent-encoded unusually (lowercase hex) on
+	// purpose — Encode() would normalize it to Go's own (uppercase hex)
+	// escaping.
+	resp, err := noRedirectClient().Get(router.URL + "/router/team/box-a/8080/?z=1&token=" + tok + "&a=space%2btab")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status: got %d want %d", resp.StatusCode, http.StatusFound)
+	}
+
+	loc, err := resp.Location()
+	if err != nil {
+		t.Fatalf("Location: %v", err)
+	}
+	const want = "z=1&a=space%2btab"
+	if loc.RawQuery != want {
+		t.Fatalf("redirect RawQuery: got %q want %q (order/encoding must survive byte-for-byte)", loc.RawQuery, want)
+	}
+}
+
+// TestBootstrapCookie_HeaderRoutedRequestNotBootstrapped is the
+// regression test for a real bug caught in review: nothing gated the
+// bootstrap to a request that actually matched --path-routing-prefix.
+// A header-routed GET carrying the bootstrap query parameter (nothing
+// stops a header-based caller from also setting it) would get
+// redirected and have its only credential stripped, with a cookie
+// whose Path could never match a header-routed URL — leaving the
+// retried request unauthenticated. It must instead be authorized and
+// proxied normally, exactly as if the cookie feature were off.
+//
+// Uses recordingAuthz (always-allow) rather than ScopedTokenAuthorizer
+// so the assertion is purely about the bootstrap's own path-routed
+// gate — ScopedTokenAuthorizer separately rejects X-Sandbox-Pod-IP
+// (needed here to reach a local httptest backend by header routing at
+// all), which would otherwise deny the request for an unrelated reason
+// and produce a false pass.
+func TestBootstrapCookie_HeaderRoutedRequestNotBootstrapped(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	a := &recordingAuthz{err: nil}
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.UpstreamMaxRetries = 0
+	cfg.PathRoutingPrefix = "/router" // configured, but this request's path won't match it
+	cfg.AuthzCookieName = "sid"
+	cfg.AuthzCookieQueryParam = "token"
+	router := httptest.NewServer(NewHandler(Options{Config: &cfg, Authorizer: a, Logger: logr.Discard()}))
+	defer router.Close()
+
+	req, _ := http.NewRequest("GET", router.URL+"/x?token=some-credential", nil)
+	req.Header.Set(HeaderSandboxID, "box-a")
+	req.Header.Set(HeaderSandboxNamespace, "team")
+	req.Header.Set(HeaderSandboxPodIP, bu.Hostname())
+	req.Header.Set(HeaderSandboxPort, bu.Port())
+
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status: got %d want %d (header-routed request must be authorized and proxied, not bootstrapped)", resp.StatusCode, http.StatusNoContent)
+	}
+	if len(resp.Cookies()) != 0 {
+		t.Fatalf("expected no Set-Cookie for a header-routed request, got %+v", resp.Cookies())
+	}
+}
+
+// TestCookieStripping_MultipleCookieHeaderLines is the regression test
+// for a real gap caught in review: pr.Out.Header.Get("Cookie") only
+// ever reads the FIRST "Cookie" header line. A client that sends the
+// session cookie on a header line other than the first must still have
+// it stripped before the request reaches the sandbox, and every other
+// cookie the client sent — regardless of which line it was on — must
+// still arrive intact.
+func TestCookieStripping_MultipleCookieHeaderLines(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		gotCookie string
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotCookie = strings.Join(r.Header.Values("Cookie"), "; ")
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := authz.MintScopedToken(secret, "team", "box-a", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	a, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+		Secret:         secret,
+		TokenLocations: authz.TokenLocations{QueryParam: "token", CookieName: "sid"},
+	})
+	if err != nil {
+		t.Fatalf("new authorizer: %v", err)
+	}
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.UpstreamMaxRetries = 0
+	cfg.PathRoutingPrefix = "/router"
+	cfg.AuthzMode = config.AuthzScopedToken
+	cfg.AuthzCookieName = "sid"
+	cfg.AuthzCookieQueryParam = "token"
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"multi-cookie-uid": {PodIP: bu.Hostname(), SandboxName: "box-a", Namespace: "team"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{Config: &cfg, Cache: lookup, Authorizer: a, Logger: logr.Discard()}))
+	defer router.Close()
+
+	req, _ := http.NewRequest("GET", router.URL+"/router/team/box-a/"+bu.Port()+"/", nil)
+	// Two distinct "Cookie" header LINES, not one combined "; "-joined
+	// value — the credential is on the second line, deliberately not
+	// the one Header.Get would see.
+	req.Header["Cookie"] = []string{"lang=en", "sid=" + tok}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status: got %d want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	mu.Lock()
+	got := gotCookie
+	mu.Unlock()
+	if strings.Contains(got, "sid=") {
+		t.Fatalf("backend saw the session cookie: %q (must be stripped regardless of which Cookie header line it arrived on)", got)
+	}
+	if !strings.Contains(got, "lang=en") {
+		t.Fatalf("backend should still see the client's other cookie, got %q", got)
+	}
+}
+
 func TestBootstrapCookie_InvalidTokenSetsNoCookie(t *testing.T) {
 	router, _, _ := bootstrapServer(t, "team", "box-a", 8080)
 	defer router.Close()
@@ -229,27 +401,92 @@ func TestBootstrapCookie_SameSiteNoneRequiresSecure(t *testing.T) {
 
 func TestIsAllowedOrigin(t *testing.T) {
 	cases := []struct {
-		name    string
-		origin  string
-		host    string
-		allowed []string
-		want    bool
+		name       string
+		origin     string
+		selfOrigin string
+		allowed    []string
+		want       bool
 	}{
-		{"no origin header is allowed", "", "router.example.com", nil, true},
-		{"same-origin (host match) allowed regardless of allowlist", "https://router.example.com", "router.example.com", nil, true},
-		{"same-origin ignores scheme", "http://router.example.com", "router.example.com", nil, true},
-		{"cross-site with empty allowlist rejected", "https://evil.example.com", "router.example.com", nil, false},
-		{"cross-site present in allowlist accepted", "https://atenea.example.com", "router.example.com", []string{"https://atenea.example.com"}, true},
-		{"cross-site not in allowlist rejected", "https://evil.example.com", "router.example.com", []string{"https://atenea.example.com"}, false},
-		{"allowlist match is case-insensitive", "https://Atenea.Example.com", "router.example.com", []string{"https://atenea.example.com"}, true},
-		{"malformed origin rejected", "not a url", "router.example.com", nil, false},
+		{"no origin header is allowed", "", "https://router.example.com", nil, true},
+		{"same-origin (scheme+host match) allowed regardless of allowlist", "https://router.example.com", "https://router.example.com", nil, true},
+		{
+			name:       "scheme mismatch is NOT treated as same-origin",
+			origin:     "http://router.example.com",
+			selfOrigin: "https://router.example.com",
+			allowed:    nil,
+			want:       false,
+		},
+		{
+			name:       "scheme mismatch the other direction is also rejected",
+			origin:     "https://router.example.com",
+			selfOrigin: "http://router.example.com",
+			allowed:    nil,
+			want:       false,
+		},
+		{"cross-site with empty allowlist rejected", "https://evil.example.com", "https://router.example.com", nil, false},
+		{"cross-site present in allowlist accepted", "https://atenea.example.com", "https://router.example.com", []string{"https://atenea.example.com"}, true},
+		{"cross-site not in allowlist rejected", "https://evil.example.com", "https://router.example.com", []string{"https://atenea.example.com"}, false},
+		{"allowlist match is case-insensitive", "https://Atenea.Example.com", "https://router.example.com", []string{"https://atenea.example.com"}, true},
+		{"malformed origin rejected", "not a url", "https://router.example.com", nil, false},
+		{
+			name:       "allowlist entry with explicit default https port matches an origin without one",
+			origin:     "https://atenea.example.com",
+			selfOrigin: "https://router.example.com",
+			allowed:    []string{"https://atenea.example.com:443"},
+			want:       true,
+		},
+		{
+			name:       "self-origin with explicit default port matches an origin without one",
+			origin:     "https://router.example.com",
+			selfOrigin: "https://router.example.com:443",
+			allowed:    nil,
+			want:       true,
+		},
+		{
+			name:       "a non-default port is never stripped and must match exactly",
+			origin:     "https://atenea.example.com",
+			selfOrigin: "https://router.example.com",
+			allowed:    []string{"https://atenea.example.com:8443"},
+			want:       false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isAllowedOrigin(tc.origin, tc.host, tc.allowed); got != tc.want {
+			if got := isAllowedOrigin(tc.origin, tc.selfOrigin, tc.allowed); got != tc.want {
 				t.Fatalf("got %v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRequestOrigin(t *testing.T) {
+	plain, _ := http.NewRequest("GET", "http://router.example.com/x", nil)
+	plain.Host = "router.example.com"
+	if got := requestOrigin(plain); got != "http://router.example.com" {
+		t.Fatalf("plain: got %q", got)
+	}
+
+	tlsReq, _ := http.NewRequest("GET", "https://router.example.com/x", nil)
+	tlsReq.Host = "router.example.com"
+	tlsReq.TLS = &tls.ConnectionState{}
+	if got := requestOrigin(tlsReq); got != "https://router.example.com" {
+		t.Fatalf("tls: got %q", got)
+	}
+}
+
+func TestNormalizeOrigin(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://example.com", "https://example.com"},
+		{"https://example.com:443", "https://example.com"},
+		{"http://example.com:80", "http://example.com"},
+		{"http://example.com:8080", "http://example.com:8080"},
+		{"https://example.com:8443", "https://example.com:8443"},
+		{"not a url", "not a url"},
+	}
+	for _, tc := range cases {
+		if got := normalizeOrigin(tc.in); got != tc.want {
+			t.Fatalf("normalizeOrigin(%q): got %q want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

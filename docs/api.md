@@ -131,6 +131,43 @@ Sandbox is the Schema for the sandboxes API.
 | `status` _[SandboxStatus](#sandboxstatus)_ | status defines the observed state of Sandbox |  | Optional: \{\} <br /> |
 
 
+#### SandboxFirstReadyRecordState
+
+_Underlying type:_ _string_
+
+SandboxFirstReadyRecordState tracks whether the controller has already
+accounted for the Sandbox's first Ready transition in lifecycle metrics.
+
+
+
+_Appears in:_
+- [SandboxLifecycleStatus](#sandboxlifecyclestatus)
+
+| Field | Description |
+| --- | --- |
+| `Recorded` | SandboxFirstReadyRecordStateRecorded indicates first-ready metrics were<br />recorded and the exact firstReadyTime is known.<br /> |
+| `RecordedUnknown` | SandboxFirstReadyRecordStateRecordedUnknown indicates first-ready metrics<br />were already accounted for, but the original firstReadyTime could not be<br />reconstructed during recovery or upgrade.<br /> |
+
+
+#### SandboxLifecycleStatus
+
+
+
+SandboxLifecycleStatus stores controller-observed lifecycle timestamps and
+metric dedupe state for a Sandbox.
+
+
+
+_Appears in:_
+- [SandboxStatus](#sandboxstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `firstObservedTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | firstObservedTime is when the controller first observed this Sandbox. |  | Format: date-time <br />Optional: \{\} <br /> |
+| `firstReadyTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | firstReadyTime is when the controller first observed this Sandbox reach<br />Ready. It remains unset when the controller can only recover that the<br />Sandbox was already counted before the precise timestamp was persisted. |  | Format: date-time <br />Optional: \{\} <br /> |
+| `firstReadyRecordState` _[SandboxFirstReadyRecordState](#sandboxfirstreadyrecordstate)_ | firstReadyRecordState tracks whether first-ready lifecycle metrics were<br />already recorded for this Sandbox. |  | Enum: [Recorded RecordedUnknown] <br />Optional: \{\} <br /> |
+
+
 #### SandboxSpec
 
 
@@ -168,6 +205,7 @@ _Appears in:_
 | `serviceFQDN` _string_ | serviceFQDN that is valid for default cluster settings<br />The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag. |  | Optional: \{\} <br /> |
 | `service` _string_ | service is the name of the headless Service created for this Sandbox. It is empty<br />when no Service exists for the Sandbox (for example when spec.service is false, or<br />unset with no pre-existing Service). See serviceFQDN for the fully qualified<br />in-cluster DNS name of this Service. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions defines the status conditions array |  | Optional: \{\} <br /> |
+| `lifecycle` _[SandboxLifecycleStatus](#sandboxlifecyclestatus)_ | lifecycle stores controller-observed lifecycle timestamps and metric<br />recording state for this Sandbox. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the number of actual replicas. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters.<br />This field is populated only while a backing pod exists. It is cleared whenever<br />the pod is absent, for example when the Sandbox is suspended (replicas: 0) or<br />before the pod has been created. |  | Optional: \{\} <br /> |
@@ -340,6 +378,43 @@ _Appears in:_
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for the Sandbox workload.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
 
 
+#### SandboxFirstReadyRecordState
+
+_Underlying type:_ _string_
+
+SandboxFirstReadyRecordState tracks whether the controller has already
+accounted for the Sandbox's first Ready transition in lifecycle metrics.
+
+
+
+_Appears in:_
+- [SandboxLifecycleStatus](#sandboxlifecyclestatus)
+
+| Field | Description |
+| --- | --- |
+| `Recorded` | SandboxFirstReadyRecordStateRecorded indicates first-ready metrics were<br />recorded and the exact firstReadyTime is known.<br /> |
+| `RecordedUnknown` | SandboxFirstReadyRecordStateRecordedUnknown indicates first-ready metrics<br />were already accounted for, but the original firstReadyTime could not be<br />reconstructed during recovery or upgrade.<br /> |
+
+
+#### SandboxLifecycleStatus
+
+
+
+SandboxLifecycleStatus stores controller-observed lifecycle timestamps and
+metric dedupe state for a Sandbox.
+
+
+
+_Appears in:_
+- [SandboxStatus](#sandboxstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `firstObservedTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | firstObservedTime is when the controller first observed this Sandbox. |  | Format: date-time <br />Optional: \{\} <br /> |
+| `firstReadyTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | firstReadyTime is when the controller first observed this Sandbox reach<br />Ready. It remains unset when the controller can only recover that the<br />Sandbox was already counted before the precise timestamp was persisted. |  | Format: date-time <br />Optional: \{\} <br /> |
+| `firstReadyRecordState` _[SandboxFirstReadyRecordState](#sandboxfirstreadyrecordstate)_ | firstReadyRecordState tracks whether first-ready lifecycle metrics were<br />already recorded for this Sandbox. |  | Enum: [Recorded RecordedUnknown] <br />Optional: \{\} <br /> |
+
+
 #### SandboxOperatingMode
 
 _Underlying type:_ _string_
@@ -400,6 +475,7 @@ _Appears in:_
 | `serviceFQDN` _string_ | serviceFQDN that is valid for default cluster settings<br />The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag. |  | Optional: \{\} <br /> |
 | `service` _string_ | service is the name of the headless Service created for this Sandbox. It is empty<br />when no Service exists for the Sandbox (for example when spec.service is false, or<br />unset with no pre-existing Service). See serviceFQDN for the fully qualified<br />in-cluster DNS name of this Service. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions defines the status conditions array |  | Optional: \{\} <br /> |
+| `lifecycle` _[SandboxLifecycleStatus](#sandboxlifecyclestatus)_ | lifecycle stores controller-observed lifecycle timestamps and metric<br />recording state for this Sandbox. |  | Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters.<br />This field is populated only while a backing pod exists. It is cleared whenever<br />the pod is absent, for example when the Sandbox is suspended<br />(operatingMode: Suspended) or before the pod has been created. |  | Optional: \{\} <br /> |
 | `nodeName` _string_ | nodeName is the name of the node where the underlying pod is scheduled.<br />Like podIPs, it is cleared whenever the pod is absent (e.g. while suspended). |  | Optional: \{\} <br /> |

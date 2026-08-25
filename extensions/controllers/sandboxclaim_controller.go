@@ -2558,21 +2558,6 @@ func (r *SandboxClaimReconciler) recordControllerStartupLatency(ctx context.Cont
 	}
 }
 
-// recordSandboxCreationLatency records the sandbox creation latency.
-func (r *SandboxClaimReconciler) recordSandboxCreationLatency(sandbox *v1beta1.Sandbox, launchType string, templateName string) {
-	if sandbox == nil || sandbox.CreationTimestamp.IsZero() {
-		return
-	}
-	sandboxReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(v1beta1.SandboxConditionReady))
-	if sandboxReady == nil || sandboxReady.Status != metav1.ConditionTrue || sandboxReady.LastTransitionTime.IsZero() {
-		return
-	}
-	latency := sandboxReady.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-	if latency >= 0 {
-		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
-	}
-}
-
 // drainObservedTime removes the observedTimes entry for a claim if the UID
 // matches. This is safe to call even when no entry exists.
 func (r *SandboxClaimReconciler) drainObservedTime(claim *extensionsv1beta1.SandboxClaim) {
@@ -2677,7 +2662,6 @@ func (r *SandboxClaimReconciler) recordCreationLatencyMetric(
 
 	r.recordClaimStartupLatency(ctx, claim, launchType, templateName)
 	r.recordControllerStartupLatency(ctx, claim, launchType, templateName)
-	r.recordSandboxCreationLatency(sandbox, launchType, templateName)
 	r.recordClientClaimStartupLatency(ctx, claim, launchType, templateName)
 
 	// Stamp the first-ready annotation to prevent duplicate metric recording on

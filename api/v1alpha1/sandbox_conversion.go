@@ -195,6 +195,21 @@ func ConvertStatusTo(src *SandboxStatus, dst *v1beta1.SandboxStatus) error {
 	dst.ServiceFQDN = src.ServiceFQDN
 	dst.Service = src.Service
 	dst.Conditions = src.Conditions
+	if src.Lifecycle != nil {
+		dst.Lifecycle = &v1beta1.SandboxLifecycleStatus{
+			FirstReadyRecordState: v1beta1.SandboxFirstReadyRecordState(src.Lifecycle.FirstReadyRecordState),
+		}
+		if src.Lifecycle.FirstObservedTime != nil {
+			firstObservedTime := src.Lifecycle.FirstObservedTime.DeepCopy()
+			dst.Lifecycle.FirstObservedTime = firstObservedTime
+		}
+		if src.Lifecycle.FirstReadyTime != nil {
+			firstReadyTime := src.Lifecycle.FirstReadyTime.DeepCopy()
+			dst.Lifecycle.FirstReadyTime = firstReadyTime
+		}
+	} else {
+		dst.Lifecycle = nil
+	}
 	dst.LabelSelector = src.LabelSelector
 	dst.PodIPs = src.PodIPs
 	dst.NodeName = "" // NodeName is new in v1beta1 and does not exist in v1alpha1
@@ -205,6 +220,21 @@ func ConvertStatusFrom(src *v1beta1.SandboxStatus, dst *SandboxStatus) error {
 	dst.ServiceFQDN = src.ServiceFQDN
 	dst.Service = src.Service
 	dst.Conditions = src.Conditions
+	if src.Lifecycle != nil {
+		dst.Lifecycle = &SandboxLifecycleStatus{
+			FirstReadyRecordState: SandboxFirstReadyRecordState(src.Lifecycle.FirstReadyRecordState),
+		}
+		if src.Lifecycle.FirstObservedTime != nil {
+			firstObservedTime := src.Lifecycle.FirstObservedTime.DeepCopy()
+			dst.Lifecycle.FirstObservedTime = firstObservedTime
+		}
+		if src.Lifecycle.FirstReadyTime != nil {
+			firstReadyTime := src.Lifecycle.FirstReadyTime.DeepCopy()
+			dst.Lifecycle.FirstReadyTime = firstReadyTime
+		}
+	} else {
+		dst.Lifecycle = nil
+	}
 	dst.LabelSelector = src.LabelSelector
 	dst.PodIPs = src.PodIPs
 	return nil

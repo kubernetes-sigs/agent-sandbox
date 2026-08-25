@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -311,9 +312,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile)
+	oldStatus := sandbox.Status.DeepCopy()
+
+	// Initialize trace ID annotation for active resources missing it.
 	tc := r.Tracer.GetTraceContext(ctx)
-	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+	needTraceContextPatch := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
+	if needTraceContextPatch {
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
@@ -325,7 +329,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	oldStatus := sandbox.Status.DeepCopy()
+	r.ensureSandboxFirstObservedTime(sandbox)
+
 	var err error
 	sandboxDeleted := false
 	result := ctrl.Result{}
@@ -380,10 +385,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if !sandboxDeleted {
+		r.prepareSandboxLifecycleStatus(sandbox, oldStatus)
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else {
+			r.recordSandboxCreationMetrics(ctx, sandbox, oldStatus)
 		}
 	}
 	// return errors seen
@@ -768,6 +776,156 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 
 	// Surface error
 	return nil
+}
+
+func (r *SandboxReconciler) ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) {
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	if lifecycle.FirstObservedTime != nil {
+		return
+	}
+	now := metav1.Now()
+	lifecycle.FirstObservedTime = &now
+}
+
+func (r *SandboxReconciler) prepareSandboxLifecycleStatus(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+
+	if lifecycle.FirstObservedTime == nil {
+		now := metav1.Now()
+		lifecycle.FirstObservedTime = &now
+	}
+
+	if firstReadyMetricsRecorded(lifecycle) {
+		return
+	}
+
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+	isReady := newReady != nil && newReady.Status == metav1.ConditionTrue
+
+	if !isReady {
+		if wasReady {
+			lifecycle.FirstReadyTime = nil
+			lifecycle.FirstReadyRecordState = sandboxv1beta1.SandboxFirstReadyRecordStateRecordedUnknown
+		}
+		return
+	}
+
+	if wasReady {
+		lifecycle.FirstReadyTime = nil
+		lifecycle.FirstReadyRecordState = sandboxv1beta1.SandboxFirstReadyRecordStateRecordedUnknown
+		return
+	}
+
+	firstReadyTime := newReady.LastTransitionTime
+	if firstReadyTime.IsZero() {
+		firstReadyTime = metav1.Now()
+	}
+	lifecycle.FirstReadyTime = &firstReadyTime
+	lifecycle.FirstReadyRecordState = sandboxv1beta1.SandboxFirstReadyRecordStateRecorded
+}
+
+// recordSandboxCreationMetrics detects the first transition to Ready=True and records
+// sandbox lifecycle metrics (creation latency, ready latency) after the durable
+// lifecycle state has already been persisted in Sandbox status.
+func (r *SandboxReconciler) recordSandboxCreationMetrics(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	logger := log.FromContext(ctx)
+
+	// Only record on the first transition to Ready=True.
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	wasReady := oldReady != nil && oldReady.Status == metav1.ConditionTrue
+
+	if newReady == nil || newReady.Status != metav1.ConditionTrue {
+		return
+	}
+
+	if wasReady {
+		return
+	}
+
+	lifecycle := sandbox.Status.Lifecycle
+	if lifecycle == nil || lifecycle.FirstReadyRecordState != sandboxv1beta1.SandboxFirstReadyRecordStateRecorded {
+		return
+	}
+	if firstReadyMetricsRecorded(oldStatus.Lifecycle) {
+		return
+	}
+
+	// Resolve metric labels.
+	launchType := asmetrics.LaunchTypeCold
+	if sandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] == sandboxv1beta1.SandboxLaunchTypeWarm {
+		launchType = asmetrics.LaunchTypeWarm
+	}
+
+	templateName := "unknown"
+	if tmpl, ok := sandbox.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation]; ok && tmpl != "" {
+		templateName = tmpl
+	}
+
+	ownedBy := resolveOwnedBy(sandbox)
+
+	logger.V(1).Info("Sandbox reached Ready state", "sandbox", sandbox.Name, "launchType", launchType, "ownedBy", ownedBy)
+
+	// 1. Creation latency (Sandbox.CreationTimestamp → Ready.LastTransitionTime).
+	if !sandbox.CreationTimestamp.IsZero() && lifecycle.FirstReadyTime != nil {
+		latency := lifecycle.FirstReadyTime.Sub(sandbox.CreationTimestamp.Time)
+		asmetrics.RecordSandboxCreationLatency(latency, sandbox.Namespace, launchType, templateName)
+	}
+
+	// 2. Ready latency (first observed timestamp → now).
+	// Use wall-clock now for the end timestamp so the controller-stamped start
+	// time retains millisecond precision. This intentionally includes the small
+	// amount of reconcile processing between the Ready transition and metric
+	// observation, rather than falling back to second-granularity condition time.
+	if lifecycle.FirstObservedTime != nil {
+		latency := time.Since(lifecycle.FirstObservedTime.Time)
+		asmetrics.RecordSandboxReadyLatency(latency, sandbox.Namespace, launchType, templateName, ownedBy)
+	}
+}
+
+func ensureSandboxLifecycleStatus(status *sandboxv1beta1.SandboxStatus) *sandboxv1beta1.SandboxLifecycleStatus {
+	if status.Lifecycle == nil {
+		status.Lifecycle = &sandboxv1beta1.SandboxLifecycleStatus{}
+	}
+	return status.Lifecycle
+}
+
+func firstReadyMetricsRecorded(lifecycle *sandboxv1beta1.SandboxLifecycleStatus) bool {
+	if lifecycle == nil {
+		return false
+	}
+	switch lifecycle.FirstReadyRecordState {
+	case sandboxv1beta1.SandboxFirstReadyRecordStateRecorded, sandboxv1beta1.SandboxFirstReadyRecordStateRecordedUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// resolveOwnedBy determines the owner of a Sandbox from its controller owner reference.
+// Owner references keep the apiVersion that was current when they were written and
+// are not rewritten by storage migration, so sandboxes created by a pre-v1beta1
+// extensions controller still carry the v1alpha1 group version after an upgrade.
+// Match on group+kind, not version, so owned_by stays stable across API bumps.
+func resolveOwnedBy(sandbox *sandboxv1beta1.Sandbox) string {
+	controllerRef := metav1.GetControllerOf(sandbox)
+	if controllerRef == nil {
+		return asmetrics.OwnedByNone
+	}
+	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
+	if err != nil || refGV.Group != extensionsv1beta1.GroupVersion.Group {
+		return asmetrics.OwnedByNone
+	}
+	switch controllerRef.Kind {
+	case "SandboxClaim":
+		return asmetrics.OwnedBySandboxClaim
+	case "SandboxWarmPool":
+		return asmetrics.OwnedBySandboxWarmPool
+	default:
+		return asmetrics.OwnedByNone
+	}
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only

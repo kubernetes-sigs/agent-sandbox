@@ -151,6 +151,20 @@ const (
 	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
 )
 
+// SandboxFirstReadyRecordState tracks whether the controller has already
+// accounted for the Sandbox's first Ready transition in lifecycle metrics.
+type SandboxFirstReadyRecordState string
+
+const (
+	// SandboxFirstReadyRecordStateRecorded indicates first-ready metrics were
+	// recorded and the exact firstReadyTime is known.
+	SandboxFirstReadyRecordStateRecorded SandboxFirstReadyRecordState = "Recorded"
+	// SandboxFirstReadyRecordStateRecordedUnknown indicates first-ready metrics
+	// were already accounted for, but the original firstReadyTime could not be
+	// reconstructed during recovery or upgrade.
+	SandboxFirstReadyRecordStateRecordedUnknown SandboxFirstReadyRecordState = "RecordedUnknown"
+)
+
 type PodMetadata struct {
 	// labels defines the map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers
@@ -334,6 +348,28 @@ type Lifecycle struct {
 	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
+// SandboxLifecycleStatus stores controller-observed lifecycle timestamps and
+// metric dedupe state for a Sandbox.
+type SandboxLifecycleStatus struct {
+	// firstObservedTime is when the controller first observed this Sandbox.
+	// +kubebuilder:validation:Format="date-time"
+	// +optional
+	FirstObservedTime *metav1.Time `json:"firstObservedTime,omitempty"`
+
+	// firstReadyTime is when the controller first observed this Sandbox reach
+	// Ready. It remains unset when the controller can only recover that the
+	// Sandbox was already counted before the precise timestamp was persisted.
+	// +kubebuilder:validation:Format="date-time"
+	// +optional
+	FirstReadyTime *metav1.Time `json:"firstReadyTime,omitempty"`
+
+	// firstReadyRecordState tracks whether first-ready lifecycle metrics were
+	// already recorded for this Sandbox.
+	// +kubebuilder:validation:Enum=Recorded;RecordedUnknown
+	// +optional
+	FirstReadyRecordState SandboxFirstReadyRecordState `json:"firstReadyRecordState,omitempty"`
+}
+
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
 	// serviceFQDN that is valid for default cluster settings
@@ -351,6 +387,11 @@ type SandboxStatus struct {
 	// conditions defines the status conditions array
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// lifecycle stores controller-observed lifecycle timestamps and metric
+	// recording state for this Sandbox.
+	// +optional
+	Lifecycle *SandboxLifecycleStatus `json:"lifecycle,omitempty"`
 
 	// selector is the label selector for pods.
 	// +optional

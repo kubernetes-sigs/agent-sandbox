@@ -414,6 +414,103 @@ func TestValidate(t *testing.T) {
 			mut:     func(c *Config) { c.PathRoutingPrefix = "/sandbox-router/browser" },
 			wantErr: "",
 		},
+		{
+			name:    "invalid cookie samesite",
+			mut:     func(c *Config) { c.AuthzCookieSameSite = "bogus" },
+			wantErr: "invalid --authz-cookie-samesite",
+		},
+		{
+			name:    "cookie query param without cookie name",
+			mut:     func(c *Config) { c.AuthzCookieQueryParam = "token" },
+			wantErr: "authz-cookie-query-param requires --authz-cookie-name",
+		},
+		{
+			name: "cookie name without path routing prefix",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+			},
+			wantErr: "authz-cookie-name requires --path-routing-prefix",
+		},
+		{
+			name: "cookie name with allow-all authz mode",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzCookieName = "sid"
+			},
+			wantErr: "authz-cookie-name has no effect with --authz-mode=allow-all",
+		},
+		{
+			name: "cookie name with invalid characters",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "s;id"
+			},
+			wantErr: "authz-cookie-name",
+		},
+		{
+			name: "cookie query param with invalid characters",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "tok en"
+			},
+			wantErr: "authz-cookie-query-param",
+		},
+		{
+			name: "samesite none incompatible with insecure",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieSameSite = CookieSameSiteNone
+				c.AuthzCookieInsecure = true
+			},
+			wantErr: "authz-cookie-samesite=none requires the cookie to be Secure",
+		},
+		{
+			name: "malformed allowed origin",
+			mut: func(c *Config) {
+				c.AuthzCookieAllowedOrigins = []string{"not-a-valid-origin"}
+			},
+			wantErr: "authz-cookie-allowed-origins",
+		},
+		{
+			name: "allowed origin with a path is rejected",
+			mut: func(c *Config) {
+				c.AuthzCookieAllowedOrigins = []string{"https://example.com/some/path"}
+			},
+			wantErr: "authz-cookie-allowed-origins",
+		},
+		{
+			name: "valid browser-session cookie configuration",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "token"
+				c.AuthzCookieAllowedOrigins = []string{"https://atenea.example.com", "https://atenea.example.com:8443"}
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid cross-site cookie configuration with samesite=none",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzTokenReview
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "token"
+				c.AuthzCookieSameSite = CookieSameSiteNone
+			},
+			wantErr: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -150,6 +150,42 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Path to a file holding the shared HMAC-SHA256 secret used to verify "+
 			"scoped tokens (see authz.MintScopedToken). Required when "+
 			"--authz-mode=scoped-token; must match whatever mints the tokens.")
+	fs.StringVar(&c.AuthzCookieName, "authz-cookie-name", c.AuthzCookieName,
+		"Name of a cookie the configured Authorizer additionally accepts a "+
+			"credential from — the only channel a browser attaches "+
+			"automatically to every request toward an origin, including a "+
+			"WebSocket handshake. Off by default. Requires "+
+			"--path-routing-prefix and an --authz-mode other than allow-all. "+
+			"See --authz-cookie-query-param for how the cookie gets set in "+
+			"the first place.")
+	fs.StringVar(&c.AuthzCookieQueryParam, "authz-cookie-query-param", c.AuthzCookieQueryParam,
+		"Name of a URL query parameter that bootstraps --authz-cookie-name: "+
+			"a GET/HEAD, non-upgrade request presenting a valid credential "+
+			"here gets the cookie set — scoped by Path to exactly the "+
+			"sandbox it authorized — and is redirected (302) to the same "+
+			"URL with the parameter stripped, so the credential spends the "+
+			"least possible time exposed in the URL, browser history, and "+
+			"Referer. Requires --authz-cookie-name.")
+	stringEnumVar(fs, (*string)(&c.AuthzCookieSameSite), "authz-cookie-samesite", string(c.AuthzCookieSameSite),
+		"SameSite attribute of the bootstrapped cookie: lax (default; "+
+			"covers same-site embedding without requiring HTTPS), strict "+
+			"(never sent cross-site, including the navigation that "+
+			"bootstraps it — rarely what you want here), or none (for "+
+			"genuinely cross-site embedding; requires the cookie to be "+
+			"Secure, and some browsers block it as third-party regardless).")
+	fs.BoolVar(&c.AuthzCookieInsecure, "authz-cookie-insecure", c.AuthzCookieInsecure,
+		"Omit the Secure attribute from the bootstrapped cookie. Only for "+
+			"local development over plain HTTP. Incompatible with "+
+			"--authz-cookie-samesite=none.")
+	stringSliceVar(fs, &c.AuthzCookieAllowedOrigins, "authz-cookie-allowed-origins",
+		"Comma-separated allowlist of scheme://host[:port] Origins permitted "+
+			"to open a protocol upgrade authorized by --authz-cookie-name. "+
+			"Same-origin requests are always allowed regardless of this "+
+			"list; a request with no Origin header is let through here since "+
+			"there is nothing for this check to inspect. Only checked when "+
+			"the credential that authorized the request came from the "+
+			"cookie — a header- or query-sourced credential cannot be forged "+
+			"by a third-party page and is not subject to this check.")
 
 	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
 		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+

@@ -106,7 +106,7 @@ Implementation notes:
   working directory. Absolute `upload_file`/`download_file` paths are honored by staging
   through a relative temp name and copying via exec — this assumes the file-API root and
   the exec working directory are the same directory, which holds for the reference
-  runtime image (both `/app`).
+  runtime image (both come from its `SANDBOX_BASE_DIR`, default `/app`).
 - An exec that exceeds its timeout abandons the HTTP request, but the process may keep
   running inside the pod (the runtime API has no server-side kill); the result carries
   `error_type="timeout"` and return code 125.

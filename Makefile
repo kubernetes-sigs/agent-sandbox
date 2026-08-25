@@ -62,7 +62,7 @@ VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
 
 GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 GIT_SHA     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE  ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+BUILD_DATE  ?= $(shell dev/tools/build-date)
 
 LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 	-X $(VERSION_PKG).gitSHA=$(GIT_SHA) \

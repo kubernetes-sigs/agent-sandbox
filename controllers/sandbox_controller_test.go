@@ -4438,12 +4438,15 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name           string
-		sandboxMutator func(*sandboxv1beta1.Sandbox)
-		initialObjs    []runtime.Object
-		expectErr      bool
-		errContains    string
-		expectOwner    bool
+		name                         string
+		sandboxMutator               func(*sandboxv1beta1.Sandbox)
+		initialObjs                  []runtime.Object
+		expectErr                    bool
+		errContains                  string
+		expectOwner                  bool
+		expectNonControllerOwnerRefs []metav1.OwnerReference
+		expectPreservedLabels        map[string]string
+		expectPreservedAnnotations   map[string]string
 	}{
 		{
 			name:        "creates new PVC when none exists",
@@ -4522,6 +4525,18 @@ func TestReconcilePVCs(t *testing.T) {
 			},
 			expectErr:   false,
 			expectOwner: false,
+			expectNonControllerOwnerRefs: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       "audit-marker",
+				UID:        "audit-marker-uid",
+			}},
+			expectPreservedLabels: map[string]string{
+				"keep": "true",
+			},
+			expectPreservedAnnotations: map[string]string{
+				"app.example.com/data": "preserve",
+			},
 		},
 		{
 			name: "refuses PVC owned by a different controller",
@@ -4658,11 +4673,20 @@ func TestReconcilePVCs(t *testing.T) {
 			} else {
 				require.Nil(t, ownerRef, "PVC should not have a controller owner reference")
 			}
-			if tc.name == "removes current sandbox owner from existing PVC when retention policy is Retain" {
-				require.Len(t, livePVC.OwnerReferences, 1)
-				require.Equal(t, "audit-marker", livePVC.OwnerReferences[0].Name)
-				require.Equal(t, "true", livePVC.Labels["keep"])
-				require.Equal(t, "preserve", livePVC.Annotations["app.example.com/data"])
+			if tc.expectNonControllerOwnerRefs != nil {
+				nonControllerOwnerRefs := make([]metav1.OwnerReference, 0, len(livePVC.OwnerReferences))
+				for _, ownerRef := range livePVC.OwnerReferences {
+					if ownerRef.Controller == nil || !*ownerRef.Controller {
+						nonControllerOwnerRefs = append(nonControllerOwnerRefs, ownerRef)
+					}
+				}
+				require.ElementsMatch(t, tc.expectNonControllerOwnerRefs, nonControllerOwnerRefs)
+			}
+			for key, expected := range tc.expectPreservedLabels {
+				require.Equal(t, expected, livePVC.Labels[key], "label %q should survive reconciliation", key)
+			}
+			for key, expected := range tc.expectPreservedAnnotations {
+				require.Equal(t, expected, livePVC.Annotations[key], "annotation %q should survive reconciliation", key)
 			}
 		})
 	}

@@ -603,7 +603,7 @@ mvdan.cc/unparam v0.0.0-20260818115549-3f964bcb5673 h1:dEE6li4OPIE54oojY2qaayFS1
 mvdan.cc/unparam v0.0.0-20260818115549-3f964bcb5673/go.mod h1:62roFV3D3nYOWIXv3PfGO4UYEKAotz2WgLywT87ONd8=
 sigs.k8s.io/controller-runtime/tools/setup-envtest v0.24.1 h1:l2AjyGE/PWub6EB165ij4/bpCK0TlY5NlhzIHfmGvmg=
 sigs.k8s.io/controller-runtime/tools/setup-envtest v0.24.1/go.mod h1:wpkYufRHTSw9ABET21/PkEL7kdGnmiZJ6o72t9p/1I8=
-sigs.k8s.io/kube-api-linter v0.0.0-20260518104151-5ebe05f9440b h1:RuUwQnOZycBGq7rHp1GyIBuTHQd3Q9cItqFKo3b8jfU=
-sigs.k8s.io/kube-api-linter v0.0.0-20260518104151-5ebe05f9440b/go.mod h1:5mP60UakkCye+eOcZ5p98VnV2O49qreW1gq9TdsUf7Q=
+sigs.k8s.io/kube-api-linter v0.0.0-20260716143926-092fe0c72997 h1:u5/qbXZq7YIrurEE6HiJKtjQ9ILcFPJJSHNY0Q1ZRhU=
+sigs.k8s.io/kube-api-linter v0.0.0-20260716143926-092fe0c72997/go.mod h1:5mP60UakkCye+eOcZ5p98VnV2O49qreW1gq9TdsUf7Q=
 sigs.k8s.io/yaml v1.6.0 h1:G8fkbMSAFqgEFgh4b1wmtzDnioxFCUgTZhlbj5P9QYs=
 sigs.k8s.io/yaml v1.6.0/go.mod h1:796bPqUfzR/0jLAl6XjHl3Ck7MiyVv8dbTdyT3/pMf4=

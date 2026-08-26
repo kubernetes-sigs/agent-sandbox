@@ -60,6 +60,30 @@ one trick for testing the tool path end to end: a message of the form `run: <com
 makes it request a `run_command` tool call and report the result. Note that the `run:` tool
 path still needs Kubernetes connectivity: the command executes in an Agent Sandbox.
 
+## ACP Server (server-side agent)
+
+`cmd/acp-server` is a server-side version of this example: it exposes the same agent loop
+over the [Agent Client Protocol](https://agentclientprotocol.com) (JSON-RPC 2.0 as
+newline-delimited JSON over TCP) so that it can run **inside** the cluster, where it creates
+Agent Sandboxes for tool execution, while any ACP client drives it remotely — creating
+sessions, sending prompts, and approving or rejecting each tool call
+(`session/request_permission`).
+
+```bash
+# Build and push the image (see the Dockerfile header), then:
+kubectl apply -f examples/sandboxed-tools/cmd/acp-server/k8s/acp-server.yaml
+kubectl port-forward service/sandboxed-tools-acp-server 8090:8090
+
+# Chat with it using the ACP client example:
+cd examples/agentclientprotocol
+go run . -addr localhost:8090
+```
+
+The bundled manifest runs the server with `OPENAI_MODEL=fake-eliza`, so the end-to-end path
+(session creation, prompting, tool permission approval, sandbox creation, and command
+execution in the sandbox) is testable without an LLM API key. Set `OPENAI_MODEL` and provide
+`GEMINI_API_KEY` via a secret to use a real model.
+
 ## Running the Example
 
 Make sure your Kubernetes cluster is running and accessible via your active `kubeconfig` context.

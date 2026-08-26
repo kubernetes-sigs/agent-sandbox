@@ -70,6 +70,7 @@ go run . -yolo -prompt "Summarize the README in this directory"
 | Flag | Description |
 |---|---|
 | `-cmd` | Agent command to spawn (default `gemini --acp`). Use shell quoting to pass the whole command as one flag value; the program then splits that value on whitespace, so individual arguments cannot themselves contain spaces (quotes inside the value are not interpreted). |
+| `-addr` | TCP address of an ACP agent to connect to instead of spawning one (e.g. `localhost:8090` behind `kubectl port-forward`) |
 | `-cwd` | Working directory for the session (default: current directory) |
 | `-prompt` | Send one prompt and exit instead of running interactively |
 | `-session-id` | Resume an existing session instead of creating a new one |
@@ -86,3 +87,18 @@ You can connect to an agent running inside a Kubernetes Sandbox pod by giving `-
 cd examples/agentclientprotocol
 go run . -cmd "kubectl exec -i sandbox-claim-pod -c agent -- gemini --acp"
 ```
+
+### Running against the sandboxed-tools ACP server
+
+The [sandboxed-tools example](../sandboxed-tools) includes an in-cluster ACP server
+(`examples/sandboxed-tools/cmd/acp-server`) whose agent loop runs server-side and whose
+tool calls execute in Agent Sandboxes. After deploying it:
+
+```bash
+kubectl port-forward service/sandboxed-tools-acp-server 8090:8090
+cd examples/agentclientprotocol
+go run . -addr localhost:8090
+```
+
+Tool calls the server-side agent wants to run arrive as `session/request_permission`
+requests and are approved or rejected from this client.

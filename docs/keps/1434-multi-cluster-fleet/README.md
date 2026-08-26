@@ -68,7 +68,7 @@ Two workload shapes motivate this:
 
 - **As a platform admin**, I describe the fleet-wide workload once — templates, a concurrency budget, and relative cluster capacity — and run one command, instead of computing a partition by hand and running one `kubectl apply` per cluster.
 - **As a platform admin with a heterogeneous fleet**, I do not want to recompute replica counts every time a cluster is resized. I want per-cluster budgets derived from what each cluster reports.
-- **As an operator draining a cluster for maintenance**, I set its weight to `0` and re-apply. It stops receiving new pools without being removed from the spec, and existing pools are left alone until I remove them.
+- **As an operator draining a cluster for maintenance**, I set its weight to `0` and re-apply. It stays in the spec and keeps reporting, but takes no new pools *and* sheds the warm capacity it is currently holding. Sandboxes already claimed on it keep running. See [Failure Handling](#failure-handling) for exactly what a drain does and does not delete.
 - **As an operator during an incident**, I want a degraded cluster to fall out of placement on its own, without a health-check protocol or cross-cluster probing.
 - **As an RL engineer**, I claim a sandbox by template name and let the client resolve which cluster currently hosts that template, rather than tracking placement myself. See [Client-Side Resolution](#client-side-resolution) for the contract this implies.
 - **As an operator debugging a run**, I want to ask "which clusters are healthy, what does each hold, and what did the planner decide" without Kubernetes credentials for every cluster.
@@ -120,6 +120,10 @@ The contract:
 3. Load that cluster's kube context and construct — or reuse from cache — a normal `SandboxClient` against it.
 4. Issue an ordinary `SandboxClaim` naming the warm pool, and **watch it on that same cluster**. There is no cross-cluster watch: once resolution picks a cluster, everything after it is a single-cluster operation against a single apiserver.
 
+**Which claims this applies to — all of them.** `warmPoolRef` is required on every `SandboxClaim`, so "template name → a cluster hosting a pool for it" is the right resolution for every claim shape, including the ones that cannot adopt a warm sandbox. Two spec fields force a cold start: `env`, because the warm pods were started without those variables, and `volumeClaimTemplates`, because warm pods have no such volumes. A claim carrying either still names a warm pool and is still served on the resolved cluster — the controller cold-starts it from that pool's `SandboxTemplate` instead of adopting a warm replica. There is no separate cold-start path and nothing bypasses resolution.
+
+What cold-start traffic does change is *accounting*, and that belongs in the spec rather than in the resolver. `target_tasks` sizes a pool for claims that adopt, so cold-start claims against a pool draw down none of the warm depth it was sized for: the pool stays full while those claims wait on a fresh pod. A predominantly cold-start workload should therefore get its own template with a small `target_tasks` rather than inflating a pool nothing consumes. Round-robin resolution is also the wrong default for it — round-robin balances warm depth, which these claims do not touch — so `hash` is the better strategy there.
+
 Failure modes are explicit rather than silent: no cluster hosting the template raises a distinct error (`fleetctl apply` not yet run, a typo, or the referenced `SandboxTemplate` CR missing on every cluster, so no member could create a pool for it). Bucket reads retry with backoff so a storage blip does not fail a claim.
 
 The caller supplies credentials for the clusters it intends to claim on — the resolver distributes placement information, never credentials.
@@ -145,7 +149,7 @@ Capacity reports carry warm-pool depth, ready count, active claims, a node-press
 | store object generation | "did someone else write since I read?" | the object store | the apply is rejected and retried against the new state |
 
 - **`schema_version` is a compatibility gate, not an ordering token.** A higher `generation` tells an older member nothing about whether it can understand the payload. Members accept a payload whose `schema_version` they know and reject one they do not; unknown *fields* within a known version are ignored, so additive changes do not require a version bump. Refusing is the safe failure: a member that cannot parse an assignment must not conclude the assignment is empty and tear down every pool it holds.
-- **`generation` is derived, never hand-authored.** `fleetctl apply` reads the archived `fleet/spec.yaml`, takes its generation, and increments. A hand-bumped integer is a silent-failure footgun: forget the bump and every member correctly ignores the apply, with no error anywhere — the operator sees a successful `fleetctl apply` and no change in the fleet. An explicit `--generation` override remains for replay and disaster recovery, and `fleetctl apply` refuses to publish a generation that is not greater than the one already in the bucket.
+- **`generation` is derived, and `fleet/assignments.json` is where it lives.** `fleetctl apply` reads the currently published assignment, takes its `generation`, increments, and publishes the result; with no assignment object present yet, the first apply is generation `1`. It is deliberately *not* read back out of the archived `fleet/spec.yaml`. The archive is a human-readable record of what was applied, written after the plan succeeds — making it the counter would put the authoritative value in the one object nothing in the system reads, and desynchronise the fleet the first time an archive write failed after a successful publish. Keeping the counter on the assignment also keeps it on the same object as the compare-and-set precondition below and the same object members compare against, so ordering, storage, and consumption all agree. The archived spec is stamped with the generation that was applied, for traceability only. A hand-bumped integer is a silent-failure footgun: forget the bump and every member correctly ignores the apply, with no error anywhere — the operator sees a successful `fleetctl apply` and no change in the fleet. An explicit `--generation` override remains for replay and disaster recovery, and `fleetctl apply` refuses to publish a generation that is not greater than the one already in the bucket.
 - **Ordering under concurrent applies is enforced by the store, not by the integer.** Two admins applying at once can otherwise derive the same next generation from the same base and race, and last-writer-wins silently discards one plan. Assignments are written with a compare-and-set precondition on the object's own store-side generation (`ifGenerationMatch` on GCS, `If-Match` on an S3-compatible store), so the loser's write fails and is retried against the state the winner produced. The monotonic `generation` remains what *members* compare, because a member sees only the payload, never the store metadata.
 
 Both files are read atomically: the read pins the object generation across fetch and body download, so a member never pairs new bytes with an old revision.
@@ -200,20 +204,25 @@ Three knobs, and the smallest binds: `max_concurrent` (fleet-wide warm budget), 
 
 **`max_concurrent` is a target, not a hard cap, and the gap is the lower clamp.** Every placed pool gets at least one replica, because a pool assigned zero replicas can only be served cold, which makes the assignment pointless. When a cluster holds more pools than its budget slice, the floor wins and the slice is exceeded — `max_concurrent: 1` across two pools yields two replicas, not one. The planner warns with the cluster name, the planned total, the slice, and the two ways out (raise `max_concurrent`, or lower `min_clusters` to place fewer pools per cluster). It does not silently truncate, and it does not silently overshoot without saying so. An operator who needs a genuine ceiling should set `max_pool` and keep pool count under budget.
 
-**When Hamilton is exact.** Setting `cluster_weights` to the per-cluster targets themselves yields those exact budgets only when both preconditions hold:
+**When Hamilton is exact.** Setting `cluster_weights` to the per-cluster targets themselves yields those exact budgets only when all three preconditions hold:
 
-- `sum(targets) == max_concurrent`, and
+- `sum(targets) == max_concurrent`,
+- **every eligible cluster appears in `cluster_weights`**, and
 - every weighted cluster is eligible and receives at least one pool.
 
-Hamilton *normalises* — it splits `max_concurrent` across the weights of the clusters actually placed. Break either precondition and the targets are rescaled, not honoured: if the sum is 400 and `max_concurrent` is 300 every cluster gets three-quarters of its target, and if one cluster is stale or drained its weight leaves the denominator and the survivors are scaled *up* to absorb its share. That second case is the dangerous one, because it looks like the plan worked. Both scale runs landed on every target with zero overshoot because both preconditions held; the claim is conditional, not general.
+Hamilton *normalises* — it splits `max_concurrent` across the weights of the clusters actually placed, so exactness is a property of the **resolved** weight map, not of the map the admin typed. Break any precondition and the targets are rescaled rather than honoured. If the sum is 400 and `max_concurrent` is 300, every cluster gets three-quarters of its target. If a weighted cluster is stale or drained, its weight leaves the denominator and the survivors are scaled *up* to absorb its share.
+
+The middle precondition is the easiest to miss, because `cluster_weights` reads like a filter and is not one: a cluster absent from it is not weightless, it defaults to `1.0`. Add a seventh cluster to the fleet and forget to list it, and the other six do not stay on their targets — the newcomer arrives at weight `1.0`, joins the split, and rescales everyone. That case and the stale-cluster case are the dangerous ones, because in both the plan looks like it worked. Both scale runs landed on every target with zero overshoot because all three preconditions held; the claim is conditional, not general.
 
 #### Failure Handling
 
 Staleness-based, with no health-check protocol and no cross-cluster probing. A capacity report older than **90 seconds** excludes that cluster from the next placement pass, exactly as a `weight: 0` drain does.
 
-**What a stale cluster's existing pools do is a genuine sharp edge, and worth stating plainly.** A cluster that is excluded from placement is assigned an *empty* pool set, not omitted — and an empty assignment means "drop everything". So the pools are not left alone: as soon as that cluster's member next reads the file, it tears them down.
+**Exclusion is not omission, and that is the whole contract.** An excluded cluster is written into the assignment with an *empty* pool set, and an empty pool set means "drop everything". There is only one exclusion mechanism and one outcome, so a drain and a stale cluster behave identically: as soon as that cluster's member next reads the file, its warm pools go away.
 
-That is correct when the cluster is genuinely gone, and it is what makes a drain able to empty a cluster that has stopped reporting. But the trigger is a missing *capacity report*, not a missing member, and those are different failures. A cluster whose reconcile loop is perfectly healthy and whose publish path is broken — bucket permissions, a wedged capacity thread — will read that empty assignment and shed every warm pool it holds, while looking fine from inside. The planner logs the teardown with the cluster name and report age rather than performing it silently. Narrowing it further (a separate liveness signal, or a grace period distinguishing "briefly restarting" from "gone") is listed under follow-ups.
+**What that deletes, precisely.** Deleting a `SandboxWarmPool` deletes the warm, unclaimed sandboxes it owns. It does **not** touch sandboxes that have already been claimed, because adoption re-parents them: the claim controller clears the sandbox's owner references and makes the `SandboxClaim` the controller, so the pool is no longer an owner by the time work is running on it. A drain therefore removes idle warm capacity and leaves in-flight work alone, which is what makes it usable for maintenance — cordon the cluster with `weight: 0`, let claims drain naturally, then take it out. What it is *not* is a way to park a cluster with its warm capacity intact; re-applying with a non-zero weight is what refills it, and that refill is a cold fill.
+
+**The sharp edge is the trigger, not the behaviour.** Teardown on exclusion is correct when the cluster is genuinely gone, and it is what lets a drain empty a cluster that has already stopped reporting. But the staleness trigger is a missing *capacity report*, not a missing member, and those are different failures. A cluster whose reconcile loop is perfectly healthy and whose publish path is broken — bucket permissions, a wedged capacity thread — will read that empty assignment and shed every warm pool it holds while looking fine from inside. The planner logs the teardown with the cluster name and report age rather than performing it silently. Narrowing it further (a separate liveness signal, or a grace period distinguishing "briefly restarting" from "gone") is listed under follow-ups.
 
 Two guards bound the blast radius:
 
@@ -234,10 +243,12 @@ min_clusters: 2                  # optional anti-affinity floor (0 = disabled).
                                  # Clamped to the eligible-cluster count, with a
                                  # warning, when it exceeds it.
 
-cluster_weights:                 # relative capacity. 0 drains a cluster in place:
-  cluster-1: 1.0                 # it stays in the spec and keeps reporting, but is
-  cluster-2: 1.0                 # excluded from placement entirely. Omit a cluster
-  cluster-3: 0.0                 # to leave it at the default weight of 1.0.
+cluster_weights:                 # Relative capacity. List EVERY cluster: an omitted
+  cluster-1: 1.0                 # one is not weightless, it defaults to 1.0 and still
+  cluster-2: 1.0                 # joins the split. 0 drains a cluster in place -- it
+  cluster-3: 0.0                 # stays in the spec and keeps reporting, takes no new
+                                 # pools, and sheds the warm capacity it holds.
+                                 # Already-claimed sandboxes keep running.
 
 models:
   # Each entry names a SandboxTemplate the admin has pre-applied on every
@@ -250,7 +261,7 @@ models:
     #        the image name mod N for image-pull locality.
 ```
 
-The admin does **not** pick clusters, warm-pool names, per-cluster budgets, per-pool replica counts, or the assignment `generation`. The planner derives all five. Note there is no `generation` key in the spec above: it is read from the archived spec and incremented by `fleetctl apply`, for the reason given under [Coordination Substrate](#coordination-substrate).
+The admin does **not** pick clusters, warm-pool names, per-cluster budgets, per-pool replica counts, or the assignment `generation`. The planner derives all five. Note there is no `generation` key in the spec above: `fleetctl apply` reads the generation of the currently published `fleet/assignments.json` and increments it, then stamps the value it used into the archived copy of this spec. The archive records what was applied; it does not drive it. See [Coordination Substrate](#coordination-substrate).
 
 #### API Changes
 

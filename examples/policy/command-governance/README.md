@@ -25,13 +25,25 @@ import re
 from k8s_agent_sandbox import SandboxClient
 
 _DENY_PATTERNS = [
-    r"\brm\s+-[a-z]*r[a-z]*f\b|\brm\s+-[a-z]*f[a-z]*r\b",  # rm -rf / -fr
     r"\bmkfs\b",
     r"\bdd\s+if=",
 ]
 
+def _has_flag(command: str, short: str, long_name: str) -> bool:
+    # Matches the short flag standalone or combined with others (-rf, -fr,
+    # -Rf), and the long GNU option, so "-r -f", "-fr", and "--recursive
+    # --force" are all treated the same regardless of order.
+    return bool(re.search(rf"(?:^|\s)-\w*{short}\w*(?:\s|$)", command, re.IGNORECASE)) or long_name in command
+
+def _is_destructive_rm(command: str) -> bool:
+    return (
+        bool(re.search(r"\brm\b", command, re.IGNORECASE))
+        and _has_flag(command, "r", "--recursive")
+        and _has_flag(command, "f", "--force")
+    )
+
 def governed_run(sandbox, command: str):
-    if any(re.search(p, command) for p in _DENY_PATTERNS):
+    if _is_destructive_rm(command) or any(re.search(p, command) for p in _DENY_PATTERNS):
         raise PermissionError(f"denied by command policy: {command}")
     return sandbox.commands.run(command)
 

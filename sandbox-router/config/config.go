@@ -453,6 +453,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("--authz-cookie-allowed-origins entry %q must have the form scheme://host[:port], with no path/query/fragment", origin)
 		}
 	}
+	if len(c.AuthzCookieAllowedOrigins) > 0 && c.AuthzCookieName == "" {
+		return errors.New("--authz-cookie-allowed-origins has no effect without --authz-cookie-name, which is what runs the same-origin check it configures")
+	}
 	if c.AuthzTrustForwardedProto && c.AuthzCookieName == "" {
 		return errors.New("--authz-trust-forwarded-proto has no effect without --authz-cookie-name, which is what runs the same-origin check it affects")
 	}

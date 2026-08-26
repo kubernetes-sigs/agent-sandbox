@@ -512,6 +512,13 @@ func TestValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "allowed origins without cookie name has no effect",
+			mut: func(c *Config) {
+				c.AuthzCookieAllowedOrigins = []string{"https://atenea.example.com"}
+			},
+			wantErr: "authz-cookie-allowed-origins has no effect without --authz-cookie-name",
+		},
+		{
 			name: "trust forwarded proto without cookie name has no effect",
 			mut: func(c *Config) {
 				c.AuthzTrustForwardedProto = true

@@ -335,6 +335,35 @@ func TestBootstrapCookie_InvalidTokenSetsNoCookie(t *testing.T) {
 	}
 }
 
+// TestBootstrapCookie_TokenNotAValidCookieValueSkipsBootstrap covers a
+// case bootstrapServer's scoped-token setup can't reach on its own:
+// MintScopedToken only ever produces base64url output, always a valid
+// cookie value, so a credential that isn't one can only come from a
+// mode this package doesn't otherwise constrain (tokenreview). Calling
+// maybeBootstrapCookie directly, bypassing Authorize, is what lets this
+// test present such a credential without a TokenReview stub.
+func TestBootstrapCookie_TokenNotAValidCookieValueSkipsBootstrap(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.AuthzCookieName = "sid"
+	cfg.AuthzCookieQueryParam = "token"
+	h := &Handler{cfg: &cfg}
+
+	r := httptest.NewRequest(http.MethodGet, "/router/team/box-a/8080/workbench?token=has%3Bsemicolon", nil)
+	w := httptest.NewRecorder()
+	target := Target{Namespace: bootstrapNamespace, ID: bootstrapID, Port: 8080}
+
+	if bootstrapped := h.maybeBootstrapCookie(w, r, target, authz.TokenSourceQuery, false, true); bootstrapped {
+		t.Fatal("expected maybeBootstrapCookie to decline, got true")
+	}
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected no response written (default 200), got %d", w.Result().StatusCode)
+	}
+	if cookies := w.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("expected no Set-Cookie for a token that isn't a valid cookie value, got %+v", cookies)
+	}
+}
+
 func TestBootstrapCookie_TokenScopedToOtherSandboxSetsNoCookie(t *testing.T) {
 	router, secret, _ := bootstrapServer(t)
 	defer router.Close()
@@ -607,5 +636,31 @@ func TestBootstrapCookiePath(t *testing.T) {
 	want := "/router/team/box-a/8080/"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestValidCookieValue(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"empty string is invalid", "", false},
+		{"scoped-token shape is valid", "v1.eyJucyI6InRlYW0ifQ.c2ln", true},
+		{"plain alphanumeric is valid", "abc123XYZ", true},
+		{"semicolon is invalid", "has;semicolon", false},
+		{"backslash is invalid", `has\backslash`, false},
+		{"double quote is invalid", `has"quote`, false},
+		{"comma is invalid", "has,comma", false},
+		{"space is invalid", "has space", false},
+		{"control character is invalid", "has\tcontrol", false},
+		{"DEL byte is invalid", "has\x7fdel", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validCookieValue(tc.value); got != tc.want {
+				t.Fatalf("validCookieValue(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
 	}
 }

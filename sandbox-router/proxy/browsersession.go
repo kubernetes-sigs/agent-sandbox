@@ -203,6 +203,18 @@ func (h *Handler) maybeBootstrapCookie(w http.ResponseWriter, r *http.Request, t
 	if token == "" {
 		return false
 	}
+	if !validCookieValue(token) {
+		// net/http silently drops any byte outside the RFC 6265
+		// cookie-octet grammar when writing Set-Cookie (see
+		// sanitizeCookieValue in the standard library) rather than
+		// erroring — bootstrapping anyway would plant a cookie that no
+		// longer equals the credential it was minted from, failing
+		// every later request's authorization with nothing pointing at
+		// why. This request's own credential already passed Authorize
+		// via the query parameter, so let it through as usual; only the
+		// cookie session is skipped.
+		return false
+	}
 
 	http.SetCookie(w, &http.Cookie{
 		Name:  h.cfg.AuthzCookieName,
@@ -242,6 +254,33 @@ func (h *Handler) maybeBootstrapCookie(w http.ResponseWriter, r *http.Request, t
 // to this same (namespace, id, port).
 func bootstrapCookiePath(prefix string, target Target) string {
 	return prefix + "/" + target.Namespace + "/" + target.ID + "/" + strconv.Itoa(target.Port) + "/"
+}
+
+// validCookieValue reports whether s is safe to use as an RFC 6265
+// cookie-value verbatim:
+//
+//	cookie-octet = %x21 / %x23-2B / %x2D-3A / %x3C-5B / %x5D-7E
+//
+// i.e. printable US-ASCII excluding DQUOTE, comma, semicolon, backslash,
+// whitespace, and control characters. A scoped-token credential (the
+// only kind this router mints itself) is always base64url, well inside
+// this set — the check exists for tokenreview mode, where the "token"
+// is an arbitrary caller-supplied bearer credential this package does
+// not otherwise constrain.
+func validCookieValue(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		b := s[i]
+		switch {
+		case b == 0x21, b >= 0x23 && b <= 0x2B, b >= 0x2D && b <= 0x3A,
+			b >= 0x3C && b <= 0x5B, b >= 0x5D && b <= 0x7E:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // sameSiteFor maps the operator-facing enum to the net/http constant.

@@ -511,6 +511,25 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "",
 		},
+		{
+			name: "trust forwarded proto without cookie name has no effect",
+			mut: func(c *Config) {
+				c.AuthzTrustForwardedProto = true
+			},
+			wantErr: "authz-trust-forwarded-proto has no effect without --authz-cookie-name",
+		},
+		{
+			name: "valid browser-session configuration behind a TLS-terminating proxy",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "token"
+				c.AuthzTrustForwardedProto = true
+			},
+			wantErr: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

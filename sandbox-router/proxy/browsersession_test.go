@@ -475,16 +475,65 @@ func TestIsAllowedOrigin(t *testing.T) {
 func TestRequestOrigin(t *testing.T) {
 	plain, _ := http.NewRequest("GET", "http://router.example.com/x", nil)
 	plain.Host = "router.example.com"
-	if got := requestOrigin(plain); got != "http://router.example.com" {
+	if got := requestOrigin(plain, false); got != "http://router.example.com" {
 		t.Fatalf("plain: got %q", got)
 	}
 
 	tlsReq, _ := http.NewRequest("GET", "https://router.example.com/x", nil)
 	tlsReq.Host = "router.example.com"
 	tlsReq.TLS = &tls.ConnectionState{}
-	if got := requestOrigin(tlsReq); got != "https://router.example.com" {
+	if got := requestOrigin(tlsReq, false); got != "https://router.example.com" {
 		t.Fatalf("tls: got %q", got)
 	}
+}
+
+func TestRequestOrigin_TrustForwardedProto(t *testing.T) {
+	behindProxy := func(forwardedProto string) *http.Request {
+		r, _ := http.NewRequest("GET", "http://router.example.com/x", nil)
+		r.Host = "router.example.com"
+		// r.TLS is nil here on purpose: this is exactly the shape of a
+		// request as a TLS-terminating load balancer or Gateway forwards
+		// it — plain HTTP to the backend, real scheme only in the header.
+		if forwardedProto != "" {
+			r.Header.Set("X-Forwarded-Proto", forwardedProto)
+		}
+		return r
+	}
+
+	t.Run("ignored when trust is off, even if present", func(t *testing.T) {
+		r := behindProxy("https")
+		if got := requestOrigin(r, false); got != "http://router.example.com" {
+			t.Fatalf("got %q, want http (X-Forwarded-Proto must be ignored)", got)
+		}
+	})
+
+	t.Run("trusted when the flag is on", func(t *testing.T) {
+		r := behindProxy("https")
+		if got := requestOrigin(r, true); got != "https://router.example.com" {
+			t.Fatalf("got %q, want https", got)
+		}
+	})
+
+	t.Run("first value wins in a proxy chain", func(t *testing.T) {
+		r := behindProxy("https, http")
+		if got := requestOrigin(r, true); got != "https://router.example.com" {
+			t.Fatalf("got %q, want https (leftmost/edge value)", got)
+		}
+	})
+
+	t.Run("case-insensitive and trims whitespace", func(t *testing.T) {
+		r := behindProxy(" HTTPS ,http")
+		if got := requestOrigin(r, true); got != "https://router.example.com" {
+			t.Fatalf("got %q, want https", got)
+		}
+	})
+
+	t.Run("falls back to r.TLS when the header is absent", func(t *testing.T) {
+		r := behindProxy("")
+		if got := requestOrigin(r, true); got != "http://router.example.com" {
+			t.Fatalf("got %q, want http (no header, r.TLS is nil)", got)
+		}
+	})
 }
 
 func TestNormalizeOrigin(t *testing.T) {

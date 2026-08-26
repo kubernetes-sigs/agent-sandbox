@@ -150,7 +150,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	credSrc := h.credentialSource(r)
 	if credSrc == authz.TokenSourceCookie {
 		origin := r.Header.Get("Origin")
-		if !isAllowedOrigin(origin, requestOrigin(r), h.cfg.AuthzCookieAllowedOrigins) {
+		if !isAllowedOrigin(origin, requestOrigin(r, h.cfg.AuthzTrustForwardedProto), h.cfg.AuthzCookieAllowedOrigins) {
 			observability.LoggerFromContext(r.Context(), h.log).Info("authorization denied: origin not allowed for cookie-authenticated request",
 				"sandbox", target.ID,
 				"namespace", target.Namespace,

@@ -188,6 +188,18 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"the credential that authorized the request came from the "+
 			"cookie — a header- or query-sourced credential cannot be forged "+
 			"by a third-party page and is not subject to this check.")
+	fs.BoolVar(&c.AuthzTrustForwardedProto, "authz-trust-forwarded-proto", c.AuthzTrustForwardedProto,
+		"Read the scheme for the same-origin half of the cookie-authz check "+
+			"from the first value of X-Forwarded-Proto, when present, "+
+			"instead of r.TLS != nil. Off by default. Needed behind any "+
+			"TLS-terminating load balancer or Gateway — the common "+
+			"production shape — where r.TLS is always nil and every "+
+			"same-origin request would otherwise be misjudged cross-origin. "+
+			"Only enable this when the router is reachable exclusively "+
+			"through a proxy that sets this header itself and strips any "+
+			"client-supplied one first; otherwise a client with direct "+
+			"network access to the router could forge its own scheme. Has "+
+			"no effect without --authz-cookie-name.")
 
 	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
 		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+

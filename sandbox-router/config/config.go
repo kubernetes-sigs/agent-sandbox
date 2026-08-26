@@ -291,6 +291,23 @@ type Config struct {
 	// upgrades" section of the README). Each entry has the form
 	// scheme://host[:port].
 	AuthzCookieAllowedOrigins []string
+	// AuthzTrustForwardedProto makes requestOrigin() (the same-origin
+	// half of the cookie-authz check above) read the scheme from the
+	// first value of X-Forwarded-Proto instead of r.TLS != nil, when
+	// that header is present. Off by default: r.TLS only reflects
+	// whether TLS terminated in this process, which is false for every
+	// request behind a TLS-terminating load balancer or Gateway — the
+	// common production shape — so without this flag every same-origin
+	// request behind one is misclassified as cross-origin and falls
+	// through to AuthzCookieAllowedOrigins (or gets rejected if that
+	// list doesn't happen to name the deployment's own public origin).
+	// Only turn this on when the router is reachable exclusively
+	// through a proxy that sets this header itself and strips any
+	// client-supplied one — otherwise a client with direct network
+	// access to the router could forge its own scheme and defeat the
+	// same-origin check this exists to make actually match reality.
+	// Has no effect without AuthzCookieName.
+	AuthzTrustForwardedProto bool
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -435,6 +452,9 @@ func (c *Config) Validate() error {
 		if !validOriginPattern(origin) {
 			return fmt.Errorf("--authz-cookie-allowed-origins entry %q must have the form scheme://host[:port], with no path/query/fragment", origin)
 		}
+	}
+	if c.AuthzTrustForwardedProto && c.AuthzCookieName == "" {
+		return errors.New("--authz-trust-forwarded-proto has no effect without --authz-cookie-name, which is what runs the same-origin check it affects")
 	}
 	return nil
 }

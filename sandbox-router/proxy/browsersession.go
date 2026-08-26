@@ -55,17 +55,36 @@ func (h *Handler) credentialSource(r *http.Request) authz.TokenSource {
 }
 
 // requestOrigin builds the router's own canonical origin for r, in the
-// same scheme://host shape a browser's Origin header uses. Scheme is
-// derived from whether the connection this request arrived on is TLS
-// (r.TLS != nil for the router's own --https-bind-address listener),
-// not guessed from a client-supplied header — a deployment behind a
-// TLS-terminating load balancer that forwards the real scheme needs to
-// set that up as trusted infrastructure, not something this function
-// takes on faith from the request itself.
-func requestOrigin(r *http.Request) string {
+// same scheme://host shape a browser's Origin header uses.
+//
+// Scheme is derived from whether the connection this request arrived on
+// is TLS (r.TLS != nil for the router's own --https-bind-address
+// listener) — unless trustForwardedProto is set, in which case a
+// present X-Forwarded-Proto is trusted instead. r.TLS alone is wrong
+// behind any TLS-terminating load balancer or Gateway, the common
+// production shape: the connection this process sees is always plain
+// HTTP, so selfOrigin would always compute as http://<host> while a
+// browser serving the page over HTTPS sends "Origin: https://<host>" —
+// a same-origin request misclassified as cross-origin. trustForwardedProto
+// is opt-in (see Config.AuthzTrustForwardedProto) precisely because
+// trusting a client-supplied header on faith is only safe when the
+// caller has confirmed the router is reachable exclusively through a
+// proxy that sets it, stripping any value a client might have sent.
+func requestOrigin(r *http.Request, trustForwardedProto bool) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
+	}
+	if trustForwardedProto {
+		if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
+			// A chain of proxies may each append their own value,
+			// comma-separated; the first one is what the client-facing
+			// edge — the one terminating TLS — actually saw.
+			first, _, _ := strings.Cut(fwd, ",")
+			if s := strings.ToLower(strings.TrimSpace(first)); s != "" {
+				scheme = s
+			}
+		}
 	}
 	return scheme + "://" + r.Host
 }

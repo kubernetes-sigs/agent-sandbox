@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Lints the helm chart and renders it across the value permutations we support.
+
+`helm lint` on its own only exercises the default values, which leaves the
+conditional templates (extensions, namespace creation, the Prometheus Operator
+resources) unrendered and therefore unchecked. This additionally runs
+`helm template` over each permutation and asserts the resulting resource set,
+so a template that fails to render -- or that renders when it should not -- is
+caught in presubmit.
+"""
+
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CHART_DIR = REPO_ROOT / "helm"
+
+# image.tag is `required` by the chart, so every invocation must set it.
+IMAGE_TAG = ["--set", "image.tag=v0.0.0-lint"]
+
+# Resources the chart always renders, regardless of values.
+CORE_RESOURCES = [
+    ("ServiceAccount", "agent-sandbox-controller"),
+    ("Deployment", "agent-sandbox-controller"),
+    ("ClusterRole", "agent-sandbox-controller"),
+    ("ClusterRoleBinding", "agent-sandbox-controller"),
+    ("Role", "agent-sandbox-controller"),
+    ("RoleBinding", "agent-sandbox-controller"),
+    ("Service", "agent-sandbox-controller"),
+    ("Service", "agent-sandbox-webhook-service"),
+    # controller-gen writes extensions-rbac.generated.yaml straight into
+    # templates/, so the extensions ClusterRole renders unconditionally. Only its
+    # ClusterRoleBinding is gated on controller.extensions.
+    ("ClusterRole", "agent-sandbox-controller-extensions"),
+]
+
+EXTENSIONS_BINDING = ("ClusterRoleBinding", "agent-sandbox-controller-extensions")
+NAMESPACE = ("Namespace", "agent-sandbox-system")
+SERVICE_MONITOR = ("ServiceMonitor", "agent-sandbox-controller")
+PROMETHEUS_RULE = ("PrometheusRule", "agent-sandbox-controller")
+
+CASES = [
+    {
+        "name": "defaults",
+        "sets": [],
+        "present": CORE_RESOURCES + [NAMESPACE],
+        "absent": [EXTENSIONS_BINDING, SERVICE_MONITOR, PROMETHEUS_RULE],
+    },
+    {
+        "name": "extensions enabled",
+        "sets": ["--set", "controller.extensions=true"],
+        "present": CORE_RESOURCES + [NAMESPACE, EXTENSIONS_BINDING],
+        "absent": [SERVICE_MONITOR, PROMETHEUS_RULE],
+    },
+    {
+        "name": "existing namespace",
+        "sets": [
+            "--set", "namespace.create=false",
+            "--set", "namespace.name=my-namespace",
+        ],
+        "present": CORE_RESOURCES,
+        "absent": [NAMESPACE, ("Namespace", "my-namespace")],
+    },
+    {
+        "name": "prometheus operator resources enabled",
+        "sets": [
+            "--set", "metrics.serviceMonitor.enabled=true",
+            "--set", "metrics.prometheusRule.enabled=true",
+        ],
+        "present": CORE_RESOURCES + [SERVICE_MONITOR, PROMETHEUS_RULE],
+        "absent": [EXTENSIONS_BINDING],
+    },
+]
+
+KIND_RE = re.compile(r"^kind:[ \t]+(\S+)[ \t]*$", re.MULTILINE)
+NAME_RE = re.compile(r"^[ \t]{2}name:[ \t]+(\S+)[ \t]*$", re.MULTILINE)
+
+
+def rendered_resources(output):
+    """Extracts the (kind, name) pairs from multi-document helm template output."""
+    resources = set()
+    for document in output.split("\n---"):
+        kind = KIND_RE.search(document)
+        name = NAME_RE.search(document)
+        if kind and name:
+            resources.add((kind.group(1), name.group(1)))
+    return resources
+
+
+def run(args):
+    """Runs a helm command, returning (ok, combined output)."""
+    result = subprocess.run(args, capture_output=True, text=True)
+    return result.returncode == 0, result.stdout + result.stderr
+
+
+def lint(case):
+    ok, output = run(["helm", "lint", str(CHART_DIR)] + IMAGE_TAG + case["sets"])
+    if not ok:
+        print(f"FAIL: helm lint ({case['name']})", file=sys.stderr)
+        print(output, file=sys.stderr)
+    return ok
+
+
+def template(case):
+    ok, output = run(
+        ["helm", "template", "agent-sandbox", str(CHART_DIR)]
+        + IMAGE_TAG
+        + case["sets"]
+    )
+    if not ok:
+        print(f"FAIL: helm template ({case['name']})", file=sys.stderr)
+        print(output, file=sys.stderr)
+        return False
+
+    resources = rendered_resources(output)
+    failed = False
+
+    for expected in case["present"]:
+        if expected not in resources:
+            print(
+                f"FAIL: {case['name']}: expected {expected[0]}/{expected[1]} "
+                "to be rendered, but it was not.",
+                file=sys.stderr,
+            )
+            failed = True
+
+    for unexpected in case["absent"]:
+        if unexpected in resources:
+            print(
+                f"FAIL: {case['name']}: {unexpected[0]}/{unexpected[1]} was "
+                "rendered, but it should not have been.",
+                file=sys.stderr,
+            )
+            failed = True
+
+    return not failed
+
+
+def main():
+    if shutil.which("helm") is None:
+        print("ERROR: helm is not installed; see https://helm.sh/docs/intro/install/", file=sys.stderr)
+        return 1
+
+    if not CHART_DIR.is_dir():
+        print(f"ERROR: {CHART_DIR} does not exist.", file=sys.stderr)
+        return 1
+
+    failed = False
+    for case in CASES:
+        print(f"==> {case['name']}")
+        if not lint(case) or not template(case):
+            failed = True
+
+    if failed:
+        return 1
+
+    print(f"\nChart is valid across {len(CASES)} value permutations.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

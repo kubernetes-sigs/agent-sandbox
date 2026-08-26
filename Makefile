@@ -144,6 +144,10 @@ lint-api:
 fix-api:
 	./dev/tools/lint-api --fix
 
+.PHONY: lint-helm
+lint-helm:
+	./dev/tools/lint-helm
+
 .PHONY: verify-chart-version
 verify-chart-version:
 	./dev/tools/verify-chart-version

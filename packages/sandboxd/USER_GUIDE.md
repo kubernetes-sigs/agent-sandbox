@@ -5,7 +5,7 @@
 inside a sandbox pod and exposes the hybrid runtime API:
 
 ```text
-sandboxd (sidecar)
+sandboxd
 ├── gRPC  127.0.0.1:9090  →  ProcessService    (streaming process I/O)
 └── HTTP  127.0.0.1:8080  →  FilesystemService (stateless file operations & runtime probes)
 ```
@@ -89,11 +89,16 @@ not need their own locking for correctness:
 There is no cross-request transaction or compare-and-swap; agents that need
 coordination on shared paths must layer it themselves.
 
-## Deploying as a sidecar
+## Side-loading into arbitrary workload containers
 
-`sandboxd` runs as a sidecar next to your (unmodified) workload container.
-The two share the workspace volume; the workload reaches `sandboxd` over pod
-loopback (enforced by `sandboxd` listening strictly on `127.0.0.1`).
+`sandboxd` is designed to be **side-loaded directly into arbitrary workload containers** at runtime.
+This allows AI agents to execute processes and manage files directly within the target container's
+environment (with its installed dependencies, packages, compilers, and PATH) without needing to
+rebuild or bake `sandboxd` into the container image.
+
+By mounting the `sandboxd` container image as an **Image Volume** and launching `sandboxd` in the background
+via a Kubernetes `postStart` lifecycle hook, the workload container's original `ENTRYPOINT` and `CMD`
+remain completely intact.
 
 ```yaml
 apiVersion: extensions.agents.x-k8s.io/v1beta1
@@ -103,11 +108,21 @@ metadata:
 spec:
   podTemplate:
     spec:
-      securityContext:
-        fsGroup: 1000
+      volumes:
+        - name: sandboxd-volume
+          image:
+            reference: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
+            pullPolicy: IfNotPresent
       containers:
-        - name: sandboxd
-          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
+        - name: workload
+          image: bring-your-own-image:latest  # Any arbitrary BYOI image
+          stdin: true # Required for postStart command in cases where the command isn't specified in image
+          # tty: true # Alternative to stdin if you prefer a TTY 
+          env:
+            - name: SANDBOXD_GRPC_ADDR
+              value: "localhost:9090"
+            - name: SANDBOXD_REST_ADDR
+              value: "localhost:8080"
           ports:
             - containerPort: 8080   # REST (localhost-only; port documented for probes)
             - containerPort: 9090   # gRPC
@@ -115,27 +130,79 @@ spec:
             httpGet:
               path: /v1/health
               port: 8080
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - "/bin/sh"
+                  - "-c"
+                  - "/opt/agent-sandbox/usr/local/bin/sandboxd --root-dir=/workspace --grpc-port=9090 --rest-port=8080 >/tmp/sandboxd.log 2>&1 &"
           volumeMounts:
-            - name: workspace
-              mountPath: /workspace
+            - name: sandboxd-volume
+              mountPath: /opt/agent-sandbox
+              readOnly: true
+```
+
+> **Why this works:**
+> - **Bring-Your-Own-Image (BYOI):** `sandboxd` runs inside the workload container's root filesystem,
+>   so commands executed via `ProcessService` have direct access to the workload's libraries, binaries,
+>   and environment variables.
+> - **Preserves Original Entrypoint:** Because `command` and `args` are omitted from the PodSpec,
+>   Kubernetes executes the image's original `ENTRYPOINT` and `CMD` as PID 1.
+> - **Zero Rebuilds:** The `sandboxd` image is mounted read-only via Kubernetes Image Volumes
+>   (Kubernetes 1.31+), eliminating the need for custom base images or init container copy steps.
+
+### Fallback: InitContainer & `emptyDir` (Kubernetes < 1.31)
+
+For clusters where Image Volumes are not enabled by default, use an `initContainer` to copy the statically
+compiled `sandboxd` binary into a shared `emptyDir` volume:
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sandboxd-template
+spec:
+  podTemplate:
+    spec:
+      volumes:
+        - name: sandboxd-bin
+          emptyDir: {}
+      initContainers:
+        - name: inject-sandboxd
+          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
+          command: ["cp", "/usr/local/bin/sandboxd", "/sandboxd-bin/sandboxd"]
+          volumeMounts:
+            - name: sandboxd-bin
+              mountPath: /sandboxd-bin
+      containers:
         - name: workload
-          image: your-agent-image:latest
+          image: bring-your-own-image:latest  # Any arbitrary BYOI image
+          stdin: true # Required for postStart command in cases where the command isn't specified in image
+          # tty: true # Alternative to stdin if you prefer a TTY 
           env:
             - name: SANDBOXD_GRPC_ADDR
               value: "localhost:9090"
             - name: SANDBOXD_REST_ADDR
               value: "localhost:8080"
+          ports:
+            - containerPort: 8080
+            - containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - "/bin/sh"
+                  - "-c"
+                  - "/sandboxd-bin/sandboxd --root-dir=/workspace --grpc-port=9090 --rest-port=8080 >/tmp/sandboxd.log 2>&1 &"
           volumeMounts:
-            - name: workspace
-              mountPath: /workspace
-      volumes:
-        - name: workspace
-          emptyDir: {}
+            - name: sandboxd-bin
+              mountPath: /sandboxd-bin
 ```
-
-> **Note:** commands launched through `ProcessService` execute inside the
-> `sandboxd` container, with the shared `/workspace` volume as their working
-> directory — so files written by either container are visible to both.
 
 ## Flags
 

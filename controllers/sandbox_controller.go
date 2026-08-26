@@ -823,6 +823,7 @@ func isSystemLabel(key string) bool {
 // extensionPodLabelKeys must stay in sync with computeExtensionPodLabels so reconcile
 // removes stale extension labels when they are no longer expected on the Pod.
 var extensionPodLabelKeys = []string{
+	extensionsv1beta1.SandboxIDLabel,
 	sandboxv1beta1.SandboxWarmPoolLabel,
 	sandboxv1beta1.SandboxTemplateRefHashLabel,
 }
@@ -842,17 +843,25 @@ func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]strin
 
 	var labels map[string]string
 
+	if k == extensionsv1beta1.SandboxClaimKind {
+		if val, ok := sandbox.Labels[extensionsv1beta1.SandboxIDLabel]; ok && val != "" {
+			if labels == nil {
+				labels = make(map[string]string, 3)
+			}
+			labels[extensionsv1beta1.SandboxIDLabel] = val
+		}
+	}
 	if k == extensionsv1beta1.SandboxWarmPoolKind {
 		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
 			if labels == nil {
-				labels = make(map[string]string, 2)
+				labels = make(map[string]string, 3)
 			}
 			labels[sandboxv1beta1.SandboxWarmPoolLabel] = val
 		}
 	}
 	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok && val != "" {
 		if labels == nil {
-			labels = make(map[string]string, 2)
+			labels = make(map[string]string, 3)
 		}
 		labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
 	}

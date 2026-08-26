@@ -296,10 +296,55 @@ resp, _ := client.Execute(ctx, &processv1.ExecuteRequest{
 fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
 ```
 
+## Agent Sandbox SDK access
+
+sandboxd binds the pod network (`0.0.0.0` by default), so it is reachable like
+any other in-pod service — via a Kubernetes **Service** or the
+**sandbox-router**. The SDKs connect via a **pod port-forward** to the sandbox
+pod (both `:8080` and `:9090`): filesystem calls go over REST, `Run` goes over
+gRPC.
+
+> **Where commands run:** `ProcessService` executes commands **inside the
+> `sandboxd` container**, not the workload container. The base `sandboxd`
+> image is minimal (a shell + coreutils), so `Run` can use `sh`, `cat`,
+> `ls`, etc. out of the box; to run a language runtime (e.g. `python3`),
+> build a sandboxd image that includes it. Files written over REST land in
+> the shared `/workspace` volume, visible to both containers.
+
+**Go** — select the runtime via `Options`:
+
+```go
+sb, _ := sandbox.New(ctx, sandbox.Options{
+    WarmPoolName: "my-pool",
+    Runtime:      sandbox.RuntimeSandboxd, // pod port-forward; REST + gRPC
+})
+_ = sb.Open(ctx)
+_ = sb.Write(ctx, "src/notes.txt", data)       // PUT /v1/files/...
+res, _ := sb.Run(ctx, "cat src/notes.txt")     // gRPC ProcessService.Execute
+_ = sb.Delete(ctx, "src", true)                // sandboxd-only
+```
+
+**Python** — select the runtime via the connection config:
+
+```python
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
+with client.claim("my-pool") as sandbox:
+    sandbox.files.write("src/notes.txt", data)    # PUT /v1/files/...
+    result = sandbox.commands.run("cat src/notes.txt")  # gRPC Execute
+    sandbox.files.delete("src", recursive=True)   # sandboxd-only
+```
+
+The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[grpc]`.
+
 ## Security model
 
-- **Network containment:** both ports bind to `127.0.0.1` only; external
-  access requires explicit proxying through `sandbox-router`.
+- **Network containment:** both ports bind `0.0.0.0` by default so the daemon
+  is reachable on the pod network (Service / sandbox-router). Containment is
+  provided by **pod isolation and NetworkPolicy**, not loopback binding; pass
+  `--listen-host=127.0.0.1` to restrict to loopback for local development.
 - **Path confinement:** every file path (and process `cwd`) is resolved with
   symlink evaluation and rejected unless it stays under `--root-dir`.
 - **Metadata hygiene:** `/v1/metadata` only serves env vars matching

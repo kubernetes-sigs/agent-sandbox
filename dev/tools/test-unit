@@ -93,6 +93,14 @@ PYTHON_TEST_SUITES = [
         "editable_installs": [
             (os.path.join("clients", "integrations", "deepagents"), "[test]"),
         ],
+    },
+    {
+        "name": "integrations-gymnasium",
+        "dir": os.path.join("clients", "integrations", "gymnasium"),
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
+            (os.path.join("clients", "integrations", "gymnasium"), "[test]"),
+        ]
     }
 ]
 

@@ -30,6 +30,8 @@ import (
 const (
 	defaultNamespace               = "default"
 	defaultServerPort              = 8888
+	defaultSandboxdRESTPort        = 8080
+	defaultSandboxdGRPCPort        = 9090
 	defaultSandboxReadyTimeout     = 180 * time.Second
 	defaultGatewayReadyTimeout     = 180 * time.Second
 	defaultPortForwardReadyTimeout = 30 * time.Second
@@ -40,6 +42,21 @@ const (
 	defaultMaxUploadSize           = 256 << 20 // 256 MB
 )
 
+// Runtime identifies the in-sandbox runtime API the SDK speaks.
+type Runtime string
+
+const (
+	// RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
+	// GET /download|list|exists/{path}, POST /execute on port 8888),
+	// reached through the sandbox-router. Default.
+	RuntimeLegacyPython Runtime = "legacy-python"
+	// RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
+	// REST filesystem (/v1/files/...) on port 8080 plus gRPC
+	// ProcessService on port 9090. The SDK connects over a pod port-forward
+	// to the sandbox pod.
+	RuntimeSandboxd Runtime = "sandboxd"
+)
+
 // Options configures a Sandbox instance.
 type Options struct {
 	// WarmPoolName is the name of the SandboxWarmPool to use.
@@ -48,6 +65,20 @@ type Options struct {
 	// CreateSandbox instead.
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
 	WarmPoolName string
+
+	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
+	// RuntimeSandboxd connects via a pod port-forward, so GatewayName is not
+	// supported with it. APIURL remains available as an advanced/testing
+	// escape hatch for the REST endpoint.
+	Runtime Runtime
+
+	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
+	// REST API. Only used with RuntimeSandboxd. Default: 8080.
+	SandboxdRESTPort int
+
+	// SandboxdGRPCPort is the pod port of sandboxd's gRPC ProcessService.
+	// Only used with RuntimeSandboxd. Default: 9090.
+	SandboxdGRPCPort int
 
 	// Namespace where the SandboxClaim will be created. Default: "default".
 	// Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
@@ -103,8 +134,9 @@ type Options struct {
 	// fixed 8 MB internal limit. Default: 256 MB.
 	MaxDownloadSize int64
 
-	// MaxUploadSize is the maximum content size for Write(). Content
-	// exceeding this limit is rejected before any network I/O. Default: 256 MB.
+	// MaxUploadSize is the maximum content size for Write() and WriteReader().
+	// Write rejects oversized content before network I/O; WriteReader enforces
+	// the limit while streaming. Default: 256 MB.
 	MaxUploadSize int64
 
 	// Logger for structured logging. Defaults to stderr at INFO level.
@@ -139,6 +171,14 @@ type Options struct {
 	// TracerProvider sets the OpenTelemetry TracerProvider for span creation.
 	// If nil, falls back to otel.GetTracerProvider (noop by default).
 	TracerProvider trace.TracerProvider
+
+	// DisablePodIPRouting suppresses the X-Sandbox-Pod-IP header even when a
+	// pod IP is available. Use in environments with strict network policies,
+	// service meshes, or secure overlays where direct pod-to-pod IP routing is
+	// restricted but service-based DNS routing works correctly.
+	// Note: this only affects router-based transports that send X-Sandbox-* headers.
+	// Default: false (header is sent when router headers are enabled and a pod IP is present).
+	DisablePodIPRouting bool
 }
 
 func (o *Options) setDefaults() {
@@ -151,8 +191,17 @@ func (o *Options) setDefaults() {
 	if o.GatewayScheme == "" {
 		o.GatewayScheme = "http"
 	}
+	if o.Runtime == "" {
+		o.Runtime = RuntimeLegacyPython
+	}
 	if o.ServerPort == 0 {
 		o.ServerPort = defaultServerPort
+	}
+	if o.SandboxdRESTPort == 0 {
+		o.SandboxdRESTPort = defaultSandboxdRESTPort
+	}
+	if o.SandboxdGRPCPort == 0 {
+		o.SandboxdGRPCPort = defaultSandboxdGRPCPort
 	}
 	if o.SandboxReadyTimeout == 0 {
 		o.SandboxReadyTimeout = defaultSandboxReadyTimeout
@@ -279,6 +328,23 @@ func (o *Options) validateCommon() error {
 	}
 	if o.ServerPort <= 0 || o.ServerPort > 65535 {
 		return fmt.Errorf("sandbox: ServerPort must be between 1 and 65535, got %d", o.ServerPort)
+	}
+	if o.Runtime != RuntimeLegacyPython && o.Runtime != RuntimeSandboxd {
+		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacyPython, RuntimeSandboxd, o.Runtime)
+	}
+	if o.Runtime == RuntimeSandboxd {
+		if o.GatewayName != "" {
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd uses pod port-forward connectivity")
+		}
+		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
+			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)
+		}
+		if o.SandboxdGRPCPort <= 0 || o.SandboxdGRPCPort > 65535 {
+			return fmt.Errorf("sandbox: SandboxdGRPCPort must be between 1 and 65535, got %d", o.SandboxdGRPCPort)
+		}
+		if o.SandboxdRESTPort == o.SandboxdGRPCPort {
+			return fmt.Errorf("sandbox: SandboxdRESTPort and SandboxdGRPCPort must differ (both %d)", o.SandboxdRESTPort)
+		}
 	}
 	if o.SandboxReadyTimeout <= 0 {
 		return fmt.Errorf("sandbox: SandboxReadyTimeout must be positive")

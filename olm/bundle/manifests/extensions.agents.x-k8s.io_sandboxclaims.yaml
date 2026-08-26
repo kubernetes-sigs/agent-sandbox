@@ -260,6 +260,8 @@ spec:
                     items:
                       type: string
                     type: array
+                  serviceFQDN:
+                    type: string
                 type: object
             type: object
         required:

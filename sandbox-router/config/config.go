@@ -18,7 +18,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // MTLSMode controls how the router validates client certificates on incoming
@@ -119,6 +121,33 @@ type Config struct {
 	// localhost. Link-local, multicast, and unspecified addresses
 	// stay rejected even when this flag is on.
 	AllowLoopbackPodIP bool
+
+	// PathRoutingPrefix, when non-empty, additionally lets a caller address
+	// a sandbox via a URL path segment instead of X-Sandbox-* headers:
+	// <PathRoutingPrefix>/<namespace>/<id>/<port>/<rest...>. This is the
+	// only way a browser can reach a WebSocket-dependent backend inside a
+	// sandbox (a web IDE's terminal, a dev server's HMR socket) through
+	// this router: a page or an iframe cannot set custom request headers
+	// at all, and the WebSocket handshake specifically has no API for
+	// them either (see the "Browser-facing traffic" section of the
+	// package README for why — it is a platform limitation, not
+	// something a client-side workaround like a Service Worker can paper
+	// over, since WebSocket handshakes are not exposed to the fetch
+	// event). A page loaded under this prefix carries the same prefix
+	// into any relative WebSocket URL it opens, so the routing identity
+	// travels with zero client-side code.
+	//
+	// Off by default (""), so header-only behavior is completely
+	// unchanged unless an operator opts in. When set, a request path
+	// starting with this prefix is parsed for routing information
+	// FIRST; a path that does not match falls straight through to
+	// X-Sandbox-* header parsing, unmodified.
+	//
+	// X-Sandbox-Pod-IP and X-Sandbox-UID have no path equivalent, by
+	// design: both are trust-sensitive dial-target overrides meant for
+	// SDKs that already hold cluster-internal knowledge, never for a
+	// browser tab.
+	PathRoutingPrefix string
 
 	// EnableTracing enables OTel tracing via the OTLP gRPC exporter. The
 	// exporter endpoint is read from OTEL_EXPORTER_OTLP_ENDPOINT.
@@ -252,6 +281,27 @@ func (c *Config) Validate() error {
 	}
 	if c.ClusterDomain == "" {
 		return errors.New("--cluster-domain must not be empty")
+	}
+	if c.PathRoutingPrefix != "" {
+		if !strings.HasPrefix(c.PathRoutingPrefix, "/") {
+			return fmt.Errorf("--path-routing-prefix must start with \"/\", got %q", c.PathRoutingPrefix)
+		}
+		if strings.HasSuffix(c.PathRoutingPrefix, "/") {
+			return fmt.Errorf("--path-routing-prefix must not end with \"/\", got %q", c.PathRoutingPrefix)
+		}
+		// A prefix containing whitespace or control characters is
+		// almost certainly a copy-paste or shell-quoting mistake (a
+		// trailing newline from a config template, a stray tab) rather
+		// than an intentional value — nothing legitimate needs one here,
+		// and letting it through would make ParsePathRoute's prefix match
+		// silently fail against every real request while giving no hint
+		// why. Reject it at startup, where it is loud, instead of at
+		// request time, where it isn't.
+		if strings.ContainsFunc(c.PathRoutingPrefix, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r)
+		}) {
+			return fmt.Errorf("--path-routing-prefix must not contain whitespace or control characters, got %q", c.PathRoutingPrefix)
+		}
 	}
 	if c.UpstreamMaxRetries < 0 {
 		return fmt.Errorf("--upstream-max-retries must be non-negative, got %d", c.UpstreamMaxRetries)

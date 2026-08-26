@@ -98,6 +98,27 @@ The router also sets `X-Forwarded-Host` / `X-Forwarded-Proto` / `X-Forwarded-For
 
 Metrics for upgraded requests record `code="101"` once the handshake completes; the duration histogram records the full lifetime of the upgraded connection.
 
+### Browser-facing traffic: path-based routing
+
+Everything above assumes the caller can set `X-Sandbox-*` headers. A browser tab, an `<iframe>`, and — critically — a WebSocket handshake cannot: there is no web API for attaching custom headers to a top-level navigation, a subresource document load, or `new WebSocket(url, protocols)` (`protocols` only negotiates a subprotocol, it is not a headers map). This is a platform limitation, not something a Service Worker can work around either — WebSocket handshakes are explicitly not exposed to the `fetch` event, which is exactly why tools that need to intercept WebSocket traffic client-side (e.g. Mock Service Worker) have to patch the global `WebSocket` constructor instead of using a Service Worker at all. See [w3c/ServiceWorker#947](https://github.com/w3c/ServiceWorker/issues/947), still open.
+
+This bites concretely for any browser-facing dev tool proxied through this router — a web IDE whose terminal is a WebSocket (code-server is the common case), or a dev server whose hot-reload client opens one (Vite/webpack HMR). Both work fine once a request reaches the router with the right headers; the problem is entirely upstream of that, in getting the browser's own request there in the first place.
+
+Set `--path-routing-prefix` to give such traffic a second way in: a request whose path starts with the configured prefix is routed by `<prefix>/<namespace>/<id>/<port>/<rest...>` instead of headers — plain URL segments, which a browser can put in any navigation, `<iframe src>`, or `new WebSocket(...)` call with zero client-side code. Concretely, once a page is loaded at a URL under this prefix, any *relative* WebSocket URL that page's own JavaScript opens (which is how code-server and most dev-server HMR clients behave) automatically carries the same prefix along — the routing identity travels for free.
+
+This is strictly additive: the default is `""` (disabled), and a request whose path does not match the configured prefix falls straight through to `X-Sandbox-*` header parsing, unchanged. `X-Sandbox-Pod-IP` and `X-Sandbox-UID` have no path equivalent — both are dial-target overrides meant for SDKs that already hold cluster-internal knowledge, never for a browser tab, so path-routed requests always resolve through the DNS form or the namespace/name cache index, same as a header-routed request carrying only `X-Sandbox-ID`.
+
+**Enabling this flag claims the entire URL namespace under the prefix.** The fallback above only applies to a path that does not match the prefix as a path segment — `/routerish/...` shares the literal string `/router` but does not match, because there is no `/` boundary right after it, so it still falls through to headers like today. Once a request's path *does* match, it is committed to path-based routing and stays there — a malformed one (missing the port segment, an invalid namespace or ID, and so on) gets a `400` from `ParsePathRoute` directly and is **not** retried against `X-Sandbox-*` headers, even if the caller happened to also send them. Pick a prefix no real application route inside a sandbox needs to answer under, for exactly this reason.
+
+Everything after `<port>` is forwarded byte-for-byte, escaping included — an encoded separator inside a single upstream path segment (e.g. a filename containing `/`, sent as `%2F`) survives the hop unchanged rather than being silently decoded into an extra segment. `sandbox_router_requests_total` labels, the access log's `sandbox_id`/`sandbox_namespace` fields, and the `sandbox.id`/`sandbox.namespace` trace attributes all reflect the resolved target regardless of whether it came from a header or from the path.
+
+```sh
+curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  'http://sandbox-router-svc:8080/router/default/my-sandbox/8080/'
+# -> 101 Switching Protocols, no X-Sandbox-* header sent anywhere in this request
+```
+
 ## Flags
 
 Run `sandbox-router --help` for the full list. The most relevant:
@@ -116,6 +137,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
+| `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |

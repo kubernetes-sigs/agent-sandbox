@@ -76,8 +76,8 @@ metadata:
       ]
     capabilities: Basic Install
     categories: AI/Machine Learning
-    containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.4
-    createdAt: "2026-08-04T08:47:20Z"
+    containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.6
+    createdAt: "2026-08-25T12:58:28Z"
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -86,7 +86,7 @@ metadata:
   labels:
     operatorframework.io/arch.amd64: supported
     operatorframework.io/os.linux: supported
-  name: agent-sandbox-operator.v0.5.4
+  name: agent-sandbox-operator.v0.5.6
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -342,7 +342,7 @@ spec:
               - args:
                 - --leader-elect=true
                 - --extensions
-                image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.4
+                image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.6
                 name: agent-sandbox-controller
                 ports:
                 - containerPort: 8080
@@ -408,4 +408,4 @@ spec:
   provider:
     name: kubernetes-sigs
     url: https://agent-sandbox.sigs.k8s.io/
-  version: 0.5.4
+  version: 0.5.6

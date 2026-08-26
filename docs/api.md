@@ -345,11 +345,13 @@ _Appears in:_
 _Underlying type:_ _string_
 
 SandboxOperatingMode defines the desired operational state of the Sandbox.
+
 It expresses intent ("running" vs. "suspended"), not observed status; whether the
 Sandbox has actually reached that state is reported by conditions (see
 SandboxConditionReady and SandboxConditionSuspended).
 
-
+_Validation:_
+- Enum: [Running Suspended]
 
 _Appears in:_
 - [SandboxSpec](#sandboxspec)
@@ -460,7 +462,8 @@ _Underlying type:_ _string_
 
 EnvVarsInjectionPolicy defines whether a SandboxClaim is allowed to inject or override environment variables.
 
-
+_Validation:_
+- Enum: [Allowed Overrides Disallowed]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -497,7 +500,8 @@ _Underlying type:_ _string_
 NetworkPolicyManagement defines whether the controller automatically generates
 and manages a shared NetworkPolicy for this template.
 
-
+_Validation:_
+- Enum: [Managed Unmanaged]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -828,7 +832,8 @@ _Underlying type:_ _string_
 
 EnvVarsInjectionPolicy defines whether a SandboxClaim is allowed to inject or override environment variables.
 
-
+_Validation:_
+- Enum: [Allowed Overrides Disallowed]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -865,7 +870,8 @@ _Underlying type:_ _string_
 NetworkPolicyManagement defines whether the controller automatically generates
 and manages a shared NetworkPolicy for this template.
 
-
+_Validation:_
+- Enum: [Managed Unmanaged]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)
@@ -966,6 +972,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | name is the name of the Sandbox created from this claim |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod, mirrored from the backing<br />Sandbox's status. A pod may have multiple IPs in dual-stack clusters.<br />This is populated only while the backing Sandbox has a running pod with assigned<br />IPs; it is cleared whenever the pod is absent (e.g. before the pod has been<br />created or while the Sandbox is suspended). |  | Optional: \{\} <br /> |
+| `serviceFQDN` _string_ | serviceFQDN is the in-cluster DNS name of the bound Sandbox's service,<br />mirrored from the Sandbox's status.serviceFQDN so consumers can reach<br />the sandbox from the claim alone. Like name and podIPs, it is eventually<br />consistent: it may lag the Sandbox by a reconcile, and is cleared when<br />the claim loses its sandbox. |  | Optional: \{\} <br /> |
 
 
 #### SandboxTemplate
@@ -1160,7 +1167,8 @@ _Underlying type:_ _string_
 
 VolumeClaimTemplatesPolicy defines whether a SandboxClaim is allowed to inject or override volume claim templates.
 
-
+_Validation:_
+- Enum: [Disallowed Allowed Overrides]
 
 _Appears in:_
 - [SandboxTemplateSpec](#sandboxtemplatespec)

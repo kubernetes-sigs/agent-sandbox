@@ -54,6 +54,11 @@ import (
 // We keep sandboxes around for 5 minutes after we last used them.
 const SandboxInactivityTimeout = 5 * time.Minute
 
+// defaultToolTimeout bounds how long a single tool invocation may run before
+// it is cancelled, so a hung command (e.g. "sleep 99999") fails fast instead
+// of blocking the agent loop indefinitely.
+const defaultToolTimeout = 2 * time.Minute
+
 func main() {
 	ctx := context.Background()
 
@@ -80,6 +85,7 @@ func main() {
 	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
 	flag.StringVar(&opts.Image, "image", opts.Image, "image")
 	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
+	flag.DurationVar(&opts.ToolTimeout, "tool-timeout", opts.ToolTimeout, "Maximum duration a single tool invocation may run before it is cancelled (Go duration syntax, e.g. \"30s\", \"2m\"). <= 0 disables the timeout.")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
@@ -655,6 +661,10 @@ type RunOptions struct {
 
 	// ModelName is the name of the model to use with the LLM.
 	ModelName string
+
+	// ToolTimeout bounds how long a single tool invocation may run before it
+	// is cancelled. <= 0 disables the timeout. Default: defaultToolTimeout.
+	ToolTimeout time.Duration
 }
 
 func (o *RunOptions) InitDefaults() {
@@ -687,6 +697,7 @@ func (o *RunOptions) InitDefaults() {
 	}
 	o.ModelName = modelName
 
+	o.ToolTimeout = defaultToolTimeout
 }
 
 func run(ctx context.Context, opts RunOptions) error {
@@ -739,6 +750,7 @@ func run(ctx context.Context, opts RunOptions) error {
 	}()
 
 	toolsRegistry := tools.NewRegistry()
+	toolsRegistry.ToolTimeout = opts.ToolTimeout
 	toolsRegistry.Add(&tools.RunCommand{})
 
 	toolsRegistry.Add(&tools.ListFilesTool{})
@@ -946,7 +958,6 @@ func (h *Harness) RunSession(ctx context.Context, session *Session) error {
 			}
 
 			for _, tc := range assistantMessage.ToolCalls {
-				// TODO: Add a timeout to the tool execution?
 				result, err := h.toolsRegistry.Call(ctx, activeSandbox, tc)
 
 				var toolMsg llm.Message

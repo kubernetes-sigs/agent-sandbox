@@ -31,7 +31,8 @@ IMAGES_YAML_PATH = "registry.k8s.io/images/k8s-staging-agent-sandbox/images.yaml
 IMAGES_TO_PROMOTE = [
     "agent-sandbox-controller",
     "chrome-sandbox",
-    "python-runtime-sandbox"
+    "python-runtime-sandbox",
+    "sandbox-router-go"
 ]
 
 # Git Remotes defaults are controlled by CLI arguments
@@ -135,6 +136,52 @@ def get_latest_digest(image_name, tag):
     return None
 
 
+def update_images_yaml(yaml_path, tag, collected_digests):
+    """Updates images.yaml with new digests for promoted images."""
+    if not os.path.exists(yaml_path):
+        print(f"❌ {yaml_path} does not exist.")
+        sys.exit(1)
+
+    print(f"📝 Updating {yaml_path}...")
+    with open(yaml_path, "r") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    active_image_block = None
+    inserted_digests = set()
+
+    # Iterate and inject digests
+    for line in lines:
+        # Detect which image block we are inside
+        if "- name:" in line:
+            for img in IMAGES_TO_PROMOTE:
+                if f"- name: {img}" in line:
+                    active_image_block = img
+                    break
+            else:
+                active_image_block = None
+
+        # If inside an active image block, skip old entries matching this tag to avoid duplicates
+        if active_image_block and (f'"{tag}"' in line or f"'{tag}'" in line):
+            print(f"   Removing old tag entry in {active_image_block}: {line.strip()}")
+            continue
+
+        new_lines.append(line)
+
+        # If inside active block, look for 'dmap:' and append new digest
+        if active_image_block and "dmap:" in line and active_image_block not in inserted_digests:
+            digest = collected_digests.get(active_image_block)
+            if digest:
+                indent = line.find("dmap:") + 2
+                new_entry = f'{" " * indent}"{digest}": ["{tag}"]\n'
+                new_lines.append(new_entry)
+                inserted_digests.add(active_image_block)
+                print(f"   Updated {active_image_block}")
+
+    with open(yaml_path, "w") as f:
+        f.writelines(new_lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Stage 1: Tag and Promote Agent Sandbox Release')
     parser.add_argument('--tag', required=True, help='The git tag for the release (e.g., v0.1.0)')
@@ -230,47 +277,7 @@ def main():
 
     # Update images.yaml
     yaml_path = os.path.join(k8s_io_dir, IMAGES_YAML_PATH)
-    if not os.path.exists(yaml_path):
-        print(f"❌ {IMAGES_YAML_PATH} does not exist in k8s.io repo.")
-        sys.exit(1)
-
-    print(f"📝 Updating {IMAGES_YAML_PATH}...")
-    with open(yaml_path, 'r') as f:
-        lines = f.readlines()
-
-    new_lines = []
-    active_image_block = None
-    inserted_digests = set()
-    
-    # Iterate and inject digests
-    for line in lines:
-        # Detect which image block we are inside
-        if "- name:" in line:
-            for img in IMAGES_TO_PROMOTE:
-                if f"- name: {img}" in line:
-                    active_image_block = img
-                    break
-            else:
-                active_image_block = None
-
-        # If inside an active image block, skip old entries matching this tag to avoid duplicates
-        if active_image_block and (f'"{tag}"' in line or f"'{tag}'" in line):
-            print(f"   Removing old tag entry in {active_image_block}: {line.strip()}")
-            continue
-
-        new_lines.append(line)
-        
-        # If inside active block, look for 'dmap:' and append new digest
-        if active_image_block and "dmap:" in line and active_image_block not in inserted_digests:
-             digest = collected_digests[active_image_block]
-             indent = line.find("dmap:") + 2 
-             new_entry = f'{" " * indent}"{digest}": ["{tag}"]\n'
-             new_lines.append(new_entry)
-             inserted_digests.add(active_image_block)
-             print(f"   Updated {active_image_block}")
-
-    with open(yaml_path, 'w') as f:
-        f.writelines(new_lines)
+    update_images_yaml(yaml_path, tag, collected_digests)
 
     run_command(["git", "add", IMAGES_YAML_PATH], cwd=k8s_io_dir)
     run_command(["git", "commit", "-m", f"Promote agent-sandbox {tag}"], cwd=k8s_io_dir)

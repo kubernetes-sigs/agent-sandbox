@@ -92,6 +92,21 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"deployments where the sandbox shares a Pod with the router, or for "+
 			"integration tests using a localhost backend. Link-local, multicast, "+
 			"and unspecified addresses stay rejected regardless of this flag.")
+	fs.StringVar(&c.PathRoutingPrefix, "path-routing-prefix", c.PathRoutingPrefix,
+		"Optional URL path prefix that additionally lets a caller address a "+
+			"sandbox via <prefix>/<namespace>/<id>/<port>/<rest...>, instead of "+
+			"X-Sandbox-* headers. Off by default (headers only, unchanged). "+
+			"Enable this for browser-facing traffic: a WebSocket handshake has "+
+			"no API for custom headers, so a browser can only reach a "+
+			"WebSocket-dependent backend inside a sandbox (a web IDE's "+
+			"terminal, a dev server's HMR socket) through this router via a "+
+			"path it can put in a plain URL. A request whose path does not "+
+			"match this prefix falls straight through to header-based "+
+			"routing — but this claims the whole URL namespace under the "+
+			"prefix: once a path DOES match, it stays on the path-routing "+
+			"path even if it's otherwise malformed (bad namespace/id/port), "+
+			"and is never retried against headers. Pick a prefix no real "+
+			"in-sandbox route needs to answer under.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+

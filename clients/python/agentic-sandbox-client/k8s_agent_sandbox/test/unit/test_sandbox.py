@@ -111,6 +111,7 @@ class TestSandbox(unittest.TestCase):
             connection_config=mock_connection_config,
             k8s_helper=mock_k8s_helper_instance,
             get_pod_ip=sandbox.get_pod_ip,
+            get_pod_name=sandbox.get_pod_name,
         )
 
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
@@ -305,7 +306,7 @@ class TestSandbox(unittest.TestCase):
 
 class TestSandboxTerminateIdempotent(unittest.TestCase):
     """`Sandbox.terminate()` must be idempotent — a second call must not
-    issue a redundant DELETE that would return 404."""
+    issue a redundant DELETE."""
 
     @patch('k8s_agent_sandbox.sandbox.Filesystem')
     @patch('k8s_agent_sandbox.sandbox.CommandExecutor')

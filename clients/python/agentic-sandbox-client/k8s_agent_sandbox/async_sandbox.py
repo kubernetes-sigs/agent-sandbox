@@ -17,11 +17,11 @@ import logging
 from .async_connector import AsyncSandboxConnector
 from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
-from .constants import POD_NAME_ANNOTATION, SANDBOX_NAME_HASH_LABEL
+from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
-from .utils import select_pod_ip
+from .utils import select_pod_ip, extract_sandbox_name_hash
 
 
 class AsyncSandbox:
@@ -104,15 +104,11 @@ class AsyncSandbox:
             return self._sandbox_name_hash
 
         sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        status = sandbox_object.get("status") or {}
-        selector = status.get("selector") or ""
-        if "=" in selector:
-            key, value = selector.split("=")
-            if key == SANDBOX_NAME_HASH_LABEL:
-                self._sandbox_name_hash = value
-                return value
+        sandbox_name_hash = extract_sandbox_name_hash(sandbox_object)
+        if sandbox_name_hash:
+            self._sandbox_name_hash = sandbox_name_hash
 
-        return None
+        return sandbox_name_hash
 
     async def get_pod_ip(self) -> str | None:
         """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
@@ -193,16 +189,18 @@ class AsyncSandbox:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 
-        This method is idempotent. Calling ``terminate()`` repeatedly after a
-        successful deletion is a safe no-op. If the remote infrastructure has
-        already been removed, subsequent calls will handle the API 404 gracefully
-        rather than raising an error.
+        This method is idempotent. After a successful delete, ``claim_name`` is
+        cleared so later calls are a local no-op and do not issue another DELETE.
+        If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
+        404 as success rather than raising.
         """
         await self.close_connection()
 
         if not self.claim_name:
+            # Already deleted (or never successfully created a claim).
             return
 
         await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
+        # Clear only after success so a failed delete can be retried.
         self.claim_name = None

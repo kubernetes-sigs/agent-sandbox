@@ -255,6 +255,11 @@ class FileEntry(BaseModel)
 
 Represents a file or directory entry in the sandbox.
 
+Runtime-neutral: the SDK decodes both the legacy python-runtime wire
+format (``mod_time`` as a float POSIX timestamp) and the sandboxd wire
+format (``modified_at`` as an RFC 3339 string, plus ``mode``) into this
+one shape. ``modified`` is always a timezone-aware datetime.
+
 <a id="k8s_agent_sandbox.models.FileEntry.name"></a>
 
 ##### name
@@ -273,11 +278,39 @@ Size of the file in bytes.
 
 Type of the entry (file or directory).
 
-<a id="k8s_agent_sandbox.models.FileEntry.mod_time"></a>
+<a id="k8s_agent_sandbox.models.FileEntry.modified"></a>
 
-##### mod\_time
+##### modified
 
-Last modification time of the file. (POSIX timestamp)
+Last modification time (timezone-aware).
+
+<a id="k8s_agent_sandbox.models.FileEntry.mode"></a>
+
+##### mode
+
+Octal permission bits (sandboxd only), e.g. "0644".
+
+<a id="k8s_agent_sandbox.models.FileEntry.from_legacy"></a>
+
+##### from\_legacy
+
+```python
+@classmethod
+def from_legacy(cls, entry: dict) -> "FileEntry"
+```
+
+Build from the legacy python-runtime listing entry.
+
+<a id="k8s_agent_sandbox.models.FileEntry.from_sandboxd"></a>
+
+##### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, entry: dict) -> "FileEntry"
+```
+
+Build from a sandboxd DirectoryListing entry.
 
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig"></a>
 
@@ -362,6 +395,38 @@ Port the sandbox container listens on.
 ##### router\_namespace
 
 Namespace where the Router service resides.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig"></a>
+
+### SandboxdPodTunnelConnectionConfig Objects
+
+```python
+class SandboxdPodTunnelConnectionConfig(BaseModel)
+```
+
+Configuration for the sandboxd runtime via a direct pod port-forward.
+
+sandboxd (KEP-539.2) exposes two listeners: the Filesystem & Runtime REST
+API and the gRPC ProcessService. This config port-forwards directly to the
+sandbox pod, reaching both.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.rest_port"></a>
+
+##### rest\_port
+
+sandboxd REST filesystem port on the pod.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.grpc_port"></a>
+
+##### grpc\_port
+
+sandboxd gRPC ProcessService port on the pod.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.port_forward_ready_timeout"></a>
+
+##### port\_forward\_ready\_timeout
+
+Seconds to wait for port-forward readiness.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

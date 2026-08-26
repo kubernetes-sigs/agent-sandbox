@@ -24,6 +24,9 @@ The application accepts the following command-line flags:
 | `-namespace`| The Kubernetes namespace where sandbox pods are created. | `default` (overrides `SANDBOX_NAMESPACE` env var) |
 | `-image` | The container image used for the temporary sandbox pod. | `debian:bookworm-slim` (overrides `SANDBOX_IMAGE` env var) |
 | `-homedir` | The directory inside the sandbox that is persisted via snapshot/restore. | `/home/clawtainer` (overrides `SANDBOX_HOME_DIR` env var) |
+| `-tool-timeout` | Maximum duration a single tool invocation (`run_command`, `ls`, `read`, or `write`) may run before it is cancelled. Accepts Go duration syntax, e.g. `30s`, `2m`, `1h`. `<= 0` disables the timeout. | `2m` |
+
+> **Note:** `-tool-timeout` cancels the Kubernetes exec connection and unblocks the agent loop; it does not guarantee that every process the command started inside the container (e.g. a detached background process) has actually been terminated.
 
 ## Configuration
 

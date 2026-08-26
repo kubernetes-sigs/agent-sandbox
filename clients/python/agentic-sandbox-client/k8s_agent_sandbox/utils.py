@@ -19,6 +19,9 @@ from datetime import datetime, timedelta, timezone
 import functools
 import ipaddress
 import time
+from typing import Any
+
+from .constants import SANDBOX_NAME_HASH_LABEL
 
 
 def record_latency(metric):
@@ -177,3 +180,14 @@ def is_valid_gateway_hostname(s: str) -> bool:
             return False
     last = s[-1]
     return last != '-' and last != '.'
+
+
+def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
+    status = sandbox_object.get("status") or {}
+    selector = status.get("selector") or ""
+    for requirement in selector.split(","):
+        key, sep, value = requirement.partition("=")
+        if sep and key.strip() == SANDBOX_NAME_HASH_LABEL:
+            return value.strip() or None
+
+    return None

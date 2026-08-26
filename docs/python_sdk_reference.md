@@ -496,3 +496,4 @@ Whether to enable OpenTelemetry tracing.
 ##### trace\_service\_name
 
 Service name used for traces.
+

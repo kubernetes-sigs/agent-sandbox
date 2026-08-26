@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Verifies helm/Chart.yaml is version-bumped when generated chart files change.
+
+The chart embeds content produced by the //go:generate directives in codegen.go
+(the CRDs and the controller-gen RBAC rules). Shipping a change to that content
+under an unchanged chart version means two different charts exist claiming to be
+the same version, which breaks `helm upgrade` and any future OCI publishing.
+
+This compares the working tree against the merge base with the PR's base branch
+and fails if the generated chart content changed without the chart version
+increasing.
+"""
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CHART_PATH = "helm/Chart.yaml"
+CHART_FILE = REPO_ROOT / CHART_PATH
+
+# Chart content written by codegen.go. Keep in sync with the //go:generate
+# directives that target helm/.
+GENERATED_CHART_PATHS = [
+    "helm/crds/",
+    "helm/templates/rbac.generated.yaml",
+    "helm/templates/extensions-rbac.generated.yaml",
+]
+
+VERSION_RE = re.compile(r"^version:\s*(\d+)\.(\d+)\.(\d+)\s*$", re.MULTILINE)
+
+
+def running_in_ci():
+    """True when running under GitHub Actions or Prow."""
+    return any(
+        os.environ.get(name)
+        for name in ("CI", "GITHUB_ACTIONS", "PROW_JOB_ID")
+    )
+
+
+def git(args, repo_root, check=True):
+    """Runs a git command, returning stdout. Raises CalledProcessError if check."""
+    return subprocess.run(
+        ["git"] + args,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
+def base_ref():
+    """The branch this change is targeting.
+
+    GITHUB_BASE_REF is set by GitHub Actions on pull_request events; Prow sets
+    PULL_BASE_REF. Fall back to main for local runs.
+    """
+    return (
+        os.environ.get("GITHUB_BASE_REF")
+        or os.environ.get("PULL_BASE_REF")
+        or "main"
+    )
+
+
+def resolve_merge_base(repo_root, ref):
+    """Finds the merge base with the base branch.
+
+    actions/checkout does not create origin/<base_ref> even at fetch-depth: 0,
+    so fetch it if it is missing rather than silently skipping the check.
+    Returns None if no comparison base can be established.
+    """
+    remote_ref = f"origin/{ref}"
+
+    result = git(["merge-base", "HEAD", remote_ref], repo_root, check=False)
+    if result.returncode == 0:
+        return result.stdout.strip()
+
+    print(f"INFO: {remote_ref} not present locally; fetching it.")
+    fetched = git(
+        ["fetch", "--no-tags", "origin", f"{ref}:refs/remotes/origin/{ref}"],
+        repo_root,
+        check=False,
+    )
+    if fetched.returncode == 0:
+        result = git(["merge-base", "HEAD", remote_ref], repo_root, check=False)
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+    # A local branch of the same name is enough outside CI.
+    result = git(["merge-base", "HEAD", ref], repo_root, check=False)
+    if result.returncode == 0:
+        return result.stdout.strip()
+
+    return None
+
+
+def changed_generated_files(repo_root, merge_base):
+    """Generated chart files differing from the merge base, including untracked ones."""
+    diff = git(
+        ["diff", "--name-only", merge_base, "--"] + GENERATED_CHART_PATHS,
+        repo_root,
+    )
+    # git diff does not report untracked files, so a newly generated CRD would
+    # otherwise slip through.
+    untracked = git(
+        ["ls-files", "--others", "--exclude-standard", "--"] + GENERATED_CHART_PATHS,
+        repo_root,
+    )
+    return sorted(
+        set(diff.stdout.split()) | set(untracked.stdout.split())
+    )
+
+
+def parse_version(text, source):
+    """Extracts (major, minor, patch) from Chart.yaml contents."""
+    match = VERSION_RE.search(text)
+    if not match:
+        print(
+            f"ERROR: could not find a 'version: X.Y.Z' line in {source}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return tuple(int(group) for group in match.groups())
+
+
+def chart_version_at(repo_root, revision):
+    """The chart version at a git revision, or None if the chart did not exist."""
+    result = git(["show", f"{revision}:{CHART_PATH}"], repo_root, check=False)
+    if result.returncode != 0:
+        return None
+    return parse_version(result.stdout, f"{CHART_PATH} at {revision}")
+
+
+def format_version(version):
+    return ".".join(str(part) for part in version)
+
+
+def verify(repo_root):
+    """Returns a process exit code."""
+    chart_file = Path(repo_root) / CHART_PATH
+    if not chart_file.exists():
+        print(f"ERROR: {CHART_PATH} does not exist.", file=sys.stderr)
+        return 1
+
+    ref = base_ref()
+    merge_base = resolve_merge_base(repo_root, ref)
+    if merge_base is None:
+        message = (
+            "could not determine a comparison base for the chart version check "
+            f"(tried origin/{ref}, fetching it, and the local {ref} branch)"
+        )
+        if running_in_ci():
+            print(f"ERROR: {message}.", file=sys.stderr)
+            return 1
+        print(f"WARNING: {message}; skipping.")
+        return 0
+
+    changed = changed_generated_files(repo_root, merge_base)
+    if not changed:
+        print("Generated chart content is unchanged; no version bump required.")
+        return 0
+
+    base_version = chart_version_at(repo_root, merge_base)
+    if base_version is None:
+        print(f"{CHART_PATH} is new in this change; no version bump required.")
+        return 0
+
+    head_version = parse_version(chart_file.read_text(), CHART_PATH)
+
+    if head_version > base_version:
+        print(
+            f"Generated chart content changed and the chart version was bumped "
+            f"({format_version(base_version)} -> {format_version(head_version)})."
+        )
+        return 0
+
+    print(
+        f"ERROR: generated chart content changed but the {CHART_PATH} version "
+        f"was not increased (still {format_version(head_version)}).",
+        file=sys.stderr,
+    )
+    print("", file=sys.stderr)
+    print("Changed generated chart files:", file=sys.stderr)
+    for path in changed:
+        print(f"  {path}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(
+        "Run 'dev/tools/bump-chart-version' (or edit the version in "
+        f"{CHART_PATH} by hand) and commit the result.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def main():
+    repo_root = subprocess.check_output(
+        ["git", "rev-parse", "--show-toplevel"], text=True
+    ).strip()
+    return verify(repo_root)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

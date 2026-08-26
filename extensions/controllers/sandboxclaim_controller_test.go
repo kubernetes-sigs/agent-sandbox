@@ -3802,6 +3802,32 @@ func TestApplyClaimWorkspaceResourcesToPodSpecTargetsInitContainer(t *testing.T)
 	}
 }
 
+func TestApplyClaimWorkspaceResourcesToPodSpecRejectsLimitBelowTemplateRequest(t *testing.T) {
+	claim := &extensionsv1beta1.SandboxClaim{Spec: extensionsv1beta1.SandboxClaimSpec{
+		WorkspaceResources: []extensionsv1beta1.WorkspaceResourceOverride{{
+			ContainerName: workspaceContainerName,
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			},
+		}},
+	}}
+	spec := &corev1.PodSpec{Containers: []corev1.Container{{
+		Name: workspaceContainerName,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+		},
+	}}}
+	want := spec.DeepCopy()
+
+	err := applyClaimWorkspaceResourcesToPodSpec(spec, claim)
+	if err == nil || !errors.Is(err, ErrWorkspaceResourcesInvalid) || !strings.Contains(err.Error(), "request for cpu (2) exceeds limit (1)") {
+		t.Fatalf("expected inherited request above override limit error, got %v", err)
+	}
+	if !reflect.DeepEqual(spec, want) {
+		t.Fatalf("expected invalid override to leave PodSpec unchanged\n  got:    %#v\n  wanted: %#v", spec, want)
+	}
+}
+
 func TestApplyWorkspaceResourceOverridesPartialOverrideKeepsTemplateValues(t *testing.T) {
 	current := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{

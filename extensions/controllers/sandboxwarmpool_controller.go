@@ -859,6 +859,14 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // transient Pod lookup failure, so both cases fall through to false here — the
 // same outcome as the previous direct Pod read, which returned false on a failed
 // Get.
+//
+// Version-skew dependency: the hold behavior needs a sandbox controller that
+// writes this mirror. The in-tree deployments register both controllers in one
+// binary from one image, so they cannot diverge; but if the extensions
+// controllers are ever run as a separate process from the core sandbox
+// controller, an extensions build newer than its core counterpart sees no
+// PodScheduled condition and unschedulable pool members fall back to
+// delete-and-replace churn (#1215) for the duration of the skew.
 func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	// A sandbox being torn down keeps its last mirrored condition until the
 	// sandbox controller reconciles the Pod's absence, so a terminating sandbox

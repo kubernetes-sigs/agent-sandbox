@@ -27,6 +27,12 @@ type SandboxWarmPoolStatusApplyConfiguration struct {
 	ReadyReplicas *int32 `json:"readyReplicas,omitempty"`
 	// selector is the label selector used to find the pods in the pool.
 	Selector *string `json:"selector,omitempty"`
+	// observedGeneration is the most recent generation observed by the controller.
+	// It corresponds to the SandboxWarmPool's metadata.generation, which is bumped
+	// on spec mutations such as replicas changes. Note that SandboxTemplate content
+	// changes do not bump the pool's generation, so this does not track template
+	// rollout progress.
+	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
 }
 
 // SandboxWarmPoolStatusApplyConfiguration constructs a declarative configuration of the SandboxWarmPoolStatus type for use with
@@ -56,5 +62,13 @@ func (b *SandboxWarmPoolStatusApplyConfiguration) WithReadyReplicas(value int32)
 // If called multiple times, the Selector field is set to the value of the last call.
 func (b *SandboxWarmPoolStatusApplyConfiguration) WithSelector(value string) *SandboxWarmPoolStatusApplyConfiguration {
 	b.Selector = &value
+	return b
+}
+
+// WithObservedGeneration sets the ObservedGeneration field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ObservedGeneration field is set to the value of the last call.
+func (b *SandboxWarmPoolStatusApplyConfiguration) WithObservedGeneration(value int64) *SandboxWarmPoolStatusApplyConfiguration {
+	b.ObservedGeneration = &value
 	return b
 }

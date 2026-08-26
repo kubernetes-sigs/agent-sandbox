@@ -2859,6 +2859,9 @@ var schemaYAML = typed.YAMLObject(`types:
           elementType:
             scalar: string
           elementRelationship: atomic
+    - name: serviceFQDN
+      type:
+        scalar: string
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxTemplate
   map:
     fields:
@@ -2955,6 +2958,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolStatus
   map:
     fields:
+    - name: observedGeneration
+      type:
+        scalar: numeric
     - name: readyReplicas
       type:
         scalar: numeric

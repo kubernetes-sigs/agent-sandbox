@@ -34,7 +34,14 @@ type SandboxSpecApplyConfiguration struct {
 	SandboxBlueprintApplyConfiguration `json:",inline"`
 	// Lifecycle defines when and how the sandbox should be shut down.
 	LifecycleApplyConfiguration `json:",inline"`
-	// operatingMode specifies the desired operational state of the Sandbox.
+	// operatingMode specifies the desired operational state of the Sandbox:
+	// - Running (default): the controller keeps a backing Pod running.
+	// - Suspended: the controller terminates the backing Pod but retains the
+	// Sandbox object and its volumes so it can later be resumed.
+	// This field declares intent only. The observed readiness of the Sandbox is
+	// reported by the Ready condition, and the progress of a suspension by the
+	// Suspended condition; a Sandbox in Running mode is not Ready until its Pod is
+	// actually up (see SandboxConditionReady).
 	// Defaults to Running if not specified.
 	OperatingMode *apiv1beta1.SandboxOperatingMode `json:"operatingMode,omitempty"`
 }

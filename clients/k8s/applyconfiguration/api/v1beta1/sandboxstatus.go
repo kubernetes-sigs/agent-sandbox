@@ -28,7 +28,10 @@ type SandboxStatusApplyConfiguration struct {
 	// serviceFQDN that is valid for default cluster settings
 	// The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag.
 	ServiceFQDN *string `json:"serviceFQDN,omitempty"`
-	// service is a sandbox-example
+	// service is the name of the headless Service created for this Sandbox. It is empty
+	// when no Service exists for the Sandbox (for example when spec.service is false, or
+	// unset with no pre-existing Service). See serviceFQDN for the fully qualified
+	// in-cluster DNS name of this Service.
 	Service *string `json:"service,omitempty"`
 	// conditions defines the status conditions array
 	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
@@ -36,8 +39,12 @@ type SandboxStatusApplyConfiguration struct {
 	LabelSelector *string `json:"selector,omitempty"`
 	// podIPs are the IP addresses of the underlying pod.
 	// A pod may have multiple IPs in dual-stack clusters.
+	// This field is populated only while a backing pod exists. It is cleared whenever
+	// the pod is absent, for example when the Sandbox is suspended
+	// (operatingMode: Suspended) or before the pod has been created.
 	PodIPs []string `json:"podIPs,omitempty"`
 	// nodeName is the name of the node where the underlying pod is scheduled.
+	// Like podIPs, it is cleared whenever the pod is absent (e.g. while suspended).
 	NodeName *string `json:"nodeName,omitempty"`
 }
 

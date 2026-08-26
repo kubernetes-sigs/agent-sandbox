@@ -146,7 +146,9 @@ warm pools are not viable in production.** The issue is not theoretical:
   ~90 claims under sustained load with nil-lifecycle claims ([#1306][1306]).
 - Every SDK crash, network partition, or agent that omits `Close()` leaves a
   VM running indefinitely — consuming real CPU, memory, and hypervisor
-  processes.
+  processes. `claimDefaults` with `Delete + TTL` handles the completed-
+  workload case; crash-with-running-pod is a liveness/session concern handled
+  by the SDK router's heartbeat mechanism.
 - The "document it" mitigation pushes the burden to every SDK integrator.
   In a multi-tenant platform with third-party agent frameworks, some will
   not comply. One non-compliant integration is enough to starve a shared
@@ -392,11 +394,13 @@ The pool object is already resolved in both paths — to find warm candidates
 (adoption) or to look up the template (cold creation). `resolvePoolLifecycle`
 receives the already-fetched pool; no additional cache read is needed.
 
-**Cold fallback (pool exhaustion):**
+**Cold fallback:**
 
-When no warm candidate is available (pool exhausted under sustained load),
-the claim falls through to `createSandbox`. This is exactly the scenario
-from the Motivation section where nil-lifecycle claims cause pool starvation.
+Claims may cold-start for several reasons: pool exhaustion under sustained
+load, claims requiring environment or volume injection incompatible with
+pre-warmed sandboxes, or pools with zero replicas. Pool exhaustion is the
+scenario from the Motivation section where nil-lifecycle claims cause pool
+starvation.
 Defaults must apply here too — otherwise the leak persists when it matters
 most. The `createSandbox` path already resolves the pool via `WarmPoolRef`;
 `resolvePoolLifecycle` is called before the sandbox creation write, and the
@@ -494,9 +498,10 @@ v1beta1-originated pool updated through the v1alpha1 API preserves
 
 - If multiple controller replicas run different versions during a rolling
   update, a claim may be adopted by either version. The old version ignores
-  `claimDefaults` and adopts with nil lifecycle. The new version applies
-  defaults. This is acceptable: the window is brief, and the worst case is
-  a claim with Retain behavior (the current default) during the rollout.
+  `claimDefaults` and adopts with nil lifecycle (no expiration, no automatic
+  cleanup). The new version applies defaults. This is acceptable: the window
+  is brief, and the worst case is a claim with nil lifecycle — the same
+  behavior as before this KEP — not a regression.
 
 ## Alternatives Considered
 
@@ -506,8 +511,12 @@ Change the default `ShutdownPolicy` from `Retain` to `Delete` for all
 `SandboxClaim` objects.
 
 **Why rejected:**
-- Breaking change. Existing claims with `Lifecycle: nil` would be retroactively
-  deleted on controller upgrade.
+- Breaking change for new claims. The CRD only defaults `shutdownPolicy` when
+  `lifecycle` is explicitly set — existing claims with `Lifecycle: nil` are
+  unaffected by CRD-level defaulting. However, any new claim or update that
+  sets `lifecycle` without specifying `shutdownPolicy` would receive `Delete`
+  instead of `Retain`, changing cleanup behavior for interactive notebooks
+  and developer environments.
 - Violates the principle that defaults should err on the side of safety.
   `Retain` is correct for developer environments and interactive notebooks.
 - The maintainers explicitly rejected this approach

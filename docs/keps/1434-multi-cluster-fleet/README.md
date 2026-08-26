@@ -276,7 +276,9 @@ The admin does **not** pick clusters, warm-pool names, per-cluster budgets, per-
 
 `FleetSpec` and `Assignments` are file schemas in object storage, not Kubernetes resources. They are deliberately *not* CRDs: making them CRDs would require a cluster to host them, which reintroduces the hub apiserver this design exists to avoid.
 
-The fleet layer consumes the existing extension APIs unchanged — it creates `SandboxWarmPool` objects referencing operator-managed `SandboxTemplate` objects, via `CustomObjectsApi` and the existing Python SDK. Both wire schemas are versioned by the `generation` field rather than by Kubernetes API versioning.
+The fleet layer consumes the existing extension APIs unchanged — it creates `SandboxWarmPool` objects referencing operator-managed `SandboxTemplate` objects, via `CustomObjectsApi` and the existing Python SDK. It reads claims through the SDK rather than constructing them per-version, so both `extensions.agents.x-k8s.io/v1alpha1` and `v1beta1` claims are served: see [Client-Side Resolution](#client-side-resolution) for how the two shapes converge on a template name.
+
+Both wire schemas are versioned by `schema_version` rather than by Kubernetes API versioning. `generation` orders successive plans within one schema; it is not a compatibility marker, and a reader must not infer parseability from it.
 
 Two SDK gaps were found while building this and are worth filing separately: `SandboxClient` exposes no template/warm-pool CRUD (so the member uses `CustomObjectsApi` directly), and `list_sandbox_claims` accepts no `limit`/`continue` (so it cannot be paged at density).
 

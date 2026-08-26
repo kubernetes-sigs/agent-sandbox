@@ -85,7 +85,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     @patch("uuid.uuid4")
     async def test_create_sandbox_with_env(self, mock_uuid):
         mock_uuid.return_value.hex = "1234abcd"
-        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="resolved-id")
 
         mock_sandbox_instance = MagicMock()
         mock_sandbox_instance.terminate = AsyncMock()
@@ -93,8 +93,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
         env = {"FOO": "bar", "DEBUG": "true"}
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create, \
-             patch.object(self.client, "_wait_for_sandbox_ready", new_callable=AsyncMock):
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = {"metadata": {"resourceVersion": "12345"}}
 
             await self.client.create_sandbox("test-warmpool", "test-namespace", env=env)
 
@@ -107,6 +107,9 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 volume_claim_templates=None,
                 pod_metadata=None,
                 env=env,
+            )
+            self.mock_k8s_helper.wait_for_claim_ready.assert_awaited_once_with(
+                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345"
             )
 
     async def test_create_sandbox_failure_cleanup(self):

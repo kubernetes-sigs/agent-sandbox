@@ -59,7 +59,8 @@ def create_sandbox(warmpool: str,
                    shutdown_after_seconds: int | None = None,
                    volume_claim_templates: list[dict] | None = None,
                    pod_labels: dict[str, str] | None = None,
-                   pod_annotations: dict[str, str] | None = None) -> T
+                   pod_annotations: dict[str, str] | None = None,
+                   env: dict[str, str] | None = None) -> T
 ```
 
 Provisions new Sandbox claim and returns a Sandbox handle which tracks
@@ -85,6 +86,10 @@ the underlying infrastructure.
   the sandbox through the Downward API.
 - `pod_annotations` - Optional annotations stamped onto the running
   Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
+- `env` - Optional environment variables to inject into the SandboxClaim.
+  Setting this populates ``spec.env`` and forces a cold start
+  from the warm pool template instead of adopting a pre-warmed
+  pod, which may increase startup latency.
   
 
 **Example**:
@@ -312,6 +317,28 @@ def from_sandboxd(cls, entry: dict) -> "FileEntry"
 
 Build from a sandboxd DirectoryListing entry.
 
+<a id="k8s_agent_sandbox.models.SandboxClaimEnvVar"></a>
+
+### SandboxClaimEnvVar Objects
+
+```python
+class SandboxClaimEnvVar(BaseModel)
+```
+
+Represents an environment variable entry in a SandboxClaim spec.
+
+<a id="k8s_agent_sandbox.models.SandboxClaimEnvVar.name"></a>
+
+##### name
+
+Name of the environment variable.
+
+<a id="k8s_agent_sandbox.models.SandboxClaimEnvVar.value"></a>
+
+##### value
+
+Value of the environment variable.
+
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig"></a>
 
 ### SandboxDirectConnectionConfig Objects
@@ -469,4 +496,3 @@ Whether to enable OpenTelemetry tracing.
 ##### trace\_service\_name
 
 Service name used for traces.
-

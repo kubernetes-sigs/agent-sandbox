@@ -85,6 +85,12 @@ MANAGED_LABEL = "fleet.agent-sandbox.io/managed"
 POOL_NAME_LABEL = "fleet.agent-sandbox.io/pool"
 GENERATION_ANNOTATION = "fleet.agent-sandbox.io/assignment-generation"
 
+# Payload shapes this member understands. Must stay in sync with
+# planner.SCHEMA_VERSION; duplicated rather than imported because the member
+# image deliberately does not depend on the planner's pydantic stack.
+SCHEMA_VERSION = 1
+SUPPORTED_SCHEMA_VERSIONS = frozenset({SCHEMA_VERSION})
+
 
 # ----------------------------------------------------------------------------
 # Wire types — mirror pkg/fleet/types.go. Kept as plain dataclasses (not
@@ -154,6 +160,7 @@ class ClusterAssignment:
 
 @dataclass
 class Assignments:
+    schema_version: int = SCHEMA_VERSION
     generation: int = 0
     updated_at: str = ""
     clusters: dict[str, ClusterAssignment] = field(default_factory=dict)
@@ -368,8 +375,37 @@ class FleetMember:
             return Assignments(), was_present
         if etag == self._last_etag:
             return self._last_assignment or Assignments(), False
-        self._last_etag = etag
         raw = json.loads(obj_bytes.decode())
+
+        # Compatibility gate, checked BEFORE anything else is read out of the
+        # payload. An unknown schema_version is not an ordering problem, so a
+        # higher `generation` says nothing about whether these bytes can be
+        # acted on. Refusing is the safe direction and the reason this check
+        # exists at all: without it, a payload this member cannot interpret
+        # yields no clusters, an empty pool set for this cluster, and an empty
+        # pool set means "drop everything" -- a schema bump would tear down the
+        # fleet it was rolling out to. Keep serving the current pools instead.
+        #
+        # Unknown FIELDS are still ignored (AssignmentPool.from_json), so this
+        # only fires on a deliberate, breaking bump.
+        version = raw.get("schema_version", SCHEMA_VERSION)
+        if version not in SUPPORTED_SCHEMA_VERSIONS:
+            # Deliberately do NOT cache the etag: re-reading each tick keeps the
+            # log loud for as long as the fleet is stuck, and picks up a
+            # corrected plan on the next interval rather than after a restart.
+            log.error(
+                "REFUSING assignments.json: schema_version=%s, this member "
+                "understands %s. It was written by a newer planner. Keeping the "
+                "%d pool(s) currently applied and NOT reconciling; upgrade this "
+                "member's image.",
+                version, sorted(SUPPORTED_SCHEMA_VERSIONS),
+                len(self._last_assignment.clusters.get(
+                    self.cluster_name, ClusterAssignment()).pools)
+                if self._last_assignment else 0,
+            )
+            return self._last_assignment or Assignments(), False
+
+        self._last_etag = etag
         clusters = {
             name: ClusterAssignment(
                 pools=[
@@ -379,6 +415,7 @@ class FleetMember:
             for name, body in raw.get("clusters", {}).items()
         }
         return Assignments(
+            schema_version=version,
             generation=raw.get("generation", 0),
             updated_at=raw.get("updated_at", ""),
             clusters=clusters,

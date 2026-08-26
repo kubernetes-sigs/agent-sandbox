@@ -39,6 +39,16 @@ from typing import Any
 # having google-cloud-storage installed.
 
 
+class CASConflict(RuntimeError):
+    """A conditional write lost: the object changed since it was read.
+
+    Raised by `put_json(..., if_generation_match=N)` when the store's own
+    generation for the object is no longer N. The caller must re-read and
+    re-derive rather than retrying the same bytes -- the point of the
+    precondition is that the state it was computed from is gone.
+    """
+
+
 @dataclass
 class Paths:
     """Canonical object paths — do NOT hardcode elsewhere."""
@@ -80,12 +90,53 @@ class GCS:
     def bucket_name(self) -> str:
         return self._bucket_name
 
-    def put_json(self, path: str, obj: Any) -> None:
+    def put_json(self, path: str, obj: Any,
+                 if_generation_match: int | None = None) -> None:
+        """Write JSON, optionally only if the object is still at a known revision.
+
+        `if_generation_match` is the STORE's generation for the object, not the
+        `generation` field inside the payload -- the two are unrelated counters
+        and only the store's is a safe concurrency token, because only the store
+        increments it on every write. Pass 0 to mean "this object must not exist
+        yet", which is what makes the first write of a fleet safe without a
+        separate create path. Omit it entirely for last-writer-wins, which is
+        correct for capacity reports: each is written by exactly one member and
+        a lost update is superseded 30 seconds later anyway.
+
+        Raises CASConflict when the precondition fails. `S3-compatible stores
+        spell the same thing `If-Match` on the ETag; the caller-facing contract
+        here is deliberately store-agnostic so a future S3 backend can raise the
+        same exception.
+        """
         blob = self._bucket.blob(path)
-        blob.upload_from_string(
-            json.dumps(obj, indent=2, sort_keys=True).encode("utf-8"),
-            content_type="application/json",
-        )
+        try:
+            blob.upload_from_string(
+                json.dumps(obj, indent=2, sort_keys=True).encode("utf-8"),
+                content_type="application/json",
+                if_generation_match=if_generation_match,
+            )
+        except self._gexc.PreconditionFailed as e:
+            raise CASConflict(
+                f"{path} changed since it was read (expected store generation "
+                f"{if_generation_match}); re-read and re-plan"
+            ) from e
+
+    def get_json_with_generation(self, path: str) -> tuple[Any | None, int]:
+        """Return (parsed JSON or None, store generation).
+
+        The generation is 0 when the object is absent, which is exactly the
+        value `put_json` wants for a "must not exist" precondition -- so a
+        read-modify-write can be written once and work on both the first apply
+        and every later one, with no `if absent` branch to get wrong.
+        """
+        blob = self._bucket.get_blob(path)
+        if blob is None:
+            return None, 0
+        try:
+            raw = blob.download_as_bytes(if_generation_match=blob.generation)
+        except self._gexc.NotFound:
+            return None, 0
+        return json.loads(raw.decode("utf-8")), blob.generation
 
     def get_json(self, path: str) -> Any | None:
         # One request, not exists()-then-download: the two calls can observe

@@ -21,6 +21,8 @@ the loops touch. That keeps the tests hermetic — no cluster, no bucket.
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 
 import pytest
@@ -502,3 +504,90 @@ def test_iter_managed_pools_holds_one_page_not_the_whole_collection():
     it = fm._iter_managed_pools()
     next(it)
     assert len(co.calls) == 1, "the walk ran to completion before yielding"
+
+
+# --------------------------------------------------------------------------- #
+# schema_version gate.
+#
+# The failure this prevents: an unparseable payload yields no clusters, an empty
+# pool set for this cluster, and an empty pool set means "drop everything". So
+# without the gate, a schema bump tears down the fleet it is rolling out to.
+# --------------------------------------------------------------------------- #
+
+def _assignment_bytes(version, generation, pools=()):
+    body = {
+        "generation": generation,
+        "clusters": {"c1": {"pools": [
+            {"template": t, "warmpool": f"{t}-pool", "replicas": 1} for t in pools
+        ]}},
+    }
+    if version is not None:
+        body["schema_version"] = version
+    return json.dumps(body).encode()
+
+
+def test_a_payload_with_a_known_schema_version_is_applied():
+    gcs = _FakeGCS()
+    gcs.obj = (_assignment_bytes(fleet_member.SCHEMA_VERSION, 4, ["t1"]), "etag-1")
+    fm = _bare_member(gcs=gcs)
+    assignments, changed = fm._fetch_assignments()
+    assert changed is True
+    assert assignments.schema_version == fleet_member.SCHEMA_VERSION
+    assert [p.template for p in assignments.clusters["c1"].pools] == ["t1"]
+
+
+def test_a_payload_with_no_schema_version_is_treated_as_the_current_one():
+    # Backward compatibility with plans written before the field existed. They
+    # are shape-identical to v1, so refusing them would strand a running fleet
+    # on the first upgrade.
+    gcs = _FakeGCS()
+    gcs.obj = (_assignment_bytes(None, 4, ["t1"]), "etag-1")
+    fm = _bare_member(gcs=gcs)
+    assignments, changed = fm._fetch_assignments()
+    assert changed is True
+    assert [p.template for p in assignments.clusters["c1"].pools] == ["t1"]
+
+
+def test_an_unknown_schema_version_is_refused_without_dropping_pools(caplog):
+    gcs = _FakeGCS()
+    gcs.obj = (_assignment_bytes(fleet_member.SCHEMA_VERSION, 4, ["t1"]), "etag-1")
+    fm = _bare_member(gcs=gcs)
+    good, _ = fm._fetch_assignments()
+    fm._last_assignment = good
+
+    gcs.obj = (_assignment_bytes(999, 5, []), "etag-2")
+    with caplog.at_level(logging.ERROR):
+        assignments, changed = fm._fetch_assignments()
+
+    assert changed is False, "an unparseable plan must not trigger a reconcile"
+    assert assignments is good, "the member must keep serving its current pools"
+    assert [p.template for p in assignments.clusters["c1"].pools] == ["t1"]
+    assert "REFUSING" in caplog.text
+
+
+def test_a_refused_payload_does_not_cache_its_etag(caplog):
+    # Caching it would make the next tick read "unchanged" and go quiet, so the
+    # fleet would sit stuck with one log line and no ongoing signal -- and a
+    # corrected plan at the same etag would never be re-read.
+    gcs = _FakeGCS()
+    gcs.obj = (_assignment_bytes(999, 5, []), "etag-bad")
+    fm = _bare_member(gcs=gcs)
+    with caplog.at_level(logging.ERROR):
+        fm._fetch_assignments()
+        assert fm._last_etag == ""
+        caplog.clear()
+        fm._fetch_assignments()
+        assert "REFUSING" in caplog.text, "the refusal must stay loud every tick"
+
+
+def test_a_corrected_plan_is_picked_up_after_a_refusal():
+    gcs = _FakeGCS()
+    gcs.obj = (_assignment_bytes(999, 5, []), "etag-bad")
+    fm = _bare_member(gcs=gcs)
+    fm._fetch_assignments()
+
+    gcs.obj = (_assignment_bytes(fleet_member.SCHEMA_VERSION, 6, ["t2"]), "etag-ok")
+    assignments, changed = fm._fetch_assignments()
+    assert changed is True
+    assert assignments.generation == 6
+    assert [p.template for p in assignments.clusters["c1"].pools] == ["t2"]

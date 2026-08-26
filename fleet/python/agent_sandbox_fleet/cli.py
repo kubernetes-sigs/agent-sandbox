@@ -110,7 +110,16 @@ def cmd_apply(args) -> int:
     provider = _provider_from(args, gcs)
 
     if not args.loop:
-        return _apply_once(gcs, args.file, args.quiet, provider)
+        return _apply_once(gcs, args.file, args.quiet, provider,
+                           generation=getattr(args, "generation", None))
+
+    # --generation is a one-shot escape hatch. Honouring it in --loop mode would
+    # make cycle 2 fail its own monotonicity check against the generation cycle
+    # 1 just published, so every cycle after the first would error out and the
+    # loop would stop re-planning while still looking alive.
+    if getattr(args, "generation", None) is not None:
+        log.warning("--generation is ignored in --loop mode; generations are "
+                    "derived from the published assignments each cycle")
 
     stop = threading.Event()
 
@@ -146,11 +155,12 @@ def cmd_apply(args) -> int:
     return 0
 
 
-def _apply_once(gcs: GCS, spec_path: str, quiet: bool, provider=None) -> int:
+def _apply_once(gcs: GCS, spec_path: str, quiet: bool, provider=None,
+                generation: int | None = None) -> int:
     with open(spec_path) as f:
         body = yaml.safe_load(f)
     spec = planner.FleetSpec.model_validate(body)
-    assn = planner.apply(gcs, spec, provider=provider)
+    assn = planner.apply(gcs, spec, provider=provider, generation=generation)
     if not quiet:
         print(json.dumps(assn.model_dump(), indent=2))
     return 0
@@ -427,6 +437,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument(
         "--quiet", action="store_true",
         help="Don't print the assignments JSON after apply (implied by --loop)",
+    )
+    a.add_argument(
+        "--generation", type=int, default=None,
+        help="Force a specific assignment generation (replay / disaster "
+             "recovery). Normally derived by incrementing the published one. "
+             "Must be greater than what is in the bucket, or members ignore it. "
+             "Ignored in --loop mode, which would otherwise republish the same "
+             "generation every cycle.",
     )
     a.set_defaults(func=cmd_apply)
 

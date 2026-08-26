@@ -40,6 +40,26 @@ from .placement import PlannerCluster, PlannerRegistry
 
 logger = logging.getLogger("agent_sandbox_fleet.planner")
 
+# The payload shape this code writes and understands. Three DIFFERENT questions
+# used to share one integer (`generation`), which is why they are now separate:
+#
+#   schema_version  "can I parse this?"   -- compatibility gate. A member that
+#                                            does not know the version refuses
+#                                            the payload and keeps serving its
+#                                            current pools, rather than reading
+#                                            an unparseable plan as empty and
+#                                            tearing the cluster down.
+#   generation      "is this newer?"      -- ordering. Derived here, compared by
+#                                            members. See `next_generation`.
+#   store generation "did someone else    -- concurrency. Owned by the object
+#                    write since I read?"   store; see objectstore.put_json.
+#
+# Bump this ONLY for a change an older member cannot safely ignore. Adding a
+# field is not one: members drop unknown fields (see AssignmentPool.from_json in
+# fleet_member.py), so additive changes ship without a bump and without a
+# lockstep rollout.
+SCHEMA_VERSION = 1
+
 # --------------------------------------------------------------------------- #
 # Wire types — matched byte-for-byte with the Go structs in pkg/fleet/types.go.
 # --------------------------------------------------------------------------- #
@@ -57,7 +77,17 @@ class ModelSpec(BaseModel):
 
 
 class FleetSpec(BaseModel):
-    generation: int = 0
+    schema_version: int = SCHEMA_VERSION
+    # DEPRECATED and ignored. `fleetctl apply` derives the generation from the
+    # published assignments (see `next_generation`); an author-supplied value is
+    # a silent-failure footgun, because forgetting to bump it makes every member
+    # correctly ignore the apply while the operator sees a successful command
+    # and no change in the fleet. Kept on the model rather than dropped so that
+    # a spec that still carries one gets a warning instead of pydantic silently
+    # discarding it as an extra field -- the whole failure mode being fixed here
+    # is a generation that goes unnoticed. Use `fleetctl apply --generation` for
+    # replay and disaster recovery.
+    generation: int | None = None
     max_concurrent: int = Field(gt=0, default=100)
     max_pool: int = Field(gt=0, default=50)
     placement_policy: str = "capacity-aware"
@@ -70,6 +100,37 @@ class FleetSpec(BaseModel):
     # scored placement entirely. Kills the CapacityAware ping-pong that happens
     # when models > clusters and extras oscillate on re-apply.
     min_clusters: int = Field(ge=0, default=0)
+
+    @field_validator("schema_version")
+    @classmethod
+    def _schema_known(cls, v: int) -> int:
+        """Refuse a spec this planner cannot parse, at load, naming the file.
+
+        Symmetric with the member-side gate: neither end should act on a payload
+        whose shape it does not know. Rejecting forward is the conservative
+        direction -- a newer spec may mean something different by a field this
+        planner thinks it understands.
+        """
+        if v != SCHEMA_VERSION:
+            raise ValueError(
+                f"spec schema_version {v} is not supported by this planner "
+                f"(understands {SCHEMA_VERSION}); upgrade fleetctl"
+            )
+        return v
+
+    @field_validator("generation")
+    @classmethod
+    def _generation_deprecated(cls, v: int | None) -> None:
+        if v is not None:
+            logger.warning(
+                "FleetSpec.generation=%d is deprecated and IGNORED: the "
+                "generation is derived from the published assignments. Remove "
+                "it from the spec; use `fleetctl apply --generation` to force a "
+                "specific value for replay.", v,
+            )
+        # Normalised away so nothing downstream can read it by accident and
+        # reintroduce the hand-authored path.
+        return None
 
     @field_validator("cluster_weights")
     @classmethod
@@ -98,6 +159,7 @@ class ClusterAssignment(BaseModel):
 
 
 class Assignments(BaseModel):
+    schema_version: int = SCHEMA_VERSION
     generation: int
     updated_at: str
     clusters: dict[str, ClusterAssignment]
@@ -125,14 +187,22 @@ def load_registry(gcs: GCS, weights: dict[str, float], paths: Paths | None = Non
 # The planner itself.
 # --------------------------------------------------------------------------- #
 
-def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
+def plan(spec: FleetSpec, registry: PlannerRegistry,
+         generation: int = 0) -> Assignments:
     """Produce ClusterAssignments from a FleetSpec + live registry.
+
+    `generation` is passed in rather than read off the spec so that plan()
+    stays a pure function of (spec, registry, generation) with no IO: deriving
+    it requires reading the published assignments, which is `apply()`'s job.
 
     Algorithm (mirrors the RL PoC's `SandboxFleet.plan()` at `fleet.py:250-291`,
     rebased on the new registry):
 
+      0. Reduce the registry to the ELIGIBLE clusters: fresh report AND weight
+         > 0. Every step below sees only these, so a drained cluster is
+         excluded from positional placement as well as from scoring.
       1. Pick a Placement selector by name.
-      2. **Spread-first pre-pass** (v1.5): give each fresh cluster ONE model
+      2. **Spread-first pre-pass** (v1.5): give each eligible cluster ONE model
          before doubling up. Prevents the CapacityAware oscillation where
          a cluster with leftover load at plan-time gets skipped indefinitely.
          Only kicks in for the first N models where N = number of fresh
@@ -153,7 +223,16 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
     divergence from the original algorithm, not an accident.
     """
     selector = placement.get_placement(spec.placement_policy)
-    fresh_clusters = sorted(registry.fresh(), key=lambda c: c.name)
+    # eligible(), not fresh(): a cluster weighted 0 is being drained and must be
+    # excluded from the candidate set before any of the three placement paths
+    # runs. Scoring it low is not enough -- see PlannerRegistry.eligible().
+    eligible_clusters = sorted(registry.eligible(), key=lambda c: c.name)
+    drained = sorted(c.name for c in registry.fresh() if c.weight <= 0)
+    if drained:
+        logger.info(
+            "excluding %d drained cluster(s) from placement (weight 0): %s",
+            len(drained), ", ".join(drained),
+        )
 
     # image-affinity hashes model.image to pin the pool to a cluster; missing
     # images make that impossible. Fail fast rather than silently misplace.
@@ -184,29 +263,60 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
     per_cluster_tasks: dict[str, int] = defaultdict(int)
     per_cluster_models: dict[str, list[ModelSpec]] = defaultdict(list)
 
-    if spec.min_clusters > 0:
-        if not fresh_clusters:
-            rr_target_count = 0  # nothing to place; downstream produces empty assignment
-        else:
-            rr_target_count = min(spec.min_clusters, len(fresh_clusters))
-            if spec.min_clusters > len(fresh_clusters):
-                logger.warning(
-                    "min_clusters=%d but only %d fresh clusters available; using %d",
-                    spec.min_clusters, len(fresh_clusters), rr_target_count,
-                )
+    # "Nothing eligible" has two causes that need opposite handling, and both
+    # produce an empty candidate list, so the reason has to be checked before
+    # the count.
+    #
+    #   Nothing FRESH  -> the planner cannot see the fleet. Raise. Publishing an
+    #                     empty assignment here would tear down every warm pool
+    #                     on every cluster in response to what is most likely a
+    #                     bucket read failure, a clock skew, or a planner that
+    #                     started before any member did. A fleet-wide teardown
+    #                     must never be the fallback for "I got no data".
+    #   All fresh ones DRAINED -> the operator asked for exactly that teardown.
+    #                     Plan empty and say so.
+    #
+    # This also keeps the all-zero weight map away from budget.hamilton_split,
+    # which reads it as "no preference, split evenly" -- correct for a caller
+    # who genuinely has no ranking, and an inversion of a full drain into a full
+    # deployment if the planner ever reached it.
+    if not registry.fresh() and spec.models:
+        raise placement.NoClusterAvailableError(
+            f"no cluster has a fresh capacity report "
+            f"(0 of {len(registry.clusters)} known, max age "
+            f"{registry.max_report_age_s:.0f}s); refusing to publish an empty "
+            f"assignment, which would drop every warm pool in the fleet"
+        )
+    if not eligible_clusters:
+        logger.warning(
+            "every fresh cluster is drained (%d of %d known at weight 0) — "
+            "planning an EMPTY assignment, which drops every warm pool in the "
+            "fleet as each member reads it",
+            len(drained), len(registry.clusters),
+        )
+    elif spec.min_clusters > 0:
+        # Clamp rather than fail. min_clusters is a floor on SPREAD, not a
+        # precondition on the fleet: refusing to plan would mean one cluster
+        # going stale mid-incident takes the whole plan down with it, which is
+        # exactly when re-planning matters most.
+        rr_target_count = min(spec.min_clusters, len(eligible_clusters))
+        if spec.min_clusters > len(eligible_clusters):
+            logger.warning(
+                "min_clusters=%d but only %d eligible clusters (fresh and not "
+                "drained); spreading across %d instead",
+                spec.min_clusters, len(eligible_clusters), rr_target_count,
+            )
         for i, model in enumerate(spec.models):
-            if rr_target_count == 0:
-                continue
-            cluster = fresh_clusters[i % rr_target_count]
+            cluster = eligible_clusters[i % rr_target_count]
             cluster.planned_replicas += 1
             per_cluster_tasks[cluster.name] += model.target_tasks
             per_cluster_models[cluster.name].append(model)
     else:
         for i, model in enumerate(spec.models):
-            if i < len(fresh_clusters):
+            if i < len(eligible_clusters):
                 # First N models: deterministic one-per-cluster. Forces spread even
                 # when the scored selector would prefer to double up.
-                cluster = fresh_clusters[i]
+                cluster = eligible_clusters[i]
             else:
                 # After each cluster has at least one pool, honor the configured
                 # selector (usually capacity-aware) for extras.
@@ -259,7 +369,10 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
 
     # Ensure every registry cluster has an entry. Empty pools means "drop
     # everything", and the fleet-member treats absent identically to empty, so
-    # this is also how a drain spec works.
+    # this is also how a drain spec works: a cluster weighted 0 was filtered out
+    # of `eligible_clusters` above and lands here, getting an empty assignment
+    # and shedding its pools. No warning for that case -- it was asked for, and
+    # the exclusion is already logged once at the top of plan().
     #
     # NOTE the sharp edge: `registry.clusters` includes STALE clusters, so a
     # cluster whose capacity report went silent is assigned empty and tears its
@@ -280,18 +393,69 @@ def plan(spec: FleetSpec, registry: PlannerRegistry) -> Assignments:
             clusters[cname] = ClusterAssignment(pools=[])
 
     now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    return Assignments(generation=spec.generation, updated_at=now_iso, clusters=clusters)
+    return Assignments(schema_version=SCHEMA_VERSION, generation=generation,
+                       updated_at=now_iso, clusters=clusters)
 
 
 def _warmpool_name(template: str) -> str:
     return f"{template}-pool"
 
 
-def publish(gcs: GCS, assignments: Assignments, paths: Paths | None = None) -> None:
+def publish(gcs: GCS, assignments: Assignments, paths: Paths | None = None,
+            if_generation_match: int | None = None) -> None:
     paths = paths or Paths()
-    gcs.put_json(paths.assignments, assignments.model_dump())
-    logger.info("wrote %s (generation=%d, %d clusters)",
-                paths.assignments, assignments.generation, len(assignments.clusters))
+    gcs.put_json(paths.assignments, assignments.model_dump(),
+                 if_generation_match=if_generation_match)
+    logger.info("wrote %s (schema_version=%d generation=%d, %d clusters)",
+                paths.assignments, assignments.schema_version,
+                assignments.generation, len(assignments.clusters))
+
+
+def read_published(gcs: GCS, paths: Paths | None = None) -> tuple[int, int]:
+    """Return (payload generation, store generation) of the live assignments.
+
+    Both are 0 when nothing has been published yet, which is the correct seed
+    for both callers: the next payload generation is 1, and a store generation
+    of 0 is the "must not exist" precondition, so the first apply of a fleet
+    needs no special case.
+
+    A published object whose schema_version this planner does not understand is
+    a hard stop rather than a 0: overwriting a plan written by a newer fleetctl
+    would silently downgrade the fleet, and the generation inside a payload this
+    code cannot parse is not trustworthy input to an increment.
+    """
+    paths = paths or Paths()
+    raw, store_gen = gcs.get_json_with_generation(paths.assignments)
+    if raw is None:
+        return 0, 0
+    published_schema = raw.get("schema_version", SCHEMA_VERSION)
+    if published_schema != SCHEMA_VERSION:
+        raise ValueError(
+            f"published {paths.assignments} has schema_version "
+            f"{published_schema}, which this fleetctl ({SCHEMA_VERSION}) does "
+            f"not understand — it was written by a different version. Refusing "
+            f"to overwrite it; upgrade fleetctl."
+        )
+    return int(raw.get("generation", 0)), store_gen
+
+
+def next_generation(current: int, override: int | None = None) -> int:
+    """Derive the generation to publish, or validate an explicit override.
+
+    Monotonicity is enforced here rather than trusted, because a generation that
+    does not advance is the one failure in this system with no symptom: members
+    ignore the plan exactly as designed, nothing errors, and the operator sees a
+    successful apply against an unchanged fleet.
+    """
+    if override is None:
+        return current + 1
+    if override <= current:
+        raise ValueError(
+            f"--generation {override} is not greater than the published "
+            f"generation {current}; every member would ignore it and the apply "
+            f"would silently do nothing"
+        )
+    return override
 
 
 def apply(
@@ -299,22 +463,43 @@ def apply(
     spec: FleetSpec,
     paths: Paths | None = None,
     provider: InventoryProvider | None = None,
+    generation: int | None = None,
 ) -> Assignments:
-    """One-shot: load registry, plan, publish, and also persist the spec.
+    """One-shot: load registry, plan, publish, and also archive the spec.
 
     `provider` selects where cluster inventory comes from. Defaults to the GCS
     capacity reports. Note that GCS remains the transport for the spec and the
     assignments regardless — only the inventory source is pluggable.
+
+    `generation` forces a specific value (replay, disaster recovery). Left None,
+    it is derived from the published assignments.
+
+    Write order is plan → publish → archive, and each step is load-bearing:
+
+      plan first, because it raises on its own (NoClusterAvailableError,
+      ValueError) and a bucket describing a plan that never ran is worse than
+      one describing a stale plan that did.
+
+      publish under a compare-and-set precondition on the store's generation, so
+      two admins applying concurrently cannot both derive generation N+1 from
+      the same base and have one silently overwrite the other. The loser gets
+      CASConflict and must re-read -- retrying the same bytes would just
+      reintroduce the lost update.
+
+      archive last, because it is the only step whose failure is survivable. The
+      spec copy is a human-readable record of what was applied; nothing reads it
+      back to make a decision. Deriving the counter from it instead would make
+      an archive write that failed after a successful publish desynchronise the
+      fleet, and the next apply would reuse a generation members have passed.
     """
     paths = paths or Paths()
     provider = provider or _inventory.GCSInventory(gcs, paths)
+    published_gen, store_gen = read_published(gcs, paths)
+    gen = next_generation(published_gen, generation)
     reg = provider.load(spec.cluster_weights)
-    # plan() before put_json(spec): it raises NoClusterAvailableError and
-    # ValueError on its own, and writing the spec first left the bucket holding
-    # a new spec generation with no matching assignments.json. show-registry
-    # reads cluster_weights out of that spec, so the fleet would then be
-    # described by a plan that was never applied.
-    assn = plan(spec, reg)
-    gcs.put_json(paths.spec, spec.model_dump())
-    publish(gcs, assn, paths)
+    assn = plan(spec, reg, generation=gen)
+    publish(gcs, assn, paths, if_generation_match=store_gen)
+    archived = spec.model_dump()
+    archived["generation"] = gen  # what was applied, for humans; not an input
+    gcs.put_json(paths.spec, archived)
     return assn

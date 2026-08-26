@@ -179,3 +179,47 @@ def test_planner_registry_satisfies_the_iterable_protocol_at_runtime():
     assert isinstance(reg, collections.abc.Iterable)
     assert isinstance(iter(reg), collections.abc.Iterator)
     assert sorted(c.name for c in reg) == ["a", "b"]
+
+
+# --------------------------------------------------------------------------- #
+# fresh() vs eligible(): reachability vs "may receive work".
+# --------------------------------------------------------------------------- #
+
+def _mixed_registry():
+    from agent_sandbox_fleet.placement import PlannerCluster, PlannerRegistry
+    reg = PlannerRegistry()
+    reg.clusters["live"] = PlannerCluster(name="live", weight=1.0, report_age_s=1)
+    reg.clusters["drained"] = PlannerCluster(name="drained", weight=0.0, report_age_s=1)
+    reg.clusters["stale"] = PlannerCluster(name="stale", weight=1.0, report_age_s=1e9)
+    return reg
+
+
+def test_fresh_answers_reachability_and_keeps_drained_clusters():
+    # A drained cluster is still talking to us, and `fleetctl status` has to be
+    # able to say so. Collapsing the two questions into one predicate would
+    # make a drain indistinguishable from a cluster that fell off the network.
+    reg = _mixed_registry()
+    assert sorted(c.name for c in reg.fresh()) == ["drained", "live"]
+
+
+def test_eligible_answers_may_receive_work_and_drops_both():
+    reg = _mixed_registry()
+    assert [c.name for c in reg.eligible()] == ["live"]
+
+
+def test_iterating_a_registry_yields_eligible_not_fresh():
+    # Every selector is written as "score whatever the registry hands me", so
+    # the drain has to be enforced at __iter__ or each selector has to remember
+    # to apply it -- and two placement paths do not go through a selector at all.
+    reg = _mixed_registry()
+    assert [c.name for c in reg] == ["live"]
+    assert reg.names() == ["live"]
+
+
+def test_no_selector_returns_a_drained_cluster():
+    from agent_sandbox_fleet.placement import _REGISTRY, get_placement
+    reg = _mixed_registry()
+    for name in sorted(_REGISTRY):
+        chosen = get_placement(name).select("gcr.io/x/img:v1", _mixed_registry())
+        assert chosen.name == "live", f"{name} selected {chosen.name}"
+    assert [c.name for c in reg.eligible()] == ["live"]

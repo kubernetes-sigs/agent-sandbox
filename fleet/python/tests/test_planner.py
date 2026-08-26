@@ -18,6 +18,8 @@ import logging
 
 import pytest
 
+from agent_sandbox_fleet import planner
+from agent_sandbox_fleet.objectstore import CASConflict, Paths
 from agent_sandbox_fleet.placement import PlannerCluster, PlannerRegistry
 from agent_sandbox_fleet.planner import (
     Assignments,
@@ -30,7 +32,6 @@ from agent_sandbox_fleet.planner import (
 
 def _spec(**overrides):
     base = dict(
-        generation=1,
         max_concurrent=10,
         max_pool=20,
         placement_policy="capacity-aware",
@@ -77,9 +78,22 @@ def test_pool_names_derive_from_template():
         assert p.warmpool == f"{p.template}-pool"
 
 
-def test_generation_propagates():
-    assn = plan(_spec(generation=42), _registry())
+def test_generation_comes_from_the_caller_not_the_spec():
+    # plan() is pure: deriving the generation needs a read of the published
+    # assignments, which is apply()'s job. See test_apply_derives_* below.
+    assn = plan(_spec(), _registry(), generation=42)
     assert assn.generation == 42
+    assert assn.schema_version == planner.SCHEMA_VERSION
+
+
+def test_a_spec_authored_generation_is_ignored_and_warned_about(caplog):
+    # It used to be the source of truth, and forgetting to bump it was a silent
+    # no-op apply. Dropping the field outright would be silent too -- pydantic
+    # ignores extras -- so it is kept, normalised away, and warned about.
+    with caplog.at_level(logging.WARNING):
+        spec = _spec(generation=9)
+    assert spec.generation is None
+    assert "deprecated and IGNORED" in caplog.text
 
 
 def test_single_cluster_gets_everything():
@@ -99,7 +113,7 @@ def test_single_cluster_gets_everything():
 def _spec_with_n_models(n: int, cluster_weights: dict[str, float]):
     """FleetSpec with n models, each a distinct template."""
     return FleetSpec(
-        generation=1, max_concurrent=100, max_pool=50,
+        max_concurrent=100, max_pool=50,
         placement_policy="capacity-aware", cluster_weights=cluster_weights,
         models=[
             ModelSpec(image=f"img-{i}:v1", template_name=f"tmpl-{i}",
@@ -311,23 +325,38 @@ def test_fresh_cluster_with_no_models_is_emptied_quietly(caplog):
 # --------------------------------------------------------------------------- #
 
 class _RecordingGCS:
-    """Records put_json in call order. Enough surface for planner.apply."""
+    """Records put_json in call order. Enough surface for planner.apply.
+
+    Also models the store's own generation counter, because apply()'s write is
+    now conditional on it: one increment per successful write, and a mismatched
+    precondition raises CASConflict exactly as GCS does.
+    """
 
     def __init__(self):
         self.puts: list[str] = []
+        self.objects: dict[str, object] = {}
+        self.generations: dict[str, int] = {}
 
     @property
     def bucket_name(self):
         return "fake-bucket"
 
-    def put_json(self, path, obj):
+    def put_json(self, path, obj, if_generation_match=None):
+        if if_generation_match is not None:
+            if if_generation_match != self.generations.get(path, 0):
+                raise CASConflict(path)
         self.puts.append(path)
+        self.objects[path] = obj
+        self.generations[path] = self.generations.get(path, 0) + 1
 
     def list_prefix(self, prefix):
         return []
 
     def get_json(self, path):
-        return None
+        return self.objects.get(path)
+
+    def get_json_with_generation(self, path):
+        return self.objects.get(path), self.generations.get(path, 0)
 
 
 class _StaticProvider:
@@ -339,7 +368,7 @@ class _StaticProvider:
 
 
 def _one_model_spec():
-    return _spec(generation=9)
+    return _spec()
 
 
 def test_apply_does_not_persist_the_spec_when_planning_fails():
@@ -360,7 +389,6 @@ def test_apply_writes_the_spec_once_planning_has_succeeded():
     # The other half: on the happy path both objects still land, and the spec
     # is not accidentally skipped by the reordering.
     from agent_sandbox_fleet import planner
-    from agent_sandbox_fleet.objectstore import Paths
     from agent_sandbox_fleet.placement import PlannerCluster, PlannerRegistry
 
     reg = PlannerRegistry()
@@ -369,3 +397,225 @@ def test_apply_writes_the_spec_once_planning_has_succeeded():
     planner.apply(gcs, _one_model_spec(), provider=_StaticProvider(reg))
     paths = Paths()
     assert set(gcs.puts) == {paths.spec, paths.assignments}
+
+
+# --------------------------------------------------------------------------- #
+# Drain: cluster_weights[x] = 0.
+#
+# Regression suite for the bug where a drained cluster still received work.
+# Scoring alone never enforced the drain, because two of the three placement
+# paths never call the scorer: the spread-first pre-pass and the min_clusters
+# round-robin both assign positionally off the candidate list. A zero-weight
+# cluster therefore got one pool per plan, Hamilton handed it a budget slice of
+# 0, and sizing.compute_replicas floored that at 1 -- so draining a cluster
+# started a sandbox on it. Eligibility is now filtered before placement.
+# --------------------------------------------------------------------------- #
+
+def _drainable_registry() -> PlannerRegistry:
+    reg = PlannerRegistry()
+    for name, w in [("keep-1", 1.0), ("keep-2", 1.0), ("drained", 0.0)]:
+        reg.clusters[name] = PlannerCluster(name=name, weight=w, report_age_s=1)
+    return reg
+
+
+def _drain_spec(**overrides):
+    base = dict(
+        max_concurrent=300,
+        max_pool=100,
+        cluster_weights={"keep-1": 1.0, "keep-2": 1.0, "drained": 0.0},
+        models=[ModelSpec(template_name=f"t{i}", target_tasks=100)
+                for i in range(3)],
+    )
+    base.update(overrides)
+    return _spec(**base)
+
+
+def test_a_drained_cluster_gets_no_pools_from_the_spread_first_pre_pass():
+    # 3 models, 3 clusters: spread-first would hand one to every cluster in
+    # sorted-name order, drained included, without ever consulting the scorer.
+    assn = plan(_drain_spec(), _drainable_registry())
+    assert assn.clusters["drained"].pools == []
+    placed = sorted(p.template for c in assn.clusters.values() for p in c.pools)
+    assert placed == ["t0", "t1", "t2"], "every model must still be placed"
+
+
+def test_a_drained_cluster_gets_no_pools_under_min_clusters():
+    # min_clusters ignores scoring entirely and round-robins positionally, so
+    # it needs the same filter. Ask for 3 with only 2 eligible.
+    assn = plan(_drain_spec(min_clusters=3), _drainable_registry())
+    assert assn.clusters["drained"].pools == []
+    assert sum(len(c.pools) for c in assn.clusters.values()) == 3
+
+
+def test_a_drained_cluster_is_still_present_and_empty_so_it_tears_down():
+    # Absent would also work -- the member treats absent as empty -- but being
+    # explicitly present and empty is what makes `fleetctl show-assignments`
+    # show the drain rather than just omitting the cluster.
+    assn = plan(_drain_spec(), _drainable_registry())
+    assert "drained" in assn.clusters
+    assert assn.clusters["drained"].pools == []
+
+
+def test_a_drained_cluster_never_reaches_the_one_replica_floor():
+    # The original symptom: budget slice 0, floored to 1, live pool on a
+    # cluster the operator drained. Assert on replicas, not just pool count.
+    assn = plan(_drain_spec(), _drainable_registry())
+    assert sum(p.replicas for p in assn.clusters["drained"].pools) == 0
+
+
+def test_draining_the_whole_fleet_plans_empty_rather_than_splitting_evenly():
+    # budget.hamilton_split reads an all-zero weight map as "no preference,
+    # split evenly", which is right for a caller with no ranking and an
+    # inversion of intent here: it would turn a full drain into a full deploy.
+    # Filtering eligibility upstream means the planner never hands it that map.
+    reg = PlannerRegistry()
+    for name in ["a", "b"]:
+        reg.clusters[name] = PlannerCluster(name=name, weight=0.0, report_age_s=1)
+    spec = _spec(cluster_weights={"a": 0.0, "b": 0.0})
+    assn = plan(spec, reg)
+    assert all(c.pools == [] for c in assn.clusters.values())
+    assert set(assn.clusters) == {"a", "b"}
+
+
+def test_no_fresh_report_raises_instead_of_planning_a_fleet_wide_teardown():
+    # The opposite of a drain, and it must not be confused with one: an empty
+    # candidate set because nothing REPORTED means the planner cannot see the
+    # fleet. Publishing empty there would drop every warm pool everywhere in
+    # response to a bucket blip. Only an explicit weight of 0 authorises that.
+    from agent_sandbox_fleet.placement import NoClusterAvailableError
+
+    reg = PlannerRegistry()
+    reg.clusters["a"] = PlannerCluster(name="a", weight=1.0, report_age_s=1e9)
+    with pytest.raises(NoClusterAvailableError):
+        plan(_spec(cluster_weights={"a": 1.0}), reg)
+
+
+def test_drain_is_logged_once_by_name(caplog):
+    # A drain is invisible in the assignment (the cluster just has no pools),
+    # so the plan has to say it excluded one and which.
+    with caplog.at_level(logging.INFO, logger="agent_sandbox_fleet.planner"):
+        plan(_drain_spec(), _drainable_registry())
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("drained" in m and "weight 0" in m for m in msgs), msgs
+
+
+def test_an_unlisted_cluster_is_not_treated_as_drained():
+    # weight defaults to 1.0 for a cluster absent from cluster_weights, so
+    # "not mentioned" must stay eligible. If eligibility were ever keyed off
+    # the weights map rather than the resolved weight, omitting a cluster
+    # would silently drain it.
+    reg = PlannerRegistry()
+    reg.clusters["listed"] = PlannerCluster(name="listed", weight=1.0, report_age_s=1)
+    reg.clusters["unlisted"] = PlannerCluster(name="unlisted", report_age_s=1)
+    spec = _spec(cluster_weights={"listed": 1.0})
+    assn = plan(spec, reg)
+    assert assn.clusters["unlisted"].pools, "an unlisted cluster must stay eligible"
+
+
+# --------------------------------------------------------------------------- #
+# schema_version + derived generation + CAS.
+#
+# One integer used to answer three questions: "can I parse this", "is this
+# newer", and "did someone else write since I read". They are now three fields
+# with three owners -- the writer's code version, the planner, and the object
+# store -- because conflating them made each failure look like the others.
+# --------------------------------------------------------------------------- #
+
+def _live_registry() -> PlannerRegistry:
+    reg = PlannerRegistry()
+    reg.clusters["a"] = PlannerCluster(name="a", report_age_s=0.0)
+    return reg
+
+
+def _apply(gcs, **kw):
+    return planner.apply(gcs, _spec(), provider=_StaticProvider(_live_registry()),
+                         **kw)
+
+
+def test_the_first_apply_of_a_fleet_publishes_generation_one():
+    # Nothing published yet: store generation 0, payload generation 0, so the
+    # first plan is 1. No bootstrap special case anywhere in apply().
+    gcs = _RecordingGCS()
+    assert _apply(gcs).generation == 1
+
+
+def test_apply_derives_the_next_generation_from_the_published_assignments():
+    gcs = _RecordingGCS()
+    assert [_apply(gcs).generation for _ in range(3)] == [1, 2, 3]
+
+
+def test_the_derived_generation_ignores_a_stale_archived_spec():
+    # The archive is a record, not the counter. Corrupt it and the next apply
+    # must still advance off assignments.json -- this is the desync that made
+    # deriving from the spec wrong.
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    _apply(gcs)
+    gcs.objects[Paths().spec]["generation"] = 99
+    assert _apply(gcs).generation == 3
+
+
+def test_the_archived_spec_records_the_generation_that_was_applied():
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    assn = _apply(gcs)
+    assert gcs.objects[Paths().spec]["generation"] == assn.generation == 2
+
+
+def test_assignments_are_published_before_the_spec_is_archived():
+    # Archive last: it is the only write whose failure is survivable, because
+    # nothing reads it back to make a decision.
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    paths = Paths()
+    assert gcs.puts == [paths.assignments, paths.spec]
+
+
+def test_a_concurrent_apply_loses_the_race_instead_of_overwriting():
+    # Two admins derive the same next generation from the same base. Without a
+    # precondition on the STORE's generation, the second write silently discards
+    # the first plan and both operators see success.
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    published_gen, store_gen = planner.read_published(gcs, Paths())
+    _apply(gcs)  # the winner moves the store generation on
+    stale = plan(_spec(), _live_registry(),
+                 generation=planner.next_generation(published_gen))
+    with pytest.raises(CASConflict):
+        planner.publish(gcs, stale, Paths(), if_generation_match=store_gen)
+
+
+def test_an_explicit_generation_override_is_honoured():
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    assert _apply(gcs, generation=50).generation == 50
+
+
+def test_an_override_that_does_not_advance_is_rejected():
+    # The one failure in this system with no symptom: members ignore the plan
+    # exactly as designed, nothing errors, and the fleet does not change.
+    gcs = _RecordingGCS()
+    _apply(gcs, generation=7)
+    with pytest.raises(ValueError, match="not greater than"):
+        _apply(gcs, generation=7)
+
+
+def test_apply_refuses_to_overwrite_a_plan_it_cannot_parse():
+    # A newer fleetctl published; this one must not clobber it, and must not
+    # increment a generation it read out of a payload it does not understand.
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    gcs.objects[Paths().assignments]["schema_version"] = 999
+    with pytest.raises(ValueError, match="schema_version"):
+        _apply(gcs)
+
+
+def test_a_spec_with_an_unknown_schema_version_is_rejected_at_load():
+    with pytest.raises(Exception, match="schema_version"):
+        _spec(schema_version=999)
+
+
+def test_published_assignments_carry_the_schema_version():
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    assert gcs.objects[Paths().assignments]["schema_version"] == planner.SCHEMA_VERSION

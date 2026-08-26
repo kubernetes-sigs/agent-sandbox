@@ -26,7 +26,7 @@ import types
 
 import pytest
 
-from agent_sandbox_fleet.objectstore import GCS
+from agent_sandbox_fleet.objectstore import GCS, CASConflict
 
 
 class _Exc:
@@ -61,12 +61,25 @@ class _Blob:
             raise _Exc.PreconditionFailed(self._path)
         return self._bucket.data[self._path]
 
+    def upload_from_string(self, raw, content_type=None, if_generation_match=None):
+        self._bucket.uploads.append((self._path, if_generation_match))
+        if if_generation_match is not None:
+            # GCS semantics: 0 means "the object must not exist yet".
+            current = self._bucket.generations.get(self._path, 0)
+            if if_generation_match != current:
+                raise _Exc.PreconditionFailed(self._path)
+        self._bucket.data[self._path] = raw
+        self._bucket.generations[self._path] = (
+            self._bucket.generations.get(self._path, 0) + 1
+        )
+
 
 class _Bucket:
     def __init__(self):
         self.data: dict[str, bytes] = {}
         self.generations: dict[str, int] = {}
         self.downloads: list[tuple[str, int | None]] = []
+        self.uploads: list[tuple[str, int | None]] = []
         self.exists_calls = 0
         self.on_download = None
 
@@ -183,3 +196,67 @@ def test_a_writer_that_outruns_the_reader_errors_rather_than_spinning():
     with pytest.raises(RuntimeError, match="outrunning"):
         g.get_with_etag("assignments.json")
     assert len(g._bucket.downloads) == 3, "retry is not bounded at 3"
+
+
+# --------------------------------------------------------------------------- #
+# put_json preconditions + get_json_with_generation.
+#
+# The store's generation is the only safe concurrency token here: it is the one
+# counter the store itself bumps on every write, so it detects a write the
+# reader never saw. The `generation` inside the payload cannot -- two planners
+# reading the same base derive the same next value.
+# --------------------------------------------------------------------------- #
+
+def test_put_json_is_unconditional_by_default():
+    # Capacity reports want last-writer-wins: one writer per object, and a lost
+    # update is superseded 30 seconds later anyway.
+    g = _gcs()
+    g.put_json("a.json", {"x": 1})
+    g.put_json("a.json", {"x": 2})
+    assert json.loads(g._bucket.data["a.json"]) == {"x": 2}
+    assert [gen for _, gen in g._bucket.uploads] == [None, None]
+
+
+def test_put_json_with_a_matching_precondition_succeeds():
+    g = _gcs()
+    g._bucket.put("a.json", b"{}", generation=11)
+    g.put_json("a.json", {"x": 1}, if_generation_match=11)
+    assert json.loads(g._bucket.data["a.json"]) == {"x": 1}
+
+
+def test_put_json_raises_cas_conflict_when_the_object_moved_on():
+    g = _gcs()
+    g._bucket.put("a.json", b"{}", generation=11)
+    with pytest.raises(CASConflict, match="changed since it was read"):
+        g.put_json("a.json", {"x": 1}, if_generation_match=10)
+    assert g._bucket.data["a.json"] == b"{}", "the losing write must not land"
+
+
+def test_generation_zero_means_the_object_must_not_exist_yet():
+    # This is what lets a read-modify-write be written once and still be correct
+    # on the very first apply of a fleet, with no "if absent" branch.
+    g = _gcs()
+    g.put_json("a.json", {"x": 1}, if_generation_match=0)
+    assert json.loads(g._bucket.data["a.json"]) == {"x": 1}
+    with pytest.raises(CASConflict):
+        g.put_json("a.json", {"x": 2}, if_generation_match=0)
+
+
+def test_get_json_with_generation_returns_zero_for_a_missing_object():
+    g = _gcs()
+    assert g.get_json_with_generation("nope.json") == (None, 0)
+
+
+def test_get_json_with_generation_returns_the_store_generation():
+    g = _gcs()
+    g._bucket.put("a.json", b'{"x": 1}', generation=42)
+    assert g.get_json_with_generation("a.json") == ({"x": 1}, 42)
+
+
+def test_read_then_conditional_write_round_trips():
+    g = _gcs()
+    _, gen = g.get_json_with_generation("a.json")
+    g.put_json("a.json", {"n": 1}, if_generation_match=gen)
+    obj, gen = g.get_json_with_generation("a.json")
+    g.put_json("a.json", {"n": obj["n"] + 1}, if_generation_match=gen)
+    assert json.loads(g._bucket.data["a.json"]) == {"n": 2}

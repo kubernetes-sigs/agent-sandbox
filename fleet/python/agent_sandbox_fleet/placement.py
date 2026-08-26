@@ -94,18 +94,47 @@ class PlannerRegistry:
         # weaker annotation meant PlannerRegistry did not formally satisfy
         # Iterable[PlannerCluster], so a caller typed against it would not
         # type-check even though the runtime behavior was always correct.
-        return iter(self.fresh())
+        #
+        # Iterating a registry yields eligible(), not fresh(): every selector
+        # below is written as "score whatever the registry hands me", so drain
+        # has to be enforced here or each selector has to remember to do it.
+        return iter(self.eligible())
 
     def names(self) -> list[str]:
-        return [c.name for c in self.fresh()]
+        return [c.name for c in self.eligible()]
 
     def get(self, name: str) -> PlannerCluster:
         return self.clusters[name]
 
     def fresh(self) -> list[PlannerCluster]:
-        """Only clusters with a recent capacity report are placement-eligible."""
+        """Clusters with a recent capacity report. Freshness ONLY.
+
+        Not the placement set — see `eligible()`. This is the reachability
+        question ("is this cluster still talking to us"), which `fleetctl
+        status` and the inventory log both want to answer on its own, separately
+        from whether the operator currently wants work placed there.
+        """
         return [c for c in self.clusters.values()
                 if c.report_age_s <= self.max_report_age_s]
+
+    def eligible(self) -> list[PlannerCluster]:
+        """Clusters that may receive pools: fresh AND not drained.
+
+        A weight of 0 means "drain": the cluster stays in the spec and keeps
+        reporting, but takes no new work. That has to be a filter on the
+        candidate set rather than a consequence of scoring low, because two of
+        the three placement paths never consult the scorer -- the spread-first
+        pre-pass and the min_clusters round-robin both assign positionally. A
+        zero-weight cluster therefore used to receive one pool per plan, and
+        since Hamilton gives it a budget slice of 0 while
+        `sizing.compute_replicas` floors every placed pool at 1, that pool came
+        up live. Draining a cluster started a sandbox on it.
+
+        Weight is only 0 when an operator wrote it: a cluster absent from
+        `cluster_weights` defaults to 1.0 (see `inventory.GCSInventory.load`),
+        so this cannot fire on an unlisted cluster.
+        """
+        return [c for c in self.fresh() if c.weight > 0]
 
 
 # --------------------------------------------------------------------------- #

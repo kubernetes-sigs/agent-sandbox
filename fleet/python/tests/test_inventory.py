@@ -488,7 +488,7 @@ def test_gcs_and_clusterprofile_plan_identically():
     assert _comparable(gcs_reg) == _comparable(cp_reg)
 
     spec = FleetSpec(
-        generation=1, max_concurrent=600, max_pool=200,
+        max_concurrent=600, max_pool=200,
         placement_policy="capacity-aware",
         cluster_weights={"a": 1.0, "b": 2.0, "c": 3.0},
         models=[ModelSpec(image=f"img-{i}", template_name=f"tmpl-{i}",
@@ -527,7 +527,7 @@ def test_parity_test_can_actually_fail():
         ])).load(weights)
 
     spec = FleetSpec(
-        generation=1, max_concurrent=600, max_pool=200,
+        max_concurrent=600, max_pool=200,
         placement_policy="capacity-aware",
         cluster_weights=weights,
         models=[ModelSpec(image=f"img-{i}", template_name=f"tmpl-{i}",

@@ -22,6 +22,7 @@ running, plus `pip install k8s-agent-sandbox`.
 
 ```python
 import re
+import shlex
 from k8s_agent_sandbox import SandboxClient
 
 _DENY_PATTERNS = [
@@ -29,18 +30,24 @@ _DENY_PATTERNS = [
     r"\bdd\s+if=",
 ]
 
-def _has_flag(command: str, short: str, long_name: str) -> bool:
-    # Matches the short flag standalone or combined with others (-rf, -fr,
-    # -Rf), and the long GNU option, so "-r -f", "-fr", and "--recursive
-    # --force" are all treated the same regardless of order.
-    return bool(re.search(rf"(?:^|\s)-\w*{short}\w*(?:\s|$)", command, re.IGNORECASE)) or long_name in command
+def _has_flag(tokens: list[str], short: str, long_name: str) -> bool:
+    # Checks parsed argv tokens, not the raw string, so quoting/escaping
+    # ("-r -f", "'-rf'") can't hide a flag the shell would still honor.
+    for t in tokens:
+        if t == long_name:
+            return True
+        if t.startswith("-") and not t.startswith("--") and short.lower() in t.lower():
+            return True
+    return False
 
 def _is_destructive_rm(command: str) -> bool:
-    return (
-        bool(re.search(r"\brm\b", command, re.IGNORECASE))
-        and _has_flag(command, "r", "--recursive")
-        and _has_flag(command, "f", "--force")
-    )
+    try:
+        tokens = shlex.split(command)  # parses quoting the way a POSIX shell would
+    except ValueError:
+        return True  # unparseable quoting - fail safe, deny
+    if not tokens or tokens[0] != "rm":
+        return False
+    return _has_flag(tokens[1:], "r", "--recursive") and _has_flag(tokens[1:], "f", "--force")
 
 def governed_run(sandbox, command: str):
     if _is_destructive_rm(command) or any(re.search(p, command) for p in _DENY_PATTERNS):
@@ -64,3 +71,12 @@ never contacted for that call. This is a minimal illustration; swap the
 regex list for whatever policy engine (OPA, a YAML rules file, an LLM
 classifier) fits your risk model — the wrapper shape around
 `sandbox.commands.run()` is the actual pattern, not the matching logic.
+
+**Scope:** `_is_destructive_rm()` only inspects the first parsed token, so it
+catches `rm` invoked directly (including quoted/escaped spellings) but not
+`rm` reached via shell chaining or substitution (`echo hi; rm -rf /`,
+`$(rm -rf /)`, pipes). Closing that fully means parsing the command as a
+shell script (not just a word list) or, more robustly, allowlisting the
+exact commands a sandbox is permitted to run instead of denylisting
+patterns — denylists are inherently a losing game against a determined
+adversary. Pick allowlisting for anything beyond a demo.

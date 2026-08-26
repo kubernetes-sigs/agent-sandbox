@@ -86,8 +86,10 @@ func TestPodCacheTransform(t *testing.T) {
 	if pod.Finalizers != nil {
 		t.Error("finalizers not stripped")
 	}
-	if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Name != "c" ||
-		pod.Spec.Containers[0].Image != "" || len(pod.Spec.InitContainers) != 0 ||
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("pod spec has %d containers, want 1: %+v", len(pod.Spec.Containers), pod.Spec)
+	}
+	if pod.Spec.Containers[0].Name != "c" || pod.Spec.Containers[0].Image != "" || len(pod.Spec.InitContainers) != 0 ||
 		len(pod.Spec.Volumes) != 0 || len(pod.Spec.Tolerations) != 0 {
 		t.Errorf("pod spec not stripped: %+v", pod.Spec)
 	}

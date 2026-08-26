@@ -117,6 +117,18 @@ func inPlaceResizePod(resources corev1.ResourceRequirements) *corev1.Pod {
 	}
 }
 
+// hasExplicitRestartFreeResizePolicy reports whether a container explicitly
+// declares a restart-free policy. An omitted policy is restart-free by
+// Kubernetes defaulting, but does not satisfy tests verifying policy injection.
+func hasExplicitRestartFreeResizePolicy(container corev1.Container, resourceName corev1.ResourceName) bool {
+	for _, policy := range container.ResizePolicy {
+		if policy.ResourceName == resourceName {
+			return policy.RestartPolicy != corev1.RestartContainer
+		}
+	}
+	return false
+}
+
 func TestReconcileInPlaceResourcesUsesStrategicResizeSubresourceWithoutRestart(t *testing.T) {
 	current := resizeResources("1", "1Gi")
 	desired := resizeResources("2", "2Gi")
@@ -149,6 +161,7 @@ func TestReconcileInPlaceResourcesUsesStrategicResizeSubresourceWithoutRestart(t
 	assert.Equal(t, int32(3), patched.Status.ContainerStatuses[0].RestartCount, "in-place resize must not restart the container")
 	assert.True(t, patched.Spec.Containers[0].Resources.Requests.Cpu().Equal(resource.MustParse("2")))
 	assert.True(t, patched.Spec.Containers[0].Resources.Limits.Memory().Equal(resource.MustParse("2Gi")))
+	assert.Equal(t, current, pod.Spec.Containers[0].Resources, "resize submission must not mutate the observed Pod")
 }
 
 func TestSetResourceResizeConditionRetainsTerminalOutcomeUntilDisabled(t *testing.T) {
@@ -288,6 +301,57 @@ func TestReconcileInPlaceResourcesRetriesWhenPodDisappears(t *testing.T) {
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
 	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
+}
+
+func TestReconcileInPlaceResourcesReportsMissingResizeSubresourceAsUnsupported(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			return k8serrors.NewMethodNotSupported(schema.GroupResource{Resource: "pods"}, "patch")
+		},
+	})
+
+	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, condition.Reason)
+	assert.Contains(t, condition.Message, "not supported by this cluster")
+}
+
+func TestReconcileChildResourcesKeepsReadyWhenResizeSubmissionRetries(t *testing.T) {
+	desired := resizeResources("2", "2Gi")
+	sandbox := inPlaceResizeSandbox(desired)
+	sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	pod.Labels = map[string]string{sandboxLabel: NameHash(sandbox.Name)}
+	pod.Status.PodIPs = []corev1.PodIP{{IP: "10.0.0.1"}}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+
+	clientWithResize := interceptor.NewClient(newFakeClient(sandbox, pod), interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			return k8serrors.NewInternalError(errors.New("temporary resize failure"))
+		},
+	})
+	reconciler := &SandboxReconciler{
+		Client:        clientWithResize,
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+
+	err := reconciler.reconcileChildResources(t.Context(), sandbox, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "temporary resize failure")
+	ready := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonDependenciesReady, ready.Reason)
+	resize := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
+	require.NotNil(t, resize)
+	assert.Equal(t, metav1.ConditionUnknown, resize.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, resize.Reason)
 }
 
 func TestReconcileInPlaceResourcesDisabledDoesNotPatchPod(t *testing.T) {

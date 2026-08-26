@@ -1214,11 +1214,14 @@ func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandb
 		return resourceResizeCondition(sandbox, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonResourceResizeCompleted, "CPU and memory resources were resized in place"), nil
 	}
 
-	base := pod.DeepCopy()
+	desired := pod.DeepCopy()
 	for _, target := range targets {
-		pod.Spec.Containers[target.index].Resources = target.resources
+		desired.Spec.Containers[target.index].Resources = target.resources
 	}
-	if err := r.SubResource("resize").Patch(ctx, pod, client.StrategicMergeFrom(base)); err != nil {
+	if err := r.SubResource("resize").Patch(ctx, desired, client.StrategicMergeFrom(pod)); err != nil {
+		if k8serrors.IsMethodNotSupported(err) {
+			return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, "Pod resize is not supported by this cluster: "+err.Error()), nil
+		}
 		if terminalPodResizeError(err) {
 			return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeFailed, "Pod resize was rejected: "+err.Error()), nil
 		}
@@ -1349,18 +1352,6 @@ func resourceListValueEqual(left, right corev1.ResourceList, resourceName corev1
 	return leftSet == rightSet && (!leftSet || leftValue.Equal(rightValue))
 }
 
-// hasExplicitRestartFreeResizePolicy reports whether a container explicitly
-// declares a restart-free policy. An omitted policy is restart-free by
-// Kubernetes defaulting, but does not satisfy callers verifying policy injection.
-func hasExplicitRestartFreeResizePolicy(container corev1.Container, resourceName corev1.ResourceName) bool {
-	for _, policy := range container.ResizePolicy {
-		if policy.ResourceName == resourceName {
-			return policy.RestartPolicy != corev1.RestartContainer
-		}
-	}
-	return false
-}
-
 func resizeConditionFromPod(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) *metav1.Condition {
 	for _, condition := range pod.Status.Conditions {
 		switch condition.Type {
@@ -1427,7 +1418,7 @@ func resourceResizeCondition(sandbox *sandboxv1beta1.Sandbox, status metav1.Cond
 }
 
 func terminalPodResizeError(err error) bool {
-	return k8serrors.IsBadRequest(err) || k8serrors.IsForbidden(err) || k8serrors.IsInvalid(err) || k8serrors.IsMethodNotSupported(err)
+	return k8serrors.IsBadRequest(err) || k8serrors.IsForbidden(err) || k8serrors.IsInvalid(err)
 }
 
 func ensureRestartFreeResizePolicies(spec *corev1.PodSpec) {

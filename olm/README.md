@@ -19,6 +19,35 @@ This directory packages Agent Sandbox for **OLM** (OperatorHub, OpenShift, and o
 
 For controller development (local kind cluster, image build), see [docs/development.md](../docs/development.md).
 
+### Upgrading from v0.5.x to v1.0.0+
+
+Starting in **v1.0.0**, `v1alpha1` support and conversion webhooks are removed. If upgrading an existing OLM-managed cluster from `v0.5.x`:
+
+1. **Migrate existing resources**: Follow the [v1alpha1 → v1beta1 API migration guide](../docs/api-migration-guide.md) to migrate all existing resources to `v1beta1`.
+2. **Prune `storedVersions` before upgrading**: Every agent-sandbox CustomResourceDefinition must report only `v1beta1` in `status.storedVersions`. Run:
+   ```bash
+   for crd in \
+       sandboxes.agents.x-k8s.io \
+       sandboxclaims.extensions.agents.x-k8s.io \
+       sandboxtemplates.extensions.agents.x-k8s.io \
+       sandboxwarmpools.extensions.agents.x-k8s.io; do
+     kubectl patch crd "${crd}" --type=json -p='[{"op":"replace","path":"/status/storedVersions","value":["v1beta1"]}]' --subresource=status
+   done
+   ```
+
+> [!WARNING]
+> **InstallPlan Failure Behavior**: If an OLM upgrade is attempted before `storedVersions` is pruned, the Kubernetes apiserver rejects the CRD update and the upgrade does not proceed. In OperatorHub UI, this may appear generically as "install failed" (with the root rejection message visible in the `Subscription` status conditions). Once you patch `storedVersions`, re-trigger or approve the `InstallPlan` if it does not converge on its own.
+
+> [!NOTE]
+> **Post-Upgrade Cleanup**: OLM automatically garbage-collects the legacy CSV-managed namespaced `Role` and `RoleBinding` objects when the previous CSV is replaced. However, `Service/agent-sandbox-webhook-service` and `Secret/agent-sandbox-webhook-certs` are not automatically pruned during CSV upgrade and should be deleted manually:
+>
+> ```bash
+> kubectl delete -n agent-sandbox-system \
+>   svc/agent-sandbox-webhook-service \
+>   secret/agent-sandbox-webhook-certs \
+>   --ignore-not-found
+> ```
+
 ## Maintaining operator manifests
 
 CRDs, ClusterRoles, and the controller Deployment in this module are **copies** of the main Agent Sandbox tree. They are not authored separately under `olm/config/`.
@@ -95,8 +124,6 @@ operator-sdk run bundle ${BUNDLE_IMG}
 ```
 
 `operator-sdk run bundle` installs the bundle into the cluster’s OLM namespace so you can subscribe and verify the operator before publishing. Use the same `VERSION`, `IMG`, and `BUNDLE_IMG` you intend to ship.
-
-> **Note:** The CRD conversion webhook `clientConfig` hardcodes `namespace: agent-sandbox-system`. Because `webhookdefinitions` is stripped from the CSV (preventing OLM from rewriting the `clientConfig`), the operator **must** be installed in the `agent-sandbox-system` namespace for conversion webhooks to function. If you use `operator-sdk run bundle`, pass `--namespace agent-sandbox-system`; the `operatorframework.io/suggested-namespace` annotation is only a hint and is not enforced.
 
 ## Contributing
 Please read our [Contributing Guidelines](../CONTRIBUTING.md) for our full code review and PR policies.

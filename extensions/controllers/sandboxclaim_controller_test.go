@@ -49,7 +49,6 @@ import (
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -4579,7 +4578,7 @@ func TestSandboxClaimClearsAssignedSandboxOwnedByAnotherClaim(t *testing.T) {
 	}{
 		{name: "annotation", ownerAPIVersion: extensionsv1beta1.GroupVersion.String()},
 		{name: "deprecated label", fromLabel: true, ownerAPIVersion: extensionsv1beta1.GroupVersion.String()},
-		{name: "deprecated label with v1alpha1 owner reference", fromLabel: true, ownerAPIVersion: extensionsv1alpha1.GroupVersion.String()},
+		{name: "deprecated label with v1alpha1 owner reference", fromLabel: true, ownerAPIVersion: "extensions.agents.x-k8s.io/v1alpha1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newScheme(t)

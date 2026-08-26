@@ -303,7 +303,6 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	sed -i.bak 's|containerImage: .*|containerImage: $(IMG)|' bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml && rm -f bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml.bak
 	$(OPERATOR_SDK) bundle validate ./bundle
-	hack/strip-csv-webhookdefs bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml webhookdefinitions
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.

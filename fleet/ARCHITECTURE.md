@@ -81,9 +81,14 @@ CLI/batch job.
    `spec.max_concurrent` across placed clusters by weight.
 5. **Planner** runs harvested `sizing.compute_replicas` per (cluster, image)
    pair to size the warm pool.
-6. **Planner** writes `fleet/assignments.json`:
+6. **Planner** reads back the live `fleet/assignments.json` to learn the
+   published generation and the store generation of that object, derives
+   `generation = published + 1`, and writes `fleet/assignments.json` back
+   conditionally on the store generation it read (see
+   [Versioning](#versioning-schema_version-vs-generation)):
    ```json
    {
+     "schema_version": 1,
      "generation": 42,
      "updated_at": "2026-07-08T15:34:12Z",
      "clusters": {
@@ -143,7 +148,7 @@ It's documented once here, and enforced via matched schemas in Go
 
 ```json
 {
-  "generation": 42,
+  "schema_version": 1,
   "max_concurrent": 100,
   "placement_policy": "capacity-aware",
   "min_clusters": 5,
@@ -170,6 +175,55 @@ spread-first + scored-extras path could oscillate.
 ### `fleet/assignments.json` (written by planner)
 
 Structure above under "Placement cycle" step 6.
+
+### Versioning: `schema_version` vs `generation`
+
+Three different questions used to share one integer. They are now three
+separate things, because they have three different owners and three different
+failure modes.
+
+| Field | Question it answers | Who sets it | Read by |
+| --- | --- | --- | --- |
+| `schema_version` | "Can I parse this at all?" | the writer's code version (constant, not a spec field) | every reader, as a gate before it trusts a single byte |
+| `generation` | "Is this newer than what I already applied?" | the planner, derived — never authored | fleet members, for ordering |
+| store generation | "Did someone else write since I read?" | GCS, on every write | the planner, as a compare-and-set precondition |
+
+**`schema_version` is a compatibility gate, and the safe direction is to
+refuse.** A fleet member that cannot parse `assignments.json` returns its
+*last good* assignment and does not cache the etag. Both halves matter. An
+empty pool set means "drop everything", so a member that read an unparseable
+payload as empty would tear down the very fleet a schema bump was rolling out
+to. And caching the etag of a payload you refused makes the next tick read
+"unchanged" — the log goes quiet while the fleet sits stuck, and a corrected
+plan republished at that same etag is never picked up. Unknown *fields* within
+a known version are still ignored (`AssignmentPool.from_json`), so additive
+changes need no version bump.
+
+**`generation` is derived, not declared.** The planner reads the live
+`fleet/assignments.json`, takes its `generation`, and publishes `+1`. First
+apply of a fresh bucket is generation 1. `generation` in a spec file is
+deprecated: it is accepted, warned about, and ignored. It was a footgun — the
+counter that decides whether a rollout is visible to the fleet lived in a
+hand-edited YAML file, so forgetting to bump it silently published a plan
+every member declined to apply. `--generation N` still exists as an operator
+override for the recover-from-a-bad-state case; it must strictly advance past
+the published value or it is rejected.
+
+**The store generation is the only sound concurrency token.** The payload
+counter cannot serve here: two planners reading the same base derive the same
+next value, so both would think they were first. `publish()` is conditional on
+the store generation observed in the read-back, and a lost race raises
+`CASConflict` rather than silently clobbering. `if_generation_match=0` means
+"this object must not exist", which is exactly the bootstrap case — so the
+read-modify-write is written once and is correct on an empty bucket, with no
+`if absent` branch.
+
+**Write order is plan → publish → archive.** `fleet/spec.json` is written last
+and is an *archive*: a record of what was applied, stamped with the generation
+for humans reading the bucket later. Nothing reads it back to make a decision,
+which is why it is the only one of the three writes whose failure is
+survivable. Deriving the counter from the archive instead would desync the
+whole fleet the first time an archive write failed after a successful publish.
 
 ### `fleet/capacity/<cluster>.json` (written by agent every 30s)
 

@@ -27,7 +27,14 @@ type SandboxWarmPoolSpecApplyConfiguration struct {
 	// sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox
 	// Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant.
 	TemplateRef *SandboxTemplateRefApplyConfiguration `json:"sandboxTemplateRef,omitempty"`
-	// updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes
+	// updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is
+	// considered stale when the effective SandboxBlueprint derived from the referenced
+	// SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits
+	// (annotations or labels) do not make a sandbox stale and never trigger replacement.
+	// It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox
+	// is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer
+	// manages or replaces it.
+	// Defaults to OnReplenish.
 	UpdateStrategy *SandboxWarmPoolUpdateStrategyApplyConfiguration `json:"updateStrategy,omitempty"`
 }
 

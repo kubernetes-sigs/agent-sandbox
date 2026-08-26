@@ -21,9 +21,18 @@ package v1beta1
 type SandboxStatusApplyConfiguration struct {
 	// name is the name of the Sandbox created from this claim
 	Name *string `json:"name,omitempty"`
-	// podIPs are the IP addresses of the underlying pod.
-	// A pod may have multiple IPs in dual-stack clusters.
+	// podIPs are the IP addresses of the underlying pod, mirrored from the backing
+	// Sandbox's status. A pod may have multiple IPs in dual-stack clusters.
+	// This is populated only while the backing Sandbox has a running pod with assigned
+	// IPs; it is cleared whenever the pod is absent (e.g. before the pod has been
+	// created or while the Sandbox is suspended).
 	PodIPs []string `json:"podIPs,omitempty"`
+	// serviceFQDN is the in-cluster DNS name of the bound Sandbox's service,
+	// mirrored from the Sandbox's status.serviceFQDN so consumers can reach
+	// the sandbox from the claim alone. Like name and podIPs, it is eventually
+	// consistent: it may lag the Sandbox by a reconcile, and is cleared when
+	// the claim loses its sandbox.
+	ServiceFQDN *string `json:"serviceFQDN,omitempty"`
 }
 
 // SandboxStatusApplyConfiguration constructs a declarative configuration of the SandboxStatus type for use with
@@ -47,5 +56,13 @@ func (b *SandboxStatusApplyConfiguration) WithPodIPs(values ...string) *SandboxS
 	for i := range values {
 		b.PodIPs = append(b.PodIPs, values[i])
 	}
+	return b
+}
+
+// WithServiceFQDN sets the ServiceFQDN field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ServiceFQDN field is set to the value of the last call.
+func (b *SandboxStatusApplyConfiguration) WithServiceFQDN(value string) *SandboxStatusApplyConfiguration {
+	b.ServiceFQDN = &value
 	return b
 }

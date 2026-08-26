@@ -57,8 +57,19 @@ type SandboxTemplateSpecApplyConfiguration struct {
 	// networkPolicyManagement defines whether the controller manages the NetworkPolicy.
 	// Valid values are "Managed" (default) or "Unmanaged".
 	NetworkPolicyManagement *extensionsapiv1beta1.NetworkPolicyManagement `json:"networkPolicyManagement,omitempty"`
-	// envVarsInjectionPolicy allows a SandboxClaim to inject or override environment variables defined in the template.
-	// If set to Disallowed, the SandboxClaim will be rejected if it specifies any environment variables.
+	// envVarsInjectionPolicy controls whether a SandboxClaim may set environment variables
+	// (spec.env) on sandboxes created from this template:
+	// - Disallowed (default): claims may not set any environment variables; a claim that
+	// specifies spec.env is rejected.
+	// - Allowed: claims may add environment variables whose names are not already defined
+	// in the template, but may not change the value of a name the template already defines.
+	// - Overrides: claims may add new environment variables and override the values of names
+	// the template already defines.
+	// Note: environment variables are baked into the Pod before it is created; they cannot be
+	// injected into an already-running warm pool Pod. Consequently, allowing injection here
+	// (Allowed or Overrides) only takes effect on a per-claim basis: any claim that actually
+	// sets spec.env is forced to cold-start a fresh Sandbox and cannot adopt a warm pool
+	// Sandbox. Claims that set no environment variables still use the warm pool normally.
 	EnvVarsInjectionPolicy *extensionsapiv1beta1.EnvVarsInjectionPolicy `json:"envVarsInjectionPolicy,omitempty"`
 	// volumeClaimTemplatesPolicy allows a SandboxClaim to inject or override volume claim templates defined in the template.
 	// If set to Disallowed, the SandboxClaim will be rejected if it specifies any volume claim templates.

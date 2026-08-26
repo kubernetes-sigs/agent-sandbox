@@ -56,7 +56,7 @@ def _is_denied(command: str) -> bool:
     if exe == "mkfs" or exe.startswith("mkfs."):
         return True
     if exe == "dd":
-        return any(t.startswith("if=") for t in tokens[1:])  # order-independent
+        return any(t.startswith("of=") for t in tokens[1:])  # order-independent
     return False
 
 def governed_run(sandbox, command: str):

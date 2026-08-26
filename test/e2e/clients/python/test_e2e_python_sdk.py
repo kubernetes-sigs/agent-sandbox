@@ -134,8 +134,18 @@ spec:
     return "python-sdk-coldpool"
 
 
+def wait_until_sandbox_routable(sandbox):
+    """Probe the data path with GET before the first POST /execute.
+
+    Claim Ready does not mean the router can dial the runtime yet. GET is
+    still retried on 5xx; POST /execute is not.
+    """
+    sandbox.files.exists(".")
+
+
 def run_sdk_tests(sandbox):
     """Runs basic SDK operations to validate functionality"""
+    wait_until_sandbox_routable(sandbox)
     # Test execution
     result = sandbox.commands.run("echo 'Hello from SDK'")
     print(f"Run result: {result}")
@@ -362,6 +372,7 @@ def test_python_sdk_volume_claim_templates(
             assert pvc_res.spec.storage_class_name == storage_class, "PVC storageClassName mismatch in cluster"
 
         print("Running command to verify sandbox is operational...")
+        wait_until_sandbox_routable(sandbox)
         res = sandbox.commands.run("df -h")
         print(f"Disk space output:\n{res.stdout}")
         assert res.exit_code == 0, f"Command df -h failed with exit code {res.exit_code}: {res.stderr}"

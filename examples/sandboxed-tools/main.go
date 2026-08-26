@@ -703,19 +703,6 @@ func (o *RunOptions) InitDefaults() {
 func run(ctx context.Context, opts RunOptions) error {
 	log := klog.FromContext(ctx)
 
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
-	if apiKey == "" {
-		return fmt.Errorf("GEMINI_API_KEY or OPENAI_API_KEY environment variable is required")
-	}
-
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
-	}
-
 	if opts.HomeDir == "" {
 		return fmt.Errorf("homeDir must not be empty")
 	}
@@ -728,7 +715,7 @@ func run(ctx context.Context, opts RunOptions) error {
 		return fmt.Errorf("invalid sessionName %q: %w", opts.SessionName, err)
 	}
 
-	llmClient, err := llm.NewClient(baseURL, apiKey)
+	llmClient, err := llm.NewFromEnv(opts.ModelName)
 	if err != nil {
 		return fmt.Errorf("failed to initialize llm client: %w", err)
 	}
@@ -781,7 +768,7 @@ func run(ctx context.Context, opts RunOptions) error {
 
 type Harness struct {
 	// llmClient is the client we use to talk to the llm.
-	llmClient *llm.Client
+	llmClient llm.ChatClient
 
 	// toolsRegistry holds all the tools we have available to the llm.
 	toolsRegistry *tools.Registry

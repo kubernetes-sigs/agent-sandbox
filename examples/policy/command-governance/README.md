@@ -21,14 +21,16 @@ running, plus `pip install k8s-agent-sandbox`.
 ## Usage
 
 ```python
-import re
+import os
 import shlex
 from k8s_agent_sandbox import SandboxClient
 
-_DENY_PATTERNS = [
-    r"\bmkfs\b",
-    r"\bdd\s+if=",
-]
+def _flags(tokens: list[str]) -> list[str]:
+    # Tokens up to (not including) a bare "--" end-of-options marker, so
+    # `rm -- --recursive --force` (real filenames, not flags) isn't denied.
+    if "--" in tokens:
+        return tokens[: tokens.index("--")]
+    return tokens
 
 def _has_flag(tokens: list[str], short: str, long_name: str) -> bool:
     # Checks parsed argv tokens, not the raw string, so quoting/escaping
@@ -40,17 +42,25 @@ def _has_flag(tokens: list[str], short: str, long_name: str) -> bool:
             return True
     return False
 
-def _is_destructive_rm(command: str) -> bool:
+def _is_denied(command: str) -> bool:
     try:
         tokens = shlex.split(command)  # parses quoting the way a POSIX shell would
     except ValueError:
         return True  # unparseable quoting - fail safe, deny
-    if not tokens or tokens[0] != "rm":
+    if not tokens:
         return False
-    return _has_flag(tokens[1:], "r", "--recursive") and _has_flag(tokens[1:], "f", "--force")
+    exe = os.path.basename(tokens[0])  # strips a path prefix like /bin/rm
+    args = _flags(tokens[1:])
+    if exe == "rm":
+        return _has_flag(args, "r", "--recursive") and _has_flag(args, "f", "--force")
+    if exe == "mkfs" or exe.startswith("mkfs."):
+        return True
+    if exe == "dd":
+        return any(t.startswith("if=") for t in tokens[1:])  # order-independent
+    return False
 
 def governed_run(sandbox, command: str):
-    if _is_destructive_rm(command) or any(re.search(p, command) for p in _DENY_PATTERNS):
+    if _is_denied(command):
         raise PermissionError(f"denied by command policy: {command}")
     return sandbox.commands.run(command)
 
@@ -67,15 +77,17 @@ finally:
 ```
 
 `rm -rf /` is rejected in this script's own process — the sandbox pod is
-never contacted for that call. This is a minimal illustration; swap the
-regex list for whatever policy engine (OPA, a YAML rules file, an LLM
+never contacted for that call. This is a minimal illustration; swap
+`_is_denied()` for whatever policy engine (OPA, a YAML rules file, an LLM
 classifier) fits your risk model — the wrapper shape around
 `sandbox.commands.run()` is the actual pattern, not the matching logic.
 
-**Scope:** `_is_destructive_rm()` only inspects the first parsed token, so it
-catches `rm` invoked directly (including quoted/escaped spellings) but not
-`rm` reached via shell chaining or substitution (`echo hi; rm -rf /`,
-`$(rm -rf /)`, pipes). Closing that fully means parsing the command as a
+**Scope:** `_is_denied()` only inspects the first parsed token (the
+executable) and its own flags/arguments, so it catches `rm`/`mkfs`/`dd`
+invoked directly (including quoted/escaped spellings and path-qualified
+executables like `/bin/rm`) but not one reached via shell chaining or
+substitution (`echo hi; rm -rf /`, `$(rm -rf /)`, pipes). Closing that fully
+means parsing the command as a
 shell script (not just a word list) or, more robustly, allowlisting the
 exact commands a sandbox is permitted to run instead of denylisting
 patterns — denylists are inherently a losing game against a determined

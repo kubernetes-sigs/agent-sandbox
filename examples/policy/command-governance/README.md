@@ -25,7 +25,7 @@ import re
 from k8s_agent_sandbox import SandboxClient
 
 _DENY_PATTERNS = [
-    r"rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r",  # rm -rf / -fr
+    r"\brm\s+-[a-z]*r[a-z]*f\b|\brm\s+-[a-z]*f[a-z]*r\b",  # rm -rf / -fr
     r"\bmkfs\b",
     r"\bdd\s+if=",
 ]

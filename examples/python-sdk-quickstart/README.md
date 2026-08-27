@@ -6,7 +6,13 @@ Agent Sandbox is a quick and easy way to start secure containers that will let a
 
 - A running Kubernetes cluster with the [Agent Sandbox Controller](../../README.md#installation) installed.
 - The [Sandbox Router](../../clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router) deployed in your cluster.
-- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See [`clients/python/agentic-sandbox-client/python-sandbox-warmpool.yaml`](../../clients/python/agentic-sandbox-client/python-sandbox-warmpool.yaml) (apply with `SANDBOX_WARMPOOL_NAME=python-sandbox-pool` and replicas > 0).
+- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster, backed by a template using the [python-runtime-sandbox](../python-runtime-sandbox) image. From the repository root:
+
+  ```bash
+  export SANDBOX_NAMESPACE=default SANDBOX_TEMPLATE_NAME=python-sandbox-template SANDBOX_WARMPOOL_NAME=python-sandbox-pool
+  envsubst < clients/python/agentic-sandbox-client/python-sandbox-template.yaml | kubectl apply -f -
+  envsubst < clients/python/agentic-sandbox-client/python-sandbox-warmpool.yaml | sed 's/replicas: 0/replicas: 1/' | kubectl apply -f -
+  ```
 - The [Python SDK](../../clients/python/agentic-sandbox-client/README.md) installed: `pip install k8s-agent-sandbox`.
 
 ## Connection Modes

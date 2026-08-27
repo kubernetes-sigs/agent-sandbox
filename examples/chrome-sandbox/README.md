@@ -22,7 +22,8 @@ spec:
     spec:
       containers:
         - name: chrome
-          image: kind.local/chrome-sandbox:latest
+          image: chrome-sandbox:local
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9222
 ```
@@ -61,8 +62,8 @@ The Chrome sandbox is already used in the project’s end-to-end tests.
 The container image is built locally (there is no published `chrome-sandbox` image):
 
 ```bash
-docker buildx build --load --tag chrome-sandbox .
-kind load docker-image chrome-sandbox   # when running against a kind cluster
+docker buildx build --load --tag chrome-sandbox:local .
+kind load docker-image chrome-sandbox:local   # when running against a kind cluster
 ```
 ---
 

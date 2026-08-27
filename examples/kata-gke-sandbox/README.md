@@ -114,7 +114,7 @@ kubectl exec -it $POD_NAME -- uname -r
 | **404 Not Found during kubectl apply**          | The GitHub raw URLs in the main branch changed.                                        | Use the pinned 3.2.0 URLs used by setup.sh (KATA_VERSION).                                                  |
 | **no handler found error in Pod events**        | The RuntimeClass is missing or the node hasn't finished installing Kata.                 | Verify setup.sh completed its RuntimeClass registration step. Check kube-system pods are running.                               |
 
-### Further Troubleshooting
+## Further Troubleshooting
 
 For issues not covered in the table, the following resources may be helpful:
 

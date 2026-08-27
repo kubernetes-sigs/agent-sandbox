@@ -1,0 +1,3 @@
+{{- if and .Values.controller.extensions (not .Values.controller.watchNamespace) }}
+{{ .Files.Get "files/extensions-rbac.generated.yaml" }}
+{{- end }}

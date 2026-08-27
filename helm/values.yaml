@@ -36,6 +36,7 @@ controller:
   # clusterDomain: "cluster.local"
   leaderElect: true
   # leaderElectionNamespace: ""
+  # watchNamespace: ""  # Namespace(s) to watch. Comma-separated for multi-namespace mode. Empty means cluster-scoped.
   extensions: false
   # enableTracing: false
   # enablePprof: false

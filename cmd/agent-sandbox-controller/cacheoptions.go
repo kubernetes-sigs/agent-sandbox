@@ -16,6 +16,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -25,6 +26,26 @@ import (
 
 	"sigs.k8s.io/agent-sandbox/controllers"
 )
+
+// parseWatchNamespaces splits a comma-separated flag value into namespace names,
+// trimming whitespace and discarding empty tokens. It returns an error if the
+// raw value is non-empty but yields no valid namespace (e.g. "," or "  ").
+func parseWatchNamespaces(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var ns []string
+	for _, tok := range strings.Split(raw, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok != "" {
+			ns = append(ns, tok)
+		}
+	}
+	if len(ns) == 0 {
+		return nil, fmt.Errorf("flag value %q contains no valid namespace names", raw)
+	}
+	return ns, nil
+}
 
 // buildCacheOptions constructs the manager's informer cache configuration.
 //
@@ -48,13 +69,19 @@ import (
 // keyed by pointer identity for lookups within this function, so writing the
 // scoped entry through a second &corev1.Pod{} literal would ADD a duplicate
 // Pod entry instead of replacing the unscoped one.
-func buildCacheOptions(scopeToTrackingLabel bool) (cache.Options, error) {
+func buildCacheOptions(scopeToTrackingLabel bool, watchNamespaces []string) (cache.Options, error) {
 	pod := &corev1.Pod{}
 	opts := cache.Options{
 		DefaultTransform: cache.TransformStripManagedFields(),
 		ByObject: map[client.Object]cache.ByObject{
 			pod: {Transform: controllers.PodCacheTransform},
 		},
+	}
+	if len(watchNamespaces) > 0 {
+		opts.DefaultNamespaces = make(map[string]cache.Config, len(watchNamespaces))
+		for _, ns := range watchNamespaces {
+			opts.DefaultNamespaces[ns] = cache.Config{}
+		}
 	}
 	if scopeToTrackingLabel {
 		trackedOnly, err := labels.NewRequirement(controllers.SandboxNameHashLabel, selection.Exists, nil)

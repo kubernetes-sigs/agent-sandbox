@@ -191,6 +191,17 @@ func run(cfg *config.Config, log logr.Logger) error {
 	}
 
 	// --- Authorization -----------------------------------------------------
+	// tokenLocations is the zero value (both fields "") unless
+	// --authz-cookie-name is set, in which case Validate() has already
+	// ensured --path-routing-prefix and a non-allow-all --authz-mode are
+	// also set. Passed to whichever Authorizer gets built below so it
+	// additionally accepts a credential from the query parameter (to
+	// bootstrap) or the cookie (every request after) — see the
+	// "Browser-session credentials" section of the README.
+	tokenLocations := authz.TokenLocations{
+		QueryParam: cfg.AuthzCookieQueryParam,
+		CookieName: cfg.AuthzCookieName,
+	}
 	var authorizer authz.Authorizer = authz.AllowAll{}
 	if cfg.AuthzMode == config.AuthzTokenReview {
 		tr, err := authz.NewTokenReviewAuthorizer(authz.TokenReviewOptions{
@@ -201,6 +212,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 			RequireToken:   cfg.AuthzTokenReviewRequireToken,
 			Audiences:      cfg.AuthzTokenReviewAudiences,
 			RequestTimeout: 0,
+			TokenLocations: tokenLocations,
 		})
 		if err != nil {
 			return fmt.Errorf("build tokenreview authorizer: %w", err)
@@ -215,7 +227,8 @@ func run(cfg *config.Config, log logr.Logger) error {
 		st, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
 			// NewScopedTokenAuthorizer trims whitespace itself, so a
 			// mounted Secret with a trailing newline just works.
-			Secret: secret,
+			Secret:         secret,
+			TokenLocations: tokenLocations,
 		})
 		if err != nil {
 			return fmt.Errorf("build scoped-token authorizer: %w", err)

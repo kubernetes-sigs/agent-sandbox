@@ -183,9 +183,9 @@ func containsPod(pods []*corev1.Pod, pod *corev1.Pod) bool {
 	return false
 }
 
-// resolvePodName returns the name of the pod associated with the given Sandbox.
-// If the sandbox has adopted a warm pool pod, the pod name is tracked in the
-// agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
+// resolvePodName returns the name of the pod associated with the given Sandbox. A Sandbox that adopted a warm pool
+// pod before the refactor to make the warm pool create full Sandbox CRs may still carry the agents.x-k8s.io/pod-name
+// annotation which holds the Pod's real name. Otherwise, the Pod name is the same as the Sandbox name.
 func resolvePodName(sandbox *sandboxv1beta1.Sandbox) string {
 	if name, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
 		return name
@@ -1277,33 +1277,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
-	ensurePodNameAnnotation := func(podName string) error {
-		annotatedPodName := ""
-		if sandbox.Annotations != nil {
-			annotatedPodName = sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
-		}
-
-		if annotatedPodName == podName {
-			return nil
-		}
-
-		if annotatedPodName != "" {
-			logger.Info("Skipping pod name annotation update because sandbox already tracks a different pod", "trackedPodName", annotatedPodName, "podName", podName)
-			return nil
-		}
-
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] = podName
-		if err := r.Patch(ctx, sandbox, patch); err != nil {
-			return fmt.Errorf("failed to set pod name annotation: %w", err)
-		}
-
-		return nil
-	}
-
 	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, error) {
 		logger.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
@@ -1390,10 +1363,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 					return nil, fmt.Errorf("failed to patch pod: %w", err)
 				}
 			}
-		}
-
-		if err := ensurePodNameAnnotation(pod.Name); err != nil {
-			return nil, err
 		}
 
 		// TODO - Do we enforce (change) spec if a pod exists ?
@@ -1493,10 +1462,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		return nil, err
-	}
-
-	if err := ensurePodNameAnnotation(pod.Name); err != nil {
 		return nil, err
 	}
 

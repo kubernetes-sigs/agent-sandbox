@@ -152,7 +152,7 @@ func readySandbox(name string) *sandboxv1beta1.Sandbox {
 			Name:      name,
 			Namespace: "default",
 			Annotations: map[string]string{
-				PodNameAnnotation: name + "-pod",
+				"test-annotation": "test-value",
 			},
 		},
 		Status: sandboxv1beta1.SandboxStatus{
@@ -202,11 +202,6 @@ func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeext
 		}
 		matched := sb.DeepCopy()
 		matched.Name = name
-		if matched.Annotations != nil {
-			if _, has := matched.Annotations[PodNameAnnotation]; has {
-				matched.Annotations[PodNameAnnotation] = name + "-pod"
-			}
-		}
 		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*matched}}, nil
 	})
 }
@@ -273,7 +268,7 @@ func TestOpen_CreatesClaimAndBecomesReady(t *testing.T) {
 	if !c.IsReady() {
 		t.Error("expected IsReady()=true after Open")
 	}
-	expectedPod := c.ClaimName() + "-pod"
+	expectedPod := c.SandboxName()
 	if c.PodName() != expectedPod {
 		t.Errorf("expected PodName=%s, got %s", expectedPod, c.PodName())
 	}
@@ -400,34 +395,6 @@ func TestClose_ToleratesAlreadyClosed(t *testing.T) {
 
 	if err := c.Close(context.Background()); err != nil {
 		t.Fatalf("Close() on unopened client returned error: %v", err)
-	}
-}
-
-func TestOpen_PodNameFallsBackToSandboxName(t *testing.T) {
-	opts := defaultTestOpts()
-	c, agentsCS, extensionsCS := newTestSandbox(opts)
-
-	sb := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sb-no-annotation",
-			Namespace: "default",
-		},
-		Status: sandboxv1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{
-				{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
-			},
-		},
-	}
-	setupWatchWithReactor(agentsCS, extensionsCS, sb)
-
-	ctx := context.Background()
-	if err := c.Open(ctx); err != nil {
-		t.Fatalf("Open() returned error: %v", err)
-	}
-	defer c.Close(context.Background())
-
-	if c.PodName() != c.SandboxName() {
-		t.Errorf("expected PodName to fall back to sandbox name %s, got %s", c.SandboxName(), c.PodName())
 	}
 }
 
@@ -1744,9 +1711,8 @@ func TestAnnotations_ReturnsAnnotations(t *testing.T) {
 	if ann == nil {
 		t.Fatal("expected non-nil annotations")
 	}
-	expectedPod := c.ClaimName() + "-pod"
-	if ann[PodNameAnnotation] != expectedPod {
-		t.Errorf("expected pod annotation %s, got %s", expectedPod, ann[PodNameAnnotation])
+	if ann["test-annotation"] != "test-value" {
+		t.Errorf("expected test-annotation test-value, got %s", ann["test-annotation"])
 	}
 }
 
@@ -2419,8 +2385,7 @@ func TestSetState_ClearsStaleAnnotations(t *testing.T) {
 		SandboxName: "sb1",
 		PodName:     "pod1",
 		Annotations: map[string]string{
-			PodNameAnnotation: "pod1",
-			"custom":          "value",
+			"custom": "value",
 		},
 	})
 	if c.Annotations() == nil {

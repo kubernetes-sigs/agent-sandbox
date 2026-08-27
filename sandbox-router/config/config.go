@@ -18,6 +18,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -36,6 +37,32 @@ const (
 	// MTLSRequired rejects any connection that does not present a valid client
 	// certificate issued by a trusted CA.
 	MTLSRequired MTLSMode = "required"
+)
+
+// CookieSameSite selects the SameSite attribute of the browser-session
+// cookie (see Config.AuthzCookieName).
+type CookieSameSite string
+
+const (
+	// CookieSameSiteLax covers same-site embedding: a page and the
+	// router sharing a registrable domain (e.g. a page on
+	// atenea.example.com embedding an iframe served from
+	// sandboxes.example.com — same site, different origin) get the
+	// cookie on the iframe load and any WebSocket handshake it opens,
+	// without requiring HTTPS. This is the default because it is both
+	// the common deployment shape and the safer one.
+	CookieSameSiteLax CookieSameSite = "lax"
+	// CookieSameSiteStrict never sends the cookie on a cross-site
+	// request, including the top-level navigation that would otherwise
+	// bootstrap it — too strict for the "open in a new tab" case this
+	// feature exists for.
+	CookieSameSiteStrict CookieSameSite = "strict"
+	// CookieSameSiteNone is for genuinely cross-site embedding
+	// (integrator and router on different registrable domains).
+	// Browsers require Secure on a SameSite=None cookie and refuse to
+	// set it otherwise; some additionally block it outright as a
+	// third-party cookie, which no router-side setting can work around.
+	CookieSameSiteNone CookieSameSite = "none"
 )
 
 // AuthzMode selects the per-request authorization strategy.
@@ -214,6 +241,73 @@ type Config struct {
 	// must share it out-of-band, e.g. the same K8s Secret mounted into
 	// both.
 	AuthzScopedTokenSecretFile string
+
+	// AuthzCookieName, when non-empty, additionally lets the configured
+	// Authorizer accept a credential carried in a cookie of this name —
+	// the only credential channel a browser attaches automatically to
+	// every request toward the same origin, including a WebSocket
+	// handshake (see authz.TokenSourceCookie and the "Browser-facing
+	// traffic" section of the README for why a header or a bare query
+	// parameter cannot do this job on their own). Requires
+	// PathRoutingPrefix: without a browser-reachable route there is
+	// nothing for this cookie to protect, and its Path attribute (see
+	// AuthzCookieQueryParam) is derived from the prefix plus the
+	// sandbox being addressed. Meaningless with AuthzMode ==
+	// AuthzAllowAll, which authorizes everything regardless.
+	AuthzCookieName string
+	// AuthzCookieQueryParam, when non-empty, is the name of a URL query
+	// parameter that bootstraps the cookie above. A GET or HEAD,
+	// non-upgrade request presenting a valid credential here gets
+	// AuthzCookieName set — scoped by Path to exactly the
+	// (namespace, id, port) it authorized — and is redirected (302) to
+	// the same URL with the parameter stripped, so the credential
+	// spends the smallest possible time exposed in the URL, browser
+	// history, and any Referer a subsequent page load might send.
+	// Requires AuthzCookieName.
+	AuthzCookieQueryParam string
+	// AuthzCookieSameSite sets the SameSite attribute of the
+	// bootstrapped cookie. Defaults to "lax".
+	AuthzCookieSameSite CookieSameSite
+	// AuthzCookieInsecure omits the Secure attribute from the
+	// bootstrapped cookie. Only for local development over plain HTTP;
+	// incompatible with AuthzCookieSameSite == CookieSameSiteNone,
+	// which browsers refuse to accept without Secure.
+	AuthzCookieInsecure bool
+	// AuthzCookieAllowedOrigins is the allowlist checked against the
+	// Origin header whenever a request's credential came from the
+	// cookie (never for header- or query-sourced credentials, which a
+	// third-party page cannot forge). A same-origin request — Origin's
+	// host equals the request's Host — is always allowed regardless of
+	// this list; a request with no Origin header at all is also let
+	// through here, since it carries nothing for this check to inspect
+	// (browsers reliably send Origin on exactly the requests this list
+	// exists to gate: cross-site requests and every WebSocket
+	// handshake). This check exists because a cookie is an ambient
+	// credential any origin's page can ride on — a WebSocket handshake
+	// in particular is not subject to the Same-Origin Policy the way a
+	// fetch is — and the router cannot lean on the upstream sandbox to
+	// reject a bad Origin itself, since it strips Origin on upgrades
+	// for code-server's benefit (see the "WebSockets and other protocol
+	// upgrades" section of the README). Each entry has the form
+	// scheme://host[:port].
+	AuthzCookieAllowedOrigins []string
+	// AuthzTrustForwardedProto makes requestOrigin() (the same-origin
+	// half of the cookie-authz check above) read the scheme from the
+	// first value of X-Forwarded-Proto instead of r.TLS != nil, when
+	// that header is present. Off by default: r.TLS only reflects
+	// whether TLS terminated in this process, which is false for every
+	// request behind a TLS-terminating load balancer or Gateway — the
+	// common production shape — so without this flag every same-origin
+	// request behind one is misclassified as cross-origin and falls
+	// through to AuthzCookieAllowedOrigins (or gets rejected if that
+	// list doesn't happen to name the deployment's own public origin).
+	// Only turn this on when the router is reachable exclusively
+	// through a proxy that sets this header itself and strips any
+	// client-supplied one — otherwise a client with direct network
+	// access to the router could forge its own scheme and defeat the
+	// same-origin check this exists to make actually match reality.
+	// Has no effect without AuthzCookieName.
+	AuthzTrustForwardedProto bool
 }
 
 // Defaults returns a Config populated with the default values used when no
@@ -236,6 +330,7 @@ func Defaults() Config {
 		AuthzMode:                 AuthzAllowAll,
 		AuthzTokenReviewTTL:       30 * time.Second,
 		AuthzTokenReviewCacheSize: 2048,
+		AuthzCookieSameSite:       CookieSameSiteLax,
 	}
 }
 
@@ -327,5 +422,77 @@ func (c *Config) Validate() error {
 	if c.AuthzMode == AuthzScopedToken && c.AuthzScopedTokenSecretFile == "" {
 		return errors.New("--authz-scoped-token-secret-file is required when --authz-mode=scoped-token")
 	}
+
+	switch c.AuthzCookieSameSite {
+	case CookieSameSiteLax, CookieSameSiteStrict, CookieSameSiteNone:
+	default:
+		return fmt.Errorf("invalid --authz-cookie-samesite %q (want lax, strict, or none)", c.AuthzCookieSameSite)
+	}
+	if c.AuthzCookieQueryParam != "" && c.AuthzCookieName == "" {
+		return errors.New("--authz-cookie-query-param requires --authz-cookie-name")
+	}
+	if c.AuthzCookieName != "" {
+		if c.PathRoutingPrefix == "" {
+			return errors.New("--authz-cookie-name requires --path-routing-prefix: without it there is no browser-reachable route for the cookie to protect")
+		}
+		if c.AuthzMode == AuthzAllowAll {
+			return errors.New("--authz-cookie-name has no effect with --authz-mode=allow-all, which authorizes every request regardless")
+		}
+		if !validTokenName(c.AuthzCookieName) {
+			return fmt.Errorf("--authz-cookie-name %q must be a valid cookie-name token (letters, digits, \"-\", \"_\", \".\", \"~\")", c.AuthzCookieName)
+		}
+	}
+	if c.AuthzCookieQueryParam != "" && !validTokenName(c.AuthzCookieQueryParam) {
+		return fmt.Errorf("--authz-cookie-query-param %q must be a valid token (letters, digits, \"-\", \"_\", \".\", \"~\")", c.AuthzCookieQueryParam)
+	}
+	if c.AuthzCookieSameSite == CookieSameSiteNone && c.AuthzCookieInsecure {
+		return errors.New("--authz-cookie-samesite=none requires the cookie to be Secure; it is incompatible with --authz-cookie-insecure")
+	}
+	for _, origin := range c.AuthzCookieAllowedOrigins {
+		if !validOriginPattern(origin) {
+			return fmt.Errorf("--authz-cookie-allowed-origins entry %q must have the form scheme://host[:port], with no path/query/fragment", origin)
+		}
+	}
+	if len(c.AuthzCookieAllowedOrigins) > 0 && c.AuthzCookieName == "" {
+		return errors.New("--authz-cookie-allowed-origins has no effect without --authz-cookie-name, which is what runs the same-origin check it configures")
+	}
+	if c.AuthzTrustForwardedProto && c.AuthzCookieName == "" {
+		return errors.New("--authz-trust-forwarded-proto has no effect without --authz-cookie-name, which is what runs the same-origin check it affects")
+	}
 	return nil
+}
+
+// validTokenName reports whether s is a non-empty string made only of
+// characters that are safe, unambiguous, and unescaped in every context
+// this package uses a name in: an RFC 6265 cookie-name, a URL query
+// parameter key, and a Go flag value copied verbatim into a Set-Cookie
+// header. Deliberately conservative — there is no legitimate reason for
+// an operator-chosen name to need anything outside this set.
+func validTokenName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.' || r == '~':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validOriginPattern reports whether s parses as exactly
+// scheme://host[:port] — no path, query, fragment, or userinfo. This is
+// the shape a browser's Origin header always takes, so an allowlist
+// entry in any other shape could never match one and is almost
+// certainly a configuration mistake worth failing fast on.
+func validOriginPattern(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return u.Scheme != "" && u.Host != "" && u.User == nil &&
+		u.Path == "" && u.RawQuery == "" && u.Fragment == ""
 }

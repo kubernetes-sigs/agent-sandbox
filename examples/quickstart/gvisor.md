@@ -73,9 +73,9 @@ spec:
     name: python-warmpool
 EOF
 
-kubectl wait --for=condition=Ready sandbox/isolation-test --timeout=60s
+kubectl wait --for=condition=Ready sandboxclaim/isolation-test --timeout=60s
 
-POD_NAME=$(kubectl get sandbox isolation-test -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD_NAME=$(kubectl get sandboxclaim isolation-test -o jsonpath='{.status.sandbox.name}')
 
 # Verify gVisor runtime
 kubectl get pod $POD_NAME -o jsonpath='{.spec.runtimeClassName}'

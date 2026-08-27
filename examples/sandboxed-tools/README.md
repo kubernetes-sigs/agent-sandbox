@@ -50,6 +50,15 @@ The LLM has access to a powerful suite of tools configured in the registry (`pkg
 * **`read`**: Reads the full contents of a file from the sandbox.
 * **`write`**: Writes specified content to a file, automatically creating parent directories if they do not exist and overwriting the file if it does.
 
+## Fake LLM for Testing
+
+Setting `OPENAI_MODEL=fake-eliza` selects a built-in fake LLM instead of a real API, so the
+agent plumbing can be exercised without an API key or network access. The fake answers every
+message with a question reflecting the user's words back (`"What is the capital of France?"`
+=> `"What do you think it means when you say 'What is the capital of France?'?"`), and knows
+one trick for testing the tool path end to end: a message of the form `run: <command>`
+makes it request a `run_command` tool call and report the result.
+
 ## Running the Example
 
 Make sure your Kubernetes cluster is running and accessible via your active `kubeconfig` context.

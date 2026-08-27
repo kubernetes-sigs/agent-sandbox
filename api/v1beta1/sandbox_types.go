@@ -123,6 +123,7 @@ const (
 	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
+	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"

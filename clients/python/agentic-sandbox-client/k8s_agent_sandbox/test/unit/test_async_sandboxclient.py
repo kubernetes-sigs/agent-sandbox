@@ -562,6 +562,71 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIn("does not support SandboxLocalTunnelConnectionConfig", str(ctx.exception))
 
+    async def test_post_requests_are_not_retried_on_server_error(self):
+        connector = AsyncSandboxConnector(
+            sandbox_id="test",
+            namespace="default",
+            connection_config=SandboxDirectConnectionConfig(
+                api_url="http://router"
+            ),
+            k8s_helper=MagicMock(),
+        )
+        response = MagicMock()
+        response.status_code = 503
+        response.is_redirect = False
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "503 Service Unavailable",
+            request=MagicMock(),
+            response=response,
+        )
+        connector.client.request = AsyncMock(return_value=response)
+
+        try:
+            with patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("POST", "execute")
+
+            self.assertEqual(connector.client.request.await_count, 1)
+        finally:
+            await connector.close()
+
+    async def test_idempotent_methods_are_retried_on_server_error(self):
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                connector = AsyncSandboxConnector(
+                    sandbox_id="test",
+                    namespace="default",
+                    connection_config=SandboxDirectConnectionConfig(
+                        api_url="http://router"
+                    ),
+                    k8s_helper=MagicMock(),
+                )
+                error_response = MagicMock()
+                error_response.status_code = 503
+                error_response.is_redirect = False
+                ok_response = MagicMock()
+                ok_response.status_code = 200
+                ok_response.is_redirect = False
+                ok_response.raise_for_status.return_value = None
+                connector.client.request = AsyncMock(
+                    side_effect=[error_response, ok_response]
+                )
+
+                try:
+                    with patch(
+                        "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                        new=AsyncMock(),
+                    ):
+                        result = await connector.send_request(method, "path")
+
+                    self.assertIs(result, ok_response)
+                    self.assertEqual(connector.client.request.await_count, 2)
+                finally:
+                    await connector.close()
+
     async def test_in_cluster_resolves_dns_by_default(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(

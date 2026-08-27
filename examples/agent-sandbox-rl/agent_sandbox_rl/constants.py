@@ -32,7 +32,6 @@ SANDBOX_VERSION = "v1beta1"
 SANDBOXES_PLURAL = "sandboxes"
 
 # Annotations / labels.
-POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 SANDBOX_NAME_HASH_LABEL = "agents.x-k8s.io/sandbox-name-hash"
 
 # A warm sandbox pod must stay alive to be claimed and exec'd into. Task images

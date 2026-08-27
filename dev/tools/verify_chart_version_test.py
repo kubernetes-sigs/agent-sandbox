@@ -53,20 +53,27 @@ class ChartVersionTestCase(unittest.TestCase):
         self.repo = Path(self._tmp.name)
 
         # verify-chart-version reads GITHUB_BASE_REF/PULL_BASE_REF, and treats
-        # CI as fatal-on-missing-base. Pin the environment for determinism.
+        # CI as fatal-on-missing-base. Pin the environment for determinism;
+        # empty is falsey, so it reads as "unset" to both checks.
         env_patch = mock.patch.dict(
             os.environ,
-            {"GITHUB_BASE_REF": "main"},
-            clear=False,
+            {
+                "GITHUB_BASE_REF": "main",
+                "PULL_BASE_REF": "",
+                "CI": "",
+                "GITHUB_ACTIONS": "",
+                "PROW_JOB_ID": "",
+            },
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)
-        for name in ("CI", "GITHUB_ACTIONS", "PROW_JOB_ID", "PULL_BASE_REF"):
-            os.environ.pop(name, None)
 
         self.git("init", "--initial-branch=main")
         self.git("config", "user.email", "test@example.com")
         self.git("config", "user.name", "Test")
+        # Contributors with commit signing enabled globally would otherwise
+        # fail to commit in this throwaway repo.
+        self.git("config", "commit.gpgsign", "false")
 
         self.write_chart("0.1.0")
         self.write("helm/templates/rbac.generated.yaml", "kind: ClusterRole\n")

@@ -29,7 +29,7 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SANDBOX_RUNTIME_CLASS` | *(required)* | RuntimeClass name: `default` (cluster default / runc), `gvisor`, `kata`, etc. Tests skip when unset. |
-| `SANDBOX_POOL_SIZES` | total worker CPUs | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to the cluster's total worker CPU count when unset. |
+| `SANDBOX_POOL_SIZES` | `{cpus/2, cpus, cpus×2}` | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to half, full, and double the cluster's total worker CPU capacity. |
 | `SANDBOX_BATCH_CAP` | `10` | Maximum number of claims fired per batch in burst recovery. Lower values reduce controller serialization; higher values stress the reconcile loop. |
 | `SANDBOX_LONGEVITY` | *(unset)* | Go duration (e.g. `2h`, `30m`) to run burst recovery in longevity mode: continuous batches with adaptive sizing until the deadline. |
 | `SANDBOX_DEBUG` | *(unset)* | Set to any non-empty value to dump scoped controller logs after each pool iteration even on success. |
@@ -82,7 +82,7 @@ SANDBOX_RUNTIME_CLASS=gvisor \
 ### Kata
 
 Kata VMs consume ~250m CPU + 350Mi RAM each (pod overhead from the RuntimeClass).
-The test auto-detects cluster CPU capacity and skips pool sizes that exceed it.
+The test auto-detects cluster CPU capacity and skips pool sizes exceeding 300%.
 
 ```shell
 SANDBOX_RUNTIME_CLASS=kata \
@@ -141,37 +141,40 @@ delay = coldStartSec × batchSize / poolSize   (floor 50ms)
 This is static (computed once) to avoid fighting with adaptive batch sizing.
 For runc this yields ~50ms, for kata ~500ms.
 
-In regular (non-longevity) mode, the delay defaults to 100ms. The test stops
-when `ReadyReplicas ≤ 1` **and** at least `poolSize` claims have been issued
-(ensuring at least one full pass through the pool), or after `2 × poolSize`
-total claims — whichever comes first.
+In regular (non-longevity) mode, the delay defaults to 100ms. The test always
+fires `2 × poolSize` claims to capture the warm-to-cold transition point.
+Pool depletion (`ReadyReplicas ≤ 1`) is logged but does not stop the test —
+claims past depletion exercise the cold fallback path and appear as
+`is_warm=false` in the CSV.
 
-## Pool Reuse and Fill Measurement
+## Pool Lifecycle and Fill Measurement
 
-`TestRuntimeClassBurstRecovery` creates a single namespace, template, and pool
-that are reused across all pool sizes. The flow:
+`TestRuntimeClassBurstRecovery` creates a fresh pool for each pool size to
+avoid stale controller state (expectations tracker, observedGeneration) from
+degrading fill times across iterations. The flow:
 
-1. **Calibration**: pool is created at 4 replicas (capped by CPU for VM
-   runtimes). A single claim measures **warm baseline** — the irreducible
-   create-claim-watch latency.
-2. **Scale to 0**: pool is drained, calibration claim deleted.
-3. **Per pool size**: scale pool to target replicas, measure **fill time**
-   (time for `ReadyReplicas` to reach target), run burst claims, scale back
-   to 0. Between iterations, the test polls until all pods in the namespace
-   (including Terminating) are fully gone — this ensures the next pool size
-   starts with all CPU capacity available, which is critical for kata where
-   pod termination can take 5-10 seconds per VM.
+1. **Calibration**: a temporary pool at 4 replicas (capped by CPU for VM
+   runtimes) measures **warm baseline** — the irreducible create-claim-watch
+   latency. The calibration pool and claim are deleted before burst iterations.
+2. **Per pool size**: a new pool is created at target replicas, **fill time**
+   is measured (time for `ReadyReplicas` to reach target), burst claims run,
+   then the pool and all claims are deleted. Between iterations, the test
+   polls until all pods in the namespace (including Terminating) are fully
+   gone — this ensures the next pool size starts with all CPU capacity
+   available, which is critical for kata where pod termination can take
+   5-10 seconds per VM.
 
 VM runtimes skip pool sizes that exceed **300%** of worker CPU capacity.
 Overprovisioning works well for kata — scheduler queues VMs while the
-pool maintains a larger buffer of pre-warmed slots. Empirically, warm
+pool maintains a larger buffer of pre-warmed slots. Empirically, green
 ratio and throughput both improve past 100% CPU (e.g., pool-28 on a
-3×8 vCPU cluster yields 89% warm at 3.3 claims/s vs 65% at 2.3 for
+3×8 vCPU cluster yields 89% green at 3.3 claims/s vs 65% at 2.3 for
 pool-16).
 
 Fill time accounts for the controller's `slowStartBatch` exponential ramp
 (1, 2, 4, 8… concurrent creates) and is used to derive claim timeouts for
-that specific pool size. The warm/cold threshold is fixed at **1 second**.
+that specific pool size. The green threshold is fixed at **1 second** — claims
+above this are classified as grey (warm but slow) or cold (fallback).
 
 ## Reading Results
 
@@ -211,9 +214,10 @@ Header metadata:
 # instance_type,n2-standard-8
 # runtime_class,kata
 # pool_size,8
-# workload_sec,0
+# workload_sec,30
+# cold_baseline_sec,8.500
 # warm_baseline_sec,0.350
-# warm_cold_threshold_sec,1.000
+# green_threshold_sec,1.000
 # pool_fill_sec,12.500
 # batch_size,4
 # max_claims,16
@@ -223,32 +227,33 @@ Header metadata:
 Footer summary:
 
 ```text
-# total_batches,6
-# total_claims,48
-# under_1s_claims,48
-# over_1s_claims,0
-# green_claims,21
-# grey_zone_claims,27
-# worst_start_sec,0.752
-# over_cold_claims,2
-# time_to_all_ready_sec,3.214
-# total_duration_sec,4.795
-# throughput_claims_per_sec,10.0
+# total_batches,4
+# total_claims,16
+# green_claims,8
+# grey_claims,4
+# cold_claims,4
+# worst_start_sec,9.215
+# total_duration_sec,18.450
+# time_to_all_ready_sec,15.720
+# throughput_claims_per_sec,0.9
 ```
 
 ### Quality zones
 
-Claims are classified into quality zones based on latency:
+Claims are classified into three zones using the controller's `is_warm` signal
+and a 1-second latency threshold:
 
-| Zone | Range | Meaning |
-|------|-------|---------|
-| **Green** | ≤ 500ms | Invisible to the caller — warm pool delivered its promise |
-| **Grey** | 500ms … 1s | Contention-degraded but still faster than cold start |
-| **Cold** | > 1s | Warm pool failed to mask the cold start |
-| **Over-cold** | > pool fill time | Worse than the measured pool fill time |
+| Zone | Criteria | Meaning |
+|------|----------|---------|
+| **Green** | `is_warm=true` and ≤ 1s | Sub-second from warm pool — target SLA met |
+| **Grey** | `is_warm=true` and > 1s | Warm-served but slow — scheduling or adoption lag |
+| **Cold** | `is_warm=false` | Pool failed to serve the claim — cold fallback path |
 
-The grey zone is dominated by API server round-trip (~170ms) and controller
-adoption overhead (~100-250ms) — it is runtime-independent.
+`is_warm` is ground truth from the controller: `true` when the sandbox pod
+existed before the claim was created (pre-warmed), `false` when the controller
+created a new sandbox on demand. This avoids runtime-specific latency
+thresholds — cold start varies from ~2s (runc) to ~8s (kata), but `is_warm`
+is unambiguous regardless of runtime.
 
 ## Report Directory Structure
 
@@ -296,8 +301,8 @@ Key differences from regular burst mode:
 - **Minimum pool size**: longevity mode skips pool sizes below 20 — smaller
   pools deplete too fast for meaningful adaptive tuning.
 - **Summary CSV**: a `burst_summary_<runtime>_pool<N>.csv` is written every
-  10 batches with aggregated p50/p95 latencies, throughput, warm ratio, and
-  batch size direction for live monitoring.
+  10 batches with aggregated p50/p95 latencies, throughput, green/grey/cold
+  counts, and batch size direction for live monitoring.
 
 ## Controller Log Capture
 
@@ -329,9 +334,6 @@ the full (unscoped) controller log as a fallback.
   to drive multi-runtime test sweeps without manual `SANDBOX_RUNTIME_CLASS` env
   var. Not all nodes support all runtimes (e.g., `kata-nvidia-gpu` requires
   specific node capabilities).
-- **CPU-relative benchmark pool sizes**: Default `SANDBOX_POOL_SIZES` to
-  `{cpuCapacity/2, cpuCapacity, cpuCapacity*2}` — half (comfortable headroom),
-  full (capacity cliff), and double (forced cold starts to measure the penalty).
 - **Multi-size lifecycle subtests**: Run `TestRuntimeClassLifecycle` at small (2)
   and half-CPU pool sizes to validate the fill → claim → refill cycle under
   moderate scheduling pressure in CI.

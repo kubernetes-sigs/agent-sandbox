@@ -852,7 +852,6 @@ func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(ctx context.Contex
 	if podName == "" {
 		podName = sb.Name
 	}
-
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: podName}, pod); err != nil {
 		return false

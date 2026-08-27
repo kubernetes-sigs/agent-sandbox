@@ -105,23 +105,53 @@ PYTHON_TEST_SUITES = [
 ]
 
 
+def find_go_modules(repo_root):
+    """ returns the repo-relative directories of all Go modules tracked in
+    the repository: "" for the repo root, plus any nested modules (e.g. the
+    examples that carry their own go.mod) """
+    # :(glob) gives ** its explicit meaning: go.mod at any depth, including
+    # the repo root.
+    output = subprocess.check_output(
+        ["git", "ls-files", "--", ":(glob)**/go.mod"], cwd=repo_root, text=True)
+    return sorted(os.path.dirname(path) for path in output.strip().splitlines())
+
+
 def run_go_tests(repo_root, artifact_dir):
-    """ runs Go unit tests and returns the exit code """
-    go_list_cmd = ["go", "list", "./..."]
-    go_list_output = subprocess.check_output(go_list_cmd, cwd=repo_root, text=True)
-    packages = go_list_output.strip().split('\n')
+    """ runs Go unit tests in every Go module and returns the exit code """
+    returncode = 0
 
-    filtered_packages = [pkg for pkg in packages if "test/e2e" not in pkg]
+    for module_rel in find_go_modules(repo_root):
+        module_dir = os.path.join(repo_root, module_rel) if module_rel else repo_root
 
-    result = subprocess.run(utils.go_tool_args(
-        "gotestsum",
-        f"--junitfile={os.path.join(artifact_dir, 'junit_unit-go.xml')}",
-        "--",
-        "-race",
-        *filtered_packages
-    ), cwd=repo_root)
+        go_list_output = subprocess.check_output(
+            ["go", "list", "./..."], cwd=module_dir, text=True)
+        packages = [
+            pkg for pkg in go_list_output.strip().split('\n')
+            if pkg and "test/e2e" not in pkg
+        ]
+        if not packages:
+            # e.g. site/ is a module only to pin the docs theme.
+            print(f"No Go packages in module {module_rel or '.'}; skipping")
+            continue
 
-    return result.returncode
+        # Keep the historical junit filename for the root module.
+        junit_name = "junit_unit-go.xml"
+        if module_rel:
+            junit_name = f"junit_unit-go-{module_rel.replace(os.sep, '-')}.xml"
+
+        print(f"\n=== Running Go unit tests: module {module_rel or '(repo root)'} ===")
+        result = subprocess.run(utils.go_tool_args(
+            "gotestsum",
+            f"--junitfile={os.path.join(artifact_dir, junit_name)}",
+            "--",
+            "-race",
+            *packages
+        ), cwd=module_dir)
+
+        if result.returncode != 0:
+            returncode = result.returncode
+
+    return returncode
 
 
 def run_python_tests(repo_root, artifact_dir):

@@ -36,7 +36,8 @@ def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
             apiVersion: kubeadm.k8s.io/v1beta4
             apiServer:
               extraArgs:
-                enable-admission-plugins: "NodeRestriction,OwnerReferencesPermissionEnforcement"
+                - name: "enable-admission-plugins"
+                  value: "NodeRestriction,OwnerReferencesPermissionEnforcement"
           - |
             kind: KubeletConfiguration
             logging:

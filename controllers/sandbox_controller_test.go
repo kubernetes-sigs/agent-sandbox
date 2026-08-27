@@ -2230,7 +2230,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "adds claim UID label to existing Pod during reconciliation",
@@ -2293,7 +2293,7 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "both warm-pool-sandbox and template-ref-hash coexist on Pod",

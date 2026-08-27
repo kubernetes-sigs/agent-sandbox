@@ -252,6 +252,23 @@ func TestNew_DefaultsApplied(t *testing.T) {
 	}
 }
 
+func TestExtractState_EmptyPodNameAnnotationFallsBackToSandboxName(t *testing.T) {
+	sb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-sandbox",
+			Annotations: map[string]string{
+				PodNameAnnotation: "",
+			},
+		},
+	}
+
+	state := extractState(sb)
+
+	if state.PodName != sb.Name {
+		t.Errorf("expected PodName to fall back to sandbox name %q for empty legacy annotation, got %q", sb.Name, state.PodName)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle tests
 // ---------------------------------------------------------------------------

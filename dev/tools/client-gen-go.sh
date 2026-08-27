@@ -39,6 +39,10 @@ EXT_APPLYCONFIG_EXTERNALS+=",sigs.k8s.io/agent-sandbox/api/v1beta1.PersistentVol
 OPENAPI_WORK_DIR=""
 
 cleanup_openapi_work() {
+  if [[ -s "${OPENAPI_REPORT:-}" ]]; then
+    echo "OpenAPI API rule violations:" >&2
+    cat "${OPENAPI_REPORT}" >&2
+  fi
   if [[ -n "${OPENAPI_WORK_DIR}" && -d "${OPENAPI_WORK_DIR}" ]]; then
     rm -rf "${OPENAPI_WORK_DIR}"
   fi

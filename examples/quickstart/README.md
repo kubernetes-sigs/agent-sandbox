@@ -123,7 +123,11 @@ EOF
 
 kubectl wait --for=condition=Ready sandboxclaim/quickstart-test --timeout=60s
 
-POD_NAME=$(kubectl get sandboxclaim quickstart-test -o jsonpath='{.status.sandbox.name}')
+SANDBOX_NAME=$(kubectl get sandboxclaim quickstart-test -o jsonpath='{.status.sandbox.name}')
+# The backing pod usually shares the Sandbox name; warm-adopted pods may differ
+# and are tracked in the pod-name annotation, so prefer it with a fallback.
+POD_NAME=$(kubectl get sandbox "$SANDBOX_NAME" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD_NAME=${POD_NAME:-$SANDBOX_NAME}
 echo "Sandbox pod: $POD_NAME"
 
 kubectl delete sandboxclaim quickstart-test
@@ -266,7 +270,11 @@ spec:
     name: python-warmpool
 EOF
 kubectl wait --for=condition=Ready sandboxclaim/${CLAIM_NAME} --timeout=60s
-POD_NAME=$(kubectl get sandboxclaim ${CLAIM_NAME} -o jsonpath='{.status.sandbox.name}' 2>/dev/null)
+SANDBOX_NAME=$(kubectl get sandboxclaim ${CLAIM_NAME} -o jsonpath='{.status.sandbox.name}' 2>/dev/null)
+# The backing pod usually shares the Sandbox name; warm-adopted pods may differ
+# and are tracked in the pod-name annotation, so prefer it with a fallback.
+POD_NAME=$(kubectl get sandbox "$SANDBOX_NAME" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD_NAME=${POD_NAME:-$SANDBOX_NAME}
 
 if [ -n "$POD_NAME" ] && [ -n "$CLAIM_NAME" ]; then
     CLAIM_TIME=$(kubectl get sandboxclaim ${CLAIM_NAME} -o jsonpath='{.metadata.creationTimestamp}')

@@ -33,7 +33,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHART_PATH = "helm/Chart.yaml"
-CHART_FILE = REPO_ROOT / CHART_PATH
 
 # Chart content written by codegen.go. Keep in sync with the //go:generate
 # directives that target helm/.
@@ -217,10 +216,10 @@ def verify(repo_root):
 
 
 def main():
-    repo_root = subprocess.check_output(
-        ["git", "rev-parse", "--show-toplevel"], text=True
-    ).strip()
-    return verify(repo_root)
+    # Resolve the root from this file rather than the cwd, so the tool always
+    # checks its own repo and agrees with bump-chart-version about which chart
+    # it is talking about.
+    return verify(str(REPO_ROOT))
 
 
 if __name__ == "__main__":

@@ -438,7 +438,12 @@ class AgentSandboxProvider:
             raise AgentSandboxCreateError(f"spec.ttl_s must be > 0, got {spec.ttl_s!r}")
         if spec.ready_timeout_s is not None and spec.ready_timeout_s <= 0:
             raise AgentSandboxCreateError(f"spec.ready_timeout_s must be > 0, got {spec.ready_timeout_s!r}")
-        options = AgentSandboxProviderOptions.from_mapping(spec.provider_options)
+        try:
+            options = AgentSandboxProviderOptions.from_mapping(spec.provider_options)
+        except (ValueError, TypeError) as e:
+            # Caller error, same contract as the create_sandbox wrap below —
+            # callers catching SandboxCreateError must see bad provider_options.
+            raise AgentSandboxCreateError(f"invalid provider_options: {e}") from e
         warmpool = self._resolve_warmpool(spec, options)
         namespace = options.namespace or self._create_config.namespace
         ready_timeout_s = spec.ready_timeout_s or self._create_config.ready_timeout_s

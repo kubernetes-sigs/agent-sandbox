@@ -228,6 +228,17 @@ async def test_create_rejects_entrypoint():
         await provider.create(SandboxSpec(entrypoint=["/bin/init"]))
 
 
+async def test_create_wraps_bad_provider_options():
+    # Both the ValueError (unknown key) and TypeError (wrong shape) paths out of
+    # from_mapping must surface as AgentSandboxCreateError, so callers catching
+    # SandboxCreateError see bad provider_options like every other caller error.
+    provider = make_provider(create={"warmpool": "pool"})
+    with pytest.raises(AgentSandboxCreateError, match="invalid provider_options.*bogus"):
+        await provider.create(SandboxSpec(provider_options={"bogus": 1}))
+    with pytest.raises(AgentSandboxCreateError, match="invalid provider_options.*pod_labels"):
+        await provider.create(SandboxSpec(provider_options={"pod_labels": "not-a-mapping"}))
+
+
 async def test_create_wraps_runtime_failure():
     client = FakeClient()
     client.create_error = SandboxNotReadyError("pool empty and pod never came up")

@@ -379,7 +379,7 @@ type SandboxStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
-// +kubebuilder:validation:XValidation:rule="!has(self.spec.service) || !self.spec.service || size(self.metadata.name) <= 63",message="metadata.name must not exceed 63 characters when spec.service is true"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.service) || !self.spec.service || (size(self.metadata.name) <= 63 && self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')) || (oldSelf.hasValue() && has(oldSelf.value().spec.service) && oldSelf.value().spec.service && (size(oldSelf.value().metadata.name) > 63 || !oldSelf.value().metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$')))",message="metadata.name must be a valid RFC 1035 label when spec.service is true",optionalOldSelf=true
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

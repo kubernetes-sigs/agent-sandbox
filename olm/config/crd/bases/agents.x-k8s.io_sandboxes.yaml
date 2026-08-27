@@ -4022,10 +4022,13 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: metadata.name must not exceed 63 characters when spec.service is
-            true
-          rule: '!has(self.spec.service) || !self.spec.service || size(self.metadata.name)
-            <= 63'
+        - message: metadata.name must be a valid RFC 1035 label when spec.service
+            is true
+          optionalOldSelf: true
+          rule: '!has(self.spec.service) || !self.spec.service || (size(self.metadata.name)
+            <= 63 && self.metadata.name.matches(''^[a-z]([-a-z0-9]*[a-z0-9])?$''))
+            || (oldSelf.hasValue() && has(oldSelf.value().spec.service) && oldSelf.value().spec.service
+            && (size(oldSelf.value().metadata.name) > 63 || !oldSelf.value().metadata.name.matches(''^[a-z]([-a-z0-9]*[a-z0-9])?$'')))'
     served: true
     storage: true
     subresources:

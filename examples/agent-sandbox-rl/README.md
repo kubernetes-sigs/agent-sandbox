@@ -598,9 +598,8 @@ PYTHONPATH=. python tests/run_full_swebench_benchmark.py \
 The fleet can fan out hundreds–thousands of concurrent claims, but throughput is
 ultimately bounded by the **Agent Sandbox controller's** reconcile concurrency, not
 this package. The controller ships with conservative defaults: the **Sandbox**
-controller reconciles at **1 worker** and **SandboxClaim** at **50** — so a
-1000-wide `max_concurrent` run still has its sandbox state transitions serialized
-one at a time. For large eval/RL batches, raise the controller's worker flags (on
+controller reconciles at **100 workers** and **SandboxClaim** at **50** — so a
+1000-wide `max_concurrent` run can still queue behind reconcile concurrency. For large eval/RL batches, raise the controller's worker flags (on
 the controller Deployment's container args, namespace `agent-sandbox-system`):
 
 | flag | default | recommended (high scale) | why |

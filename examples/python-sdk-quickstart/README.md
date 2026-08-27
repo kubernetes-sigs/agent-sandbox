@@ -4,10 +4,10 @@ Agent Sandbox is a quick and easy way to start secure containers that will let a
 
 ## Prerequisites
 
-- A running Kubernetes cluster with the [Agent Sandbox Controller](/README.md/#installation) installed.
-- The [Sandbox Router](/clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router) deployed in your cluster.
-- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See the Python Runtime Sandbox guide for setup instructions.
-- The [Python SDK](/clients/python/agentic-sandbox-client/README.md) installed: `pip install k8s-agent-sandbox`.
+- A running Kubernetes cluster with the [Agent Sandbox Controller](../../README.md#installation) installed.
+- The [Sandbox Router](../../clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router) deployed in your cluster.
+- A `SandboxWarmPool` named `python-sandbox-pool` applied to your cluster. See [`clients/python/agentic-sandbox-client/python-sandbox-warmpool.yaml`](../../clients/python/agentic-sandbox-client/python-sandbox-warmpool.yaml) (apply with `SANDBOX_WARMPOOL_NAME=python-sandbox-pool` and replicas > 0).
+- The [Python SDK](../../clients/python/agentic-sandbox-client/README.md) installed: `pip install k8s-agent-sandbox`.
 
 ## Connection Modes
 
@@ -19,7 +19,8 @@ The SDK supports three modes:
 |------|-------------|-------------|
 | **Tunnel** (default) | `SandboxLocalTunnelConnectionConfig` | Local development and CI — tunnels via `kubectl port-forward` |
 | **Gateway** | `SandboxGatewayConnectionConfig` | Production clusters with a public Kubernetes Gateway |
-| **Direct** | `SandboxDirectConnectionConfig` | In-cluster agents or custom domains, bypasses discovery entirely |
+| **Direct** | `SandboxDirectConnectionConfig` | Custom router URLs, bypasses discovery entirely |
+| **In-cluster** | `SandboxInClusterConnectionConfig` | Agents running inside the cluster |
 
 ## Usage
 

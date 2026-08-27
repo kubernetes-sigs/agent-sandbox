@@ -26,7 +26,7 @@ This composition can be achieved in multiple ways:
 
 This example demonstrates the second approach, using KRO to define a new `AgenticSandbox` CRD that encapsulates a `Sandbox`, a `NetworkPolicy`, and a `Service`.
 
-The `Service` created here is distinct from the one created by the `agent-sandbox` controller. This layering allows for more complex networking configurations and showcases the value of composing resources.
+The controller only creates its own headless `Service` when the Sandbox sets `spec.service: true`; this example leaves it unset, so the `Service` defined here is the only one. This layering allows for more complex networking configurations and showcases the value of composing resources.
 
 ## Brief introduction to KRO
 

@@ -13,7 +13,7 @@ spec:
       containers:
       - name: runtime
         # Insert your python runtime image
-        image: us-docker.pkg.dev/vicenteferrara-gke-dev/python-runtime/sandbox:latest
+        image: # REPLACE_WITH_YOUR_IMAGE
         imagePullPolicy: Always
 ---
 apiVersion: extensions.agents.x-k8s.io/v1beta1

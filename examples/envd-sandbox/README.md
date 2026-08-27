@@ -47,7 +47,7 @@ The [kvcache-ai/AgentENV](https://github.com/kvcache-ai/AgentENV) project uses e
 
 ## Prerequisites
 
-1. Kubernetes cluster with agent-sandbox controller installed ([quickstart](../../README.md#quickstart))
+1. Kubernetes cluster with agent-sandbox controller installed ([installation guide](../../README.md#installation))
 2. `kubectl` configured to access the cluster
 3. Docker (or other OCI builder) to build the envd image
 

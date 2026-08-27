@@ -31,6 +31,10 @@ const (
 	// flag.
 	EnvKubeconfig = "KUBECONFIG"
 
+	// EnvConfigMapName is the environment variable consulted for the
+	// ConfigMap name when --config-configmap-name is not present.
+	EnvConfigMapName = "SANDBOX_ROUTER_CONFIG_CONFIGMAP_NAME"
+
 	// Standard OpenTelemetry exporter env vars. When any of these is set
 	// and the corresponding --enable-* flag wasn't explicitly passed on
 	// the command line, the relevant signal is auto-enabled. See
@@ -234,6 +238,15 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Path to a YAML config file with keys matching flag names "+
 			"(kebab-case). Also honors "+EnvConfigFile+". File values override "+
 			"env-var defaults; CLI flags override file values.")
+	// --config-configmap-name follows the same pre-parse pattern as --config:
+	// the value is extracted from args/env by MapFromArgsAndEnv before
+	// flag.Parse, but registered here so it shows up in --help.
+	fs.StringVar(&c.ConfigMapName, "config-configmap-name", c.ConfigMapName,
+		"Name of a Kubernetes ConfigMap whose data keys are applied as "+
+			"configuration (same semantics as --config). The ConfigMap is "+
+			"read from the router's own namespace. Also honors "+
+			EnvConfigMapName+". ConfigMap values take precedence over "+
+			"CLI flags and config file values.")
 }
 
 // ApplyPostParseEnvDefaults turns on tracing and / or OTel metrics push

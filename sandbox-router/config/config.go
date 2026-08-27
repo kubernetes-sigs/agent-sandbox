@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package config defines the runtime configuration for the sandbox-router binary.
+// Package config defines the runtime configuration for the sandbox-router
+// binary.
+//
+// Resolution order: ConfigMap value > CLI flag > config file > env > built-in default.
 package config
 
 import (
@@ -196,6 +199,14 @@ type Config struct {
 	// the actual file load happens in main() before flag.Parse.
 	ConfigFile string
 
+	// ConfigMapName is the name of a Kubernetes ConfigMap whose data keys
+	// are applied as configuration (same key=value semantics as the YAML
+	// config file). Defaults to "sandbox-router-config". Set via
+	// --config-configmap-name or SANDBOX_ROUTER_CONFIG_CONFIGMAP_NAME.
+	// The ConfigMap is read from the namespace the router Pod runs in
+	// (detected from the in-Pod service-account namespace file).
+	ConfigMapName string
+
 	// CacheEnabled turns on the in-process Pod-IP cache. When true the
 	// router builds an informer for sandbox-owned Pods and serves the
 	// KEP-NNNN fast path: requests carrying X-Sandbox-UID are dialed at
@@ -331,6 +342,7 @@ func Defaults() Config {
 		AuthzTokenReviewTTL:       30 * time.Second,
 		AuthzTokenReviewCacheSize: 2048,
 		AuthzCookieSameSite:       CookieSameSiteLax,
+		ConfigMapName:             "sandbox-router-config",
 	}
 }
 

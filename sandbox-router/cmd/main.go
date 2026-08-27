@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -58,6 +59,14 @@ func main() {
 	config.RegisterFlags(flag.CommandLine, &cfg, os.LookupEnv)
 	zapOpts.BindFlags(flag.CommandLine)
 
+	// Detect ConfigMap name early (before flag.Parse) from raw args/env.
+	// The actual loading happens after flag.Parse so ConfigMap values
+	// take the highest precedence.
+	cmName := config.MapFromArgsAndEnv(os.Args[1:], os.Getenv)
+	if cmName != "" {
+		cfg.ConfigMapName = cmName
+	}
+
 	// Apply config-file values BEFORE flag.Parse so CLI flags take precedence.
 	// The file path is pulled from --config / SANDBOX_ROUTER_CONFIG without
 	// touching flag.Parse, so the rest of the args are still available below.
@@ -81,6 +90,35 @@ func main() {
 	// flags were set on the command line.
 	config.ApplyPostParseEnvDefaults(flag.CommandLine, &cfg,
 		func(k string) (string, bool) { return os.LookupEnv(k) })
+
+	// Apply ConfigMap values AFTER flag.Parse so they take the highest
+	// precedence — matching the controller's resolution order
+	// (ConfigMap > CLI flags > config file > env > built-in defaults).
+	if cmName != "" {
+		ns, err := config.InPodNamespace()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "configmap: %v\n", err)
+			os.Exit(2)
+		}
+		if ns == "" {
+			fmt.Fprintf(os.Stderr, "configmap: --config-configmap-name requires running in a Pod (no in-pod namespace found)\n")
+			os.Exit(2)
+		}
+		cmClient, err := buildKubernetesClient(cfg.Kubeconfig)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "configmap: kubernetes client: %v\n", err)
+			os.Exit(2)
+		}
+		cm, err := cmClient.CoreV1().ConfigMaps(ns).Get(context.Background(), cmName, metav1.GetOptions{})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "configmap: get %s/%s: %v\n", ns, cmName, err)
+			os.Exit(2)
+		}
+		if err := config.LoadFromConfigMapData(cm.Data, flag.CommandLine); err != nil {
+			fmt.Fprintf(os.Stderr, "configmap: %v\n", err)
+			os.Exit(2)
+		}
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 	log := ctrl.Log.WithName("sandbox-router")

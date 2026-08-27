@@ -109,7 +109,7 @@ The Python SDK lives at [clients/python/agentic-sandbox-client/](clients/python/
 
 ## Tests
 
-- Unit tests live next to the code they cover (`*_test.go`) and run under `make test-unit`. New behavior needs a unit test.
+- Unit tests live next to the code they cover (`*_test.go`) and run under `make test-unit`. New behavior in the controllers, SDKs, and shared packages needs a unit test. Tests and test fixtures do not themselves need tests. Be more lenient in `examples/`: test what is genuinely load-bearing there (protocol logic, security checks, tricky parsing), and don't demand coverage of example code for its own sake.
 - Reconciler tests use envtest-style fixtures in [controllers/](controllers/) and [extensions/controllers/](extensions/controllers/); follow the existing harness rather than inventing a new one.
 - E2E tests live in [test/e2e/](test/e2e/) and run against a kind cluster created by `make deploy-kind`. Use them for behavior that crosses the controller/apiserver boundary.
 - Benchmarks: [test/benchmarks/](test/benchmarks/), runnable via `make test-e2e-benchmarks`.

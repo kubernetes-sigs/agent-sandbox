@@ -206,6 +206,10 @@ fix-olm-manifests:
 verify-olm:
 	./dev/tools/verify-olm-manifests
 
+.PHONY: verify-olm-bundle
+verify-olm-bundle:
+	./dev/tools/verify-olm-bundle
+
 .PHONY: clean
 clean:
 	rm -rf dev/tools/tmp

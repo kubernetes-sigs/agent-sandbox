@@ -179,6 +179,10 @@ def verify(repo_root):
     # The version must exceed the base branch tip, not just the merge base;
     # otherwise a bump that landed concurrently is duplicated.
     tip = git(["rev-parse", f"origin/{ref}"], repo_root, check=False)
+    if tip.returncode != 0:
+        # No remote-tracking ref (local runs, or a base branch that only exists
+        # locally); a local branch of the same name is the next best tip.
+        tip = git(["rev-parse", ref], repo_root, check=False)
     version_revision = tip.stdout.strip() if tip.returncode == 0 else merge_base
     base_version = chart_version_at(repo_root, version_revision)
     if base_version is None:

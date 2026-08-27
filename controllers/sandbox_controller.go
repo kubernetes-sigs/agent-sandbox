@@ -1189,7 +1189,8 @@ func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1beta1.Sandbox) 
 // updates a regular Pod endpoint and never replaces a Pod: the resize
 // subresource is the only mutation path when the policy opts in.
 func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (*metav1.Condition, error) {
-	if !inPlaceResourceResizeEnabled(sandbox) || pod == nil || pod.Status.Phase != corev1.PodRunning || !isOwnedBySandbox(pod, sandbox) {
+	if !inPlaceResourceResizeEnabled(sandbox) || pod == nil || pod.Status.Phase != corev1.PodRunning ||
+		!pod.DeletionTimestamp.IsZero() || !isOwnedBySandbox(pod, sandbox) {
 		return nil, nil
 	}
 
@@ -1201,7 +1202,7 @@ func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandb
 		if condition := resizeConditionFromPod(sandbox, pod); condition != nil {
 			return condition, nil
 		}
-		if resourceResizeAwaitingCompletion(sandbox) && podTemplateResourcesEnacted(pod, sandbox) {
+		if resourceResizeReported(sandbox) && podTemplateResourcesEnacted(pod, sandbox) {
 			return resourceResizeCondition(sandbox, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonResourceResizeCompleted, "CPU and memory resources were resized in place"), nil
 		}
 		return nil, nil
@@ -1394,9 +1395,8 @@ func resizeTargetsEnacted(pod *corev1.Pod, targets []inPlaceResizeTarget) bool {
 	return true
 }
 
-func resourceResizeAwaitingCompletion(sandbox *sandboxv1beta1.Sandbox) bool {
-	condition := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize))
-	return condition != nil && condition.Status == metav1.ConditionUnknown
+func resourceResizeReported(sandbox *sandboxv1beta1.Sandbox) bool {
+	return meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionResourceResize)) != nil
 }
 
 func podTemplateResourcesEnacted(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {

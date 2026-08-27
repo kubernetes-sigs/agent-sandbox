@@ -164,6 +164,26 @@ func TestReconcileInPlaceResourcesUsesStrategicResizeSubresourceWithoutRestart(t
 	assert.Equal(t, current, pod.Spec.Containers[0].Resources, "resize submission must not mutate the observed Pod")
 }
 
+func TestReconcileInPlaceResourcesSkipsTerminatingPod(t *testing.T) {
+	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	deletionTime := metav1.Now()
+	pod.DeletionTimestamp = &deletionTime
+
+	patched := false
+	clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			patched = true
+			return nil
+		},
+	})
+
+	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	assert.Nil(t, condition)
+	assert.False(t, patched, "terminating Pods must not receive resize requests")
+}
+
 func TestSetResourceResizeConditionRetainsTerminalOutcomeUntilDisabled(t *testing.T) {
 	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
 	completed := resourceResizeCondition(
@@ -410,6 +430,29 @@ func TestReconcileInPlaceResourcesCompletesOnlyAfterKubeletEnactsResources(t *te
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionTrue, condition.Status)
 	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeCompleted, condition.Reason)
+}
+
+func TestReconcileInPlaceResourcesCompletesWhenTerminalOutcomeNoLongerHasDrift(t *testing.T) {
+	for _, reason := range []string{
+		sandboxv1beta1.SandboxReasonResourceResizeFailed,
+		sandboxv1beta1.SandboxReasonResourceResizeUnsupported,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			resources := resizeResources("1", "1Gi")
+			sandbox := inPlaceResizeSandbox(resources)
+			sandbox.Status.Conditions = []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionResourceResize), Status: metav1.ConditionFalse, Reason: reason,
+			}}
+			pod := inPlaceResizePod(resources)
+
+			condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+			require.NoError(t, err)
+			require.NotNil(t, condition)
+			assert.Equal(t, metav1.ConditionTrue, condition.Status)
+			assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeCompleted, condition.Reason)
+			assert.Equal(t, sandbox.Generation, condition.ObservedGeneration)
+		})
+	}
 }
 
 func TestEnsureRestartFreeResizePoliciesPreservesExplicitRestartPolicy(t *testing.T) {

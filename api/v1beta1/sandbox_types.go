@@ -120,6 +120,7 @@ const (
 
 	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime
 	// and its underlying resources were torn down (see Lifecycle).
+	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxConditionResourceResize reports the observed outcome of an
 	// opt-in in-place CPU or memory resize.
@@ -137,9 +138,6 @@ const (
 	// SandboxReasonResourceResizeFailed indicates a terminal API-server or
 	// kubelet resize failure.
 	SandboxReasonResourceResizeFailed = "Failed"
-
-	SandboxReasonExpired = "SandboxExpired"
-
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"

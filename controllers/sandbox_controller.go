@@ -1220,7 +1220,7 @@ func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandb
 		desired.Spec.Containers[target.index].Resources = target.resources
 	}
 	if err := r.SubResource("resize").Patch(ctx, desired, client.StrategicMergeFrom(pod)); err != nil {
-		if k8serrors.IsMethodNotSupported(err) {
+		if podResizeSubresourceUnavailable(err) {
 			return resourceResizeCondition(sandbox, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, "Pod resize is not supported by this cluster: "+err.Error()), nil
 		}
 		if terminalPodResizeError(err) {
@@ -1269,10 +1269,7 @@ func inPlaceResizeTargets(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) ([]i
 		if !found {
 			continue
 		}
-		target, changed, unsupported := resourceResizeTarget(current.Resources, desired.Resources)
-		if unsupported != "" {
-			return nil, fmt.Sprintf("container %q %s", current.Name, unsupported)
-		}
+		target, changed := resourceResizeTarget(current.Resources, desired.Resources)
 		if !changed {
 			continue
 		}
@@ -1285,42 +1282,33 @@ func inPlaceResizeTargets(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) ([]i
 }
 
 // resourceResizeTarget changes only CPU and memory requests/limits, leaving
-// every other resource and every non-resource Pod field untouched. Kubernetes
-// cannot remove an existing resource through the resize subresource, so an
-// omitted desired key is reported as unsupported and preserved in the target.
-func resourceResizeTarget(current, desired corev1.ResourceRequirements) (corev1.ResourceRequirements, bool, string) {
+// every other resource and every non-resource Pod field untouched. Omitted
+// desired keys preserve current values because Pod admission may have defaulted
+// them from limits or injected them through a LimitRange.
+func resourceResizeTarget(current, desired corev1.ResourceRequirements) (corev1.ResourceRequirements, bool) {
 	target := *current.DeepCopy()
 	changed := false
 	for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
-		requestChanged, removal := copyResizeResource(&target.Requests, desired.Requests, resourceName)
-		if removal {
-			return target, false, fmt.Sprintf("cannot remove existing %s request through in-place resize", resourceName)
-		}
-		changed = requestChanged || changed
-
-		limitChanged, removal := copyResizeResource(&target.Limits, desired.Limits, resourceName)
-		if removal {
-			return target, false, fmt.Sprintf("cannot remove existing %s limit through in-place resize", resourceName)
-		}
-		changed = limitChanged || changed
+		changed = copyResizeResource(&target.Requests, desired.Requests, resourceName) || changed
+		changed = copyResizeResource(&target.Limits, desired.Limits, resourceName) || changed
 	}
-	return target, changed, ""
+	return target, changed
 }
 
-func copyResizeResource(target *corev1.ResourceList, desired corev1.ResourceList, resourceName corev1.ResourceName) (bool, bool) {
+func copyResizeResource(target *corev1.ResourceList, desired corev1.ResourceList, resourceName corev1.ResourceName) bool {
 	want, wantSet := desired[resourceName]
-	current, currentSet := (*target)[resourceName]
 	if !wantSet {
-		return false, currentSet
+		return false
 	}
+	current, currentSet := (*target)[resourceName]
 	if currentSet && want.Equal(current) {
-		return false, false
+		return false
 	}
 	if *target == nil {
 		*target = corev1.ResourceList{}
 	}
 	(*target)[resourceName] = want
-	return true, false
+	return true
 }
 
 func incompatibleResizePolicy(container corev1.Container, target corev1.ResourceRequirements) string {
@@ -1400,9 +1388,19 @@ func resourceResizeReported(sandbox *sandboxv1beta1.Sandbox) bool {
 }
 
 func podTemplateResourcesEnacted(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
-	targets := make([]inPlaceResizeTarget, 0, len(sandbox.Spec.PodTemplate.Spec.Containers))
-	for index, container := range sandbox.Spec.PodTemplate.Spec.Containers {
-		targets = append(targets, inPlaceResizeTarget{index: index, name: container.Name, resources: container.Resources})
+	desiredByName := make(map[string]corev1.Container, len(sandbox.Spec.PodTemplate.Spec.Containers))
+	for _, container := range sandbox.Spec.PodTemplate.Spec.Containers {
+		desiredByName[container.Name] = container
+	}
+
+	targets := make([]inPlaceResizeTarget, 0, len(pod.Spec.Containers))
+	for index, current := range pod.Spec.Containers {
+		desired, found := desiredByName[current.Name]
+		if !found {
+			continue
+		}
+		target, _ := resourceResizeTarget(current.Resources, desired.Resources)
+		targets = append(targets, inPlaceResizeTarget{index: index, name: current.Name, resources: target})
 	}
 	return resizeTargetsEnacted(pod, targets)
 }
@@ -1419,6 +1417,21 @@ func resourceResizeCondition(sandbox *sandboxv1beta1.Sandbox, status metav1.Cond
 
 func terminalPodResizeError(err error) bool {
 	return k8serrors.IsBadRequest(err) || k8serrors.IsForbidden(err) || k8serrors.IsInvalid(err)
+}
+
+func podResizeSubresourceUnavailable(err error) bool {
+	if k8serrors.IsMethodNotSupported(err) {
+		return true
+	}
+	if !k8serrors.IsNotFound(err) {
+		return false
+	}
+	var status k8serrors.APIStatus
+	if !errors.As(err, &status) {
+		return false
+	}
+	details := status.Status().Details
+	return details == nil || details.Name == ""
 }
 
 func ensureRestartFreeResizePolicies(spec *corev1.PodSpec) {

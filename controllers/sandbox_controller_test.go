@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -239,39 +240,34 @@ func TestReconcileInPlaceResourcesAllowsMissingResizePolicy(t *testing.T) {
 	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
 }
 
-func TestReconcileInPlaceResourcesRejectsResourceRemoval(t *testing.T) {
+func TestResourceResizeTargetPreservesOmittedResources(t *testing.T) {
 	tests := []struct {
 		name           string
 		removeResource func(*corev1.ResourceRequirements)
-		wantMessage    string
 	}{
 		{
 			name: "CPU request",
 			removeResource: func(resources *corev1.ResourceRequirements) {
 				delete(resources.Requests, corev1.ResourceCPU)
 			},
-			wantMessage: "cannot remove existing cpu request",
 		},
 		{
 			name: "CPU limit",
 			removeResource: func(resources *corev1.ResourceRequirements) {
 				delete(resources.Limits, corev1.ResourceCPU)
 			},
-			wantMessage: "cannot remove existing cpu limit",
 		},
 		{
 			name: "memory request",
 			removeResource: func(resources *corev1.ResourceRequirements) {
 				delete(resources.Requests, corev1.ResourceMemory)
 			},
-			wantMessage: "cannot remove existing memory request",
 		},
 		{
 			name: "memory limit",
 			removeResource: func(resources *corev1.ResourceRequirements) {
 				delete(resources.Limits, corev1.ResourceMemory)
 			},
-			wantMessage: "cannot remove existing memory limit",
 		},
 	}
 
@@ -280,31 +276,39 @@ func TestReconcileInPlaceResourcesRejectsResourceRemoval(t *testing.T) {
 			current := resizeResources("1", "1Gi")
 			desired := *current.DeepCopy()
 			tt.removeResource(&desired)
-			sandbox := inPlaceResizeSandbox(desired)
-			pod := inPlaceResizePod(current)
-			target, changed, unsupported := resourceResizeTarget(current, desired)
+			target, changed := resourceResizeTarget(current, desired)
 			assert.False(t, changed)
-			assert.Contains(t, unsupported, tt.wantMessage)
-			assert.Equal(t, current, target, "an omitted resource must remain in the resize target")
-
-			patched := false
-			clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
-				SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
-					patched = true
-					return nil
-				},
-			})
-
-			condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
-			require.NoError(t, err)
-			require.NotNil(t, condition)
-			assert.False(t, patched, "unsupported removal must not reach the Pod resize subresource")
-			assert.Equal(t, metav1.ConditionFalse, condition.Status)
-			assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, condition.Reason)
-			assert.Contains(t, condition.Message, tt.wantMessage)
-			assert.Equal(t, current, pod.Spec.Containers[0].Resources, "the live Pod resources must remain unchanged")
+			assert.Equal(t, current, target, "an omitted resource must preserve the admission-defaulted Pod value")
 		})
 	}
+}
+
+func TestReconcileInPlaceResourcesPreservesDefaultedRequest(t *testing.T) {
+	current := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+	}
+	desired := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}
+	sandbox := inPlaceResizeSandbox(desired)
+	pod := inPlaceResizePod(current)
+
+	var patched *corev1.Pod
+	clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, obj client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			patched = obj.(*corev1.Pod).DeepCopy()
+			return nil
+		},
+	})
+
+	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
+	require.NotNil(t, patched)
+	assert.True(t, patched.Spec.Containers[0].Resources.Requests.Cpu().Equal(resource.MustParse("1")))
+	assert.True(t, patched.Spec.Containers[0].Resources.Limits.Cpu().Equal(resource.MustParse("2")))
 }
 
 func TestReconcileInPlaceResourcesRetriesWhenPodDisappears(t *testing.T) {
@@ -324,20 +328,42 @@ func TestReconcileInPlaceResourcesRetriesWhenPodDisappears(t *testing.T) {
 }
 
 func TestReconcileInPlaceResourcesReportsMissingResizeSubresourceAsUnsupported(t *testing.T) {
-	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
-	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
-	clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
-		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
-			return k8serrors.NewMethodNotSupported(schema.GroupResource{Resource: "pods"}, "patch")
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "method not supported",
+			err:  k8serrors.NewMethodNotSupported(schema.GroupResource{Resource: "pods"}, "patch"),
 		},
-	})
+		{
+			name: "endpoint not found",
+			err: &k8serrors.StatusError{ErrStatus: metav1.Status{
+				Status: metav1.StatusFailure,
+				Reason: metav1.StatusReasonNotFound,
+				Code:   http.StatusNotFound,
+			}},
+		},
+	}
 
-	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
-	require.NoError(t, err)
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionFalse, condition.Status)
-	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, condition.Reason)
-	assert.Contains(t, condition.Message, "not supported by this cluster")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
+			pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+			clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+				SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+					return tt.err
+				},
+			})
+
+			condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+			require.NoError(t, err)
+			require.NotNil(t, condition)
+			assert.Equal(t, metav1.ConditionFalse, condition.Status)
+			assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeUnsupported, condition.Reason)
+			assert.Contains(t, condition.Message, "not supported by this cluster")
+		})
+	}
 }
 
 func TestReconcileChildResourcesKeepsReadyWhenResizeSubmissionRetries(t *testing.T) {
@@ -424,6 +450,28 @@ func TestReconcileInPlaceResourcesCompletesOnlyAfterKubeletEnactsResources(t *te
 	}}
 	pod := inPlaceResizePod(desired)
 	pod.Status.ContainerStatuses[0].Resources = desired.DeepCopy()
+
+	condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeCompleted, condition.Reason)
+}
+
+func TestReconcileInPlaceResourcesCompletesWithDefaultedRequest(t *testing.T) {
+	desired := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}
+	effective := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+	}
+	sandbox := inPlaceResizeSandbox(desired)
+	sandbox.Status.Conditions = []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionResourceResize), Status: metav1.ConditionUnknown,
+		Reason: sandboxv1beta1.SandboxReasonResourceResizePending,
+	}}
+	pod := inPlaceResizePod(effective)
 
 	condition, err := (&SandboxReconciler{Client: newFakeClient()}).reconcileInPlaceResources(context.Background(), sandbox, pod)
 	require.NoError(t, err)

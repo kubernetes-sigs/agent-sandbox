@@ -208,16 +208,18 @@ auto-adapt pool sizing to cluster capacity.
 
 Key behaviors:
 
-- **`isVMRuntime()`** automatically caps pool sizes by CPU capacity for
-  kata (1 VM = 1 CPU), prevents over-provisioning
+- **`isVMRuntime()`** allows up to 300% CPU overprovisioning for kata in
+  `TestRuntimeClassBurstRecovery` — larger pools improve warm-hit ratio even
+  past CPU capacity. The strict per-CPU cap remains only in
+  `BenchmarkRuntimeClassWarmClaim`.
 - **`benchPoolSizes()`** defaults to `{half, full, 2×}` of available CPU
   capacity when `SANDBOX_POOL_SIZES` is not set
 - **Multi-size pool sweep** tests pool behavior across small → large
   configurations on each runtime
 - **CSV milestone output** with cluster metadata (instance type, runtime,
   pool size) for cross-runtime comparison
-- **Configurable burst parameters** via `SANDBOX_BATCH_CAP` and
-  `SANDBOX_SETTLE_SEC` for tuning per-runtime sensitivity
+- **Configurable burst parameters** via `SANDBOX_BATCH_CAP` for tuning
+  per-runtime sensitivity
 
 ### Why timing diversity matters
 
@@ -245,6 +247,7 @@ that look harmless on runc reveal their real cost.
 name: pull-agent-sandbox-e2e-gvisor
 cluster: eks-prow-build-cluster
 always_run: true
+optional: true
 decorate: true
 spec:
   containers:

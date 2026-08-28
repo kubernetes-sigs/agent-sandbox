@@ -289,6 +289,7 @@ that rejects `ShutdownTime`:
 ```go
 // ClaimDefaults defines default values for SandboxClaims targeting a pool.
 // +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.shutdownTime)",message="shutdownTime is not allowed in claimDefaults; use ttlSecondsAfterFinished instead"
+// +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.ttlSecondsAfterFinished) || self.lifecycle.ttlSecondsAfterFinished >= 1",message="ttlSecondsAfterFinished in claimDefaults must be at least 1 to avoid premature expiry during transient Finished states"
 type ClaimDefaults struct {
     // lifecycle specifies the default lifecycle for claims with nil Lifecycle.
     // If the claim sets its own Lifecycle, this field is ignored.
@@ -305,9 +306,17 @@ level defaults.
 The injection point is `adoptSandboxFromCandidates` in
 `extensions/controllers/sandboxclaim_controller.go`, immediately before the
 `r.Update(ctx, claim)` call that records the `AssignedSandboxName` annotation
-(line ~1143). The pool object is already resolved earlier in the adoption
-path (to find warm candidates), so it is passed into this function — no
-second lookup, no risk of a transient cache miss silently skipping defaults:
+(line ~1143).
+
+Today `adoptSandboxFromCandidates` does not receive the pool object — the pool
+is resolved lazily inside `getCandidate` / `resolveRecreate` and is not
+returned to the caller. This implementation adds the pool as an explicit
+parameter to `adoptSandboxFromCandidates`. The pool is already resolved by
+`reconcileSandboxClaim` (via `resolvePool`) before candidates are searched; if
+`resolvePool` fails, the error is returned and the claim is requeued — the
+adoption path is never reached. This means the pool object is guaranteed to be
+non-nil when `adoptSandboxFromCandidates` is called, with no second lookup and
+no risk of a cache miss silently skipping defaults:
 
 ```go
 // Extract pool's claimDefaults. The pool object was already resolved
@@ -445,6 +454,14 @@ This mirrors the existing pattern but in the reverse direction.
 the v1alpha1 object for the v1beta1 state annotation. If present, deserialize
 and restore `ClaimDefaults` on the v1beta1 `Spec`. Strip the annotation from
 the v1beta1 object so it does not leak.
+
+> **Note on annotation nesting:** `ConvertTo` also serializes the full v1alpha1
+> object into `v1alpha1SandboxWarmPoolStateAnnotation`. Because `ConvertFrom`
+> writes the v1beta1-state annotation onto the v1alpha1 object, that annotation
+> would otherwise be nested inside the serialized blob and resurface on the next
+> round-trip. The implementation must strip the v1beta1-state annotation from
+> the v1alpha1 object **before** serializing it into
+> `v1alpha1SandboxWarmPoolStateAnnotation`.
 
 This ensures lossless round-tripping in both directions: a v1beta1 pool with
 `claimDefaults` read via v1alpha1 and written back retains the field, and a

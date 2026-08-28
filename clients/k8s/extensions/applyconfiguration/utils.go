@@ -20,10 +20,8 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
-	apiv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/api/v1alpha1"
 	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/api/v1beta1"
 	internal "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/applyconfiguration/internal"
-	v1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	v1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
@@ -31,37 +29,7 @@ import (
 // apply configuration type exists for the given GroupVersionKind.
 func ForKind(kind schema.GroupVersionKind) interface{} {
 	switch kind {
-	// Group=extensions.agents.x-k8s.io, Version=v1alpha1
-	case v1alpha1.SchemeGroupVersion.WithKind("EnvVar"):
-		return &apiv1alpha1.EnvVarApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("Lifecycle"):
-		return &apiv1alpha1.LifecycleApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("NetworkPolicySpec"):
-		return &apiv1alpha1.NetworkPolicySpecApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxClaim"):
-		return &apiv1alpha1.SandboxClaimApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxClaimSpec"):
-		return &apiv1alpha1.SandboxClaimSpecApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxClaimStatus"):
-		return &apiv1alpha1.SandboxClaimStatusApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxStatus"):
-		return &apiv1alpha1.SandboxStatusApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxTemplate"):
-		return &apiv1alpha1.SandboxTemplateApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxTemplateRef"):
-		return &apiv1alpha1.SandboxTemplateRefApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxTemplateSpec"):
-		return &apiv1alpha1.SandboxTemplateSpecApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxWarmPool"):
-		return &apiv1alpha1.SandboxWarmPoolApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxWarmPoolSpec"):
-		return &apiv1alpha1.SandboxWarmPoolSpecApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxWarmPoolStatus"):
-		return &apiv1alpha1.SandboxWarmPoolStatusApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxWarmPoolUpdateStrategy"):
-		return &apiv1alpha1.SandboxWarmPoolUpdateStrategyApplyConfiguration{}
-
-		// Group=extensions.agents.x-k8s.io, Version=v1beta1
+	// Group=extensions.agents.x-k8s.io, Version=v1beta1
 	case v1beta1.SchemeGroupVersion.WithKind("EnvVar"):
 		return &apiv1beta1.EnvVarApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("Lifecycle"):

@@ -20,9 +20,7 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	managedfields "k8s.io/apimachinery/pkg/util/managedfields"
-	v1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
-	apiv1alpha1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1alpha1"
 	apiv1beta1 "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/api/v1beta1"
 	internal "sigs.k8s.io/agent-sandbox/clients/k8s/applyconfiguration/internal"
 )
@@ -31,25 +29,7 @@ import (
 // apply configuration type exists for the given GroupVersionKind.
 func ForKind(kind schema.GroupVersionKind) interface{} {
 	switch kind {
-	// Group=agents.x-k8s.io, Version=v1alpha1
-	case v1alpha1.SchemeGroupVersion.WithKind("EmbeddedObjectMetadata"):
-		return &apiv1alpha1.EmbeddedObjectMetadataApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("Lifecycle"):
-		return &apiv1alpha1.LifecycleApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("PersistentVolumeClaimTemplate"):
-		return &apiv1alpha1.PersistentVolumeClaimTemplateApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("PodMetadata"):
-		return &apiv1alpha1.PodMetadataApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("PodTemplate"):
-		return &apiv1alpha1.PodTemplateApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("Sandbox"):
-		return &apiv1alpha1.SandboxApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxSpec"):
-		return &apiv1alpha1.SandboxSpecApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("SandboxStatus"):
-		return &apiv1alpha1.SandboxStatusApplyConfiguration{}
-
-		// Group=agents.x-k8s.io, Version=v1beta1
+	// Group=agents.x-k8s.io, Version=v1beta1
 	case v1beta1.SchemeGroupVersion.WithKind("EmbeddedObjectMetadata"):
 		return &apiv1beta1.EmbeddedObjectMetadataApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("Lifecycle"):

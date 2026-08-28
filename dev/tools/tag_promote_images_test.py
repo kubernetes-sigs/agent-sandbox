@@ -118,6 +118,75 @@ class UpdateImagesYamlTest(unittest.TestCase):
         self.assertIn('"sha256:new_v2": ["v0.2.0"]', content)
         self.assertNotIn('"sha256:old_v2": ["v0.2.0"]', content)
 
+    def test_update_images_yaml_appends_missing_image_block(self):
+        sample_yaml = """
+        images:
+          - name: agent-sandbox-controller
+            dmap:
+              "sha256:old1": ["v0.1.0"]
+          - name: chrome-sandbox
+            dmap:
+              "sha256:old2": ["v0.1.0"]
+          - name: python-runtime-sandbox
+            dmap:
+              "sha256:old3": ["v0.1.0"]
+        """
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {
+            "agent-sandbox-controller": "sha256:new1",
+            "chrome-sandbox": "sha256:new2",
+            "python-runtime-sandbox": "sha256:new3",
+            "sandbox-router-go": "sha256:new4",
+        }
+
+        tag_promote.update_images_yaml(yaml_path, "v1.0.0", collected_digests)
+
+        with open(yaml_path, "r") as f:
+            content = f.read()
+
+        self.assertIn('"sha256:new1": ["v1.0.0"]', content)
+        self.assertIn('"sha256:new2": ["v1.0.0"]', content)
+        self.assertIn('"sha256:new3": ["v1.0.0"]', content)
+        self.assertIn("- name: sandbox-router-go", content)
+        self.assertIn('"sha256:new4": ["v1.0.0"]', content)
+
+    def test_update_images_yaml_appends_missing_image_block_top_level(self):
+        sample_yaml = """- name: agent-sandbox-controller
+  dmap:
+    "sha256:old1": ["v0.1.0"]
+- name: chrome-sandbox
+  dmap:
+    "sha256:old2": ["v0.1.0"]
+"""
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {
+            "agent-sandbox-controller": "sha256:new1",
+            "chrome-sandbox": "sha256:new2",
+            "sandbox-router-go": "sha256:new4",
+        }
+
+        tag_promote.update_images_yaml(yaml_path, "v1.0.0", collected_digests)
+
+        with open(yaml_path, "r") as f:
+            content = f.read()
+
+        self.assertIn("- name: sandbox-router-go\n  dmap:\n    \"sha256:new4\": [\"v1.0.0\"]", content)
+
+    def test_update_images_yaml_fails_when_digest_is_none(self):
+        sample_yaml = """- name: agent-sandbox-controller
+  dmap:
+    "sha256:old1": ["v0.1.0"]
+"""
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {
+            "agent-sandbox-controller": None,
+        }
+
+        with self.assertRaises(SystemExit) as cm:
+            tag_promote.update_images_yaml(yaml_path, "v1.0.0", collected_digests)
+        self.assertEqual(cm.exception.code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

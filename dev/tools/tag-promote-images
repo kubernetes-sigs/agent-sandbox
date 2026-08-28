@@ -150,6 +150,13 @@ def update_images_yaml(yaml_path, tag, collected_digests):
     active_image_block = None
     inserted_digests = set()
 
+    # Determine base indentation of `- name:` entries if present
+    base_indent = ""
+    for line in lines:
+        if "- name:" in line:
+            base_indent = line[:line.find("- name:")]
+            break
+
     # Iterate and inject digests
     for line in lines:
         # Detect which image block we are inside
@@ -177,6 +184,29 @@ def update_images_yaml(yaml_path, tag, collected_digests):
                 new_lines.append(new_entry)
                 inserted_digests.add(active_image_block)
                 print(f"   Updated {active_image_block}")
+
+    # Append new image blocks for images not previously in images.yaml
+    remaining = [img for img in IMAGES_TO_PROMOTE if img in collected_digests and img not in inserted_digests]
+    for img in collected_digests:
+        if img not in remaining and img not in inserted_digests:
+            remaining.append(img)
+
+    for img in remaining:
+        digest = collected_digests.get(img)
+        if not digest:
+            continue
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+        new_lines.append(f"{base_indent}- name: {img}\n")
+        new_lines.append(f"{base_indent}  dmap:\n")
+        new_lines.append(f'{base_indent}    "{digest}": ["{tag}"]\n')
+        inserted_digests.add(img)
+        print(f"   Added new image block for {img}")
+
+    missing = set(collected_digests.keys()) - inserted_digests
+    if missing:
+        print(f"❌ Failed to insert digests for: {', '.join(sorted(missing))}")
+        sys.exit(1)
 
     with open(yaml_path, "w") as f:
         f.writelines(new_lines)

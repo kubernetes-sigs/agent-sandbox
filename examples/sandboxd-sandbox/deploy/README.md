@@ -45,14 +45,15 @@ sandboxd runs as the container's main process (PID 1).
 
 ## Try it
 
-Apply **one** of the two (both define a `sandboxd-warmpool` in `default`):
+From the repository root, apply **one** of the two (both define a
+`sandboxd-warmpool` in `default`):
 
 ```console
 # Option A (default)
-$ kubectl apply -f a-runtime-image.yaml
+$ kubectl apply -f examples/sandboxd-sandbox/deploy/a-runtime-image.yaml
 
 # ...or Option B (no-rebuild)
-$ kubectl apply -f b-inject-binary.yaml
+$ kubectl apply -f examples/sandboxd-sandbox/deploy/b-inject-binary.yaml
 ```
 
 Then run the SDK example against it — the client code is identical either way:

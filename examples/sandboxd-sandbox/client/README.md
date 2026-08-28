@@ -14,9 +14,9 @@ then deletes the sandbox on exit.
 
 - A Kubernetes cluster you can reach with `kubectl` (a `kind` cluster is fine).
 - A sandboxd-backed `SandboxTemplate` **and** `SandboxWarmPool` applied to the
-  cluster. Use [`../sandbox-template.yaml`](../sandbox-template.yaml) as the
-  template (it runs the `sandboxd` image), and create a `SandboxWarmPool` that
-  references it.
+  cluster. Apply one of the ready-to-use deployment topologies in
+  [`../deploy/`](../deploy/) — each file defines both the template and a
+  `sandboxd-warmpool` (see its README for choosing between them).
 - Your kubeconfig must allow **port-forward to pods** in the target namespace —
   the SDK reaches sandboxd via a pod port-forward.
 

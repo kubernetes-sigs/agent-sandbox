@@ -65,6 +65,13 @@ spec:
             capabilities:
               drop:
                 - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           volumeMounts:
             - name: sandboxd-bin
               mountPath: /sandboxd-bin
@@ -88,6 +95,13 @@ spec:
             capabilities:
               drop:
                 - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           ports:
             - containerPort: 8080  # REST filesystem + probes
             - containerPort: 9090  # gRPC ProcessService

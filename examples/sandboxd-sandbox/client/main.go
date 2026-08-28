@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
@@ -94,8 +95,10 @@ func run(warmPool, namespace, path, content, extraCmd string) error {
 	fmt.Printf("wrote %d bytes to %s\n", len(content), path)
 
 	// 3. Exec a command over the gRPC ProcessService and grab its output.
-	// Run passes the command through `sh -c`, so quote anything interpolated.
-	result, err := sb.Run(ctx, fmt.Sprintf("cat %q", path))
+	// Run passes the command through `sh -c`, so single-quote the path
+	// (escaping embedded single quotes) to prevent shell expansion.
+	quotedPath := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	result, err := sb.Run(ctx, "cat "+quotedPath)
 	if err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
@@ -105,10 +108,9 @@ func run(warmPool, namespace, path, content, extraCmd string) error {
 	if result.Stdout != content {
 		return fmt.Errorf("command output mismatch: got %q, want %q", result.Stdout, content)
 	}
-	fmt.Printf("run: exit=%d\nstdout: %s", result.ExitCode, result.Stdout)
-	if result.Stderr != "" {
-		fmt.Printf("stderr: %s", result.Stderr)
-	}
+	fmt.Printf("run: exit=%d\n", result.ExitCode)
+	printStream("stdout", result.Stdout)
+	printStream("stderr", result.Stderr)
 
 	// 3b. Optionally exec an extra command — handy for checking which
 	// topology you're on (e.g. -cmd 'npm --version' succeeds under the
@@ -118,10 +120,9 @@ func run(warmPool, namespace, path, content, extraCmd string) error {
 		if err != nil {
 			return fmt.Errorf("run %q: %w", extraCmd, err)
 		}
-		fmt.Printf("cmd %q: exit=%d\nstdout: %s", extraCmd, extra.ExitCode, extra.Stdout)
-		if extra.Stderr != "" {
-			fmt.Printf("stderr: %s", extra.Stderr)
-		}
+		fmt.Printf("cmd %q: exit=%d\n", extraCmd, extra.ExitCode)
+		printStream("stdout", extra.Stdout)
+		printStream("stderr", extra.Stderr)
 	}
 
 	// 4. Read the file back over REST to confirm the round trip.
@@ -135,4 +136,16 @@ func run(warmPool, namespace, path, content, extraCmd string) error {
 	fmt.Printf("read back %d bytes, content matches\n", len(got))
 
 	return nil
+}
+
+// printStream prints a labeled output stream, skipping empty streams and
+// ensuring a trailing newline so following lines never concatenate onto it.
+func printStream(label, s string) {
+	if s == "" {
+		return
+	}
+	if !strings.HasSuffix(s, "\n") {
+		s += "\n"
+	}
+	fmt.Printf("%s: %s", label, s)
 }

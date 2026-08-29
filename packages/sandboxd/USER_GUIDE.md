@@ -18,10 +18,12 @@ sandboxd (runtime daemon)
   plain HTTP client works without generated stubs.
 
 Both listeners bind to `--listen-host` (default `0.0.0.0`), so the daemon is
-reachable on the pod network — via a Kubernetes Service, the `sandbox-router`,
-or an SDK pod port-forward. Containment is provided by pod isolation and
-NetworkPolicy, not loopback binding; pass `--listen-host=127.0.0.1` to
-restrict to loopback (e.g. local development).
+reachable through the Pod IP, a Kubernetes Service, or an SDK pod
+port-forward. The current `sandbox-router` is HTTP/1.1-only and cannot carry
+the gRPC `ProcessService`, so it is not a complete `sandboxd` transport.
+Containment is provided by pod isolation and NetworkPolicy, not loopback
+binding; pass `--listen-host=127.0.0.1` to restrict to loopback (e.g. local
+development).
 
 **Where commands execute:** `ProcessService` runs commands inside whichever
 container hosts the `sandboxd` process, using that container's root
@@ -36,18 +38,60 @@ The specifications live in [`spec/`](spec/):
 | `ProcessService` (gRPC) | [`spec/process/v1/process.proto`](spec/process/v1/process.proto) |
 | Filesystem & Runtime REST API | [`spec/filesystem/v1/filesystem.yaml`](spec/filesystem/v1/filesystem.yaml) |
 
-## Endpoint discovery
+## Implementing a compatible runtime
 
-SDKs and agent code discover the endpoints through environment variables set
-on the workload container:
+`sandboxd` is the reference implementation, but SDKs depend on the wire
+contracts above rather than on the `sandboxd` binary itself. An alternative
+runtime is compatible when it provides both versioned surfaces against the
+same workspace and execution environment:
+
+- Serve `process.v1.ProcessService` without changing protobuf field numbers
+  or RPC names. For a successfully started process, `Start` emits one
+  `InitEvent` before process output, zero or more `stdout`/`stderr` events,
+  and one final `ExitEvent`. The process ID from `InitEvent` is the handle
+  used by `WriteStdin`, `SendSignal`, and `ResizeTTY`.
+- Serve the `/v1/files`, `/v1/health`, and `/v1/metadata` REST resources with
+  the status codes and JSON shapes in the OpenAPI document. File payloads are
+  raw bytes rather than base64; `PUT` accepts both an octet-stream body and a
+  multipart `file` part.
+- Resolve filesystem paths and process working directories beneath one
+  sandbox root, including symlink-aware traversal protection. A file written
+  through REST must be visible to a process launched through gRPC.
+- Preserve the documented readiness, metadata filtering, error, and
+  concurrency semantics. Use standard gRPC status codes for RPC failures and
+  the OpenAPI `Error` shape for REST failures.
+- Treat `process.v1` and `/v1` as protocol versions. Backward-incompatible
+  wire changes require a new version instead of silently changing the v1
+  contract.
+
+The runtime protocol is independent of the transport used to reach a sandbox.
+A compatible proxy or router needs to route the REST and gRPC connections to
+the same sandbox, preserve HTTP/2 and gRPC trailers, and stream file bodies and
+`Start` responses without buffering them to completion. The Go SDK uses a
+direct pod port-forward by default and also supports in-cluster Pod IP or
+headless Service connectivity. The synchronous Python SDK uses a direct pod
+port-forward.
+
+A useful smoke test is to run the SDK filesystem and command operations against
+the alternative implementation, followed by the reference integration scenario
+in [`examples/sandboxd-sandbox/`](../../examples/sandboxd-sandbox/). This does
+not replace a formal conformance suite; implementations should also verify every
+RPC and REST operation and the documented error and concurrency semantics.
+
+## Endpoint addressing
+
+Workload-local applications and custom clients may use environment variables
+such as the following to locate a co-located `sandboxd` instance:
 
 ```bash
 SANDBOXD_GRPC_ADDR=localhost:9090
 SANDBOXD_REST_ADDR=localhost:8080
 ```
 
-If the variables are absent, SDKs fall back to the legacy `python-runtime`
-API, enabling a phased rollout across sandbox templates.
+These names are an application convention: `sandboxd` does not require them,
+and the supported SDKs do not inspect them or automatically switch between
+`sandboxd` and the legacy `python-runtime`. Select the runtime and connectivity
+explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 
 ## API summary
 
@@ -229,11 +273,13 @@ fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
 
 ## Agent Sandbox SDK access
 
-sandboxd binds the pod network (`0.0.0.0` by default), so it is reachable like
-any other in-pod service — via a Kubernetes **Service** or the
-**sandbox-router**. The SDKs connect via a **pod port-forward** to the sandbox
-pod (both `:8080` and `:9090`): filesystem calls go over REST, `Run` goes over
-gRPC.
+`sandboxd` binds the pod network (`0.0.0.0` by default), but the SDKs do not
+auto-detect it. They select the runtime and transport explicitly. The Go SDK
+and synchronous Python SDK can use a direct **pod port-forward** for `:8080`
+and `:9090`; the Go SDK can also dial the Pod IP or the Sandbox's headless
+Service from inside the cluster. Filesystem calls use REST and `Run` uses
+gRPC. The current `sandbox-router` cannot provide this combined transport
+because it does not proxy gRPC.
 
 > **Where commands run:** `ProcessService` executes commands inside the
 > container that hosts `sandboxd` (see
@@ -257,6 +303,18 @@ res, _ := sb.Run(ctx, "cat src/notes.txt")     // gRPC ProcessService.Execute
 _ = sb.Delete(ctx, "src", true)                // sandboxd-only
 ```
 
+For an in-cluster caller, set `Connectivity` explicitly. Service connectivity
+requires `spec.service: true` on the Sandbox template; Pod IP connectivity
+does not, but it carries the risk of addressing a recycled Pod IP.
+
+```go
+sb, _ := sandbox.New(ctx, sandbox.Options{
+    WarmPoolName: "my-pool",
+    Runtime:      sandbox.RuntimeSandboxd,
+    Connectivity: sandbox.ConnectivityInClusterService,
+})
+```
+
 **Python** — select the runtime via the connection config:
 
 ```python
@@ -275,9 +333,14 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
 ## Security model
 
 - **Network containment:** both ports bind `0.0.0.0` by default so the daemon
-  is reachable on the pod network (Service / sandbox-router). Containment is
-  provided by **pod isolation and NetworkPolicy**, not loopback binding; pass
-  `--listen-host=127.0.0.1` to restrict to loopback for local development.
+  is reachable on the pod network through the Pod IP or a Service.
+  Containment is provided by **pod isolation and NetworkPolicy**, not
+  loopback binding; pass `--listen-host=127.0.0.1` to restrict to loopback
+  for local development.
+- **Transport authentication:** `sandboxd` does not authenticate clients or
+  terminate TLS. Pod port-forward access is authorized by the Kubernetes API
+  server. Protect direct pod-network access with NetworkPolicy, a service mesh
+  or mTLS proxy, or another trusted transport boundary.
 - **Path confinement:** every file path (and process `cwd`) is resolved with
   symlink evaluation and rejected unless it stays under `--root-dir`.
 - **Metadata hygiene:** `/v1/metadata` only serves env vars matching

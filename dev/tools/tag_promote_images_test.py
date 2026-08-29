@@ -233,6 +233,83 @@ class UpdateImagesYamlTest(unittest.TestCase):
             content = f.read()
         self.assertEqual(content.count("- name: sandbox-router-go"), 1)
 
+    def test_update_images_yaml_appends_to_flow_style_empty_images_manifest(self):
+        sample_yaml = """images: []\n"""
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {
+            "sandbox-router-go": "sha256:new4",
+        }
+
+        tag_promote.update_images_yaml(yaml_path, "v1.0.0", collected_digests)
+
+        with open(yaml_path, "r") as f:
+            content = f.read()
+
+        parsed = yaml.safe_load(content)
+        self.assertEqual(
+            parsed,
+            {
+                "images": [
+                    {
+                        "name": "sandbox-router-go",
+                        "dmap": {
+                            "sha256:new4": ["v1.0.0"],
+                        },
+                    }
+                ]
+            },
+        )
+
+    def test_update_images_yaml_exact_name_matching_prevents_prefix_collision(self):
+        sample_yaml = """- name: sandbox-router-go
+  dmap:
+    "sha256:old_go": ["v0.1.0"]
+- name: sandbox-router
+  dmap:
+    "sha256:old_router": ["v0.1.0"]
+"""
+        yaml_path = self._write_temp_yaml(sample_yaml)
+        collected_digests = {
+            "sandbox-router": "sha256:new_router",
+            "sandbox-router-go": "sha256:new_go",
+        }
+
+        tag_promote.update_images_yaml(yaml_path, "v1.0.0", collected_digests)
+
+        with open(yaml_path, "r") as f:
+            content = f.read()
+
+        parsed = yaml.safe_load(content)
+        self.assertEqual(
+            parsed,
+            [
+                {
+                    "name": "sandbox-router-go",
+                    "dmap": {
+                        "sha256:new_go": ["v1.0.0"],
+                        "sha256:old_go": ["v0.1.0"],
+                    },
+                },
+                {
+                    "name": "sandbox-router",
+                    "dmap": {
+                        "sha256:new_router": ["v1.0.0"],
+                        "sha256:old_router": ["v0.1.0"],
+                    },
+                },
+            ],
+        )
+
+    def test_parse_image_name(self):
+        self.assertEqual(tag_promote.parse_image_name("- name: my-image"), "my-image")
+        self.assertEqual(tag_promote.parse_image_name("  - name: my-image"), "my-image")
+        self.assertEqual(tag_promote.parse_image_name("- name: 'my-image'"), "my-image")
+        self.assertEqual(tag_promote.parse_image_name('- name: "my-image"'), "my-image")
+        self.assertEqual(tag_promote.parse_image_name("- name: my-image # comment"), "my-image")
+        self.assertIsNone(tag_promote.parse_image_name("- name:"))
+        self.assertIsNone(tag_promote.parse_image_name("# - name: commented"))
+        self.assertIsNone(tag_promote.parse_image_name("images: []"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -136,6 +136,22 @@ def get_latest_digest(image_name, tag):
     return None
 
 
+def parse_image_name(line):
+    """Extracts the image name from a line starting with '- name:'.
+
+    Handles inline comments (e.g. '# ...') and optional quotes.
+    Returns None if the line does not define an image name.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("- name:"):
+        return None
+    rest = stripped[len("- name:"):].strip()
+    if not rest:
+        return None
+    token = rest.split()[0]
+    return token.strip("'\"")
+
+
 def update_images_yaml(yaml_path, tag, collected_digests):
     """Updates images.yaml with new digests for promoted images."""
     if not os.path.exists(yaml_path):
@@ -152,28 +168,37 @@ def update_images_yaml(yaml_path, tag, collected_digests):
     inserted_digests = set()
     all_target_images = set(IMAGES_TO_PROMOTE) | set(collected_digests.keys())
 
-    # Determine base indentation of `- name:` entries if present
+    # Determine base indentation of list items
     base_indent = ""
-    for line in lines:
-        if "- name:" in line:
-            base_indent = line[:line.find("- name:")]
-            break
+    has_list_items = any(parse_image_name(line) is not None for line in lines)
+    if not has_list_items:
+        for i, line in enumerate(lines):
+            clean = line.strip().split("#")[0].strip()
+            if clean in ("images: []", "images:[]") or (clean.startswith("images:") and "[]" in clean):
+                indent = line[:line.find("images:")]
+                lines[i] = f"{indent}images:\n"
+                base_indent = indent + "  "
+                break
+            elif clean == "images:":
+                indent = line[:line.find("images:")]
+                base_indent = indent + "  "
+                break
     else:
         for line in lines:
-            if line.strip() == "images:" or line.strip().startswith("images:"):
-                base_indent = line[:line.find("images:")] + "  "
+            if parse_image_name(line) is not None:
+                base_indent = line[:line.find("- name:")]
                 break
 
     # Iterate and inject digests
     for line in lines:
         # Detect which image block we are inside
-        if "- name:" in line:
-            active_image_block = None
-            for img in all_target_images:
-                if f"- name: {img}" in line:
-                    active_image_block = img
-                    existing_images.add(img)
-                    break
+        img_name = parse_image_name(line)
+        if img_name is not None:
+            if img_name in all_target_images:
+                active_image_block = img_name
+                existing_images.add(img_name)
+            else:
+                active_image_block = None
 
         # If inside an active image block, skip old entries matching this tag to avoid duplicates
         if active_image_block and (f'"{tag}"' in line or f"'{tag}'" in line):

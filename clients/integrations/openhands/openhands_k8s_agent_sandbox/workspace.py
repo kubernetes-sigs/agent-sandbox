@@ -141,6 +141,15 @@ class AgentSandboxWorkspace(RemoteWorkspace):
     claim_labels: dict[str, str] | None = Field(
         default=None, description="Labels for the SandboxClaim object."
     )
+    check_server_version: bool = Field(
+        default=True,
+        description=(
+            "After attach, compare the agent-server's reported version with "
+            "the installed openhands-sdk and log a loud warning on skew (the "
+            "SDK and server image are released together). Never fails the "
+            "attach; disable for offline tests."
+        ),
+    )
     sandbox_client: Any = Field(
         default=None,
         exclude=True,
@@ -214,6 +223,27 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             raise
         logger.info("Agent-sandbox workspace is ready at %s", self.host)
         super().model_post_init(context)
+        if self.check_server_version:
+            self._log_version_skew()
+
+    def _log_version_skew(self) -> None:
+        """Warn (never fail) when the server and SDK versions diverge."""
+        try:
+            info = self.get_server_info()
+            server_version = str(info.get("version") or "")
+            from importlib.metadata import version as _dist_version
+
+            sdk_version = _dist_version("openhands-sdk")
+            if server_version and server_version != sdk_version:
+                logger.warning(
+                    "agent-server reports version %s but the installed "
+                    "openhands-sdk is %s — align the SandboxTemplate image "
+                    "tag with the SDK release to avoid protocol skew",
+                    server_version,
+                    sdk_version,
+                )
+        except Exception as e:  # noqa: BLE001 — advisory only
+            logger.debug("server version check skipped: %s", e)
 
     def _endpoint_url(self, sandbox: Any) -> str:
         if self.router_url:

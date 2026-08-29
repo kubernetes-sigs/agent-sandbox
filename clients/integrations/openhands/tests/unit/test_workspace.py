@@ -66,6 +66,8 @@ def no_health(monkeypatch):
 
 def make_workspace(client=None, **kwargs):
     kwargs.setdefault("warmpool", "agent-server-pool")
+    # Offline tests: the advisory version check would issue a real HTTP call.
+    kwargs.setdefault("check_server_version", False)
     return AgentSandboxWorkspace(sandbox_client=client or FakeClient(), **kwargs)
 
 
@@ -244,6 +246,33 @@ def test_router_and_endpoint_template_are_exclusive():
             endpoint_template="http://gw/{claim_name}",
         )
     assert client.create_calls == []  # rejected before any claim
+
+
+# -------------------------------------------------------- version skew check
+
+
+def test_version_skew_warns(no_health, monkeypatch, caplog):
+    monkeypatch.setattr(
+        AgentSandboxWorkspace, "get_server_info",
+        lambda self: {"version": "0.0.1-other"},
+    )
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        make_workspace(check_server_version=True)
+    assert any("protocol skew" in r.message for r in caplog.records)
+
+
+def test_version_check_failure_is_silent(no_health, monkeypatch, caplog):
+    def boom(self):
+        raise ConnectionError("unreachable")
+
+    monkeypatch.setattr(AgentSandboxWorkspace, "get_server_info", boom)
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        make_workspace(check_server_version=True)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 # ----------------------------------------------------------------- teardown

@@ -49,6 +49,15 @@ updates:
       patterns:
       - "*"
 
+- package-ecosystem: "npm"
+  directory: "/site"
+  schedule:
+    interval: "daily"
+  groups:
+    npm-dependencies:
+      patterns:
+      - "*"
+
 - package-ecosystem: "docker"
   directory: "/"
   schedule:

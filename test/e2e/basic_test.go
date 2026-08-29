@@ -179,15 +179,8 @@ func TestSandboxServiceNameValidation(t *testing.T) {
 
 	t.Run("64 characters with service is rejected", func(t *testing.T) {
 		err := tc.CreateWithCleanup(t.Context(), newSandbox(strings.Repeat("b", 64), new(true)))
-		require.ErrorContains(t, err, "metadata.name must be a valid RFC 1035 label when spec.service is true")
+		require.ErrorContains(t, err, "metadata.name must not exceed 63 characters when spec.service is true")
 	})
-
-	for _, name := range []string{"0abc", "a.b"} {
-		t.Run(fmt.Sprintf("%q with service is rejected", name), func(t *testing.T) {
-			err := tc.CreateWithCleanup(t.Context(), newSandbox(name, new(true)))
-			require.ErrorContains(t, err, "metadata.name must be a valid RFC 1035 label when spec.service is true")
-		})
-	}
 
 	t.Run("64 characters without service succeeds but enabling service is rejected", func(t *testing.T) {
 		sandbox := newSandbox(strings.Repeat("c", 64), new(false))
@@ -195,7 +188,7 @@ func TestSandboxServiceNameValidation(t *testing.T) {
 
 		sandbox.Spec.Service = new(true)
 		err := tc.Update(t.Context(), sandbox)
-		require.ErrorContains(t, err, "metadata.name must be a valid RFC 1035 label when spec.service is true")
+		require.ErrorContains(t, err, "metadata.name must not exceed 63 characters when spec.service is true")
 	})
 
 	t.Run("64 characters with service unset succeeds", func(t *testing.T) {

@@ -294,11 +294,11 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         if sandbox is None:
             return
         self._sandbox = None
+        # Capture before terminate(): the SDK clears identity fields on close.
+        claim_name = getattr(sandbox, "claim_name", "?")
         try:
             sandbox.terminate()
-            logger.info(
-                "Released sandbox claim %s", getattr(sandbox, "claim_name", "?")
-            )
+            logger.info("Released sandbox claim %s", claim_name)
         except Exception as e:  # noqa: BLE001 — ttl_s backstops a failed delete
             logger.warning(
                 "Failed to terminate sandbox %s: %s (ttl_s backstop applies "

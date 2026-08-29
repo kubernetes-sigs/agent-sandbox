@@ -7,6 +7,7 @@ metadata:
   name: agent-server-pool
   namespace: default
 spec:
-  templateRef:
-    name: openhands-agent-server
   replicas: 8
+  sandboxTemplateRef:
+    # Must exactly match the SandboxTemplate's metadata.name.
+    name: openhands-agent-server

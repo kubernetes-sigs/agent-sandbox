@@ -752,14 +752,14 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
 
 			var podList corev1.PodList
-			if err := tc.List(t.Context(), &podList, client.InNamespace(ns.Name)); err == nil {
-				nodePods := make(map[string]int)
-				for i := range podList.Items {
-					nodePods[podList.Items[i].Spec.NodeName]++
-				}
-				for _, w := range cluster.Workers {
-					_ = cw.Write([]string{"# pods_on_node", w.Name, strconv.Itoa(nodePods[w.Name])})
-				}
+			require.NoError(t, tc.List(t.Context(), &podList, client.InNamespace(ns.Name)),
+				"listing pods for per-node distribution")
+			nodePods := make(map[string]int)
+			for i := range podList.Items {
+				nodePods[podList.Items[i].Spec.NodeName]++
+			}
+			for _, w := range cluster.Workers {
+				_ = cw.Write([]string{"# pods_on_node", w.Name, strconv.Itoa(nodePods[w.Name])})
 			}
 
 			if longevity == 0 || t.Failed() || os.Getenv("SANDBOX_DEBUG") != "" {

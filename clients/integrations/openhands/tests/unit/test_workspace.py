@@ -165,8 +165,8 @@ def test_health_check_polls_urlopen(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    def fake_urlopen(url, timeout):
-        calls.append(url)
+    def fake_urlopen(request, timeout):
+        calls.append(request)
         if len(calls) == 1:
             raise ConnectionError("not yet")
         return FakeResponse()
@@ -177,7 +177,73 @@ def test_health_check_polls_urlopen(monkeypatch):
     ws = make_workspace(FakeClient(FakeSandbox(pod_ip="10.0.0.3")))
     assert ws.host == "http://10.0.0.3:8000"
     assert len(calls) == 2
-    assert calls[0] == "http://10.0.0.3:8000/health"
+    assert calls[0].full_url == "http://10.0.0.3:8000/health"
+
+
+# ------------------------------------------------------------- router mode
+
+
+def test_router_mode_host_and_headers(no_health):
+    sandbox = FakeSandbox(pod_ip="10.4.4.4", sandbox_id="sbx-777")
+    ws = make_workspace(
+        FakeClient(sandbox),
+        namespace="rl",
+        router_url="http://sandbox-router.default.svc:8080/",
+        router_auth_token="router-secret",
+        api_key="pool-secret",
+    )
+    assert ws.host == "http://sandbox-router.default.svc:8080"
+    headers = ws._headers
+    assert headers["X-Sandbox-ID"] == "sbx-777"
+    assert headers["X-Sandbox-Namespace"] == "rl"
+    assert headers["X-Sandbox-Port"] == "8000"
+    assert headers["X-Sandbox-Pod-IP"] == "10.4.4.4"
+    assert headers["Authorization"] == "Bearer router-secret"
+    # Session auth for the agent-server rides along; the router strips only
+    # Authorization before forwarding.
+    assert headers["X-Session-API-Key"] == "pool-secret"
+
+
+def test_router_mode_health_check_sends_routing_headers(monkeypatch):
+    captured = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        captured.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "openhands_k8s_agent_sandbox.workspace.urlopen", fake_urlopen
+    )
+    make_workspace(
+        FakeClient(FakeSandbox(sandbox_id="sbx-9")),
+        router_url="http://router:8080",
+        router_auth_token="tok",
+    )
+    request = captured[0]
+    assert request.full_url == "http://router:8080/health"
+    # urllib capitalizes header names on add
+    assert request.get_header("X-sandbox-id") == "sbx-9"
+    assert request.get_header("Authorization") == "Bearer tok"
+
+
+def test_router_and_endpoint_template_are_exclusive():
+    client = FakeClient()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        make_workspace(
+            client,
+            router_url="http://router:8080",
+            endpoint_template="http://gw/{claim_name}",
+        )
+    assert client.create_calls == []  # rejected before any claim
 
 
 # ----------------------------------------------------------------- teardown

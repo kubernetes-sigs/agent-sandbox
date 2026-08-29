@@ -140,12 +140,39 @@ python example.py
 | `api_key` | `None` | sent as `X-Session-API-Key`; must equal the pool's session key |
 | `working_dir` | `/workspace` | agent/tool cwd inside the pod |
 | `server_port` | `8000` | agent-server port inside the pod |
-| `endpoint_template` | `None` | URL template for gateway/proxied data paths; supports `{pod_ip}`, `{port}`, `{namespace}`, `{claim_name}`, `{sandbox_id}` |
+| `endpoint_template` | `None` | URL template for gateway/proxied data paths; supports `{pod_ip}`, `{port}`, `{namespace}`, `{claim_name}`, `{sandbox_id}`; mutually exclusive with `router_url` |
+| `router_url` | `None` | base URL of a [sandbox-router](../../python/agentic-sandbox-client/sandbox-router) deployment; all traffic (health check included) goes to the router with `X-Sandbox-*` routing headers injected |
+| `router_auth_token` | `None` | Bearer token for the router (`ROUTER_AUTH_TOKEN`); stripped by the router before forwarding, so it composes with `api_key` |
 | `claim_timeout_s` | `60` | wait for the claim to bind a Ready sandbox |
 | `health_check_timeout` | `10.0` | wait for `/health`; deliberately short — a warm pod that isn't healthy is broken, fail fast and re-claim |
 | `ttl_s` | `None` | claim TTL (`spec.lifecycle` shutdownTime) — the controller deletes the claim on expiry even if this process died |
 | `claim_labels` | `None` | labels on the `SandboxClaim` object |
 | `sandbox_client` | `None` | inject a configured `k8s_agent_sandbox.SandboxClient`; built with defaults when omitted |
+
+## Routing through sandbox-router
+
+When pod IPs aren't routable from the client (off-VPC clients, laptop dev), route
+through the client SDK's [sandbox-router](../../python/agentic-sandbox-client/sandbox-router)
+instead of raw pod IPs:
+
+```python
+AgentSandboxWorkspace(
+    warmpool="agent-server-pool",
+    router_url="http://sandbox-router.default.svc:8080",   # or its LB/Gateway address
+    router_auth_token="<ROUTER_AUTH_TOKEN>",
+    api_key="<pool session key>",
+)
+```
+
+The workspace sends `X-Sandbox-ID`/`-Namespace`/`-Port`/`-Pod-IP` routing headers on
+every request (health check included); paths pass through the router verbatim, so
+the agent-server protocol is unchanged. Two auth layers compose: the Bearer token
+authenticates to the router, which strips `Authorization` before forwarding, while
+`X-Session-API-Key` passes through to the agent-server. The router's proxy timeout
+(default 180 s) is compatible with the SDK's start-then-poll command pattern — no
+long-lived requests. Laptop tip: the router is a regular runc Deployment, so
+`kubectl port-forward svc/sandbox-router` works even when the sandboxes themselves
+are gVisor pods (where direct pod port-forward does not — see Troubleshooting).
 
 ## Auth model
 

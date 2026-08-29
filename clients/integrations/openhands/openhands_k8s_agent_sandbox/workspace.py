@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from pydantic import Field, PrivateAttr
 
@@ -94,7 +94,26 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             "Optional URL template for the agent-server endpoint, for gateway or "
             "proxied data paths. Supports {pod_ip}, {port}, {namespace}, "
             "{claim_name}, {sandbox_id}. Default: http://{pod_ip}:{port} "
-            "(GKE pod IPs are VPC-routable)."
+            "(GKE pod IPs are VPC-routable). Mutually exclusive with router_url."
+        ),
+    )
+    router_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL of a sandbox-router deployment (see the client's "
+            "sandbox-router/). When set, all traffic goes to the router with "
+            "X-Sandbox-* routing headers (ID, namespace, port, pod IP) injected "
+            "on every request — including the health check. Use when pod IPs "
+            "are not routable from the client. Mutually exclusive with "
+            "endpoint_template."
+        ),
+    )
+    router_auth_token: str | None = Field(
+        default=None,
+        description=(
+            "Bearer token for the sandbox-router (its ROUTER_AUTH_TOKEN). Sent "
+            "as Authorization to the router, which strips it before forwarding "
+            "— it never reaches the agent-server, so it composes with api_key."
         ),
     )
     claim_timeout_s: int = Field(
@@ -134,8 +153,33 @@ class AgentSandboxWorkspace(RemoteWorkspace):
     _sandbox: Any = PrivateAttr(default=None)
     _owns_client: bool = PrivateAttr(default=False)
 
+    @property
+    def _headers(self):
+        """Session headers, plus router routing/auth headers in router mode.
+
+        The router resolves the backend from X-Sandbox-* headers on EVERY
+        request; the pod IP shortcut skips the per-sandbox Service DNS hop.
+        The Bearer token authenticates to the router only — the router strips
+        Authorization before forwarding, so it never shadows api_key.
+        """
+        headers = dict(super()._headers)
+        if self.router_url and self._sandbox is not None:
+            headers["X-Sandbox-ID"] = getattr(self._sandbox, "sandbox_id", "")
+            headers["X-Sandbox-Namespace"] = self.namespace
+            headers["X-Sandbox-Port"] = str(self.server_port)
+            pod_ip = self._sandbox.get_pod_ip()
+            if pod_ip:
+                headers["X-Sandbox-Pod-IP"] = pod_ip
+            if self.router_auth_token:
+                headers["Authorization"] = f"Bearer {self.router_auth_token}"
+        return headers
+
     def model_post_init(self, context: Any) -> None:
         """Claim a warm pod, point RemoteWorkspace at it, verify health."""
+        if self.router_url and self.endpoint_template:
+            raise ValueError(
+                "router_url and endpoint_template are mutually exclusive"
+            )
         client = self.sandbox_client
         if client is None:
             from k8s_agent_sandbox import SandboxClient
@@ -172,6 +216,8 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         super().model_post_init(context)
 
     def _endpoint_url(self, sandbox: Any) -> str:
+        if self.router_url:
+            return self.router_url.rstrip("/")
         pod_ip = sandbox.get_pod_ip()
         if self.endpoint_template:
             return self.endpoint_template.format(
@@ -190,13 +236,18 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         return f"http://{pod_ip}:{self.server_port}"
 
     def _wait_for_health(self, *, timeout: float) -> None:
-        """Poll GET /health until 2xx or the (short) budget elapses."""
+        """Poll GET /health until 2xx or the (short) budget elapses.
+
+        In router mode the routing headers must ride along or the router
+        rejects the probe with 400 before it ever reaches the sandbox.
+        """
         health_url = f"{self.host.rstrip('/')}/health"
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                with urlopen(health_url, timeout=1.0) as resp:
+                request = Request(health_url, headers=self._headers)
+                with urlopen(request, timeout=1.0) as resp:
                     if 200 <= getattr(resp, "status", 200) < 300:
                         return
             except Exception as e:  # noqa: BLE001 — retried until the deadline

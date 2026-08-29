@@ -21,16 +21,17 @@ info:
     High-performance raw file transfers (read/write) are served over HTTP REST, while interactive
     process execution is served over gRPC on a dedicated port.
     Compatibility & Migration Note: This specification replaces the unversioned python-runtime
-    endpoints (/upload, /download, /list, /exists) and FileEntry wire representation. Existing
-    SDK clients migrate to this versioned /v1/ surface using the dynamic endpoint discovery and
-    breaking change rollout strategy documented in KEP-539.2.
-    Security note: sandboxd listens strictly on localhost or Unix Domain Socket within the isolated
-    container network namespace and must never be exposed on public interfaces.
+    endpoints (/upload, /download, /list, /exists) and FileEntry wire representation. Supported
+    SDK clients select this versioned /v1/ surface explicitly; they do not auto-detect the runtime
+    from environment variables. See KEP-539.2 for the endpoint and wire-format differences.
+    Security note: sandboxd listens on the pod network by default. Protect both runtime ports with
+    pod isolation and NetworkPolicy, or bind to loopback for local-only access. Never expose the
+    runtime API directly to an untrusted public network.
   version: "v1"
 
 servers:
   - url: http://localhost:8080/v1
-    description: sandboxd REST server (default port 8080 or Unix Domain Socket)
+    description: sandboxd REST server (default port 8080; listen address is configurable)
 
 paths:
   /files/{path}:
@@ -62,6 +63,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DirectoryListing"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    head:
+      summary: Check whether a file or directory exists
+      description: Returns the same status and metadata headers as GET without a response body.
+      responses:
+        "200":
+          description: Path exists
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":

@@ -34,7 +34,8 @@ import (
 // pod, carrying both sandboxd listeners: the Filesystem & Runtime REST API
 // and the gRPC ProcessService. It is the default sandboxd transport because
 // the tunnel is brokered by the apiserver, so it works from a laptop or CI
-// runner with no route to pod IPs. The sandbox-router is HTTP/1.1-only besides.
+// runner with no route to pod IPs. The sandbox-router is HTTP/1.1-only besides,
+// while sandboxd listens on the pod network by default.
 //
 // Callers can go for a shorter path with inClusterStrategy (incluster.go),
 // which dials the pod IP directly and keeps the apiserver off the data path.

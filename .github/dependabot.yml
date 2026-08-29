@@ -4,41 +4,36 @@ updates:
 # Dependabot only supports files named exactly 'go.mod'. 
 # Maintainers will need to manually update tools.mod when shared dependencies change.
 # See discussion in PR #629 and #588 for context.
+# Cover every Go module in the repo: "/" is the root module, and the
+# globstar pattern matches every subdirectory containing a go.mod, so
+# new Go modules are picked up automatically.
 - package-ecosystem: "gomod"
-  directory: "/"
+  directories:
+  - "/"
+  - "**/*"
   schedule:
-    interval: "weekly"
+    interval: "daily"
   groups:
+    # Kubernetes minor bumps (e.g. k8s.io/* 0.36 -> 0.37) track a new
+    # Kubernetes release and can carry API changes, so keep them out of
+    # the routine update group. Combined with the ignore rules below,
+    # only k8s patch releases are raised automatically; minor upgrades
+    # are done by hand as a coordinated migration.
+    kubernetes-dependencies:
+      patterns:
+      - "k8s.io/*"
+      - "sigs.k8s.io/*"
     gomod-dependencies:
       patterns:
       - "*"
-
-- package-ecosystem: "gomod"
-  directory: "/dev/tools"
-  schedule:
-    interval: "weekly"
-  groups:
-    gomod-dependencies:
-      patterns:
-      - "*"
-
-- package-ecosystem: "gomod"
-  directory: "/examples/chrome-sandbox"
-  schedule:
-    interval: "weekly"
-  groups:
-    gomod-dependencies:
-      patterns:
-      - "*"
-
-- package-ecosystem: "gomod"
-  directory: "/site"
-  schedule:
-    interval: "weekly"
-  groups:
-    gomod-dependencies:
-      patterns:
-      - "*"
+      exclude-patterns:
+      - "k8s.io/*"
+      - "sigs.k8s.io/*"
+  ignore:
+  - dependency-name: "k8s.io/*"
+    update-types: ["version-update:semver-major", "version-update:semver-minor"]
+  - dependency-name: "sigs.k8s.io/*"
+    update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
 - package-ecosystem: "pip"
   directory: "/clients/python/agentic-sandbox-client"

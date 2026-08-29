@@ -182,6 +182,7 @@ up). Leaving key and `api_key` unset is acceptable only on a private, trusted ne
 | claim times out | pool empty or still filling — check `kubectl get sandboxwarmpool`; raise `replicas` or `claim_timeout_s` |
 | health check fails instantly | probe path/port mismatch in the template, or the pod isn't the agent-server image — a Ready pod must mean a serving `/health:8000` |
 | `no pod IP` / connect timeouts | client can't route to pod IPs — use `endpoint_template` through a gateway, or run the client inside the VPC |
+| `kubectl port-forward` refused while the pod is Ready | expected with gVisor: the forwarder dials loopback in the host-side netns, which isn't connected to runsc's netstack. Pod-IP traffic is unaffected; for laptop dev use a runc template variant or an in-VPC runner |
 | HTTP 401 from the server | `api_key` doesn't match the pool's `OH_SESSION_API_KEYS_0` Secret value |
 | odd protocol errors | SDK ↔ server version skew — compare `workspace.get_server_info()` with your installed `openhands-sdk` version and realign the template image tag |
 

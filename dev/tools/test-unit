@@ -117,6 +117,16 @@ PYTHON_TEST_SUITES = [
             (os.path.join("clients", "integrations", "nemo-gym"), "[test]"),
         ],
     },
+    {
+        "name": "integrations-openhands",
+        "dir": os.path.join("clients", "integrations", "openhands"),
+        # openhands-sdk publishes requires-python >=3.12.
+        "min_python": (3, 12),
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
+            (os.path.join("clients", "integrations", "openhands"), "[test]"),
+        ],
+    },
 ]
 
 

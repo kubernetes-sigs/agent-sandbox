@@ -1,0 +1,257 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Agent-sandbox-backed workspace for the OpenHands agent SDK.
+
+``AgentSandboxWorkspace`` is a provisioning-only ``RemoteWorkspace`` subclass:
+instead of ``docker run`` + health-wait (``DockerWorkspace``), it claims a
+**pre-warmed** pod from a ``SandboxWarmPool`` whose template already runs the
+OpenHands agent-server image, and hands the pod's URL to the base class. All
+workspace operations (bash, files, git) are inherited from ``RemoteWorkspace``,
+which speaks HTTP to the agent-server — this module adds no execution plumbing.
+
+The warm pool's SandboxTemplate must run the agent-server image with
+``--host 0.0.0.0 --port <server_port>`` and a readinessProbe on
+``/health:<server_port>`` so that a Ready pod == a healthy agent-server
+(see ``configs/agent-server-template.yaml``).
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+from urllib.request import urlopen
+
+from pydantic import Field, PrivateAttr
+
+from openhands.sdk.logger import get_logger
+from openhands.sdk.workspace import RemoteWorkspace
+
+
+logger = get_logger(__name__)
+
+
+class AgentSandboxWorkspace(RemoteWorkspace):
+    """Remote workspace bound to a pre-warmed agent-sandbox pod.
+
+    Provisioning maps 1:1 onto ``DockerWorkspace``'s lifecycle, with the cold
+    container start replaced by a warm-pool claim (a bind, not a boot):
+
+    - ``model_post_init``: claim → resolve endpoint → health check → hand off
+      to ``RemoteWorkspace``.
+    - ``cleanup()`` (also via ``with`` / ``__del__``): delete the claim; the
+      pool replenishes in the background. ``ttl_s`` backstops clients that die
+      without cleanup.
+
+    Example:
+        >>> with AgentSandboxWorkspace(warmpool="agent-server-pool",
+        ...                            namespace="openhands") as workspace:
+        ...     result = workspace.execute_command("ls -la")
+
+    Auth note: pre-warmed servers cannot receive a per-claim key, so all pods
+    in a pool share the session key their template injects (env
+    ``OH_SESSION_API_KEYS_0``, typically from one Secret). Pass that same value
+    as ``api_key``; leave both unset only on a private, trusted network.
+    """
+
+    # Overridden parent defaults.
+    working_dir: str = Field(
+        default="/workspace",
+        description="Working directory inside the sandbox pod.",
+    )
+    host: str = Field(
+        default="",
+        description="Agent-server URL (set automatically after the claim binds).",
+    )
+
+    # Provisioning configuration.
+    warmpool: str = Field(
+        description="SandboxWarmPool holding pre-warmed agent-server pods."
+    )
+    namespace: str = Field(
+        default="default", description="Kubernetes namespace of the warm pool."
+    )
+    server_port: int = Field(
+        default=8000,
+        ge=1,
+        le=65535,
+        description="Port the agent-server listens on inside the pod.",
+    )
+    endpoint_template: str | None = Field(
+        default=None,
+        description=(
+            "Optional URL template for the agent-server endpoint, for gateway or "
+            "proxied data paths. Supports {pod_ip}, {port}, {namespace}, "
+            "{claim_name}, {sandbox_id}. Default: http://{pod_ip}:{port} "
+            "(GKE pod IPs are VPC-routable)."
+        ),
+    )
+    claim_timeout_s: int = Field(
+        default=60,
+        gt=0,
+        description="Seconds to wait for the claim to bind a Ready sandbox.",
+    )
+    health_check_timeout: float = Field(
+        default=10.0,
+        gt=0.0,
+        description=(
+            "Seconds to wait for /health. Deliberately short: a warm pod that "
+            "is Ready but unhealthy is broken — fail fast and re-claim rather "
+            "than wait out a Docker-style cold-boot budget."
+        ),
+    )
+    ttl_s: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional claim TTL (spec.lifecycle shutdownTime). The controller "
+            "deletes the claim on expiry even if this process dies first."
+        ),
+    )
+    claim_labels: dict[str, str] | None = Field(
+        default=None, description="Labels for the SandboxClaim object."
+    )
+    sandbox_client: Any = Field(
+        default=None,
+        exclude=True,
+        description=(
+            "Injected k8s_agent_sandbox.SandboxClient (or compatible). Built "
+            "lazily with defaults when omitted; tests inject fakes."
+        ),
+    )
+
+    _sandbox: Any = PrivateAttr(default=None)
+    _owns_client: bool = PrivateAttr(default=False)
+
+    def model_post_init(self, context: Any) -> None:
+        """Claim a warm pod, point RemoteWorkspace at it, verify health."""
+        client = self.sandbox_client
+        if client is None:
+            from k8s_agent_sandbox import SandboxClient
+
+            client = SandboxClient()
+            self.sandbox_client = client
+            self._owns_client = True
+
+        sandbox = client.create_sandbox(
+            self.warmpool,
+            namespace=self.namespace,
+            sandbox_ready_timeout=self.claim_timeout_s,
+            labels=self.claim_labels,
+            shutdown_after_seconds=self.ttl_s,
+        )
+        self._sandbox = sandbox
+        logger.info(
+            "Claimed sandbox %s from warm pool %r (ns=%s)",
+            getattr(sandbox, "claim_name", "?"),
+            self.warmpool,
+            self.namespace,
+        )
+        try:
+            # Mirror DockerWorkspace: bypass validate-assignment plumbing when
+            # rewriting connection fields mid-init.
+            if not self.host:
+                object.__setattr__(self, "host", self._endpoint_url(sandbox))
+            self._wait_for_health(timeout=self.health_check_timeout)
+        except Exception:
+            # Never leave an orphaned claim behind a failed init.
+            self._terminate_sandbox()
+            raise
+        logger.info("Agent-sandbox workspace is ready at %s", self.host)
+        super().model_post_init(context)
+
+    def _endpoint_url(self, sandbox: Any) -> str:
+        pod_ip = sandbox.get_pod_ip()
+        if self.endpoint_template:
+            return self.endpoint_template.format(
+                pod_ip=pod_ip or "",
+                port=self.server_port,
+                namespace=self.namespace,
+                claim_name=getattr(sandbox, "claim_name", ""),
+                sandbox_id=getattr(sandbox, "sandbox_id", ""),
+            )
+        if not pod_ip:
+            raise RuntimeError(
+                f"sandbox {getattr(sandbox, 'claim_name', '?')!r} bound but has "
+                "no pod IP; cannot build the agent-server endpoint (set "
+                "endpoint_template for gateway/proxied data paths)"
+            )
+        return f"http://{pod_ip}:{self.server_port}"
+
+    def _wait_for_health(self, *, timeout: float) -> None:
+        """Poll GET /health until 2xx or the (short) budget elapses."""
+        health_url = f"{self.host.rstrip('/')}/health"
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                with urlopen(health_url, timeout=1.0) as resp:
+                    if 200 <= getattr(resp, "status", 200) < 300:
+                        return
+            except Exception as e:  # noqa: BLE001 — retried until the deadline
+                last_error = e
+            time.sleep(0.5)
+        raise RuntimeError(
+            f"agent-server at {health_url} failed to become healthy within "
+            f"{timeout}s (pre-warmed pods should be healthy at claim time; "
+            f"last error: {last_error!r})"
+        )
+
+    # ------------------------------------------------------------- lifecycle
+
+    def __enter__(self) -> "AgentSandboxWorkspace":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
+        self.cleanup()
+
+    def __del__(self) -> None:
+        # Guard against interpreter-shutdown states where pydantic private
+        # attributes are already gone (same pattern as DockerWorkspace).
+        try:
+            object.__getattribute__(self, "__pydantic_private__")
+        except AttributeError:
+            return
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        """Delete the claim (the pool replenishes) and drop an owned client."""
+        self._terminate_sandbox()
+        if self._owns_client and self.sandbox_client is not None:
+            close = getattr(self.sandbox_client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as e:  # noqa: BLE001 — best-effort teardown
+                    logger.warning("Error closing sandbox client: %s", e)
+            self.sandbox_client = None
+            self._owns_client = False
+
+    def _terminate_sandbox(self) -> None:
+        sandbox = self._sandbox
+        if sandbox is None:
+            return
+        self._sandbox = None
+        try:
+            sandbox.terminate()
+            logger.info(
+                "Released sandbox claim %s", getattr(sandbox, "claim_name", "?")
+            )
+        except Exception as e:  # noqa: BLE001 — ttl_s backstops a failed delete
+            logger.warning(
+                "Failed to terminate sandbox %s: %s (ttl_s backstop applies "
+                "if configured)",
+                getattr(sandbox, "claim_name", "?"),
+                e,
+            )

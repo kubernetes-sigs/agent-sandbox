@@ -122,6 +122,7 @@ The Python SDK lives at [clients/python/agentic-sandbox-client/](clients/python/
 - A bot may auto-assign GitHub Copilot as a first-pass reviewer. **Never click "Commit suggestion" in the GitHub UI** — that adds Copilot as a co-author, and Copilot cannot sign the Kubernetes CLA, so the CLA check will fail and block the PR. Instead: read the suggestion, apply the change manually in your local checkout, and push it as a normal commit authored by you.
 - Inactive PRs go stale after 30 days and close after 15 more. Reopen freely if you return to the work.
 - Keep PR titles short and conventional; the body should explain motivation and link any issue or KEP.
+- Commit messages must stand alone: a reader with only `git log` should understand what changed and why. Lead with the motivation — the problem or gap that prompted the change — rather than restating the diff, which the reader can see for themselves. Use the terminology already established in the code and docs; do not invent new names for existing concepts. Be clear and concise. Since the default merge mode is squash, the PR title and body usually become the commit message — write them to the same standard.
 
 ## Things to avoid
 

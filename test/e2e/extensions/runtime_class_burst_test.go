@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// benchWorkloadSec returns the workload sleep duration from SANDBOX_WORKLOAD_SEC (default 30).
 func benchWorkloadSec() int {
 	if v := os.Getenv("SANDBOX_WORKLOAD_SEC"); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
@@ -47,6 +48,7 @@ func benchWorkloadSec() int {
 	return 30
 }
 
+// workloadPodSpec returns a PodSpec with the given RuntimeClass and a sleep or pause container.
 func workloadPodSpec(rcPtr *string, workloadSec int) corev1.PodSpec {
 	container := corev1.Container{
 		Name:            "workload",
@@ -82,6 +84,7 @@ func benchLongevity() time.Duration {
 	return 0
 }
 
+// waitForNoPods polls until no pods remain in the namespace, including Terminating ones.
 func waitForNoPods(ctx context.Context, cl *framework.ClusterClient, namespace string) error {
 	for {
 		var podList corev1.PodList
@@ -106,7 +109,6 @@ func waitForNoPods(ctx context.Context, cl *framework.ClusterClient, namespace s
 	}
 }
 
-
 type claimRecord struct {
 	batch        int
 	claimIndex   int
@@ -117,6 +119,7 @@ type claimRecord struct {
 	breakdown    milestoneBreakdown
 }
 
+// emitBatchSummary writes an aggregated summary row (p50/p95, green/grey/cold counts) to the summary CSV.
 func emitBatchSummary(cw *csv.Writer, records []claimRecord, batchFrom, batchTo int,
 	batchSize, startBatchSize int, testStart time.Time,
 	readySum float64, batchCount int) {
@@ -209,8 +212,9 @@ func emitBatchSummary(cw *csv.Writer, records []claimRecord, batchFrom, batchTo 
 // main loop begins.
 //
 // Each subtest fires claims in dynamically sized batches with 100ms delay
-// between batches, stopping when ReadyReplicas ≤ 1 and at least poolSize
-// claims have been issued, or after 2×poolSize total claims.
+// between batches, always continuing to 2×poolSize total claims. Pool
+// depletion (ReadyReplicas ≤ 1) is logged but does not stop the test —
+// claims past depletion exercise the cold fallback path.
 //
 // Set SANDBOX_LONGEVITY to a Go duration (e.g. "2h", "30m") to run in
 // longevity mode: batches fire continuously until the deadline with adaptive
@@ -320,9 +324,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	require.NoError(t, tc0.Delete(t.Context(), calibClaim))
 	require.NoError(t, tc0.Delete(t.Context(), calibPool))
 	calibDrainCtx, calibDrainCancel := context.WithTimeout(t.Context(), fillTimeout)
-	if err := waitForNoPods(calibDrainCtx, tc0.ClusterClient, ns.Name); err != nil {
-		t.Logf("[calibration drain] WARNING: %v", err)
-	}
+	require.NoError(t, waitForNoPods(calibDrainCtx, tc0.ClusterClient, ns.Name),
+		"calibration drain must complete before burst iterations")
 	calibDrainCancel()
 
 	batchCap := benchBatchCap()
@@ -430,8 +433,15 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			defer cw.Flush()
 
 			_ = cw.Write([]string{"# cluster_id", cluster.Identity})
+			_ = cw.Write([]string{"# kubernetes_version", cluster.KubernetesVersion})
+			_ = cw.Write([]string{"# sandbox_version", cluster.SandboxVersion})
+			_ = cw.Write([]string{"# provider", cluster.Provider})
 			_ = cw.Write([]string{"# worker_count", strconv.Itoa(len(cluster.Workers))})
 			_ = cw.Write([]string{"# total_cpu_capacity", strconv.FormatInt(cpus, 10)})
+			_ = cw.Write([]string{"# total_ram_capacity_bytes", strconv.FormatInt(cluster.TotalRAMCapacity, 10)})
+			_ = cw.Write([]string{"# preexisting_pods", strconv.Itoa(cluster.PreexistingPods)})
+			_ = cw.Write([]string{"# allocated_cpu_millis", strconv.FormatInt(cluster.AllocatedCPUMillis, 10)})
+			_ = cw.Write([]string{"# allocated_ram_bytes", strconv.FormatInt(cluster.AllocatedRAM, 10)})
 			_ = cw.Write([]string{"# instance_type", instanceType})
 			_ = cw.Write([]string{"# runtime_class", runtimeClass})
 			_ = cw.Write([]string{"# pool_size", strconv.Itoa(poolSize)})
@@ -741,6 +751,17 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# time_to_all_ready_sec", fmt.Sprintf("%.3f", timeToAllReadySec)})
 			_ = cw.Write([]string{"# throughput_claims_per_sec", fmt.Sprintf("%.1f", float64(totalClaims)/totalDuration.Seconds())})
 
+			var podList corev1.PodList
+			if err := tc.List(t.Context(), &podList, client.InNamespace(ns.Name)); err == nil {
+				nodePods := make(map[string]int)
+				for i := range podList.Items {
+					nodePods[podList.Items[i].Spec.NodeName]++
+				}
+				for _, w := range cluster.Workers {
+					_ = cw.Write([]string{"# pods_on_node", w.Name, strconv.Itoa(nodePods[w.Name])})
+				}
+			}
+
 			if longevity == 0 || t.Failed() || os.Getenv("SANDBOX_DEBUG") != "" {
 				label := fmt.Sprintf("pool%d", poolSize)
 				if longevity > 0 {
@@ -755,9 +776,11 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		// Claimed sandboxes are owned by claims (adoption transferred
 		// ownership), so delete claims explicitly too.
 		var claimList extensionsv1beta1.SandboxClaimList
-		if err := tc0.ClusterClient.List(t.Context(), &claimList, client.InNamespace(ns.Name)); err == nil {
-			for i := range claimList.Items {
-				_ = tc0.ClusterClient.Delete(t.Context(), &claimList.Items[i])
+		require.NoError(t, tc0.ClusterClient.List(t.Context(), &claimList, client.InNamespace(ns.Name)),
+			"listing claims for cleanup")
+		for i := range claimList.Items {
+			if err := tc0.ClusterClient.Delete(t.Context(), &claimList.Items[i]); client.IgnoreNotFound(err) != nil {
+				require.NoError(t, err, "deleting claim %s", claimList.Items[i].Name)
 			}
 		}
 		require.NoError(t, tc0.Delete(t.Context(), pool))
@@ -765,9 +788,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		drainTimeout := time.Duration(poolSize)*10*time.Second + 30*time.Second
 		drainCtx, drainCancel := context.WithTimeout(t.Context(), drainTimeout)
 		t.Logf("[drain] waiting for pods in %s to terminate (timeout %s)", ns.Name, drainTimeout)
-		if err := waitForNoPods(drainCtx, tc0.ClusterClient, ns.Name); err != nil {
-			t.Logf("[drain] WARNING: %v", err)
-		}
+		require.NoError(t, waitForNoPods(drainCtx, tc0.ClusterClient, ns.Name),
+			"pod drain must complete before next pool iteration")
 		drainCancel()
 	}
 }

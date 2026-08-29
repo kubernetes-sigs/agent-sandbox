@@ -148,7 +148,9 @@ def update_images_yaml(yaml_path, tag, collected_digests):
 
     new_lines = []
     active_image_block = None
+    existing_images = set()
     inserted_digests = set()
+    all_target_images = set(IMAGES_TO_PROMOTE) | set(collected_digests.keys())
 
     # Determine base indentation of `- name:` entries if present
     base_indent = ""
@@ -156,17 +158,22 @@ def update_images_yaml(yaml_path, tag, collected_digests):
         if "- name:" in line:
             base_indent = line[:line.find("- name:")]
             break
+    else:
+        for line in lines:
+            if line.strip() == "images:" or line.strip().startswith("images:"):
+                base_indent = line[:line.find("images:")] + "  "
+                break
 
     # Iterate and inject digests
     for line in lines:
         # Detect which image block we are inside
         if "- name:" in line:
-            for img in IMAGES_TO_PROMOTE:
+            active_image_block = None
+            for img in all_target_images:
                 if f"- name: {img}" in line:
                     active_image_block = img
+                    existing_images.add(img)
                     break
-            else:
-                active_image_block = None
 
         # If inside an active image block, skip old entries matching this tag to avoid duplicates
         if active_image_block and (f'"{tag}"' in line or f"'{tag}'" in line):
@@ -185,13 +192,13 @@ def update_images_yaml(yaml_path, tag, collected_digests):
                 inserted_digests.add(active_image_block)
                 print(f"   Updated {active_image_block}")
 
-    # Append new image blocks for images not previously in images.yaml
-    remaining = [img for img in IMAGES_TO_PROMOTE if img in collected_digests and img not in inserted_digests]
+    # Append new image blocks only for images truly absent from images.yaml
+    images_to_append = [img for img in IMAGES_TO_PROMOTE if img in collected_digests and img not in existing_images]
     for img in collected_digests:
-        if img not in remaining and img not in inserted_digests:
-            remaining.append(img)
+        if img not in images_to_append and img not in existing_images:
+            images_to_append.append(img)
 
-    for img in remaining:
+    for img in images_to_append:
         digest = collected_digests.get(img)
         if not digest:
             continue

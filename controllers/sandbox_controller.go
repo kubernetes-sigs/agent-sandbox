@@ -80,11 +80,11 @@ const (
 //   - metadata.finalizers: never read on Pods by any controller in this repo
 //     (the sandboxes/finalizers RBAC is for the Sandbox CR itself, not Pods).
 //     Stripping is safe and saves a trivial amount of memory.
-//   - spec: nodeName plus each container's name, CPU/memory resources, and
-//     resizePolicy survive. The narrow opt-in resize reconciler needs exactly
-//     these fields to prepare a Pod /resize patch and to reject policies that
-//     would restart a container. The controller otherwise still builds Pod
-//     specs from the Sandbox PodTemplate and only metadata-patches cached Pods.
+//   - spec: nodeName plus each container's name, resources, and resizePolicy
+//     survive. The narrow opt-in resize reconciler needs exactly these fields
+//     to prepare a Pod /resize patch and to reject policies that would restart
+//     a container. The controller otherwise still builds Pod specs from the
+//     Sandbox PodTemplate and only metadata-patches cached Pods.
 //
 // metadata (labels/annotations/ownerRefs) and status are kept in full.
 // Non-pod inputs (e.g. cache.DeletedFinalStateUnknown tombstones) pass

@@ -1699,9 +1699,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 	mutatedSpec := sandbox.Spec.PodTemplate.Spec.DeepCopy()
 	if inPlaceResourceResizeEnabled(sandbox) {
-		// The backing Pod must be born with an explicit restart-free policy.
-		// Updating resizePolicy on an already-running Pod is not supported, so
-		// legacy Pods are rejected by reconcileInPlaceResources instead.
+		// Record explicit restart-free policies on new Pods. Existing or adopted
+		// Pods may omit these policies because Kubernetes defaults them to
+		// NotRequired; only an explicit RestartContainer policy is rejected.
 		ensureRestartFreeResizePolicies(mutatedSpec)
 	}
 

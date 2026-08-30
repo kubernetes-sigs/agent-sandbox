@@ -412,8 +412,9 @@ func TestReconcileInPlaceResourcesDisabledDoesNotPatchPod(t *testing.T) {
 }
 
 func TestReconcileInPlaceResourcesProjectsTerminalPodFailure(t *testing.T) {
-	sandbox := inPlaceResizeSandbox(resizeResources("2", "2Gi"))
-	pod := inPlaceResizePod(resizeResources("1", "1Gi"))
+	desired := resizeResources("2", "2Gi")
+	sandbox := inPlaceResizeSandbox(desired)
+	pod := inPlaceResizePod(desired)
 	pod.Status.Conditions = []corev1.PodCondition{{
 		Type: corev1.PodResizePending, Status: corev1.ConditionFalse, Reason: corev1.PodReasonInfeasible, Message: "node capacity exhausted",
 	}}
@@ -424,6 +425,33 @@ func TestReconcileInPlaceResourcesProjectsTerminalPodFailure(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
 	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizeFailed, condition.Reason)
 	assert.Equal(t, "node capacity exhausted", condition.Message)
+}
+
+func TestReconcileInPlaceResourcesSubmitsNewTargetWhilePreviousResizeIsPending(t *testing.T) {
+	desired := resizeResources("2", "1Gi")
+	sandbox := inPlaceResizeSandbox(desired)
+	pod := inPlaceResizePod(resizeResources("4", "1Gi"))
+	current := resizeResources("1", "1Gi")
+	pod.Status.ContainerStatuses[0].Resources = current.DeepCopy()
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodResizePending, Status: corev1.ConditionFalse, Reason: corev1.PodReasonInfeasible, Message: "4 CPUs exceed node capacity",
+	}}
+
+	var patched *corev1.Pod
+	clientWithResize := interceptor.NewClient(newFakeClient(), interceptor.Funcs{
+		SubResourcePatch: func(_ context.Context, _ client.Client, _ string, obj client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+			patched = obj.(*corev1.Pod).DeepCopy()
+			return nil
+		},
+	})
+
+	condition, err := (&SandboxReconciler{Client: clientWithResize}).reconcileInPlaceResources(t.Context(), sandbox, pod)
+	require.NoError(t, err)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonResourceResizePending, condition.Reason)
+	require.NotNil(t, patched)
+	assert.Equal(t, desired, patched.Spec.Containers[0].Resources)
 }
 
 func TestReconcileInPlaceResourcesProjectsPodResizeInProgress(t *testing.T) {

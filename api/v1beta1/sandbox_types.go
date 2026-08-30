@@ -340,6 +340,9 @@ type SandboxSpec struct {
 	// resourceResizePolicy controls CPU and memory reconciliation for an
 	// already-running backing Pod. Disabled is the safe default: the
 	// controller never replaces a Pod in response to resource changes.
+	// InPlace manages only CPU and memory request or limit keys explicitly
+	// present in the PodTemplate. An omitted key preserves the live Pod value,
+	// including values added by admission, and does not request removal.
 	// +kubebuilder:default={type:Disabled}
 	// +optional
 	ResourceResizePolicy *ResourceResizePolicy `json:"resourceResizePolicy,omitempty"`

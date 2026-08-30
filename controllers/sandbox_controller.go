@@ -1208,13 +1208,6 @@ func (r *SandboxReconciler) reconcileInPlaceResources(ctx context.Context, sandb
 		return nil, nil
 	}
 
-	if condition := resizeConditionFromPod(sandbox, pod); condition != nil {
-		return condition, nil
-	}
-	if resizeTargetsEnacted(pod, targets) {
-		return resourceResizeCondition(sandbox, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonResourceResizeCompleted, "CPU and memory resources were resized in place"), nil
-	}
-
 	desired := pod.DeepCopy()
 	for _, target := range targets {
 		desired.Spec.Containers[target.index].Resources = target.resources

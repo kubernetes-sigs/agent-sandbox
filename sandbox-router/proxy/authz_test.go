@@ -285,8 +285,8 @@ func TestAuthzPassesNamespaceAndID(t *testing.T) {
 	if calls[0].target.Namespace != "team-a" || calls[0].target.SandboxName != "sandbox-7" {
 		t.Fatalf("Authorize got (%q,%q) want (team-a, sandbox-7)", calls[0].target.Namespace, calls[0].target.SandboxName)
 	}
-	if calls[0].target.SandboxUID != "uid-7" || calls[0].target.Port != mustAtoi(t, port) || calls[0].target.Method != http.MethodGet || calls[0].target.Path != "/x" {
-		t.Fatalf("Authorize got target %+v, want uid-7, routed port, GET, and /x", calls[0].target)
+	if calls[0].target.SandboxUID != "" || calls[0].target.Port != mustAtoi(t, port) || calls[0].target.Method != http.MethodGet || calls[0].target.Path != "/x" {
+		t.Fatalf("Authorize got target %+v, want no cache-resolved UID, routed port, GET, and /x", calls[0].target)
 	}
 }
 

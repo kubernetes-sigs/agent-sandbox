@@ -171,11 +171,11 @@ The `Authorizer` interface is intentionally simple:
 
 ```go
 type Authorizer interface {
-    Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error
+    Authorize(ctx context.Context, r *http.Request, target AuthorizationTarget) error
 }
 ```
 
-Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (Bearer token via `authz.BearerTokenFromRequest`, TLS client cert, custom header) directly off the request.
+`AuthorizationTarget` carries the namespace, Sandbox name, Sandbox UID, execution port, normalized HTTP method, and the upstream path after path-routing prefixes have been removed. Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (TLS client cert, Bearer token via `authz.BearerTokenFromRequest`, custom header) directly off the request.
 
 The `sandbox_router_authz_decisions_total{decision="allow|deny",sandbox_namespace="…"}` counter records every verdict so deployments can see whether `AllowAll` is actually allowing the traffic shape they expect.
 
@@ -199,7 +199,11 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 ### Scoped-token authorizer
 
-Set `--authz-mode=scoped-token` to enable the built-in authorizer that closes exactly the gap called out above, but without requiring the caller to hold a cluster-verifiable K8s credential at all. A scoped token is a small HMAC-SHA256-signed value binding `(namespace, name, exp)` — minted with `authz.MintScopedToken`, wire format `v1.<payload>.<signature>` — and the authorizer both verifies the signature/expiry *and* checks that the token's `(namespace, name)` matches the sandbox actually being addressed. The leading `v1` version lets a future format coexist with outstanding tokens during a rollout, and the signature is domain-separated (MAC'd over a fixed context string) so it can't be cross-verified by any other component sharing the Secret. A token minted for `box-a` gets 403 against `box-b`; there is no TokenReview round-trip and no K8s API access implied by possessing the token. Requests carrying `X-Sandbox-Pod-IP` or `X-Sandbox-UID` are rejected outright in this mode: both override how the proxy picks the dial target *after* authorization (a raw IP, or a UID→IP cache lookup), which would let a token scoped to one sandbox reach a different pod while `X-Sandbox-ID` still names the authorized one. Rejecting them leaves resolution by `(namespace, name)` — exactly the identity the token authorizes — as the only routing path, so the dial target always matches what was authorized. Today that resolution is DNS, so scoped-token mode needs the sandbox reachable by its `(namespace, name)` DNS name (e.g. a headless `Service`), rather than the UID cache fast-path. A `(namespace, name)`-keyed cache name index (added in #1239) resolves the same identity and composes here without weakening the guarantee — it would lift the headless-`Service` requirement for warm-pool sandboxes; whichever of the two lands second should keep this sentence and #1239's wording in sync.
+Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
+
+Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
+
+V2 requires `X-Sandbox-UID` and `--cache-enabled`. It rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. The current cache still falls back from a missing UID entry to namespace and name. The v2 contract therefore does not yet prove same-name replacement fencing; that requires cache resolution to return the canonical UID it actually selected and to reject a stale UID instead of falling back.
 
 This is the primitive an agent-facing example needs to reproduce the credential-boundary story of `examples/containarium-ssh-sandbox` (agent holds one narrow, single-purpose credential, never a cluster token) using only pieces native to this project — no third-party SSH gateway, no vendor runtime image. `MintScopedToken` is exported so a Sandbox controller (or a test/example harness standing in for one) can mint a token at Sandbox-creation time and hand it to the agent; the router itself never mints, only verifies.
 
@@ -208,9 +212,19 @@ Flags:
 | Flag | Default | Notes |
 |---|---|---|
 | `--authz-mode` | `allow-all` | `allow-all`, `tokenreview`, or `scoped-token`. |
-| `--authz-scoped-token-secret-file` | `""` | Path to a file holding the shared HMAC-SHA256 secret. Required when `--authz-mode=scoped-token`; must match whatever minted the tokens (e.g. the same K8s Secret mounted into the controller and the router). At least 32 bytes after whitespace trimming (`authz.MinScopedTokenSecretLen`) — every observed token is an offline brute-force oracle for this secret, so short values are refused at startup. Minter and verifier both trim surrounding whitespace, so a trailing newline in the mounted file is harmless. |
+| `--authz-scoped-token-secret-file` | `""` | Path to the legacy v1 HMAC-SHA256 secret. Required unless v2 verification keys are configured. At least 32 bytes after whitespace trimming. |
+| `--authz-scoped-token-verification-keys-file` | `""` | Path to a JSON Ed25519 public-key set for v2. Requires `--cache-enabled`. |
+| `--authz-scoped-token-v1-accept-until` | `""` | Exclusive RFC3339 cutoff for v1 verification. Required when v1 and v2 readers overlap. |
 
-**Follow-up, not in this change.** Nothing here mints tokens automatically at Sandbox creation or rotates the shared secret without a restart — both are natural next steps once a controller-side minting story is agreed, tracked alongside the per-sandbox-authorization follow-up on TokenReview above.
+The v2 key file contains unpadded base64url public keys:
+
+```json
+{"keys":[{"kid":"2026-08","publicKey":"<base64url-ed25519-public-key>"}]}
+```
+
+A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+
+The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
 
 ### Browser-session credentials
 

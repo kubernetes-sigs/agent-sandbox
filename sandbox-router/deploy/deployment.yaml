@@ -34,6 +34,9 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: sandbox-router
+      # Mount only the bounded token projected below, so its lifetime is
+      # part of this Pod contract rather than an API server default.
+      automountServiceAccountToken: false
       # Spread replicas across nodes/zones so a single failure doesn't take
       # the router fleet offline.
       topologySpreadConstraints:
@@ -88,8 +91,12 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        volumeMounts:
+        # client-go's in-cluster configuration reads this standard path.
+        - name: kubernetes-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
         # Uncomment to enable TLS mounts:
-        # volumeMounts:
         # - name: tls-certs
         #   mountPath: /tls
         #   readOnly: true
@@ -122,8 +129,30 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+      volumes:
+      - name: kubernetes-api-access
+        projected:
+          defaultMode: 0444
+          sources:
+          - serviceAccountToken:
+              # No audience, so kubelet requests the API server's own. The
+              # implicit mount asks for 3607 seconds, which
+              # --service-account-extend-token-expiration stretches to a
+              # year; 3600 keeps this a genuine one-hour token.
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
       # Uncomment to provide TLS certificates via Secret:
-      # volumes:
       # - name: tls-certs
       #   secret:
       #     secretName: sandbox-router-tls

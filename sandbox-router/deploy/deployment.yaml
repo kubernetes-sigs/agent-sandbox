@@ -32,6 +32,9 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: sandbox-router
+      # Mount only the bounded token below. Disabling the implicit mount
+      # makes the audience and lifetime visible in this Pod contract.
+      automountServiceAccountToken: false
       # Spread replicas across nodes/zones so a single failure doesn't take
       # the router fleet offline.
       topologySpreadConstraints:
@@ -107,6 +110,32 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+        volumeMounts:
+        # client-go's in-cluster configuration reads this standard path.
+        - name: kubernetes-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: kubernetes-api-access
+        projected:
+          defaultMode: 0444
+          sources:
+          - serviceAccountToken:
+              # Must match an audience accepted by your kube-apiserver.
+              audience: https://kubernetes.default.svc
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
       # Give in-flight requests a chance to finish before the kubelet
       # delivers SIGKILL. The router's own --shutdown-timeout defaults to
       # 30s; keep this slightly larger.

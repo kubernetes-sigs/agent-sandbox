@@ -205,6 +205,11 @@ func (c *Cache) WaitForSync(ctx context.Context) bool {
 	return cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced)
 }
 
+// HasSynced lets readiness probes require the informer's initial LIST.
+func (c *Cache) HasSynced() bool {
+	return c.informer.HasSynced()
+}
+
 // Get looks up the cached entry for the given Sandbox UID. Returns
 // (Entry, true) when known, (Entry{}, false) on cache miss. Lock-free in
 // the common case via sync.RWMutex.

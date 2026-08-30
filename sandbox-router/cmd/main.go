@@ -278,7 +278,11 @@ func run(cfg *config.Config, log logr.Logger) error {
 	// Top-level mux: /healthz reuses the probes implementation so the
 	// Python router's contract (200 OK with {"status":"ok"}) is preserved.
 	// All other paths fall through to the proxy.
-	probes := server.NewProbes()
+	var cacheReady func() bool
+	if podCache != nil {
+		cacheReady = podCache.HasSynced
+	}
+	probes := server.NewProbesWithReadyCheck(cacheReady)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", probes.Healthz)
 	mux.Handle("/", handler)

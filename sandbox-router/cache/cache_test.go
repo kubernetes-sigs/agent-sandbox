@@ -100,11 +100,17 @@ func newCache(t *testing.T, objs ...runtime.Object) (*Cache, *fake.Clientset, co
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	if c.HasSynced() {
+		t.Fatal("cache must not be ready before the initial LIST")
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	c.Start(ctx)
 	if ok := c.WaitForSync(ctx); !ok {
 		cancel()
 		t.Fatalf("WaitForSync failed")
+	}
+	if !c.HasSynced() {
+		t.Fatal("cache must be ready after WaitForSync succeeds")
 	}
 	return c, client, cancel
 }

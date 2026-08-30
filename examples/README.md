@@ -3,6 +3,7 @@
 This directory contains examples of how to use the Agent Sandbox. Each subdirectory contains a different example.
 
 - [**agent-sandbox-rl**](./agent-sandbox-rl): Generic, multi-cluster batch orchestration for running SWE-bench-style RL/eval workloads on Agent Sandbox warm pools.
+- [**agtsbx-agents**](./agtsbx-agents): A sandboxd runtime image with the opencode, Claude Code and Codex CLIs, for running a coding agent in a throwaway sandbox with `agtsbx run`.
 - [**aio-sandbox**](./aio-sandbox): An example of running All-in-One (AIO) Sandbox using agent-sandbox.
 - [**apf-insulation**](./apf-insulation): An opt-in API Priority and Fairness overlay giving the controller dedicated apiserver concurrency for high-rate claim workloads (claim path > bulk refill > events).
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.

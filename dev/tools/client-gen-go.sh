@@ -43,15 +43,12 @@ cleanup_openapi_work() {
   if [[ -n "${OPENAPI_WORK_DIR}" && -d "${OPENAPI_WORK_DIR}" ]]; then
     rm -rf "${OPENAPI_WORK_DIR}"
   fi
-  if [[ -n "${OPENAPI_SCHEMA:-}" ]]; then
-    rm -f "${OPENAPI_SCHEMA}"
-  fi
 }
 
 trap cleanup_openapi_work EXIT
 
-OPENAPI_SCHEMA="${SCRIPT_ROOT}/bin/client-gen-openapi-schema.json"
 OPENAPI_WORK_DIR="$(mktemp -d "${SCRIPT_ROOT}/zz_client_openapi_work_XXXXXX")"
+OPENAPI_SCHEMA="${OPENAPI_WORK_DIR}/openapi-schema.json"
 OPENAPI_WORK_BASENAME="$(basename "${OPENAPI_WORK_DIR}")"
 OPENAPI_DEFS_PKG="sigs.k8s.io/agent-sandbox/${OPENAPI_WORK_BASENAME}/defs"
 OPENAPI_DUMP_DIR="${OPENAPI_WORK_DIR}/dump"
@@ -59,7 +56,7 @@ OPENAPI_DEFS_DIR="${OPENAPI_WORK_DIR}/defs"
 OPENAPI_REPORT="${OPENAPI_WORK_DIR}/api_violations.report"
 
 echo "Generating OpenAPI schema for apply configurations..."
-mkdir -p "${OPENAPI_DEFS_DIR}" "${OPENAPI_DUMP_DIR}" "$(dirname "${OPENAPI_SCHEMA}")"
+mkdir -p "${OPENAPI_DEFS_DIR}" "${OPENAPI_DUMP_DIR}"
 ${OPENAPI_CMD}/cmd/openapi-gen \
   --output-dir "${OPENAPI_DEFS_DIR}" \
   --output-pkg "${OPENAPI_DEFS_PKG}" \

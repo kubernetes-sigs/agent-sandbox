@@ -116,13 +116,8 @@ class AsyncSandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         self.k8s_helper = AsyncK8sHelper(api_client=api_client)
-        self._atexit_api_client_configuration = (
-            api_client.configuration if api_client is not None else None
-        )
-        self._atexit_api_client_default_headers = (
-            dict(api_client.default_headers) if api_client is not None else {}
-        )
-        self._atexit_api_client_cookie = api_client.cookie if api_client is not None else None
+        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
+        self._injected_api_client = api_client
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
@@ -393,11 +388,12 @@ class AsyncSandboxClient(Generic[T]):
 
         Uses a snapshot of the tracked claims and a fresh :class:`AsyncK8sHelper`
         so that no loop-bound objects from the original client are reused across
-        event loop boundaries. When an ApiClient was injected, its Configuration
-        is reused to target the same cluster from the fresh cleanup loop.
-        Per-claim failures and top-level errors emit
-        warnings to ``sys.stderr`` rather than raising — atexit cleanup is
-        best-effort.
+        event loop boundaries. When an ApiClient was injected, its
+        configuration/default_headers/cookie are read live off that client at
+        cleanup time, so a caller that refreshes credentials after constructing 
+        this client still gets a cleanup client with current credentials. 
+        Per-claim failures and top-level errors emit warnings to ``sys.stderr`` 
+        rather than raising — atexit cleanup is best-effort.
         """
         claims = list(self._active_connection_sandboxes.keys())
         if not claims:
@@ -405,12 +401,12 @@ class AsyncSandboxClient(Generic[T]):
 
         async def _do_cleanup():
             atexit_api_client = None
-            if self._atexit_api_client_configuration is not None:
+            if self._injected_api_client is not None:
                 atexit_api_client = async_client.ApiClient(
-                    configuration=self._atexit_api_client_configuration,
-                    cookie=self._atexit_api_client_cookie,
+                    configuration=self._injected_api_client.configuration,
+                    cookie=self._injected_api_client.cookie,
                 )
-                for name, value in self._atexit_api_client_default_headers.items():
+                for name, value in dict(self._injected_api_client.default_headers).items():
                     atexit_api_client.set_default_header(name, value)
             helper = AsyncK8sHelper(api_client=atexit_api_client)
             try:

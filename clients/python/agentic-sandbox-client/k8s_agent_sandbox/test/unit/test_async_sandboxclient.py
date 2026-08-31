@@ -321,6 +321,46 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         )
         MockHelper.assert_called_once_with(api_client=atexit_api_client)
 
+    def test_atexit_cleanup_reflects_injected_client_state_at_cleanup_time_not_construction_time(self):
+        """Atexit cleanup should reflect the state of the injected client at cleanup time, not construction time."""
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_configuration = MagicMock(name="InjectedConfiguration")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {"Authorization": "Bearer old-token"}
+        injected_api_client.cookie = "session=old"
+        atexit_api_client = MagicMock(name="AtexitApiClient")
+        atexit_api_client.close = AsyncMock()
+        atexit_api_client.set_default_header = MagicMock()
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = AsyncMock()
+        mock_helper_instance.close = AsyncMock()
+
+        refreshed_configuration = MagicMock(name="RefreshedConfiguration")
+        injected_api_client.configuration = refreshed_configuration
+        injected_api_client.default_headers["Authorization"] = "Bearer refreshed-token"
+        injected_api_client.cookie = "session=refreshed"
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper",
+            return_value=mock_helper_instance,
+        ), patch(
+            "k8s_agent_sandbox.async_sandbox_client.async_client.ApiClient",
+            return_value=atexit_api_client,
+        ) as MockApiClient:
+            client._atexit_cleanup()
+
+        self.assertIs(MockApiClient.call_args.kwargs["configuration"], refreshed_configuration)
+        self.assertEqual(MockApiClient.call_args.kwargs["cookie"], "session=refreshed")
+        atexit_api_client.set_default_header.assert_called_once_with(
+            "Authorization", "Bearer refreshed-token"
+        )
+
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
         self.client._active_connection_sandboxes = {}

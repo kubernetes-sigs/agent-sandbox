@@ -26,8 +26,10 @@ import types
 import pytest
 
 from agent_sandbox_rl.adapters.openhands import (
+    BoundHandleClient,
     FleetWorkspaceClient,
     make_fleet_workspace,
+    make_handle_workspace,
 )
 from agent_sandbox_rl.sources import Task
 
@@ -40,12 +42,19 @@ class FakeSdkSandbox:
     return self._pod_ip
 
 
+class FakeCluster:
+  def __init__(self, namespace="fleet-ns"):
+    self.namespace = namespace
+
+
 class FakeHandle:
-  def __init__(self, pod_ip="10.1.2.3", sandbox=None):
+  def __init__(self, pod_ip="10.1.2.3", sandbox=None, task=None, cluster=None):
     self.claim_name = "claim-42"
     self.sandbox_id = "sbx-42"
     self.pod_ip = pod_ip
     self.sandbox = sandbox
+    self.task = task
+    self._cluster = cluster
 
 
 class FakeFleet:
@@ -134,3 +143,48 @@ def test_missing_integration_raises_clear_hint(monkeypatch):
   monkeypatch.setitem(sys.modules, "openhands_k8s_agent_sandbox", None)
   with pytest.raises(RuntimeError, match="openhands-k8s-agent-sandbox"):
     make_fleet_workspace(FakeFleet(), make_task())
+
+
+# ------------------------------------------------------ make_handle_workspace
+
+
+def test_bound_handle_client_binds_without_acquiring():
+  handle = FakeHandle()
+  view = BoundHandleClient(handle).create_sandbox("ignored", labels={"x": "y"})
+  assert view.claim_name == "claim-42"
+  assert view.get_pod_ip() == "10.1.2.3"
+  view.terminate()          # must be a no-op: fleet.run owns the release
+  # No fleet in sight — nothing to have released; the handle is untouched.
+  assert handle.pod_ip == "10.1.2.3"
+
+
+def test_make_handle_workspace_wires_bound_client(fake_openhands_integration):
+  handle = FakeHandle(task=make_task(), cluster=FakeCluster("rl-ns"))
+  make_handle_workspace(handle, api_key="pool-key")
+  kwargs = fake_openhands_integration
+  assert kwargs["warmpool"] == "handle:img:1"       # informational marker
+  assert isinstance(kwargs["sandbox_client"], BoundHandleClient)
+  assert kwargs["sandbox_client"].handle is handle
+  assert kwargs["api_key"] == "pool-key"
+
+
+def test_handle_workspace_namespace_defaults_from_cluster(
+    fake_openhands_integration):
+  handle = FakeHandle(task=make_task(), cluster=FakeCluster("fleet-ns"))
+  make_handle_workspace(handle)
+  assert fake_openhands_integration["namespace"] == "fleet-ns"
+
+
+def test_handle_workspace_namespace_override_wins(fake_openhands_integration):
+  handle = FakeHandle(task=make_task(), cluster=FakeCluster("fleet-ns"))
+  make_handle_workspace(handle, namespace="explicit")
+  assert fake_openhands_integration["namespace"] == "explicit"
+
+
+@pytest.mark.parametrize("key,value", [
+    ("ttl_s", 60), ("warmpool", "p"), ("sandbox_client", object()),
+])
+def test_handle_workspace_fleet_owned_kwargs_rejected(
+    fake_openhands_integration, key, value):
+  with pytest.raises(ValueError, match="fleet-owned"):
+    make_handle_workspace(FakeHandle(), **{key: value})

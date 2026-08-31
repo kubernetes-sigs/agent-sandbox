@@ -74,27 +74,47 @@ class FleetWorkspaceClient:
   def create_sandbox(self, warmpool, **_fleet_owned):  # noqa: ARG002
     handle = self._fleet.acquire(self._task)
     self.handle = handle
-    fleet = self._fleet
+    # Ownership inversion: release to the fleet, never delete directly.
+    return _handle_view(handle, lambda: self._fleet.release(handle))
 
-    class _HandleView:
-      claim_name = handle.claim_name
-      sandbox_id = handle.sandbox_id
 
-      @staticmethod
-      def get_pod_ip():
-        if handle.pod_ip:
-          return handle.pod_ip
-        sandbox = handle.sandbox
-        if sandbox is not None:
-          return sandbox.get_pod_ip()
-        return None
+def _handle_view(handle, on_terminate):
+  """Duck-typed SDK-sandbox view over a fleet handle for the workspace."""
 
-      @staticmethod
-      def terminate():
-        # Ownership inversion: release to the fleet, never delete directly.
-        fleet.release(handle)
+  class _HandleView:
+    claim_name = handle.claim_name
+    sandbox_id = handle.sandbox_id
 
-    return _HandleView()
+    @staticmethod
+    def get_pod_ip():
+      if handle.pod_ip:
+        return handle.pod_ip
+      sandbox = handle.sandbox
+      if sandbox is not None:
+        return sandbox.get_pod_ip()
+      return None
+
+    @staticmethod
+    def terminate():
+      on_terminate()
+
+  return _HandleView()
+
+
+class BoundHandleClient:
+  """Duck-typed ``sandbox_client`` over an ALREADY-acquired handle.
+
+  For ``fleet.run(process_fn)`` flows: the fleet acquired the handle before
+  calling ``process_fn(task, handle)`` and releases it after the function
+  returns, so the workspace must neither acquire nor release — ``terminate()``
+  is a no-op on the pod (closing the workspace only drops HTTP state).
+  """
+
+  def __init__(self, handle):
+    self.handle = handle
+
+  def create_sandbox(self, warmpool, **_fleet_owned):  # noqa: ARG002
+    return _handle_view(self.handle, lambda: None)
 
 
 def make_fleet_workspace(fleet, task, *, namespace: str | None = None,
@@ -128,5 +148,53 @@ def make_fleet_workspace(fleet, task, *, namespace: str | None = None,
       # planned a pool for this task's image.
       warmpool=f"fleet:{task.image}",
       sandbox_client=FleetWorkspaceClient(fleet, task),
+      **kwargs,
+  )
+
+
+def make_handle_workspace(handle, *, namespace: str | None = None,
+                          **workspace_kwargs):
+  """Build an `AgentSandboxWorkspace` bound to an ALREADY-acquired handle.
+
+  This is the form to use inside ``fleet.run(process_fn)``: the fleet passes
+  ``(task, handle)`` to your function and releases the handle when it returns,
+  so the workspace binds the pod without acquiring or releasing anything —
+  ``workspace.cleanup()`` is safe to call and touches only HTTP state.
+
+  ::
+
+      def rollout(task, handle):
+          workspace = make_handle_workspace(handle, api_key=POOL_KEY)
+          try:
+              conversation = Conversation(agent=agent, workspace=workspace)
+              ...
+          finally:
+              workspace.cleanup()   # no-op on the pod; the fleet releases
+
+      results = fleet.run(rollout)
+
+  ``namespace`` defaults from the handle's cluster (it matters for router-mode
+  headers); fleet-owned kwargs (``warmpool``, ``ttl_s``, ``sandbox_client``)
+  raise, as in `make_fleet_workspace`.
+  """
+  for key in _FLEET_OWNED_KWARGS:
+    if key in workspace_kwargs:
+      raise ValueError(
+          f"{key!r} is fleet-owned when using make_handle_workspace — "
+          "configure it on the fleet, not the workspace")
+  try:
+    from openhands_k8s_agent_sandbox import AgentSandboxWorkspace
+  except ImportError as e:
+    raise RuntimeError(f"agent_sandbox_rl.adapters.openhands {_HINT}") from e
+
+  kwargs = dict(workspace_kwargs)
+  if namespace is None:
+    namespace = getattr(getattr(handle, "_cluster", None), "namespace", None)
+  if namespace is not None:
+    kwargs["namespace"] = namespace
+  task_image = getattr(getattr(handle, "task", None), "image", "?")
+  return AgentSandboxWorkspace(
+      warmpool=f"handle:{task_image}",     # informational; nothing is claimed
+      sandbox_client=BoundHandleClient(handle),
       **kwargs,
   )

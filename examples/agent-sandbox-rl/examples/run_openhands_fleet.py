@@ -79,8 +79,10 @@ def _agent_server_container(session_key):
       "ports": [{"containerPort": 8000}],
       "readinessProbe": {
           "httpGet": {"path": "/health", "port": 8000},
-          "periodSeconds": 1,
-          "failureThreshold": 120,
+          # 5 min boot budget: agent-server cold boots were measured at up to
+          # ~4 min on runc nodes. This is pool-fill time, off the claim path.
+          "periodSeconds": 2,
+          "failureThreshold": 150,
       },
   }
   if session_key:
@@ -156,8 +158,13 @@ def main():
   else:
     clusters = [ClusterConfig(name="default", namespace=namespace)]
 
+  # Pool depth must cover the concurrency: FleetConfig.max_warmpool_size
+  # hard-caps replicas per image pool (default 8), and every conversation
+  # holds a pod while active — an unraised cap would silently throttle claims.
+  max_pool = max(max_concurrent, int(_env("MAX_WARMPOOL_SIZE", "8")))
   fleet = SandboxFleet(FleetConfig(
       clusters=clusters, max_concurrent=max_concurrent, template=template,
+      max_warmpool_size=max_pool,
       ready_timeout=int(_env("SANDBOX_READY_TIMEOUT", "600"))))
   # One shared agent-server image -> the fleet plans a single warm pool sized
   # to the concurrency; conversations are just tasks against it.

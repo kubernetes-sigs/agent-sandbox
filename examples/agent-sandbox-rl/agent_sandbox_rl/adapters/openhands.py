@@ -57,27 +57,6 @@ _HINT = (
 _FLEET_OWNED_KWARGS = ("sandbox_client", "warmpool", "ttl_s")
 
 
-class FleetWorkspaceClient:
-  """Duck-typed ``sandbox_client`` backed by a fleet.
-
-  ``create_sandbox()`` acquires a warm pod from the fleet (the ``warmpool``
-  argument and lifecycle kwargs the workspace passes are ignored — the fleet
-  owns pools, placement, and claim TTLs). The returned view's ``terminate()``
-  releases the handle back to the fleet instead of deleting anything itself.
-  """
-
-  def __init__(self, fleet, task):
-    self._fleet = fleet
-    self._task = task
-    self.handle = None
-
-  def create_sandbox(self, warmpool, **_fleet_owned):  # noqa: ARG002
-    handle = self._fleet.acquire(self._task)
-    self.handle = handle
-    # Ownership inversion: release to the fleet, never delete directly.
-    return _handle_view(handle, lambda: self._fleet.release(handle))
-
-
 def _handle_view(handle, on_terminate):
   """Duck-typed SDK-sandbox view over a fleet handle for the workspace."""
 
@@ -99,6 +78,27 @@ def _handle_view(handle, on_terminate):
       on_terminate()
 
   return _HandleView()
+
+
+class FleetWorkspaceClient:
+  """Duck-typed ``sandbox_client`` backed by a fleet.
+
+  ``create_sandbox()`` acquires a warm pod from the fleet (the ``warmpool``
+  argument and lifecycle kwargs the workspace passes are ignored — the fleet
+  owns pools, placement, and claim TTLs). The returned view's ``terminate()``
+  releases the handle back to the fleet instead of deleting anything itself.
+  """
+
+  def __init__(self, fleet, task):
+    self._fleet = fleet
+    self._task = task
+    self.handle = None
+
+  def create_sandbox(self, warmpool, **_fleet_owned):  # noqa: ARG002
+    handle = self._fleet.acquire(self._task)
+    self.handle = handle
+    # Ownership inversion: release to the fleet, never delete directly.
+    return _handle_view(handle, lambda: self._fleet.release(handle))
 
 
 class BoundHandleClient:

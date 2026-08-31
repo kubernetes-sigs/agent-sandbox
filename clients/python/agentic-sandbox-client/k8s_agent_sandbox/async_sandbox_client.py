@@ -50,46 +50,57 @@ T = TypeVar("T", bound=AsyncSandbox)
 # unresponsive apiserver would otherwise hang process exit indefinitely.
 _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS = 300
 
-# Connection/auth fields copied from an injected kubernetes_asyncio
-# Configuration onto the sync kubernetes.client.Configuration built for
-# atexit cleanup. kubernetes.client and kubernetes_asyncio.client are
-# separate generated packages that happen to expose the same attribute names
-# for these fields, but they aren't interchangeable: e.g. the sync client's
-# urllib3 transport reads configuration.no_proxy, which the async
-# Configuration class doesn't define, so passing an async Configuration
-# directly into a sync ApiClient risks an AttributeError. Hence an explicit
-# allowlist instead of reusing the object or copying its whole __dict__.
-_ATEXIT_CONFIGURATION_FIELDS = (
-    "host",
-    "api_key",
-    "api_key_prefix",
-    "username",
-    "password",
-    "ssl_ca_cert",
-    "cert_file",
-    "key_file",
-    "verify_ssl",
-    "assert_hostname",
-    "proxy",
-    "proxy_headers",
-    "connection_pool_maxsize",
-    "retries",
-    "socket_options",
-    "tls_server_name",
-    "refresh_api_key_hook",
-    "discard_unknown_keys",
+# Connection/auth fields, copied from an injected kubernetes_asyncio Configuration onto a
+# sync one by _sync_configuration_from_async, since the sync Configuration is only used
+# for atexit cleanup and needs nothing beyond connecting and authenticating.
+_CONNECTION_FIELDS = (
+    "host", "api_key", "api_key_prefix", "username", "password",
+    "ssl_ca_cert", "cert_file", "key_file", "verify_ssl",
+    "proxy_headers", "tls_server_name", "assert_hostname",
+    "socket_options", "retries", "connection_pool_maxsize",
 )
 
 
 def _sync_configuration_from_async(async_configuration) -> sync_client.Configuration:
-    """Mirrors an injected ``kubernetes_asyncio`` ``Configuration`` onto a
-    ``kubernetes`` one, so atexit cleanup's synchronous ``K8sHelper`` targets
-    the same cluster/credentials as the caller's injected ``api_client``.
-    """
+    """Builds the sync Configuration atexit cleanup uses from an injected async one, copying only
+    ``_CONNECTION_FIELDS`` so sync-only fields (e.g. ``no_proxy``) keep their defaults and an async
+    ``refresh_api_key_hook`` is never carried over."""
     sync_configuration = sync_client.Configuration()
-    for field in _ATEXIT_CONFIGURATION_FIELDS:
-        setattr(sync_configuration, field, getattr(async_configuration, field))
+    for field in _CONNECTION_FIELDS:
+        if hasattr(async_configuration, field):
+            setattr(sync_configuration, field, getattr(async_configuration, field))
+    # kubernetes_asyncio leaves proxy unset and lets aiohttp read HTTPS_PROXY/NO_PROXY, while the sync
+    # Configuration reads them itself, so only an explicit proxy may override that.
+    if async_configuration.proxy:
+        sync_configuration.proxy = async_configuration.proxy
+    # Copied so neither the refresh hook nor the alias below mutates the injected config.
+    sync_configuration.api_key = dict(async_configuration.api_key)
+    sync_configuration.api_key_prefix = dict(async_configuration.api_key_prefix)
+    _refresh_api_key_for_atexit(async_configuration.refresh_api_key_hook, sync_configuration)
+    # kubernetes<36's auth_settings() reads "authorization", not kubernetes_asyncio's "BearerToken".
+    for values in (sync_configuration.api_key, sync_configuration.api_key_prefix):
+        if "BearerToken" in values:
+            values.setdefault("authorization", values["BearerToken"])
     return sync_configuration
+
+
+def _refresh_api_key_for_atexit(refresh_api_key_hook, sync_configuration) -> None:
+    """Runs the injected client's ``refresh_api_key_hook`` against the sync copy, since kubernetes_asyncio
+    only runs it when preparing a request and the token may have expired since the last one. An async hook
+    can't be awaited at atexit, so its coroutine is closed unrun and the live ``api_key`` is used as-is."""
+    if refresh_api_key_hook is None:
+        return
+    try:
+        result = refresh_api_key_hook(sync_configuration)
+        if asyncio.iscoroutine(result):
+            result.close()
+    except Exception as e:
+        if sys.stderr is not None:
+            print(
+                "[agent-sandbox] Warning: failed to refresh API key during atexit "
+                f"cleanup, using the last known one: {e}",
+                file=sys.stderr,
+            )
 
 
 class AsyncSandboxClient(Generic[T]):
@@ -174,13 +185,8 @@ class AsyncSandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         self.k8s_helper = AsyncK8sHelper(api_client=api_client)
-        self._atexit_api_client_configuration = (
-            api_client.configuration if api_client is not None else None
-        )
-        self._atexit_api_client_default_headers = (
-            dict(api_client.default_headers) if api_client is not None else {}
-        )
-        self._atexit_api_client_cookie = api_client.cookie if api_client is not None else None
+        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
+        self._injected_api_client = api_client
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
@@ -519,17 +525,10 @@ class AsyncSandboxClient(Generic[T]):
         emergency path first so sandboxd port-forward processes are not left
         behind. Claim deletion uses the synchronous :class:`K8sHelper` because
         an atexit handler may run after async event-loop resources and the
-        process-wide executor have started shutting down; kubernetes_asyncio's
-        aiohttp transport does a per-request netrc lookup via a background
-        thread, which raises "cannot schedule new futures after interpreter
-        shutdown" once that teardown has started. The synchronous client's
-        urllib3 transport has no event loop or executor dependency, so it
-        isn't affected. When an ApiClient was injected, its Configuration is
-        mirrored onto a fresh sync ApiClient (see
-        ``_sync_configuration_from_async``) so cleanup targets the same
-        cluster instead of falling back to the ambient kubeconfig. Per-claim
-        failures and top-level errors are reported to ``sys.stderr`` rather
-        than raised.
+        process-wide executor have started shutting down. An injected
+        ``api_client``'s connection settings are read at cleanup time and
+        mirrored onto that helper so it targets the same cluster. Per-claim
+        failures and top-level errors are reported to ``sys.stderr`` rather than raised.
         """
         try:
             claims = list(self._active_connection_sandboxes.keys())
@@ -551,12 +550,12 @@ class AsyncSandboxClient(Generic[T]):
                         )
 
             atexit_api_client = None
-            if self._atexit_api_client_configuration is not None:
+            if self._injected_api_client is not None:
                 atexit_api_client = sync_client.ApiClient(
-                    configuration=_sync_configuration_from_async(self._atexit_api_client_configuration),
-                    cookie=self._atexit_api_client_cookie,
+                    configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
+                    cookie=self._injected_api_client.cookie,
                 )
-                for name, value in self._atexit_api_client_default_headers.items():
+                for name, value in dict(self._injected_api_client.default_headers).items():
                     atexit_api_client.set_default_header(name, value)
 
             helper = K8sHelper(api_client=atexit_api_client)

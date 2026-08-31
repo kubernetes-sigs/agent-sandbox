@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
@@ -36,7 +37,11 @@ from kubernetes_asyncio import client as async_client
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
-from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient, _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+from k8s_agent_sandbox.async_sandbox_client import (
+    AsyncSandboxClient,
+    _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
+    _sync_configuration_from_async,
+)
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -301,7 +306,6 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             mock_atexit.register.assert_not_called()
 
     def test_atexit_cleanup_deletes_tracked_claims(self):
-        """_atexit_cleanup should open a fresh K8sHelper and delete all tracked claims."""
         first_sandbox = MagicMock()
         first_sandbox.close_connection = AsyncMock()
         first_sandbox._close_for_atexit = MagicMock()
@@ -350,13 +354,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         sandbox.close_connection.assert_not_awaited()
 
     def test_atexit_cleanup_does_not_fall_back_to_default_kubeconfig_with_injected_api_client(self):
-        """Atexit cleanup should preserve the cluster targeted by an injected ApiClient.
-
-        The atexit hook uses the synchronous K8sHelper (see
-        _sync_configuration_from_async), so this asserts on a real sync
-        kubernetes.client.Configuration mirroring the injected async one,
-        rather than object identity across the two client libraries.
-        """
+        """Atexit cleanup should preserve the cluster targeted by an injected ApiClient."""
         injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
         injected_configuration.verify_ssl = False
         injected_api_client = MagicMock(name="InjectedApiClient")
@@ -386,16 +384,154 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(atexit_api_client.cookie, "session=abc")
         self.assertEqual(atexit_api_client.default_headers.get("Impersonate-User"), "tenant-a")
 
+    def test_atexit_cleanup_reflects_injected_client_state_at_cleanup_time_not_construction_time(self):
+        injected_configuration = async_client.Configuration(host="https://old.example.com")
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {"Authorization": "Bearer old-token"}
+        injected_api_client.cookie = "session=old"
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        refreshed_configuration = async_client.Configuration(host="https://refreshed.example.com")
+        injected_api_client.configuration = refreshed_configuration
+        injected_api_client.default_headers["Authorization"] = "Bearer refreshed-token"
+        injected_api_client.cookie = "session=refreshed"
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper:
+            client._atexit_cleanup()
+
+        atexit_api_client = MockHelper.call_args.kwargs["api_client"]
+        self.assertEqual(atexit_api_client.configuration.host, "https://refreshed.example.com")
+        self.assertEqual(atexit_api_client.cookie, "session=refreshed")
+        self.assertEqual(
+            atexit_api_client.default_headers.get("Authorization"), "Bearer refreshed-token"
+        )
+
+    def test_atexit_cleanup_does_not_copy_async_refresh_api_key_hook(self):
+        """The sync client doesn't await an async refresh_api_key_hook, so copying it would leave an un-awaited coroutine instead of refreshing; the live api_key must be used instead."""
+        async def async_refresh_hook(config):
+            config.api_key["BearerToken"] = "should-not-be-used"
+
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "live-token"
+        injected_configuration.refresh_api_key_hook = async_refresh_hook
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {}
+        injected_api_client.cookie = None
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch(
+                "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+                return_value=mock_helper_instance,
+            ) as MockHelper:
+                client._atexit_cleanup()
+
+        self.assertFalse(
+            any("was never awaited" in str(w.message) for w in caught),
+            "copying an async refresh_api_key_hook must not leave an un-awaited coroutine",
+        )
+        atexit_api_client = MockHelper.call_args.kwargs["api_client"]
+        self.assertIsNone(atexit_api_client.configuration.refresh_api_key_hook)
+        self.assertEqual(
+            atexit_api_client.configuration.get_api_key_with_prefix("BearerToken"), "live-token"
+        )
+
+    def test_atexit_cleanup_sends_injected_bearer_token_on_older_sync_clients(self):
+        """kubernetes<36's auth_settings() only reads api_key["authorization"], so the token kubernetes_asyncio stores under "BearerToken" must be mirrored there without mutating the injected config."""
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "live-token"
+        injected_configuration.api_key_prefix["BearerToken"] = "Bearer"
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {}
+        injected_api_client.cookie = None
+        client = AsyncSandboxClient(
+            connection_config=self.config,
+            cleanup=False,
+            api_client=injected_api_client,
+        )
+        client._active_connection_sandboxes = {("tenant-ns", "claim-abc"): MagicMock()}
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
+            client._atexit_cleanup()
+
+        atexit_configuration = MockHelper.call_args.kwargs["api_client"].configuration
+        self.assertEqual(atexit_configuration.auth_settings()["BearerToken"]["value"], "Bearer live-token")
+        self.assertEqual(atexit_configuration.api_key["authorization"], "live-token")
+        self.assertEqual(atexit_configuration.api_key_prefix["authorization"], "Bearer")
+        self.assertEqual(injected_configuration.api_key, {"BearerToken": "live-token"})
+        self.assertEqual(injected_configuration.api_key_prefix, {"BearerToken": "Bearer"})
+
+    def test_atexit_configuration_runs_sync_refresh_hook_for_token_expired_since_last_request(self):
+        """Cleanup must use the refresh_api_key_hook to avoid deleting with a token that expired."""
+        def sync_refresh_hook(config):
+            config.api_key["BearerToken"] = "Bearer fresh-token"
+
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "Bearer expired-token"
+        injected_configuration.refresh_api_key_hook = sync_refresh_hook
+
+        sync_configuration = _sync_configuration_from_async(injected_configuration)
+
+        self.assertEqual(sync_configuration.auth_settings()["BearerToken"]["value"], "Bearer fresh-token")
+        self.assertEqual(sync_configuration.api_key["authorization"], "Bearer fresh-token")
+        self.assertEqual(injected_configuration.api_key, {"BearerToken": "Bearer expired-token"})
+
+    def test_atexit_configuration_keeps_live_token_when_refresh_hook_fails(self):
+        def failing_refresh_hook(config):
+            raise OSError("token file unreadable")
+
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "Bearer live-token"
+        injected_configuration.refresh_api_key_hook = failing_refresh_hook
+
+        with patch("sys.stderr") as mock_stderr:
+            sync_configuration = _sync_configuration_from_async(injected_configuration)
+
+        self.assertEqual(sync_configuration.auth_settings()["BearerToken"]["value"], "Bearer live-token")
+        mock_stderr.write.assert_called()
+
+    def test_atexit_configuration_keeps_environment_proxy_unless_injected_one_is_explicit(self):
+        """kubernetes_asyncio leaves proxy unset and lets aiohttp read HTTPS_PROXY/NO_PROXY, while the sync
+        Configuration reads them itself, so an unset async proxy must not clear the sync one."""
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://env-proxy:3128", "NO_PROXY": "internal.example.com"}, clear=True):
+            from_env = _sync_configuration_from_async(async_client.Configuration(host="https://tenant-a.example.com"))
+            sync_default = sync_client.Configuration()
+            explicit_async_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+            explicit_async_configuration.proxy = "http://explicit-proxy:8080"
+            explicit = _sync_configuration_from_async(explicit_async_configuration)
+
+        self.assertEqual(from_env.proxy, sync_default.proxy)
+        self.assertEqual(from_env.no_proxy, sync_default.no_proxy)
+        self.assertEqual(explicit.proxy, "http://explicit-proxy:8080")
+
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
-        """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
         self.client._active_connection_sandboxes = {}
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
             self.client._atexit_cleanup()
             MockHelper.assert_not_called()
 
     def test_atexit_cleanup_suppresses_errors(self):
-        """_atexit_cleanup should not propagate exceptions — cleanup is best-effort.
-        A warning is printed to stderr so the user knows a sandbox was orphaned."""
         sandbox = MagicMock()
         sandbox.close_connection = AsyncMock()
         sandbox._close_for_atexit = MagicMock()
@@ -411,8 +547,6 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 mock_stderr.write.assert_called()
 
     def test_atexit_cleanup_suppresses_helper_construction_errors(self):
-        """A failure constructing K8sHelper itself (e.g. no reachable kubeconfig)
-        must not escape _atexit_cleanup either — cleanup is best-effort."""
         self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", side_effect=Exception("no kubeconfig")):

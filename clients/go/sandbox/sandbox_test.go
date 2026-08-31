@@ -252,20 +252,44 @@ func TestNew_DefaultsApplied(t *testing.T) {
 	}
 }
 
-func TestExtractState_EmptyPodNameAnnotationFallsBackToSandboxName(t *testing.T) {
-	sb := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-sandbox",
-			Annotations: map[string]string{
-				PodNameAnnotation: "",
-			},
+func TestExtractState_PodNameAnnotationFallback(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        string
+	}{
+		{
+			name:        "empty annotation falls back to sandbox name",
+			annotations: map[string]string{PodNameAnnotation: ""},
+			want:        "test-sandbox",
+		},
+		{
+			name:        "absent annotation falls back to sandbox name",
+			annotations: nil,
+			want:        "test-sandbox",
+		},
+		{
+			name:        "set annotation is honored",
+			annotations: map[string]string{PodNameAnnotation: "custom-pod"},
+			want:        "custom-pod",
 		},
 	}
 
-	state := extractState(sb)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-sandbox",
+					Annotations: tt.annotations,
+				},
+			}
 
-	if state.PodName != sb.Name {
-		t.Errorf("expected PodName to fall back to sandbox name %q for empty legacy annotation, got %q", sb.Name, state.PodName)
+			state := extractState(sb)
+
+			if state.PodName != tt.want {
+				t.Errorf("expected PodName=%q, got %q", tt.want, state.PodName)
+			}
+		})
 	}
 }
 

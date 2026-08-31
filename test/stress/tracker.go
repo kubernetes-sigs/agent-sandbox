@@ -47,6 +47,15 @@ const (
 	// Poisson jitter against continuously replenished warm pools, measuring
 	// whether create -> Ready latency holds over time (see sustained.go).
 	PhaseClaimsWarmSustained PhaseName = "claims-warm-sustained"
+	// PhaseWarmPoolOvercreate fills many SandboxWarmPools at once and asserts
+	// the controller's exactly-N-creates and never-above-target population
+	// invariants (see warmpool.go).
+	PhaseWarmPoolOvercreate PhaseName = "warmpool-overcreate"
+	// PhaseWarmPoolUnschedulable parks one SandboxWarmPool on an impossible
+	// resource request and asserts the controller holds the unschedulable
+	// sandboxes (no delete/recreate churn) and emits exactly one
+	// WarmPoolNotProgressing Warning event (see warmpool.go).
+	PhaseWarmPoolUnschedulable PhaseName = "warmpool-unschedulable"
 )
 
 // PhaseNumber is a 1-based index into the run's phase list (Config.Phases /
@@ -167,11 +176,41 @@ type SandboxRecord struct {
 type Tracker struct {
 	mu      sync.Mutex
 	records map[types.NamespacedName]*SandboxRecord
+
+	// observers receive every decoded watch event after milestone processing.
+	// Phases that assert on objects the harness did not create itself (the
+	// warm-pool phases watch controller-owned Sandboxes and pool Events)
+	// register one for the duration of the phase. Keyed for removal.
+	observers  map[int]watchObserver
+	observerID int
 }
+
+// watchObserver is a phase-installed callback for raw watch events. It runs
+// on the watch decode path, so implementations must be fast and must not
+// block; observers do their own locking.
+type watchObserver func(resource string, eventType watch.EventType, u *unstructured.Unstructured)
 
 func NewTracker() *Tracker {
 	return &Tracker{
 		records: make(map[types.NamespacedName]*SandboxRecord),
+	}
+}
+
+// AddObserver registers fn to receive every watch event (all resources) and
+// returns a function that removes it again. Removal is idempotent.
+func (t *Tracker) AddObserver(fn watchObserver) (remove func()) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.observers == nil {
+		t.observers = make(map[int]watchObserver)
+	}
+	id := t.observerID
+	t.observerID++
+	t.observers[id] = fn
+	return func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		delete(t.observers, id)
 	}
 }
 
@@ -361,6 +400,22 @@ func (t *Tracker) HandleWatchEvent(resource string, eventType watch.EventType, u
 		t.handlePodEvent(eventType, u)
 	case "sandboxclaims":
 		t.handleClaimEvent(eventType, u)
+	}
+
+	// Fan out to phase-installed observers. Snapshot under the lock, invoke
+	// outside it: observers take their own locks and must not nest inside
+	// ours (the milestone handlers above also lock t.mu).
+	t.mu.Lock()
+	var observers []watchObserver
+	if len(t.observers) > 0 {
+		observers = make([]watchObserver, 0, len(t.observers))
+		for _, fn := range t.observers {
+			observers = append(observers, fn)
+		}
+	}
+	t.mu.Unlock()
+	for _, fn := range observers {
+		fn(resource, eventType, u)
 	}
 }
 

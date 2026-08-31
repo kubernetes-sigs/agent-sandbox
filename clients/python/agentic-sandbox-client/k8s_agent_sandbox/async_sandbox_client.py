@@ -21,6 +21,7 @@ Requires the ``async`` optional dependencies::
 
 import atexit
 import asyncio
+import copy
 import logging
 import sys
 import uuid
@@ -47,45 +48,22 @@ T = TypeVar("T", bound=AsyncSandbox)
 # unresponsive apiserver would otherwise hang process exit indefinitely.
 _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS = 300
 
-# Connection/auth fields copied from an injected kubernetes_asyncio
-# Configuration onto the sync kubernetes.client.Configuration built for
-# atexit cleanup. kubernetes.client and kubernetes_asyncio.client are
-# separate generated packages that happen to expose the same attribute names
-# for these fields, but they aren't interchangeable: e.g. the sync client's
-# urllib3 transport reads configuration.no_proxy, which the async
-# Configuration class doesn't define, so passing an async Configuration
-# directly into a sync ApiClient risks an AttributeError. Hence an explicit
-# allowlist instead of reusing the object or copying its whole __dict__.
-_ATEXIT_CONFIGURATION_FIELDS = (
-    "host",
-    "api_key",
-    "api_key_prefix",
-    "username",
-    "password",
-    "ssl_ca_cert",
-    "cert_file",
-    "key_file",
-    "verify_ssl",
-    "assert_hostname",
-    "proxy",
-    "proxy_headers",
-    "connection_pool_maxsize",
-    "retries",
-    "socket_options",
-    "tls_server_name",
-    "refresh_api_key_hook",
-    "discard_unknown_keys",
-)
-
-
 def _sync_configuration_from_async(async_configuration) -> sync_client.Configuration:
     """Mirrors an injected ``kubernetes_asyncio`` ``Configuration`` onto a
     ``kubernetes`` one, so atexit cleanup's synchronous ``K8sHelper`` targets
     the same cluster/credentials as the caller's injected ``api_client``.
+
+    Shallow copying and reclassing is used as the two classes have the same underlying
+    layout (plain ``__dict__`` attribute bags) but are different types, so re-using the configuration
+    object directly would break the sync client due to its async methods returning unawaited coroutines.
     """
-    sync_configuration = sync_client.Configuration()
-    for field in _ATEXIT_CONFIGURATION_FIELDS:
-        setattr(sync_configuration, field, getattr(async_configuration, field))
+    sync_configuration = copy.copy(async_configuration)
+    sync_configuration.__class__ = sync_client.Configuration
+    # The sync client reads this unconditionally when a proxy is set, but the async Configuration class
+    # never sets it, so we give it an explicit default.
+    sync_configuration.no_proxy = None
+    # An async refresh hook would never be awaited by the sync client, so we use the existing api_key value.
+    sync_configuration.refresh_api_key_hook = None
     return sync_configuration
 
 
@@ -165,13 +143,8 @@ class AsyncSandboxClient(Generic[T]):
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
         self.k8s_helper = AsyncK8sHelper(api_client=api_client)
-        self._atexit_api_client_configuration = (
-            api_client.configuration if api_client is not None else None
-        )
-        self._atexit_api_client_default_headers = (
-            dict(api_client.default_headers) if api_client is not None else {}
-        )
-        self._atexit_api_client_cookie = api_client.cookie if api_client is not None else None
+        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
+        self._injected_api_client = api_client
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
@@ -442,17 +415,17 @@ class AsyncSandboxClient(Generic[T]):
 
         Uses the synchronous :class:`K8sHelper` rather than kubernetes_asyncio,
         even though this class is otherwise fully async. atexit runs during
-        interpreter shutdown, after Python has begun tearing down its
-        process-wide thread pool; kubernetes_asyncio's aiohttp transport does a
+        interpreter shutdown, after Python has begun blocking new work on any
+        ``ThreadPoolExecutor``; kubernetes_asyncio's aiohttp transport does a
         per-request netrc lookup via a background thread, which raises "cannot
-        schedule new futures after interpreter shutdown" once that teardown has
-        started. The synchronous client's urllib3 transport has no event loop or
-        executor dependency, so it isn't affected. When an ApiClient was
-        injected, its Configuration is mirrored onto a fresh sync ApiClient
-        (see ``_sync_configuration_from_async``) so cleanup targets the same
-        cluster instead of falling back to the ambient kubeconfig. Per-claim
-        failures emit warnings to ``sys.stderr`` rather than raising — atexit
-        cleanup is best-effort.
+        schedule new futures after interpreter shutdown" once that block has
+        taken effect. The synchronous client's urllib3 transport has no event loop or
+        executor dependency, so it isn't affected. When an ApiClient is
+        injected, its configuration/default_headers/cookie are read live off
+        that client at cleanup time (so a caller that refreshes credentials
+        after construction still gets a cleanup client with current
+        credentials) and mirrored onto a fresh sync ApiClient so cleanup targets the same
+        cluster instead of falling back to the ambient kubeconfig.
         """
         try:
             claims = list(self._active_connection_sandboxes.keys())
@@ -460,12 +433,12 @@ class AsyncSandboxClient(Generic[T]):
                 return
 
             atexit_api_client = None
-            if self._atexit_api_client_configuration is not None:
+            if self._injected_api_client is not None:
                 atexit_api_client = sync_client.ApiClient(
-                    configuration=_sync_configuration_from_async(self._atexit_api_client_configuration),
-                    cookie=self._atexit_api_client_cookie,
+                    configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
+                    cookie=self._injected_api_client.cookie,
                 )
-                for name, value in self._atexit_api_client_default_headers.items():
+                for name, value in dict(self._injected_api_client.default_headers).items():
                     atexit_api_client.set_default_header(name, value)
 
             helper = K8sHelper(api_client=atexit_api_client)

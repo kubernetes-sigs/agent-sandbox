@@ -28,9 +28,10 @@ cluster access alone. Env-configured:
   N_CONVERSATIONS=4 MAX_CONCURRENT=4 SANDBOX_SESSION_KEY=$(openssl rand -hex 24) \
   LLM_API_KEY=... LLM_MODEL=... NAMESPACE=default python run_openhands_fleet.py
 
-Requires: pip install -e ../../../clients/integrations/openhands  (and
-openhands-tools for the conversation mode). The agent-server image tag should
-match the installed openhands-sdk release.
+Requires: Python >= 3.12 (the openhands-sdk floor) and
+pip install -e ../../../clients/integrations/openhands  (plus openhands-tools
+for the conversation mode). The agent-server image tag should match the
+installed openhands-sdk release.
 """
 
 import json

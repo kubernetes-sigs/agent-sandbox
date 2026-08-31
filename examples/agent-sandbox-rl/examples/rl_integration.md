@@ -263,10 +263,13 @@ def rollout(task, handle):
     workspace = make_handle_workspace(handle, api_key=POOL_KEY)
     try:
         conversation = Conversation(agent=agent, workspace=workspace)
-        conversation.send_message(prompt); conversation.run()
-        return {"id": task.id, "status": str(conversation.state.execution_status)}
+        try:
+            conversation.send_message(prompt); conversation.run()
+            return {"id": task.id, "status": str(conversation.state.execution_status)}
+        finally:
+            conversation.close()
     finally:
-        conversation.close(); workspace.cleanup()   # no-op on the pod
+        workspace.cleanup()   # no-op on the pod; the fleet releases
 
 results = fleet.run(rollout, strategy="naive", concurrency=64)
 
@@ -280,7 +283,8 @@ The pool's template must *run* the agent-server (`TemplateSpec.keepalive_command
 replaces the image entrypoint) with a `/health` readinessProbe merged via
 `extra_pod_spec` — `examples/run_openhands_fleet.py` is the complete runnable
 version (with a no-LLM smoke mode). Fleet-owned kwargs (`warmpool`, `ttl_s`,
-`sandbox_client`) raise; needs `pip install openhands-k8s-agent-sandbox`.
+`sandbox_client`) raise; needs `pip install openhands-k8s-agent-sandbox`
+(Python >= 3.12 — the `openhands-sdk` floor).
 
 ## Multi-cluster
 

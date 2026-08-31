@@ -92,6 +92,21 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"deployments where the sandbox shares a Pod with the router, or for "+
 			"integration tests using a localhost backend. Link-local, multicast, "+
 			"and unspecified addresses stay rejected regardless of this flag.")
+	fs.StringVar(&c.PathRoutingPrefix, "path-routing-prefix", c.PathRoutingPrefix,
+		"Optional URL path prefix that additionally lets a caller address a "+
+			"sandbox via <prefix>/<namespace>/<id>/<port>/<rest...>, instead of "+
+			"X-Sandbox-* headers. Off by default (headers only, unchanged). "+
+			"Enable this for browser-facing traffic: a WebSocket handshake has "+
+			"no API for custom headers, so a browser can only reach a "+
+			"WebSocket-dependent backend inside a sandbox (a web IDE's "+
+			"terminal, a dev server's HMR socket) through this router via a "+
+			"path it can put in a plain URL. A request whose path does not "+
+			"match this prefix falls straight through to header-based "+
+			"routing — but this claims the whole URL namespace under the "+
+			"prefix: once a path DOES match, it stays on the path-routing "+
+			"path even if it's otherwise malformed (bad namespace/id/port), "+
+			"and is never retried against headers. Pick a prefix no real "+
+			"in-sandbox route needs to answer under.")
 	fs.IntVar(&c.UpstreamMaxRetries, "upstream-max-retries", c.UpstreamMaxRetries,
 		"Number of additional dial attempts before returning 502. Only dial-class "+
 			"failures (DNS, connection refused) are retried. Smooths the case "+
@@ -135,6 +150,56 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 		"Path to a file holding the shared HMAC-SHA256 secret used to verify "+
 			"scoped tokens (see authz.MintScopedToken). Required when "+
 			"--authz-mode=scoped-token; must match whatever mints the tokens.")
+	fs.StringVar(&c.AuthzCookieName, "authz-cookie-name", c.AuthzCookieName,
+		"Name of a cookie the configured Authorizer additionally accepts a "+
+			"credential from — the only channel a browser attaches "+
+			"automatically to every request toward an origin, including a "+
+			"WebSocket handshake. Off by default. Requires "+
+			"--path-routing-prefix and an --authz-mode other than allow-all. "+
+			"See --authz-cookie-query-param for how the cookie gets set in "+
+			"the first place.")
+	fs.StringVar(&c.AuthzCookieQueryParam, "authz-cookie-query-param", c.AuthzCookieQueryParam,
+		"Name of a URL query parameter that bootstraps --authz-cookie-name: "+
+			"a GET/HEAD, non-upgrade request presenting a valid credential "+
+			"here gets the cookie set — scoped by Path to exactly the "+
+			"sandbox it authorized — and is redirected (302) to the same "+
+			"URL with the parameter stripped, so the credential spends the "+
+			"least possible time exposed in the URL, browser history, and "+
+			"Referer. Requires --authz-cookie-name.")
+	stringEnumVar(fs, (*string)(&c.AuthzCookieSameSite), "authz-cookie-samesite", string(c.AuthzCookieSameSite),
+		"SameSite attribute of the bootstrapped cookie: lax (default; "+
+			"covers same-site embedding without requiring HTTPS), strict "+
+			"(never sent cross-site, including the navigation that "+
+			"bootstraps it — rarely what you want here), or none (for "+
+			"genuinely cross-site embedding; requires the cookie to be "+
+			"Secure, and some browsers block it as third-party regardless).")
+	fs.BoolVar(&c.AuthzCookieInsecure, "authz-cookie-insecure", c.AuthzCookieInsecure,
+		"Omit the Secure attribute from the bootstrapped cookie. Only for "+
+			"local development over plain HTTP. Incompatible with "+
+			"--authz-cookie-samesite=none.")
+	stringSliceVar(fs, &c.AuthzCookieAllowedOrigins, "authz-cookie-allowed-origins",
+		"Comma-separated allowlist of scheme://host[:port] Origins permitted "+
+			"to make a cookie-authenticated request authorized by "+
+			"--authz-cookie-name — any request, not just protocol upgrades, "+
+			"though a WebSocket handshake is the case this exists for. "+
+			"Same-origin requests are always allowed regardless of this "+
+			"list; a request with no Origin header is let through here since "+
+			"there is nothing for this check to inspect. Only checked when "+
+			"the credential that authorized the request came from the "+
+			"cookie — a header- or query-sourced credential cannot be forged "+
+			"by a third-party page and is not subject to this check.")
+	fs.BoolVar(&c.AuthzTrustForwardedProto, "authz-trust-forwarded-proto", c.AuthzTrustForwardedProto,
+		"Read the scheme for the same-origin half of the cookie-authz check "+
+			"from the first value of X-Forwarded-Proto, when present, "+
+			"instead of r.TLS != nil. Off by default. Needed behind any "+
+			"TLS-terminating load balancer or Gateway — the common "+
+			"production shape — where r.TLS is always nil and every "+
+			"same-origin request would otherwise be misjudged cross-origin. "+
+			"Only enable this when the router is reachable exclusively "+
+			"through a proxy that sets this header itself and strips any "+
+			"client-supplied one first; otherwise a client with direct "+
+			"network access to the router could forge its own scheme. Has "+
+			"no effect without --authz-cookie-name.")
 
 	fs.BoolVar(&c.CacheEnabled, "cache-enabled", c.CacheEnabled,
 		"Enable the in-process Pod-IP cache (KEP-NNNN fast path). When on, "+

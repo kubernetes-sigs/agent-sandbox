@@ -37,8 +37,14 @@ generate-go-docs: # Generate Go SDK reference documentation
 		--repository.path "/" \
 		./clients/go/sandbox/... > $(REF_GO_PATH).tmp1
 	sed 's/^#/##/' < $(REF_GO_PATH).tmp1 > $(REF_GO_PATH).tmp2
-	tail -n +2 < $(REF_GO_PATH).tmp2 > $(REF_GO_PATH)
-	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2
+	# Strip #L<line> anchors from source links: line numbers are brittle and
+	# make the generated docs go stale on every unrelated edit. Keep the
+	# file link (per reviewer request). Staged through a temp file (rather than
+	# a pipe) so a tail failure aborts the recipe instead of silently writing a
+	# partial doc -- portable across /bin/sh implementations without pipefail.
+	tail -n +2 < $(REF_GO_PATH).tmp2 > $(REF_GO_PATH).tmp3
+	sed -E 's@(/blob/[^)# ]+)#L[0-9]+(-L[0-9]+)?@\1@g' < $(REF_GO_PATH).tmp3 > $(REF_GO_PATH)
+	rm $(REF_GO_PATH).tmp1 $(REF_GO_PATH).tmp2 $(REF_GO_PATH).tmp3
 
 PYDOC_MARKDOWN_VERSION := 4.8.2
 .PHONY: generate-python-docs
@@ -56,7 +62,7 @@ VERSION_PKG := sigs.k8s.io/agent-sandbox/internal/version
 
 GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 GIT_SHA     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE  ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+BUILD_DATE  ?= $(shell dev/tools/build-date)
 
 LD_FLAGS := -s -w -X $(VERSION_PKG).gitVersion=$(GIT_VERSION) \
 	-X $(VERSION_PKG).gitSHA=$(GIT_SHA) \
@@ -78,17 +84,20 @@ build-sandboxd:
 	go build -ldflags "$(LD_FLAGS)" -o bin/sandboxd ./packages/sandboxd/cmd/sandboxd
 
 KIND_CLUSTER=agent-sandbox
-CONTAINER_ENGINE ?= docker
 
+# `make deploy-kind` delegates to dev/tools/deploy-kind, which reads its
+# configuration from environment variables (GNU make exports command-line
+# variables to recipe subprocesses):
+#   SKIP_BUILD=true       deploy published images instead of building locally
+#   IMAGE_TAG=vX.Y.Z      pin the published image tag (with SKIP_BUILD=true)
+#   EXTENSIONS=true       deploy the extensions controller and CRDs
+#   CONTROLLER_ONLY=true  build and push only the controller image
+#   CONTROLLER_ARGS=...   extra controller flags
+#   CONTAINER_ENGINE=...  docker or podman
+#   KIND_CLUSTER_NAME=... cluster name (default: agent-sandbox)
 .PHONY: deploy-kind
-# `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
-# `CONTROLLER_ARGS="--enable-pprof-debug --zap-log-level=debug" make deploy-kind` to deploy with custom controller flags.
-# `CONTROLLER_ONLY=true make deploy-kind` to build and push only the controller image.
-# `CONTAINER_ENGINE=podman make deploy-kind` to use podman instead of docker.
 deploy-kind:
-	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG --container-engine=${CONTAINER_ENGINE}
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} --container-engine=${CONTAINER_ENGINE} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
+	KIND_CLUSTER_NAME="$${KIND_CLUSTER_NAME:-$(KIND_CLUSTER)}" ./dev/tools/deploy-kind
 
 .PHONY: deploy-cloud-provider-kind
 deploy-cloud-provider-kind:

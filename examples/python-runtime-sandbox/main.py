@@ -35,16 +35,26 @@ class ExecuteResponse(BaseModel):
     stderr: str
     exit_code: int
 
+def get_base_dir() -> str:
+    """Reads SANDBOX_BASE_DIR, falling back to /app when it's unset or blank.
+
+    Making the base directory configurable lets the sandbox run with a
+    read-only root filesystem: the runtime code stays wherever the image put
+    it, while commands and file operations are confined to a writable volume
+    (e.g. an emptyDir) mounted at SANDBOX_BASE_DIR.
+    """
+    return os.environ.get("SANDBOX_BASE_DIR", "").strip() or "/app"
+
 def get_safe_path(file_path: str) -> str:
-    """Sanitizes the file path to ensure it stays within /app."""
-    base_dir = os.path.realpath("/app")
+    """Sanitizes the file path to ensure it stays within the base directory."""
+    base_dir = os.path.realpath(get_base_dir())
     # Remove leading slashes to ensure path is relative
     clean_path = file_path.lstrip("/")
     full_path = os.path.realpath(os.path.join(base_dir, clean_path))
 
     if os.path.commonpath([base_dir, full_path]) != base_dir:
-        raise ValueError("Access denied: Path must be within /app")
-    
+        raise ValueError("Access denied: Path must be within the sandbox base directory")
+
     return full_path
 
 app = FastAPI(
@@ -82,7 +92,7 @@ def _run_command(args: list, timeout: float) -> subprocess.CompletedProcess:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        cwd="/app",
+        cwd=get_base_dir(),
         start_new_session=True,
     ) as process:
         try:
@@ -111,7 +121,7 @@ async def execute_command(request: ExecuteRequest):
         # Split the command string into a list to safely pass to subprocess
         args = shlex.split(request.command)
         
-        # Execute the command, always from the /app directory. Run it in a
+        # Execute the command, always from the base directory. Run it in a
         # worker thread so a long-running or hung command doesn't block the
         # event loop (and with it, the health check and file endpoints), and
         # enforce a timeout so a runaway command can't wedge the sandbox
@@ -136,11 +146,11 @@ async def execute_command(request: ExecuteRequest):
 @app.post("/upload", summary="Upload a file to the sandbox")
 async def upload_file(file: UploadFile = File(...)):
     """
-    Receives a file and saves it to the /app directory in the sandbox.
+    Receives a file and saves it to the base directory in the sandbox.
     """
     try:
         logging.info(f"--- UPLOAD_FILE CALLED: Attempting to save '{file.filename}' ---")
-        
+
         try:
             file_path = get_safe_path(file.filename)
         except ValueError:
@@ -148,7 +158,13 @@ async def upload_file(file: UploadFile = File(...)):
                 status_code=403,
                 content={"message": "Access denied"}
             )
-        
+
+        # The filename may carry a relative destination path (e.g.
+        # "data/input.csv"); create the intermediate directories so such
+        # uploads don't fail. file_path is already confined to the base
+        # directory by get_safe_path, so its parents are too.
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
         with open(file_path, "wb") as f:
             f.write(await file.read())
             
@@ -166,7 +182,7 @@ async def upload_file(file: UploadFile = File(...)):
 @app.get("/download/{encoded_file_path:path}", summary="Download a file from the sandbox")
 async def download_file(encoded_file_path: str):
     """
-    Downloads a specified file from the /app directory in the sandbox.
+    Downloads a specified file from the base directory in the sandbox.
     """
     decoded_path = urllib.parse.unquote(encoded_file_path)
     try:
@@ -181,7 +197,7 @@ async def download_file(encoded_file_path: str):
 @app.get("/list/{encoded_file_path:path}", summary="List files in a directory")
 async def list_files(encoded_file_path: str):
     """
-    Lists the contents of a directory under the /app directory in the sandbox.
+    Lists the contents of a directory under the base directory in the sandbox.
     """
     decoded_path = urllib.parse.unquote(encoded_file_path)
     try:
@@ -210,7 +226,7 @@ async def list_files(encoded_file_path: str):
 @app.get("/exists/{encoded_file_path:path}", summary="Check if the relative path exists")
 async def exists(encoded_file_path: str):
     """
-    Checks if a specified file or directory exists under the /app directory in the sandbox.
+    Checks if a specified file or directory exists under the base directory in the sandbox.
     """
     decoded_path = urllib.parse.unquote(encoded_file_path)
     try:

@@ -24,6 +24,9 @@ The application accepts the following command-line flags:
 | `-namespace`| The Kubernetes namespace where sandbox pods are created. | `default` (overrides `SANDBOX_NAMESPACE` env var) |
 | `-image` | The container image used for the temporary sandbox pod. | `debian:bookworm-slim` (overrides `SANDBOX_IMAGE` env var) |
 | `-homedir` | The directory inside the sandbox that is persisted via snapshot/restore. | `/home/clawtainer` (overrides `SANDBOX_HOME_DIR` env var) |
+| `-tool-timeout` | Maximum duration a single tool invocation (`run_command`, `ls`, `read`, or `write`) may run before it is cancelled. Accepts Go duration syntax, e.g. `30s`, `2m`, `1h`. `<= 0` disables the timeout. | `2m` |
+
+> **Note:** `-tool-timeout` cancels the Kubernetes exec connection and unblocks the agent loop; it does not guarantee that every process the command started inside the container (e.g. a detached background process) has actually been terminated.
 
 ## Configuration
 
@@ -46,6 +49,15 @@ The LLM has access to a powerful suite of tools configured in the registry (`pkg
 * **`ls`**: Lists the files and directories inside a specific folder (defaults to the current directory).
 * **`read`**: Reads the full contents of a file from the sandbox.
 * **`write`**: Writes specified content to a file, automatically creating parent directories if they do not exist and overwriting the file if it does.
+
+## Fake LLM for Testing
+
+Setting `OPENAI_MODEL=fake-eliza` selects a built-in fake LLM instead of a real API, so the
+agent plumbing can be exercised without an API key or network access. The fake answers every
+message with a question reflecting the user's words back (`"What is the capital of France?"`
+=> `"What do you think it means when you say 'What is the capital of France?'?"`), and knows
+one trick for testing the tool path end to end: a message of the form `run: <command>`
+makes it request a `run_command` tool call and report the result.
 
 ## Running the Example
 

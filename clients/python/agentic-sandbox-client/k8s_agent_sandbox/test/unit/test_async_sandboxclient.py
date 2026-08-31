@@ -73,13 +73,44 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 labels=None,
                 lifecycle=None,
                 volume_claim_templates=None,
-                pod_metadata=None
+                pod_metadata=None,
+                env=None,
             )
 
             self.assertEqual(sandbox, mock_sandbox_instance)
 
             active = await self.client.list_active_sandboxes()
             self.assertEqual(len(active), 1)
+
+    @patch("uuid.uuid4")
+    async def test_create_sandbox_with_env(self, mock_uuid):
+        mock_uuid.return_value.hex = "1234abcd"
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="resolved-id")
+
+        mock_sandbox_instance = MagicMock()
+        mock_sandbox_instance.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        env = {"FOO": "bar", "DEBUG": "true"}
+
+        with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = {"metadata": {"resourceVersion": "12345"}}
+
+            await self.client.create_sandbox("test-warmpool", "test-namespace", env=env)
+
+            mock_create.assert_called_once_with(
+                "sandbox-claim-1234abcd",
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None,
+                env=env,
+            )
+            self.mock_k8s_helper.wait_for_claim_ready.assert_awaited_once_with(
+                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345"
+            )
 
     async def test_create_sandbox_failure_cleanup(self):
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
@@ -349,6 +380,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 lifecycle=None,
                 volume_claim_templates=vcts,
                 pod_metadata=None,
+                env=None,
             )
 
     async def test_create_claim_with_volume_claim_templates(self):
@@ -374,6 +406,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             lifecycle=None,
             volume_claim_templates=vcts,
             pod_metadata=None,
+            env=None,
         )
 
     async def test_create_sandbox_without_shutdown_after_seconds(self):
@@ -390,6 +423,26 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             call_kwargs = mock_create.call_args
             lifecycle = call_kwargs[1].get("lifecycle")
             self.assertIsNone(lifecycle)
+
+    async def test_create_claim_with_env(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = None
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock()
+
+        env = {"FOO": "bar"}
+        await self.client._create_claim("test-claim", "test-warmpool", "test-namespace", env=env)
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim",
+            "test-warmpool",
+            "test-namespace",
+            annotations={},
+            labels=None,
+            lifecycle=None,
+            volume_claim_templates=None,
+            pod_metadata=None,
+            env=env,
+        )
 
     async def test_shutdown_after_seconds_validation_zero(self):
         with self.assertRaises(ValueError):
@@ -508,6 +561,71 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
                 k8s_helper=MagicMock(),
             )
         self.assertIn("does not support SandboxLocalTunnelConnectionConfig", str(ctx.exception))
+
+    async def test_post_requests_are_not_retried_on_server_error(self):
+        connector = AsyncSandboxConnector(
+            sandbox_id="test",
+            namespace="default",
+            connection_config=SandboxDirectConnectionConfig(
+                api_url="http://router"
+            ),
+            k8s_helper=MagicMock(),
+        )
+        response = MagicMock()
+        response.status_code = 503
+        response.is_redirect = False
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "503 Service Unavailable",
+            request=MagicMock(),
+            response=response,
+        )
+        connector.client.request = AsyncMock(return_value=response)
+
+        try:
+            with patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("POST", "execute")
+
+            self.assertEqual(connector.client.request.await_count, 1)
+        finally:
+            await connector.close()
+
+    async def test_idempotent_methods_are_retried_on_server_error(self):
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                connector = AsyncSandboxConnector(
+                    sandbox_id="test",
+                    namespace="default",
+                    connection_config=SandboxDirectConnectionConfig(
+                        api_url="http://router"
+                    ),
+                    k8s_helper=MagicMock(),
+                )
+                error_response = MagicMock()
+                error_response.status_code = 503
+                error_response.is_redirect = False
+                ok_response = MagicMock()
+                ok_response.status_code = 200
+                ok_response.is_redirect = False
+                ok_response.raise_for_status.return_value = None
+                connector.client.request = AsyncMock(
+                    side_effect=[error_response, ok_response]
+                )
+
+                try:
+                    with patch(
+                        "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                        new=AsyncMock(),
+                    ):
+                        result = await connector.send_request(method, "path")
+
+                    self.assertIs(result, ok_response)
+                    self.assertEqual(connector.client.request.await_count, 2)
+                finally:
+                    await connector.close()
 
     async def test_in_cluster_resolves_dns_by_default(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)

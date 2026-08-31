@@ -54,6 +54,11 @@ import (
 // We keep sandboxes around for 5 minutes after we last used them.
 const SandboxInactivityTimeout = 5 * time.Minute
 
+// defaultToolTimeout bounds how long a single tool invocation may run before
+// it is cancelled, so a hung command (e.g. "sleep 99999") fails fast instead
+// of blocking the agent loop indefinitely.
+const defaultToolTimeout = 2 * time.Minute
+
 func main() {
 	ctx := context.Background()
 
@@ -80,6 +85,7 @@ func main() {
 	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
 	flag.StringVar(&opts.Image, "image", opts.Image, "image")
 	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
+	flag.DurationVar(&opts.ToolTimeout, "tool-timeout", opts.ToolTimeout, "Maximum duration a single tool invocation may run before it is cancelled (Go duration syntax, e.g. \"30s\", \"2m\"). <= 0 disables the timeout.")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
@@ -260,11 +266,7 @@ readyLoop:
 				}
 			}
 			if ready {
-				if name, ok := latest.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
-					s.podName = name
-				} else {
-					s.podName = latest.Name
-				}
+				s.podName = latest.Name
 				break readyLoop
 			}
 		}
@@ -325,8 +327,7 @@ func (s *Sandbox) ExecCommand(ctx context.Context, opts tools.ExecCommandOptions
 
 	exitCode := 0
 	if err != nil {
-		var exitErr exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[exec.ExitError](err); ok {
 			exitCode = exitErr.ExitStatus()
 		} else {
 			return nil, fmt.Errorf("kubernetes exec failed: %w", err)
@@ -655,6 +656,10 @@ type RunOptions struct {
 
 	// ModelName is the name of the model to use with the LLM.
 	ModelName string
+
+	// ToolTimeout bounds how long a single tool invocation may run before it
+	// is cancelled. <= 0 disables the timeout. Default: defaultToolTimeout.
+	ToolTimeout time.Duration
 }
 
 func (o *RunOptions) InitDefaults() {
@@ -687,23 +692,11 @@ func (o *RunOptions) InitDefaults() {
 	}
 	o.ModelName = modelName
 
+	o.ToolTimeout = defaultToolTimeout
 }
 
 func run(ctx context.Context, opts RunOptions) error {
 	log := klog.FromContext(ctx)
-
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
-	}
-	if apiKey == "" {
-		return fmt.Errorf("GEMINI_API_KEY or OPENAI_API_KEY environment variable is required")
-	}
-
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
-	}
 
 	if opts.HomeDir == "" {
 		return fmt.Errorf("homeDir must not be empty")
@@ -717,7 +710,7 @@ func run(ctx context.Context, opts RunOptions) error {
 		return fmt.Errorf("invalid sessionName %q: %w", opts.SessionName, err)
 	}
 
-	llmClient, err := llm.NewClient(baseURL, apiKey)
+	llmClient, err := llm.NewFromEnv(opts.ModelName)
 	if err != nil {
 		return fmt.Errorf("failed to initialize llm client: %w", err)
 	}
@@ -739,6 +732,7 @@ func run(ctx context.Context, opts RunOptions) error {
 	}()
 
 	toolsRegistry := tools.NewRegistry()
+	toolsRegistry.ToolTimeout = opts.ToolTimeout
 	toolsRegistry.Add(&tools.RunCommand{})
 
 	toolsRegistry.Add(&tools.ListFilesTool{})
@@ -769,7 +763,7 @@ func run(ctx context.Context, opts RunOptions) error {
 
 type Harness struct {
 	// llmClient is the client we use to talk to the llm.
-	llmClient *llm.Client
+	llmClient llm.ChatClient
 
 	// toolsRegistry holds all the tools we have available to the llm.
 	toolsRegistry *tools.Registry
@@ -946,7 +940,6 @@ func (h *Harness) RunSession(ctx context.Context, session *Session) error {
 			}
 
 			for _, tc := range assistantMessage.ToolCalls {
-				// TODO: Add a timeout to the tool execution?
 				result, err := h.toolsRegistry.Call(ctx, activeSandbox, tc)
 
 				var toolMsg llm.Message

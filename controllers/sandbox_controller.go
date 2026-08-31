@@ -42,7 +42,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	sandboxv1alpha1 "sigs.k8s.io/agent-sandbox/api/v1alpha1"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -152,8 +151,7 @@ func (e *multipleSandboxPodsError) Error() string {
 }
 
 func asMultipleSandboxPodsError(err error) *multipleSandboxPodsError {
-	var multiplePodsErr *multipleSandboxPodsError
-	if errors.As(err, &multiplePodsErr) {
+	if multiplePodsErr, ok := errors.AsType[*multipleSandboxPodsError](err); ok {
 		return multiplePodsErr
 	}
 	return nil
@@ -184,9 +182,9 @@ func containsPod(pods []*corev1.Pod, pod *corev1.Pod) bool {
 	return false
 }
 
-// resolvePodName returns the name of the pod associated with the given Sandbox.
-// If the sandbox has adopted a warm pool pod, the pod name is tracked in the
-// agents.x-k8s.io/pod-name annotation and may differ from sandbox.Name.
+// resolvePodName returns the name of the pod associated with the given Sandbox. A Sandbox that adopted a warm pool
+// pod before the refactor to make the warm pool create full Sandbox CRs may still carry the agents.x-k8s.io/pod-name
+// annotation which holds the Pod's real name. Otherwise, the Pod name is the same as the Sandbox name.
 func resolvePodName(sandbox *sandboxv1beta1.Sandbox) string {
 	if name, ok := sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && name != "" {
 		return name
@@ -221,7 +219,6 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(Scheme))
-	utilruntime.Must(sandboxv1alpha1.AddToScheme(Scheme))
 	utilruntime.Must(sandboxv1beta1.AddToScheme(Scheme))
 }
 
@@ -269,7 +266,6 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
-//+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;update;patch,resourceNames=sandboxes.agents.x-k8s.io;sandboxclaims.extensions.agents.x-k8s.io;sandboxtemplates.extensions.agents.x-k8s.io;sandboxwarmpools.extensions.agents.x-k8s.io
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -823,6 +819,7 @@ func isSystemLabel(key string) bool {
 // extensionPodLabelKeys must stay in sync with computeExtensionPodLabels so reconcile
 // removes stale extension labels when they are no longer expected on the Pod.
 var extensionPodLabelKeys = []string{
+	extensionsv1beta1.SandboxIDLabel,
 	sandboxv1beta1.SandboxWarmPoolLabel,
 	sandboxv1beta1.SandboxTemplateRefHashLabel,
 }
@@ -842,17 +839,25 @@ func computeExtensionPodLabels(sandbox *sandboxv1beta1.Sandbox) map[string]strin
 
 	var labels map[string]string
 
+	if k == extensionsv1beta1.SandboxClaimKind {
+		if val, ok := sandbox.Labels[extensionsv1beta1.SandboxIDLabel]; ok && val != "" {
+			if labels == nil {
+				labels = make(map[string]string, 3)
+			}
+			labels[extensionsv1beta1.SandboxIDLabel] = val
+		}
+	}
 	if k == extensionsv1beta1.SandboxWarmPoolKind {
 		if val, ok := sandbox.Labels[sandboxv1beta1.SandboxWarmPoolLabel]; ok && val != "" {
 			if labels == nil {
-				labels = make(map[string]string, 2)
+				labels = make(map[string]string, 3)
 			}
 			labels[sandboxv1beta1.SandboxWarmPoolLabel] = val
 		}
 	}
 	if val, ok := sandbox.Labels[sandboxv1beta1.SandboxTemplateRefHashLabel]; ok && val != "" {
 		if labels == nil {
-			labels = make(map[string]string, 2)
+			labels = make(map[string]string, 3)
 		}
 		labels[sandboxv1beta1.SandboxTemplateRefHashLabel] = val
 	}
@@ -1271,33 +1276,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		return pod, nil
 	}
 
-	ensurePodNameAnnotation := func(podName string) error {
-		annotatedPodName := ""
-		if sandbox.Annotations != nil {
-			annotatedPodName = sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]
-		}
-
-		if annotatedPodName == podName {
-			return nil
-		}
-
-		if annotatedPodName != "" {
-			logger.Info("Skipping pod name annotation update because sandbox already tracks a different pod", "trackedPodName", annotatedPodName, "podName", podName)
-			return nil
-		}
-
-		patch := client.MergeFrom(sandbox.DeepCopy())
-		if sandbox.Annotations == nil {
-			sandbox.Annotations = make(map[string]string)
-		}
-		sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] = podName
-		if err := r.Patch(ctx, sandbox, patch); err != nil {
-			return fmt.Errorf("failed to set pod name annotation: %w", err)
-		}
-
-		return nil
-	}
-
 	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, error) {
 		logger.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
@@ -1384,10 +1362,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 					return nil, fmt.Errorf("failed to patch pod: %w", err)
 				}
 			}
-		}
-
-		if err := ensurePodNameAnnotation(pod.Name); err != nil {
-			return nil, err
 		}
 
 		// TODO - Do we enforce (change) spec if a pod exists ?
@@ -1487,10 +1461,6 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		return nil, err
-	}
-
-	if err := ensurePodNameAnnotation(pod.Name); err != nil {
 		return nil, err
 	}
 

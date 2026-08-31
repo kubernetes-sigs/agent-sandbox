@@ -5,9 +5,9 @@
 inside a sandbox pod and exposes the hybrid runtime API:
 
 ```text
-sandboxd (sidecar)
-├── gRPC  127.0.0.1:9090  →  ProcessService    (streaming process I/O)
-└── HTTP  127.0.0.1:8080  →  FilesystemService (stateless file operations & runtime probes)
+sandboxd (runtime daemon)
+├── gRPC  :9090  →  ProcessService    (streaming process I/O)
+└── HTTP  :8080  →  FilesystemService (stateless file operations & runtime probes)
 ```
 
 - **Process execution** is served over **gRPC** because `Start` is a
@@ -17,9 +17,17 @@ sandboxd (sidecar)
   `application/octet-stream` payloads with no protobuf wrapping, and any
   plain HTTP client works without generated stubs.
 
-Both listeners bind strictly to `localhost` inside the pod network namespace.
-They are never reachable from outside the pod without explicit proxying
-(`sandbox-router`).
+Both listeners bind to `--listen-host` (default `0.0.0.0`), so the daemon is
+reachable on the pod network — via a Kubernetes Service, the `sandbox-router`,
+or an SDK pod port-forward. Containment is provided by pod isolation and
+NetworkPolicy, not loopback binding; pass `--listen-host=127.0.0.1` to
+restrict to loopback (e.g. local development).
+
+**Where commands execute:** `ProcessService` runs commands inside whichever
+container hosts the `sandboxd` process, using that container's root
+filesystem. A shared volume (`/workspace`) shares *files* between containers —
+it does **not** share binaries. This is the single most important fact for
+choosing a [deployment topology](#deployment-topologies).
 
 The specifications live in [`spec/`](spec/):
 
@@ -89,60 +97,50 @@ not need their own locking for correctness:
 There is no cross-request transaction or compare-and-swap; agents that need
 coordination on shared paths must layer it themselves.
 
-## Deploying as a sidecar
+## Deployment topologies
 
-`sandboxd` runs as a sidecar next to your (unmodified) workload container.
-The two share the workspace volume; the workload reaches `sandboxd` over pod
-loopback (enforced by `sandboxd` listening strictly on `127.0.0.1`).
+The SDK and API are identical regardless of how `sandboxd` is deployed — but
+**which container runs the `sandboxd` process decides where your commands
+execute and which binaries they can see.** Pick the topology from that:
 
-```yaml
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxTemplate
-metadata:
-  name: sandboxd-template
-spec:
-  podTemplate:
-    spec:
-      securityContext:
-        fsGroup: 1000
-      containers:
-        - name: sandboxd
-          image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd:latest-main
-          ports:
-            - containerPort: 8080   # REST (localhost-only; port documented for probes)
-            - containerPort: 9090   # gRPC
-          readinessProbe:
-            httpGet:
-              path: /v1/health
-              port: 8080
-          volumeMounts:
-            - name: workspace
-              mountPath: /workspace
-        - name: workload
-          image: your-agent-image:latest
-          env:
-            - name: SANDBOXD_GRPC_ADDR
-              value: "localhost:9090"
-            - name: SANDBOXD_REST_ADDR
-              value: "localhost:8080"
-          volumeMounts:
-            - name: workspace
-              mountPath: /workspace
-      volumes:
-        - name: workspace
-          emptyDir: {}
-```
+| | A — dedicated runtime container | B — inject into an existing image |
+|---|---|---|
+| Commands run in | sandboxd's own container rootfs | your app image's rootfs |
+| Tools available | what's baked into the runtime image | everything already in your image |
+| Needs image rebuild | yes (to add tools) | no (initContainer injects the binary) |
+| Isolation | stronger (dedicated, minimal runtime) | weaker (daemon runs in your full image) |
+| Use when | you can build the execution image | you cannot rebuild your image |
 
-> **Note:** commands launched through `ProcessService` execute inside the
-> `sandboxd` container, with the shared `/workspace` volume as their working
-> directory — so files written by either container are visible to both.
+**A (default):** `sandboxd` runs as the pod's runtime container. Commands
+execute in that container, so tools must be baked into its image (the base
+image is minimal — a shell + coreutils; build `FROM sandboxd` to add `npm`,
+`python3`, …). Strongest isolation: untrusted agent code runs in a
+controlled runtime image.
+
+**B (no-rebuild alternative):** an initContainer copies the statically-linked
+`sandboxd` binary into a shared `emptyDir`, and your existing, unmodified
+tool-rich image runs it as its command. Commands now execute inside *your*
+image, so e.g. `npm install` finds `npm` — no rebuild required.
+
+Complete, runnable manifests for both (plus an end-to-end SDK client) live in
+[`examples/sandboxd-sandbox/`](../../examples/sandboxd-sandbox/).
+
+> **A common pitfall:** running `sandboxd` as a *sidecar* — a separate
+> container next to an (unmodified) workload container, sharing `/workspace`.
+> This looks like topology B but behaves like topology A: the shared volume
+> shares files, **not** the workload's binaries, so commands exec'd through
+> `ProcessService` still run in the sandboxd container and cannot see the
+> workload image's tools. A co-located workload container is useful only as a
+> *client* of the sandboxd API (reaching it over pod-local networking), not
+> as a source of tools.
 
 ## Flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `--grpc-port` | `9090` | Port for the gRPC ProcessService. Always binds to `127.0.0.1`. |
-| `--rest-port` | `8080` | Port for the REST API. Always binds to `127.0.0.1`. |
+| `--listen-host` | `0.0.0.0` | Interface for both listeners. Default is reachable on the pod network; set `127.0.0.1` to restrict to loopback. |
+| `--grpc-port` | `9090` | Port for the gRPC ProcessService. |
+| `--rest-port` | `8080` | Port for the REST API. |
 | `--root-dir` | `/workspace` | Sandbox root confining all file operations and working directories. Created if missing. |
 | `--metadata-env-prefix` | `SANDBOX_` | Env var prefix exposed on `/v1/metadata`. |
 | `--shutdown-timeout` | `10s` | Grace period for in-flight requests and child processes. |
@@ -229,10 +227,57 @@ resp, _ := client.Execute(ctx, &processv1.ExecuteRequest{
 fmt.Println(resp.GetExitCode(), string(resp.GetStdout()))
 ```
 
+## Agent Sandbox SDK access
+
+sandboxd binds the pod network (`0.0.0.0` by default), so it is reachable like
+any other in-pod service — via a Kubernetes **Service** or the
+**sandbox-router**. The SDKs connect via a **pod port-forward** to the sandbox
+pod (both `:8080` and `:9090`): filesystem calls go over REST, `Run` goes over
+gRPC.
+
+> **Where commands run:** `ProcessService` executes commands inside the
+> container that hosts `sandboxd` (see
+> [Deployment topologies](#deployment-topologies)). With topology A the base
+> `sandboxd` image is minimal (a shell + coreutils), so `Run` can use `sh`,
+> `cat`, `ls`, etc. out of the box; for a language runtime, either build a
+> sandboxd image that includes it (A) or inject sandboxd into an image that
+> already has it (B). Files written over REST land in the `/workspace`
+> volume.
+
+**Go** — select the runtime via `Options`:
+
+```go
+sb, _ := sandbox.New(ctx, sandbox.Options{
+    WarmPoolName: "my-pool",
+    Runtime:      sandbox.RuntimeSandboxd, // pod port-forward; REST + gRPC
+})
+_ = sb.Open(ctx)
+_ = sb.Write(ctx, "src/notes.txt", data)       // PUT /v1/files/...
+res, _ := sb.Run(ctx, "cat src/notes.txt")     // gRPC ProcessService.Execute
+_ = sb.Delete(ctx, "src", true)                // sandboxd-only
+```
+
+**Python** — select the runtime via the connection config:
+
+```python
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
+with client.claim("my-pool") as sandbox:
+    sandbox.files.write("src/notes.txt", data)    # PUT /v1/files/...
+    result = sandbox.commands.run("cat src/notes.txt")  # gRPC Execute
+    sandbox.files.delete("src", recursive=True)   # sandboxd-only
+```
+
+The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[grpc]`.
+
 ## Security model
 
-- **Network containment:** both ports bind to `127.0.0.1` only; external
-  access requires explicit proxying through `sandbox-router`.
+- **Network containment:** both ports bind `0.0.0.0` by default so the daemon
+  is reachable on the pod network (Service / sandbox-router). Containment is
+  provided by **pod isolation and NetworkPolicy**, not loopback binding; pass
+  `--listen-host=127.0.0.1` to restrict to loopback for local development.
 - **Path confinement:** every file path (and process `cwd`) is resolved with
   symlink evaluation and rejected unless it stays under `--root-dir`.
 - **Metadata hygiene:** `/v1/metadata` only serves env vars matching

@@ -121,9 +121,9 @@ spec:
     name: python-warmpool
 EOF
 
-kubectl wait --for=condition=Ready sandbox/quickstart-test --timeout=60s
+kubectl wait --for=condition=Ready sandboxclaim/quickstart-test --timeout=60s
 
-POD_NAME=$(kubectl get sandbox quickstart-test -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD_NAME=$(kubectl get sandboxclaim quickstart-test -o jsonpath='{.status.sandbox.name}')
 echo "Sandbox pod: $POD_NAME"
 
 kubectl delete sandboxclaim quickstart-test
@@ -131,14 +131,12 @@ kubectl delete sandboxclaim quickstart-test
 
 ### Understanding How WarmPool Works
 
-The WarmPool creates pre-warmed **PODS** (not Sandbox resources) that are ready to be claimed:
+The WarmPool creates pre-warmed **Sandbox** resources that are ready to be claimed:
 
-1. **WarmPool creates pods directly** with label `agents.x-k8s.io/pool=<hash>`
-2. When you create a **SandboxClaim**, the controller claims a pod from the pool
-3. The claimed pod gets:
-   - Annotation: `agents.x-k8s.io/pod-name: <pod-name>`
-   - Label changes from `pool=<hash>` to `sandbox-name-hash=<hash>`
-4. **WarmPool automatically creates a replacement pod** to maintain replica count
+1. **WarmPool creates sandboxes directly** with label `agents.x-k8s.io/warm-pool-sandbox=<hash>`
+2. When you create a **SandboxClaim**, the controller claims a sandbox from the pool
+3. The claimed sandbox's backing pod name matches the sandbox name
+4. **WarmPool automatically creates a replacement sandbox** to maintain replica count
 
 Performance comparison:
 - **With WarmPool**: Sub-2 second allocation (pod already running)
@@ -256,7 +254,7 @@ To confirm that the WarmPool is pre-warming pods, check whether the pod existed 
 ```bash
 # Pick a claim from the warmpool
 CLAIM_NAME=$(kubectl get sandboxclaim -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-POD_NAME=$(kubectl get sandbox ${CLAIM_NAME} -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}' 2>/dev/null)
+POD_NAME=$(kubectl get sandboxclaim ${CLAIM_NAME} -o jsonpath='{.status.sandbox.name}' 2>/dev/null)
 
 if [ -n "$POD_NAME" ] && [ -n "$CLAIM_NAME" ]; then
     CLAIM_TIME=$(kubectl get sandboxclaim ${CLAIM_NAME} -o jsonpath='{.metadata.creationTimestamp}')

@@ -102,27 +102,90 @@ PYTHON_TEST_SUITES = [
         "editable_installs": [
             (os.path.join("clients", "integrations", "deepagents"), "[test]"),
         ],
-    }
+    },
+    {
+        "name": "integrations-gymnasium",
+        "dir": os.path.join("clients", "integrations", "gymnasium"),
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
+            (os.path.join("clients", "integrations", "gymnasium"), "[test]"),
+        ]
+    },
+    {
+        "name": "integrations-nemo-gym",
+        "dir": os.path.join("clients", "integrations", "nemo-gym"),
+        # The integration itself needs Python >= 3.13. nemo-gym publishes
+        # requires-python >=3.13.14 — no released 3.13.x satisfies that (3.14+
+        # does) — so pre-install it past its floor; the editable install below
+        # then sees the requirement already satisfied. Drop the pre_install
+        # when nemo-gym relaxes its floor.
+        "min_python": (3, 13),
+        "pre_installs": [["--ignore-requires-python", "nemo-gym>=0.5.0"]],
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), "[async]"),
+            (os.path.join("clients", "integrations", "nemo-gym"), "[test]"),
+        ],
+    },
+    {
+        "name": "integrations-openhands",
+        "dir": os.path.join("clients", "integrations", "openhands"),
+        # openhands-sdk publishes requires-python >=3.12.
+        "min_python": (3, 12),
+        "editable_installs": [
+            (os.path.join("clients", "python", "agentic-sandbox-client"), ""),
+            (os.path.join("clients", "integrations", "openhands"), "[test]"),
+        ],
+    },
 ]
 
 
+def find_go_modules(repo_root):
+    """ returns the repo-relative directories of all Go modules tracked in
+    the repository: "" for the repo root, plus any nested modules (e.g. the
+    examples that carry their own go.mod) """
+    # :(glob) gives ** its explicit meaning: go.mod at any depth, including
+    # the repo root.
+    output = subprocess.check_output(
+        ["git", "ls-files", "--", ":(glob)**/go.mod"], cwd=repo_root, text=True)
+    return sorted(os.path.dirname(path) for path in output.strip().splitlines())
+
+
 def run_go_tests(repo_root, artifact_dir):
-    """ runs Go unit tests and returns the exit code """
-    go_list_cmd = ["go", "list", "./..."]
-    go_list_output = subprocess.check_output(go_list_cmd, cwd=repo_root, text=True)
-    packages = go_list_output.strip().split('\n')
+    """ runs Go unit tests in every Go module and returns the exit code """
+    returncode = 0
 
-    filtered_packages = [pkg for pkg in packages if "test/e2e" not in pkg]
+    for module_rel in find_go_modules(repo_root):
+        module_dir = os.path.join(repo_root, module_rel) if module_rel else repo_root
 
-    result = subprocess.run(utils.go_tool_args(
-        "gotestsum",
-        f"--junitfile={os.path.join(artifact_dir, 'junit_unit-go.xml')}",
-        "--",
-        "-race",
-        *filtered_packages
-    ), cwd=repo_root)
+        go_list_output = subprocess.check_output(
+            ["go", "list", "./..."], cwd=module_dir, text=True)
+        packages = [
+            pkg for pkg in go_list_output.strip().split('\n')
+            if pkg and "test/e2e" not in pkg
+        ]
+        if not packages:
+            # e.g. site/ is a module only to pin the docs theme.
+            print(f"No Go packages in module {module_rel or '.'}; skipping")
+            continue
 
-    return result.returncode
+        # Keep the historical junit filename for the root module.
+        junit_name = "junit_unit-go.xml"
+        if module_rel:
+            junit_name = f"junit_unit-go-{module_rel.replace(os.sep, '-')}.xml"
+
+        print(f"\n=== Running Go unit tests: module {module_rel or '(repo root)'} ===")
+        result = subprocess.run(utils.go_tool_args(
+            "gotestsum",
+            f"--junitfile={os.path.join(artifact_dir, junit_name)}",
+            "--",
+            "-race",
+            *packages
+        ), cwd=module_dir)
+
+        if result.returncode != 0:
+            returncode = result.returncode
+
+    return returncode
 
 
 def run_python_tests(repo_root, artifact_dir):
@@ -133,6 +196,13 @@ def run_python_tests(repo_root, artifact_dir):
         test_dir = os.path.join(repo_root, suite["dir"])
         if not os.path.isdir(test_dir):
             print(f"WARNING: Python test directory not found, skipping: {test_dir}")
+            continue
+
+        min_python = suite.get("min_python")
+        if min_python and sys.version_info < min_python:
+            wanted = ".".join(str(part) for part in min_python)
+            running = ".".join(str(part) for part in sys.version_info[:3])
+            print(f"WARNING: Skipping {suite['name']} tests: requires Python >= {wanted}, running {running}")
             continue
 
         venv_dir = os.path.join(repo_root, "bin", f"python-venv-{suite['name']}")
@@ -151,6 +221,13 @@ def run_python_tests(repo_root, artifact_dir):
         env = os.environ.copy()
         if not os.environ.get("PIP_EXTRA_INDEX_URL"):
             env.pop("PIP_EXTRA_INDEX_URL", None)
+
+        # Pre-installs run before editable installs so the resolver sees these
+        # requirements as already satisfied (e.g. forcing a package past a broken
+        # published requires-python floor).
+        for pre_install_args in suite.get("pre_installs", []):
+            subprocess.check_call(
+                [venv_pip, "install", "--quiet", *pre_install_args], env=env)
 
         req_name = suite.get("requirements")
         req_file = os.path.join(test_dir, req_name) if req_name else None

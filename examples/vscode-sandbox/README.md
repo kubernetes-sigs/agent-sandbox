@@ -188,18 +188,21 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
 
 1.  **Deploy the Router (Required for All Modes):**
     ```bash
-    # Deploys the Deployment and Service
-    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml
+    # Deploys the Deployment, Service, ServiceAccount, and RBAC
+    kubectl apply -f ../../sandbox-router/deploy/serviceaccount.yaml \
+      -f ../../sandbox-router/deploy/rbac.yaml \
+      -f ../../sandbox-router/deploy/deployment.yaml \
+      -f ../../sandbox-router/deploy/service.yaml
     ```
 
 2.  **Deploy the Gateway (Production Only):**
     If you need external access via a Public IP (GKE), apply the Gateway configuration.
     ```bash
     # Deploys Gateway, HTTPRoute, and HealthCheckPolicy
-    kubectl apply -f ../../clients/python/agentic-sandbox-client/sandbox-router/gateway.yaml
+    kubectl apply -f ../../sandbox-router/deploy/examples/gateway-gke.yaml
     ```
 
-**For Production (via Gateway)**
+**Via Gateway**
 
 1. Get the Gateway IP:
 ```bash
@@ -225,7 +228,7 @@ curl -v -H "X-Sandbox-ID: sandbox-example" \
 
     You should see the VSCode interface load immediately.
 
-**For Local Development (via Router Tunnel)**
+**Via Router Port-Forward Tunnel**
 
 For local development, port-forward to the **Router Service** (do not port-forward to the pod directly, as it's not compatible with secure runtimes like gVisor/kata).
 

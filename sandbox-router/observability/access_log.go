@@ -98,6 +98,14 @@ func (r *accessLogRecorder) Unwrap() http.ResponseWriter {
 // attached upstream, e.g. by TracingMiddleware with the trace_id baked in)
 // and falls back to base.
 //
+// sandbox_id and sandbox_namespace are read from Labels (via
+// LabelsForRequest) rather than the X-Sandbox-* request headers directly:
+// the proxy handler is what resolves the actual Target, from headers or,
+// when path-based routing is enabled, from the URL path instead — see
+// ParsePathRoute. Reading headers here, as an earlier version of this
+// middleware did, silently logged an empty sandbox identity for every
+// path-routed request, making exactly that traffic unsearchable.
+//
 // skip returns true for requests that should not be logged. Pass nil to log
 // every request; the typical caller passes a function that ignores
 // frequently-polled health endpoints so they don't drown the logs.
@@ -109,8 +117,9 @@ func AccessLogMiddleware(base logr.Logger, skip func(*http.Request) bool) func(h
 				return
 			}
 			start := time.Now()
+			ctx, labels := LabelsForRequest(r.Context())
 			rec := &accessLogRecorder{ResponseWriter: w, status: http.StatusOK}
-			next.ServeHTTP(rec, r)
+			next.ServeHTTP(rec, r.WithContext(ctx))
 
 			log := LoggerFromContext(r.Context(), base)
 			log.Info("request",
@@ -119,8 +128,8 @@ func AccessLogMiddleware(base logr.Logger, skip func(*http.Request) bool) func(h
 				"status", rec.status,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"client_ip", clientIP(r),
-				"sandbox_id", r.Header.Get("X-Sandbox-Id"),
-				"sandbox_namespace", r.Header.Get("X-Sandbox-Namespace"),
+				"sandbox_id", labels.SandboxID,
+				"sandbox_namespace", labels.SandboxNamespace,
 				"bytes_out", rec.bytes,
 				"user_agent", r.UserAgent(),
 			)

@@ -407,8 +407,7 @@ func execInPod(ctx context.Context, restConfig *rest.Config, coreClient corev1cl
 
 	exitCode := 0
 	if err != nil {
-		var exitErr remoteexec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[remoteexec.ExitError](err); ok {
 			exitCode = exitErr.ExitStatus()
 		} else {
 			return stdoutBuf.String(), stderrBuf.String(), 0, err

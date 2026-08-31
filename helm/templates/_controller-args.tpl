@@ -56,12 +56,6 @@
 {{- if hasKey .Values.controller "enableWarmPoolEviction" }}
 - --enable-warm-pool-eviction={{ .Values.controller.enableWarmPoolEviction }}
 {{- end }}
-{{- if .Values.webhookServiceName }}
-- --webhook-service-name={{ .Values.webhookServiceName }}
-{{- end }}
-{{- if (include "agent-sandbox.namespace" .) }}
-- --webhook-namespace={{ include "agent-sandbox.namespace" . }}
-{{- end }}
 {{- range .Values.controller.extraArgs }}
 - {{ . | quote }}
 {{- end }}

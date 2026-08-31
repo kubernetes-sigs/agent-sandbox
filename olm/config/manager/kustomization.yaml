@@ -5,4 +5,4 @@ resources:
 images:
 - name: controller
   newName: registry.k8s.io/agent-sandbox/agent-sandbox-controller
-  newTag: v0.5.4
+  newTag: v1.0.0

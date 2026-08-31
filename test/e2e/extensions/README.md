@@ -39,6 +39,7 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. Longevity mode overrides this to `max(10, coldStart×5)` unless explicitly set — derived from cold start calibration so pods survive pool fill time. |
 | `SANDBOX_TTL` | `0` | TTL in seconds for claim auto-cleanup after workload finishes. All claims use `ShutdownPolicy: Delete` with this TTL. Set higher to simulate Retain-like behavior where claims linger before deletion. |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
+| `SANDBOX_CONTROLLER_WORKERS` | *(unset)* | Override controller worker counts before benchmark. Format: `sandbox:20,claim:10,pool:1,batch:10`. Patches the controller deployment, waits for rollout, and restores original args on test cleanup. Useful for measuring whether lower concurrency improves latency for VM-backed runtimes where the runtime (not the controller) is the bottleneck. |
 
 ## Quick Start
 
@@ -101,6 +102,12 @@ SANDBOX_RUNTIME_CLASS=kata-clh \
   SANDBOX_LONGEVITY=5m \
   SANDBOX_DEBUG=true \
   go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 10m
+
+# Worker tuning sweep — compare default vs reduced concurrency for kata
+SANDBOX_RUNTIME_CLASS=kata-clh \
+  SANDBOX_POOL_SIZES=20 \
+  SANDBOX_CONTROLLER_WORKERS=sandbox:10,claim:10,batch:10 \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 60m
 ```
 
 ## Batch Sizing

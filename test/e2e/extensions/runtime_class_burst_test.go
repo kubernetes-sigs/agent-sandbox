@@ -239,12 +239,15 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	workloadSec := benchWorkloadSec()
 	longevity := benchLongevity()
 
+	tc0 := framework.NewTestContext(t)
+	workerCfg, restoreWorkers := applyControllerWorkerTuning(t, t.Context(), tc0.ClusterClient)
+	defer restoreWorkers()
+
 	reportDir := os.Getenv("SANDBOX_REPORT_DIR")
 	if reportDir == "" {
 		reportDir = "artifacts"
 	}
 
-	tc0 := framework.NewTestContext(t)
 	cluster, err := tc0.ClusterInfo(t.Context())
 	require.NoError(t, err)
 	instanceType := "unknown"
@@ -458,6 +461,9 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				_ = cw.Write([]string{"# max_claims", strconv.Itoa(poolSize * 2)})
 			}
 			_ = cw.Write([]string{"# inter_batch_delay_ms", strconv.Itoa(int(interBatchDelay.Milliseconds()))})
+			for _, h := range controllerWorkerCSVHeaders(workerCfg) {
+				_ = cw.Write(h)
+			}
 			_ = cw.Write([]string{"batch", "claim", "batch_size", "latency_sec", "timestamp", "wall_offset_sec", "ready_at_start",
 				"create_ack_ms", "adoption_ms", "schedule_ms", "runtime_ms", "propagate_ms", "e2e_ms", "is_warm"})
 			cw.Flush()

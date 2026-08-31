@@ -244,15 +244,23 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         health_url = f"{self.host.rstrip('/')}/health"
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
-        while time.monotonic() < deadline:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
                 request = Request(health_url, headers=self._headers)
-                with urlopen(request, timeout=1.0) as resp:
+                # Bound each probe and the backoff by the remaining budget so
+                # the caller's timeout is honored, not just approximated.
+                with urlopen(request, timeout=min(1.0, remaining)) as resp:
                     if 200 <= getattr(resp, "status", 200) < 300:
                         return
             except Exception as e:  # noqa: BLE001 — retried until the deadline
                 last_error = e
-            time.sleep(0.5)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.5, remaining))
         raise RuntimeError(
             f"agent-server at {health_url} failed to become healthy within "
             f"{timeout}s (pre-warmed pods should be healthy at claim time; "

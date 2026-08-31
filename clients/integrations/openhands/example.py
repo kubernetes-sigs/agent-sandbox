@@ -46,17 +46,17 @@ def workspace_ops(workspace: AgentSandboxWorkspace) -> None:
     result = workspace.execute_command("echo hello from a warm pod && uname -a")
     print(f"$ {result.command!r} -> exit {result.exit_code}\n{result.stdout}")
 
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-        f.write("round-trip payload\n")
-        local_path = f.name
-    upload = workspace.file_upload(local_path, "/workspace/roundtrip.txt")
-    print(f"upload ok={upload.success}")
-    download = workspace.file_download(
-        "/workspace/roundtrip.txt", local_path + ".back"
-    )
-    print(f"download ok={download.success}")
-    with open(local_path + ".back") as f:
-        assert f.read() == "round-trip payload\n"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        local_path = os.path.join(tmp_dir, "roundtrip.txt")
+        back_path = os.path.join(tmp_dir, "roundtrip.txt.back")
+        with open(local_path, "w") as f:
+            f.write("round-trip payload\n")
+        upload = workspace.file_upload(local_path, "/workspace/roundtrip.txt")
+        print(f"upload ok={upload.success}")
+        download = workspace.file_download("/workspace/roundtrip.txt", back_path)
+        print(f"download ok={download.success}")
+        with open(back_path) as f:
+            assert f.read() == "round-trip payload\n"
     print("file round-trip verified")
 
 

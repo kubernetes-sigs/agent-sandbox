@@ -303,6 +303,6 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             logger.warning(
                 "Failed to terminate sandbox %s: %s (ttl_s backstop applies "
                 "if configured)",
-                getattr(sandbox, "claim_name", "?"),
+                claim_name,
                 e,
             )

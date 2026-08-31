@@ -44,7 +44,9 @@ policy, per-pod resource limits) for the model-driven code the agent executes.
 1. **Session key** (pool-level auth — see [Auth model](#auth-model)):
 
    ```bash
-   kubectl create secret generic openhands-session-key \
+   # -n must match the namespace the template/pool manifests use (default);
+   # the pods read the secret from their own namespace.
+   kubectl create secret generic openhands-session-key -n default \
      --from-literal=key="$(openssl rand -hex 24)"
    ```
 

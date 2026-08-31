@@ -315,8 +315,16 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         self.cleanup()
 
     def cleanup(self) -> None:
-        """Delete the claim (the pool replenishes) and drop an owned client."""
+        """Delete the claim (the pool replenishes) and drop an owned client.
+
+        A failed termination keeps the claim reference so a later cleanup()
+        (or __del__) can retry — otherwise a claim with no ttl_s would leak
+        and silently eat warm-pool capacity. The owned client is kept open
+        while a retry is still possible.
+        """
         self._terminate_sandbox()
+        if self._sandbox is not None:
+            return  # termination failed; keep the client for the retry
         if self._owns_client and self.sandbox_client is not None:
             close = getattr(self.sandbox_client, "close", None)
             if callable(close):
@@ -331,16 +339,18 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         sandbox = self._sandbox
         if sandbox is None:
             return
-        self._sandbox = None
         # Capture before terminate(): the SDK clears identity fields on close.
         claim_name = getattr(sandbox, "claim_name", "?")
         try:
             sandbox.terminate()
-            logger.info("Released sandbox claim %s", claim_name)
-        except Exception as e:  # noqa: BLE001 — ttl_s backstops a failed delete
+        except Exception as e:  # noqa: BLE001 — retried on the next cleanup()
             logger.warning(
-                "Failed to terminate sandbox %s: %s (ttl_s backstop applies "
-                "if configured)",
+                "Failed to terminate sandbox %s: %s (kept for retry; ttl_s "
+                "backstop applies if configured)",
                 claim_name,
                 e,
             )
+            return
+        # Clear only after success so a failed delete stays retryable.
+        self._sandbox = None
+        logger.info("Released sandbox claim %s", claim_name)

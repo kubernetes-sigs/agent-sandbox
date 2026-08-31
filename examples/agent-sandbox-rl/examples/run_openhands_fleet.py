@@ -93,12 +93,26 @@ def _agent_server_container(session_key):
   return container
 
 
-def _rollout(session_key):
+def _conversation_mode():
+  """LLM configured AND the agent preset installed; else fall back to smoke."""
+  if not os.getenv("LLM_API_KEY"):
+    return False
+  try:
+    import openhands.tools  # noqa: F401
+  except ImportError:
+    logging.warning(
+        "LLM_API_KEY is set but openhands-tools is not installed — falling "
+        "back to smoke mode (pip install openhands-tools)")
+    return False
+  return True
+
+
+def _rollout(session_key, conversation_mode):
   """Per-task fn for fleet.run: bind the handle, converse (or smoke)."""
   def fn(task, handle):
     workspace = make_handle_workspace(handle, api_key=session_key or None)
     try:
-      if os.getenv("LLM_API_KEY"):
+      if conversation_mode:
         return _conversation(task, workspace)
       result = workspace.execute_command("echo ready && uname -m")
       return {"id": task.id, "mode": "smoke", "cluster": handle.cluster_name,
@@ -171,7 +185,7 @@ def main():
   fleet.load_tasks([Task(id=f"conv-{i}", image=image, metadata={})
                     for i in range(n_conversations)])
 
-  results = fleet.run(_rollout(session_key),
+  results = fleet.run(_rollout(session_key, _conversation_mode()),
                       strategy=_env("WARMPOOL_STRATEGY", "naive"),
                       concurrency=max_concurrent)
   print(json.dumps({"conversations": len(results), "results": results},

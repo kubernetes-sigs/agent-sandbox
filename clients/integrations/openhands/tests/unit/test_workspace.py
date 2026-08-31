@@ -312,3 +312,26 @@ def test_terminate_error_is_swallowed(no_health):
     ws = make_workspace(FakeClient(sandbox))
     ws.cleanup()  # must not raise; ttl_s is the backstop
     assert sandbox.terminated == 1
+
+
+def test_cleanup_retries_after_failed_terminate(no_health):
+    # First attempt fails -> the claim reference is kept and the next
+    # cleanup() retries; only success clears it (else a no-ttl claim leaks).
+    sandbox = FakeSandbox()
+    attempts = []
+
+    def flaky():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("apiserver hiccup")
+        sandbox.terminated += 1
+
+    sandbox.terminate = flaky
+    ws = make_workspace(FakeClient(sandbox))
+    ws.cleanup()
+    assert ws._sandbox is not None  # kept for retry
+    ws.cleanup()
+    assert sandbox.terminated == 1
+    assert ws._sandbox is None
+    ws.cleanup()  # idempotent after success
+    assert len(attempts) == 2

@@ -10,14 +10,36 @@ permissions:
 
 jobs:
   test:
-    name: Run Unit Tests 🧪
+    name: >-
+      Run Unit Tests 🧪 (${{ matrix.package-name }}, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.13"]
-    defaults:
-      run:
-        working-directory: clients/python/agentic-sandbox-client
+        include:
+          - package-name: k8s-agent-sandbox
+            package-directory: clients/python/agentic-sandbox-client
+            python-version: "3.11"
+            resolver-requirement: ""
+          - package-name: k8s-agent-sandbox
+            package-directory: clients/python/agentic-sandbox-client
+            python-version: "3.13"
+            resolver-requirement: ""
+          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.10)
+            package-directory: clients/integrations/deepagents
+            python-version: "3.11"
+            resolver-requirement: deepagents==0.7.10
+          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.11)
+            package-directory: clients/integrations/deepagents
+            python-version: "3.11"
+            resolver-requirement: deepagents==0.7.11
+          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.10)
+            package-directory: clients/integrations/deepagents
+            python-version: "3.13"
+            resolver-requirement: deepagents==0.7.10
+          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.11)
+            package-directory: clients/integrations/deepagents
+            python-version: "3.13"
+            resolver-requirement: deepagents==0.7.11
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,20 +54,26 @@ jobs:
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
 
-      - name: Install dependencies (including tests)
+      - name: Install SDK dependencies (including tests)
+        if: matrix.resolver-requirement == ''
+        working-directory: ${{ matrix.package-directory }}
         run: python3 -m pip install ".[test]"
 
+      - name: Install adapter dependencies (including tests)
+        if: matrix.resolver-requirement != ''
+        working-directory: ${{ matrix.package-directory }}
+        run: >-
+          python3 -m pip install "${{ matrix.resolver-requirement }}" ".[test]"
+
       - name: Run Unit Tests
+        working-directory: ${{ matrix.package-directory }}
         run: python3 -m pytest
 
   build:
-    name: Build distribution 📦
+    name: Build distributions 📦
     needs: test
 
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: clients/python/agentic-sandbox-client
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,8 +89,13 @@ jobs:
         run: >-
           python3 -m pip install build==1.4.3 twine==6.2.0
 
-      - name: Build a binary wheel and a source tarball
-        run: python3 -m build
+      - name: Build k8s-agent-sandbox
+        run: >-
+          python3 -m build clients/python/agentic-sandbox-client --outdir dist
+
+      - name: Build deepagents-k8s-agent-sandbox
+        run: >-
+          python3 -m build clients/integrations/deepagents --outdir dist
 
       - name: Check distribution packages
         run: python3 -m twine check dist/*
@@ -71,7 +104,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-package-distributions
-          path: clients/python/agentic-sandbox-client/dist/
+          path: dist/
 
   publish-to-pypi:
     name: >-
@@ -81,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/k8s-agent-sandbox
+      url: https://pypi.org/
     permissions:
       id-token: write # IMPORTANT: mandatory for trusted publishing
       contents: read

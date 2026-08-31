@@ -88,8 +88,17 @@ PYTHON_TEST_SUITES = [
         ]
     },
     {
-        "name": "integrations-deepagents",
+        "name": "integrations-deepagents-0.7.10",
         "dir": os.path.join("clients", "integrations", "deepagents"),
+        "resolver_requirements": ["deepagents==0.7.10"],
+        "editable_installs": [
+            (os.path.join("clients", "integrations", "deepagents"), "[test]"),
+        ],
+    },
+    {
+        "name": "integrations-deepagents-0.7.11",
+        "dir": os.path.join("clients", "integrations", "deepagents"),
+        "resolver_requirements": ["deepagents==0.7.11"],
         "editable_installs": [
             (os.path.join("clients", "integrations", "deepagents"), "[test]"),
         ],
@@ -149,7 +158,14 @@ def run_python_tests(repo_root, artifact_dir):
             # install each (relative_dir, extras) editable, in order
             for rel_dir, extras in suite["editable_installs"]:
                 subprocess.check_call(
-                    [venv_pip, "install", "--quiet", "-e", f".{extras}"],
+                    [
+                        venv_pip,
+                        "install",
+                        "--quiet",
+                        *suite.get("resolver_requirements", []),
+                        "-e",
+                        f".{extras}",
+                    ],
                     cwd=os.path.join(repo_root, rel_dir), env=env)
         elif req_file and os.path.isfile(req_file):
             subprocess.check_call(

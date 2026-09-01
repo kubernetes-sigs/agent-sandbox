@@ -40,7 +40,7 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
-    "@kubernetes/client-node": "^1.0.0"
+    "@kubernetes/client-node": "^2.0.0"
   },
   "peerDependencies": {
     "@opentelemetry/api": "^1.9.0",

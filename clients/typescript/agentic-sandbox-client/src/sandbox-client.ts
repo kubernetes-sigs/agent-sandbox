@@ -166,14 +166,22 @@ type WatchPassResult<V> =
 
 /**
  * True when a Watch `done(err)` signals the stream ended without a real
- * failure: `done(null)`, our own AbortController firing (AbortError), or the
- * apiserver returning 410 Gone because the supplied resourceVersion has been
- * compacted away. In every case the caller re-GETs and restarts the watch
- * from a fresh resourceVersion.
+ * failure, so the caller should re-GET and restart the watch from a fresh
+ * resourceVersion rather than surface the error:
+ *  - `done(null)`: the server closed the long-poll connection normally;
+ *  - AbortError: our own AbortController firing (deadline or success);
+ *  - TimeoutError: @kubernetes/client-node 2.x aborts every watch after its
+ *    30s request timeout — far shorter than the public ready-wait budget;
+ *  - 410 Gone: the supplied resourceVersion has been compacted away.
  */
 function isWatchCleanClose(err: unknown): boolean {
   if (!err) return true;
-  if (err instanceof Error && err.name === "AbortError") return true;
+  if (
+    err instanceof Error &&
+    (err.name === "AbortError" || err.name === "TimeoutError")
+  ) {
+    return true;
+  }
   const code =
     (err as { statusCode?: number; code?: number }).statusCode ??
     (err as { statusCode?: number; code?: number }).code;
@@ -1068,7 +1076,8 @@ export class SandboxClient {
           },
           (err) => {
             if (isWatchCleanClose(err)) {
-              // done(null), AbortError, or 410 Gone → caller will re-GET.
+              // Clean close (done(null) / AbortError / 30s TimeoutError / 410
+              // Gone): the outer loop re-GETs and re-watches until the deadline.
               settle({ type: "closed" });
             } else {
               settle({
@@ -1297,7 +1306,8 @@ export class SandboxClient {
           },
           (err) => {
             if (isWatchCleanClose(err)) {
-              // done(null), AbortError, or 410 Gone → caller will re-GET.
+              // Clean close (done(null) / AbortError / 30s TimeoutError / 410
+              // Gone): the outer loop re-GETs and re-watches until the deadline.
               settle({ type: "closed" });
             } else {
               settle({

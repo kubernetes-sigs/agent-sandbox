@@ -1165,6 +1165,53 @@ describe("SandboxClient (registry)", () => {
         SandboxTimeoutError,
       );
     }, 3_000);
+
+    it("treats the client library's 30s TimeoutError as a clean close and re-GETs", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // GET claim: not resolved yet.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+      // Claim watch: @kubernetes/client-node 2.x aborts the request after 30s
+      // and reports it as a DOMException named "TimeoutError".
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _cb: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          Promise.resolve().then(() =>
+            done(
+              new DOMException(
+                "The operation was aborted due to timeout",
+                "TimeoutError",
+              ),
+            ),
+          );
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Re-GET after the clean close: claim is now resolved.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: { sandbox: { name: "sb-after-timeout" } },
+      });
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            metadata: { name: "sb-after-timeout", annotations: {} },
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient({ sandboxReadyTimeout: 2 });
+      const sandbox = await client.createSandbox("tpl");
+      expect(sandbox.sandboxName).toBe("sb-after-timeout");
+    }, 5_000);
   });
 
   // ===== SandboxTimeoutError on timeout =====

@@ -19,7 +19,6 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
-import fetch, { type RequestInit } from "node-fetch";
 import { warmPoolReady } from "./predicates.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -89,7 +88,8 @@ export class TestContext {
         this.namespace = null;
       }
     } catch (e: unknown) {
-      const status = (e as { statusCode?: number }).statusCode;
+      const status = (e as { code?: number; statusCode?: number }).code ??
+        (e as { code?: number; statusCode?: number }).statusCode;
       if (status === 404) {
         console.log(`Namespace ${ns} not found, skipping deletion.`);
       } else {
@@ -133,6 +133,12 @@ export class TestContext {
 
   /**
    * Waits for a Kubernetes object to satisfy a given predicate function using the Watch API.
+   *
+   * @kubernetes/client-node 2.x aborts every watch after a fixed 30s request
+   * timeout, which is shorter than the wait budget here, so a single watch pass
+   * is not enough: the stream is re-established (from the watch cache, so
+   * existing objects are re-delivered) after each clean close until the overall
+   * deadline fires.
    */
   async waitForObject<T>(
     watchPath: string,
@@ -145,48 +151,14 @@ export class TestContext {
     const startMs = Date.now();
     const timeoutMs = timeout * 1000;
 
-    // Initial GET: check if already satisfied and capture resourceVersion to
-    // avoid missing events that occur between the GET and watch establishment.
-    let watchResourceVersion: string | undefined;
-    let initialObj: (T & { metadata?: { resourceVersion?: string } }) | undefined;
-    try {
-      const cluster = this.kubeConfig.getCurrentCluster();
-      if (cluster?.server) {
-        const serverBase = cluster.server.replace(/\/$/, "");
-        const fetchOpts = (await this.kubeConfig.applyToFetchOptions(
-          {},
-        )) as RequestInit;
-        const timeoutSignal = AbortSignal.timeout(10_000);
-        fetchOpts.signal = fetchOpts.signal
-          ? AbortSignal.any([fetchOpts.signal as AbortSignal, timeoutSignal])
-          : timeoutSignal;
-        const resp = await fetch(
-          `${serverBase}${watchPath}/${name}`,
-          fetchOpts,
-        );
-        if (resp.ok) {
-          initialObj = (await resp.json()) as T & {
-            metadata?: { resourceVersion?: string };
-          };
-          watchResourceVersion = initialObj.metadata?.resourceVersion;
-        } else {
-          // Drain the body to release the TCP socket back to the keep-alive pool.
-          resp.body?.resume();
-        }
-      }
-    } catch {
-      // Transient network/HTTP error — fall through to watch.
-    }
-
-    // Evaluate the predicate outside the network catch block so that
-    // errors thrown by predicateFn propagate to the caller rather than
-    // being silently swallowed as if they were transient GET failures.
-    if (initialObj != null && predicateFn(initialObj)) {
-      console.log(
-        `Object ${name} already satisfied predicate (initial GET).`,
-      );
-      return true;
-    }
+    // A watch ending without a real failure: the server closed the long-poll
+    // connection (done(null)), our own abort fired (AbortError), or the client
+    // library hit its 30s request timeout (TimeoutError). None are fatal — the
+    // caller re-establishes the watch until the deadline.
+    const isCleanClose = (err: unknown): boolean =>
+      !err ||
+      (err instanceof Error &&
+        (err.name === "AbortError" || err.name === "TimeoutError"));
 
     return new Promise<boolean>((resolve, reject) => {
       // Track whether the promise has been settled (resolved or rejected)
@@ -250,83 +222,85 @@ export class TestContext {
         );
       }, remainingMs);
 
-      watcher
-        .watch(
-          watchPath,
-          {
-            fieldSelector: `metadata.name=${name}`,
-            // Pass the captured resourceVersion to ensure no events are missed
-            // between the initial GET and watch establishment. Fall back to "0"
-            // (replay from the API server's watch cache) when the GET failed or
-            // returned a non-ok status — "0" ensures an ADDED event is delivered
-            // for objects that already exist.
-            resourceVersion: watchResourceVersion ?? "0",
-          },
-          (type: string, obj: T) => {
-            console.log(
-              `[watch ${name}] event=${type} status=${JSON.stringify((obj as { status?: unknown })?.status)}`,
-            );
-            if (settled) return;
-            let matched: boolean;
-            try {
-              matched = predicateFn(obj);
-            } catch (predicateErr) {
-              // predicateFn threw — propagate to the caller. Without this guard
-              // the k8s Watch library's own try/catch would silently discard the
-              // exception, leaving the Promise to hang until the timeout fires.
-              settled = true;
-              cleanup();
-              reject(predicateErr);
-              return;
-            }
-            if (matched) {
+      const startPass = () => {
+        if (settled) return;
+        watcher
+          .watch(
+            watchPath,
+            {
+              fieldSelector: `metadata.name=${name}`,
+              // resourceVersion "0" replays from the API server's watch cache,
+              // so an ADDED event is delivered for objects that already exist
+              // and the predicate is evaluated against current state without a
+              // separate initial GET.
+              resourceVersion: "0",
+            },
+            (type: string, obj: T) => {
               console.log(
-                `Object ${name} satisfied predicate on event type ${type}.`,
+                `[watch ${name}] event=${type} status=${JSON.stringify((obj as { status?: unknown })?.status)}`,
               );
+              if (settled) return;
+              let matched: boolean;
+              try {
+                matched = predicateFn(obj);
+              } catch (predicateErr) {
+                // predicateFn threw — propagate to the caller. Without this
+                // guard the k8s Watch library's own try/catch would silently
+                // discard the exception, leaving the Promise to hang until the
+                // timeout fires.
+                settled = true;
+                cleanup();
+                reject(predicateErr);
+                return;
+              }
+              if (matched) {
+                console.log(
+                  `Object ${name} satisfied predicate on event type ${type}.`,
+                );
+                settled = true;
+                cleanup();
+                resolve(true);
+              }
+            },
+            (err?: unknown) => {
+              if (settled) return;
+              if (isCleanClose(err)) {
+                // The stream ended without a real failure. Re-establish it; the
+                // outer timer rejects once the overall deadline is reached.
+                console.log(
+                  `[watch ${name}] stream closed cleanly, re-establishing watch`,
+                );
+                startPass();
+                return;
+              }
               settled = true;
               cleanup();
-              resolve(true);
-            }
-          },
-          (err?: unknown) => {
-            cleanup();
-            // Only reject if we haven't already settled.
-            // When we abort the watch after success or timeout, the
-            // doneCallback receives an abort error which we should ignore.
-            if (err && !settled) {
-              settled = true;
               reject(
                 new Error(
-                  `Watch error for ${name}: ${err instanceof Error ? err.message : String(err)
+                  `Watch error for ${name}: ${
+                    err instanceof Error ? err.message : String(err)
                   }`,
                 ),
               );
+            },
+          )
+          .then((ac) => {
+            abortController = ac;
+            // Abort if already settled (timeout or predicate satisfied) before
+            // the watch's AbortController was returned to us.
+            if (timedOut || settled) {
+              abortWatch();
             }
-            if (!err && !settled) {
-              settled = true;
-              reject(
-                new Error(
-                  `Watch for ${name} ended before predicate was satisfied.`,
-                ),
-              );
-            }
-          },
-        )
-        .then((ac) => {
-          abortController = ac;
-          // Abort if already settled (timeout or predicate satisfied) before
-          // the watch's AbortController was returned to us.
-          if (timedOut || settled) {
-            abortWatch();
-          }
-        })
-        .catch((err) => {
-          cleanup();
-          if (!settled) {
+          })
+          .catch((err) => {
+            if (settled) return;
             settled = true;
+            cleanup();
             reject(err);
-          }
-        });
+          });
+      };
+
+      startPass();
     });
   }
 

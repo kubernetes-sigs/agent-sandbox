@@ -273,6 +273,7 @@ describe("initializeTracer — parallel call safety", () => {
 
   it("provider.register() is called exactly once when initializeTracer runs in parallel with full SDK mocked", async () => {
     const registerMock = vi.fn();
+    const constructorOpts: Array<{ spanProcessors?: unknown[] }> = [];
 
     vi.doMock("@opentelemetry/api", () => ({
       SpanStatusCode: { ERROR: 2 },
@@ -289,13 +290,20 @@ describe("initializeTracer — parallel call safety", () => {
       propagation: { inject: vi.fn() },
     }));
     vi.doMock("@opentelemetry/sdk-trace-node", () => ({
+      // SDK 2.0: no addSpanProcessor(); span processors arrive via the
+      // constructor. Omitting the old method here means a regression to the
+      // pre-2.0 call path surfaces as a TypeError instead of passing silently.
       NodeTracerProvider: class {
-        addSpanProcessor() {}
+        constructor(opts: { spanProcessors?: unknown[] }) {
+          constructorOpts.push(opts);
+        }
         register = registerMock;
         async shutdown() {}
       },
     }));
-    vi.doMock("@opentelemetry/resources", () => ({ Resource: class {} }));
+    vi.doMock("@opentelemetry/resources", () => ({
+      resourceFromAttributes: vi.fn(() => ({})),
+    }));
     vi.doMock("@opentelemetry/sdk-trace-base", () => ({
       BatchSpanProcessor: class {},
     }));
@@ -314,6 +322,11 @@ describe("initializeTracer — parallel call safety", () => {
     // Without the tracerInitPromise cache, both concurrent calls would each
     // create a NodeTracerProvider and call register(), resulting in 2 invocations.
     expect(registerMock).toHaveBeenCalledTimes(1);
+
+    // The BatchSpanProcessor must be wired through the constructor (SDK 2.0),
+    // not a post-construction addSpanProcessor() call.
+    expect(constructorOpts).toHaveLength(1);
+    expect(constructorOpts[0].spanProcessors).toHaveLength(1);
   });
 });
 
@@ -364,13 +377,12 @@ describe("initializeTracer — beforeExit shutdown error handling", () => {
     }));
     vi.doMock("@opentelemetry/sdk-trace-node", () => ({
       NodeTracerProvider: class {
-        addSpanProcessor() {}
         register() {}
         shutdown = shutdownMock;
       },
     }));
     vi.doMock("@opentelemetry/resources", () => ({
-      Resource: class {},
+      resourceFromAttributes: vi.fn(() => ({})),
     }));
     vi.doMock("@opentelemetry/sdk-trace-base", () => ({
       BatchSpanProcessor: class {},

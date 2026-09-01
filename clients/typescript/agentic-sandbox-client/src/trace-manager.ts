@@ -137,14 +137,18 @@ export async function initializeTracer(
           "@opentelemetry/exporter-trace-otlp-grpc"
         );
 
-        const Resource = resources.Resource as new (
+        // SDK 2.0 removed the `new Resource(...)` constructor and
+        // `provider.addSpanProcessor(...)`: build the resource via
+        // resourceFromAttributes() and pass span processors to the
+        // NodeTracerProvider constructor instead.
+        const resourceFromAttributes = resources.resourceFromAttributes as (
           attrs: Record<string, string>,
         ) => unknown;
         const NodeTracerProvider =
           sdkTraceNode.NodeTracerProvider as new (opts: {
             resource: unknown;
+            spanProcessors: unknown[];
           }) => {
-            addSpanProcessor(processor: unknown): void;
             register(): void;
             shutdown(): Promise<void>;
           };
@@ -154,11 +158,13 @@ export async function initializeTracer(
         const OTLPTraceExporter =
           exporterOtlpGrpc.OTLPTraceExporter as new () => unknown;
 
-        const resource = new Resource({ "service.name": serviceName });
-        const provider = new NodeTracerProvider({ resource });
-        provider.addSpanProcessor(
-          new BatchSpanProcessor(new OTLPTraceExporter()),
-        );
+        const resource = resourceFromAttributes({
+          "service.name": serviceName,
+        });
+        const provider = new NodeTracerProvider({
+          resource,
+          spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter())],
+        });
         provider.register();
 
         // Register shutdown hook to flush BatchSpanProcessor on process exit.

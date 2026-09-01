@@ -44,10 +44,10 @@
   },
   "peerDependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": ">=0.50.0",
-    "@opentelemetry/resources": "^1.0.0",
-    "@opentelemetry/sdk-trace-base": "^1.0.0",
-    "@opentelemetry/sdk-trace-node": "^1.0.0"
+    "@opentelemetry/exporter-trace-otlp-grpc": ">=0.200.0",
+    "@opentelemetry/resources": "^2.0.0",
+    "@opentelemetry/sdk-trace-base": "^2.0.0",
+    "@opentelemetry/sdk-trace-node": "^2.0.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {

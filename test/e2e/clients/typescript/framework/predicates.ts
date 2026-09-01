@@ -14,23 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import * as k8s from "@kubernetes/client-node";
-
-/**
- * Predicate to check if a Deployment has at least minReady available replicas.
- */
-export function deploymentReady(
-  minReady: number = 1,
-): (obj: k8s.V1Deployment) => boolean {
-  return (obj: k8s.V1Deployment): boolean => {
-    if (obj.status) {
-      const availableReplicas = obj.status.availableReplicas ?? 0;
-      return availableReplicas >= minReady;
-    }
-    return false;
-  };
-}
-
 /**
  * Predicate to check if a SandboxWarmPool (CR) has all the required number of ready sandboxes.
  */
@@ -50,18 +33,5 @@ export function warmPoolReady(): (
       return typeof status.selector === "string" && status.selector.length > 0;
     }
     return true;
-  };
-}
-
-/**
- * Predicate to check if a Gateway has an address.
- */
-export function gatewayAddressReady(): (
-  obj: Record<string, any>,
-) => boolean {
-  return (obj: Record<string, any>): boolean => {
-    const status = obj?.status ?? {};
-    const addresses = status.addresses ?? [];
-    return addresses.length > 0;
   };
 }

@@ -155,16 +155,6 @@ function isValidDNSLabel(s: string): boolean {
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(s);
 }
 
-function isValidDNSSubdomain(s: string): boolean {
-  if (s.length === 0 || s.length > 253) return false;
-  return (
-    /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(s) &&
-    !s.includes("..") &&
-    !s.includes(".-") &&
-    !s.includes("-.")
-  );
-}
-
 /**
  * Result of a single watch pass.
  * "closed" means the watch stream ended cleanly (done(null)) — caller should re-list.
@@ -195,21 +185,9 @@ function isWatchCleanClose(err: unknown): boolean {
  * Tracks all created sandboxes and supports creating, retrieving,
  * listing, and deleting them.
  */
-export class SandboxClient<T extends Sandbox = Sandbox> {
-  protected readonly sandboxClass: new (
-    init: SandboxInit,
-  ) => T;
-
+export class SandboxClient {
   private readonly defaultNamespace: string;
-  private readonly apiUrl: string | undefined;
-  private readonly gatewayName: string | undefined;
-  private readonly gatewayNamespace: string;
-  private readonly routerNamespace: string;
-  private readonly serverPort: number;
   private readonly defaultSandboxReadyTimeout: number;
-  private readonly gatewayReadyTimeout: number;
-  private readonly portForwardReadyTimeout: number;
-  private readonly perAttemptTimeoutMs: number | undefined;
   private readonly enableTracing: boolean;
   private readonly traceServiceName: string;
   private readonly logger: Logger;
@@ -220,14 +198,14 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   protected readonly kubeConfig: k8s.KubeConfig;
   protected readonly customObjectsApi: k8s.CustomObjectsApi;
 
-  private readonly registry: Map<string, T> = new Map();
+  private readonly registry: Map<string, Sandbox> = new Map();
 
   /**
    * In-flight handle constructions, keyed like the registry: both
    * getSandbox() attaches and createSandbox() provisions publish here so the
    * two can never build competing handles for the same claim.
    */
-  private readonly attaching: Map<string, Promise<T>> = new Map();
+  private readonly attaching: Map<string, Promise<Sandbox>> = new Map();
 
   /**
    * Registry keys of createSandbox() calls that have not registered a handle
@@ -246,96 +224,31 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   private readonly cancelledProvisions: Set<string> = new Set();
 
   constructor(options: SandboxClientOptions = {}) {
-    if (options.serverPort !== undefined) {
-      if (
-        !Number.isInteger(options.serverPort) ||
-        options.serverPort < 1 ||
-        options.serverPort > 65535
-      ) {
-        throw new SandboxError(
-          `serverPort must be an integer between 1 and 65535, got: ${options.serverPort}`,
-        );
-      }
-    }
-    for (const [key, value] of [
-      ["sandboxReadyTimeout", options.sandboxReadyTimeout],
-      ["gatewayReadyTimeout", options.gatewayReadyTimeout],
-      ["portForwardReadyTimeout", options.portForwardReadyTimeout],
-      ["perAttemptTimeoutMs", options.perAttemptTimeoutMs],
-    ] as [string, number | undefined][]) {
-      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
-        throw new SandboxError(
-          `${key} must be a positive number, got: ${value}`,
-        );
-      }
-    }
-    for (const [key, value] of [
-      ["namespace", options.namespace],
-      ["gatewayNamespace", options.gatewayNamespace],
-      ["routerNamespace", options.routerNamespace],
-    ] as [string, string | undefined][]) {
-      if (value !== undefined && value.length === 0) {
-        throw new SandboxError(`${key} must be a non-empty string`);
-      }
-    }
-
-    // apiUrl URL structure validation (http/https scheme, non-empty host)
-    if (options.apiUrl !== undefined) {
-      let parsedUrl: URL;
-      try {
-        parsedUrl = new URL(options.apiUrl);
-      } catch {
-        throw new SandboxError(
-          `apiUrl must be a valid URL, got: ${options.apiUrl}`,
-        );
-      }
-      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-        throw new SandboxError(
-          `apiUrl must use http or https scheme, got: ${parsedUrl.protocol}`,
-        );
-      }
-      if (!parsedUrl.host) {
-        throw new SandboxError(
-          `apiUrl must include a host, got: ${options.apiUrl}`,
-        );
-      }
-    }
-
-    // DNS label validation for namespace, gatewayNamespace, and routerNamespace
-    for (const [key, value] of [
-      ["namespace", options.namespace],
-      ["gatewayNamespace", options.gatewayNamespace],
-      ["routerNamespace", options.routerNamespace],
-    ] as [string, string | undefined][]) {
-      if (value !== undefined && value.length > 0 && !isValidDNSLabel(value)) {
-        throw new SandboxError(
-          `${key} must be a valid Kubernetes namespace (DNS label): ` +
-            `lowercase alphanumeric or hyphens, max 63 characters, got: ${value}`,
-        );
-      }
-    }
-
-    // DNS subdomain validation for gatewayName
     if (
-      options.gatewayName !== undefined &&
-      options.gatewayName.length > 0 &&
-      !isValidDNSSubdomain(options.gatewayName)
+      options.sandboxReadyTimeout !== undefined &&
+      (!Number.isFinite(options.sandboxReadyTimeout) ||
+        options.sandboxReadyTimeout <= 0)
     ) {
       throw new SandboxError(
-        `gatewayName must be a valid Kubernetes DNS subdomain name, got: ${options.gatewayName}`,
+        `sandboxReadyTimeout must be a positive number, got: ${options.sandboxReadyTimeout}`,
+      );
+    }
+    if (options.namespace !== undefined && options.namespace.length === 0) {
+      throw new SandboxError("namespace must be a non-empty string");
+    }
+    if (
+      options.namespace !== undefined &&
+      options.namespace.length > 0 &&
+      !isValidDNSLabel(options.namespace)
+    ) {
+      throw new SandboxError(
+        "namespace must be a valid Kubernetes namespace (DNS label): " +
+          `lowercase alphanumeric or hyphens, max 63 characters, got: ${options.namespace}`,
       );
     }
 
     this.defaultNamespace = options.namespace ?? "default";
-    this.apiUrl = options.apiUrl;
-    this.gatewayName = options.gatewayName;
-    this.gatewayNamespace = options.gatewayNamespace ?? "default";
-    this.routerNamespace = options.routerNamespace ?? "agent-sandbox-system";
-    this.serverPort = options.serverPort ?? 8888;
     this.defaultSandboxReadyTimeout = options.sandboxReadyTimeout ?? 180;
-    this.gatewayReadyTimeout = options.gatewayReadyTimeout ?? 180;
-    this.portForwardReadyTimeout = options.portForwardReadyTimeout ?? 30;
-    this.perAttemptTimeoutMs = options.perAttemptTimeoutMs;
     this.enableTracing = options.enableTracing ?? false;
     this.traceServiceName = options.traceServiceName ?? "sandbox-client";
     this.logger = resolveLogger(options.logger, options.quiet);
@@ -354,8 +267,6 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       );
     }
     this.customObjectsApi = this.kubeConfig.makeApiClient(k8s.CustomObjectsApi);
-
-    this.sandboxClass = Sandbox as unknown as new (init: SandboxInit) => T;
   }
 
   /**
@@ -366,7 +277,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     warmpool: string,
     namespace?: string,
     opts?: CreateSandboxOptions,
-  ): Promise<T> {
+  ): Promise<Sandbox> {
     if (!warmpool) {
       throw new Error("Warmpool name cannot be empty.");
     }
@@ -413,15 +324,15 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
   }
 
   /**
-   * Creates the SandboxClaim, waits for readiness, connects, and registers the
-   * handle. The caller owns the {@link attaching} entry for this claim.
+   * Creates the SandboxClaim, waits for readiness, and registers the handle.
+   * The caller owns the {@link attaching} entry for this claim.
    */
   private async provisionSandbox(
     claimName: string,
     warmpool: string,
     ns: string,
     opts?: CreateSandboxOptions,
-  ): Promise<T> {
+  ): Promise<Sandbox> {
     const sandboxReadyTimeout =
       opts?.sandboxReadyTimeout ?? this.defaultSandboxReadyTimeout;
 
@@ -439,7 +350,6 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
 
     let sandboxName: string;
     let podName: string;
-    let annotations: Record<string, string>;
 
     try {
       const traceContextStr =
@@ -461,7 +371,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
           `SandboxClaim '${claimName}' was cleaned up while it was being created.`,
         );
       }
-      ({ sandboxName, podName, annotations } = await this.waitForSandboxReady(
+      ({ sandboxName, podName } = await this.waitForSandboxReady(
         claimName,
         ns,
         sandboxReadyTimeout * 1000,
@@ -509,32 +419,12 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       sandboxName,
       podName,
       namespace: ns,
-      annotations,
-      serverPort: this.serverPort,
-      apiUrl: this.apiUrl,
-      gatewayName: this.gatewayName,
-      gatewayNamespace: this.gatewayNamespace,
-      routerNamespace: this.routerNamespace,
-      gatewayReadyTimeout: this.gatewayReadyTimeout,
-      portForwardReadyTimeout: this.portForwardReadyTimeout,
-      perAttemptTimeoutMs: this.perAttemptTimeoutMs,
-      kubeConfig: this.kubeConfig,
       customObjectsApi: this.customObjectsApi,
-      traceServiceName: this.traceServiceName,
-      tracer: sandboxTracer,
       tracingManager: sandboxTracingManager,
       logger: this.logger,
     };
 
-    const sandbox = new this.sandboxClass(init);
-
-    try {
-      await sandbox.connect();
-    } catch (err) {
-      // connect() failed — close sandbox (which also deletes claim)
-      await sandbox.close().catch(() => {});
-      throw err;
-    }
+    const sandbox = new Sandbox(init);
 
     this.registry.set(`${ns}/${claimName}`, sandbox);
     return sandbox;
@@ -544,7 +434,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
    * Retrieves an existing sandbox handle by claim name.
    * Returns the cached handle if still active, otherwise re-attaches.
    */
-  async getSandbox(claimName: string, namespace?: string): Promise<T> {
+  async getSandbox(claimName: string, namespace?: string): Promise<Sandbox> {
     // normalize empty string to defaultNamespace (matches Go behaviour)
     const ns = namespace || this.defaultNamespace;
     const key = `${ns}/${claimName}`;
@@ -571,7 +461,7 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     claimName: string,
     ns: string,
     key: string,
-  ): Promise<T> {
+  ): Promise<Sandbox> {
     const existing = this.registry.get(key);
     if (existing?.isActive) {
       // Verify the claim still exists and check if the sandbox name has changed.
@@ -697,9 +587,8 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
     // Resolve the sandbox identity and wait for readiness
     let sandboxName: string;
     let podName: string;
-    let annotations: Record<string, string>;
     try {
-      ({ sandboxName, podName, annotations } = await this.waitForSandboxReady(
+      ({ sandboxName, podName } = await this.waitForSandboxReady(
         claimName,
         ns,
         this.defaultSandboxReadyTimeout * 1000,
@@ -716,34 +605,12 @@ export class SandboxClient<T extends Sandbox = Sandbox> {
       sandboxName,
       podName,
       namespace: ns,
-      annotations,
-      serverPort: this.serverPort,
-      apiUrl: this.apiUrl,
-      gatewayName: this.gatewayName,
-      gatewayNamespace: this.gatewayNamespace,
-      routerNamespace: this.routerNamespace,
-      gatewayReadyTimeout: this.gatewayReadyTimeout,
-      portForwardReadyTimeout: this.portForwardReadyTimeout,
-      perAttemptTimeoutMs: this.perAttemptTimeoutMs,
-      kubeConfig: this.kubeConfig,
       customObjectsApi: this.customObjectsApi,
-      traceServiceName: this.traceServiceName,
-      tracer: sandboxTracer,
       tracingManager: sandboxTracingManager,
       logger: this.logger,
     };
 
-    const sandbox = new this.sandboxClass(init);
-    try {
-      await sandbox.connect();
-    } catch (err) {
-      // Release local resources (port-forward process, tracing span) on
-      // connect failure, but do NOT delete the SandboxClaim — the claim belongs
-      // to the existing sandbox which may still be healthy; only the local tunnel
-      // setup failed.
-      await sandbox.closeLocal().catch(() => {});
-      throw err;
-    }
+    const sandbox = new Sandbox(init);
 
     this.registry.set(key, sandbox);
     return sandbox;

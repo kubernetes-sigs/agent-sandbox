@@ -60,24 +60,6 @@ vi.mock("@kubernetes/client-node", () => {
   return { KubeConfig: MockKubeConfig, CustomObjectsApi, Watch };
 });
 
-// ---------- mock: node:child_process ----------
-
-vi.mock("node:child_process", () => ({
-  spawn: vi.fn(),
-  ChildProcess: vi.fn(),
-}));
-
-// ---------- mock: node:net ----------
-
-vi.mock("node:net", async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>;
-  return {
-    ...actual,
-    default: { ...actual },
-    createServer: actual.createServer,
-  };
-});
-
 // ---------- import SUT after mocks ----------
 
 import {
@@ -87,6 +69,7 @@ import {
   POD_NAME_ANNOTATION,
 } from "../constants.js";
 import {
+  SandboxClaimFailedError,
   SandboxError,
   SandboxNotFoundError,
   SandboxTemplateNotFoundError,
@@ -169,8 +152,6 @@ describe("SandboxClient (registry)", () => {
     it("accepts all options without throwing", () => {
       const client = new SandboxClient({
         namespace: "prod",
-        apiUrl: "http://api:8080",
-        serverPort: 3000,
         sandboxReadyTimeout: 60,
         enableTracing: false,
         traceServiceName: "my-service",
@@ -182,30 +163,6 @@ describe("SandboxClient (registry)", () => {
   // ===== constructor validation =====
 
   describe("constructor validation", () => {
-    it("throws SandboxError for serverPort 0", () => {
-      expect(() => new SandboxClient({ serverPort: 0 })).toThrow(SandboxError);
-    });
-
-    it("throws SandboxError for serverPort 65536", () => {
-      expect(() => new SandboxClient({ serverPort: 65536 })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("throws SandboxError for non-integer serverPort", () => {
-      expect(() => new SandboxClient({ serverPort: 8080.5 })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("accepts serverPort 1 (minimum valid)", () => {
-      expect(() => new SandboxClient({ serverPort: 1 })).not.toThrow();
-    });
-
-    it("accepts serverPort 65535 (maximum valid)", () => {
-      expect(() => new SandboxClient({ serverPort: 65535 })).not.toThrow();
-    });
-
     it("throws SandboxError for sandboxReadyTimeout 0", () => {
       expect(() => new SandboxClient({ sandboxReadyTimeout: 0 })).toThrow(
         SandboxError,
@@ -214,18 +171,6 @@ describe("SandboxClient (registry)", () => {
 
     it("throws SandboxError for sandboxReadyTimeout negative", () => {
       expect(() => new SandboxClient({ sandboxReadyTimeout: -1 })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("throws SandboxError for gatewayReadyTimeout negative", () => {
-      expect(() => new SandboxClient({ gatewayReadyTimeout: -1 })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("throws SandboxError for portForwardReadyTimeout negative", () => {
-      expect(() => new SandboxClient({ portForwardReadyTimeout: -1 })).toThrow(
         SandboxError,
       );
     });
@@ -239,12 +184,6 @@ describe("SandboxClient (registry)", () => {
     it("throws SandboxError for empty namespace", () => {
       expect(() => new SandboxClient({ namespace: "" })).toThrow(SandboxError);
     });
-
-    it("throws SandboxError for empty gatewayNamespace", () => {
-      expect(() => new SandboxClient({ gatewayNamespace: "" })).toThrow(
-        SandboxError,
-      );
-    });
   });
 
   // ===== createSandbox =====
@@ -254,7 +193,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("my-sandbox", "my-pod-0");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("test-template", "default");
 
       expect(sandbox).toBeInstanceOf(Sandbox);
@@ -283,7 +222,6 @@ describe("SandboxClient (registry)", () => {
 
       const client = new SandboxClient({
         namespace: "prod",
-        apiUrl: "http://api:8080",
       });
       const sandbox = await client.createSandbox("tpl");
 
@@ -298,7 +236,6 @@ describe("SandboxClient (registry)", () => {
 
       const client = new SandboxClient({
         namespace: "prod",
-        apiUrl: "http://api:8080",
       });
       const sandbox = await client.createSandbox("tpl", "staging");
 
@@ -309,7 +246,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-labeled");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await client.createSandbox("tpl", "default", {
         labels: { env: "test", team: "infra" },
       });
@@ -322,7 +259,7 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("throws when warmpool is empty", async () => {
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.createSandbox("")).rejects.toThrow(
         "Warmpool name cannot be empty.",
       );
@@ -374,7 +311,7 @@ describe("SandboxClient (registry)", () => {
           },
         );
 
-        const client = new SandboxClient({ apiUrl: "http://api:8080" });
+        const client = new SandboxClient();
         await expect(client.createSandbox("tpl")).rejects.toThrow(
           "watch failed",
         );
@@ -391,7 +328,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-xyz"); // no podAnnotation
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl");
 
       expect(sandbox.podName).toBe("sandbox-xyz");
@@ -402,7 +339,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-reg");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl");
 
       const active = client.listActiveSandboxes();
@@ -443,7 +380,7 @@ describe("SandboxClient (registry)", () => {
         new Error("K8s API unavailable"),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       // Original error is re-raised; cleanup error is logged but not surfaced
       await expect(client.createSandbox("tpl")).rejects.toThrow("watch failed");
       // Cleanup was still attempted
@@ -469,7 +406,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-ns-norm");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl", "");
 
       expect(sandbox.namespace).toBe("default");
@@ -485,7 +422,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-cache");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
 
       // createSandbox() makes 2 initial GET calls (resolveSandboxName + watchForSandboxReady).
@@ -512,7 +449,7 @@ describe("SandboxClient (registry)", () => {
       mockDeleteNamespacedCustomObject.mockResolvedValue({});
       mockSandboxReadyFlow("sandbox-reattach");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
       const claimName = sandbox1.claimName;
 
@@ -533,7 +470,7 @@ describe("SandboxClient (registry)", () => {
         Object.assign(new Error("Not Found"), { code: 404 }),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.getSandbox("nonexistent-claim")).rejects.toThrow(
         "SandboxClaim 'nonexistent-claim' not found",
       );
@@ -550,7 +487,7 @@ describe("SandboxClient (registry)", () => {
         },
       });
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const [first, second] = await Promise.all([
         client.getSandbox("shared-claim"),
         client.getSandbox("shared-claim"),
@@ -601,7 +538,7 @@ describe("SandboxClient (registry)", () => {
         status: { conditions: [{ type: "Ready", status: "True" }] },
       });
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const creating = client.createSandbox("tpl");
       await vi.waitFor(() => expect(releaseWatch).toBeDefined());
 
@@ -622,7 +559,7 @@ describe("SandboxClient (registry)", () => {
         Object.assign(new Error("Not Found"), { code: 404 }),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.getSandbox("retry-claim")).rejects.toThrow(
         SandboxNotFoundError,
       );
@@ -645,7 +582,7 @@ describe("SandboxClient (registry)", () => {
         new Error("HTTP 404"),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.getSandbox("some-claim", "")).rejects.toThrow();
 
       const callArgs = mockGetNamespacedCustomObject.mock.calls[0][0];
@@ -663,7 +600,7 @@ describe("SandboxClient (registry)", () => {
       mockSandboxReadyFlow("sandbox-a");
       mockSandboxReadyFlow("sandbox-b");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sb1 = await client.createSandbox("tpl");
       const sb2 = await client.createSandbox("tpl");
 
@@ -676,7 +613,7 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("returns empty list when no sandboxes", () => {
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       expect(client.listActiveSandboxes()).toEqual([]);
     });
   });
@@ -692,7 +629,7 @@ describe("SandboxClient (registry)", () => {
         ],
       });
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const names = await client.listAllSandboxes("default");
 
       expect(names).toEqual(["sandbox-claim-aaa", "sandbox-claim-bbb"]);
@@ -706,7 +643,7 @@ describe("SandboxClient (registry)", () => {
 
     it("returns empty array when no claims exist", async () => {
       mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       expect(await client.listAllSandboxes()).toEqual([]);
     });
   });
@@ -719,7 +656,7 @@ describe("SandboxClient (registry)", () => {
       mockDeleteNamespacedCustomObject.mockResolvedValue({});
       mockSandboxReadyFlow("sandbox-del");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl");
       const claimName = sandbox.claimName;
 
@@ -734,7 +671,7 @@ describe("SandboxClient (registry)", () => {
     it("deletes claim directly when sandbox is not tracked", async () => {
       mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await client.deleteSandbox("untracked-claim", "default");
 
       expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
@@ -747,10 +684,33 @@ describe("SandboxClient (registry)", () => {
         Object.assign(new Error("Not Found"), { code: 404 }),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(
         client.deleteSandbox("missing-claim"),
       ).resolves.toBeUndefined();
+    });
+
+    it("surfaces a non-404 delete failure so the caller can retry", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-del-retry");
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("tpl");
+
+      // First delete fails transiently...
+      mockDeleteNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Service Unavailable"), { code: 503 }),
+      );
+      await expect(
+        client.deleteSandbox(sandbox.claimName),
+      ).rejects.toBeInstanceOf(SandboxError);
+
+      // ...the handle was evicted, so a retry takes the untracked-delete path.
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      await expect(
+        client.deleteSandbox(sandbox.claimName),
+      ).resolves.toBeUndefined();
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -764,7 +724,7 @@ describe("SandboxClient (registry)", () => {
       mockSandboxReadyFlow("sandbox-all-a");
       mockSandboxReadyFlow("sandbox-all-b");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sb1 = await client.createSandbox("tpl");
       const sb2 = await client.createSandbox("tpl");
 
@@ -778,7 +738,7 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("is idempotent when no sandboxes exist", async () => {
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.deleteAll()).resolves.toBeUndefined();
     });
 
@@ -853,6 +813,73 @@ describe("SandboxClient (registry)", () => {
       await sweep;
       expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledTimes(2);
     });
+
+    it("discards a handle whose create resolved during the sweep", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValue({});
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        metadata: { resourceVersion: "1" },
+        status: {},
+      });
+
+      // The claim resolves a sandbox name right away; the Sandbox watch is held
+      // open so readiness can be delivered while the sweep is in flight.
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: { sandbox: { name: "sandbox-race" } },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      let sandboxWatchCallback:
+        | ((type: string, obj: Record<string, unknown>) => void)
+        | undefined;
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          sandboxWatchCallback = callback;
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      let releaseDelete: (() => void) | undefined;
+      const deleteLanded = new Promise<void>((resolve) => {
+        releaseDelete = resolve;
+      });
+      mockDeleteNamespacedCustomObject.mockImplementation(async () => {
+        await deleteLanded;
+        return {};
+      });
+
+      const client = new SandboxClient();
+      const pending = client.createSandbox("tpl");
+      await vi.waitFor(() => expect(sandboxWatchCallback).toBeDefined());
+
+      const sweep = client.deleteAll();
+      await vi.waitFor(() =>
+        expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledTimes(1),
+      );
+
+      // The sandbox turns ready before the claim deletion completes, so the
+      // create registers a handle for a claim that is already being removed.
+      sandboxWatchCallback?.("MODIFIED", {
+        metadata: { name: "sandbox-race", annotations: {} },
+        status: { conditions: [{ type: "Ready", status: "True" }] },
+      });
+      const sandbox = await pending;
+      releaseDelete?.();
+      await sweep;
+
+      expect(sandbox.isActive).toBe(false);
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
   });
 
   // ===== [Symbol.asyncDispose] =====
@@ -863,7 +890,7 @@ describe("SandboxClient (registry)", () => {
       mockDeleteNamespacedCustomObject.mockResolvedValue({});
       mockSandboxReadyFlow("sandbox-dispose");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl");
 
       await client[Symbol.asyncDispose]();
@@ -872,44 +899,34 @@ describe("SandboxClient (registry)", () => {
     });
   });
 
-  // ===== getSandbox() does not delete claim on connect failure =====
+  // ===== getSandbox() re-attach preserves the SandboxClaim =====
 
-  describe("getSandbox() preserves SandboxClaim on connect failure", () => {
-    it("does not delete SandboxClaim when connect() fails", async () => {
-      // GET claim: returns metadata so resolveSandboxName-equivalent resolves,
-      // but the Sandbox stays in port-forward mode and connect() will fail
+  describe("getSandbox() preserves SandboxClaim on re-attach", () => {
+    it("does not delete the SandboxClaim when re-attaching a stale handle", async () => {
       mockGetNamespacedCustomObject.mockResolvedValue({
-        metadata: {
-          name: "test-claim",
-          annotations: {},
-        },
+        metadata: { name: "test-claim", annotations: {} },
         status: {
           sandbox: { name: "test-sandbox" },
-          sandboxRef: {
-            name: "test-sandbox",
-            namespace: "default",
-          },
+          sandboxRef: { name: "test-sandbox", namespace: "default" },
           conditions: [{ type: "Ready", status: "True" }],
         },
       });
 
       mockSandboxReadyFlow("test-sandbox");
 
-      // Use direct-URL mode so connect() succeeds (getSandbox just re-attaches)
-      // Then simulate that the sandbox was closed (isActive=false) to force re-attach
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
 
-      // First createSandbox so we have something in registry
+      // First createSandbox so we have something in the registry.
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       const sandbox = await client.createSandbox("tpl");
       const claimName = sandbox.claimName;
       const sandboxName = sandbox.sandboxName;
 
-      // Close locally to mark it inactive (simulates a stale handle)
+      // Close locally to mark it inactive (simulates a stale handle).
       await sandbox.closeLocal();
       expect(sandbox.isActive).toBe(false);
 
-      // getSandbox should re-attach; set up watch mocks for re-attach flow
+      // getSandbox should re-attach; set up watch mocks for the re-attach flow.
       mockSandboxReadyFlow(sandboxName);
       mockGetNamespacedCustomObject.mockResolvedValue({
         metadata: { name: claimName, annotations: {} },
@@ -924,40 +941,8 @@ describe("SandboxClient (registry)", () => {
       expect(reattached).toBeInstanceOf(Sandbox);
       expect(reattached.isActive).toBe(true);
 
-      // The claim must NOT have been deleted during re-attachment
+      // The claim must NOT have been deleted during re-attachment.
       expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
-    });
-
-    it("closeLocal() is called (not close()) when getSandbox connect fails", async () => {
-      // Simulate getSandbox finding a ready claim but connect() failing.
-      // getSandbox must call closeLocal() (not close()), so the SandboxClaim
-      // must NOT be deleted.
-      mockGetNamespacedCustomObject.mockResolvedValue({
-        metadata: { name: "my-claim", annotations: {} },
-        status: {
-          sandbox: { name: "my-sandbox" },
-          sandboxRef: { name: "my-sandbox", namespace: "default" },
-          conditions: [{ type: "Ready", status: "True" }],
-        },
-      });
-
-      // Force connect() to reject so the catch branch (closeLocal) is exercised.
-      const connectSpy = vi
-        .spyOn(Sandbox.prototype, "connect")
-        .mockRejectedValueOnce(new Error("simulated connect failure"));
-
-      try {
-        const client = new SandboxClient({ apiUrl: "http://api:8080" });
-
-        await expect(client.getSandbox("my-claim")).rejects.toThrow(
-          "simulated connect failure",
-        );
-
-        // closeLocal() releases local resources but does NOT delete the SandboxClaim.
-        expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
-      } finally {
-        connectSpy.mockRestore();
-      }
     });
   });
 
@@ -988,13 +973,115 @@ describe("SandboxClient (registry)", () => {
       mockGetNamespacedCustomObject.mockResolvedValueOnce(readyObject);
 
       const client = new SandboxClient({
-        apiUrl: "http://api:8080",
         sandboxReadyTimeout: 1, // 1s timeout — watch-only code would time out
       });
 
       await expect(client.createSandbox("tpl")).resolves.toBeInstanceOf(
         Sandbox,
       );
+    }, 5_000);
+  });
+
+  // ===== watch resumes from the GET resourceVersion =====
+
+  describe("watch starts from the preceding GET's resourceVersion", () => {
+    // A Sandbox watch pass that immediately reports the resource Ready.
+    const sandboxReadyWatch =
+      (name: string) =>
+      (
+        _path: string,
+        _query: unknown,
+        callback: (type: string, obj: Record<string, unknown>) => void,
+      ) => {
+        callback("MODIFIED", {
+          metadata: { name, annotations: {} },
+          status: { conditions: [{ type: "Ready", status: "True" }] },
+        });
+        return Promise.resolve(new AbortController());
+      };
+
+    it("claim watch passes the claim's metadata.resourceVersion", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // GET claim: exists, has a resourceVersion, but no sandbox name yet.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { resourceVersion: "claim-rv-123" },
+        status: {},
+      });
+      // Claim watch resolves the sandbox name...
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", { status: { sandbox: { name: "sb-rv" } } });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // ...then the sandbox watch reports Ready.
+      mockWatchFn.mockImplementationOnce(sandboxReadyWatch("sb-rv"));
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl");
+
+      const claimWatchQuery = mockWatchFn.mock.calls[0][1] as {
+        resourceVersion?: string;
+      };
+      expect(claimWatchQuery.resourceVersion).toBe("claim-rv-123");
+    });
+
+    it("sandbox watch passes the Sandbox's metadata.resourceVersion", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // GET claim: already resolved to a sandbox name (no claim watch happens).
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { resourceVersion: "claim-rv" },
+        status: { sandbox: { name: "sb-ready" } },
+      });
+      // GET sandbox: exists with a resourceVersion, not Ready yet.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { name: "sb-ready", resourceVersion: "sandbox-rv-456" },
+        status: {},
+      });
+      mockWatchFn.mockImplementationOnce(sandboxReadyWatch("sb-ready"));
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl");
+
+      // Only one watch was needed (the claim resolved via GET): the sandbox watch.
+      const sandboxWatchQuery = mockWatchFn.mock.calls[0][1] as {
+        resourceVersion?: string;
+      };
+      expect(sandboxWatchQuery.resourceVersion).toBe("sandbox-rv-456");
+    });
+
+    it("treats an ERROR watch event (stale resourceVersion) as a clean close and re-GETs", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      // First GET: claim not resolved yet.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { resourceVersion: "stale" },
+        status: {},
+      });
+      // First claim watch: apiserver rejects the resourceVersion with an ERROR event.
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("ERROR", { code: 410, message: "too old resource version" });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Re-GET after the clean close: claim is now resolved.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: { resourceVersion: "fresh" },
+        status: { sandbox: { name: "sb-after-410" } },
+      });
+      mockWatchFn.mockImplementationOnce(sandboxReadyWatch("sb-after-410"));
+
+      const client = new SandboxClient({ sandboxReadyTimeout: 2 });
+      const sandbox = await client.createSandbox("tpl");
+      expect(sandbox.sandboxName).toBe("sb-after-410");
     }, 5_000);
   });
 
@@ -1026,7 +1113,6 @@ describe("SandboxClient (registry)", () => {
 
       const { SandboxTimeoutError } = await import("../exceptions.js");
       const client = new SandboxClient({
-        apiUrl: "http://api:8080",
         sandboxReadyTimeout: 0.05, // 50 ms — exhausted after re-list + backoff
       });
 
@@ -1072,7 +1158,6 @@ describe("SandboxClient (registry)", () => {
 
       const { SandboxTimeoutError } = await import("../exceptions.js");
       const client = new SandboxClient({
-        apiUrl: "http://api:8080",
         sandboxReadyTimeout: 0.05, // 50 ms
       });
 
@@ -1094,7 +1179,6 @@ describe("SandboxClient (registry)", () => {
       );
 
       const client = new SandboxClient({
-        apiUrl: "http://api:8080",
         sandboxReadyTimeout: 0.05, // 50 ms
       });
 
@@ -1127,7 +1211,6 @@ describe("SandboxClient (registry)", () => {
       );
 
       const client = new SandboxClient({
-        apiUrl: "http://api:8080",
         sandboxReadyTimeout: 0.05,
       });
 
@@ -1149,7 +1232,7 @@ describe("SandboxClient (registry)", () => {
           Promise.reject(new Error("ECONNREFUSED")),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.createSandbox("tpl")).rejects.toThrow("ECONNREFUSED");
     });
 
@@ -1175,7 +1258,7 @@ describe("SandboxClient (registry)", () => {
           Promise.reject(new Error("watch startup failed")),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.createSandbox("tpl")).rejects.toThrow(
         "watch startup failed",
       );
@@ -1224,32 +1307,6 @@ describe("SandboxClient (registry)", () => {
 
   // ===== option validation =====
 
-  describe("apiUrl option validation", () => {
-    it("throws SandboxError for non-URL apiUrl", () => {
-      expect(() => new SandboxClient({ apiUrl: "not-a-url" })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("throws SandboxError for non-http/https scheme", () => {
-      expect(
-        () => new SandboxClient({ apiUrl: "ftp://api.example.com" }),
-      ).toThrow(SandboxError);
-    });
-
-    it("accepts http scheme", () => {
-      expect(
-        () => new SandboxClient({ apiUrl: "http://api.example.com:8080" }),
-      ).not.toThrow();
-    });
-
-    it("accepts https scheme", () => {
-      expect(
-        () => new SandboxClient({ apiUrl: "https://api.example.com" }),
-      ).not.toThrow();
-    });
-  });
-
   describe("namespace DNS label validation", () => {
     it("throws SandboxError for namespace with uppercase letters", () => {
       expect(() => new SandboxClient({ namespace: "MyNamespace" })).toThrow(
@@ -1276,62 +1333,11 @@ describe("SandboxClient (registry)", () => {
     });
   });
 
-  describe("routerNamespace DNS label validation", () => {
-    it("throws SandboxError for routerNamespace with uppercase letters", () => {
-      expect(() => new SandboxClient({ routerNamespace: "Foo_bar" })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("throws SandboxError for empty routerNamespace", () => {
-      expect(() => new SandboxClient({ routerNamespace: "" })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("throws SandboxError for routerNamespace starting with hyphen", () => {
-      expect(() => new SandboxClient({ routerNamespace: "-bad-ns" })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("accepts valid routerNamespace", () => {
-      expect(
-        () => new SandboxClient({ routerNamespace: "my-router-ns" }),
-      ).not.toThrow();
-    });
-
-    it("defaults to agent-sandbox-system when not specified", () => {
-      // Verify the default does not throw and the client is constructable
-      expect(() => new SandboxClient()).not.toThrow();
-    });
-  });
-
-  describe("gatewayName DNS subdomain validation", () => {
-    it("throws SandboxError for gatewayName with uppercase letters", () => {
-      expect(() => new SandboxClient({ gatewayName: "MyGateway" })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("throws SandboxError for gatewayName with invalid characters", () => {
-      expect(() => new SandboxClient({ gatewayName: "gateway_name" })).toThrow(
-        SandboxError,
-      );
-    });
-
-    it("accepts valid gatewayName with dots and hyphens", () => {
-      expect(
-        () => new SandboxClient({ gatewayName: "my-gateway.prod" }),
-      ).not.toThrow();
-    });
-  });
-
   // ===== enableAutoCleanup idempotency =====
 
   describe("enableAutoCleanup()", () => {
     it("is idempotent: second call returns no-op and does not register duplicate handlers", () => {
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const listenerCountBefore = process.listenerCount("SIGINT");
 
       const stop1 = client.enableAutoCleanup();
@@ -1347,7 +1353,7 @@ describe("SandboxClient (registry)", () => {
     });
 
     it("allows re-registration after stop()", () => {
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const baseLine = process.listenerCount("SIGINT");
 
       const stop = client.enableAutoCleanup();
@@ -1415,7 +1421,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-evict");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
 
       // K8s GET returns 404 during cache-hit validation
@@ -1434,7 +1440,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-underlying");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
 
       // 1st GET: claim verify succeeds with matching sandbox name
@@ -1457,7 +1463,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-non404");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
 
       // 1st GET: claim verify succeeds with matching sandbox name
@@ -1502,7 +1508,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-original");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
 
       // Cache-hit validation returns claim with a *different* sandbox name
@@ -1563,12 +1569,10 @@ describe("SandboxClient (registry)", () => {
       });
 
       const client = new SandboxClient({
-        apiUrl: "http://api:8080",
         sandboxReadyTimeout: 2,
       });
 
-      // Expected: createSandbox eventually succeeds by re-listing after done(null).
-      // Current behavior: throws SandboxNotReadyError immediately on done(null).
+      // createSandbox eventually succeeds by re-listing after done(null).
       const sandbox = await client.createSandbox("tpl");
       expect(sandbox.sandboxName).toBe("sandbox-relisted");
     }, 5_000);
@@ -1585,7 +1589,7 @@ describe("SandboxClient (registry)", () => {
       );
 
       const { SandboxNotFoundError } = await import("../exceptions.js");
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.createSandbox("tpl")).rejects.toBeInstanceOf(
         SandboxNotFoundError,
       );
@@ -1606,7 +1610,7 @@ describe("SandboxClient (registry)", () => {
       const { SandboxError, SandboxNotFoundError } = await import(
         "../exceptions.js"
       );
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const err = await client
         .getSandbox("some-claim")
         .catch((e: unknown) => e);
@@ -1620,7 +1624,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-non404");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
 
       // Cache-hit validation returns non-404 error
@@ -1676,7 +1680,7 @@ describe("SandboxClient (registry)", () => {
         },
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.createSandbox("missing-pool")).rejects.toBeInstanceOf(
         SandboxWarmPoolNotFoundError,
       );
@@ -1698,7 +1702,7 @@ describe("SandboxClient (registry)", () => {
         },
       });
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(client.createSandbox("missing-pool")).rejects.toBeInstanceOf(
         SandboxWarmPoolNotFoundError,
       );
@@ -1732,7 +1736,7 @@ describe("SandboxClient (registry)", () => {
         },
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(
         client.createSandbox("warmpool-with-bad-tpl"),
       ).rejects.toBeInstanceOf(SandboxTemplateNotFoundError);
@@ -1753,7 +1757,7 @@ describe("SandboxClient (registry)", () => {
         },
       });
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(
         client.createSandbox("warmpool-with-bad-tpl"),
       ).rejects.toBeInstanceOf(SandboxTemplateNotFoundError);
@@ -1798,7 +1802,7 @@ describe("SandboxClient (registry)", () => {
         },
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("warmpool-ok");
       expect(sandbox.sandboxName).toBe("sandbox-ok");
     });
@@ -1841,7 +1845,7 @@ describe("SandboxClient (registry)", () => {
         },
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("warmpool-ok");
       expect(sandbox.sandboxName).toBe("sandbox-ok");
     });
@@ -1888,9 +1892,105 @@ describe("SandboxClient (registry)", () => {
         },
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox = await client.createSandbox("warmpool-ok");
       expect(sandbox.sandboxName).toBe("sandbox-ok");
+    });
+
+    it("GET path: throws SandboxClaimFailedError on a terminal Ready=False reason", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: {
+          conditions: [
+            {
+              type: "Ready",
+              status: "False",
+              reason: "VolumeClaimTemplatesError",
+              message: "bad PVC template",
+            },
+          ],
+        },
+      });
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("warmpool-bad-pvc"),
+      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("watch path: throws SandboxClaimFailedError on a terminal Ready=False reason", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: {
+              conditions: [
+                {
+                  type: "Ready",
+                  status: "False",
+                  reason: "ClaimExpired",
+                  message: "claim TTL elapsed",
+                },
+              ],
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("warmpool-expired"),
+      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
+    });
+
+    it("does NOT throw for a transient Ready=False reason the controller retries", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({ status: {} });
+
+      // First claim watch: transient reason, then the sandbox name.
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            status: {
+              conditions: [
+                { type: "Ready", status: "False", reason: "SandboxNotReady" },
+              ],
+              sandbox: { name: "sandbox-transient" },
+            },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+      // Sandbox watch: becomes ready.
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback("MODIFIED", {
+            metadata: { name: "sandbox-transient", annotations: {} },
+            status: { conditions: [{ type: "Ready", status: "True" }] },
+          });
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("warmpool-ok");
+      expect(sandbox.sandboxName).toBe("sandbox-transient");
     });
   });
 
@@ -1901,7 +2001,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-leak-404");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
       expect(sandbox1.isActive).toBe(true);
 
@@ -1922,7 +2022,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-leak-500");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
       expect(sandbox1.isActive).toBe(true);
 
@@ -1947,7 +2047,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-leak-cr-404");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
       expect(sandbox1.isActive).toBe(true);
 
@@ -1972,7 +2072,7 @@ describe("SandboxClient (registry)", () => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockSandboxReadyFlow("sandbox-original-handle");
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const sandbox1 = await client.createSandbox("tpl");
       expect(sandbox1.isActive).toBe(true);
 
@@ -2002,7 +2102,7 @@ describe("SandboxClient (registry)", () => {
         spec: { warmPoolRef: { name: "my-warmpool" } },
       });
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const name = await client.getSandboxClaimWarmpoolName("my-claim");
       expect(name).toBe("my-warmpool");
 
@@ -2018,7 +2118,7 @@ describe("SandboxClient (registry)", () => {
         spec: { warmPoolRef: { name: "pool-in-ns" } },
       });
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await client.getSandboxClaimWarmpoolName("my-claim", "custom-ns");
 
       const callArgs = mockGetNamespacedCustomObject.mock.calls[0][0];
@@ -2030,7 +2130,7 @@ describe("SandboxClient (registry)", () => {
         Object.assign(new Error("Not Found"), { code: 404 }),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       await expect(
         client.getSandboxClaimWarmpoolName("missing-claim"),
       ).rejects.toBeInstanceOf(SandboxNotFoundError);
@@ -2041,7 +2141,7 @@ describe("SandboxClient (registry)", () => {
         Object.assign(new Error("Service Unavailable"), { code: 503 }),
       );
 
-      const client = new SandboxClient({ apiUrl: "http://api:8080" });
+      const client = new SandboxClient();
       const err = await client
         .getSandboxClaimWarmpoolName("my-claim")
         .catch((e: unknown) => e);
@@ -2077,7 +2177,6 @@ describe("SandboxClient (registry)", () => {
 
       const { SandboxTimeoutError } = await import("../exceptions.js");
       const client = new SandboxClient({
-        apiUrl: "http://api:8080",
         sandboxReadyTimeout: 0.05, // 50 ms
       });
 

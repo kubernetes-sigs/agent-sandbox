@@ -14,28 +14,9 @@
 
 export interface SandboxClientOptions {
   namespace?: string;
-  apiUrl?: string;
-  gatewayName?: string;
-  gatewayNamespace?: string;
-  serverPort?: number;
   sandboxReadyTimeout?: number;
-  gatewayReadyTimeout?: number;
-  portForwardReadyTimeout?: number;
   enableTracing?: boolean;
   traceServiceName?: string;
-  /**
-   * Per-attempt HTTP timeout in milliseconds (independent of the overall
-   * request timeout). Applied to every attempt in the retry loop. When
-   * omitted, the client uses PER_ATTEMPT_TIMEOUT_MS (60_000 ms), matching
-   * the Go client's defaultPerAttemptTimeout.
-   */
-  perAttemptTimeoutMs?: number;
-  /**
-   * Namespace where the sandbox Router service (svc/sandbox-router-svc) is
-   * deployed. Used only in port-forward (local tunnel) mode.
-   * Defaults to "agent-sandbox-system".
-   */
-  routerNamespace?: string;
   /**
    * Logger used for diagnostic output (lifecycle events, retries, warnings).
    * Defaults to a logger that writes to stderr. Mirrors the Go client's
@@ -60,47 +41,7 @@ export interface Logger {
   error(message: string): void;
 }
 
-/**
- * Options accepted by individual sandbox operations (run, read, write, ...).
- * Used to pass a cancellation signal and/or an overall timeout per call.
- */
-export interface CallOptions {
-  /** Overall timeout in seconds, capping the full retry loop. */
-  timeout?: number;
-  /** External cancellation signal. When aborted, the in-flight request is
-   *  cancelled immediately without retrying. */
-  signal?: AbortSignal;
-  /** Skip path sanitisation for write/read/list/exists. Mirrors Python's allow_unsafe_paths. */
-  allowUnsafePaths?: boolean;
-}
-
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
 }
-
-export interface ExecutionResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-export interface FileEntry {
-  name: string;
-  size: number;
-  type: "file" | "directory";
-  modTime: number;
-}
-
-export type RequestFn = (
-  method: string,
-  endpoint: string,
-  options?: {
-    body?: BodyInit | null;
-    headers?: Record<string, string>;
-    timeout?: number;
-    maxRetries?: number;
-    signal?: AbortSignal;
-    perAttemptTimeoutMs?: number;
-  },
-) => Promise<Response>;

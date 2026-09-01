@@ -20,11 +20,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
 import fetch, { type RequestInit } from "node-fetch";
-import {
-  deploymentReady,
-  gatewayAddressReady,
-  warmPoolReady,
-} from "./predicates.js";
+import { warmPoolReady } from "./predicates.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,7 +36,6 @@ export class TestContext {
   private kubeconfigPath: string;
   private _kubeConfig: k8s.KubeConfig | null = null;
   private _coreV1Api: k8s.CoreV1Api | null = null;
-  private _appsV1Api: k8s.AppsV1Api | null = null;
   namespace: string | null = null;
 
   constructor(kubeconfigPath?: string) {
@@ -61,13 +56,6 @@ export class TestContext {
       this._coreV1Api = this.kubeConfig.makeApiClient(k8s.CoreV1Api);
     }
     return this._coreV1Api;
-  }
-
-  get appsV1Api(): k8s.AppsV1Api {
-    if (!this._appsV1Api) {
-      this._appsV1Api = this.kubeConfig.makeApiClient(k8s.AppsV1Api);
-    }
-    return this._appsV1Api;
   }
 
   /**
@@ -343,27 +331,6 @@ export class TestContext {
   }
 
   /**
-   * Waits for a Deployment to have at least minReady available replicas.
-   */
-  async waitForDeploymentReady(
-    name: string,
-    namespace?: string,
-    minReady: number = 1,
-    timeout: number = DEFAULT_TIMEOUT_SECONDS,
-  ): Promise<boolean> {
-    const ns = namespace ?? this.namespace;
-    if (!ns) throw new Error("Namespace must be provided.");
-
-    return this.waitForObject<k8s.V1Deployment>(
-      `/apis/apps/v1/namespaces/${ns}/deployments`,
-      name,
-      ns,
-      deploymentReady(minReady),
-      timeout,
-    );
-  }
-
-  /**
    * Waits for a SandboxWarmPool to have all the required number of ready sandboxes.
    */
   async waitForWarmPoolReady(
@@ -379,26 +346,6 @@ export class TestContext {
       name,
       ns,
       warmPoolReady(),
-      timeout,
-    );
-  }
-
-  /**
-   * Waits for a Gateway to have an address in its status.
-   */
-  async waitForGatewayAddress(
-    name: string,
-    namespace?: string,
-    timeout: number = DEFAULT_TIMEOUT_SECONDS,
-  ): Promise<boolean> {
-    const ns = namespace ?? this.namespace;
-    if (!ns) throw new Error("Namespace must be provided.");
-
-    return this.waitForObject<Record<string, any>>(
-      `/apis/gateway.networking.k8s.io/v1/namespaces/${ns}/gateways`,
-      name,
-      ns,
-      gatewayAddressReady(),
       timeout,
     );
   }

@@ -23,19 +23,9 @@ export class SandboxError extends Error {
 }
 
 /**
- * Raised when the sandbox is not ready for communication.
- */
-export class SandboxNotReadyError extends SandboxError {}
-
-/**
  * Raised when the sandbox or sandbox claim cannot be found or was deleted.
  */
 export class SandboxNotFoundError extends SandboxError {}
-
-/**
- * Raised when the port-forward process crashes.
- */
-export class SandboxPortForwardError extends SandboxError {}
 
 /**
  * Raised when the sandbox object is missing expected metadata.
@@ -56,37 +46,6 @@ export class SandboxTemplateNotFoundError extends SandboxError {}
  * Raised when the referenced SandboxWarmPool does not exist.
  */
 export class SandboxWarmPoolNotFoundError extends SandboxError {}
-
-/**
- * Raised when an HTTP request to the sandbox fails.
- */
-export class SandboxRequestError extends SandboxError {
-  readonly statusCode: number | undefined;
-  readonly response: Response | undefined;
-  readonly body: string | undefined;
-  readonly operation: string | undefined;
-
-  constructor(
-    message: string,
-    options?: ErrorOptions & {
-      statusCode?: number;
-      response?: Response;
-      body?: string;
-      operation?: string;
-    },
-  ) {
-    super(message, options);
-    this.statusCode = options?.statusCode;
-    this.response = options?.response;
-    this.body = options?.body;
-    this.operation = options?.operation;
-  }
-}
-
-/**
- * Raised when a response body exceeds the configured size limit.
- */
-export class SandboxResponseTooLargeError extends SandboxRequestError {}
 
 /**
  * Raised when the SandboxClaim reported a terminal Ready=False reason.

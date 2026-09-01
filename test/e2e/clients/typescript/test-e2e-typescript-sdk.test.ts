@@ -16,6 +16,7 @@ limitations under the License.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   afterEach,
   beforeAll,
@@ -24,9 +25,8 @@ import {
   expect,
   test,
 } from "vitest";
-import { Sandbox, SandboxClient } from "agentic-sandbox-client";
+import { SandboxClient } from "agentic-sandbox-client";
 import { TestContext } from "./framework/context.js";
-import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,19 +45,6 @@ const COLDPOOL_YAML_PATH = path.join(
   "sandbox-coldpool.yaml",
 );
 
-// Project root is 4 levels up from test/e2e/clients/typescript/
-const PROJECT_ROOT = path.resolve(__dirname, "../../../..");
-const ROUTER_YAML_PATH = path.join(
-  PROJECT_ROOT,
-  "clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml",
-);
-const GATEWAY_YAML_PATH = path.join(
-  PROJECT_ROOT,
-  "clients/python/agentic-sandbox-client/gateway-kind/gateway-kind.yaml",
-);
-
-const GATEWAY_NAME = "kind-gateway";
-
 const WARMPOOL_NAME = "ts-sdk-warmpool";
 const COLDPOOL_NAME = "ts-sdk-coldpool";
 
@@ -73,55 +60,11 @@ function getImagePrefix(): string {
  * Deploys the SandboxTemplate into the test namespace.
  */
 function deploySandboxTemplate(tc: TestContext, namespace: string): void {
-  const imageTag = getImageTag();
-  const imagePrefix = getImagePrefix();
   const manifest = fs
     .readFileSync(TEMPLATE_YAML_PATH, "utf-8")
-    .replaceAll("{image_prefix}", imagePrefix)
-    .replaceAll("{image_tag}", imageTag);
+    .replaceAll("{image_prefix}", getImagePrefix())
+    .replaceAll("{image_tag}", getImageTag());
   tc.applyManifestText(manifest, namespace);
-}
-
-/**
- * Deploys the sandbox router and waits for it to be ready.
- */
-async function deployRouter(tc: TestContext, namespace: string): Promise<void> {
-  const imageTag = getImageTag();
-  const imagePrefix = getImagePrefix();
-  const routerImage = `${imagePrefix}sandbox-router:${imageTag}`;
-  console.log(`Using router image: ${routerImage}`);
-
-  const manifest = fs
-    .readFileSync(ROUTER_YAML_PATH, "utf-8")
-    .replaceAll("IMAGE_PLACEHOLDER", routerImage)
-    .replaceAll("${ROUTER_IMAGE}", routerImage)
-    // Enable unauthenticated mode for E2E test execution (mirrors Python E2E test)
-    .replace(
-      '- name: ALLOW_UNAUTHENTICATED_ROUTER\n          value: "false"',
-      '- name: ALLOW_UNAUTHENTICATED_ROUTER\n          value: "true"',
-    );
-
-  console.log(`Applying router manifest to namespace: ${namespace}`);
-  tc.applyManifestText(manifest, namespace);
-
-  console.log("Waiting for router deployment to be ready...");
-  await tc.waitForDeploymentReady("sandbox-router-deployment", namespace);
-}
-
-/**
- * Deploys the gateway and waits for an address.
- */
-async function deployGateway(
-  tc: TestContext,
-  namespace: string,
-): Promise<void> {
-  const manifest = fs.readFileSync(GATEWAY_YAML_PATH, "utf-8");
-
-  console.log(`Applying gateway manifest to namespace: ${namespace}`);
-  tc.applyManifestText(manifest, namespace);
-
-  console.log("Waiting for gateway to get an address...");
-  await tc.waitForGatewayAddress(GATEWAY_NAME, namespace);
 }
 
 /**
@@ -133,63 +76,70 @@ async function deployWarmPool(
 ): Promise<void> {
   const manifest = fs.readFileSync(WARMPOOL_YAML_PATH, "utf-8");
   tc.applyManifestText(manifest, namespace);
-  console.log("Warmpool manifest applied.");
-
   await tc.waitForWarmPoolReady(WARMPOOL_NAME, namespace);
-  console.log("Warmpool is ready.");
 }
 
 /**
- * Deploys the cold pool (replicas: 0) for tests that provision sandboxes without pre-warmed slots.
+ * Deploys the cold pool (replicas: 0) for tests that provision sandboxes
+ * without pre-warmed slots.
  */
-async function deployColdPool(
-  tc: TestContext,
-  namespace: string,
-): Promise<void> {
+function deployColdPool(tc: TestContext, namespace: string): void {
   const manifest = fs.readFileSync(COLDPOOL_YAML_PATH, "utf-8");
   tc.applyManifestText(manifest, namespace);
-  console.log("Coldpool manifest applied.");
 }
 
 /**
- * Runs basic SDK operations to validate functionality.
+ * Polls listAllSandboxes() until the claim no longer appears.
  */
-async function runSdkTests(sandbox: Sandbox): Promise<void> {
-  // Test execution
-  const result = await sandbox.commands.run("echo 'Hello from SDK'");
-  console.log(`Run result: ${JSON.stringify(result)}`);
-  expect(result.stdout).toBe("Hello from SDK\n");
-  expect(result.stderr).toBe("");
-  expect(result.exitCode).toBe(0);
-
-  // Test File Write / Read
-  const fileContent = "This is a test file.";
-  const filePath = "test.txt";
-
-  console.log(`Writing content to '${filePath}'...`);
-  await sandbox.files.write(filePath, fileContent);
-
-  console.log(`Reading content from '${filePath}'...`);
-  const readContent = await sandbox.files.read(filePath);
-  expect(readContent.toString("utf-8")).toBe(fileContent);
-
-  console.log(`Checking if '${filePath}' exists...`);
-  await expect(sandbox.files.exists(filePath)).resolves.toBe(true);
-
-  console.log("Checking that a missing file does not exist...");
-  await expect(sandbox.files.exists("missing.txt")).resolves.toBe(false);
-
-  console.log("Listing files in '.'...");
-  const files = await sandbox.files.list(".");
-  const fileEntry = files.find((file) => file.name === filePath);
-  expect(fileEntry).toBeDefined();
-  expect(fileEntry?.size).toBe(Buffer.byteLength(fileContent));
-  expect(fileEntry?.type).toBe("file");
-  expect(fileEntry?.modTime).toEqual(expect.any(Number));
-  expect(fileEntry?.modTime).toBeGreaterThan(0);
+async function waitForClaimDeleted(
+  client: SandboxClient,
+  claimName: string,
+  namespace: string,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const claims = await client.listAllSandboxes(namespace);
+    if (!claims.includes(claimName)) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(
+    `SandboxClaim '${claimName}' was not deleted within ${timeoutMs}ms`,
+  );
 }
 
-describe("TypeScript SDK E2E", () => {
+/**
+ * Exercises the Kubernetes resource layer: provision a Sandbox from a pool,
+ * assert its identity and that the SandboxClaim exists, then delete it.
+ * Connectivity to the sandbox runtime is a follow-up (see issue #977).
+ */
+async function runResourceLayerChecks(
+  client: SandboxClient,
+  poolName: string,
+  namespace: string,
+): Promise<void> {
+  const sandbox = await client.createSandbox(poolName, namespace);
+
+  expect(sandbox.claimName).toMatch(/^sandbox-claim-/);
+  expect(sandbox.sandboxName).toBeTruthy();
+  expect(sandbox.podName).toBeTruthy();
+  expect(sandbox.namespace).toBe(namespace);
+  expect(sandbox.isActive).toBe(true);
+
+  const claims = await client.listAllSandboxes(namespace);
+  expect(claims).toContain(sandbox.claimName);
+
+  // getSandbox() re-resolves the same identity from the live claim.
+  const fetched = await client.getSandbox(sandbox.claimName, namespace);
+  expect(fetched.sandboxName).toBe(sandbox.sandboxName);
+
+  await sandbox.close();
+  expect(sandbox.isActive).toBe(false);
+
+  await waitForClaimDeleted(client, sandbox.claimName, namespace);
+}
+
+describe("TypeScript SDK E2E — Kubernetes resource layer", () => {
   let tc: TestContext;
   let namespace: string;
 
@@ -205,81 +155,28 @@ describe("TypeScript SDK E2E", () => {
     await tc.deleteNamespace(namespace);
   });
 
-  test("router mode (without warmpool)", async () => {
+  test("provisions and deletes a sandbox from a cold pool", async () => {
     deploySandboxTemplate(tc, namespace);
-    await deployRouter(tc, namespace);
-    await deployColdPool(tc, namespace);
+    deployColdPool(tc, namespace);
 
-    const client = new SandboxClient({ namespace, routerNamespace: namespace });
-    const sandbox = await client.createSandbox(COLDPOOL_NAME);
-
-    try {
-      console.log("\n--- Running SDK tests without warmpool ---");
-      await runSdkTests(sandbox);
-      console.log("SDK test without warmpool passed!");
-    } finally {
-      await sandbox.close();
-    }
+    const client = new SandboxClient({ namespace });
+    await runResourceLayerChecks(client, COLDPOOL_NAME, namespace);
   });
 
-  test("router mode (with warmpool)", async () => {
+  test("provisions and deletes a sandbox from a warm pool", async () => {
     deploySandboxTemplate(tc, namespace);
-    await deployRouter(tc, namespace);
     await deployWarmPool(tc, namespace);
 
-    const client = new SandboxClient({ namespace, routerNamespace: namespace });
-    const sandbox = await client.createSandbox(WARMPOOL_NAME);
-
-    try {
-      console.log("\n--- Running SDK tests with warmpool ---");
-      await runSdkTests(sandbox);
-      console.log("SDK test with warmpool passed!");
-    } finally {
-      await sandbox.close();
-    }
+    const client = new SandboxClient({ namespace });
+    await runResourceLayerChecks(client, WARMPOOL_NAME, namespace);
   });
+});
 
-  test("gateway mode (without warmpool)", async () => {
-    deploySandboxTemplate(tc, namespace);
-    await deployRouter(tc, namespace);
-    await deployColdPool(tc, namespace);
-    await deployGateway(tc, namespace);
-
-    const client = new SandboxClient({
-      namespace,
-      gatewayName: GATEWAY_NAME,
-      gatewayNamespace: namespace,
-    });
-    const sandbox = await client.createSandbox(COLDPOOL_NAME);
-
-    try {
-      console.log("\n--- Running SDK tests without warmpool ---");
-      await runSdkTests(sandbox);
-      console.log("SDK test without warmpool passed!");
-    } finally {
-      await sandbox.close();
-    }
-  });
-
-  test("gateway mode (with warmpool)", async () => {
-    deploySandboxTemplate(tc, namespace);
-    await deployRouter(tc, namespace);
-    await deployWarmPool(tc, namespace);
-    await deployGateway(tc, namespace);
-
-    const client = new SandboxClient({
-      namespace,
-      gatewayName: GATEWAY_NAME,
-      gatewayNamespace: namespace,
-    });
-    const sandbox = await client.createSandbox(WARMPOOL_NAME);
-
-    try {
-      console.log("\n--- Running SDK tests with warmpool ---");
-      await runSdkTests(sandbox);
-      console.log("SDK test with warmpool passed!");
-    } finally {
-      await sandbox.close();
-    }
-  });
+// Runtime connectivity (running commands, reading/writing files) lands with the
+// sandboxd protocol layer as a follow-up under issue #977. These placeholders
+// mark the coverage that suite will add.
+describe.skip("TypeScript SDK E2E — sandbox runtime operations (#977)", () => {
+  test.todo("runs a command inside the sandbox");
+  test.todo("writes and reads a file inside the sandbox");
+  test.todo("lists files inside the sandbox");
 });

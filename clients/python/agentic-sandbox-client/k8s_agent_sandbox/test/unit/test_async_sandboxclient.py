@@ -875,21 +875,33 @@ class AsyncSandboxHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _start_stub_server(handler_cls):
+    """Starts handler_cls on a local HTTPServer on a daemon thread.
+
+    Returns (server, thread, port); pass to _stop_stub_server in tearDownClass.
+    """
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    port = server.server_address[1]
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, port
+
+
+def _stop_stub_server(server, thread):
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
 class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.server = HTTPServer(("127.0.0.1", 0), AsyncSandboxHandler)
-        cls.port = cls.server.server_address[1]
-        cls.server_thread = Thread(target=cls.server.serve_forever)
-        cls.server_thread.daemon = True
-        cls.server_thread.start()
+        cls.server, cls.server_thread, cls.port = _start_stub_server(AsyncSandboxHandler)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.server_thread.join(timeout=5)
+        _stop_stub_server(cls.server, cls.server_thread)
 
     def _make_connector(self) -> AsyncSandboxConnector:
         config = SandboxDirectConnectionConfig(
@@ -1267,17 +1279,11 @@ class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.server = HTTPServer(("127.0.0.1", 0), SandboxClaimDeleteHandler)
-        cls.port = cls.server.server_address[1]
-        cls.server_thread = Thread(target=cls.server.serve_forever)
-        cls.server_thread.daemon = True
-        cls.server_thread.start()
+        cls.server, cls.server_thread, cls.port = _start_stub_server(SandboxClaimDeleteHandler)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.server_thread.join(timeout=5)
+        _stop_stub_server(cls.server, cls.server_thread)
 
     def setUp(self):
         SandboxClaimDeleteHandler.received_deletes = []

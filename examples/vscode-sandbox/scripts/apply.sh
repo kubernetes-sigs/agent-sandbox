@@ -58,7 +58,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export KUBECONFIG="${SCRIPT_DIR}/kubeconfig"
 
 # install agent sandbox
-export VERSION="v0.5.6"
+export VERSION="v1.0.0"
 
 # install only the core components:
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml

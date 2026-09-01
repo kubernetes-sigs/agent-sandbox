@@ -261,26 +261,24 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             mock_atexit.register.assert_not_called()
 
     def test_atexit_cleanup_deletes_tracked_claims(self):
-        """_atexit_cleanup should open a fresh AsyncK8sHelper and delete all tracked claims."""
+        """_atexit_cleanup should open a fresh K8sHelper and delete all tracked claims."""
         self.client._active_connection_sandboxes = {
             ("default", "claim-abc"): MagicMock(),
             ("other-ns", "claim-xyz"): MagicMock(),
         }
         mock_helper_instance = MagicMock()
-        mock_helper_instance.delete_sandbox_claim = AsyncMock()
-        mock_helper_instance.close = AsyncMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
 
-        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
             self.client._atexit_cleanup()
 
         mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-abc", "default")
         mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-xyz", "other-ns")
-        mock_helper_instance.close.assert_called_once()
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
         self.client._active_connection_sandboxes = {}
-        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper") as MockHelper:
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
             self.client._atexit_cleanup()
             MockHelper.assert_not_called()
 
@@ -289,15 +287,41 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         A warning is printed to stderr so the user knows a sandbox was orphaned."""
         self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
         mock_helper_instance = MagicMock()
-        mock_helper_instance.delete_sandbox_claim = AsyncMock(side_effect=Exception("network error"))
-        mock_helper_instance.close = AsyncMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock(side_effect=Exception("network error"))
 
-        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
             with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
                 # Should not raise
                 self.client._atexit_cleanup()
                 # Should have printed a warning
                 mock_stderr.write.assert_called()
+
+    def test_atexit_cleanup_suppresses_helper_construction_errors(self):
+        """A failure constructing K8sHelper itself (e.g. no reachable kubeconfig)
+        must not escape _atexit_cleanup either — cleanup is best-effort."""
+        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", side_effect=Exception("no kubeconfig")):
+            with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
+                # Should not raise
+                self.client._atexit_cleanup()
+                # Should have printed a warning
+                mock_stderr.write.assert_called()
+
+    def test_atexit_cleanup_suppresses_claim_snapshot_errors(self):
+        """A failure snapshotting _active_connection_sandboxes itself (e.g. a
+        concurrent mutation raising "dictionary changed size during
+        iteration") must not escape _atexit_cleanup either — cleanup is
+        best-effort."""
+        mock_sandboxes = MagicMock()
+        mock_sandboxes.keys.side_effect = RuntimeError("dictionary changed size during iteration")
+        self.client._active_connection_sandboxes = mock_sandboxes
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
+            # Should not raise
+            self.client._atexit_cleanup()
+            # Should have printed a warning
+            mock_stderr.write.assert_called()
 
     async def test_validate_labels_rejects_invalid_value(self):
         with self.assertRaises(ValueError):

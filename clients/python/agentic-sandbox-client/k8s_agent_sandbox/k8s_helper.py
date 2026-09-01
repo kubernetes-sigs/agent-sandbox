@@ -14,6 +14,7 @@
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, List
 from kubernetes import client, config, watch
@@ -131,7 +132,14 @@ class K8sHelper:
         return self._watch_claim(claim_name, namespace, timeout, require_ready=False,
                                  resource_version=resource_version)
 
-    def wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    def wait_for_claim_ready(
+        self,
+        claim_name: str,
+        namespace: str,
+        timeout: int,
+        resource_version: str | None = None,
+        claim_validator: Callable[[dict], object] | None = None,
+    ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
 
@@ -147,11 +155,24 @@ class K8sHelper:
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
         """
-        return self._watch_claim(claim_name, namespace, timeout, require_ready=True,
-                                 resource_version=resource_version)
+        return self._watch_claim(
+            claim_name,
+            namespace,
+            timeout,
+            require_ready=True,
+            resource_version=resource_version,
+            claim_validator=claim_validator,
+        )
 
-    def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
-                     resource_version: str | None = None) -> str:
+    def _watch_claim(
+        self,
+        claim_name: str,
+        namespace: str,
+        timeout: int,
+        require_ready: bool,
+        resource_version: str | None = None,
+        claim_validator: Callable[[dict], object] | None = None,
+    ) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -201,15 +222,24 @@ class K8sHelper:
                         raise SandboxMetadataError(deleted_msg)
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event['object']
+                        if claim_validator is not None:
+                            claim_validator(claim_object)
                         # Track the last-seen resourceVersion so a stream
                         # restart resumes instead of replaying history.
                         seen_rv = (claim_object.get('metadata') or {}).get('resourceVersion')
                         if seen_rv:
                             rv = seen_rv
+                        metadata = claim_object.get('metadata') or {}
+                        generation = metadata.get('generation')
                         status = claim_object.get('status') or {}
 
                         ready = False
                         for cond in status.get('conditions', []):
+                            if (
+                                claim_validator is not None
+                                and cond.get('observedGeneration') != generation
+                            ):
+                                continue
                             if (
                                 cond.get('type') == 'Ready'
                                 and cond.get('status') == 'False'

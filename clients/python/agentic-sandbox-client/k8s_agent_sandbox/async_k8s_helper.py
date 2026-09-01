@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -154,7 +155,14 @@ class AsyncK8sHelper:
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=False,
                                        resource_version=resource_version)
 
-    async def wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    async def wait_for_claim_ready(
+        self,
+        claim_name: str,
+        namespace: str,
+        timeout: int,
+        resource_version: str | None = None,
+        claim_validator: Callable[[dict], object] | None = None,
+    ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
 
@@ -170,11 +178,24 @@ class AsyncK8sHelper:
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
         """
-        return await self._watch_claim(claim_name, namespace, timeout, require_ready=True,
-                                       resource_version=resource_version)
+        return await self._watch_claim(
+            claim_name,
+            namespace,
+            timeout,
+            require_ready=True,
+            resource_version=resource_version,
+            claim_validator=claim_validator,
+        )
 
-    async def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
-                           resource_version: str | None = None) -> str:
+    async def _watch_claim(
+        self,
+        claim_name: str,
+        namespace: str,
+        timeout: int,
+        require_ready: bool,
+        resource_version: str | None = None,
+        claim_validator: Callable[[dict], object] | None = None,
+    ) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -227,15 +248,24 @@ class AsyncK8sHelper:
                         )
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event["object"]
+                        if claim_validator is not None:
+                            claim_validator(claim_object)
                         # Track the last-seen resourceVersion so a stream
                         # restart resumes instead of replaying history.
                         seen_rv = (claim_object.get("metadata") or {}).get("resourceVersion")
                         if seen_rv:
                             rv = seen_rv
+                        metadata = claim_object.get("metadata") or {}
+                        generation = metadata.get("generation")
                         status = claim_object.get("status") or {}
 
                         ready = False
                         for cond in status.get("conditions", []):
+                            if (
+                                claim_validator is not None
+                                and cond.get("observedGeneration") != generation
+                            ):
+                                continue
                             if (
                                 cond.get("type") == "Ready"
                                 and cond.get("status") == "False"

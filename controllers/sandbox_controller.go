@@ -762,8 +762,42 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		return err
 	}
 
+	// Events are only emitted once the new status is persisted, so a failed patch does not produce a misleading event
+	// and a no-op reconcile does not re-emit one (due to deepEqual check above).
+	r.recordReadyTransitionEvent(sandbox, oldStatus)
+
 	// Surface error
 	return nil
+}
+
+func (r *SandboxReconciler) recordReadyTransitionEvent(sandbox *sandboxv1beta1.Sandbox, oldStatus *sandboxv1beta1.SandboxStatus) {
+	if r.Recorder == nil {
+		return
+	}
+	var oldReason string
+	if oldReady := meta.FindStatusCondition(oldStatus.Conditions, string(sandboxv1beta1.SandboxConditionReady)); oldReady != nil {
+		oldReason = oldReady.Reason
+	}
+	newReady := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if newReady == nil || newReady.Reason == oldReason {
+		return
+	}
+	switch newReady.Reason {
+	case sandboxv1beta1.SandboxReasonDependenciesReady:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, "SandboxReady", "Ready", "Sandbox is ready")
+	case sandboxv1beta1.SandboxReasonExpired:
+		// This event should only be emitted when ShutdownPolicy=Retain since in the Delete case, the Sandbox is torn down immediately on expiry.
+		// The ShutdownPolicy is checked here because updateStatus is called before handleSandboxExpiry's later policy check.
+		if sandbox.Spec.ShutdownPolicy == nil || *sandbox.Spec.ShutdownPolicy != sandboxv1beta1.ShutdownPolicyDelete {
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonExpired, "Expiry", "Sandbox has expired")
+		}
+	case sandboxv1beta1.SandboxReasonSuspended:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonSuspended, "Suspension", "Sandbox is suspended")
+	case sandboxv1beta1.SandboxReasonPodSucceeded:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeNormal, sandboxv1beta1.SandboxReasonPodSucceeded, "PodCompletion", "Pod completed successfully")
+	case sandboxv1beta1.SandboxReasonPodFailed:
+		r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, sandboxv1beta1.SandboxReasonPodFailed, "PodCompletion", "Pod failed")
+	}
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only
@@ -1461,7 +1495,14 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, "SandboxPodCreateFailed", "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
+		}
 		return nil, err
+	}
+
+	if r.Recorder != nil {
+		r.Recorder.Eventf(sandbox, pod, corev1.EventTypeNormal, "SandboxPodCreated", "PodCreation", "Created Pod %q", pod.Name)
 	}
 
 	if r.Tracer.IsRecording(ctx) {

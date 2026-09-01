@@ -14,6 +14,10 @@
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1235,6 +1239,115 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
                             "HTTPStatusError should clear gateway base_url cache")
         finally:
             await connector.close()
+
+
+class SandboxClaimDeleteHandler(BaseHTTPRequestHandler):
+    """Stub K8s apiserver; only handles the DELETE call atexit cleanup makes."""
+
+    received_deletes = []
+
+    def do_DELETE(self):
+        self.__class__.received_deletes.append(self.path)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        payload = b"{}"
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass  # silence BaseHTTPRequestHandler's default per-request access-log line
+
+
+class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
+    """Regression test for a bug where AsyncSandboxClient's atexit cleanup only failed at real interpreter shutdown: 
+    kubernetes_asyncio's aiohttp transport dispatches a per-request netrc lookup via a background thread, which fails
+    once Python's own thread-pool teardown has begun. No in-process test can reproduce that condition because the 
+    interpreter never actually exits mid-suite, so this spawns a real subprocess and lets it exit for real."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = HTTPServer(("127.0.0.1", 0), SandboxClaimDeleteHandler)
+        cls.port = cls.server.server_address[1]
+        cls.server_thread = Thread(target=cls.server.serve_forever)
+        cls.server_thread.daemon = True
+        cls.server_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.server_thread.join(timeout=5)
+
+    def setUp(self):
+        SandboxClaimDeleteHandler.received_deletes = []
+
+    def _write_fake_kubeconfig(self) -> str:
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(f"""\
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: http://127.0.0.1:{self.port}
+  name: test-cluster
+contexts:
+- context:
+    cluster: test-cluster
+    user: test-user
+  name: test-context
+current-context: test-context
+users:
+- name: test-user
+  user: {{}}
+""")
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_atexit_cleanup_deletes_claim_on_real_process_exit(self):
+        kubeconfig_path = self._write_fake_kubeconfig()
+        script = """
+import asyncio
+from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
+from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+async def main():
+    client = AsyncSandboxClient(
+        connection_config=SandboxDirectConnectionConfig(api_url="http://unused:8080"),
+        cleanup=True,
+    )
+    client._active_connection_sandboxes[("default", "claim-abc")] = object()
+
+asyncio.run(main())
+# No explicit close()/delete_all() — relying entirely on the atexit hook.
+"""
+        # K8sHelper.__init__ tries load_incluster_config() before falling
+        # back to KUBECONFIG. If the parent process happens to be running
+        # inside a real pod (e.g. in CI), KUBERNETES_SERVICE_HOST/PORT are
+        # already set and inherited via os.environ, which would make the
+        # subprocess skip KUBECONFIG entirely and talk to the real in-cluster
+        # apiserver instead of this stub. Strip them so it deterministically
+        # falls through to the fake kubeconfig.
+        env = dict(os.environ)
+        for k in ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT", "KUBERNETES_PORT"):
+            env.pop(k, None)
+        env["KUBECONFIG"] = kubeconfig_path
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr, result.stderr)
+        self.assertEqual(
+            SandboxClaimDeleteHandler.received_deletes,
+            ["/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/default/sandboxclaims/claim-abc"],
+        )
 
 
 if __name__ == "__main__":

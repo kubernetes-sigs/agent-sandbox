@@ -903,9 +903,6 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	namespacedWarmPoolName := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
 
 	var skipped []queue.SandboxKey
-	var fallbackSandbox *v1beta1.Sandbox
-	var fallbackKey queue.SandboxKey
-	var adoptingFallback bool
 	var pendingNetworkCandidates int
 
 	// Lazily resolve, at most once, whether the claim's warm pool uses the Recreate strategy and,
@@ -951,10 +948,6 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	defer func() {
 		for _, key := range skipped {
 			r.WarmSandboxQueue.Add(namespacedWarmPoolName, key)
-		}
-		// If we parked a fallback sandbox but never ended up adopting it (due to error or adopting a ready one), requeue it.
-		if fallbackSandbox != nil && !adoptingFallback {
-			r.WarmSandboxQueue.Add(namespacedWarmPoolName, fallbackKey)
 		}
 	}()
 
@@ -1014,11 +1007,6 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 	for {
 		adoptedKey, ok := r.WarmSandboxQueue.GetWithStrategy(namespacedWarmPoolName, pickSmart)
 		if !ok {
-			// No more candidates in our namespace. If we found an unready fallback sandbox, return it.
-			if fallbackSandbox != nil {
-				adoptingFallback = true
-				return fallbackSandbox, fallbackKey, pendingNetworkCandidates, nil
-			}
 			return nil, queue.SandboxKey{}, pendingNetworkCandidates, nil
 		}
 
@@ -1096,15 +1084,9 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			return adopted, adoptedKey, pendingNetworkCandidates, nil
 		}
 
-		// Sandbox is valid but NOT Ready.
-		// Keep the first unready sandbox we found as fallback.
-		if fallbackSandbox == nil {
-			fallbackSandbox = adopted
-			fallbackKey = adoptedKey
-		} else {
-			// Push subsequent unready sandboxes to skipped so they go back to the queue
-			skipped = append(skipped, adoptedKey)
-		}
+		// Keep unready sandboxes available for a later claim after their
+		// Ready condition changes. This claim cold-starts if none are ready.
+		skipped = append(skipped, adoptedKey)
 	}
 }
 
@@ -1123,13 +1105,14 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 				logger.V(4).Info("No network-ready warm sandbox after checking candidates", "claim", claim.Name, "pendingCandidates", pendingNetworkCandidates)
 				return nil, pendingNetworkCandidates, nil
 			}
-			logger.V(4).Info("No warm sandbox candidates available", "claim", claim.Name)
-			return nil, 0, nil // Warm pool is truly empty, fall completely to cold start
+			logger.V(4).Info("No ready warm sandbox candidates available", "claim", claim.Name)
+			return nil, 0, nil
 		}
 
 		// Wrap the API logic in a closure
 		success, err := func() (bool, error) {
 			poolName := getWarmPoolName(adopted)
+			candidateWasReady := isSandboxReady(adopted)
 
 			logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
@@ -1187,7 +1170,7 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 			}
 
 			podCondition := "not_ready"
-			if isSandboxReady(adopted) {
+			if candidateWasReady {
 				podCondition = "ready"
 			}
 			templateName := r.resolveTemplateName(adopted)
@@ -1423,6 +1406,9 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 		if err := verifySandboxCandidate(fresh, claim); err != nil {
 			return fmt.Errorf("%w: sandbox %s is no longer adoptable by claim %s: %s", errAdoptionConflict, sandboxName, claim.Name, err.Error())
 		}
+		if !isSandboxReady(fresh) {
+			return fmt.Errorf("%w: sandbox %s is no longer ready for claim %s", errAdoptionConflict, sandboxName, claim.Name)
+		}
 		// Still pool-owned and adoptable: re-patch on the fresh base; a
 		// further 409 re-runs this closure with another fresh read.
 		if err := r.completeAdoption(ctx, claim, fresh); err != nil {
@@ -1500,10 +1486,12 @@ func (r *SandboxClaimReconciler) removeAssignedSandboxReference(ctx context.Cont
 	return err
 }
 
-// isSandboxReady checks if a sandbox has Ready=True condition.
+// isSandboxReady checks if a sandbox has Ready=True for its current generation.
 func isSandboxReady(sb *v1beta1.Sandbox) bool {
 	for _, cond := range sb.Status.Conditions {
-		if cond.Type == string(v1beta1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+		if cond.Type == string(v1beta1.SandboxConditionReady) &&
+			cond.Status == metav1.ConditionTrue &&
+			cond.ObservedGeneration == sb.Generation {
 			return true
 		}
 	}
@@ -2021,7 +2009,16 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 						return nil, fmt.Errorf("failed to remove invalid sandbox reference: %w", err)
 					}
 				} else {
-					if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
+					if !isSandboxReady(sandbox) {
+						// Readiness from the informer cache can lag behind the server.
+						// Resolve the committed assignment authoritatively before
+						// deciding whether it is safe to clear.
+						resolved, resolveErr := r.resolveAdoptionCompletion(ctx, claim, sbName)
+						if resolveErr != nil {
+							return nil, resolveErr
+						}
+						sandbox = resolved
+					} else if err := r.completeAdoption(ctx, claim, sandbox); err != nil {
 						if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
 							return nil, fmt.Errorf("failed to complete adoption of %q: %w", sbName, err)
 						}
@@ -2725,6 +2722,7 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 
 	newAdoptable := isAdoptable(newSandbox) == nil
 	oldAdoptable := isAdoptable(oldSandbox) == nil
+	becameReady := !isSandboxReady(oldSandbox) && isSandboxReady(newSandbox)
 
 	logger := log.FromContext(ctx)
 
@@ -2734,7 +2732,7 @@ func (h *sandboxEventHandler) Update(ctx context.Context, e event.UpdateEvent, _
 	poolChanged := oldWarmPoolName != newWarmPoolName
 	nodeScheduled := oldSandbox.Status.NodeName != newSandbox.Status.NodeName
 
-	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) || (newAdoptable && nodeScheduled) {
+	if (!oldAdoptable && newAdoptable) || (newAdoptable && poolChanged) || (newAdoptable && nodeScheduled) || (newAdoptable && becameReady) {
 		// Add/update sandbox in the queue
 		key := queue.SandboxKey{
 			Namespace: newSandbox.Namespace,

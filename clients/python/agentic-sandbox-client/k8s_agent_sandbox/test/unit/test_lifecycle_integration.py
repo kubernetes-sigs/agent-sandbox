@@ -61,6 +61,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
+        sandbox_client._automatic_cleanup_claims = set()
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
@@ -108,6 +109,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
+        sandbox_client._automatic_cleanup_claims = set()
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
@@ -139,6 +141,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
+        sandbox_client._automatic_cleanup_claims = set()
         sandbox_client.sandbox_class = MagicMock()
 
         with self.assertRaises(ValueError):

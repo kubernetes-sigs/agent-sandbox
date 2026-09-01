@@ -21,7 +21,10 @@ import uuid
 import atexit
 import sys
 import logging
+from functools import partial
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
+
+from kubernetes.client import ApiException
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
@@ -34,6 +37,11 @@ from .models import (
     SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
+from .claim_adoption import (
+    get_ready_sandbox_name,
+    validate_claim_for_adoption,
+    validate_claim_name,
+)
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .exceptions import SandboxNotFoundError
@@ -68,8 +76,9 @@ class SandboxClient(Generic[T]):
                 or SandboxGatewayConnectionConfig.
             tracer_config: Configuration for OpenTelemetry tracing. 
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
-            cleanup: If True, registers an atexit hook to automatically delete 
-                all tracked sandboxes when the program terminates. Defaults to False.
+            cleanup: If True, registers an atexit hook to automatically delete
+                internally named sandboxes when the program terminates. Explicitly
+                named claims remain caller-owned. Defaults to False.
         """
         # Sandbox related configuration
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
@@ -85,10 +94,11 @@ class SandboxClient(Generic[T]):
         
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
+        self._automatic_cleanup_claims: set[Tuple[str, str]] = set()
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
-            atexit.register(self.delete_all)
+            atexit.register(self._delete_automatic_cleanup_claims)
 
     def create_sandbox(
         self,
@@ -97,6 +107,8 @@ class SandboxClient(Generic[T]):
         sandbox_ready_timeout: int = 180,
         labels: dict[str, str] | None = None,
         *,
+        claim_name: str | None = None,
+        adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_labels: dict[str, str] | None = None,
@@ -112,6 +124,13 @@ class SandboxClient(Generic[T]):
             sandbox_ready_timeout: Seconds to wait for the sandbox to be ready.
             labels: Optional Kubernetes labels to attach to the claim object
                 (``SandboxClaim.metadata.labels``).
+            claim_name: Optional deterministic SandboxClaim name. When omitted,
+                the client preserves its random-name behavior and owns automatic
+                cleanup. Explicitly named claims remain caller-owned.
+            adopt_existing: On a create conflict, adopt the exact existing
+                ``claim_name`` only after validating its immutable request
+                contract. Requires ``claim_name`` and cannot be combined with
+                ``shutdown_after_seconds``.
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -142,23 +161,71 @@ class SandboxClient(Generic[T]):
         if labels:
             validate_labels(labels)
 
+        if adopt_existing and claim_name is None:
+            raise ValueError("adopt_existing requires an explicit claim_name.")
+        if adopt_existing and shutdown_after_seconds is not None:
+            raise ValueError(
+                "adopt_existing cannot be combined with shutdown_after_seconds "
+                "because each retry computes a different shutdownTime."
+            )
+
         pod_metadata = build_pod_metadata(pod_labels, pod_annotations)
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        generated_claim_name = claim_name is None
+        if generated_claim_name:
+            claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
+        else:
+            validate_claim_name(claim_name)
 
+        key = (namespace, claim_name)
+        adopted_sandbox_id = None
+        claim_validator = None
         try:
-            created_claim = self._create_claim(
-                claim_name,
-                warmpool,
-                namespace,
-                labels=labels,
-                lifecycle=lifecycle,
-                volume_claim_templates=volume_claim_templates,
-                pod_metadata=pod_metadata,
-                env=env,
-            )
+            try:
+                created_claim = self._create_claim(
+                    claim_name,
+                    warmpool,
+                    namespace,
+                    labels=labels,
+                    lifecycle=lifecycle,
+                    volume_claim_templates=volume_claim_templates,
+                    pod_metadata=pod_metadata,
+                    env=env,
+                )
+                if not generated_claim_name:
+                    self._automatic_cleanup_claims.discard(key)
+                claim_rv = None
+                if isinstance(created_claim, dict):
+                    claim_rv = (created_claim.get("metadata") or {}).get("resourceVersion")
+            except ApiException as error:
+                if not (adopt_existing and error.status == 409):
+                    raise
+                existing_claim = self.k8s_helper.get_sandbox_claim(
+                    claim_name, namespace
+                )
+                validate_adopted_claim = partial(
+                    validate_claim_for_adoption,
+                    claim_name=claim_name,
+                    namespace=namespace,
+                    warmpool=warmpool,
+                    labels=labels,
+                    lifecycle=lifecycle,
+                    volume_claim_templates=volume_claim_templates,
+                    pod_metadata=pod_metadata,
+                    env=env,
+                )
+                claim_identity = validate_adopted_claim(existing_claim)
+                self._automatic_cleanup_claims.discard(key)
+                claim_rv = claim_identity.resource_version
+                claim_validator = partial(
+                    validate_adopted_claim,
+                    expected_uid=claim_identity.uid,
+                )
+                adopted_sandbox_id = get_ready_sandbox_name(
+                    existing_claim, claim_name
+                )
             # Wait for the claim to be bound and Ready in a single watch.
             # The claim status carries the sandbox name (which differs from
             # the claim name with warm pools) and the forwarded Ready
@@ -166,12 +233,23 @@ class SandboxClient(Generic[T]):
             # Sandbox resource is needed. The watch starts from the create
             # response's resourceVersion so the apiserver serves it from the
             # watch cache instead of a quorum etcd read per wait.
-            claim_rv = None
-            if isinstance(created_claim, dict):
-                claim_rv = (created_claim.get("metadata") or {}).get("resourceVersion")
-            sandbox_id = self._wait_for_claim_ready(
-                claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv
-            )
+            sandbox_id = adopted_sandbox_id
+            if sandbox_id is None:
+                if claim_validator is None:
+                    sandbox_id = self._wait_for_claim_ready(
+                        claim_name,
+                        namespace,
+                        sandbox_ready_timeout,
+                        resource_version=claim_rv,
+                    )
+                else:
+                    sandbox_id = self._wait_for_claim_ready(
+                        claim_name,
+                        namespace,
+                        sandbox_ready_timeout,
+                        resource_version=claim_rv,
+                        claim_validator=claim_validator,
+                    )
 
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
@@ -182,11 +260,13 @@ class SandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
             )
         except Exception:
-            # If creation or waiting fails, ensure we don't leave an orphaned claim
-            self._delete_claim(claim_name, namespace)
+            if generated_claim_name:
+                self._delete_claim(claim_name, namespace)
             raise
 
-        self._active_connection_sandboxes[(namespace, claim_name)] = sandbox
+        self._active_connection_sandboxes[key] = sandbox
+        if generated_claim_name:
+            self._automatic_cleanup_claims.add(key)
         return sandbox
 
     def get_sandbox(
@@ -223,7 +303,11 @@ class SandboxClient(Generic[T]):
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
         except Exception as e:
             if existing:
-                existing.terminate()
+                if key in self._automatic_cleanup_claims:
+                    existing.terminate()
+                    self._automatic_cleanup_claims.discard(key)
+                else:
+                    existing.close_connection()
             self._active_connection_sandboxes.pop(key, None)
             raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
@@ -300,12 +384,13 @@ class SandboxClient(Generic[T]):
                 self._active_connection_sandboxes.pop(key, None)
             else:
                 self._delete_claim(claim_name, namespace)
+            self._automatic_cleanup_claims.discard(key)
         except Exception as e:
             logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
             
     def delete_all(self) -> None:
         """
-        Cleanup all tracked sandboxes managed by this client.
+        Deliberately delete every sandbox tracked by this client.
         
         Example:
         
@@ -314,7 +399,17 @@ class SandboxClient(Generic[T]):
             >>> client.create_sandbox("python-sandbox-pool")
             >>> client.delete_all()
         """
-        for (ns, claim_name), _ in list(self._active_connection_sandboxes.items()):
+        for ns, claim_name in list(self._active_connection_sandboxes):
+            try:
+                self.delete_sandbox(claim_name, namespace=ns)
+            except Exception as e:
+                logging.error(
+                    f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
+                )
+
+    def _delete_automatic_cleanup_claims(self):
+        """Best-effort cleanup of internally named claims only."""
+        for ns, claim_name in list(self._automatic_cleanup_claims):
             try:
                 self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
@@ -361,9 +456,29 @@ class SandboxClient(Generic[T]):
         )
 
     @trace_span("wait_for_claim_ready")
-    def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    def _wait_for_claim_ready(
+        self,
+        claim_name: str,
+        namespace: str,
+        timeout: int,
+        resource_version: str | None = None,
+        claim_validator=None,
+    ) -> str:
         """Waits for the SandboxClaim to be bound and Ready, returning the sandbox name."""
-        return self.k8s_helper.wait_for_claim_ready(claim_name, namespace, timeout, resource_version=resource_version)
+        if claim_validator is None:
+            return self.k8s_helper.wait_for_claim_ready(
+                claim_name,
+                namespace,
+                timeout,
+                resource_version=resource_version,
+            )
+        return self.k8s_helper.wait_for_claim_ready(
+            claim_name,
+            namespace,
+            timeout,
+            resource_version=resource_version,
+            claim_validator=claim_validator,
+        )
 
     @trace_span("wait_for_sandbox_ready")
     def _wait_for_sandbox_ready(

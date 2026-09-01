@@ -44,7 +44,8 @@ Initializes the SandboxClient.
 - `tracer_config` - Configuration for OpenTelemetry tracing.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
 - `cleanup` - If True, registers an atexit hook to automatically delete
-  all tracked sandboxes when the program terminates. Defaults to False.
+  internally named sandboxes when the program terminates. Explicitly
+  named claims remain caller-owned. Defaults to False.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 
@@ -56,6 +57,8 @@ def create_sandbox(warmpool: str,
                    sandbox_ready_timeout: int = 180,
                    labels: dict[str, str] | None = None,
                    *,
+                   claim_name: str | None = None,
+                   adopt_existing: bool = False,
                    shutdown_after_seconds: int | None = None,
                    volume_claim_templates: list[dict] | None = None,
                    pod_labels: dict[str, str] | None = None,
@@ -73,6 +76,13 @@ the underlying infrastructure.
 - `sandbox_ready_timeout` - Seconds to wait for the sandbox to be ready.
 - `labels` - Optional Kubernetes labels to attach to the claim object
   (``SandboxClaim.metadata.labels``).
+- `claim_name` - Optional deterministic SandboxClaim name. When omitted,
+  the client preserves its random-name behavior and owns automatic
+  cleanup. Explicitly named claims remain caller-owned.
+- `adopt_existing` - On a create conflict, adopt the exact existing
+  ``claim_name`` only after validating its immutable request
+  contract. Requires ``claim_name`` and cannot be combined with
+  ``shutdown_after_seconds``.
 - `shutdown_after_seconds` - Optional TTL in seconds. When set, the
   claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
   of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
@@ -198,7 +208,7 @@ Stops the client side connection and deletes the Kubernetes resources.
 def delete_all() -> None
 ```
 
-Cleanup all tracked sandboxes managed by this client.
+Deliberately delete every sandbox tracked by this client.
 
 **Example**:
 

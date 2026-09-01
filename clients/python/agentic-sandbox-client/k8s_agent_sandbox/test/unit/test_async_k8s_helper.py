@@ -320,6 +320,79 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(name, "warm-sandbox-1")
         self.assertEqual(stream_rvs, ["12345", "0"])
 
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_adoption_watch_revalidates_after_410_and_ignores_stale_ready(
+        self, mock_watch_class
+    ):
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        stale_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {
+                    "name": "test-claim",
+                    "resourceVersion": "8",
+                    "generation": 2,
+                },
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "True",
+                            "observedGeneration": 1,
+                        }
+                    ],
+                    "sandbox": {"name": "stale-sandbox"},
+                },
+            },
+        }
+        current_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {
+                    "name": "test-claim",
+                    "resourceVersion": "9",
+                    "generation": 2,
+                },
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Ready",
+                            "status": "True",
+                            "observedGeneration": 2,
+                        }
+                    ],
+                    "sandbox": {"name": "current-sandbox"},
+                },
+            },
+        }
+        stream_count = 0
+
+        async def mock_stream(*_args, **_kwargs):
+            nonlocal stream_count
+            stream_count += 1
+            if stream_count == 1:
+                raise client.ApiException(status=410)
+            yield stale_event
+            yield current_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+        claim_validator = MagicMock()
+
+        name = await self.helper.wait_for_claim_ready(
+            "test-claim",
+            "default",
+            timeout=5,
+            resource_version="12345",
+            claim_validator=claim_validator,
+        )
+
+        self.assertEqual(name, "current-sandbox")
+        self.assertEqual(claim_validator.call_count, 2)
+        claim_validator.assert_any_call(stale_event["object"])
+        claim_validator.assert_any_call(current_event["object"])
+
 
 class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 

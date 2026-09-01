@@ -887,6 +887,42 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
         self.assertEqual(second.kwargs["resource_version"], "0")
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_adoption_watch_revalidates_after_410_and_ignores_stale_ready(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        stale_event = self._ready_event(rv="8")
+        stale_event["object"]["metadata"]["generation"] = 2
+        stale_event["object"]["status"]["conditions"][0][
+            "observedGeneration"
+        ] = 1
+        current_event = self._ready_event(rv="9")
+        current_event["object"]["metadata"]["generation"] = 2
+        current_event["object"]["status"]["conditions"][0][
+            "observedGeneration"
+        ] = 2
+        mock_watch = MagicMock()
+        mock_watch.stream.side_effect = [
+            client.ApiException(status=410),
+            [stale_event, current_event],
+        ]
+        mock_watch_class.return_value = mock_watch
+        claim_validator = MagicMock()
+
+        helper = K8sHelper()
+        name = helper.wait_for_claim_ready(
+            "test-claim",
+            "default",
+            timeout=5,
+            resource_version="12345",
+            claim_validator=claim_validator,
+        )
+
+        self.assertEqual(name, "warm-sandbox-1")
+        self.assertEqual(claim_validator.call_count, 2)
+        claim_validator.assert_any_call(stale_event["object"])
+        claim_validator.assert_any_call(current_event["object"])
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_watch_non_410_api_exception_reraises(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
         mock_watch = MagicMock()
         mock_watch.stream.side_effect = client.ApiException(status=403)

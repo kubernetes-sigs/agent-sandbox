@@ -13,7 +13,7 @@ tool (
 )
 
 require (
-	github.com/gofrs/flock v0.13.0
+	github.com/gofrs/flock v0.13.1
 	k8s.io/klog/v2 v2.140.0
 )
 

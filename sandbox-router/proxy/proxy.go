@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/net/http/httpguts"
 	"k8s.io/apimachinery/pkg/types"
@@ -94,6 +96,12 @@ func NewHandler(o Options) *Handler {
 			o.Config.UpstreamRetryMaxDelay,
 			onRetry,
 		)
+	}
+	// Wrap with metrics last (outermost) so every upstream byte —
+	// including those on the single successful attempt after dial-class
+	// retries — is counted exactly once.
+	if o.Metrics != nil {
+		tr = newMetricsTransport(tr, o.Metrics)
 	}
 	authorizer := o.Authorizer
 	if authorizer == nil {
@@ -475,4 +483,82 @@ func classifyError(err error) string {
 		return "dial"
 	}
 	return "other"
+}
+
+// metricsTransport wraps an http.RoundTripper and increments Prometheus
+// counters for every byte flowing to / from the upstream sandbox. The
+// sandbox_namespace label is read from the per-request *Labels the proxy
+// handler attached to the request context earlier in ServeHTTP — same
+// mechanism the rest of the observability stack uses.
+//
+// The wrapping is applied outside retryTransport so retries that fail at
+// dial time (before any body bytes move) don't double-count; retries on
+// dial failures are safe here because http.Transport only consumes the
+// body after a successful connect.
+type metricsTransport struct {
+	base    http.RoundTripper
+	metrics *observability.Metrics
+}
+
+func newMetricsTransport(base http.RoundTripper, metrics *observability.Metrics) *metricsTransport {
+	return &metricsTransport{base: base, metrics: metrics}
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t *metricsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	namespace := observability.SandboxNamespaceFromContext(req.Context())
+
+	// Wrap the request body so bytes streamed to the upstream are
+	// counted toward upstream_tx_bytes_total. The counter is bound to
+	// the resolved namespace up front; WithLabelValues is a map lookup
+	// but the series is reused for the lifetime of the process so the
+	// per-call cost is trivial.
+	if req.Body != nil {
+		req.Body = &upstreamCountingReadCloser{
+			rc:      req.Body,
+			counter: t.metrics.UpstreamTxBytesTotal.WithLabelValues(namespace),
+		}
+	}
+
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap the response body so bytes streamed back from the upstream
+	// are counted toward upstream_rx_bytes_total. httputil.ReverseProxy
+	// copies resp.Body to the client via io.Copy and then calls Close,
+	// so the counter is incremented lazily as bytes flow — SSE /
+	// streaming responses are accounted for correctly because the
+	// counting happens per Read, not per response.
+	if resp.Body != nil {
+		resp.Body = &upstreamCountingReadCloser{
+			rc:      resp.Body,
+			counter: t.metrics.UpstreamRxBytesTotal.WithLabelValues(namespace),
+		}
+	}
+
+	return resp, nil
+}
+
+// upstreamCountingReadCloser wraps an io.ReadCloser, counts bytes read,
+// and increments a Prometheus counter in real time. Incrementing per Read
+// (rather than accumulating locally and flushing at Close) keeps the
+// counters accurate even if a streaming response is abandoned mid-flight
+// — the bytes that did flow are still attributed.
+type upstreamCountingReadCloser struct {
+	rc      io.ReadCloser
+	counter prometheus.Counter
+}
+
+func (c *upstreamCountingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	if n > 0 {
+		c.counter.Add(float64(n))
+	}
+	return n, err
+}
+
+func (c *upstreamCountingReadCloser) Close() error {
+	return c.rc.Close()
 }

@@ -52,6 +52,8 @@ print(sc.get("name","") if isinstance(sc,dict) else (sc or ""))')
 
 echo "=== 1. Apply snapshot config, template, pool"
 export SNAPSHOT_BUCKET DEMO_IMAGE
+# fixed-name triggers from a previous run would satisfy the waits below
+kubectl delete podsnapshotmanualtriggers golden-v1 golden-v2 golden-v3 --ignore-not-found
 envsubst < 00-storageconfig.yaml | kubectl apply -f -
 kubectl apply -f 05-podsnapshotpolicy.yaml
 envsubst < 10-sandboxtemplate.yaml | kubectl apply -f -
@@ -89,12 +91,14 @@ for POD in $(kubectl get pods -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='
 done
 
 echo "=== 5. Workers adopt pre-warmed restored members"
+POOL_BEFORE=$(kubectl get sandbox -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='{.items[*].metadata.name}')
 kubectl apply -f 40-worker-claims.yaml
 kubectl wait --for=condition=Ready sandboxclaim/podsnap-worker-1 sandboxclaim/podsnap-worker-2 --timeout=300s
 for CLAIM in podsnap-worker-1 podsnap-worker-2; do
     POD=$(pod_of_claim "$CLAIM")
     S=$(state "$POD")
     echo "$CLAIM ($POD): $S"
+    case " $POOL_BEFORE " in *" $POD "*) ;; *) echo "$CLAIM did not adopt a pool member"; exit 1;; esac
     [ "$(field "$S" boot_nonce)" = "$PRIMER_NONCE" ]
     [ "$(field "$S" marker)" = "golden-v1" ]
 done
@@ -133,13 +137,18 @@ SNAP_V3=$(snap_of_trigger golden-v3)
 kubectl wait --for=condition=Ready "podsnapshots.podsnapshot.gke.io/$SNAP_V3" --timeout=600s
 kubectl delete sandbox -l agents.x-k8s.io/warm-pool-sandbox --wait=true
 kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+POOL_BEFORE=$(kubectl get sandbox -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='{.items[*].metadata.name}')
 kubectl apply -f 50-refresh-claim.yaml
 kubectl wait --for=condition=Ready sandboxclaim/podsnap-worker-3 --timeout=300s
 POD=$(pod_of_claim podsnap-worker-3)
 S=$(state "$POD")
 echo "podsnap-worker-3 ($POD): $S"
+case " $POOL_BEFORE " in *" $POD "*) ;; *) echo "podsnap-worker-3 did not adopt a pool member"; exit 1;; esac
 [ "$(field "$S" boot_nonce)" = "$PRIMER_NONCE" ]
 [ "$(field "$S" counter)" = "5" ]
 [ "$(field "$S" marker)" = "golden-v3" ]
+
+echo "=== 9. Snapshot deletion works (validates the service agent's bucket IAM)"
+kubectl delete "podsnapshots.podsnapshot.gke.io/$SNAP_V1" --timeout=300s
 
 echo "ALL CHECKS PASSED"

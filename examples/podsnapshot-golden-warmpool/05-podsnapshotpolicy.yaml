@@ -12,6 +12,7 @@ apiVersion: podsnapshot.gke.io/v1
 kind: PodSnapshotPolicy
 metadata:
   name: podsnap-golden-policy
+  namespace: default
 spec:
   storageConfigName: podsnap-golden-storage
   selector:

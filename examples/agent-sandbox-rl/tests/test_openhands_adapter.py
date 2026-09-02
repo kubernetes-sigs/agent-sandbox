@@ -99,6 +99,7 @@ def test_pod_ip_falls_back_to_sdk_sandbox():
 def test_terminate_releases_to_fleet():
   fleet = FakeFleet()
   view = FleetWorkspaceClient(fleet, make_task()).create_sandbox("p")
+  assert view.releases_on_terminate is True   # workspace logs a release
   view.terminate()
   assert fleet.released == [fleet.handle]
 
@@ -156,6 +157,8 @@ def test_bound_handle_client_binds_without_acquiring():
   view.terminate()          # must be a no-op: fleet.run owns the release
   # No fleet in sight — nothing to have released; the handle is untouched.
   assert handle.pod_ip == "10.1.2.3"
+  # ...and the view says so, so the workspace logs a detach, not a release.
+  assert view.releases_on_terminate is False
 
 
 def test_make_handle_workspace_wires_bound_client(fake_openhands_integration):

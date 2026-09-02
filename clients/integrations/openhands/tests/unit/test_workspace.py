@@ -19,8 +19,13 @@ import, no network. The health check is stubbed per test (its real
 implementation is exercised separately against a fake urlopen).
 """
 
+import logging
+from importlib.metadata import PackageNotFoundError
+
+import httpx
 import pytest
 
+from openhands_k8s_agent_sandbox import workspace as workspace_module
 from openhands_k8s_agent_sandbox.workspace import AgentSandboxWorkspace
 
 
@@ -263,16 +268,62 @@ def test_version_skew_warns(no_health, monkeypatch, caplog):
     assert any("protocol skew" in r.message for r in caplog.records)
 
 
-def test_version_check_failure_is_silent(no_health, monkeypatch, caplog):
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("unreachable"), ValueError("body is not JSON")],
+    ids=["transport", "not-json"],
+)
+def test_version_check_expected_failures_are_silent(
+    no_health, monkeypatch, caplog, error
+):
     def boom(self):
-        raise ConnectionError("unreachable")
+        raise error
 
     monkeypatch.setattr(AgentSandboxWorkspace, "get_server_info", boom)
-    import logging
-
     with caplog.at_level(logging.WARNING):
         make_workspace(check_server_version=True)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_check_missing_sdk_dist_is_silent(no_health, monkeypatch, caplog):
+    monkeypatch.setattr(
+        AgentSandboxWorkspace, "get_server_info", lambda self: {"version": "1.0"}
+    )
+
+    def missing(_name):
+        raise PackageNotFoundError("openhands-sdk")
+
+    monkeypatch.setattr(workspace_module, "_dist_version", missing)
+    with caplog.at_level(logging.WARNING):
+        make_workspace(check_server_version=True)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_check_unexpected_payload_warns(no_health, monkeypatch, caplog):
+    # A non-dict payload must not raise (AttributeError on .get) nor vanish.
+    monkeypatch.setattr(
+        AgentSandboxWorkspace, "get_server_info", lambda self: ["1.0"]
+    )
+    with caplog.at_level(logging.WARNING):
+        ws = make_workspace(check_server_version=True)
+    assert ws.host.startswith("http://")  # attach still succeeded
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "expected a JSON object" in warnings[0].message
+
+
+def test_version_check_bug_is_loud_but_not_fatal(no_health, monkeypatch, caplog):
+    def bug(self):
+        raise TypeError("bug in the check")
+
+    monkeypatch.setattr(AgentSandboxWorkspace, "get_server_info", bug)
+    with caplog.at_level(logging.WARNING):
+        ws = make_workspace(check_server_version=True)
+    assert ws.host.startswith("http://")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "failed unexpectedly" in warnings[0].message
+    assert warnings[0].exc_info is not None  # traceback attached, not hidden
 
 
 # ----------------------------------------------------------------- teardown
@@ -291,6 +342,28 @@ def test_context_manager_cleans_up(no_health):
     with make_workspace(FakeClient(sandbox)) as ws:
         assert ws.host.startswith("http://")
     assert sandbox.terminated == 1
+
+
+def test_cleanup_logs_release_for_owning_sandbox(no_health, caplog):
+    ws = make_workspace(FakeClient(FakeSandbox(claim_name="claim-own")))
+    with caplog.at_level(logging.INFO):
+        ws.cleanup()
+    messages = [r.message for r in caplog.records]
+    assert "Released sandbox claim claim-own" in messages
+
+
+def test_cleanup_logs_detach_for_non_releasing_view(no_health, caplog):
+    # Injected views (e.g. a fleet handle bound for fleet.run) whose
+    # terminate() is a no-op on the pod must not claim a release.
+    sandbox = FakeSandbox(claim_name="claim-bound")
+    sandbox.releases_on_terminate = False
+    ws = make_workspace(FakeClient(sandbox))
+    with caplog.at_level(logging.INFO):
+        ws.cleanup()
+    messages = [r.message for r in caplog.records]
+    assert sandbox.terminated == 1
+    assert not any("Released sandbox claim" in m for m in messages)
+    assert any("Detached from sandbox claim-bound" in m for m in messages)
 
 
 def test_injected_client_not_closed(no_health):

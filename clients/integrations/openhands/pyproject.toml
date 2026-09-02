@@ -27,6 +27,10 @@ dependencies = [
     # claim API (create_sandbox / get_pod_ip / terminate) is stable across the
     # 0.5 → 1.x line.
     "k8s-agent-sandbox>=0.5.1",
+    # RemoteWorkspace's HTTP transport (already pulled in by openhands-sdk);
+    # imported directly so the advisory version check can narrow its error
+    # handling to transport/HTTP failures.
+    "httpx",
 ]
 
 [project.urls]

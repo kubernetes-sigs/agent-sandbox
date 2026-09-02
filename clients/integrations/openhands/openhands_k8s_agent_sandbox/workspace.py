@@ -30,9 +30,12 @@ The warm pool's SandboxTemplate must run the agent-server image with
 from __future__ import annotations
 
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 from typing import Any
 from urllib.request import Request, urlopen
 
+import httpx
 from pydantic import Field, PrivateAttr
 
 from openhands.sdk.logger import get_logger
@@ -154,8 +157,12 @@ class AgentSandboxWorkspace(RemoteWorkspace):
         default=None,
         exclude=True,
         description=(
-            "Injected k8s_agent_sandbox.SandboxClient (or compatible). Built "
-            "lazily with defaults when omitted; tests inject fakes."
+            "Injected k8s_agent_sandbox.SandboxClient (or compatible: "
+            "create_sandbox() returns an object with claim_name, sandbox_id, "
+            "get_pod_ip() and terminate()). Built lazily with defaults when "
+            "omitted; tests inject fakes. A returned object may set "
+            "releases_on_terminate=False when its terminate() does not "
+            "release the pod, so cleanup logs a detach rather than a release."
         ),
     )
 
@@ -227,23 +234,47 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             self._log_version_skew()
 
     def _log_version_skew(self) -> None:
-        """Warn (never fail) when the server and SDK versions diverge."""
+        """Warn (never fail) when the server and SDK versions diverge.
+
+        Only the failures an advisory probe is expected to hit stay quiet:
+        transport/HTTP errors reaching ``/server_info``, a non-JSON body, or
+        an SDK that isn't installed as a distribution. Anything else — an
+        unexpected payload shape or a bug in this check — is logged at
+        WARNING so it cannot silently disable the advisory on every attach.
+        """
         try:
             info = self.get_server_info()
-            server_version = str(info.get("version") or "")
-            from importlib.metadata import version as _dist_version
-
-            sdk_version = _dist_version("openhands-sdk")
-            if server_version and server_version != sdk_version:
-                logger.warning(
-                    "agent-server reports version %s but the installed "
-                    "openhands-sdk is %s — align the SandboxTemplate image "
-                    "tag with the SDK release to avoid protocol skew",
-                    server_version,
-                    sdk_version,
-                )
-        except Exception as e:  # noqa: BLE001 — advisory only
+        except (httpx.HTTPError, ValueError) as e:
+            # Connection refused / timeout, non-2xx, or a body that isn't JSON.
             logger.debug("server version check skipped: %s", e)
+            return
+        except Exception:  # noqa: BLE001 — advisory: never break the attach
+            logger.warning("server version check failed unexpectedly", exc_info=True)
+            return
+        if not isinstance(info, dict):
+            logger.warning(
+                "server version check skipped: /server_info returned %s, "
+                "expected a JSON object",
+                type(info).__name__,
+            )
+            return
+        server_version = str(info.get("version") or "")
+        try:
+            sdk_version = _dist_version("openhands-sdk")
+        except PackageNotFoundError:
+            logger.debug(
+                "server version check skipped: openhands-sdk is not installed "
+                "as a distribution"
+            )
+            return
+        if server_version and server_version != sdk_version:
+            logger.warning(
+                "agent-server reports version %s but the installed "
+                "openhands-sdk is %s — align the SandboxTemplate image "
+                "tag with the SDK release to avoid protocol skew",
+                server_version,
+                sdk_version,
+            )
 
     def _endpoint_url(self, sandbox: Any) -> str:
         if self.router_url:
@@ -353,4 +384,12 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             return
         # Clear only after success so a failed delete stays retryable.
         self._sandbox = None
-        logger.info("Released sandbox claim %s", claim_name)
+        if getattr(sandbox, "releases_on_terminate", True):
+            logger.info("Released sandbox claim %s", claim_name)
+        else:
+            # Injected view whose terminate() is a no-op on the pod (e.g. a
+            # fleet-bound handle): we only detached; its owner releases it.
+            logger.info(
+                "Detached from sandbox %s (its owner releases the claim)",
+                claim_name,
+            )

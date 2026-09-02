@@ -57,12 +57,18 @@ _HINT = (
 _FLEET_OWNED_KWARGS = ("sandbox_client", "warmpool", "ttl_s")
 
 
-def _handle_view(handle, on_terminate):
-  """Duck-typed SDK-sandbox view over a fleet handle for the workspace."""
+def _handle_view(handle, on_terminate, *, releases=True):
+  """Duck-typed SDK-sandbox view over a fleet handle for the workspace.
+
+  ``releases`` tells the workspace what ``terminate()`` means here: a fleet
+  release (True) or nothing at all (False, handle-bound mode) — it logs a
+  release or a detach accordingly instead of claiming a release it never did.
+  """
 
   class _HandleView:
     claim_name = handle.claim_name
     sandbox_id = handle.sandbox_id
+    releases_on_terminate = releases
 
     @staticmethod
     def get_pod_ip():
@@ -107,14 +113,16 @@ class BoundHandleClient:
   For ``fleet.run(process_fn)`` flows: the fleet acquired the handle before
   calling ``process_fn(task, handle)`` and releases it after the function
   returns, so the workspace must neither acquire nor release — ``terminate()``
-  is a no-op on the pod (closing the workspace only drops HTTP state).
+  is a no-op on the pod (closing the workspace only drops HTTP state), and the
+  view says so (``releases_on_terminate=False``) so the workspace's cleanup
+  logs a detach, not a release the fleet actually performs later.
   """
 
   def __init__(self, handle):
     self.handle = handle
 
   def create_sandbox(self, warmpool, **_fleet_owned):  # noqa: ARG002
-    return _handle_view(self.handle, lambda: None)
+    return _handle_view(self.handle, lambda: None, releases=False)
 
 
 def make_fleet_workspace(fleet, task, *, namespace: str | None = None,

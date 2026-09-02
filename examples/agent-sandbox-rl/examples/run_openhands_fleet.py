@@ -69,6 +69,25 @@ def _env(name, default):
   return os.getenv(name, default)
 
 
+def _pool_size(max_concurrent, pool_cap, *, explicit):
+  """Per-image pool cap: MAX_WARMPOOL_SIZE, raised to MAX_CONCURRENT if lower.
+
+  FleetConfig.max_warmpool_size hard-caps replicas per image pool and every
+  active conversation holds a pod, so a cap below the concurrency would
+  silently throttle claims. Raising it means more warm capacity than asked
+  for — say so, and loudly when the cap was set explicitly.
+  """
+  if pool_cap >= max_concurrent:
+    return pool_cap
+  logging.log(
+      logging.WARNING if explicit else logging.INFO,
+      "MAX_WARMPOOL_SIZE=%d (%s) is below MAX_CONCURRENT=%d; using %d so every "
+      "concurrent conversation can hold a warm pod — expect that many replicas",
+      pool_cap, "explicit" if explicit else "default", max_concurrent,
+      max_concurrent)
+  return max_concurrent
+
+
 def _agent_server_container(session_key):
   """Merged into the rendered container via extra_pod_spec (no name = first).
 
@@ -173,10 +192,10 @@ def main():
   else:
     clusters = [ClusterConfig(name="default", namespace=namespace)]
 
-  # Pool depth must cover the concurrency: FleetConfig.max_warmpool_size
-  # hard-caps replicas per image pool (default 8), and every conversation
-  # holds a pod while active — an unraised cap would silently throttle claims.
-  max_pool = max(max_concurrent, int(_env("MAX_WARMPOOL_SIZE", "8")))
+  # Pool depth must cover the concurrency (default cap 8); see _pool_size.
+  pool_cap_env = os.getenv("MAX_WARMPOOL_SIZE")
+  max_pool = _pool_size(max_concurrent, int(pool_cap_env) if pool_cap_env else 8,
+                        explicit=bool(pool_cap_env))
   fleet = SandboxFleet(FleetConfig(
       clusters=clusters, max_concurrent=max_concurrent, template=template,
       max_warmpool_size=max_pool,

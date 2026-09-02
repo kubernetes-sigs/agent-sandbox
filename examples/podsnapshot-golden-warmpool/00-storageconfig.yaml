@@ -1,5 +1,5 @@
 # Where GKE stores the snapshots. The bucket must exist and the pod's
-# Kubernetes ServiceAccount (10-rbac.yaml) needs storage.bucketViewer +
+# Kubernetes ServiceAccount (10-sandboxtemplate.yaml) needs storage.bucketViewer +
 # storage.objectUser on it via Workload Identity — see the README.
 # Substitute ${SNAPSHOT_BUCKET} before applying (envsubst).
 apiVersion: podsnapshot.gke.io/v1

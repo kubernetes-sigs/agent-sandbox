@@ -64,7 +64,7 @@ restores from the latest `Ready` snapshot in the group.
 
 - The [agent-sandbox controller with extensions](../../README.md#installation)
   (v1.0.0+) installed.
-- `envsubst`, `kubectl`, `gcloud`, and Docker.
+- `envsubst`, `kubectl`, `gcloud`, `python3`, and Docker.
 
 ## 2. Snapshot storage bucket + IAM
 

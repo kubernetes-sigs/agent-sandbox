@@ -124,7 +124,7 @@ echo "post-v2 member $FRESH: $S"
 [ "$(field "$S" marker)" = "golden-v2" ]
 [ "$(field "$S" counter)" = "4" ]
 
-echo "=== 8. Extension: snapshot-then-roll keeps a size-1 pool on the latest state"
+echo "=== 7. Extension: snapshot-then-roll keeps a size-1 pool on the latest state"
 kubectl patch sandboxwarmpool podsnap-golden-pool --type merge -p '{"spec":{"replicas":1}}'
 post "$PRIMER_POD" /bump                       # counter 4 -> 5
 post "$PRIMER_POD" /write "golden-v3"
@@ -148,7 +148,7 @@ case " $POOL_BEFORE " in *" $POD "*) ;; *) echo "podsnap-worker-3 did not adopt 
 [ "$(field "$S" counter)" = "5" ]
 [ "$(field "$S" marker)" = "golden-v3" ]
 
-echo "=== 9. Snapshot deletion works (validates the service agent's bucket IAM)"
+echo "=== 8. Snapshot deletion works (validates the service agent's bucket IAM)"
 kubectl delete "podsnapshots.podsnapshot.gke.io/$SNAP_V1" --timeout=300s
 
 echo "ALL CHECKS PASSED"

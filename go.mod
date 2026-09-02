@@ -4,6 +4,12 @@ go 1.26.0
 
 toolchain go1.26.4
 
+require sigs.k8s.io/agent-sandbox/examples/agentclientprotocol v0.0.0
+
+// The agentclientprotocol example is its own (dependency-free) module; the
+// sandboxed-tools ACP server reuses its pkg/acp protocol implementation.
+replace sigs.k8s.io/agent-sandbox/examples/agentclientprotocol => ./examples/agentclientprotocol
+
 require (
 	github.com/creack/pty v1.1.24
 	github.com/felixge/fgprof v0.9.5

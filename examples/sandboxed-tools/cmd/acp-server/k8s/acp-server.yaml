@@ -1,0 +1,101 @@
+# Deploys the sandboxed-tools ACP server.
+#
+#   kubectl apply -f examples/sandboxed-tools/cmd/acp-server/k8s/acp-server.yaml
+#   kubectl port-forward service/sandboxed-tools-acp-server 8090:8090
+#   go run ./examples/agentclientprotocol -addr localhost:8090
+#
+# The deployment defaults to the built-in fake LLM (fake-eliza) so that it
+# works without an API key; set OPENAI_MODEL (and provide GEMINI_API_KEY via
+# a secret) to talk to a real model.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+rules:
+  # The server creates a Sandbox per session for tool execution, extends its
+  # shutdown time while in use, and deletes it on shutdown.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["create", "get", "update", "delete"]
+  # Tools run via exec in the sandbox pod.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandboxed-tools-acp-server
+subjects:
+  - kind: ServiceAccount
+    name: sandboxed-tools-acp-server
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+  labels:
+    app: sandboxed-tools-acp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sandboxed-tools-acp-server
+  template:
+    metadata:
+      labels:
+        app: sandboxed-tools-acp-server
+    spec:
+      serviceAccountName: sandboxed-tools-acp-server
+      containers:
+        - name: acp-server
+          image: gcr.io/justinsb-knotai-dev/sandboxed-tools-acp-server:latest
+          imagePullPolicy: Always
+          args:
+            - --listen=:8090
+          env:
+            # Use the built-in fake LLM; no API key needed.
+            - name: OPENAI_MODEL
+              value: fake-eliza
+            - name: SANDBOX_NAMESPACE
+              value: default
+          ports:
+            - name: acp
+              containerPort: 8090
+          volumeMounts:
+            # Session state and filesystem snapshots ($HOME).
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandboxed-tools-acp-server
+  namespace: default
+spec:
+  selector:
+    app: sandboxed-tools-acp-server
+  ports:
+    - name: acp
+      port: 8090
+      targetPort: acp

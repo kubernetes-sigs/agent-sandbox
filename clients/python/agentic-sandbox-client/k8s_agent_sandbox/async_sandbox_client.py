@@ -26,6 +26,8 @@ import sys
 import uuid
 from typing import Generic, TypeVar
 
+from kubernetes_asyncio import client as async_client
+
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
@@ -75,6 +77,7 @@ class AsyncSandboxClient(Generic[T]):
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = True,
+        api_client: async_client.ApiClient | None = None,
     ):
         """
         Args:
@@ -93,6 +96,9 @@ class AsyncSandboxClient(Generic[T]):
                 sandboxes are not leaked when a caller forgets to clean up;
                 pass ``cleanup=False`` to opt out. Note this differs from the
                 synchronous ``SandboxClient``, which defaults to False.
+            api_client: Optional pre-configured ``kubernetes_asyncio`` ``ApiClient``
+                forwarded to the underlying ``AsyncK8sHelper`` to target a specific
+                cluster/context.
         """
         if connection_config is None:
             raise ValueError(
@@ -109,7 +115,9 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = AsyncK8sHelper()
+        self.k8s_helper = AsyncK8sHelper(api_client=api_client)
+        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
+        self._injected_api_client = api_client
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
@@ -380,16 +388,27 @@ class AsyncSandboxClient(Generic[T]):
 
         Uses a snapshot of the tracked claims and a fresh :class:`AsyncK8sHelper`
         so that no loop-bound objects from the original client are reused across
-        event loop boundaries. Per-claim failures and top-level errors emit
-        warnings to ``sys.stderr`` rather than raising — atexit cleanup is
-        best-effort.
+        event loop boundaries. When an ApiClient was injected, its
+        configuration/default_headers/cookie are read live off that client at
+        cleanup time, so a caller that refreshes credentials after constructing 
+        this client still gets a cleanup client with current credentials. 
+        Per-claim failures and top-level errors emit warnings to ``sys.stderr`` 
+        rather than raising — atexit cleanup is best-effort.
         """
         claims = list(self._active_connection_sandboxes.keys())
         if not claims:
             return
 
         async def _do_cleanup():
-            helper = AsyncK8sHelper()
+            atexit_api_client = None
+            if self._injected_api_client is not None:
+                atexit_api_client = async_client.ApiClient(
+                    configuration=self._injected_api_client.configuration,
+                    cookie=self._injected_api_client.cookie,
+                )
+                for name, value in dict(self._injected_api_client.default_headers).items():
+                    atexit_api_client.set_default_header(name, value)
+            helper = AsyncK8sHelper(api_client=atexit_api_client)
             try:
                 async def _delete_one(ns, claim_name):
                     try:
@@ -405,6 +424,8 @@ class AsyncSandboxClient(Generic[T]):
                 await asyncio.gather(*(_delete_one(ns, claim_name) for ns, claim_name in claims))
             finally:
                 await helper.close()
+                if atexit_api_client is not None:
+                    await atexit_api_client.close()
 
         try:
             asyncio.run(_do_cleanup())

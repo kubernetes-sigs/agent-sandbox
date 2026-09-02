@@ -380,6 +380,47 @@ Latency guidance:
   for the `kubectl port-forward` startup; the SDK probes the local port every
   50ms while it comes up. Gateway/in-cluster modes do not have this step.
 
+### 10. Targeting a Specific Cluster or Context
+
+By default, `SandboxClient` and `AsyncSandboxClient` load their Kubernetes credentials via an in-cluster config if running inside a pod, otherwise `KUBECONFIG`, falling back to `~/.kube/config`'s `current-context` if unset. To target a different cluster/context instead, pass a pre-configured `api_client`.
+
+> **Warning:** In local-tunnel connection mode, `api_client` only redirects the Kubernetes API calls (creating/watching the `Sandbox`/`SandboxClaim`). The `kubectl port-forward` subprocess used to reach the sandbox-router service still uses your ambient kubeconfig context, not the context configured on `api_client`. If those two point at different clusters, the tunnel silently connects to the wrong one. There is an open follow-up to make the tunnel context-aware (e.g. a `context`/`kubeconfig` field on `SandboxLocalTunnelConnectionConfig`); until then, make sure your ambient `kubectl` context matches the cluster targeted by `api_client` when using local-tunnel mode.
+
+**A kubeconfig file outside the default location** (e.g. a `pytest-kind` cluster):
+
+```python
+from kubernetes import client, config
+from k8s_agent_sandbox import SandboxClient
+
+cfg = client.Configuration()
+config.load_kube_config(
+    config_file="/path/to/other-kubeconfig.yaml",  # not KUBECONFIG/~/.kube/config
+    context="my-cluster-context",
+    client_configuration=cfg,
+)
+
+sandbox_client = SandboxClient(api_client=client.ApiClient(configuration=cfg))
+```
+
+**Multiple clusters in one process** — each `SandboxClient` needs its own `api_client`, built from its own `Configuration`; constructing one doesn't affect another already in use:
+
+```python
+from kubernetes import client, config
+from k8s_agent_sandbox import SandboxClient
+
+def build_client(context: str) -> SandboxClient:
+    cfg = client.Configuration()
+    config.load_kube_config(context=context, client_configuration=cfg)
+    return SandboxClient(api_client=client.ApiClient(configuration=cfg))
+
+client_a = build_client("cluster-a")
+client_b = build_client("cluster-b")
+```
+
+The async client takes the same parameter with a `kubernetes_asyncio.client.ApiClient`.
+
+An injected `api_client` is caller-owned: `AsyncSandboxClient` and `AsyncK8sHelper` never close it (only a client they create internally is closed). The synchronous `SandboxClient` and `K8sHelper` don't close their underlying client either way, injected or not. Closing an injected client is the caller's responsibility in both cases.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

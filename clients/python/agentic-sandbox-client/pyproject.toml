@@ -55,7 +55,7 @@ async = [
 # needs none of this.
 grpc = [
     "grpcio>=1.83.0",
-    "protobuf>=7.35.1",
+    "protobuf>=7.36.1",
 ]
 test = [
     "pytest",

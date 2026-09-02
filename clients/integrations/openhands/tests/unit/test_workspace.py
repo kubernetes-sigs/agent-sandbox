@@ -83,6 +83,19 @@ def test_provision_sets_host_from_pod_ip(no_health):
     client = FakeClient(FakeSandbox(pod_ip="10.9.8.7"))
     ws = make_workspace(client)
     assert ws.host == "http://10.9.8.7:8000"
+
+
+def test_explicit_host_is_replaced_by_claimed_endpoint(no_health, caplog):
+    # A caller-supplied host must never win over the claimed pod: commands
+    # (and the pool session key) would go to an unrelated server while the
+    # claim sits idle.
+    client = FakeClient(FakeSandbox(pod_ip="10.9.8.7"))
+    with caplog.at_level(logging.WARNING):
+        ws = make_workspace(client, host="http://elsewhere:9999")
+    assert ws.host == "http://10.9.8.7:8000"
+    assert any(
+        "host=" in r.message and "ignored" in r.message for r in caplog.records
+    )
     assert ws.working_dir == "/workspace"
 
 
@@ -261,8 +274,6 @@ def test_version_skew_warns(no_health, monkeypatch, caplog):
         AgentSandboxWorkspace, "get_server_info",
         lambda self: {"version": "0.0.1-other"},
     )
-    import logging
-
     with caplog.at_level(logging.WARNING):
         make_workspace(check_server_version=True)
     assert any("protocol skew" in r.message for r in caplog.records)

@@ -75,7 +75,12 @@ class AgentSandboxWorkspace(RemoteWorkspace):
     )
     host: str = Field(
         default="",
-        description="Agent-server URL (set automatically after the claim binds).",
+        description=(
+            "Agent-server URL. Always derived from the claimed sandbox once "
+            "the claim binds; a caller-supplied value is replaced (with a "
+            "warning). Use router_url or endpoint_template to reach pods "
+            "through a gateway."
+        ),
     )
 
     # Provisioning configuration.
@@ -219,10 +224,16 @@ class AgentSandboxWorkspace(RemoteWorkspace):
             self.namespace,
         )
         try:
-            # Mirror DockerWorkspace: bypass validate-assignment plumbing when
-            # rewriting connection fields mid-init.
-            if not self.host:
-                object.__setattr__(self, "host", self._endpoint_url(sandbox))
+            if self.host:
+                logger.warning(
+                    "host=%r is ignored: the endpoint is always derived from "
+                    "the claimed sandbox (use router_url or endpoint_template "
+                    "for gateway/proxied paths)",
+                    self.host,
+                )
+            # Bypass validate-assignment plumbing when rewriting connection
+            # fields mid-init (the same trick DockerWorkspace uses).
+            object.__setattr__(self, "host", self._endpoint_url(sandbox))
             self._wait_for_health(timeout=self.health_check_timeout)
         except Exception:
             # Never leave an orphaned claim behind a failed init.

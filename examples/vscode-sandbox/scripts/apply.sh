@@ -68,8 +68,8 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 
 # install sandbox-router
 pushd ../../../clients/python/agentic-sandbox-client/sandbox-router
-# replace IMAGE_PLACEHOLDER with the actual image
-sed "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMAGE}|g" ./sandbox_router.yaml | kubectl apply -f -
+# substitute the router image placeholder
+ROUTER_IMAGE="${SANDBOX_ROUTER_IMAGE}" envsubst '$ROUTER_IMAGE' < ./sandbox_router.yaml | kubectl apply -f -
 popd
 
 # install vscode-sandbox with kata-mshv overlay

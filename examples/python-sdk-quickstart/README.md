@@ -19,7 +19,7 @@ Agent Sandbox is a quick and easy way to start secure containers that will let a
 
 `SandboxClient()` with no arguments defaults to **Tunnel mode** (`SandboxLocalTunnelConnectionConfig`), which opens a `kubectl port-forward` tunnel to the Router Service — no public IP required, works on KinD and Minikube.
 
-The SDK supports three modes:
+The SDK supports four modes:
 
 | Mode | Config class | When to use |
 |------|-------------|-------------|

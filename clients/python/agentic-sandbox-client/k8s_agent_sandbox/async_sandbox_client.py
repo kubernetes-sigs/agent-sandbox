@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=AsyncSandbox)
 
+# Bounds each per-claim delete issued by the atexit cleanup below. urllib3
+# (used by the synchronous K8sHelper) has no default read timeout, so an
+# unresponsive apiserver would otherwise hang process exit indefinitely.
+_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS = 300
+
 
 class AsyncSandboxClient(Generic[T]):
     """
@@ -399,7 +404,9 @@ class AsyncSandboxClient(Generic[T]):
             helper = K8sHelper()
             for ns, claim_name in claims:
                 try:
-                    helper.delete_sandbox_claim(claim_name, ns)
+                    helper.delete_sandbox_claim(
+                        claim_name, ns, _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+                    )
                 except Exception as e:
                     if sys.stderr is not None:
                         print(

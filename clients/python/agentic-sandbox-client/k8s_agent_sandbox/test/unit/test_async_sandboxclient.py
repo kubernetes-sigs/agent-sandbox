@@ -31,7 +31,7 @@ pytest.importorskip("kubernetes_asyncio")
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
-from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
+from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient, _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -276,8 +276,12 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
             self.client._atexit_cleanup()
 
-        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-abc", "default")
-        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-xyz", "other-ns")
+        mock_helper_instance.delete_sandbox_claim.assert_any_call(
+            "claim-abc", "default", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+        )
+        mock_helper_instance.delete_sandbox_claim.assert_any_call(
+            "claim-xyz", "other-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+        )
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""

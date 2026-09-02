@@ -6,6 +6,14 @@ metadata:
 rules:
 - apiGroups:
   - ""
+  resourceNames:
+  - agent-sandbox-config
+  resources:
+  - configmaps
+  verbs:
+  - get
+- apiGroups:
+  - ""
   resources:
   - persistentvolumeclaims
   - pods

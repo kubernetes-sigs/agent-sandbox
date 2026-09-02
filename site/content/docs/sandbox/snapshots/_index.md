@@ -83,4 +83,12 @@ response = sandbox.commands.run("cat /tmp/data/status.txt")
 print(response.stdout) # Should output 'session_active'
 ```
 
+## Sharing one snapshot across many sandboxes
 
+The workflow above restores a sandbox from **its own** snapshots. To go the
+other way — capture one primed sandbox's memory and filesystem once and have
+every sandbox a `SandboxWarmPool` pre-warms afterward boot already restored
+from it — see the
+[golden-snapshot warm pool example](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/podsnapshot-golden-warmpool),
+which uses a `PodSnapshotPolicy` grouped by the shared template label instead
+of the per-sandbox name hash.

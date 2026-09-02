@@ -15,6 +15,8 @@
 package main
 
 import (
+	"time"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -38,6 +40,7 @@ func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Optio
 		// manager stops; mgr.Start is the last explicit statement in main(),
 		// and any deferred shutdown work (e.g. tracing cleanup) must stay
 		// bounded so the process still exits promptly.
+		GracefulShutdownTimeout:       new(5 * time.Second),
 		LeaderElectionReleaseOnCancel: true,
 	}
 }

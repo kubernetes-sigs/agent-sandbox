@@ -15,10 +15,13 @@ spec:
       {{- $selectorLabels := include "agent-sandbox.selectorLabels" . | fromYaml }}
       labels:
         {{- toYaml (merge (dict) $selectorLabels .Values.podLabels) | nindent 8 }}
-      {{- with .Values.podAnnotations }}
+      {{- /* omit keeps user podAnnotations from shadowing the computed checksum */ -}}
+      {{- $podAnnotations := omit (.Values.podAnnotations | default dict) "checksum/config" }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with $podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: agent-sandbox-controller
       {{- with .Values.podSecurityContext }}
@@ -33,6 +36,11 @@ spec:
       - name: agent-sandbox-controller
         image: {{ include "agent-sandbox.image" . }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         args:
         {{- include "agent-sandbox.controllerArgs" . | nindent 8 }}
         ports:

@@ -1,0 +1,10 @@
+# Claim created after a snapshot-then-roll cycle — it must adopt a pool
+# member carrying the newest golden state.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: podsnap-worker-3
+  namespace: default
+spec:
+  warmPoolRef:
+    name: podsnap-golden-pool

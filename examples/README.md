@@ -30,6 +30,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**openclaw-gvisor-sandbox**](./openclaw-gvisor-sandbox): A production-shaped, gVisor-isolated OpenClaw sandbox using the template/claim pattern and persistent storage.
 - [**openclaw-kata-aks-sandbox**](./openclaw-kata-aks-sandbox): An OpenClaw sandbox isolated by Kata Containers on AKS, so the agent runtime gets its own VM and guest kernel.
 - [**playwright-sandbox**](./playwright-sandbox): An example of running Playwright with Chromium in a sandbox for web scraping and screenshots.
+- [**podsnapshot-golden-warmpool**](./podsnapshot-golden-warmpool): Golden-snapshot warm pools on GKE — snapshot one primed sandbox (memory + filesystem) and every pool member pre-warmed afterward boots already restored from it, so claims adopt pre-initialized sandboxes.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.

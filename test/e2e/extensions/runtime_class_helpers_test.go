@@ -65,7 +65,7 @@ func baselineColdStart(t *testing.T, tc *framework.TestContext, ns string, podSp
 			Namespace: ns,
 		},
 	}
-	sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+	sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: &podSpec}
 
 	t.Logf("[baseline] measuring cold start...")
 	start := time.Now()

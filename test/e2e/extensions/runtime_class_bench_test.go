@@ -119,7 +119,7 @@ func BenchmarkRuntimeClassColdStart(b *testing.B) {
 						Namespace: ns.Name,
 					},
 				}
-				sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+				sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: &podSpec}
 
 				startTime := time.Now()
 				tc.MustCreateWithCleanup(sandbox)
@@ -189,7 +189,7 @@ func BenchmarkRuntimeClassWarmClaim(b *testing.B) {
 						Namespace: ns.Name,
 					},
 				}
-				template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+				template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: &podSpec}
 				tc.MustCreateWithCleanup(template)
 
 				replicas := int32(poolSize)

@@ -301,7 +301,8 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			Namespace: ns.Name,
 		},
 	}
-	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: workloadPodSpec(rcPtr, workloadSec)}
+	burstPodSpec := workloadPodSpec(rcPtr, workloadSec)
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: &burstPodSpec}
 	require.NoError(t, tc0.CreateWithCleanup(t.Context(), template))
 
 	zeroReplicas := int32(0)

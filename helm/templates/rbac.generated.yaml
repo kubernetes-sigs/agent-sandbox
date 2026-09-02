@@ -58,3 +58,11 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxtemplates
+  verbs:
+  - get
+  - list
+  - watch

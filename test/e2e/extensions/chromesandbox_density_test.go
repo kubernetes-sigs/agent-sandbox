@@ -127,7 +127,7 @@ func chromeSandboxPerf(namespace, name, nodeName string) *sandboxv1beta1.Sandbox
 	sandbox.Name = name
 	sandbox.Namespace = namespace
 	sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
-		Spec: corev1.PodSpec{
+		Spec: &corev1.PodSpec{
 			NodeSelector: map[string]string{
 				"kubernetes.io/hostname": nodeName,
 			},

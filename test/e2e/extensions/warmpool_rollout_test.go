@@ -40,7 +40,7 @@ func createSandboxTemplate(ns *corev1.Namespace, name string) *extensionsv1beta1
 	template.Name = name
 	template.Namespace = ns.Name
 	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
-		Spec: corev1.PodSpec{
+		Spec: &corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
 					Name:  "pause",

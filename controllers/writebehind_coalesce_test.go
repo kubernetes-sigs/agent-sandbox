@@ -78,7 +78,7 @@ func postAdoptionFixture() (*sandboxv1beta1.Sandbox, *corev1.Pod) {
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}},
+					Spec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}},
 					// Post-adoption template: safe-to-evict deleted by the
 					// claim controller's spec rewrite.
 					ObjectMeta: sandboxv1beta1.PodMetadata{},

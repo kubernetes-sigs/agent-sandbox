@@ -4018,8 +4018,6 @@ spec:
                     required:
                     - containers
                     type: object
-                required:
-                - spec
                 type: object
               service:
                 type: boolean
@@ -4142,6 +4140,9 @@ spec:
             required:
             - podTemplate
             type: object
+            x-kubernetes-validations:
+            - message: podTemplate.spec is required in a SandboxTemplate
+              rule: has(self.podTemplate.spec)
         required:
         - spec
         type: object

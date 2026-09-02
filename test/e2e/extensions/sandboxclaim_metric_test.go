@@ -45,7 +45,7 @@ func TestSandboxClaimObservabilityAnnotation(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
 						Name:  "pause",

@@ -41,7 +41,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 	sandboxObj.Namespace = ns.Name
 	sandboxObj.Spec.Service = new(true)
 	sandboxObj.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
-		Spec: corev1.PodSpec{
+		Spec: &corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
 					Name:  "pause",
@@ -150,7 +150,7 @@ func TestSandboxVolumeClaimTemplatesImmutable(t *testing.T) {
 			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
 		},
 	}
-	pausePod := sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "pause", Image: "registry.k8s.io/pause:3.10"}}}}
+	pausePod := sandboxv1beta1.PodTemplate{Spec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "pause", Image: "registry.k8s.io/pause:3.10"}}}}
 
 	cases := []struct {
 		name    string

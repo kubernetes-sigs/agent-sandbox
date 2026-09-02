@@ -106,6 +106,11 @@ type SandboxWarmPoolReconciler struct {
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
+	// BlueprintRefEnabled makes new pool sandboxes reference their template's
+	// blueprint (spec.blueprintRef) instead of embedding a copy of it, which
+	// shrinks every Sandbox object on the watch/list path. Existing embedded
+	// sandboxes are unaffected; both kinds coexist in a pool during rollout.
+	BlueprintRefEnabled bool
 	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready
 	// before it is considered stuck (delete-and-replace, or held if its pod
 	// is unschedulable). Zero means DefaultWarmPoolReadinessGracePeriod.
@@ -1008,11 +1013,7 @@ func computePodTemplateHash(template *extensionsv1beta1.SandboxTemplate) (string
 
 // computeSandboxBlueprintHash computes a hash of the sandbox template's Spec.SandboxBlueprint.
 func computeSandboxBlueprintHash(template *extensionsv1beta1.SandboxTemplate) (string, error) {
-	specJSON, err := json.Marshal(template.Spec.SandboxBlueprint)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal sandbox blueprint for hashing: %w", err)
-	}
-	return sandboxcontrollers.NameHash(string(specJSON)), nil
+	return sandboxcontrollers.BlueprintHash(&template.Spec.SandboxBlueprint)
 }
 
 // fetchTemplateAndHash fetches the sandbox template and computes its hash.
@@ -1062,10 +1063,21 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 			Labels:       sandboxLabels,
 			Annotations:  sandboxAnnotations,
 		},
+	}
+	if r.BlueprintRefEnabled {
+		// Reference the template's blueprint instead of embedding a copy: the
+		// sandbox controller resolves podTemplate.spec, volumeClaimTemplates
+		// and service from the template, pinned to this hash. Only the pod
+		// template's metadata is carried inline (identity labels are merged
+		// into it at adoption time and cannot live behind the reference).
+		sandbox.Spec.BlueprintRef = &sandboxv1beta1.BlueprintRef{
+			Name:          warmPool.Spec.TemplateRef.Name,
+			BlueprintHash: currentSandboxBlueprintHash,
+		}
+		sandbox.Spec.PodTemplate.ObjectMeta = *template.Spec.PodTemplate.ObjectMeta.DeepCopy()
+	} else {
 		// Deep-copy the entire shared blueprint
-		Spec: sandboxv1beta1.SandboxSpec{
-			SandboxBlueprint: *template.Spec.SandboxBlueprint.DeepCopy(),
-		},
+		sandbox.Spec.SandboxBlueprint = *template.Spec.SandboxBlueprint.DeepCopy()
 	}
 
 	// Propagate pool and template labels to pod template for consistency and targeting
@@ -1088,8 +1100,12 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 		}
 	}
 
-	// Apply secure defaults to the sandbox pod spec
-	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
+	// Apply secure defaults to the sandbox pod spec. A blueprintRef sandbox
+	// has no embedded pod spec; the sandbox controller applies the same
+	// defaults after resolving the reference.
+	if sandbox.Spec.PodTemplate.Spec != nil {
+		sandboxcontrollers.ApplySandboxSecureDefaults(template, sandbox.Spec.PodTemplate.Spec)
+	}
 
 	// Set controller reference so the Sandbox is owned by the SandboxWarmPool
 	if err := ctrl.SetControllerReference(warmPool, sandbox, r.Scheme); err != nil {
@@ -1167,6 +1183,15 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 		return true
 	}
 
+	// A blueprintRef sandbox pins the exact blueprint content it was created
+	// against; the pinned hash is the staleness identity and there is no
+	// embedded blueprint to fall back to for a semantic comparison. Keep the
+	// empty-current-hash safeguard: a marshal failure must not read as "every
+	// sandbox is stale" and mass-delete the pool.
+	if sandbox.Spec.BlueprintRef != nil {
+		return currentSandboxBlueprintHash != "" && sandbox.Spec.BlueprintRef.BlueprintHash != currentSandboxBlueprintHash
+	}
+
 	// Check if the sandbox is unowned (orphaned).
 	controllerRef := metav1.GetControllerOf(sandbox)
 	isOrphan := controllerRef == nil
@@ -1211,9 +1236,12 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 // comparePodSpecs checks if the pod spec in the sandbox is semantically equal to the template,
 // normalizing for fields that the controller populates by default.
 func comparePodSpecs(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *corev1.PodSpec) bool {
+	if actualSandboxSpec == nil || template.Spec.PodTemplate.Spec == nil {
+		return false
+	}
 	// Create what the sandbox SHOULD look like if it were created from the current template.
 	expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
-	ApplySandboxSecureDefaults(template, expectedSpec)
+	sandboxcontrollers.ApplySandboxSecureDefaults(template, expectedSpec)
 
 	// Compare the actual sandbox spec to the expected "perfect" spec.
 	// Since both have now undergone the exact same defaulting logic,
@@ -1244,7 +1272,7 @@ func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, ac
 // compareSandboxBlueprint checks if the sandbox blueprint in the sandbox is semantically equal to the template,
 // ignoring metadata differences and only comparing the fields that are relevant for staleness detection.
 func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
-	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
+	return comparePodSpecs(template, actualSandboxSpec.PodTemplate.Spec) &&
 		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
 		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
 }

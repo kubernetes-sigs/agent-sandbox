@@ -89,6 +89,10 @@ type NetworkPolicySpec struct {
 }
 
 // SandboxTemplateSpec defines the desired state of Sandbox.
+// podTemplate.spec is optional in the shared SandboxBlueprint type only so a
+// Sandbox can reference it via blueprintRef; a template is the thing being
+// referenced, so its own blueprint must always be complete.
+// +kubebuilder:validation:XValidation:rule="has(self.podTemplate.spec)",message="podTemplate.spec is required in a SandboxTemplate"
 type SandboxTemplateSpec struct {
 	// SandboxBlueprint defines the workload configuration shared with SandboxSpec.
 	// NOTE: Once a field is added here, it is promoted to both Sandbox and SandboxTemplate.

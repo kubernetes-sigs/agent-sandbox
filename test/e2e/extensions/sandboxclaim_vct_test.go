@@ -225,7 +225,7 @@ func createTemplateForVCT(t *testing.T, tc *framework.TestContext, namespace, na
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				VolumeClaimTemplates: vcts,
 				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
+					Spec: &corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
 								Name:  "pause",

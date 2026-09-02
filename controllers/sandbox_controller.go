@@ -260,6 +260,7 @@ type SandboxReconciler struct {
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
@@ -393,7 +394,21 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	var allErrors error
 	var conditionErrors error
 
-	// Reconcile PVCs from volumeClaimTemplates
+	// Hydrate a blueprintRef sandbox's blueprint (in memory only). On failure
+	// the child reconciles below degrade instead of erroring wholesale:
+	// nothing new is created (no pod, no PVCs, no service) and nothing
+	// existing is mutated or torn down — an existing pod keeps reconciling
+	// normally off the inline podTemplate.metadata. The error is surfaced via
+	// conditions only when the sandbox has no owned pod (see below), so a
+	// template that drifts under a live workload degrades that sandbox to
+	// frozen-but-healthy rather than flapping its Ready condition.
+	resolveErr := r.resolveBlueprintRef(ctx, sandbox)
+	if resolveErr != nil {
+		log.FromContext(ctx).Error(resolveErr, "Failed to resolve sandbox blueprintRef")
+	}
+
+	// Reconcile PVCs from volumeClaimTemplates (empty while the blueprint is
+	// unresolved, so this is a no-op in that case)
 	err := r.reconcilePVCs(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 	conditionErrors = errors.Join(conditionErrors, err)
@@ -420,6 +435,16 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 			sandbox.Status.PodIPs = nil
 			sandbox.Status.NodeName = ""
 		}
+	}
+
+	// An unresolved blueprint blocks pod creation, so surface it as this
+	// reconcile's error — but only while no owned pod exists. A sandbox whose
+	// pod is already running is unaffected by the missing blueprint (the pod
+	// is the realized workload); failing its conditions would flap Ready on
+	// every sandbox of a template the moment that template is updated.
+	if resolveErr != nil && (pod == nil || !isOwnedBySandbox(pod, sandbox)) {
+		allErrors = errors.Join(allErrors, resolveErr)
+		conditionErrors = errors.Join(conditionErrors, resolveErr)
 	}
 
 	// Do not create or modify a routing Service while the backing Pod mapping is
@@ -885,6 +910,13 @@ func isControllerManagedPodAnnotation(key string) bool {
 }
 
 func servicePortsForSandbox(sandbox *sandboxv1beta1.Sandbox) []corev1.ServicePort {
+	// No resolved pod spec (blueprintRef sandbox whose template is
+	// unavailable): no ports are derivable. Callers freeze Service handling
+	// in that state rather than acting on an empty port list.
+	if sandbox.Spec.PodTemplate.Spec == nil {
+		return nil
+	}
+
 	type servicePortKey struct {
 		port     int32
 		protocol corev1.Protocol
@@ -983,6 +1015,22 @@ func generatedServicePortName(port int32, protocol corev1.Protocol, reservedName
 
 func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) (*corev1.Service, error) {
 	logger := log.FromContext(ctx)
+
+	// While a blueprintRef sandbox's blueprint is unresolved, both the desired
+	// Service flag and the ports are unknown: freeze Service handling. An
+	// existing Service is returned untouched (its ports must not be stripped
+	// against an empty derived port list); a missing one is not created.
+	if blueprintUnresolved(sandbox) {
+		service := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, service); err != nil {
+			if k8serrors.IsNotFound(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("service get failed: %w", err)
+		}
+		return service, nil
+	}
+
 	desired := sandbox.Spec.Service
 	desiredPorts := servicePortsForSandbox(sandbox)
 
@@ -1372,6 +1420,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
 		return reconcileExistingPod(pod)
+	}
+
+	// An unresolved blueprintRef means there is no pod spec to create from.
+	// reconcileChildResources surfaces the resolution error; report "no pod"
+	// here rather than double-reporting it.
+	if blueprintUnresolved(sandbox) {
+		return nil, nil
 	}
 
 	// Create new Pod

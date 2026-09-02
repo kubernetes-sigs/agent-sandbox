@@ -38,6 +38,16 @@ spec:
             type: object
           spec:
             properties:
+              blueprintRef:
+                properties:
+                  blueprintHash:
+                    type: string
+                  name:
+                    type: string
+                required:
+                - blueprintHash
+                - name
+                type: object
               operatingMode:
                 default: Running
                 enum:
@@ -3836,8 +3846,6 @@ spec:
                     required:
                     - containers
                     type: object
-                required:
-                - spec
                 type: object
               service:
                 type: boolean
@@ -3967,6 +3975,17 @@ spec:
               rule: has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates)
                 && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates ==
                 oldSelf.volumeClaimTemplates)
+            - message: exactly one of podTemplate.spec and blueprintRef must be set
+              rule: has(self.blueprintRef) != has(self.podTemplate.spec)
+            - message: volumeClaimTemplates must not be set when blueprintRef is set
+                (they are resolved from the template)
+              rule: '!has(self.blueprintRef) || !has(self.volumeClaimTemplates)'
+            - message: service must not be set when blueprintRef is set (it is resolved
+                from the template)
+              rule: '!has(self.blueprintRef) || !has(self.service)'
+            - message: blueprintRef is immutable
+              rule: has(self.blueprintRef) == has(oldSelf.blueprintRef) && (!has(self.blueprintRef)
+                || self.blueprintRef == oldSelf.blueprintRef)
           status:
             properties:
               conditions:

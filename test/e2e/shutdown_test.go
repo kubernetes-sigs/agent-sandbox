@@ -135,7 +135,7 @@ func TestSandboxRetainedExpiryPreservesFinishedCondition(t *testing.T) {
 			Namespace: ns.Name,
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				RestartPolicy: corev1.RestartPolicyNever,
 				Containers: []corev1.Container{{
 					Name:    "busybox",

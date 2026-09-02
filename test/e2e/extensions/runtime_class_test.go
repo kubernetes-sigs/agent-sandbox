@@ -72,7 +72,7 @@ func TestRuntimeClassLifecycle(t *testing.T) {
 	}
 	rcPtr := runtimeClassPtrFromEnv(runtimeClass)
 	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
-		Spec: corev1.PodSpec{
+		Spec: &corev1.PodSpec{
 			RuntimeClassName: rcPtr,
 			Containers: []corev1.Container{
 				{
@@ -209,7 +209,7 @@ func TestRuntimeClassStartupComparison(t *testing.T) {
 			Namespace: ns.Name,
 		},
 	}
-	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: podSpec}
+	template.Spec.PodTemplate = sandboxv1beta1.PodTemplate{Spec: &podSpec}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
 
 	replicas := int32(1)

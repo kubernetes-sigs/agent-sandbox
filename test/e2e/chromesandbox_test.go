@@ -73,7 +73,7 @@ func chromeSandbox(namespace string) *sandboxv1beta1.Sandbox {
 	sandbox.Name = "chrome-sandbox"
 	sandbox.Namespace = namespace
 	sandbox.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
-		Spec: corev1.PodSpec{
+		Spec: &corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
 					Name:            "chrome-sandbox",

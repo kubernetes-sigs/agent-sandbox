@@ -526,7 +526,7 @@ func (h *Harness) CreateSandbox(ctx context.Context, session *Session) (*Sandbox
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
+					Spec: &corev1.PodSpec{
 						AutomountServiceAccountToken: new(false),
 						Containers: []corev1.Container{
 							{

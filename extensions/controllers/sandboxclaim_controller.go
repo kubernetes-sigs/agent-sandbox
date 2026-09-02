@@ -50,6 +50,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
@@ -189,6 +190,11 @@ type SandboxClaimReconciler struct {
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
 	AllowedLabelDomains     []string
+	// BlueprintRefEnabled makes cold-created sandboxes reference their
+	// template's blueprint (spec.blueprintRef) instead of embedding a copy of
+	// it. Claims that customize the pod spec (env, volumeClaimTemplates)
+	// always embed: their resolved blueprint is unique to the claim.
+	BlueprintRefEnabled bool
 	// DisableObservabilityAnnotations skips persisting the observability
 	// annotations (first-observed timestamp, trace context) onto the claim,
 	// removing one API write per claim. The values are still stamped on the
@@ -1694,8 +1700,29 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 	// Track the sandbox template ref to be used by metrics collector
 	sandbox.Annotations[v1beta1.SandboxTemplateRefAnnotation] = template.Name
 
-	sandbox.Spec.SandboxBlueprint = *template.Spec.SandboxBlueprint.DeepCopy()
+	// A claim without pod-spec customization (env, volumeClaimTemplates) can
+	// reference the template's blueprint instead of embedding a copy: the
+	// sandbox controller resolves it, pinned to the template's current
+	// blueprint hash. Customizing claims always embed — their resolved
+	// blueprint is unique to the claim, so there is nothing shared to
+	// reference. Only the pod template's metadata is carried inline (identity
+	// labels and claim metadata are merged into it below).
+	useBlueprintRef := r.BlueprintRefEnabled && len(claim.Spec.Env) == 0 && len(claim.Spec.VolumeClaimTemplates) == 0
+	if useBlueprintRef {
+		blueprintHash, err := computeSandboxBlueprintHash(template)
+		if err != nil {
+			return nil, fmt.Errorf("failed to hash template blueprint: %w", err)
+		}
+		sandbox.Spec.BlueprintRef = &v1beta1.BlueprintRef{
+			Name:          template.Name,
+			BlueprintHash: blueprintHash,
+		}
+		sandbox.Spec.PodTemplate.ObjectMeta = *template.Spec.PodTemplate.ObjectMeta.DeepCopy()
+	} else {
+		sandbox.Spec.SandboxBlueprint = *template.Spec.SandboxBlueprint.DeepCopy()
+	}
 	// Merge volumeClaimTemplates from template and claim according to the template policy
+	// (a blueprintRef sandbox has no claim VCTs, so it takes the validate-only branch).
 	if len(claim.Spec.VolumeClaimTemplates) > 0 {
 		resolvedVCTs, err := mergeVolumeClaimTemplates(
 			template.Spec.VolumeClaimTemplates,
@@ -1801,8 +1828,12 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		}
 	}
 
-	// Apply secure defaults to the sandbox pod spec
-	ApplySandboxSecureDefaults(template, &sandbox.Spec.PodTemplate.Spec)
+	// Apply secure defaults to the sandbox pod spec. A blueprintRef sandbox
+	// has no embedded pod spec; the sandbox controller applies the same
+	// defaults after resolving the reference.
+	if sandbox.Spec.PodTemplate.Spec != nil {
+		sandboxcontrollers.ApplySandboxSecureDefaults(template, sandbox.Spec.PodTemplate.Spec)
+	}
 
 	if err := controllerutil.SetControllerReference(claim, sandbox, r.Scheme); err != nil {
 		err = fmt.Errorf("failed to set controller reference for sandbox: %w", err)

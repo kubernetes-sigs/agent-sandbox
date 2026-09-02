@@ -78,7 +78,7 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 	if template != nil {
 		templateRefHash = sandboxcontrollers.NameHash(template.Name)
 		podSpec = *template.Spec.PodTemplate.Spec.DeepCopy()
-		ApplySandboxSecureDefaults(template, &podSpec)
+		sandboxcontrollers.ApplySandboxSecureDefaults(template, &podSpec)
 		// If template has a version label, we could use it as part of the hash placeholder
 		if v, ok := template.Spec.PodTemplate.ObjectMeta.Labels["version"]; ok {
 			podTemplateHash = "pod-hash-" + v
@@ -100,10 +100,10 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 				},
 			},
 		}
-		podTemplateJSON, _ := json.Marshal(sandboxv1beta1.PodTemplate{Spec: podSpec})
+		podTemplateJSON, _ := json.Marshal(sandboxv1beta1.PodTemplate{Spec: &podSpec})
 		podTemplateHash = sandboxcontrollers.NameHash(string(podTemplateJSON))
 
-		sandboxBlueprintJSON, _ := json.Marshal(sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: podSpec}})
+		sandboxBlueprintJSON, _ := json.Marshal(sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: &podSpec}})
 		sandboxBlueprintHash = sandboxcontrollers.NameHash(string(sandboxBlueprintJSON))
 	}
 
@@ -128,7 +128,7 @@ func createPoolSandbox(poolName, namespace, poolNameHash string, template *exten
 					sandboxv1beta1.SandboxTemplateHashLabel:              sandboxBlueprintHash,
 				},
 			},
-			Spec: podSpec,
+			Spec: &podSpec,
 		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
 		},
 	}
@@ -141,7 +141,7 @@ func createTemplate(namespace string) *extensionsv1beta1.SandboxTemplate {
 			Namespace: namespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
 						Name:  "test-container",
@@ -456,7 +456,7 @@ func TestPoolLabelValueInIntegration(t *testing.T) {
 						"pod-annotation": "from-podtemplate",
 					},
 				},
-				Spec: corev1.PodSpec{
+				Spec: &corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
 							Name:  "test-container",
@@ -533,7 +533,7 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{Name: "app", Image: "test-image"},
 				},
@@ -657,7 +657,7 @@ func TestCreatePoolSandboxAppliesSecureDefaults(t *testing.T) {
 					Namespace: poolNamespace,
 				},
 				Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: tt.templateSpec,
+					Spec: &tt.templateSpec,
 				}}, NetworkPolicyManagement: tt.management,
 					NetworkPolicy: tt.networkPolicy,
 				},
@@ -1041,7 +1041,7 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 					Namespace: poolNamespace,
 				},
 				Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
+					Spec: &corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
 								Name:  "test-container",
@@ -1193,7 +1193,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
 						Name:  "test-container",
@@ -1344,17 +1344,17 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		templateSpec   corev1.PodSpec
-		actualSpec     corev1.PodSpec
+		templateSpec   *corev1.PodSpec
+		actualSpec     *corev1.PodSpec
 		secureByDef    bool
 		expectedResult bool // true if they should be considered equal
 	}{
 		{
 			name: "Identical specs should match",
-			templateSpec: corev1.PodSpec{
+			templateSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "test", Image: "img"}},
 			},
-			actualSpec: corev1.PodSpec{
+			actualSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "test", Image: "img"}},
 			},
 			secureByDef:    true,
@@ -1362,10 +1362,10 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 		},
 		{
 			name: "AutomountServiceAccountToken nil in template vs false in actual should match",
-			templateSpec: corev1.PodSpec{
+			templateSpec: &corev1.PodSpec{
 				AutomountServiceAccountToken: nil,
 			},
-			actualSpec: corev1.PodSpec{
+			actualSpec: &corev1.PodSpec{
 				AutomountServiceAccountToken: &falseVal,
 			},
 			secureByDef:    true,
@@ -1373,10 +1373,10 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 		},
 		{
 			name: "AutomountServiceAccountToken true in template vs false in actual should NOT match (drift)",
-			templateSpec: corev1.PodSpec{
+			templateSpec: &corev1.PodSpec{
 				AutomountServiceAccountToken: &trueVal,
 			},
-			actualSpec: corev1.PodSpec{
+			actualSpec: &corev1.PodSpec{
 				AutomountServiceAccountToken: &falseVal,
 			},
 			secureByDef:    true,
@@ -1384,10 +1384,10 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 		},
 		{
 			name: "DNSPolicy empty in template vs DNSNone in actual (SecureByDefault) should match",
-			templateSpec: corev1.PodSpec{
+			templateSpec: &corev1.PodSpec{
 				DNSPolicy: "",
 			},
-			actualSpec: corev1.PodSpec{
+			actualSpec: &corev1.PodSpec{
 				DNSPolicy: corev1.DNSNone,
 				DNSConfig: &corev1.PodDNSConfig{
 					Nameservers: []string{"8.8.8.8", "1.1.1.1"},
@@ -1398,10 +1398,10 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 		},
 		{
 			name: "DNSPolicy drift from Default to ClusterFirst should NOT match",
-			templateSpec: corev1.PodSpec{
+			templateSpec: &corev1.PodSpec{
 				DNSPolicy: corev1.DNSClusterFirst,
 			},
-			actualSpec: corev1.PodSpec{
+			actualSpec: &corev1.PodSpec{
 				DNSPolicy: corev1.DNSDefault,
 			},
 			secureByDef:    false,
@@ -1428,7 +1428,7 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 			actualSpecCopy := tt.actualSpec.DeepCopy()
 			// Only apply if it's NOT a drift test case where we WANT them to be different
 			if tt.expectedResult {
-				ApplySandboxSecureDefaults(template, actualSpecCopy)
+				sandboxcontrollers.ApplySandboxSecureDefaults(template, actualSpecCopy)
 			}
 
 			result := comparePodSpecs(template, actualSpecCopy)
@@ -1455,7 +1455,7 @@ func TestReconcilePool_TemplateUpdate_DNSPolicy(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{Name: "test", Image: "img"},
 				},
@@ -1539,7 +1539,7 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 			Namespace: poolNamespace,
 		},
 		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{Name: "app", Image: "genuine-image"},
 				},
@@ -1570,7 +1570,7 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 				warmPoolSandboxLabel:                    sandboxcontrollers.NameHash(poolName),
 			},
 		},
-		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: *spoofedSpec}}},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: spoofedSpec}}},
 	}
 
 	isStaleSpoofed := r.isSandboxStale(ctx, spoofedOrphan, template, currentSandboxBlueprintHash, vettedHashes)
@@ -1579,7 +1579,7 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 	// Case 2: Orphaned sandbox with matching hash label and genuine/fully vetted PodSpec.
 	// Should be evaluated as fresh (not stale) after passing full semantic comparison.
 	genuineSpec := template.Spec.PodTemplate.Spec.DeepCopy()
-	ApplySandboxSecureDefaults(template, genuineSpec)
+	sandboxcontrollers.ApplySandboxSecureDefaults(template, genuineSpec)
 
 	genuineOrphan := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1591,7 +1591,7 @@ func TestIsSandboxStale_OrphanedSandboxVetting(t *testing.T) {
 				warmPoolSandboxLabel:                    sandboxcontrollers.NameHash(poolName),
 			},
 		},
-		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: *genuineSpec}}},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: genuineSpec}}},
 	}
 
 	isStaleGenuine := r.isSandboxStale(ctx, genuineOrphan, template, currentSandboxBlueprintHash, vettedHashes)
@@ -1793,7 +1793,7 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 
 	baseSandboxBlueprint := sandboxv1beta1.SandboxBlueprint{
 		PodTemplate: sandboxv1beta1.PodTemplate{
-			Spec: corev1.PodSpec{
+			Spec: &corev1.PodSpec{
 				AutomountServiceAccountToken: &falseVal,
 				Containers:                   []corev1.Container{{Name: "app", Image: "image-v1"}},
 			},
@@ -2094,7 +2094,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 	trueVal := true
 
 	basePodTemplate := sandboxv1beta1.PodTemplate{
-		Spec: corev1.PodSpec{
+		Spec: &corev1.PodSpec{
 			AutomountServiceAccountToken: &falseVal,
 			Containers:                   []corev1.Container{{Name: "app", Image: "image-v1"}},
 		},
@@ -2182,7 +2182,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			name: "Pod spec image drift should NOT match",
 			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
+					Spec: &corev1.PodSpec{
 						AutomountServiceAccountToken: &falseVal,
 						Containers:                   []corev1.Container{{Name: "app", Image: "image-v1"}},
 					},
@@ -2190,7 +2190,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			},
 			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
+					Spec: &corev1.PodSpec{
 						AutomountServiceAccountToken: &falseVal,
 						Containers:                   []corev1.Container{{Name: "app", Image: "image-v2"}},
 					},

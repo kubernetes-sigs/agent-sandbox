@@ -79,6 +79,7 @@ func main() {
 	var sandboxWarmPoolReadinessGracePeriod time.Duration
 	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
+	var sandboxBlueprintRef bool
 	var cacheLabelSelectors bool
 	var printVersion bool
 	var disableClaimEvents bool
@@ -137,6 +138,12 @@ func main() {
 	flag.DurationVar(&sandboxWarmPoolReadinessGracePeriod, "sandbox-warm-pool-readiness-grace-period", extensionscontrollers.DefaultWarmPoolReadinessGracePeriod, "How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.")
 	flag.DurationVar(&sandboxWarmPoolUnschedulableRecheckInterval, "sandbox-warm-pool-unschedulable-recheck-interval", extensionscontrollers.DefaultUnschedulableRecheckInterval, "Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
+	flag.BoolVar(&sandboxBlueprintRef, "sandbox-blueprint-ref", false,
+		"Create Sandboxes that reference their SandboxTemplate's blueprint (spec.blueprintRef) instead of embedding a copy of it. "+
+			"The embedded blueprint (pod spec, volume claim templates) plus its managedFields shadow is typically the majority of a Sandbox object's bytes, "+
+			"and every watch event, relist and update ships the whole object, so referencing shrinks the Sandbox watch/list plane by roughly that share. "+
+			"Applies to sandboxes created by the SandboxWarmPool and SandboxClaim controllers; claims that customize the pod spec (env, volumeClaimTemplates) still embed. "+
+			"The Sandbox controller resolves references regardless of this flag, so it is safe to enable and disable at any time; existing sandboxes are never rewritten.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
 			controllers.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
@@ -432,6 +439,7 @@ func main() {
 			Tracer:                          instrumenter,
 			AllowedLabelDomains:             allowedDomains,
 			DisableObservabilityAnnotations: disableClaimObservabilityAnnotations,
+			BlueprintRefEnabled:             sandboxBlueprintRef,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
@@ -457,6 +465,7 @@ func main() {
 			MaxRefillRate:                sandboxWarmPoolMaxRefillRate,
 			ReadinessGracePeriod:         sandboxWarmPoolReadinessGracePeriod,
 			UnschedulableRecheckInterval: sandboxWarmPoolUnschedulableRecheckInterval,
+			BlueprintRefEnabled:          sandboxBlueprintRef,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)

@@ -461,7 +461,7 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				Service: &serviceReq,
 				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
+					Spec: &corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
 								Name:  "pause",

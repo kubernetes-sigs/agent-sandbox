@@ -56,7 +56,7 @@ func simpleSandbox(ns string) *sandboxv1beta1.Sandbox {
 	sandboxObj.Namespace = ns
 	sandboxObj.Spec.Service = new(true)
 	sandboxObj.Spec.PodTemplate = sandboxv1beta1.PodTemplate{
-		Spec: corev1.PodSpec{
+		Spec: &corev1.PodSpec{
 			Containers: []corev1.Container{
 				{ // Use a simple pause container as a basic test
 					Name:  "pause",

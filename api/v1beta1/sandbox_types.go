@@ -194,11 +194,17 @@ type EmbeddedObjectMetadata struct {
 }
 
 type PodTemplate struct {
-	// spec is the Pod's spec
-	// +required
-	Spec corev1.PodSpec `json:"spec"`
+	// spec is the Pod's spec. In a SandboxTemplate it is required. In a Sandbox
+	// exactly one of spec.podTemplate.spec and spec.blueprintRef must be set: a
+	// Sandbox may instead reference its SandboxTemplate's blueprint via
+	// spec.blueprintRef, in which case the controller resolves the pod spec from
+	// the template and this field stays unset.
+	// +optional
+	Spec *corev1.PodSpec `json:"spec,omitempty"`
 
 	// metadata is the Pod's metadata. Only labels and annotations are used.
+	// It is always stored inline (never resolved from a blueprintRef), because
+	// controllers merge per-Sandbox identity labels and annotations into it.
 	// +optional
 	ObjectMeta PodMetadata `json:"metadata"`
 }
@@ -268,9 +274,38 @@ type SandboxBlueprint struct {
 	Service *bool `json:"service,omitempty"`
 }
 
+// BlueprintRef pins a Sandbox to the SandboxBlueprint of a SandboxTemplate in
+// the Sandbox's namespace instead of embedding a copy of it. The blueprint
+// (podTemplate.spec, volumeClaimTemplates, service) is resolved by the
+// controller at reconcile time and never stored on the Sandbox, which keeps
+// Sandbox objects — and every watch event and relist carrying them — small.
+// blueprintHash pins the exact blueprint content the Sandbox was created
+// against: if the template's blueprint no longer hashes to this value, the
+// controller refuses to create a backing Pod from it (a drifted template must
+// not silently produce a different pod than the one this Sandbox was sized,
+// scheduled and labeled for). Warm pool staleness handling replaces such
+// sandboxes through the normal churn path.
+type BlueprintRef struct {
+	// name is the name of the SandboxTemplate, in the Sandbox's namespace,
+	// whose blueprint backs this Sandbox.
+	// +required
+	Name string `json:"name"`
+
+	// blueprintHash is the hash of the template's SandboxBlueprint that this
+	// Sandbox was created against (the same value tracked in the
+	// agents.x-k8s.io/sandbox-template-hash label). Resolution fails if the
+	// template's current blueprint does not hash to this value.
+	// +required
+	BlueprintHash string `json:"blueprintHash"`
+}
+
 // SandboxSpec defines the desired state of Sandbox.
 // volumeClaimTemplates is immutable after creation.
 // +kubebuilder:validation:XValidation:rule="has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates) && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates == oldSelf.volumeClaimTemplates)",message="volumeClaimTemplates is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.blueprintRef) != has(self.podTemplate.spec)",message="exactly one of podTemplate.spec and blueprintRef must be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.blueprintRef) || !has(self.volumeClaimTemplates)",message="volumeClaimTemplates must not be set when blueprintRef is set (they are resolved from the template)"
+// +kubebuilder:validation:XValidation:rule="!has(self.blueprintRef) || !has(self.service)",message="service must not be set when blueprintRef is set (it is resolved from the template)"
+// +kubebuilder:validation:XValidation:rule="has(self.blueprintRef) == has(oldSelf.blueprintRef) && (!has(self.blueprintRef) || self.blueprintRef == oldSelf.blueprintRef)",message="blueprintRef is immutable"
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
@@ -280,6 +315,14 @@ type SandboxSpec struct {
 	// Since moving fields out is breaking, if unsure whether a new field should be shared,
 	// define it in SandboxSpec (or SandboxTemplateSpec) first and promote it here later.
 	SandboxBlueprint `json:",inline"`
+
+	// blueprintRef references the SandboxTemplate whose blueprint backs this
+	// Sandbox instead of embedding a copy of it (see BlueprintRef). When set,
+	// podTemplate.spec, volumeClaimTemplates and service must be unset; the
+	// controller resolves them from the template. podTemplate.metadata stays
+	// inline. Immutable after creation.
+	// +optional
+	BlueprintRef *BlueprintRef `json:"blueprintRef,omitempty"`
 
 	// Lifecycle defines when and how the sandbox should be shut down.
 	// +optional

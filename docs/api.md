@@ -17,6 +17,33 @@ Package v1beta1 contains API Schema definitions for the agents v1beta1 API group
 
 
 
+#### BlueprintRef
+
+
+
+BlueprintRef pins a Sandbox to the SandboxBlueprint of a SandboxTemplate in
+the Sandbox's namespace instead of embedding a copy of it. The blueprint
+(podTemplate.spec, volumeClaimTemplates, service) is resolved by the
+controller at reconcile time and never stored on the Sandbox, which keeps
+Sandbox objects — and every watch event and relist carrying them — small.
+blueprintHash pins the exact blueprint content the Sandbox was created
+against: if the template's blueprint no longer hashes to this value, the
+controller refuses to create a backing Pod from it (a drifted template must
+not silently produce a different pod than the one this Sandbox was sized,
+scheduled and labeled for). Warm pool staleness handling replaces such
+sandboxes through the normal churn path.
+
+
+
+_Appears in:_
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name is the name of the SandboxTemplate, in the Sandbox's namespace,<br />whose blueprint backs this Sandbox. |  | Required: \{\} <br /> |
+| `blueprintHash` _string_ | blueprintHash is the hash of the template's SandboxBlueprint that this<br />Sandbox was created against (the same value tracked in the<br />agents.x-k8s.io/sandbox-template-hash label). Resolution fails if the<br />template's current blueprint does not hash to this value. |  | Required: \{\} <br /> |
+
+
 
 
 #### EmbeddedObjectMetadata
@@ -107,7 +134,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `spec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#podspec-v1-core)_ | spec is the Pod's spec |  | Required: \{\} <br /> |
+| `spec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#podspec-v1-core)_ | spec is the Pod's spec. In a SandboxTemplate it is required. In a Sandbox<br />exactly one of spec.podTemplate.spec and spec.blueprintRef must be set: a<br />Sandbox may instead reference its SandboxTemplate's blueprint via<br />spec.blueprintRef, in which case the controller resolves the pod spec from<br />the template and this field stays unset. |  | Optional: \{\} <br /> |
 | `metadata` _[PodMetadata](#podmetadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 
 
@@ -191,6 +218,7 @@ _Appears in:_
 | `podTemplate` _[PodTemplate](#podtemplate)_ | podTemplate describes the pod that will be created in the sandbox.<br />Note: When provisioned via a SandboxTemplate (such as by a SandboxClaim or SandboxWarmPool),<br />if AutomountServiceAccountToken is not specified in the PodSpec, the controller defaults it<br />to false to ensure a secure-by-default environment. |  | Required: \{\} <br /> |
 | `volumeClaimTemplates` _[PersistentVolumeClaimTemplate](#persistentvolumeclaimtemplate) array_ | volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.<br />When creating a sandbox, PVCs will be created from these templates.<br />Every claim in this list must have at least one matching access mode with a provisioner volume.<br />NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries. |  | Optional: \{\} <br /> |
 | `service` _boolean_ | service controls whether the controller should automatically create a<br />headless Service for the Sandbox workload.<br />When unset, the controller preserves existing Services for backward<br />compatibility but does not create new ones. Set to true to enable or false<br />to explicitly disable and remove the Service. |  | Optional: \{\} <br /> |
+| `blueprintRef` _[BlueprintRef](#blueprintref)_ | blueprintRef references the SandboxTemplate whose blueprint backs this<br />Sandbox instead of embedding a copy of it (see BlueprintRef). When set,<br />podTemplate.spec, volumeClaimTemplates and service must be unset; the<br />controller resolves them from the template. podTemplate.metadata stays<br />inline. Immutable after creation. |  | Optional: \{\} <br /> |
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time at which the Sandbox expires. When the current<br />time reaches shutdownTime, the controller tears down the underlying resources<br />(Pod and Service) and then applies shutdownPolicy to the Sandbox object itself.<br />If unset, the Sandbox never expires and lives until it is explicitly deleted. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the Sandbox object itself when it expires<br />(i.e. when shutdownTime is reached). The underlying resources (Pod, Service) are<br />always deleted on expiry regardless of this policy; shutdownPolicy governs only the<br />Sandbox object:<br />  - Retain (default): the Sandbox object is kept after its resources are torn down.<br />    Its live status fields are cleared and a Ready=False condition with reason<br />    SandboxExpired is set so the expiry is observable.<br />  - Delete: the Sandbox object is deleted once its underlying resources are removed.<br />This field has no effect while shutdownTime is unset, since the Sandbox never expires. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox:<br />  - Running (default): the controller keeps a backing Pod running.<br />  - Suspended: the controller terminates the backing Pod but retains the<br />    Sandbox object and its volumes so it can later be resumed.<br />This field declares intent only. The observed readiness of the Sandbox is<br />reported by the Ready condition, and the progress of a suspension by the<br />Suspended condition; a Sandbox in Running mode is not Ready until its Pod is<br />actually up (see SandboxConditionReady).<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
@@ -458,6 +486,9 @@ _Appears in:_
 
 
 SandboxTemplateSpec defines the desired state of Sandbox.
+podTemplate.spec is optional in the shared SandboxBlueprint type only so a
+Sandbox can reference it via blueprintRef; a template is the thing being
+referenced, so its own blueprint must always be complete.
 
 
 

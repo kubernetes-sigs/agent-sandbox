@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 
 	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
@@ -45,11 +47,34 @@ func main() {
 		"write Namespace from controller + Deployment from extensions",
 	)
 	image := flag.String("image", "controller:latest", "container image for the extensions Deployment")
+	routerDir := flag.String(
+		"router-dir",
+		"",
+		"directory of copied sandbox-router manifests to rewrite namespace in-place (optional)",
+	)
+	routerNS := flag.String("router-namespace", "agent-sandbox-system", "target namespace for router manifests")
+	crdDir := flag.String(
+		"crd-dir",
+		"",
+		"directory of copied CRD bases; generates kustomization.yaml in the parent (optional)",
+	)
 	flag.Parse()
 
 	if err := run(*controllerPath, *extensionsPath, *supportOut, *managerOut, *image); err != nil {
 		fmt.Fprintf(os.Stderr, "sync-k8s-manifests: %v\n", err)
 		os.Exit(1)
+	}
+	if *routerDir != "" {
+		if err := rewriteRouterNamespace(*routerDir, *routerNS); err != nil {
+			fmt.Fprintf(os.Stderr, "sync-k8s-manifests: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if *crdDir != "" {
+		if err := writeCRDKustomization(*crdDir); err != nil {
+			fmt.Fprintf(os.Stderr, "sync-k8s-manifests: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 
@@ -171,6 +196,70 @@ func replaceControllerImage(dep map[string]interface{}, replacement string) erro
 		}
 	}
 	return fmt.Errorf("extensions deployment: no container image matching %q", koControllerImage)
+}
+
+func writeCRDKustomization(basesDir string) error {
+	entries, err := os.ReadDir(basesDir)
+	if err != nil {
+		return fmt.Errorf("read CRD dir %s: %w", basesDir, err)
+	}
+	resources := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		resources = append(resources, "bases/"+e.Name())
+	}
+	out := filepath.Join(filepath.Dir(filepath.Clean(basesDir)), "kustomization.yaml")
+	return writeResourcesKustomization(out, resources)
+}
+
+// writeResourcesKustomization writes a kustomization that only lists resources,
+// matching config/crd/kustomization.yaml. Image remaps belong on a parent
+// overlay that copy-k8s-config does not regenerate (config/default).
+func writeResourcesKustomization(path string, resources []string) error {
+	var buf bytes.Buffer
+	buf.WriteString("resources:\n")
+	for _, r := range resources {
+		fmt.Fprintf(&buf, "- %s\n", r)
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+// nsDefaultRe matches "namespace: default" with any surrounding whitespace,
+// preserving indentation. This avoids a full YAML parse-marshal round-trip
+// that would drop comments and reorder keys.
+var nsDefaultRe = regexp.MustCompile(`(?m)^(\s*namespace:\s+)default\s*$`)
+
+func rewriteRouterNamespace(dir, namespace string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read router dir %s: %w", dir, err)
+	}
+	excludeFromResources := map[string]bool{
+		"kustomization.yaml":    true,
+		"networkpolicy.yaml":    true,
+		"rbac-tokenreview.yaml": true,
+	}
+	resources := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", e.Name(), err)
+		}
+		data = nsDefaultRe.ReplaceAll(data, []byte("${1}"+namespace))
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", e.Name(), err)
+		}
+		if !excludeFromResources[e.Name()] {
+			resources = append(resources, e.Name())
+		}
+	}
+	return writeResourcesKustomization(filepath.Join(dir, "kustomization.yaml"), resources)
 }
 
 func writeMultiDoc(path string, docs []map[string]interface{}) error {

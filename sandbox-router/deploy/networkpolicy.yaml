@@ -9,7 +9,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: sandbox-router
-  namespace: default
+  namespace: agent-sandbox-system
   labels:
     app.kubernetes.io/name: sandbox-router
     app.kubernetes.io/component: sandbox-router

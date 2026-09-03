@@ -8,7 +8,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: sandbox-router
-  namespace: default
+  namespace: agent-sandbox-system
   labels:
     app.kubernetes.io/name: sandbox-router
     app.kubernetes.io/component: sandbox-router

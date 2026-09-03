@@ -33,7 +33,7 @@ The following example demonstrates creating a sandbox, modifying its filesystem,
 > Note: this example uses `simple-sandbox-pool`, which you should create in your GKE cluster first (along with its backing `simple-sandbox-template`). See the [snapshots example source folder](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/site/content/docs/sandbox/snapshots/source) for the matching `SandboxTemplate` manifest.
 
 > [!NOTE]
-> A sandbox can only be restored from its own previous snapshots (via the `suspend()` and `resume()` lifecycle).
+> With the SDK's recommended per-sandbox grouping policy (snapshots grouped by `agents.x-k8s.io/sandbox-name-hash`), a sandbox is only restored from its own previous snapshots via the `suspend()` and `resume()` lifecycle. This is a consequence of that grouping policy, not a platform limit — see the section below for a policy that shares one snapshot group across a whole template.
 >
 > Snapshot/suspend/resume support is Python-only for now. `PodSnapshotSandboxClient` drives this through GKE's `podsnapshot.gke.io` custom resources, which the published Go SDK (`clients/go/sandbox`) doesn't wrap yet — there's no equivalent to add here without reimplementing that orchestration from scratch.
 

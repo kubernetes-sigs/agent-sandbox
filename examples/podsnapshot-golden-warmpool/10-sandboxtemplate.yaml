@@ -19,8 +19,9 @@ spec:
     metadata:
       labels:
         # matched by the PodSnapshotPolicy selector AND used as its snapshot
-        # group key — this label is what makes the pool "golden"
-        app: podsnap-golden
+        # group key — a dedicated key (not a generic one like "app") so no
+        # unrelated pod can accidentally join the golden group
+        golden-pool: podsnap-demo
     spec:
       # Pod Snapshots require GKE Sandbox (gVisor)
       runtimeClassName: gvisor

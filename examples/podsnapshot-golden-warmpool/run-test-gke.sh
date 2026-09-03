@@ -58,7 +58,9 @@ envsubst < 00-storageconfig.yaml | kubectl apply -f -
 kubectl apply -f 05-podsnapshotpolicy.yaml
 envsubst < 10-sandboxtemplate.yaml | kubectl apply -f -
 kubectl apply -f 20-sandboxwarmpool.yaml
-kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+# wait on the pool's own status: a label-selector wait races the controller
+# creating the first Sandbox objects ("no matching resources found")
+kubectl wait sandboxwarmpool/podsnap-golden-pool --for=jsonpath='{.status.readyReplicas}'=2 --timeout=600s
 
 echo "=== 2. Primer: claim, seed memory + filesystem state"
 kubectl apply -f 25-primer-claim.yaml
@@ -81,7 +83,8 @@ echo "golden snapshot: $SNAP_V1"
 
 echo "=== 4. Roll the pool: fresh members must boot restored"
 kubectl delete sandbox -l agents.x-k8s.io/warm-pool-sandbox --wait=true
-kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+sleep 10   # let the pool status observe the deletions before waiting on it
+kubectl wait sandboxwarmpool/podsnap-golden-pool --for=jsonpath='{.status.readyReplicas}'=2 --timeout=600s
 for POD in $(kubectl get pods -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='{.items[*].metadata.name}'); do
     S=$(state "$POD")
     echo "pool member $POD: $S"
@@ -117,7 +120,8 @@ STALE=$(kubectl get pods -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='{.ite
 echo "pre-v2 member $STALE still golden-v1 (expected)"
 # ...until the pool is rolled again
 kubectl delete sandbox -l agents.x-k8s.io/warm-pool-sandbox --wait=true
-kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+sleep 10
+kubectl wait sandboxwarmpool/podsnap-golden-pool --for=jsonpath='{.status.readyReplicas}'=2 --timeout=600s
 FRESH=$(kubectl get pods -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='{.items[0].metadata.name}')
 S=$(state "$FRESH")
 echo "post-v2 member $FRESH: $S"
@@ -136,7 +140,8 @@ SNAP_V3=$(snap_of_trigger golden-v3)
 # completion alone re-warms from the previous snapshot.
 kubectl wait --for=condition=Ready "podsnapshots.podsnapshot.gke.io/$SNAP_V3" --timeout=600s
 kubectl delete sandbox -l agents.x-k8s.io/warm-pool-sandbox --wait=true
-kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+sleep 10
+kubectl wait sandboxwarmpool/podsnap-golden-pool --for=jsonpath='{.status.readyReplicas}'=1 --timeout=600s
 POOL_BEFORE=$(kubectl get sandbox -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='{.items[*].metadata.name}')
 kubectl apply -f 50-refresh-claim.yaml
 kubectl wait --for=condition=Ready sandboxclaim/podsnap-worker-3 --timeout=300s

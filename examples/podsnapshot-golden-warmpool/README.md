@@ -113,7 +113,7 @@ envsubst < 00-storageconfig.yaml | kubectl apply -f -
 kubectl apply -f 05-podsnapshotpolicy.yaml
 envsubst < 10-sandboxtemplate.yaml | kubectl apply -f -
 kubectl apply -f 20-sandboxwarmpool.yaml
-kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+kubectl wait sandboxwarmpool/podsnap-golden-pool --for=jsonpath='{.status.readyReplicas}'=2 --timeout=600s
 ```
 
 These first two pool members **cold-start** — no snapshot exists yet.
@@ -153,7 +153,7 @@ replacements restore automatically:
 
 ```sh
 kubectl delete sandbox -l agents.x-k8s.io/warm-pool-sandbox
-kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+kubectl wait sandboxwarmpool/podsnap-golden-pool --for=jsonpath='{.status.readyReplicas}'=2 --timeout=600s
 for POD in $(kubectl get pods -l agents.x-k8s.io/warm-pool-sandbox -o jsonpath='{.items[*].metadata.name}'); do probe "$POD" /state; done
 ```
 
@@ -204,7 +204,7 @@ kubectl patch sandboxwarmpool podsnap-golden-pool --type merge -p '{"spec":{"rep
 # ...take a snapshot as in §5, then:
 kubectl wait --for=condition=Ready "podsnapshots.podsnapshot.gke.io/$SNAP" --timeout=600s
 kubectl delete sandbox -l agents.x-k8s.io/warm-pool-sandbox
-kubectl wait --for=condition=Ready sandbox -l agents.x-k8s.io/warm-pool-sandbox --timeout=600s
+kubectl wait sandboxwarmpool/podsnap-golden-pool --for=jsonpath='{.status.readyReplicas}'=1 --timeout=600s
 kubectl apply -f 50-refresh-claim.yaml     # adopts a member with the newest state
 ```
 
@@ -220,22 +220,38 @@ Two properties worth knowing:
   `podsnapshot.gke.io/ps-name` annotation via the claim's
   `additionalPodMetadata` instead. Snapshot less often than the pool
   re-warms, or the pool spends its life rebooting.
+- **Rolls don't scale linearly.** This example is validated at
+  `replicas: 2`; a label-wide delete on a large pool is a synchronized
+  restore storm — restores queue, per-pod resume latency grows with wave
+  position, and node pod-density limits become the wall before the snapshot
+  machinery does. Roll large pools in batches.
 
 ## Keep in mind
 
-- **Whoever snapshots last redefines the pool.** With a shared group, any
-  matching pod's snapshot becomes the state every future pod boots from.
-  Keep `triggerConfig.type: manual` and treat trigger-creation RBAC as a
-  control point; snapshot only from a dedicated primer.
+- **One user's session can become everyone's golden image.** The primer and
+  workers necessarily share the group label, so the policy cannot tell them
+  apart: a `PodSnapshotManualTrigger` aimed at a worker pod — typo or anyone
+  with trigger RBAC in the namespace — publishes that user's live session as
+  the state every future sandbox boots from. Keep `triggerConfig.type:
+  manual`, treat trigger-creation RBAC as the tenancy boundary, snapshot only
+  from a dedicated primer, and use a dedicated group label key (this example
+  uses `golden-pool`, not a generic `app` label another workload might carry).
+- **Restored members are memory clones of the primer.** The identical
+  `boot_nonce` that proves the demo is also the risk: any secret, cached
+  token, or PRNG state resident before the snapshot is identical in — and
+  disclosed to — every future claimant's sandbox. Prime only deterministic,
+  shareable state; generate per-session secrets and reseed RNGs after
+  adoption, never before the snapshot.
 - **Claim env injection is rejected — leave it that way.** This template
   keeps `envVarsInjectionPolicy` at its default (`Disallowed`), so a claim
   carrying `spec.env` fails with `EnvVarsInjectionRejected` instead of
   quietly cold-starting outside the golden state (verified on GKE). Don't
   enable injection on a golden template.
 - **The SandboxTemplate is the cache key.** Snapshot matching hashes the
-  pod spec, so editing the template invalidates existing snapshots — new
-  pods silently cold-start until a new snapshot is taken from the updated
-  template.
+  pod spec, so editing the template invalidates existing snapshots — when
+  the newest snapshot in the group no longer matches a new pod's spec, GKE
+  silently cold-starts it (no error, no event); take a fresh snapshot from
+  the updated template to re-arm the pool.
 - **This is a GKE-level pattern, not an SDK one.** The Python SDK's
   `PodSnapshotSandboxClient` deliberately scopes restores to one sandbox;
   first-class warm-pool restore is tracked upstream in

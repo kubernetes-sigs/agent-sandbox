@@ -17,7 +17,7 @@ spec:
   storageConfigName: podsnap-golden-storage
   selector:
     matchLabels:
-      app: podsnap-golden
+      golden-pool: podsnap-demo
   snapshotScope: whole-pod
   triggerConfig:
     # manual: snapshots happen only when a PodSnapshotManualTrigger is
@@ -30,7 +30,7 @@ spec:
   snapshotGroupingRules:
     groupByLabelValue:
       labels:
-        - app
+        - golden-pool
       groupRetentionPolicy:
         # keep the last few golden images; oldest are pruned first
         maxSnapshotCountPerGroup: 3

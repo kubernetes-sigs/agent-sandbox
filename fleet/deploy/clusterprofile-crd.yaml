@@ -1,0 +1,67 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# Minimal ClusterProfile CRD for LOCAL TESTING of the clusterprofile inventory
+# provider. This is NOT the upstream CRD -- it is a deliberately loose stand-in.
+#
+# It differs from sigs.k8s.io/cluster-inventory-api (KEP-4322) in one way that
+# matters, and the difference is INVISIBLE until it bites:
+#
+#   The schema is preserve-unknown-fields rather than the real structural
+#   schema. Two consequences. A typo in a property name will NOT be rejected by
+#   the apiserver -- that is how `node-pressure` vs `node-pressure-score` got as
+#   far as a running cluster. And `status.properties` carries no
+#   `x-kubernetes-list-type`, so it is ATOMIC: under Server-Side Apply, one
+#   manager's apply replaces the entire list and silently deletes properties
+#   owned by another manager. If upstream marks that list as `map` keyed on
+#   `name`, per-manager ownership works; if it does not, a member publishing
+#   capacity would drop whatever the cluster manager published alongside it.
+#   This fixture cannot tell you which -- it is atomic either way.
+#
+# When you want fidelity instead of convenience, install the upstream CRD from
+# the cluster-inventory-api repo and re-run the demo unchanged.
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusterprofiles.multicluster.x-k8s.io
+spec:
+  group: multicluster.x-k8s.io
+  scope: Namespaced
+  names:
+    kind: ClusterProfile
+    listKind: ClusterProfileList
+    plural: clusterprofiles
+    singular: clusterprofile
+    shortNames:
+      - cp
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      # Declared to match upstream. Consequence: `kubectl apply -f` silently
+      # DROPS any status block, which is why demo/seed-clusterprofiles.sh
+      # creates spec-only objects and the publisher fills in status. That is
+      # the honest shape anyway -- status is the member's to write.
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Manager
+          type: string
+          jsonPath: .spec.clusterManager.name
+        - name: Version
+          type: string
+          jsonPath: .status.version.kubernetes
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

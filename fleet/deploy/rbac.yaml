@@ -1,0 +1,63 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: multi-cluster-fleet
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-member
+  namespace: multi-cluster-fleet
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fleet-member
+rules:
+  # SandboxWarmPool — fleet-member OWNS these (creates + deletes per assignment).
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxwarmpools/status"]
+    verbs: ["get"]
+  # SandboxTemplate — READ-ONLY. Operator owns these (kubectl / GitOps).
+  # Fleet-member only verifies existence before creating a WarmPool that refs them.
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxtemplates"]
+    verbs: ["get", "list", "watch"]
+  # Read-only on SandboxClaims for capacity signal (active_claims)
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "watch"]
+  # Read Sandboxes owned by warmpools (used by SDK for active_claims count)
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Node pressure signal for capacity reports
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Events (future — for structured emission on assignment application)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fleet-member
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fleet-member
+subjects:
+  - kind: ServiceAccount
+    name: fleet-member
+    namespace: multi-cluster-fleet

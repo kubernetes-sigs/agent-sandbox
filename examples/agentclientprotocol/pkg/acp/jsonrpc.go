@@ -18,6 +18,7 @@ package acp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -92,4 +93,24 @@ const (
 	InvalidParams = -32602
 	// InternalError indicates the request failed while being handled.
 	InternalError = -32603
+
+	// AuthRequired is the ACP error code reporting that the client must
+	// authenticate before the request can succeed.
+	AuthRequired = -32000
 )
+
+// ErrorCode returns the JSON-RPC error code carried by err (looking through
+// wrapped errors), or 0 if err does not carry an *RPCError.
+func ErrorCode(err error) int {
+	var rpcErr *RPCError
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code
+	}
+	return 0
+}
+
+// IsAuthRequiredError reports whether err is the agent telling the client
+// that it must call authenticate before the request can succeed.
+func IsAuthRequiredError(err error) bool {
+	return ErrorCode(err) == AuthRequired
+}

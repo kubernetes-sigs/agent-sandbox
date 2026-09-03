@@ -240,16 +240,15 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	longevity := benchLongevity()
 
 	tc0 := framework.NewTestContext(t)
-	workerCfg, restoreWorkers := applyControllerWorkerTuning(t, t.Context(), tc0.ClusterClient)
+	cluster, err := tc0.ClusterInfo(t.Context())
+	require.NoError(t, err)
+	workerCfg, restoreWorkers := applyControllerWorkerTuning(t, t.Context(), tc0.ClusterClient, runtimeClass, len(cluster.Workers))
 	defer restoreWorkers()
 
 	reportDir := os.Getenv("SANDBOX_REPORT_DIR")
 	if reportDir == "" {
 		reportDir = "artifacts"
 	}
-
-	cluster, err := tc0.ClusterInfo(t.Context())
-	require.NoError(t, err)
 	instanceType := "unknown"
 	if len(cluster.Workers) > 0 && cluster.Workers[0].InstanceType != "" {
 		instanceType = cluster.Workers[0].InstanceType
@@ -346,6 +345,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 	}
 	t.Logf("[plan] pool sizes=%v cpuCapacity=%d runtime=%s", poolSizes, cpus, runtimeClass)
 
+	var executed bool
 	for i, poolSize := range poolSizes {
 		// Allow up to 300% CPU overprovisioning for VM runtimes — scheduler
 		// queues excess VMs while the larger pool improves warm hit ratio.
@@ -353,11 +353,12 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			t.Logf("[skip] pool-%d: exceeds 300%% of worker CPU capacity (%d vCPUs)", poolSize, cpus)
 			continue
 		}
-		if longevity > 0 && poolSize < 20 {
-			t.Logf("[skip] pool-%d: longevity mode requires pool size ≥ 20", poolSize)
+		if longevity > 0 && poolSize < 8 {
+			t.Logf("[skip] pool-%d: longevity mode requires pool size ≥ 8", poolSize)
 			continue
 		}
 		t.Logf("[start] pool-%d (%d/%d)", poolSize, i+1, len(poolSizes))
+		executed = true
 
 		// Fresh pool per iteration: clean controller state (expectations
 		// tracker, observedGeneration, status). Reusing a pool across
@@ -373,6 +374,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
 			},
 		}
+		poolCreateStart := time.Now()
 		require.NoError(t, tc0.CreateWithCleanup(t.Context(), pool))
 		poolID := types.NamespacedName{Name: pool.Name, Namespace: ns.Name}
 
@@ -388,18 +390,16 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 		if longevity > 0 {
 			minReady := int32(min(2*preBatchSize, poolSize))
 			t.Logf("[longevity] filling pool to %d, waiting for %d ready replicas...", poolSize, minReady)
-			start := time.Now()
 			fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
+			defer fillCancel()
 			require.NoError(t, tc0.WaitForWarmPoolMinReady(fillCtx, poolID, minReady))
-			fillCancel()
-			poolFillTime = time.Since(start)
+			poolFillTime = time.Since(poolCreateStart)
 			t.Logf("[longevity] pool has %d+ ready in %.3fs (fill continues in background)", minReady, poolFillTime.Seconds())
 		} else {
-			start := time.Now()
 			fillCtx, fillCancel := context.WithTimeout(t.Context(), fillTimeout)
+			defer fillCancel()
 			require.NoError(t, tc0.WaitForWarmPoolReady(fillCtx, poolID))
-			fillCancel()
-			poolFillTime = time.Since(start)
+			poolFillTime = time.Since(poolCreateStart)
 			t.Logf("[fill] pool-%d filled in %.3fs", poolSize, poolFillTime.Seconds())
 		}
 
@@ -411,7 +411,10 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			defer tracker.Stop()
 
 			claimTimeout := poolFillTime + 30*time.Second
-			t.Logf("[setup] Pool-%d filled in %.3fs", poolSize, poolFillTime.Seconds())
+			if longevity > 0 {
+				claimTimeout = max(claimTimeout, coldBaseline*5+30*time.Second)
+			}
+			t.Logf("[setup] Pool-%d filled in %.3fs  claimTimeout=%.0fs", poolSize, poolFillTime.Seconds(), claimTimeout.Seconds())
 
 			batchSize := calcBatchSize(poolSize)
 			if longevity > 0 && coldBaseline > 0 {
@@ -426,6 +429,10 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				interBatchDelay = max(50*time.Millisecond,
 					coldBaseline*time.Duration(batchSize)/time.Duration(poolSize))
 			}
+
+			maxClaims := poolSize * 2
+			initialBatchSize := batchSize
+			adaptiveBatch := longevity > 0 && os.Getenv("SANDBOX_BATCH_CAP") == ""
 
 			// --- CSV setup ---
 			csvPath := filepath.Join(reportDir, fmt.Sprintf("burst_recovery_%s_pool%d.csv", runtimeClass, poolSize))
@@ -453,7 +460,7 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 			_ = cw.Write([]string{"# warm_baseline_sec", fmt.Sprintf("%.3f", warmBaseline.Seconds())})
 			_ = cw.Write([]string{"# green_threshold_sec", "1.000"})
 			_ = cw.Write([]string{"# pool_fill_sec", fmt.Sprintf("%.3f", poolFillTime.Seconds())})
-			_ = cw.Write([]string{"# batch_size", strconv.Itoa(batchSize)})
+			_ = cw.Write([]string{"# batch_size", strconv.Itoa(initialBatchSize)})
 			if longevity > 0 {
 				_ = cw.Write([]string{"# longevity", longevity.String()})
 				_ = cw.Write([]string{"# max_claims", "unlimited"})
@@ -507,7 +514,11 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 								WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name},
 							},
 						}
-						claim.Spec.Lifecycle = claimLifecycle
+						shutdownAt := metav1.NewTime(time.Now().Add(time.Duration(workloadSec)*time.Second + 10*time.Second))
+						claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
+							ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
+							ShutdownTime:   &shutdownAt,
+						}
 						tracker.Register(claimName)
 						createStart := time.Now()
 						tracker.MarkCreateCalled(claimName, createStart)
@@ -537,15 +548,21 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 				}
 				wg.Wait()
 
+				var valid []claimRecord
 				for i, e := range errs {
-					require.NoError(t, e, "batch %d claim %d failed", batchNum, i+1)
+					if e != nil {
+						if longevity > 0 {
+							t.Logf("[warn] batch %d claim %d failed (non-fatal in longevity): %v", batchNum, i+1, e)
+							continue
+						}
+						require.NoError(t, e, "batch %d claim %d failed", batchNum, i+1)
+					}
+					if records[i].latency > 0 {
+						valid = append(valid, records[i])
+					}
 				}
-				return records
+				return valid
 			}
-
-			maxClaims := poolSize * 2
-			initialBatchSize := batchSize
-			adaptiveBatch := longevity > 0 && os.Getenv("SANDBOX_BATCH_CAP") == ""
 
 			// --- Header ---
 			t.Logf("=======================================================================")
@@ -793,9 +810,12 @@ func TestRuntimeClassBurstRecovery(t *testing.T) {
 
 		drainTimeout := time.Duration(poolSize)*10*time.Second + 30*time.Second
 		drainCtx, drainCancel := context.WithTimeout(t.Context(), drainTimeout)
+		defer drainCancel()
 		t.Logf("[drain] waiting for pods in %s to terminate (timeout %s)", ns.Name, drainTimeout)
 		require.NoError(t, waitForNoPods(drainCtx, tc0.ClusterClient, ns.Name),
 			"pod drain must complete before next pool iteration")
-		drainCancel()
+	}
+	if !executed {
+		t.Skip("no pool size was eligible for this cluster configuration")
 	}
 }

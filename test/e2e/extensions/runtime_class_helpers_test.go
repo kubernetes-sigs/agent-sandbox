@@ -116,16 +116,51 @@ func baselinePoolFill(t *testing.T, tc *framework.TestContext, pool *extensionsv
 	return d
 }
 
+const (
+	// vmBootsPerNode is the number of concurrent VM boots a single node can
+	// sustain without significant CPU/IO contention. Each QEMU boot consumes
+	// ~1 vCPU; at 2 concurrent boots the contention is mild, at 3+ individual
+	// boot times degrade due to memory bandwidth and disk IO saturation.
+	vmBootsPerNode = 2
+
+	// vmClaimWorkers is the default claim controller concurrency for VM runtimes.
+	// Claims are lightweight adoption operations (label swap on an existing
+	// sandbox), so high concurrency is safe regardless of runtime type.
+	vmClaimWorkers = 10
+
+	// vmPoolWorkers is the default pool controller concurrency for VM runtimes.
+	// Serializing pool reconciliation (1 worker) prevents replenishment boot
+	// storms when multiple pools need sandboxes simultaneously.
+	vmPoolWorkers = 1
+)
+
 type controllerWorkerConfig struct {
 	SandboxWorkers int
 	ClaimWorkers   int
 	PoolWorkers    int
 	MaxBatchSize   int
+	AutoReason     string // non-empty when auto-derived; describes the derivation
 }
 
 func (c controllerWorkerConfig) String() string {
 	return fmt.Sprintf("sandbox:%d,claim:%d,pool:%d,batch:%d",
 		c.SandboxWorkers, c.ClaimWorkers, c.PoolWorkers, c.MaxBatchSize)
+}
+
+// defaultVMWorkerConfig returns node-aware controller worker counts for VM
+// runtimes (kata). VM boot is a per-node operation — parallelism scales with
+// node count, not total cluster CPU. More nodes means more independent boot
+// lanes; extra CPUs on the same node give diminishing returns because VM boot
+// stages (BIOS, kernel, init) are largely sequential.
+func defaultVMWorkerConfig(nodeCount int) *controllerWorkerConfig {
+	sandboxWorkers := max(nodeCount*vmBootsPerNode, 2)
+	return &controllerWorkerConfig{
+		SandboxWorkers: sandboxWorkers,
+		ClaimWorkers:   vmClaimWorkers,
+		PoolWorkers:    vmPoolWorkers,
+		MaxBatchSize:   sandboxWorkers,
+		AutoReason:     fmt.Sprintf("auto(%d nodes × %d boots/node)", nodeCount, vmBootsPerNode),
+	}
 }
 
 // parseControllerWorkers parses SANDBOX_CONTROLLER_WORKERS.
@@ -160,10 +195,16 @@ func parseControllerWorkers() *controllerWorkerConfig {
 }
 
 // applyControllerWorkerTuning patches the agent-sandbox-controller deployment
-// with the worker counts from SANDBOX_CONTROLLER_WORKERS. Returns the parsed
-// config (nil if unset) and a restore function that reverts to the original args.
-func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framework.ClusterClient) (*controllerWorkerConfig, func()) {
+// with the worker counts from SANDBOX_CONTROLLER_WORKERS. For VM runtimes
+// (kata), auto-derives node-aware defaults when the env var is unset.
+// Returns the config (nil only for non-VM runtimes with no env var) and a
+// restore function that reverts to the original args.
+func applyControllerWorkerTuning(t *testing.T, ctx context.Context, cl *framework.ClusterClient, runtimeClass string, nodeCount int) (*controllerWorkerConfig, func()) {
 	cfg := parseControllerWorkers()
+	if cfg == nil && isVMRuntime(runtimeClass) {
+		cfg = defaultVMWorkerConfig(nodeCount)
+		t.Logf("[tuning] auto-derived VM worker config for %d nodes: %s", nodeCount, cfg)
+	}
 	if cfg == nil {
 		return nil, func() {}
 	}
@@ -263,6 +304,9 @@ func controllerWorkerCSVHeaders(cfg *controllerWorkerConfig) [][]string {
 	}
 	var headers [][]string
 	headers = append(headers, []string{"# controller_workers", cfg.String()})
+	if cfg.AutoReason != "" {
+		headers = append(headers, []string{"# controller_workers_source", cfg.AutoReason})
+	}
 	if cfg.SandboxWorkers > 0 {
 		headers = append(headers, []string{"# sandbox_concurrent_workers", strconv.Itoa(cfg.SandboxWorkers)})
 	}

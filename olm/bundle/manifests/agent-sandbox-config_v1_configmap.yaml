@@ -1,0 +1,21 @@
+apiVersion: v1
+data:
+  _readme: |
+    Tunable controller knobs. Add keys to this ConfigMap to override
+    compiled defaults. Restart the controller Deployment to pick up
+    changes. ConfigMap values take precedence over CLI flags.
+
+    Example keys (defaults shown):
+      sandbox-concurrent-workers: "100"
+      sandbox-claim-concurrent-workers: "50"
+      sandbox-warm-pool-concurrent-workers: "1"
+      sandbox-template-concurrent-workers: "1"
+      sandbox-warm-pool-max-batch-size: "300"
+      enable-warm-pool-eviction: "true"
+      kube-api-qps: "-1"
+      kube-api-burst: "10"
+      pprof-block-profile-rate: "1000000"
+      pprof-mutex-profile-fraction: "10"
+kind: ConfigMap
+metadata:
+  name: agent-sandbox-config

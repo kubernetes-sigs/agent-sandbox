@@ -1,0 +1,11 @@
+# Takes the golden snapshot of the primer's pod. The pod name equals the
+# Sandbox name; substitute ${PRIMER_POD} (read it from the primer claim's
+# .status.sandbox.name) before applying. Each trigger needs a fresh name —
+# bump the suffix for subsequent snapshots.
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotManualTrigger
+metadata:
+  name: golden-${TRIGGER_SUFFIX}
+  namespace: default
+spec:
+  targetPod: ${PRIMER_POD}

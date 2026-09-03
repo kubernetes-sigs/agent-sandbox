@@ -1,0 +1,36 @@
+# The policy that turns the warm pool golden.
+#
+# Deliberately DIFFERENT from the per-session policy in
+# clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md:
+# that one groups snapshots by agents.x-k8s.io/sandbox-name-hash, which
+# isolates every sandbox to its own snapshots (self-restore only). Here we
+# group by the shared template label instead, so ONE snapshot group covers
+# every pod the template produces — and any NEW matching pod (including
+# pre-warmed pool members) automatically restores from the latest Ready
+# snapshot in the group.
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotPolicy
+metadata:
+  name: podsnap-golden-policy
+  namespace: default
+spec:
+  storageConfigName: podsnap-golden-storage
+  selector:
+    matchLabels:
+      golden-pool: podsnap-demo
+  snapshotScope: whole-pod
+  triggerConfig:
+    # manual: snapshots happen only when a PodSnapshotManualTrigger is
+    # created (30-snapshot-trigger.yaml). This is the control point — with a
+    # shared group, whoever snapshots last defines what every future pod
+    # restores; keep that ability to yourself.
+    type: manual
+    # resume: the primer keeps running after the checkpoint is taken.
+    postCheckpoint: resume
+  snapshotGroupingRules:
+    groupByLabelValue:
+      labels:
+        - golden-pool
+      groupRetentionPolicy:
+        # keep the last few golden images; oldest are pruned first
+        maxSnapshotCountPerGroup: 3

@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd "${ROOT}"
+
+CSV="olm/bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml"
+
+echo "Checking OLM bundle is up to date..."
+
+# Save the committed createdAt timestamp — make bundle always overwrites it
+# with the current time, which would cause a false diff on every run.
+# createdAt lives under metadata.annotations (4-space indent), not at the
+# metadata root, so match any leading whitespace.
+created_at_re='^[[:space:]]+createdAt:'
+original_timestamp=""
+if [ -f "${CSV}" ]; then
+  original_timestamp=$(grep -E "${created_at_re}" "${CSV}" || true)
+fi
+
+# Restore even if make bundle fails (generation or validation) so a generated
+# createdAt is not left in the working tree.
+restore_created_at() {
+  if [ -z "${original_timestamp}" ] || [ ! -f "${CSV}" ]; then
+    return 0
+  fi
+  local tmp="${CSV}.tmp"
+  if ! ORIGINAL_TIMESTAMP="${original_timestamp}" awk \
+    '/^[[:space:]]+createdAt:/{print ENVIRON["ORIGINAL_TIMESTAMP"]; next} {print}' \
+    "${CSV}" > "${tmp}"; then
+    rm -f "${tmp}"
+    echo "Failed to restore createdAt in ${CSV}" >&2
+    return 1
+  fi
+  mv "${tmp}" "${CSV}"
+}
+trap restore_created_at EXIT
+
+if ! bundle_out=$(make -s --no-print-directory -C olm bundle 2>&1); then
+  echo "${bundle_out}"
+  exit 1
+fi
+
+# Restore now so git diff does not treat a new createdAt as a real change.
+restore_created_at
+trap - EXIT
+
+dirty=false
+
+if ! git diff HEAD --quiet olm/bundle/; then
+  dirty=true
+fi
+
+# Also catch new untracked files that make bundle may have created.
+if [ -n "$(git ls-files --others --exclude-standard olm/bundle/)" ]; then
+  dirty=true
+fi
+
+# Check whether olm/config/ diverged from HEAD — make bundle runs
+# copy-k8s-config, so this detects stale config even when the tree was
+# clean before generation.
+config_dirty=false
+if ! git diff HEAD --quiet olm/config/; then
+  config_dirty=true
+fi
+
+if [ "${dirty}" = true ]; then
+  echo "OLM bundle not up to date. Please run 'make -C olm bundle' and commit the result."
+  git --no-pager diff --stat olm/bundle/
+  git ls-files --others --exclude-standard olm/bundle/
+  if [ "${config_dirty}" = true ]; then
+    echo "(Note: olm/config/ also has uncommitted changes — run 'make fix-olm-manifests' first.)"
+  fi
+  # Restore the working tree so the script leaves no mutations behind.
+  git checkout -- olm/bundle/ olm/config/ 2>/dev/null || true
+  git clean -fd olm/bundle/ 2>/dev/null || true
+  exit 1
+fi
+
+echo "OLM bundle is up to date."

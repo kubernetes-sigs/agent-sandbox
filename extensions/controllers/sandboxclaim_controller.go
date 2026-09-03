@@ -1562,7 +1562,7 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(claimMeta *v1beta
 				}
 			}
 			if !allowed {
-				return fmt.Errorf("label domain %q is not in the allowlist", domain)
+				return fmt.Errorf("label domain %q is not in the allowlist (configure the allowed-label-domains key of the agent-sandbox-config ConfigMap in the controller namespace; default: sandbox.users.io)", domain)
 			}
 		} else {
 			// For annotations, we use the blocklist

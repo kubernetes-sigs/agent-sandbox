@@ -146,12 +146,12 @@ async def test_event_loop_not_blocked(client, warmpool_name, namespace):
 async def run_async_client_tests(connection_config, warmpool_name, namespace):
     """Runs each test with a fresh client so cleanup between tests is total."""
     async with AsyncSandboxClient(
-        connection_config=connection_config, cleanup=False
+        connection_config=connection_config, cleanup=True
     ) as client:
         await test_concurrent_sandbox_creation(client, warmpool_name, namespace)
 
     async with AsyncSandboxClient(
-        connection_config=connection_config, cleanup=False
+        connection_config=connection_config, cleanup=True
     ) as client:
         await test_event_loop_not_blocked(client, warmpool_name, namespace)
 

@@ -103,7 +103,9 @@ The extensions controller reads the allowlist **once at startup** from
 ConfigMap named `agent-sandbox-config` in the controller's namespace. The
 file's contents **replace** the default rather than extending it, so include
 `sandbox.users.io` if existing consumers rely on it. Domains are separated
-by newlines or commas.
+by newlines or commas. An empty (or separator-only) file does not disable
+the allowlist — the controller treats it the same as an absent file and
+falls back to the `sandbox.users.io` default.
 
 ```yaml
 apiVersion: v1

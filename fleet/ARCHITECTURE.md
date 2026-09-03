@@ -220,7 +220,9 @@ read-modify-write is written once and is correct on an empty bucket, with no
 
 **Write order is plan → publish → archive.** `fleet/spec.json` is written last
 and is an *archive*: a record of what was applied, stamped with the generation
-for humans reading the bucket later. Nothing reads it back to make a decision,
+under its own `applied_generation` key for humans reading the bucket later —
+not the deprecated `generation` spec field, which `fleetctl status` would warn
+about when it re-validates the archive. Nothing reads it back to make a decision,
 which is why it is the only one of the three writes whose failure is
 survivable. Deriving the counter from the archive instead would desync the
 whole fleet the first time an archive write failed after a successful publish.

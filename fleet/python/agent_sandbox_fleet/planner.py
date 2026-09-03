@@ -74,6 +74,11 @@ class ModelSpec(BaseModel):
     image: str | None = None
     template_name: str
     target_tasks: int = Field(gt=0)
+    # Explicit placement for the `pinned` policy: the name of the cluster this
+    # model MUST land on (e.g. the cluster whose secondary-boot-disk shard
+    # holds the image). Required on every model when placement_policy=pinned;
+    # ignored by every other policy.
+    cluster: str | None = None
 
 
 class FleetSpec(BaseModel):
@@ -244,6 +249,29 @@ def plan(spec: FleetSpec, registry: PlannerRegistry,
                 f"missing on templates: {missing}"
             )
 
+    # pinned places each model on the cluster its spec names. Both halves are
+    # validated up front: a model without a pin has no fallback (unlike
+    # image-affinity there is nothing sensible to hash), and a pin naming a
+    # non-eligible cluster must fail the PLAN, not silently strand the model —
+    # for a pre-sharded fleet, "put it somewhere else" is data loss, not
+    # placement. Lists are truncated: a spec can carry tens of thousands of
+    # models and an exception is not a report.
+    if spec.placement_policy == "pinned":
+        unpinned = [m.template_name for m in spec.models if not m.cluster]
+        if unpinned:
+            raise ValueError(
+                f"placement_policy=pinned requires a cluster on every model; "
+                f"missing on {len(unpinned)} model(s), first few: {unpinned[:5]}"
+            )
+        eligible_names = {c.name for c in eligible_clusters}
+        bad = sorted({m.cluster for m in spec.models} - eligible_names)
+        if bad:
+            raise placement.NoClusterAvailableError(
+                f"placement_policy=pinned: {len(bad)} pinned cluster(s) are not "
+                f"eligible (no fresh report, or drained at weight 0): {bad[:5]}; "
+                f"eligible: {sorted(eligible_names)}"
+            )
+
     # Step 1: pick placement mode.
     #
     # min_clusters > 0 → anti-affinity mode. ALL models placed round-robin
@@ -294,6 +322,17 @@ def plan(spec: FleetSpec, registry: PlannerRegistry,
             "fleet as each member reads it",
             len(drained), len(registry.clusters),
         )
+    elif spec.placement_policy == "pinned":
+        # Explicit mode: every model names its cluster and both were validated
+        # above. Deterministic, independent of capacity scoring, and immune to
+        # re-apply ping-pong by construction — the operator's shard layout IS
+        # the placement. Takes precedence over min_clusters: an explicit pin is
+        # a stronger statement than an anti-affinity floor.
+        for model in spec.models:
+            cluster = registry.get(model.cluster)
+            cluster.planned_replicas += 1
+            per_cluster_tasks[cluster.name] += model.target_tasks
+            per_cluster_models[cluster.name].append(model)
     elif spec.min_clusters > 0:
         # Clamp rather than fail. min_clusters is a floor on SPREAD, not a
         # precondition on the fleet: refusing to plan would mean one cluster
@@ -499,7 +538,11 @@ def apply(
     reg = provider.load(spec.cluster_weights)
     assn = plan(spec, reg, generation=gen)
     publish(gcs, assn, paths, if_generation_match=store_gen)
-    archived = spec.model_dump()
-    archived["generation"] = gen  # what was applied, for humans; not an input
+    archived = spec.model_dump(exclude={"generation"})
+    # What was applied, for humans; not an input. Stamped under its own key:
+    # cmd_status re-validates this archive as a FleetSpec, and writing the
+    # deprecated `generation` field made every status run warn about a value
+    # apply() itself wrote.
+    archived["applied_generation"] = gen
     gcs.put_json(paths.spec, archived)
     return assn

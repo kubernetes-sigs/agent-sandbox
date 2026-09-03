@@ -129,14 +129,25 @@ class GCS:
         read-modify-write can be written once and work on both the first apply
         and every later one, with no `if absent` branch to get wrong.
         """
-        blob = self._bucket.get_blob(path)
-        if blob is None:
-            return None, 0
-        try:
-            raw = blob.download_as_bytes(if_generation_match=blob.generation)
-        except self._gexc.NotFound:
-            return None, 0
-        return json.loads(raw.decode("utf-8")), blob.generation
+        # Same two-request race as get_with_etag: an overwrite landing between
+        # get_blob() and the pinned download fails the precondition, and there
+        # is then a newer generation to fetch. Bounded for the same reason —
+        # a writer outrunning the reader should surface, not spin.
+        for _ in range(3):
+            blob = self._bucket.get_blob(path)
+            if blob is None:
+                return None, 0
+            try:
+                raw = blob.download_as_bytes(if_generation_match=blob.generation)
+            except self._gexc.NotFound:
+                return None, 0
+            except self._gexc.PreconditionFailed:
+                continue
+            return json.loads(raw.decode("utf-8")), blob.generation
+        raise RuntimeError(
+            f"{path} changed generation on every read attempt; the writer is "
+            "outrunning the reader"
+        )
 
     def get_json(self, path: str) -> Any | None:
         # One request, not exists()-then-download: the two calls can observe

@@ -260,3 +260,46 @@ def test_read_then_conditional_write_round_trips():
     obj, gen = g.get_json_with_generation("a.json")
     g.put_json("a.json", {"n": obj["n"] + 1}, if_generation_match=gen)
     assert json.loads(g._bucket.data["a.json"]) == {"n": 2}
+
+
+def test_get_json_with_generation_rereads_when_a_write_lands_mid_read():
+    # Same two-request race as get_with_etag, but only NotFound used to be
+    # caught here: an overwrite landing between get_blob() and the pinned
+    # download raised PreconditionFailed straight out of fleetctl apply.
+    g = _gcs()
+    g._bucket.put("spec.json", b'{"v": 1}', generation=1)
+
+    def publish_once():
+        g._bucket.on_download = None
+        g._bucket.put("spec.json", b'{"v": 2}', generation=2)
+
+    g._bucket.on_download = publish_once
+    obj, gen = g.get_json_with_generation("spec.json")
+    assert obj == {"v": 2}
+    assert gen == 2, "bytes and generation must come from the same revision"
+
+
+def test_get_json_with_generation_bounds_the_re_read():
+    g = _gcs()
+    g._bucket.put("spec.json", b"{}", generation=1)
+    counter = {"n": 1}
+
+    def always_bump():
+        counter["n"] += 1
+        g._bucket.generations["spec.json"] = counter["n"]
+
+    g._bucket.on_download = always_bump
+    with pytest.raises(RuntimeError, match="outrunning"):
+        g.get_json_with_generation("spec.json")
+    assert len(g._bucket.downloads) == 3, "retry is not bounded at 3"
+
+
+def test_get_json_with_generation_treats_a_mid_read_delete_as_absent():
+    g = _gcs()
+    g._bucket.put("spec.json", b"{}", generation=1)
+
+    def delete_it():
+        g._bucket.data.pop("spec.json")
+
+    g._bucket.on_download = delete_it
+    assert g.get_json_with_generation("spec.json") == (None, 0)

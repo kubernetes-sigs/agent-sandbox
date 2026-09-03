@@ -294,6 +294,14 @@ class FleetMember:
 
     def _reconcile_once(self) -> None:
         assignments, changed = self._fetch_assignments()
+        if assignments is None:
+            # Refused payload with no last-good assignment to fall back on
+            # (fresh process start mid schema rollout). Reconciling would
+            # treat the refusal as an empty plan -- the first-pass clause
+            # below fires, the orphan sweep deletes every managed pool, and
+            # the empty set gets cached as last-good. Skip the pass; whatever
+            # the previous pod applied keeps serving.
+            return
         # Re-run when the object changed, on the very first pass, or when the
         # previous pass did not fully apply. Without that last clause a pass
         # that fails partway -- a missing SandboxTemplate, an ApiException out
@@ -360,8 +368,13 @@ class FleetMember:
             assignments.generation, applied, skipped,
         )
 
-    def _fetch_assignments(self) -> tuple[Assignments, bool]:
-        """Return (assignments, changed). `changed` is False if etag matched."""
+    def _fetch_assignments(self) -> tuple[Assignments | None, bool]:
+        """Return (assignments, changed). `changed` is False if etag matched.
+
+        `assignments` is None only when the payload was refused AND no plan
+        has been parsed since this process started, so there is nothing
+        last-good to keep serving. The caller must skip the pass outright.
+        """
         try:
             obj_bytes, etag = self.gcs.get_with_etag(self.paths.assignments)
         except FileNotFoundError:
@@ -393,6 +406,20 @@ class FleetMember:
             # Deliberately do NOT cache the etag: re-reading each tick keeps the
             # log loud for as long as the fleet is stuck, and picks up a
             # corrected plan on the next interval rather than after a restart.
+            if self._last_assignment is None:
+                # Fresh start (e.g. a pod restart mid schema rollout): there is
+                # no last-good assignment to keep serving, and substituting an
+                # empty Assignments() would read as "tear everything down" to
+                # the caller -- the exact teardown this gate exists to prevent.
+                log.error(
+                    "REFUSING assignments.json: schema_version=%s, this member "
+                    "understands %s. It was written by a newer planner, and no "
+                    "plan has been parsed since this process started, so NOT "
+                    "reconciling at all -- pools already on the cluster are "
+                    "left untouched; upgrade this member's image.",
+                    version, sorted(SUPPORTED_SCHEMA_VERSIONS),
+                )
+                return None, False
             log.error(
                 "REFUSING assignments.json: schema_version=%s, this member "
                 "understands %s. It was written by a newer planner. Keeping the "
@@ -400,10 +427,9 @@ class FleetMember:
                 "member's image.",
                 version, sorted(SUPPORTED_SCHEMA_VERSIONS),
                 len(self._last_assignment.clusters.get(
-                    self.cluster_name, ClusterAssignment()).pools)
-                if self._last_assignment else 0,
+                    self.cluster_name, ClusterAssignment()).pools),
             )
-            return self._last_assignment or Assignments(), False
+            return self._last_assignment, False
 
         self._last_etag = etag
         clusters = {

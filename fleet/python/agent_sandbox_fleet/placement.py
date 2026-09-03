@@ -254,7 +254,28 @@ class CapacityAware:
         return best
 
 
+class Pinned:
+    """Explicit operator placement: each model names its cluster in the spec.
+
+    Exists for fleets whose data layer is pre-sharded (e.g. per-cluster
+    secondary-boot-disk shards): the operator already knows the only cluster
+    that can serve each image, so scored placement is not just unnecessary but
+    wrong. Selection is keyed on the MODEL's `cluster` field, which this
+    per-image protocol cannot express, so the planner resolves pinned
+    assignment itself (exactly like the min_clusters positional mode); this
+    class exists to make `pinned` a first-class policy name. select() firing
+    at all means a planner bug — raise rather than guess.
+    """
+
+    def select(self, image: str, registry: PlannerRegistry) -> PlannerCluster:
+        raise RuntimeError(
+            "placement 'pinned' is resolved by the planner from each model's "
+            "`cluster` field; Pinned.select() must never be called"
+        )
+
+
 _REGISTRY: dict[str, type[Placement]] = {
+    "pinned": Pinned,
     "round-robin": RoundRobin,
     "least-loaded": LeastLoaded,
     "capacity-weighted": CapacityWeighted,

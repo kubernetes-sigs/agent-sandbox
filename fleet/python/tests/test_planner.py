@@ -559,7 +559,22 @@ def test_the_archived_spec_records_the_generation_that_was_applied():
     gcs = _RecordingGCS()
     _apply(gcs)
     assn = _apply(gcs)
-    assert gcs.objects[Paths().spec]["generation"] == assn.generation == 2
+    archived = gcs.objects[Paths().spec]
+    assert archived["applied_generation"] == assn.generation == 2
+    assert "generation" not in archived, (
+        "stamping the deprecated input field makes every cmd_status run warn "
+        "about a value apply() itself wrote"
+    )
+
+
+def test_revalidating_the_archive_does_not_trip_the_deprecation_warning(caplog):
+    # cmd_status round-trips the archive through FleetSpec.model_validate, so
+    # the archive must not carry the deprecated `generation` input field.
+    gcs = _RecordingGCS()
+    _apply(gcs)
+    with caplog.at_level(logging.WARNING):
+        planner.FleetSpec.model_validate(gcs.objects[Paths().spec])
+    assert "deprecated" not in caplog.text
 
 
 def test_assignments_are_published_before_the_spec_is_archived():
@@ -619,3 +634,94 @@ def test_published_assignments_carry_the_schema_version():
     gcs = _RecordingGCS()
     _apply(gcs)
     assert gcs.objects[Paths().assignments]["schema_version"] == planner.SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# pinned placement (added 2026-08-28: pre-sharded fleets — SBD shard layouts)
+# ---------------------------------------------------------------------------
+
+def _pinned_spec(**overrides):
+    base = dict(
+        max_concurrent=10,
+        max_pool=20,
+        placement_policy="pinned",
+        cluster_weights={"a": 1.0, "b": 1.0},
+        models=[
+            ModelSpec(image="gcr.io/x/img-1:v1", template_name="tmpl-1",
+                      target_tasks=5, cluster="a"),
+            ModelSpec(image="gcr.io/x/img-2:v1", template_name="tmpl-2",
+                      target_tasks=5, cluster="b"),
+            ModelSpec(image="gcr.io/x/img-3:v1", template_name="tmpl-3",
+                      target_tasks=5, cluster="a"),
+        ],
+    )
+    base.update(overrides)
+    return FleetSpec(**base)
+
+
+def test_pinned_places_each_model_on_its_named_cluster():
+    assn = plan(_pinned_spec(), _registry())
+    a_templates = {p.template for p in assn.clusters["a"].pools}
+    b_templates = {p.template for p in assn.clusters["b"].pools}
+    assert a_templates == {"tmpl-1", "tmpl-3"}
+    assert b_templates == {"tmpl-2"}
+
+
+def test_pinned_requires_a_cluster_on_every_model():
+    spec = _pinned_spec()
+    spec.models[1].cluster = None
+    with pytest.raises(ValueError, match="requires a cluster on every model"):
+        plan(spec, _registry())
+
+
+def test_pinned_to_unknown_or_stale_cluster_fails_the_plan():
+    spec = _pinned_spec()
+    spec.models[0].cluster = "ghost"
+    with pytest.raises(planner.placement.NoClusterAvailableError,
+                       match="pinned"):
+        plan(spec, _registry())
+
+
+def test_pinned_to_drained_cluster_fails_the_plan():
+    reg = _registry()
+    reg.clusters["a"].weight = 0  # drained
+    with pytest.raises(planner.placement.NoClusterAvailableError):
+        plan(_pinned_spec(), reg)
+
+
+def test_pinned_wins_over_min_clusters():
+    # An explicit pin is a stronger statement than the anti-affinity floor.
+    spec = _pinned_spec(min_clusters=2)
+    spec.models = [ModelSpec(image="gcr.io/x/i:v", template_name="only",
+                             target_tasks=5, cluster="a")]
+    assn = plan(spec, _registry())
+    assert [p.template for p in assn.clusters["a"].pools] == ["only"]
+    assert assn.clusters["b"].pools == []
+
+
+def test_pinned_sizing_exact_when_budget_matches_totals():
+    # The pre-sharded recipe: cluster_weights = per-cluster task totals,
+    # max_concurrent = fleet total, max_pool = replicas-per-pool. Hamilton
+    # then hands every cluster exactly its task count and every pool sizes
+    # to exactly target_tasks.
+    spec = _pinned_spec(
+        max_concurrent=15,
+        max_pool=5,
+        cluster_weights={"a": 10.0, "b": 5.0},
+    )
+    # In the real flow inventory.load() copies spec.cluster_weights onto the
+    # registry; plan() reads REGISTRY weights, so mirror that here.
+    reg = _registry()
+    reg.clusters["a"].weight = 10.0
+    reg.clusters["b"].weight = 5.0
+    assn = plan(spec, reg)
+    for c in ("a", "b"):
+        for p in assn.clusters[c].pools:
+            assert p.replicas == 5
+
+
+def test_pinned_other_policies_ignore_the_cluster_field():
+    spec = _pinned_spec(placement_policy="capacity-aware")
+    assn = plan(spec, _registry())  # must not raise, pins are decorative here
+    placed = sum(len(c.pools) for c in assn.clusters.values())
+    assert placed == 3

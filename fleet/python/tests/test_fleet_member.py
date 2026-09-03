@@ -580,6 +580,41 @@ def test_a_refused_payload_does_not_cache_its_etag(caplog):
         assert "REFUSING" in caplog.text, "the refusal must stay loud every tick"
 
 
+def test_a_refusal_on_a_fresh_start_does_not_reconcile_at_all(caplog):
+    # The pod restarted mid schema rollout: _last_assignment is None and the
+    # first payload this process ever sees is one it cannot parse. The refused
+    # path used to substitute an empty Assignments(), and the first-pass clause
+    # in _reconcile_once reconciled it anyway -- sweeping every managed pool as
+    # orphaned and caching the empty set as last-good. A fleet teardown,
+    # triggered by a restart.
+    gcs = _FakeGCS()
+    gcs.obj = (_assignment_bytes(999, 5, []), "etag-bad")
+    fm = _bare_member(gcs=gcs)
+
+    with caplog.at_level(logging.ERROR):
+        assignments, changed = fm._fetch_assignments()
+    assert assignments is None, "there is no last-good assignment to fall back on"
+    assert changed is False
+    assert "REFUSING" in caplog.text
+
+    deleted: list[str] = []
+
+    class _Recorder:
+        def delete_namespaced_custom_object(self, **kw):
+            deleted.append(kw["name"])
+
+    fm.custom_objects = _Recorder()
+    fm._template_exists = lambda t: True
+    fm._ensure_warmpool = lambda gen, pool: None
+    fm._list_managed_pool_names = lambda: ["pool-from-previous-pod"]
+
+    fm._reconcile_once()
+    assert deleted == [], "the previous pod's pools were swept as orphans"
+    assert fm._last_assignment is None, (
+        "an empty set must not be cached as last-good"
+    )
+
+
 def test_a_corrected_plan_is_picked_up_after_a_refusal():
     gcs = _FakeGCS()
     gcs.obj = (_assignment_bytes(999, 5, []), "etag-bad")

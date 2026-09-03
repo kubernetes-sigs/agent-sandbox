@@ -27,6 +27,7 @@ Nothing here runs unless a cluster sets ``ClusterConfig(snapshots=True)``.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from .exceptions import SnapshotError, SnapshotsUnavailable
@@ -116,10 +117,17 @@ class RestoreStatus:
   message: str = ""
 
   def from_snapshot(self, snapshot_uid: str | None = None) -> bool:
-    """True when restored — and, if ``snapshot_uid`` is given, from *that* one."""
+    """True when restored — and, if ``snapshot_uid`` is given, from *that* one.
+
+    The uid is matched as a whole token in the condition message (GKE names the
+    snapshot there), so ``uid-1`` does not match a message about ``uid-10``.
+    """
     if not self.restored:
       return False
-    return not snapshot_uid or snapshot_uid in self.message
+    if not snapshot_uid:
+      return True
+    return re.search(rf"(?<![\w.-]){re.escape(snapshot_uid)}(?![\w.-])",
+                     self.message) is not None
 
 
 def pod_restore_status(core_api, pod_name: str, namespace: str) -> RestoreStatus:

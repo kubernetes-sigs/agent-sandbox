@@ -313,7 +313,12 @@ def test_pod_restore_status_reads_condition():
   st = snap.pod_restore_status(core, "pod", "ns")
   assert st.restored is True
   assert st.from_snapshot("uid-42") and not st.from_snapshot("uid-1")
+  assert not st.from_snapshot("uid-4")               # prefix of uid-42 must not match
+  assert not st.from_snapshot("id-42")               # nor a suffix
   assert st.from_snapshot()                          # no uid → any restore counts
+  st2 = snap.RestoreStatus(True, "PodSnapshot golden-v1-20260903-ab12 restored (uid=x.y)")
+  assert st2.from_snapshot("golden-v1-20260903-ab12") and st2.from_snapshot("x.y")
+  assert not st2.from_snapshot("golden-v1")
 
 
 def test_pod_restore_status_fresh_and_unreadable():

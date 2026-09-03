@@ -100,7 +100,6 @@ controllerConfig: {}
   # sandbox-concurrent-workers: "200"
   # sandbox-warm-pool-max-batch-size: "500"
   # enable-warm-pool-eviction: "false"
-  # allowed-label-domains: "example.com,corp.internal"
 
 service:
   # name sets the name of the controller Service that exposes the metrics endpoint.

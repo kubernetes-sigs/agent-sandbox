@@ -77,6 +77,25 @@ func TestLoadFromConfigMapData_AppliesValues(t *testing.T) {
 	}
 }
 
+func TestLoadFromConfigMapData_IgnoresDocumentationKeys(t *testing.T) {
+	cfg := Defaults()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&strings.Builder{})
+	RegisterFlags(fs, &cfg, func(string) (string, bool) { return "", false })
+
+	data := map[string]string{
+		"_readme":        "This ConfigMap configures the sandbox-router.",
+		".description":   "Another documentation key.",
+		"cluster-domain": "cm.local",
+	}
+	if err := LoadFromConfigMapData(data, fs); err != nil {
+		t.Fatalf("LoadFromConfigMapData should skip _/. keys, got: %v", err)
+	}
+	if cfg.ClusterDomain != "cm.local" {
+		t.Errorf("ClusterDomain: got %q want %q", cfg.ClusterDomain, "cm.local")
+	}
+}
+
 func TestLoadFromConfigMapData_UnknownKeyRejected(t *testing.T) {
 	cfg := Defaults()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)

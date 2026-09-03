@@ -184,7 +184,11 @@ func main() {
 	}
 
 	// Apply ConfigMap overrides from the API server.
-	configMapData := fetchConfigMapData(controllerNamespace)
+	configMapData, err := fetchConfigMapData(controllerNamespace)
+	if err != nil {
+		setupLog.Error(err, "failed to read controller ConfigMap")
+		os.Exit(1)
+	}
 	if overrides, err := internalconfig.ApplyConfigMapData(configMapData, flag.CommandLine); err != nil {
 		setupLog.Error(err, "failed to parse controller config from ConfigMap")
 		os.Exit(1)
@@ -507,13 +511,14 @@ func main() {
 }
 
 // fetchConfigMapData reads the agent-sandbox-config ConfigMap from the
-// API server. Returns nil if the ConfigMap doesn't exist or the API is
-// unreachable (the controller will start with compiled defaults).
-func fetchConfigMapData(namespace string) map[string]string {
+// API server. Returns (nil, nil) if the ConfigMap does not exist (it is
+// optional). Returns a non-nil error on any other failure (RBAC,
+// timeout, client construction) so the caller can exit and let the pod
+// restart rather than silently running on compiled defaults.
+func fetchConfigMapData(namespace string) (map[string]string, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
-		setupLog.Error(err, "unable to get kubeconfig for ConfigMap fetch")
-		return nil
+		return nil, fmt.Errorf("unable to get kubeconfig for ConfigMap fetch: %w", err)
 	}
 	// Bound client construction (RESTMapper discovery) and the Get so a
 	// slow/unreachable API server cannot hang startup indefinitely.
@@ -523,15 +528,14 @@ func fetchConfigMapData(namespace string) map[string]string {
 
 	c, err := client.New(cfg, client.Options{})
 	if err != nil {
-		setupLog.Error(err, "unable to create client for ConfigMap fetch")
-		return nil
+		return nil, fmt.Errorf("unable to create client for ConfigMap fetch: %w", err)
 	}
 	var cm corev1.ConfigMap
 	if err := c.Get(ctx, client.ObjectKey{Name: "agent-sandbox-config", Namespace: namespace}, &cm); err != nil {
-		if !apierrors.IsNotFound(err) {
-			setupLog.Error(err, "unable to fetch agent-sandbox-config ConfigMap, starting with defaults")
+		if apierrors.IsNotFound(err) {
+			return nil, nil
 		}
-		return nil
+		return nil, fmt.Errorf("unable to fetch agent-sandbox-config ConfigMap: %w", err)
 	}
-	return cm.Data
+	return cm.Data, nil
 }

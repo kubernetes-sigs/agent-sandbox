@@ -36,6 +36,11 @@ spec:
       - name: agent-sandbox-controller
         image: {{ include "agent-sandbox.image" . }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         args:
         {{- include "agent-sandbox.controllerArgs" . | nindent 8 }}
         ports:

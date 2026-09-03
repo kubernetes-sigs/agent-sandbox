@@ -65,6 +65,9 @@ func MapFromArgsAndEnv(args []string, lookupEnv func(string) string) string {
 // config package free of k8s.io/client-go imports.
 func LoadFromConfigMapData(data map[string]string, fs *flag.FlagSet) error {
 	for key, value := range data {
+		if strings.HasPrefix(key, "_") || strings.HasPrefix(key, ".") {
+			continue
+		}
 		if fs.Lookup(key) == nil {
 			return fmt.Errorf("unknown config key %q in ConfigMap (must match a --flag name)", key)
 		}

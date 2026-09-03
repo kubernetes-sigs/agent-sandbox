@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -94,29 +95,34 @@ func main() {
 	// Apply ConfigMap values AFTER flag.Parse so they take the highest
 	// precedence — matching the controller's resolution order
 	// (ConfigMap > CLI flags > config file > env > built-in defaults).
-	if cmName != "" {
+	// When the name was not explicitly set (cmName == ""), tolerate
+	// NotFound and skip when not running in a Pod.
+	if cfg.ConfigMapName != "" {
 		ns, err := config.InPodNamespace()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "configmap: %v\n", err)
 			os.Exit(2)
 		}
-		if ns == "" {
+		if ns == "" && cmName != "" {
 			fmt.Fprintf(os.Stderr, "configmap: --config-configmap-name requires running in a Pod (no in-pod namespace found)\n")
 			os.Exit(2)
 		}
-		cmClient, err := buildKubernetesClient(cfg.Kubeconfig)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "configmap: kubernetes client: %v\n", err)
-			os.Exit(2)
-		}
-		cm, err := cmClient.CoreV1().ConfigMaps(ns).Get(context.Background(), cmName, metav1.GetOptions{})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "configmap: get %s/%s: %v\n", ns, cmName, err)
-			os.Exit(2)
-		}
-		if err := config.LoadFromConfigMapData(cm.Data, flag.CommandLine); err != nil {
-			fmt.Fprintf(os.Stderr, "configmap: %v\n", err)
-			os.Exit(2)
+		if ns != "" {
+			cmClient, err := buildKubernetesClient(cfg.Kubeconfig)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "configmap: kubernetes client: %v\n", err)
+				os.Exit(2)
+			}
+			cm, err := cmClient.CoreV1().ConfigMaps(ns).Get(context.Background(), cfg.ConfigMapName, metav1.GetOptions{})
+			if err != nil && (!apierrors.IsNotFound(err) || cmName != "") {
+				fmt.Fprintf(os.Stderr, "configmap: get %s/%s: %v\n", ns, cfg.ConfigMapName, err)
+				os.Exit(2)
+			} else if err == nil {
+				if loadErr := config.LoadFromConfigMapData(cm.Data, flag.CommandLine); loadErr != nil {
+					fmt.Fprintf(os.Stderr, "configmap: %v\n", loadErr)
+					os.Exit(2)
+				}
+			}
 		}
 	}
 

@@ -297,15 +297,23 @@ class K8sHelper:
                     w.stop()
                     raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
 
-    def delete_sandbox_claim(self, name: str, namespace: str):
-        """Deletes a SandboxClaim custom resource."""
+    def delete_sandbox_claim(
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
+    ):
+        """Deletes a SandboxClaim custom resource.
+
+        Args:
+            _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
+                pair) forwarded to the underlying urllib3-based request.
+        """
         try:
             self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
-                name=name
+                name=name,
+                _request_timeout=_request_timeout,
             )
             logging.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:

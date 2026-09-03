@@ -53,6 +53,16 @@ class DeployKindTest(unittest.TestCase):
              os.path.join(_REPO_ROOT, "bin", "KUBECONFIG"),
              "--container-engine", engine])
 
+    def test_env_flag_accepts_true_and_one_case_insensitive(self):
+        for value in ("true", "TRUE", "True", "1", " 1 "):
+            with mock.patch.dict(os.environ, {"FLAG": value}, clear=True):
+                self.assertTrue(deploy_kind._env_flag("FLAG"))
+
+    def test_env_flag_rejects_other_values(self):
+        for value in ("false", "FALSE", "0", "yes", "", " false "):
+            with mock.patch.dict(os.environ, {"FLAG": value}, clear=True):
+                self.assertFalse(deploy_kind._env_flag("FLAG"))
+
     def test_default_flow(self):
         calls = self._run_with()
         self._assert_create_call(calls, "agent-sandbox", "docker")

@@ -57,8 +57,8 @@ _spec.loader.exec_module(_latest_published_tag)
 
 
 def _env_flag(name):
-    """Treat an env var as true when it is literally "true"."""
-    return os.environ.get(name, "") == "true"
+    """Treat an env var as true when it is "true" or "1" (case-insensitive)."""
+    return os.environ.get(name, "").strip().lower() in ("true", "1")
 
 
 def _run_tool(tool, *args):

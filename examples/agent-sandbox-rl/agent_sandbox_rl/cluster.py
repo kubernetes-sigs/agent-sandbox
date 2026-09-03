@@ -103,12 +103,22 @@ class Cluster:
 
   @property
   def sandbox_client(self):
-    """SDK SandboxClient using this cluster's K8sHelper (lazy, injected)."""
+    """SDK SandboxClient using this cluster's K8sHelper (lazy, injected).
+
+    With ``ClusterConfig(snapshots=True)`` this is the SDK's GKE PodSnapshot-
+    capable client instead (same claim API; its sandboxes add snapshot /
+    suspend / resume / restore — see `agent_sandbox_rl.snapshots`), bound to
+    this cluster's helper *before* its CRD check runs.
+    """
     if self._sandbox_client is None:
-      from k8s_agent_sandbox import SandboxClient
-      c = (SandboxClient(tracer_config=self.tracer_config)
-           if self.tracer_config is not None else SandboxClient())
-      c.k8s_helper = self.k8s_helper
+      if getattr(self.config, "snapshots", False):
+        from .snapshots import build_snapshot_client
+        c = build_snapshot_client(self.k8s_helper, tracer_config=self.tracer_config)
+      else:
+        from k8s_agent_sandbox import SandboxClient
+        c = (SandboxClient(tracer_config=self.tracer_config)
+             if self.tracer_config is not None else SandboxClient())
+        c.k8s_helper = self.k8s_helper
       self._sandbox_client = c
     return self._sandbox_client
 

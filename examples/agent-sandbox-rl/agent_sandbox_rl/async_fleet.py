@@ -165,17 +165,40 @@ class AsyncSandboxFleet:
     await self._to_thread(self._fleet.setup, prepull)
     return self
 
-  async def acquire(self, task: Task) -> SandboxHandle:
-    return await self._to_thread(self._fleet.acquire, task)
+  async def acquire(self, task: Task, *, snapshot_uid: str | None = None,
+                    pod_annotations: dict | None = None) -> SandboxHandle:
+    return await self._to_thread(self._fleet.acquire, task, snapshot_uid=snapshot_uid,
+                                 pod_annotations=pod_annotations)
 
   async def acquire_batch(self, tasks: list[Task]) -> list[SandboxHandle]:
     return list(await asyncio.gather(*(self.acquire(t) for t in tasks)))
 
-  async def release(self, handle: SandboxHandle):
-    return await self._to_thread(self._fleet.release, handle)
+  async def release(self, handle: SandboxHandle, *, delete_snapshots: bool = False):
+    return await self._to_thread(self._fleet.release, handle,
+                                 delete_snapshots=delete_snapshots)
 
   async def release_all(self):
     await asyncio.gather(*(self.release(h) for h in self.handles()))
+
+  # --- GKE Pod Snapshots (blocking SDK calls, run on the pool) ------------- #
+  # The handle's snapshot methods block (the SDK extension is synchronous); use
+  # these from an event loop instead of calling the handle directly.
+  async def snapshot(self, handle: SandboxHandle, name: str | None = None, *,
+                     timeout: int = 180) -> str:
+    return await self._to_thread(self._fleet.snapshot, handle, name, timeout=timeout)
+
+  async def suspend(self, handle: SandboxHandle, *, snapshot: bool = True,
+                    timeout: int = 180):
+    return await self._to_thread(self._fleet.suspend, handle, snapshot=snapshot,
+                                 timeout=timeout)
+
+  async def resume(self, handle: SandboxHandle, *, timeout: int = 180) -> bool:
+    return await self._to_thread(self._fleet.resume, handle, timeout=timeout)
+
+  async def restore(self, handle: SandboxHandle, snapshot_uid: str, *,
+                    timeout: int = 180) -> None:
+    return await self._to_thread(self._fleet.restore, handle, snapshot_uid,
+                                 timeout=timeout)
 
   async def teardown(self, delete_namespace: bool = False):
     return await self._to_thread(self._fleet.teardown, delete_namespace)

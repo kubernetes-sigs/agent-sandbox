@@ -46,3 +46,13 @@ DEFAULT_LABELS = {MANAGED_BY_LABEL: MANAGED_BY_VALUE}
 # Per-run label stamped on every resource a fleet creates, so an orphaned run's
 # resources can always be swept by the reaper (`reap(run_id=…)`).
 RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"
+
+# GKE Pod Snapshots (podsnapshot.gke.io) — used only when a cluster opts in with
+# ClusterConfig(snapshots=True). Mirrors the SDK's gke_extensions constants.
+PODSNAPSHOT_GROUP = "podsnapshot.gke.io"
+PODSNAPSHOT_VERSION = "v1"
+PODSNAPSHOTS_PLURAL = "podsnapshots"
+PODSNAPSHOT_TRIGGERS_PLURAL = "podsnapshotmanualtriggers"
+PODSNAPSHOT_POLICIES_PLURAL = "podsnapshotpolicies"
+# Pod annotation pinning a pod to one snapshot (opts out of "latest Ready wins").
+PODSNAPSHOT_NAME_ANNOTATION = "podsnapshot.gke.io/ps-name"

@@ -36,6 +36,7 @@ CONCURRENCY = 3
 SERIAL_FRACTION_LIMIT = 0.6
 TICKER_INTERVAL_S = 0.02
 TICKER_GAP_LIMIT_S = 0.5
+ROUTABLE_PROBE_PATH = "routability-probe"
 
 WARMPOOL_NAME = "async-client-warmpool"
 
@@ -180,7 +181,7 @@ async def _assert_event_loop_not_blocked(client, warmpool_name, namespace):
         sandbox = await client.create_sandbox(
             warmpool=warmpool_name, namespace=namespace
         )
-        await sandbox.files.exists(".")
+        await sandbox.files.exists(ROUTABLE_PROBE_PATH)
         result = await sandbox.commands.run("echo hello")
         assert result.exit_code == 0, (
             f"Command failed with exit code {result.exit_code}: {result.stderr}"

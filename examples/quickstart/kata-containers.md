@@ -95,6 +95,7 @@ EOF
 
 kubectl wait --for=condition=Ready sandboxclaim/isolation-test --timeout=60s
 
+# The backing pod shares the Sandbox name
 POD_NAME=$(kubectl get sandboxclaim isolation-test -o jsonpath='{.status.sandbox.name}')
 
 # Verify Kata runtime

@@ -69,8 +69,8 @@ export KUBECONFIG="$KUBECFG_FILE"
 # Cleanup function
 cleanup() {
     echo "Cleaning up..."
-    kubectl delete --ignore-not-found -f "$PROJECT_ROOT/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"
-    kubectl delete --ignore-not-found sandboxclaim sandbox-computeruse-claim
+    kubectl delete --ignore-not-found -n agent-sandbox-system -f "$PROJECT_ROOT/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"
+    kubectl delete --ignore-not-found sandboxclaim -l agents.x-k8s.io/created-by=python-client
     kubectl delete --ignore-not-found secret gemini-api-key
     kubectl delete --ignore-not-found -f "$SCRIPT_DIR/sandbox-gemini-computer-use.yaml"
     rm -f "$KUBECFG_FILE" # Delete the temporary kubeconfig file
@@ -78,11 +78,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Applying CRD and deployment..."
-(cd "$PROJECT_ROOT/clients/python/agentic-sandbox-client/sandbox-router" && kubectl apply -f sandbox_router.yaml)
+(cd "$PROJECT_ROOT/clients/python/agentic-sandbox-client/sandbox-router" && ROUTER_IMAGE="${SANDBOX_ROUTER_IMG}" envsubst '$ROUTER_IMAGE' < sandbox_router.yaml | kubectl apply -n agent-sandbox-system -f -)
 kubectl apply -f "$SCRIPT_DIR/sandbox-gemini-computer-use.yaml"
 
 # Ensure the local client is up-to-date for running tests
-(cd "$PROJECT_ROOT" && pip install -e . --break-system-packages)
+(cd "$PROJECT_ROOT/clients/python/agentic-sandbox-client" && pip install -e . --break-system-packages)
 
 echo "Running the programmatic test..."
 (cd "$PROJECT_ROOT" && python3 -m unittest "clients.python.agentic-sandbox-client.test_computer_use_extension")

@@ -51,7 +51,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 2. Deploy the Sandbox Router:
 
 The router securely funnels traffic from your local Ray script to the GKE sandboxes.
-(Note: Ensure you have built and replaced the IMAGE_PLACEHOLDER in sandbox_router.yaml as per the [router documentation](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/python/agentic-sandbox-client/sandbox-router)).
+(Note: Ensure you have built and replaced the `${ROUTER_IMAGE}` placeholder in sandbox_router.yaml as per the [router documentation](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/python/agentic-sandbox-client/sandbox-router)).
 
 ```bash
 kubectl apply -f clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml

@@ -26,7 +26,9 @@ This composition can be achieved in multiple ways:
 
 This example demonstrates the second approach, using KRO to define a new `AgenticSandbox` CRD that encapsulates a `Sandbox`, a `NetworkPolicy`, and a `Service`.
 
-The `Service` created here is distinct from the one created by the `agent-sandbox` controller. This layering allows for more complex networking configurations and showcases the value of composing resources.
+> **Note:** KRO serves a single schema version per RGD. If you previously applied an older revision of this example (which declared `v1alpha1`), delete the old RGD and any `AgenticSandbox` instances first (`kubectl delete agenticsandbox --all && kubectl delete rgd agentic-sandbox`), then apply this one and recreate your instances at `v1beta1`.
+
+The controller only creates its own headless `Service` when the Sandbox sets `spec.service: true`; this example leaves it unset, so the `Service` defined here is the only one. This layering allows for more complex networking configurations and showcases the value of composing resources.
 
 ## Brief introduction to KRO
 

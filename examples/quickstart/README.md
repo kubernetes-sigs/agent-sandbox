@@ -123,6 +123,7 @@ EOF
 
 kubectl wait --for=condition=Ready sandboxclaim/quickstart-test --timeout=60s
 
+# The backing pod shares the Sandbox name
 POD_NAME=$(kubectl get sandboxclaim quickstart-test -o jsonpath='{.status.sandbox.name}')
 echo "Sandbox pod: $POD_NAME"
 
@@ -131,12 +132,12 @@ kubectl delete sandboxclaim quickstart-test
 
 ### Understanding How WarmPool Works
 
-The WarmPool creates pre-warmed **Sandbox** resources that are ready to be claimed:
+The WarmPool creates pre-warmed **Sandbox** resources (each backed by a running pod) that are ready to be claimed:
 
-1. **WarmPool creates sandboxes directly** with label `agents.x-k8s.io/warm-pool-sandbox=<hash>`
-2. When you create a **SandboxClaim**, the controller claims a sandbox from the pool
+1. **WarmPool creates Sandbox resources** labeled `agents.x-k8s.io/warm-pool-sandbox=<pool-name-hash>` (the label is propagated to the backing pods)
+2. When you create a **SandboxClaim**, the controller adopts a ready Sandbox from the pool (the Sandbox keeps its pool-generated name and reports it at `.status.sandbox.name`)
 3. The claimed sandbox's backing pod name matches the sandbox name
-4. **WarmPool automatically creates a replacement sandbox** to maintain replica count
+4. **WarmPool automatically creates a replacement Sandbox** to maintain replica count
 
 Performance comparison:
 - **With WarmPool**: Sub-2 second allocation (pod already running)
@@ -188,11 +189,11 @@ envsubst '${ROUTER_IMAGE}' \
 # Check WarmPool status
 kubectl get sandboxwarmpool python-warmpool
 
-# Check pre-warmed PODS (not Sandboxes - WarmPool creates pods directly)
-kubectl get pods -l agents.x-k8s.io/pool
+# Check pre-warmed pods
+kubectl get pods -l agents.x-k8s.io/warm-pool-sandbox
 
 # Wait for pods to be ready
-kubectl wait --for=condition=Ready pod -l agents.x-k8s.io/pool --timeout=60s
+kubectl wait --for=condition=Ready pod -l agents.x-k8s.io/warm-pool-sandbox --timeout=60s
 ```
 
 Expected output:
@@ -244,7 +245,8 @@ Run it against the quickstart namespace and template:
 ```bash
 python clients/python/agentic-sandbox-client/test_client.py \
     --warmpool-name python-warmpool \
-    --namespace agent-sandbox-demo
+    --namespace agent-sandbox-demo \
+    --router-namespace agent-sandbox-system
 ```
 
 ### 9.2 Verify WarmPool Performance
@@ -252,8 +254,20 @@ python clients/python/agentic-sandbox-client/test_client.py \
 To confirm that the WarmPool is pre-warming pods, check whether the pod existed before the claim:
 
 ```bash
-# Pick a claim from the warmpool
-CLAIM_NAME=$(kubectl get sandboxclaim -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+# The test client deletes its claims on exit, so create a throwaway claim to inspect
+CLAIM_NAME=warmpool-perf-test
+cat <<EOF | kubectl apply -f -
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: ${CLAIM_NAME}
+  namespace: agent-sandbox-demo
+spec:
+  warmPoolRef:
+    name: python-warmpool
+EOF
+kubectl wait --for=condition=Ready sandboxclaim/${CLAIM_NAME} --timeout=60s
+# The backing pod shares the Sandbox name
 POD_NAME=$(kubectl get sandboxclaim ${CLAIM_NAME} -o jsonpath='{.status.sandbox.name}' 2>/dev/null)
 
 if [ -n "$POD_NAME" ] && [ -n "$CLAIM_NAME" ]; then
@@ -267,8 +281,9 @@ if [ -n "$POD_NAME" ] && [ -n "$CLAIM_NAME" ]; then
         echo "Pod created on-demand (not from warmpool)"
     fi
 else
-    echo "No sandbox claims found. Run the test client first (Step 9.1)."
+    echo "Claim did not bind to a sandbox; check the warmpool status."
 fi
+kubectl delete sandboxclaim ${CLAIM_NAME}
 ```
 
 ## Step 10: Cleanup

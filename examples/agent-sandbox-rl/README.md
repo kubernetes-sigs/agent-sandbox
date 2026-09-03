@@ -484,7 +484,9 @@ the `k8s-agent-sandbox` SDK's GKE extension on its handles; nothing about pools,
 sizing, or strategies changes.
 
 **Prerequisites** (cluster side; the SDK creates only the per-snapshot triggers):
-a GKE cluster (≥ 1.35.3) with Pod Snapshots enabled and a **gVisor** runtime class;
+a GKE cluster on **1.35.3-gke.1234000 or later** with Pod Snapshots enabled (see
+[Prepare for Pod snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots-prepare))
+and a **gVisor** runtime class;
 a `PodSnapshotStorageConfig` (GCS bucket, `tokenSource: podKSA`) and a
 `PodSnapshotPolicy` whose grouping rules include `agents.x-k8s.io/sandbox-name-hash`
 and whose selector matches your template's pod labels (every fleet pod carries

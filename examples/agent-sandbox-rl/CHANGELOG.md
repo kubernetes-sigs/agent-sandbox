@@ -11,7 +11,8 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   check, so multi-context fleets check the right cluster). Everything else is unchanged
   when unset.
 - **`SandboxHandle.snapshot() / suspend() / resume() / restore(uid) / list_snapshots()
-  / delete_snapshot(s)() / is_suspended / refresh()`** — thin wrappers over the SDK
+  / delete_snapshot(uid) / delete_snapshots() / is_suspended / refresh()`** — thin
+  wrappers over the SDK
   extension. Resume/restore bring up a new pod: the handle refreshes `pod_name` /
   `pod_ip` and drops its exec session; identity (`hostname` / `sandbox_id` /
   `claim_name`) is stable. Extension result objects map to `SnapshotError`

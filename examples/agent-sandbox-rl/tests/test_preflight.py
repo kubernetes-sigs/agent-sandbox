@@ -193,3 +193,17 @@ def test_registry_preflight_passes_cluster_snapshot_flag(monkeypatch):
   b = types.SimpleNamespace(name="b", config=types.SimpleNamespace())
   pf.preflight([a, b])
   assert seen == {"a": True, "b": False}
+
+
+def test_snapshots_served_version_mismatch_is_hard_failure(monkeypatch):
+  def route(name):
+    if name.endswith(constants.PODSNAPSHOT_GROUP):
+      return _crd(("v1alpha1",))            # CRD present, but not serving v1
+    return _crd()
+  _patch(monkeypatch, crd_for=route)
+  rep = pf.preflight_cluster(_snapshot_cluster(), snapshots=True,
+                             require_runtime_class="gvisor")
+  assert not rep.ok
+  bad = {ch.name: ch.detail for ch in rep.failures}
+  assert set(bad) == {"crd:podsnapshots", "crd:podsnapshotmanualtriggers"}
+  assert all(detail == "v1alpha1" for detail in bad.values())

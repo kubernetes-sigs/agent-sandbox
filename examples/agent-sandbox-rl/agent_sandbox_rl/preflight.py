@@ -86,7 +86,8 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
                       image_pull_secret: str | None = None,
                       namespace: str | None = None,
                       validate_template=None,
-                      sample_image: str = "busybox:latest") -> PreflightReport:
+                      sample_image: str = "busybox:latest",
+                      snapshots: bool = False) -> PreflightReport:
   """Run all checks on one cluster and return a `PreflightReport`.
 
   If ``validate_template`` (a `TemplateSpec`) is given, the hand-built
@@ -94,6 +95,12 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
   against the live CRD schema — a clear schema rejection (HTTP 400/422) is a hard
   failure (catches drift the mocked unit tests can't); other errors (RBAC,
   dry-run unsupported) are warnings so we never false-fail.
+
+  With ``snapshots`` (the cluster opted into GKE Pod Snapshots) the PodSnapshot
+  CRDs must be served and a gVisor runtime class configured (hard failures —
+  the SDK client refuses to build without the CRDs, and GKE only snapshots
+  gVisor pods); a missing ``PodSnapshotPolicy`` in the namespace is a warning
+  (the SDK creates only triggers, so without a policy snapshots fail later).
   """
   r = PreflightReport(cluster.name)
   ns = namespace or cluster.namespace
@@ -167,6 +174,41 @@ def preflight_cluster(cluster, *, require_runtime_class: str | None = None,
     except Exception as e:  # noqa: BLE001 — connectivity / dry-run unsupported
       r.add("manifests", False, str(e), warn_only=True)
 
+  # 8. GKE Pod Snapshots (only when this cluster opted in)
+  if snapshots:
+    for plural in (constants.PODSNAPSHOTS_PLURAL, constants.PODSNAPSHOT_TRIGGERS_PLURAL):
+      name = f"{plural}.{constants.PODSNAPSHOT_GROUP}"
+      try:
+        crd = crd_api.read_custom_resource_definition(name)
+        served = [v.name for v in crd.spec.versions if v.served]
+        r.add(f"crd:{plural}", constants.PODSNAPSHOT_VERSION in served,
+              ",".join(served) or "none")
+      except client.ApiException as e:
+        r.add(f"crd:{plural}", False,
+              "not found (enable Pod Snapshots on the GKE cluster)"
+              if e.status == 404 else str(e))
+    if not require_runtime_class:
+      r.add("snapshots:runtime_class", False,
+            "Pod Snapshots need a gVisor runtime class — set "
+            "TemplateSpec/ClusterConfig runtime_class='gvisor'")
+    else:
+      # Only the literal GKE class name is known-good; anything else may still
+      # be gVisor under another name, so warn rather than fail.
+      r.add("snapshots:runtime_class", require_runtime_class == "gvisor",
+            require_runtime_class, warn_only=require_runtime_class != "gvisor")
+    try:
+      pols = cluster.custom_api.list_namespaced_custom_object(
+          constants.PODSNAPSHOT_GROUP, constants.PODSNAPSHOT_VERSION, ns,
+          constants.PODSNAPSHOT_POLICIES_PLURAL)
+      n = len((pols or {}).get("items") or [])
+      r.add("snapshots:policy", n > 0,
+            f"{n} PodSnapshotPolicy in {ns}" if n else
+            f"no PodSnapshotPolicy in {ns} — snapshots will fail (the SDK "
+            "creates only triggers; apply a policy grouped by "
+            f"{constants.SANDBOX_NAME_HASH_LABEL})", warn_only=True)
+    except Exception as e:  # noqa: BLE001 — RBAC etc.; advisory only
+      r.add("snapshots:policy", False, str(e), warn_only=True)
+
   return r
 
 
@@ -183,7 +225,8 @@ def preflight(registry, *, runtime_class: str | None = None,
   for c in registry:
     rep = preflight_cluster(
         c, require_runtime_class=runtime_class,
-        image_pull_secret=image_pull_secret, namespace=namespace)
+        image_pull_secret=image_pull_secret, namespace=namespace,
+        snapshots=getattr(getattr(c, "config", None), "snapshots", False))
     reports[c.name] = rep
     for w in rep.warnings:
       logger.warning("[%s] %s: %s", c.name, w.name, w.detail)

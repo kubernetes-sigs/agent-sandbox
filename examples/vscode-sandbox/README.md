@@ -211,7 +211,7 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
 
 1. Get the Gateway IP:
 ```bash
-export GATEWAY_IP=$(kubectl get gateway external-http-gateway -n default -o jsonpath='{.status.addresses[0].value}')
+export GATEWAY_IP=$(kubectl get gateway external-http-gateway -n agent-sandbox-system -o jsonpath='{.status.addresses[0].value}')
 echo "Gateway IP: $GATEWAY_IP"
 ```
 
@@ -240,7 +240,7 @@ For local development, port-forward to the **Router Service** (do not port-forwa
 1. Start the Tunnel: 
 ```bash 
 # Forward local 8080 to the Router Service
-kubectl port-forward svc/sandbox-router-svc 8080:8080 -n default
+kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system
 ```
 
 - **Access via Curl:** You need to send the correct headers to route traffic to your specific sandbox. Via curl, set:

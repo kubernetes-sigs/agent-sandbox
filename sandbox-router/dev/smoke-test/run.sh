@@ -48,7 +48,7 @@ log() { printf '\n=== %s ===\n' "$*"; }
 # smoke-curl doesn't exist yet to do an actively-serving probe.
 wait_router_endpoints() {
   for _ in $(seq 1 30); do
-    if kubectl get endpoints sandbox-router-svc -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -q .; then
+    if kubectl -n agent-sandbox-system get endpoints sandbox-router-svc -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -q .; then
       return 0
     fi
     sleep 1
@@ -66,7 +66,7 @@ wait_router_endpoints() {
 wait_router_serving() {
   for _ in $(seq 1 30); do
     if kubectl exec smoke-curl -- curl -sS --max-time 2 -o /dev/null \
-        "http://sandbox-router-svc.default.svc.cluster.local:8080/healthz" >/dev/null 2>&1; then
+        "http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/healthz" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -116,6 +116,7 @@ kind load docker-image "${ROUTER_IMAGE}" --name "${CLUSTER_NAME}"
 
 # --- 3. Apply deploy manifests, with the smoke image. --------------------
 log "Applying deploy manifests"
+kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f sandbox-router/deploy/serviceaccount.yaml
 kubectl apply -f sandbox-router/deploy/rbac.yaml
 kubectl apply -f sandbox-router/deploy/service.yaml
@@ -129,7 +130,7 @@ sed -e "s|registry.k8s.io/agent-sandbox/sandbox-router-go:latest|${ROUTER_IMAGE}
   | kubectl apply -f -
 
 log "Waiting for router rollout"
-kubectl -n default rollout status deploy/sandbox-router --timeout=120s
+kubectl -n agent-sandbox-system rollout status deploy/sandbox-router --timeout=120s
 wait_router_endpoints
 
 # --- 4. Create a fake sandbox pod that the router's cache should see. ---
@@ -217,7 +218,7 @@ STATUS=$(in_cluster_curl \
   -H "X-Sandbox-ID: ${SANDBOX_NAME}" \
   -H "X-Sandbox-Namespace: ${SANDBOX_NAMESPACE}" \
   -H "X-Sandbox-Port: 8888" \
-  http://sandbox-router-svc.default.svc.cluster.local:8080/)
+  http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/)
 BODY=$(kubectl exec smoke-curl -- cat /tmp/body)
 if [[ "${STATUS}" != "200" ]]; then
   echo "FAIL: DNS-form expected 200, got ${STATUS}; body=${BODY}" >&2
@@ -233,7 +234,7 @@ STATUS=$(in_cluster_curl \
   -H "X-Sandbox-Uid: ${SANDBOX_UID}" \
   -H "X-Sandbox-Namespace: ${SANDBOX_NAMESPACE}" \
   -H "X-Sandbox-Port: 8888" \
-  http://sandbox-router-svc.default.svc.cluster.local:8080/)
+  http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/)
 BODY=$(kubectl exec smoke-curl -- cat /tmp/body)
 if [[ "${STATUS}" != "200" ]]; then
   echo "FAIL: UID-cache expected 200, got ${STATUS}; body=${BODY}" >&2
@@ -251,7 +252,7 @@ echo "PASS: UID cache hit"
 log "Test: metrics endpoint exposes the new collectors"
 # Scrape every router replica and union the output; load-balancing
 # means an arbitrary pod may have seen no traffic yet.
-ROUTER_IPS=$(kubectl get pod -l app.kubernetes.io/name=sandbox-router -o jsonpath='{.items[*].status.podIP}')
+ROUTER_IPS=$(kubectl -n agent-sandbox-system get pod -l app.kubernetes.io/name=sandbox-router -o jsonpath='{.items[*].status.podIP}')
 METRICS=""
 for ip in ${ROUTER_IPS}; do
   METRICS+=$'\n'"$(kubectl exec smoke-curl -- curl -sS "http://${ip}:9090/metrics")"
@@ -287,7 +288,7 @@ STATUS=$(in_cluster_curl \
   -H "X-Sandbox-Namespace: ${SANDBOX_NAMESPACE}" \
   -H "X-Sandbox-Port: 8888" \
   --max-time 5 \
-  http://sandbox-router-svc.default.svc.cluster.local:8080/ || true)
+  http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/ || true)
 # Give the informer a moment to settle and re-scrape metrics.
 sleep 1
 METRICS=""
@@ -314,17 +315,17 @@ echo "PASS: pod deletion observed (status=${STATUS}; invalidations ${BEFORE} →
 # the 401 path.
 log "Applying tokenreview RBAC + reconfiguring router for --authz-mode=tokenreview"
 kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
-kubectl -n default patch deploy sandbox-router --type=json -p='[
+kubectl -n agent-sandbox-system patch deploy sandbox-router --type=json -p='[
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--authz-mode=tokenreview"},
   {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--authz-tokenreview-require-token=true"}
 ]'
-kubectl -n default rollout status deploy/sandbox-router --timeout=120s
+kubectl -n agent-sandbox-system rollout status deploy/sandbox-router --timeout=120s
 wait_router_serving
 
 log "Test: tokenreview rejects requests without Bearer"
 STATUS=$(in_cluster_curl \
   -H "X-Sandbox-ID: anything" \
-  http://sandbox-router-svc.default.svc.cluster.local:8080/)
+  http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/)
 if [[ "${STATUS}" != "401" ]]; then
   echo "FAIL: expected 401, got ${STATUS}" >&2
   exit 1
@@ -367,7 +368,7 @@ STATUS=$(in_cluster_curl \
   -H "X-Sandbox-Namespace: ${SANDBOX_NAMESPACE}" \
   -H "X-Sandbox-Port: 8888" \
   -H "Authorization: Bearer ${SMOKE_TOKEN}" \
-  http://sandbox-router-svc.default.svc.cluster.local:8080/)
+  http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/)
 BODY=$(kubectl exec smoke-curl -- cat /tmp/body)
 if [[ "${STATUS}" != "200" ]]; then
   echo "FAIL: expected 200 with valid token, got ${STATUS}; body=${BODY}" >&2

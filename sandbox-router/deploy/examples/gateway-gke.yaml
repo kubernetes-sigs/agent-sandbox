@@ -1,12 +1,12 @@
 # A Gateway to create an endpoint for external HTTP traffic on GKE.
-# Note: This example uses `namespace: default` and limits routes to the `Same` namespace.
+# Note: This example uses `namespace: agent-sandbox-system` and limits routes to the `Same` namespace.
 # The sandbox-router Service must either be in this same namespace, or you must
 # configure cross-namespace Gateway API wiring (e.g. ReferenceGrant).
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: external-http-gateway
-  namespace: default
+  namespace: agent-sandbox-system
 spec:
   gatewayClassName: gke-l7-global-external-managed # Specific to GKE; creates all necessary GatewayClass resources; choose a different gateway class to use other Gateway implementations
   listeners:
@@ -22,7 +22,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: sandbox-router-route
-  namespace: default
+  namespace: agent-sandbox-system
 spec:
   parentRefs:
   - name: external-http-gateway # This must match the name of the Gateway
@@ -41,7 +41,7 @@ apiVersion: networking.gke.io/v1 # Specific to GKE
 kind: HealthCheckPolicy
 metadata:
   name: router-health-check-policy
-  namespace: default
+  namespace: agent-sandbox-system
 spec:
   targetRef:
     group: ""

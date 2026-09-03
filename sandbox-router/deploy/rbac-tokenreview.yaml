@@ -26,4 +26,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: sandbox-router
-  namespace: default
+  namespace: agent-sandbox-system

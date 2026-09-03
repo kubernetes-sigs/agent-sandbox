@@ -6,7 +6,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: sandbox-router
-  namespace: default
+  namespace: agent-sandbox-system
   labels:
     app.kubernetes.io/name: sandbox-router
     app.kubernetes.io/component: sandbox-router

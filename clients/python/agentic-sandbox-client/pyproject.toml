@@ -51,7 +51,8 @@ async = [
     "kubernetes_asyncio<34.0.0",
 ]
 # Required for the sandboxd runtime (SandboxdPodTunnelConnectionConfig):
-# command execution runs over gRPC ProcessService. The legacy python-runtime
+# command execution runs over gRPC ProcessService. The generated process stubs
+# validate a protobuf runtime of at least 7.36.1. The legacy python-runtime
 # needs none of this.
 grpc = [
     "grpcio>=1.83.0",

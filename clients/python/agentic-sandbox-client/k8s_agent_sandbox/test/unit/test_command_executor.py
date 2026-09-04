@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for synchronous and asynchronous command execution."""
+
+import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from k8s_agent_sandbox.commands.command_executor import CommandExecutor, _extract_executable
 from k8s_agent_sandbox.commands.async_command_executor import AsyncCommandExecutor
@@ -59,6 +63,7 @@ class TestCommandExecutor(unittest.TestCase):
 
 
 class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
+    """Verify async command routing, results, and tracing."""
 
     @patch("k8s_agent_sandbox.commands.async_command_executor.trace")
     async def test_async_executor_logs_executable(self, mock_trace):
@@ -67,6 +72,7 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         mock_trace.get_current_span.return_value = mock_span
 
         mock_connector = MagicMock()
+        mock_connector.is_sandboxd.return_value = False
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "stdout": "hello_async",
@@ -84,6 +90,41 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         mock_span.set_attribute.assert_any_call("sandbox.command.executable", "python3")
         mock_span.set_attribute.assert_any_call("sandbox.exit_code", 0)
         self.assertEqual(result.stdout, "hello_async")
+
+    async def test_async_sandboxd_executor_uses_grpc(self):
+        mock_connector = MagicMock()
+        mock_connector.is_sandboxd.return_value = True
+        mock_connector.connect = AsyncMock()
+        mock_connector.grpc_channel = AsyncMock(return_value=MagicMock())
+        mock_response = MagicMock(stdout=b"hello", stderr=b"", exit_code=0)
+        mock_pb2 = SimpleNamespace(
+            ProcessConfig=MagicMock(), ExecuteRequest=MagicMock()
+        )
+        mock_pb2_grpc = SimpleNamespace(ProcessServiceStub=MagicMock())
+        mock_pb2_grpc.ProcessServiceStub.return_value.Execute = AsyncMock(
+            return_value=mock_response
+        )
+        mock_grpc = SimpleNamespace(RpcError=Exception)
+
+        with patch.dict(
+            sys.modules,
+            {
+                "grpc": mock_grpc,
+                "k8s_agent_sandbox.commands._process_stubs": SimpleNamespace(
+                    process_pb2=mock_pb2,
+                    process_pb2_grpc=mock_pb2_grpc,
+                )
+            },
+        ):
+            executor = AsyncCommandExecutor(
+                mock_connector, MagicMock(), "sandbox-client"
+            )
+            result = await executor.run("echo hello", timeout=12)
+
+        mock_connector.connect.assert_awaited_once()
+        mock_pb2.ExecuteRequest.assert_called_once()
+        self.assertEqual(result.stdout, "hello")
+        self.assertEqual(result.exit_code, 0)
 
 
 if __name__ == "__main__":

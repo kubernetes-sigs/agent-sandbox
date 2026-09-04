@@ -285,6 +285,14 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubelet.eventQPS=5 \
   --set cluster.spec.kubelet.eventBurst=50
 
+# kubeControllerManager.nodeCIDRMaskSize: each node's pod CIDR is carved
+# out of the cluster pod CIDR (10.4.0.0/14 on kOps GCE), and the mask
+# bounds the cluster along two axes:
+#   pods per node  <= 2^(32-mask) - 2   (/24 -> 254, /23 -> 510)
+#   nodes          <= 2^(mask-14)       (/24 -> 1024, /23 -> 512, /22 -> 256)
+# /23 balances the two axes: up to 510 pods/node AND up to 512 nodes.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set "cluster.spec.kubeControllerManager.nodeCIDRMaskSize=${STRESS_NODE_CIDR_MASK_SIZE:-23}"
 
 if [[ "${CNI}" == "cilium" ]]; then
   # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the

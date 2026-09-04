@@ -81,6 +81,7 @@ func main() {
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
+	var disableSandboxEvents bool
 	var disableClaimEvents bool
 	var disableClaimObservabilityAnnotations bool
 
@@ -145,6 +146,9 @@ func main() {
 			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
 			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
 			"this flag is enabled.")
+	flag.BoolVar(&disableSandboxEvents, "disable-sandbox-events", false,
+		"Disable Kubernetes Event emission from the Sandbox controller (its Eventf calls become no-ops), "+
+			"reducing API server writes during large warm-pool fills. Default false (events enabled).")
 	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large claim bursts. Default false (events enabled).")
@@ -376,10 +380,19 @@ func main() {
 			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
 	}
 
+	// Every Eventf site in the sandbox controller is nil-guarded on the
+	// recorder, so a nil recorder cleanly disables event emission.
+	var sandboxRecorder events.EventRecorder
+	if disableSandboxEvents {
+		setupLog.Info("Sandbox controller event emission disabled (--disable-sandbox-events)")
+	} else {
+		sandboxRecorder = mgr.GetEventRecorder("sandbox-controller")
+	}
+
 	if err = (&controllers.SandboxReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorder("sandbox-controller"),
+		Recorder:          sandboxRecorder,
 		Tracer:            instrumenter,
 		ClusterDomain:     clusterDomain,
 		WriteBehindWindow: sandboxWriteBehindWindow,

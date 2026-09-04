@@ -1,0 +1,50 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# Sample FleetSpec — matches python/agent_sandbox_fleet/planner.py:FleetSpec.
+# Apply with `fleetctl apply -f demo/fleet-spec.yaml`.
+#
+# Sizing for a "sustained 20/s stress across 5 clusters" clean-run demo:
+#   - 5 clusters × 100 warm pods each = 500 warm sandboxes fleet-wide
+#   - 20 claims/sec × 60s = 1200 claims → 240 per cluster (net drain ~1/s
+#     assuming ~3/s replenishment on Autopilot → pool never fully drains)
+#   - Hamilton split of max_concurrent=500 across 5 clusters at weight=1.0
+#     → 100 tasks per cluster → sizing.compute_replicas caps at max_pool=100
+#     → 100 warm pods per pool.
+max_concurrent: 500
+max_pool: 100
+placement_policy: capacity-aware
+# min_clusters: N (v1.5, optional, default 0). When set, ALL models placed
+# round-robin across the first N sorted-by-name fresh clusters, ignoring the
+# placement selector. Deterministic — same spec + same fresh set → same
+# placement, so re-apply cannot ping-pong. Use when you want anti-affinity
+# stronger than the default spread-first pre-pass (e.g. models > clusters).
+min_clusters: 5
+
+cluster_weights:
+  ap-multi-1: 1.0
+  ap-multi-2: 1.0
+  ap-multi-3: 1.0
+  ap-multi-4: 1.0
+  ap-multi-5: 1.0
+
+models:
+  # `image` is OPTIONAL for capacity-aware / least-loaded / round-robin /
+  # capacity-weighted policies (the actual pod image lives in the
+  # operator-managed SandboxTemplate on each cluster). Required only when
+  # placement_policy is `image-affinity` — that selector hashes the image
+  # string to pin same-image pools to the same cluster for pull locality.
+  - template_name: sb-tmpl-a
+    target_tasks: 100
+
+  - template_name: sb-tmpl-b
+    target_tasks: 100
+
+  - template_name: sb-tmpl-c
+    target_tasks: 100
+
+  - template_name: sb-tmpl-d
+    target_tasks: 100
+
+  - template_name: sb-tmpl-e
+    target_tasks: 100

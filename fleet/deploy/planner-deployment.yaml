@@ -1,0 +1,153 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# Continuous-planner Deployment.
+#
+# Shape: single-replica Deployment running `fleetctl apply --loop`. Reads the
+# FleetSpec from a mounted ConfigMap so the operator can edit it via
+# `kubectl edit configmap fleet-spec` and the next loop iteration picks it up
+# automatically (no image rebuild, no re-apply).
+#
+# Why this exists:
+#   The one-shot `fleetctl apply` on a laptop is brittle. If an operator
+#   forgets to re-run it after a cluster dies, placement stays wrong. This
+#   Deployment closes the loop so re-planning happens continuously.
+#
+# WHERE TO DEPLOY IT
+#   Any one of the fleet clusters — or a dedicated management cluster if you
+#   have one. The planner only talks to GCS; it does NOT need Kubernetes API
+#   access to any of the fleet clusters. Deploying it into one of the fleet
+#   clusters is fine; if that cluster dies, restart it elsewhere.
+#
+# HA CAVEAT
+#   This is a single-replica Deployment (Recreate strategy) — a SPOF for the
+#   re-plan loop, though not for serving. If it crashes, the fleet keeps
+#   running the last-known-good assignment; only *new* placement decisions
+#   are stuck until a fresh replica comes up (~5-15s on healthy nodes). For
+#   HA, add a Lease + leader election (v2).
+#
+# envsubst variables (set by the operator when applying):
+#   ${FLEET_MEMBER_IMAGE}  Container image (same one used by the fleet-member
+#                          — the CLI is packaged in the same wheel).
+#   ${FLEET_BUCKET}        GCS bucket serving as the hub.
+#   ${LOOP_INTERVAL}       Seconds between re-plans (default 60).
+#
+# RENDER WITH deploy/render.sh, NOT envsubst DIRECTLY. envsubst substitutes an
+# unset variable with the empty string and reports nothing, and the default
+# noted above is prose — envsubst has no default syntax. Unset LOOP_INTERVAL
+# therefore yields `--loop-interval=`, argparse rejects the empty float, and
+# the planner dies before its first log line while `kubectl rollout status`
+# still reports success. render.sh supplies the documented defaults and
+# refuses to emit a manifest with a hole in it.
+#
+#   ./deploy/render.sh deploy/planner-deployment.yaml | kubectl apply -f -
+#
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fleet-planner
+  namespace: multi-cluster-fleet
+  # No ClusterRole/RoleBinding — the planner only touches GCS, not the k8s API.
+  # GCS auth comes via Workload Identity binding on the ServiceAccount
+  # annotation; deploy/setup-hub.sh creates the GSA and the binding.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fleet-spec
+  namespace: multi-cluster-fleet
+data:
+  # Replace this with your real FleetSpec — see demo/fleet-spec.yaml for a
+  # minimal working example.
+  fleet-spec.yaml: |
+    max_concurrent: 300
+    max_pool: 100
+    placement_policy: image-affinity
+    min_clusters: 0
+    cluster_weights: {}
+    models: []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleet-planner
+  namespace: multi-cluster-fleet
+  labels:
+    app: fleet-planner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: fleet-planner}
+  template:
+    metadata:
+      labels: {app: fleet-planner}
+    spec:
+      serviceAccountName: fleet-planner
+      # Co-locate with fleet-member on the controller pool at real scale —
+      # both are lightweight and benefit from being off the sandbox pool.
+      # Omit this stanza (or delete both keys) at XS profile where no
+      # controller-pool taint exists.
+      nodeSelector:
+        cloud.google.com/gke-nodepool: controller-pool
+      tolerations:
+        - key: controller-pool
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: planner
+          image: ${FLEET_MEMBER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          # The image ships USER fleet, but ${FLEET_MEMBER_IMAGE} is
+          # operator-supplied, so that is a convention rather than a
+          # boundary. Assert it here instead. The planner reads a ConfigMap
+          # and talks to GCS; it needs no capabilities of any kind.
+          #
+          # runAsUser is set EXPLICITLY rather than left to the image. The
+          # kubelet enforces runAsNonRoot by inspecting the image's user
+          # field, and a NON-NUMERIC one -- `USER fleet`, which is what this
+          # image shipped -- cannot be resolved to a uid at admission. The
+          # container is then refused with CreateContainerConfigError:
+          # "image has non-numeric user (fleet), cannot verify user is
+          # non-root", which reads as a broken manifest rather than a broken
+          # image. Pinning the uid here makes the assertion hold whatever
+          # ${FLEET_MEMBER_IMAGE} turns out to be.
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          # Override the image's default ENTRYPOINT (`fleet-member`) so we
+          # run the fleetctl CLI in loop mode instead. Same wheel, different
+          # console_script.
+          command: ["fleetctl"]
+          args:
+            - --bucket=${FLEET_BUCKET}
+            - apply
+            - -f
+            - /etc/fleet/fleet-spec.yaml
+            - --loop
+            - --loop-interval=${LOOP_INTERVAL}
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+          volumeMounts:
+            - name: spec
+              mountPath: /etc/fleet
+              readOnly: true
+          resources:
+            requests: {cpu: 50m,  memory: 128Mi}
+            limits:   {cpu: 200m, memory: 256Mi}
+          # Planner is idempotent and fast to restart; a crash loop just
+          # delays the next re-plan cycle. No readiness probe needed since
+          # nothing routes traffic to it.
+      volumes:
+        - name: spec
+          configMap:
+            name: fleet-spec

@@ -72,6 +72,10 @@ KWOKCTL="${BINDIR}/kwokctl"
 # Must be a full 40-char SHA: it is fetched directly by hash (see the
 # shallow-fetch block below), which GitHub only resolves for full SHAs.
 CL2_COMMIT="${CL2_COMMIT:-d14a402a9540e4c8ba34717e428bfd2cf31a41a8}"
+if [[ ! "${CL2_COMMIT}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  echo "CL2_COMMIT must be a full 40-character hex SHA, got: ${CL2_COMMIT}" >&2
+  exit 1
+fi
 CL2_BIN="${BINDIR}/clusterloader2"
 
 if [[ ! -x "${KWOKCTL}" ]]; then

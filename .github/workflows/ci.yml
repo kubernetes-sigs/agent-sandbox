@@ -4,6 +4,17 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      - "api/**"
+      - "extensions/**"
+      - "controllers/**"
+      - "helm/**"
+      - "cmd/**"
+      - "dev/tools/fix-*"
+      - "dev/tools/bump-chart-version"
+      - "dev/tools/verify-chart-version"
+      - "dev/tools/lint-helm"
+      - "dev/ci/presubmits/**"
+      - "codegen.go"
 
 jobs:
   lint-workflows:
@@ -14,3 +25,42 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: devops-actions/actionlint@ec02b36684b2f574f1d219ad0a43b082e46bf3e4 # v0.1.13
+
+  verify-generate:
+    name: Verify Generated Files Up To Date
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # actions/checkout only configures a refspec for the PR ref, so
+      # origin/<base> is absent even at fetch-depth: 0. The chart version check
+      # needs it to find the merge base.
+      - name: Fetch base branch
+        run: git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Run autogen check
+        run: dev/ci/presubmits/test-autogen-up-to-date
+
+  lint-helm:
+    name: Lint Helm Chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.19.0
+
+      - name: Lint chart
+        run: dev/ci/presubmits/lint-helm

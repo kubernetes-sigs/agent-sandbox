@@ -19,7 +19,12 @@ import platform
 import shutil
 import subprocess
 import tarfile
+import time
 import urllib.request
+
+# Number of attempts (including the first) for the Node.js tarball download.
+_DOWNLOAD_ATTEMPTS = 3
+_DOWNLOAD_RETRY_DELAY_SECONDS = 5
 
 # SHA256 digests from https://nodejs.org/dist/<version>/SHASUMS256.txt.
 # Update both the version constant below and this table whenever Node.js is bumped.
@@ -122,10 +127,21 @@ def install_node(install_dir):
 
     print(f"Downloading {url}...")
     tar_path = os.path.join(install_dir, filename)
-    try:
-        urllib.request.urlretrieve(url, tar_path)
-    except Exception as e:
-        print(f"Failed to download Node.js: {e}")
+    # The nodejs.org CDN occasionally drops connections mid-download in CI;
+    # retrying a couple of times recovers most of those without masking a
+    # persistent outage (e.g. a bad version/URL, which fails every attempt).
+    last_error = None
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        try:
+            urllib.request.urlretrieve(url, tar_path)
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            print(f"Failed to download Node.js (attempt {attempt} of {_DOWNLOAD_ATTEMPTS}): {e}")
+            if attempt < _DOWNLOAD_ATTEMPTS:
+                time.sleep(_DOWNLOAD_RETRY_DELAY_SECONDS)
+    if last_error is not None:
         return None
 
     # Verify digest before extraction to guard against a tampered archive.

@@ -285,6 +285,17 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubelet.eventQPS=5 \
   --set cluster.spec.kubelet.eventBurst=50
 
+# etcd backend quota: etcd's default is 2GiB; if we exceed it,
+# etcd raises the NOSPACE alarm and rejects EVERY write with
+# "mvcc: database space exceeded" until the alarm is cleared.
+# Defaults to 8GiB (overridable via STRESS_ETCD_QUOTA_BYTES), which puts
+# the cliff far from any benchmark workload; etcd only uses the space it
+# actually writes.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set 'cluster.spec.etcdClusters[0].manager.env[0].name=ETCD_QUOTA_BACKEND_BYTES' \
+  --set "cluster.spec.etcdClusters[0].manager.env[0].value=${STRESS_ETCD_QUOTA_BYTES:-8589934592}" \
+  --set 'cluster.spec.etcdClusters[1].manager.env[0].name=ETCD_QUOTA_BACKEND_BYTES' \
+  --set "cluster.spec.etcdClusters[1].manager.env[0].value=${STRESS_ETCD_QUOTA_BYTES:-8589934592}"
 
 if [[ "${CNI}" == "cilium" ]]; then
   # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the

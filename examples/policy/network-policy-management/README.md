@@ -37,13 +37,15 @@ To make discovery straightforward, the generated policy is predictably named `<t
 
 ## The "Secure by Default" Posture
 
-If you create a `SandboxTemplate` and set `networkPolicyManagement: Managed` (or leave it blank, as this is the default) without specifying custom rules, the controller applies a highly restrictive **Secure Default** policy.
+If you create a `SandboxTemplate` with `networkPolicyManagement: Managed` (or leave it unset, which is the default) and omit `spec.networkPolicy`, the controller applies a highly restrictive **Secure Default** policy.
 
 This is designed for running untrusted code safely:
 
 **Ingress (Incoming Traffic)**
 
-- **Allowed:**  Traffic is only allowed from the designated [Sandbox Router](../../../clients/python/agentic-sandbox-client/sandbox-router) (`app: sandbox-router`) residing in the `"agent-sandbox-system"` system namespace.
+- **Allowed:** Traffic is only allowed from the project's supported Sandbox Router deployments: the [Python router](../../../clients/python/agentic-sandbox-client/sandbox-router) (`app: sandbox-router`) in the `"agent-sandbox-system"` namespace, or the [Go router](../../../sandbox-router/deploy/README.md) (`app.kubernetes.io/name: sandbox-router` and `app.kubernetes.io/component: sandbox-router`) in the `"default"` namespace.
+
+  These built-in identities assume that Pod creation is restricted in the router namespaces. In a shared `default` namespace or another multi-tenant environment, deploy the router in a dedicated namespace and allow it with an explicit `spec.networkPolicy` instead. Routers deployed in another namespace or with different labels must also be allowed through an explicit `spec.networkPolicy`.
 
 - **Blocked:** All other internal cluster traffic and external ingress is explicitly denied.
 
@@ -125,7 +127,7 @@ spec:
           - protocol: TCP
             port: 8080
 
-      # 2. Re-allow the standard Sandbox Router (required if you override defaults)
+      # 2. Re-allow the standard Sandbox Routers (required if you override defaults)
       - from:
         - namespaceSelector:
             matchLabels:
@@ -133,6 +135,14 @@ spec:
           podSelector:
             matchLabels:
               app: sandbox-router
+      - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-router
+              app.kubernetes.io/component: sandbox-router
 
     egress:
       # 1. Allow outbound traffic to a specific internal Vector Database
@@ -189,7 +199,7 @@ spec:
   networkPolicyManagement: Managed
   networkPolicy:
     ingress:
-      # Re-allow the standard Sandbox Router
+      # Re-allow the standard Sandbox Routers
       - from:
         - namespaceSelector:
             matchLabels:
@@ -197,6 +207,14 @@ spec:
           podSelector:
             matchLabels:
               app: sandbox-router
+      - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-router
+              app.kubernetes.io/component: sandbox-router
     egress:
       # 1. Allow outbound IPv4 to the public internet (excluding private subnets and link-local)
       - to:

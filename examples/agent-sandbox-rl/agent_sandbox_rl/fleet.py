@@ -40,7 +40,12 @@ from kubernetes import client
 from . import constants, sizing
 from .cluster import Cluster, ClusterRegistry
 from .config import ClusterConfig, FleetConfig
-from .exceptions import FleetError, FleetOvercommitError, PreflightError
+from .exceptions import (
+    FleetError,
+    FleetOvercommitError,
+    PoolNotFoundError,
+    PreflightError,
+)
 from .handles import SandboxHandle
 from .observability import Observer, repo_family
 from .placement import get_placement
@@ -77,6 +82,10 @@ class PlanEntry:
   pool: str
   replicas: int
   tasks: int
+  # True when this pool already existed and was adopted (``adopt_existing``)
+  # rather than sized and created by this fleet. An adopted entry's ``replicas``
+  # is the pool's *observed* depth, which nothing here owns or may change.
+  adopted: bool = False
 
 
 class FleetPlan:
@@ -141,6 +150,11 @@ class SandboxFleet:
     self._handles: list[SandboxHandle] = []
     self._warmed: dict[str, int] = {}        # image -> replicas currently warmed
     self._ondemand: set[tuple[str, str]] = set()   # (cluster, image) pools made via acquire()
+    # (cluster, name) of pools/templates adopted under `adopt_existing`. Someone
+    # else owns these; teardown must not sweep them even if they happen to carry
+    # our management label (e.g. left behind by an earlier run of this SDK).
+    self._adopted_pools: set[tuple[str, str]] = set()
+    self._adopted_templates: set[tuple[str, str]] = set()
     self._lock = threading.Lock()            # guards bookkeeping under parallel run
     self._guard_active = False                # re-entrancy flag for overcommit_guard
     self._guard_lock = threading.Lock()      # guards _guard_active
@@ -200,6 +214,14 @@ class SandboxFleet:
     hard = self.config.max_live_sandboxes
     if expected is None:
       expected = self.plan_.total_replicas if self.plan_ else 0
+    if self.config.adopt_existing:
+      # The intent-based ceiling is meaningless here and would be actively
+      # misleading: an adopted plan's `total_replicas` is the provisioner's depth
+      # (large), while `live_owned_count` sees only pods carrying THIS run's
+      # label — of which adoption creates none. Ceiling × 1.5 against a count
+      # that is structurally ~0 is a breaker that cannot fire. Only an explicit
+      # `max_live_sandboxes` still applies.
+      expected = 0
     ceilings = []
     if factor and factor > 0 and expected > 0:
       ceilings.append(int(expected * factor))
@@ -438,6 +460,8 @@ class SandboxFleet:
       return self._plan()
 
   def _plan(self) -> FleetPlan:
+    if self.config.adopt_existing:
+      return self._plan_adopt()
     counts = self.image_counts()
     # image -> cluster (each unique image placed once).
     assigned: "collections.OrderedDict[str, Cluster]" = collections.OrderedDict()
@@ -470,16 +494,97 @@ class SandboxFleet:
             "warm_per_task: image %s has %d tasks but max_warmpool_size=%d; "
             "warming only %d replicas (raise max_warmpool_size for one per task)",
             image, counts[image], self.config.max_warmpool_size, replicas)
-      template = self.config.template_name(image)
       entries.append(PlanEntry(
-          cluster=c.name, image=image, template=template,
-          pool=f"pool-{template}", replicas=replicas, tasks=counts[image]))
+          cluster=c.name, image=image, template=self.config.template_name(image),
+          pool=self.config.pool_name(image), replicas=replicas,
+          tasks=counts[image]))
     self.plan_ = FleetPlan(entries)
     self._advise(self.plan_)                   # (#5) warn-only capacity/QPS advisory
     logger.info("Plan: %d images across %d cluster(s), %d total warm replicas",
                 len(entries), len(self.plan_.by_cluster()),
                 self.plan_.total_replicas)
     return self.plan_
+
+  def _plan_adopt(self) -> FleetPlan:
+    """``adopt_existing``: plan against the warm pools already in the namespace
+    instead of creating any.
+
+    Matching is by **image** — every pool's ``sandboxTemplateRef`` is resolved to
+    its template's container image — so it does not depend on the provisioner and
+    this SDK agreeing on a pool-naming scheme, which is exactly what they don't
+    do (this package writes ``pool-<template>``, the multi-cluster fleet layer
+    writes ``<template>-pool``).
+
+    Nothing here is ours, and the rest of the fleet honors that: no template is
+    created or relabelled, no pool is created, scaled or deleted, and teardown
+    skips both. An image nothing serves raises `PoolNotFoundError` rather than
+    falling through to a size-1 on-demand pool — a slow working run that quietly
+    ignored a warm fleet is the outcome this mode exists to prevent."""
+    counts = self.image_counts()
+    discovered: dict[str, dict] = {}
+    for c in self.registry:
+      try:
+        discovered[c.name] = c.resources.discover_pools()
+      except Exception as exc:  # noqa: BLE001 — adoption cannot proceed blind
+        raise FleetError(
+            f"adopt_existing: could not list warm pools on cluster "
+            f"'{c.name}': {exc}") from exc
+
+    entries: list[PlanEntry] = []
+    missing: list[str] = []
+    for image in counts:
+      hits = [(cname, found[image]) for cname, found in discovered.items()
+              if image in found]
+      if not hits:
+        missing.append(image)
+        continue
+      if len(hits) > 1:
+        # Deepest pool wins, cluster name breaks the tie — deterministic, so
+        # re-planning the same fleet does not shuffle images between clusters.
+        hits.sort(key=lambda h: (-h[1].replicas, h[0]))
+        logger.info("adopt: image %s is served on %d clusters (%s); using %s",
+                    image, len(hits), ", ".join(h[0] for h in hits), hits[0][0])
+      cname, dp = hits[0]
+      entries.append(PlanEntry(
+          cluster=cname, image=image, template=dp.template, pool=dp.pool,
+          replicas=dp.replicas, tasks=counts[image], adopted=True))
+    if missing:
+      raise PoolNotFoundError(self._adopt_miss_message(missing, discovered))
+
+    self.plan_ = FleetPlan(entries)
+    self._adopted_pools = {(e.cluster, e.pool) for e in entries}
+    self._adopted_templates = {(e.cluster, e.template) for e in entries}
+    logger.info("Adopted %d existing warm pool(s) across %d cluster(s), %d "
+                "replicas standing (created nothing)", len(entries),
+                len(self.plan_.by_cluster()), self.plan_.total_replicas)
+    return self.plan_
+
+  def _adopt_miss_message(self, missing: list[str], discovered: dict) -> str:
+    """The message an operator gets when adoption cannot cover the task set.
+
+    Deliberately long. The failure is "nothing here serves this image", and the
+    three things that actually cause it — wrong namespace, wrong cluster, pool
+    not filled yet — are indistinguishable from the exception type alone."""
+    shown = missing[:10]
+    lines = [
+        f"adopt_existing: {len(missing)} of {len(self.image_counts())} task "
+        f"image(s) have no warm pool in the fleet, and adopt mode does not "
+        f"create them:",
+    ]
+    lines += [f"  - {img}  (this SDK would have named its pool "
+              f"'{self.config.pool_name(img)}')" for img in shown]
+    if len(missing) > len(shown):
+      lines.append(f"  ... and {len(missing) - len(shown)} more")
+    lines.append("Pools found, by cluster:")
+    for c in self.registry:
+      found = discovered.get(c.name, {})
+      lines.append(f"  - {c.name} (namespace {c.namespace}): {len(found)} pool(s)")
+    lines.append(
+        "Check the namespace first — pools are namespaced and an empty count "
+        "above usually means the harness is pointed at the wrong one. If the "
+        "counts look right, the pools serve different images than the tasks "
+        "loaded. Set adopt_existing=False to provision on demand instead.")
+    return "\n".join(lines)
 
   def _advise(self, plan: "FleetPlan") -> None:
     """(#5) Warn — never refuse — when the plan's footprint or claim concurrency
@@ -510,7 +615,7 @@ class SandboxFleet:
   # --- provisioning ------------------------------------------------------ #
   def _ensure_pool(self, cluster: Cluster, image: str, replicas: int) -> str:
     template = self.config.template_name(image)
-    pool = f"pool-{template}"
+    pool = self.config.pool_name(image)
     cluster.resources.ensure_template(
         image, template, cluster.template_spec(self.config.template))
     cluster.resources.create_warmpool(pool, template, replicas)
@@ -518,6 +623,13 @@ class SandboxFleet:
 
   def ensure_templates(self) -> None:
     plan = self.plan_ or self.plan()
+    if self.config.adopt_existing:
+      # Creating is the obvious half; the hazard is `ensure_template`'s label
+      # reconcile, which would stamp OUR run-id onto the provisioner's pod
+      # template and thereby onto every sandbox it goes on to create.
+      logger.info("adopt_existing: not touching templates (%d adopted)",
+                  len(plan.entries))
+      return
     for e in plan.entries:
       c = self.registry.get(e.cluster)
       c.resources.ensure_template(
@@ -531,6 +643,9 @@ class SandboxFleet:
     atomic helpers and ``_warmed`` writes hold the lock. It is NOT safe to warm the
     *same* image from two threads at once (the reuse check + record aren't atomic
     across the released lock); the callers never do that — one entry per image."""
+    if self.config.adopt_existing:
+      self._adopt_entry(e, wait)
+      return
     reps = replicas_override if replicas_override is not None else e.replicas
     c = self.registry.get(e.cluster)
     fam = repo_family(e.image)
@@ -562,6 +677,34 @@ class SandboxFleet:
     self._obs.warm_add(e.cluster, delta)
     if wait:
       _await_ready()
+
+  def _adopt_entry(self, e, wait: bool) -> None:
+    """The ``adopt_existing`` counterpart to `_warm_entry`: confirm the pool can
+    serve a claim, create/patch/reserve nothing.
+
+    Readiness is ``>= 1`` ready replica, not ``>= e.replicas``. The pool's depth
+    belongs to its provisioner and moves under us — a fleet member replenishing
+    after a claim burst, an operator rescaling — so blocking on the full observed
+    depth would make readiness a race against someone else's controller. One warm
+    replica is the claimable-now contract this SDK needs.
+
+    ``replicas_override`` has no counterpart here on purpose: overriding depth is
+    a write, and adopt mode does not write."""
+    c = self.registry.get(e.cluster)
+    if wait:
+      with self._obs.phase("wait_pool_ready", cluster=e.cluster,
+                           family=repo_family(e.image)):
+        if not c.resources.wait_for_pool_ready(
+            e.pool, 1, timeout=self.config.ready_timeout):
+          raise FleetError(
+              f"adopted warm pool '{e.pool}' on cluster '{e.cluster}' (image "
+              f"{e.image}) had no ready replica within "
+              f"{self.config.ready_timeout}s — it exists but is not serving")
+    # Recorded so the reuse short-circuit and the per-image bookkeeping behave as
+    # usual. No `reserve_replicas` / `warm_add`: the capacity counters track what
+    # this fleet created, and it created none of this.
+    with self._lock:
+      self._warmed[e.image] = e.replicas
 
   def _warm_entries(self, entries, wait: bool,
                     replicas_override: int | None = None) -> None:
@@ -618,6 +761,12 @@ class SandboxFleet:
     # None = fall back to the configured default; 0 = explicitly warm all at once.
     budget = self.config.warm_create_budget if create_budget is None else create_budget
     entries = (self.plan_ or self.plan()).entries
+    if self.config.adopt_existing:
+      # Staging exists to bound the controller's concurrent *create* burst. Adopt
+      # mode issues no creates, and its entries carry the provisioner's depth
+      # (often thousands), which would split every pool into its own wave.
+      self._warm_entries(entries, wait)
+      return
     if not budget or budget <= 0:
       self._warm_entries(entries, wait)
       return
@@ -698,6 +847,13 @@ class SandboxFleet:
 
   def _unwarm_entry(self, entry) -> None:
     """Tear down a single plan entry's warm pool and template, releasing replicas."""
+    if self.config.adopt_existing:
+      # The windowed strategies sweep their window as it slides. Under adoption
+      # that would delete the provisioner's pools out from under every other
+      # consumer of the fleet.
+      logger.debug("adopt_existing: leaving pool '%s' on '%s' alone (adopted)",
+                   entry.pool, entry.cluster)
+      return
     with self._lock:
       if entry.image not in self._warmed:
         return                                 # already unwarmed — don't double-release
@@ -749,6 +905,14 @@ class SandboxFleet:
     capacity counter — the delta is reconciled at ``teardown`` (reset_counts)."""
     entry = (self.plan_ or self.plan()).for_image(image)
     if entry is None:
+      return
+    if self.config.adopt_existing:
+      # `run(recycle=True, scale_on_hold=True)` calls this per held shard. On an
+      # adopted pool that is a write to someone else's object, and it would fight
+      # the provisioner's own reconcile loop.
+      logger.warning("adopt_existing: not scaling adopted pool '%s' on '%s' to "
+                     "%d — its depth belongs to whoever provisioned it",
+                     entry.pool, entry.cluster, replicas)
       return
     replicas = max(0, replicas)
     c = self.registry.get(entry.cluster)
@@ -810,6 +974,15 @@ class SandboxFleet:
       cluster = self.registry.get(entry.cluster)
       pool = entry.pool
     created_pool = False          # did THIS call create the on-demand pool?
+    if on_demand and self.config.adopt_existing:
+      # Reachable when tasks are added after planning (plan() itself already
+      # rejects an uncovered image). Adopt mode's contract is that a miss is an
+      # error, not a quiet size-1 pool.
+      raise PoolNotFoundError(
+          f"adopt_existing: no adopted warm pool for image '{task.image}', and "
+          f"adopt mode does not create one. The image is not in the current plan "
+          f"— reload tasks and re-run plan(), or point the fleet at a namespace "
+          f"that serves it.")
     if on_demand:
       cluster = self.placement.select(task.image, self.registry)
       pool = self._ensure_pool(cluster, task.image, 1)
@@ -821,6 +994,17 @@ class SandboxFleet:
         if created_pool:
           self._ondemand.add(key)
       if created_pool:
+        # Once per (cluster, image), not per claim. This path used to be silent,
+        # which is the failure the warning is for: a harness pointed at a cluster
+        # whose warm pools are named differently finds none of them, provisions
+        # its own one replica at a time, and reports a healthy — but far slower —
+        # run over the top of a warm fleet it never touched.
+        logger.warning(
+            "image %s is not in the plan; creating an on-demand size-1 pool "
+            "'%s' on cluster %s. If this image IS already warm here, the pool is "
+            "named something other than %r — set pool_name_format to match, or "
+            "adopt_existing=True to fail instead of provisioning in parallel.",
+            task.image, pool, cluster.name, self.config.pool_name_format)
         cluster.reserve_replicas(1)
 
     fam = repo_family(task)
@@ -924,6 +1108,20 @@ class SandboxFleet:
       except Exception as exc:
         logger.exception("Failed to list resources on cluster %s during teardown: %s", c.name, exc)
         claims, pools, tmpls = [], [], []
+      # Adopted pools/templates are swept out of the delete set explicitly. They
+      # normally don't carry our managed label at all, but they can — adopting a
+      # pool an earlier run of this SDK left behind is a legitimate use — and
+      # deleting the fleet's warm pods on the way out is not a recoverable
+      # mistake. Claims stay in: those we created, and they must be released.
+      if self._adopted_pools or self._adopted_templates:
+        kept_p = [p for p in pools if (c.name, p) in self._adopted_pools]
+        kept_t = [t for t in tmpls if (c.name, t) in self._adopted_templates]
+        if kept_p or kept_t:
+          logger.info("teardown: leaving %d adopted pool(s) and %d adopted "
+                      "template(s) on cluster %s in place",
+                      len(kept_p), len(kept_t), c.name)
+        pools = [p for p in pools if (c.name, p) not in self._adopted_pools]
+        tmpls = [t for t in tmpls if (c.name, t) not in self._adopted_templates]
       total_items = len(claims) + len(pools) + len(tmpls)
       if total_items > 0:
         workers = max(1, min(total_items, self.config.max_concurrent))
@@ -955,6 +1153,8 @@ class SandboxFleet:
     with self._lock:
       self._warmed.clear()
       self._ondemand.clear()
+    self._adopted_pools.clear()
+    self._adopted_templates.clear()
     self.plan_ = None
     self._remove_teardown_hooks()
 

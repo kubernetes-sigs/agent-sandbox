@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 
 from kubernetes import client, watch
 
@@ -31,6 +32,17 @@ from . import constants
 from .config import TemplateSpec
 
 logger = logging.getLogger("agent_sandbox_rl.resources")
+
+
+@dataclass(frozen=True)
+class DiscoveredPool:
+  """A SandboxWarmPool that already exists in the namespace, resolved to the
+  image it serves. Produced by `Resources.discover_pools`."""
+
+  pool: str
+  template: str
+  image: str
+  replicas: int
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -125,7 +137,7 @@ class Resources:
                          template: TemplateSpec) -> dict:
     pod_spec: dict = {
         "containers": [{
-            "name": "agent-runtime",
+            "name": constants.RUNTIME_CONTAINER,
             "image": image,
             "imagePullPolicy": template.image_pull_policy,
             "command": list(template.keepalive_command),
@@ -465,13 +477,81 @@ class Resources:
   def managed_selector(self) -> str:
     return f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}"
 
-  def _list(self, plural: str, label_selector: str | None, *,
-            group: str = constants.GROUP, version: str = constants.VERSION) -> list[str]:
+  # --- adoption ---------------------------------------------------------- #
+  def template_images(self, label_selector: str | None = None) -> "dict[str, str]":
+    """Map SandboxTemplate name -> the container image it runs.
+
+    Read back off the live objects rather than recomputed from a name, so it
+    works for templates this package did not write (no assumption about the
+    `<prefix><md5>` scheme, which only holds for our own)."""
+    out: dict[str, str] = {}
+    for obj in self._list_objects(constants.TEMPLATES_PLURAL, label_selector):
+      name = (obj.get("metadata") or {}).get("name")
+      containers = ((((obj.get("spec") or {}).get("podTemplate") or {})
+                     .get("spec") or {}).get("containers")) or []
+      if not name or not containers:
+        continue
+      chosen = next((c for c in containers
+                     if c.get("name") == constants.RUNTIME_CONTAINER), containers[0])
+      image = chosen.get("image")
+      if image:
+        out[name] = image
+    return out
+
+  def discover_pools(self, label_selector: str | None = None
+                     ) -> "dict[str, DiscoveredPool]":
+    """Map image -> `DiscoveredPool` for warm pools already in this namespace.
+
+    Keyed by **image**, not by name, which is the whole point: a pool provisioned
+    by something else (the multi-cluster fleet layer names its pools
+    ``<template>-pool``, this package names them ``pool-<template>``) is found
+    regardless of what it is called. Pools whose template is missing or carries no
+    image are skipped — they cannot be matched to a task.
+
+    ``label_selector`` is normally left unset: an adopted pool belongs to its
+    provisioner and does not carry our management labels."""
+    images = self.template_images(label_selector)
+    found: dict[str, DiscoveredPool] = {}
+    for obj in self._list_objects(constants.WARMPOOLS_PLURAL, label_selector):
+      name = (obj.get("metadata") or {}).get("name")
+      spec = obj.get("spec") or {}
+      tref = (spec.get("sandboxTemplateRef") or {}).get("name")
+      if not name or not tref:
+        continue
+      image = images.get(tref)
+      if image is None:
+        logger.debug("warm pool '%s' references template '%s', which was not "
+                     "listed (or has no image); skipping", name, tref)
+        continue
+      replicas = int(spec.get("replicas", 0) or 0)
+      prev = found.get(image)
+      if prev is None:
+        found[image] = DiscoveredPool(name, tref, image, replicas)
+        continue
+      # Two pools serving one image is legal and happens (a leftover alongside a
+      # fresh one). Pick deterministically — deepest wins, name breaks the tie —
+      # so repeated planning of the same namespace does not flip between them.
+      winner = (DiscoveredPool(name, tref, image, replicas)
+                if (replicas, prev.pool) > (prev.replicas, name) else prev)
+      logger.warning("image %s is served by more than one warm pool (%s, %s); "
+                     "using '%s' (%d replicas)", image, prev.pool, name,
+                     winner.pool, winner.replicas)
+      found[image] = winner
+    return found
+
+  def _list_objects(self, plural: str, label_selector: str | None = None, *,
+                    group: str = constants.GROUP,
+                    version: str = constants.VERSION) -> list[dict]:
     kwargs = {"label_selector": label_selector} if label_selector else {}
     objs = self.custom_api.list_namespaced_custom_object(
         group=group, version=version,
         namespace=self.namespace, plural=plural, **kwargs)
-    return [o["metadata"]["name"] for o in objs.get("items", [])]
+    return list(objs.get("items", []))
+
+  def _list(self, plural: str, label_selector: str | None, *,
+            group: str = constants.GROUP, version: str = constants.VERSION) -> list[str]:
+    return [o["metadata"]["name"] for o in
+            self._list_objects(plural, label_selector, group=group, version=version)]
 
   def _delete(self, plural: str, name: str, kind: str, *,
               group: str = constants.GROUP, version: str = constants.VERSION) -> None:

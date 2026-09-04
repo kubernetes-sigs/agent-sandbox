@@ -38,6 +38,13 @@ SANDBOX_NAME_HASH_LABEL = "agents.x-k8s.io/sandbox-name-hash"
 # have their own entrypoint, so we override it to idle.
 KEEPALIVE_COMMAND = ["sleep", "infinity"]
 
+# Name of the container holding the task image in a SandboxTemplate's pod
+# template. Also the container `discover_pools` reads back to work out which
+# image an existing pool serves; a template written by something else (the fleet
+# layer, a platform team) may name it differently, in which case the first
+# container is used.
+RUNTIME_CONTAINER = "agent-runtime"
+
 # Default label applied to every resource this package creates (for listing +
 # scoped cleanup).
 MANAGED_BY_LABEL = "app"

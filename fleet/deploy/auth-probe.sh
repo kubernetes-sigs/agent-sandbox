@@ -21,19 +21,35 @@
 
 set -euo pipefail
 
+log() { printf "\033[1;34m[authprobe]\033[0m %s\n" "$*" >&2; }
+die() { printf "\033[1;31m[authprobe] ERROR:\033[0m %s\n" "$*" >&2; exit 1; }
+
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 CLUSTER_NAME="${CLUSTER_NAME:-cluster-a}"
 ZONE="${ZONE:-us-central1-a}"
-MEMBER_CTX="${MEMBER_CTX:-gke_${PROJECT}_${ZONE}_${CLUSTER_NAME}}"
 MEMBER_NS="${MEMBER_NS:-multi-cluster-fleet}"
 HUB_NS="${HUB_NS:-fleet-system}"
 KSA="${KSA:-fleet-member}"
 
-log() { printf "\033[1;34m[authprobe]\033[0m %s\n" "$*" >&2; }
-die() { printf "\033[1;31m[authprobe] ERROR:\033[0m %s\n" "$*" >&2; exit 1; }
+# Only derived when not given: from an empty PROJECT this would produce
+# "gke__us-central1-a_cluster-a" and kubectl would report a missing context,
+# which reads as a kubeconfig problem rather than an unset gcloud project.
+if [[ -z "${MEMBER_CTX:-}" ]]; then
+  [[ -n "$PROJECT" ]] || die "PROJECT is not set and gcloud has no default \
+project. Set PROJECT=<id>, or set MEMBER_CTX=<context> directly."
+  MEMBER_CTX="gke_${PROJECT}_${ZONE}_${CLUSTER_NAME}"
+fi
 
-[[ -n "${FLEET_MEMBER_IMAGE:-}" ]] || \
-  die "set FLEET_MEMBER_IMAGE (e.g. FLEET_MEMBER_IMAGE=\$(./deploy/build-push.sh))"
+# Any image that carries the fleet member's Python environment: it must have
+# agent_sandbox_fleet importable and the `kubernetes` client installed, since
+# this probe imports hubauth.py and monkeypatches the REST layer. The image the
+# fleet member is already running is the right one -- using a different build
+# would be probing a different client than the one that is failing.
+[[ -n "${FLEET_MEMBER_IMAGE:-}" ]] || die "set FLEET_MEMBER_IMAGE to the fleet \
+member image (the same ref deployment/fleet-member runs; deploy/build-push.sh \
+prints one). Read it off the running member with:
+  kubectl --context \"\$MEMBER_CTX\" -n $MEMBER_NS get deploy/fleet-member \\
+    -o jsonpath='{.spec.template.spec.containers[0].image}'"
 
 PY=$(cat <<'PYEOF'
 import json, sys, traceback
@@ -116,13 +132,18 @@ print(json.dumps({"spec": {
 PY2
 )"
 
+cleanup() {
+  kubectl --context "$MEMBER_CTX" -n "$MEMBER_NS" delete pod auth-probe \
+    --ignore-not-found >/dev/null 2>&1 || true
+}
+# The probe pod runs as the member's ServiceAccount and prints a redacted
+# bearer token. A Ctrl-C out of `logs -f` should not leave that sitting there.
+trap cleanup EXIT INT TERM
+
 log "running auth-probe on $MEMBER_CTX as $MEMBER_NS/$KSA"
-kubectl --context "$MEMBER_CTX" -n "$MEMBER_NS" delete pod auth-probe \
-  --ignore-not-found >/dev/null 2>&1 || true
+cleanup
 kubectl --context "$MEMBER_CTX" -n "$MEMBER_NS" run auth-probe \
   --restart=Never --image "$FLEET_MEMBER_IMAGE" --overrides="$OVERRIDES" >/dev/null
 kubectl --context "$MEMBER_CTX" -n "$MEMBER_NS" wait --for=condition=Ready \
   pod/auth-probe --timeout=120s >/dev/null 2>&1 || true
 kubectl --context "$MEMBER_CTX" -n "$MEMBER_NS" logs -f pod/auth-probe || true
-kubectl --context "$MEMBER_CTX" -n "$MEMBER_NS" delete pod auth-probe \
-  --ignore-not-found >/dev/null 2>&1 || true

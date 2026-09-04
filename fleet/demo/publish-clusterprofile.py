@@ -44,11 +44,23 @@ DEFAULT_STATE = (0, 0, 0, 0.0, 0.05, 200)
 
 
 def _iso(offset_s: float = 0.0) -> str:
+  """An RFC3339 UTC timestamp `offset_s` seconds in the past.
+
+  The offset is how --stale is built: a real heartbeat, just an old one, so
+  the planner's freshness test is exercised rather than its parser.
+  """
   t = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=offset_s)
   return t.isoformat().replace("+00:00", "Z")
 
 
 def main() -> int:
+  """Publish one synthetic capacity report per named cluster.
+
+  Returns 0 only if every publish succeeded. A 409 is reported as the
+  distinct, useful outcome it is -- SSA is tracking ownership -- but it still
+  counts as a failure, because the values on the hub are not the ones asked
+  for.
+  """
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument("--kubeconfig")
   p.add_argument("--context")

@@ -28,6 +28,12 @@ from agent_sandbox_fleet import inventory, planner  # noqa: E402
 
 
 def main() -> int:
+  """Load the hub inventory, print the registry, optionally plan against it.
+
+  Returns 0 on success and 1 when the hub yields no ClusterProfiles at all --
+  that is the one outcome worth failing on, because an empty registry and a
+  wrong --namespace are indistinguishable from the table alone.
+  """
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument("--kubeconfig")
   p.add_argument("--context")

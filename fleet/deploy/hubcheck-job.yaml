@@ -17,7 +17,14 @@
 #   kubectl --context <member> logs -n multi-cluster-fleet job/fleet-hubcheck -f
 #
 # envsubst variables:
-#   ${FLEET_MEMBER_IMAGE}  the image built by deploy/build-push.sh
+#   ${FLEET_MEMBER_IMAGE}  the fleet member image -- any image that provides
+#                          the `fleet-hubcheck` entrypoint. Use the same ref
+#                          deployment/fleet-member is running, since the point
+#                          is to check the identity and client that will do
+#                          the publishing. Read it off the running member:
+#                            kubectl -n multi-cluster-fleet get deploy/fleet-member \
+#                              -o jsonpath='{.spec.template.spec.containers[0].image}'
+#                          (deploy/build-push.sh prints one if you are building.)
 #   ${CLUSTER_NAME}        this cluster's name; must match its ClusterProfile
 ---
 apiVersion: batch/v1
@@ -40,12 +47,12 @@ spec:
       containers:
         - name: hubcheck
           image: ${FLEET_MEMBER_IMAGE}
-          # Always, even though build-push.sh now emits content-addressed tags
-          # that make IfNotPresent safe. This Job is the thing you reach for
-          # when something is already wrong, often after a hand-tagged rebuild,
-          # and "the node served a stale layer" is the single most misleading
-          # answer it could give you. One extra pull per diagnostic run is a
-          # trade worth making.
+          # Always, even where the tag is content-addressed and IfNotPresent
+          # would be safe. This Job is the thing you reach for when something
+          # is already wrong, often after a hand-tagged rebuild, and "the node
+          # served a stale layer" is the single most misleading answer it
+          # could give you. One extra pull per diagnostic run is a trade worth
+          # making.
           imagePullPolicy: Always
           command: ["fleet-hubcheck"]
           args:

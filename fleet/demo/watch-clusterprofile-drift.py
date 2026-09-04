@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as _dt
+import math
 import pathlib
 import re
 import subprocess
@@ -96,10 +97,17 @@ _METRIC = re.compile(
 
 
 def _now() -> float:
+  """Wall-clock seconds. One place to stub if this ever needs a fake clock."""
   return time.time()
 
 
 def _parse_iso(s: str) -> float | None:
+  """RFC3339 string -> epoch seconds, or None if it is absent or unparseable.
+
+  Naive timestamps are read as UTC, which is what the publisher emits. A
+  parse failure returns None rather than raising: an unreadable heartbeat is
+  a measurement this script reports, not a reason to stop measuring.
+  """
   if not s:
     return None
   try:
@@ -112,6 +120,13 @@ def _parse_iso(s: str) -> float | None:
 
 
 def _api(kubeconfig, context):
+  """A CustomObjectsApi for one context, built the way the member builds it.
+
+  Goes through `load_hub_configuration` rather than `config.load_kube_config`
+  so the client here is assembled by the same code the fleet member uses --
+  otherwise a client-construction bug would be invisible to the tool watching
+  for it.
+  """
   from kubernetes import client as k8s_client
   cfg = load_hub_configuration(
       kubeconfig=kubeconfig, context=context, token_source="kubeconfig")
@@ -130,6 +145,7 @@ def _published(api, args) -> dict:
            for p in ((obj.get("status") or {}).get("properties") or [])}
 
   def num(key, cast=int):
+    """One property as a number, or None if it is absent or not a number."""
     v = props.get(key)
     try:
       return cast(v)
@@ -191,25 +207,70 @@ def _actual(args) -> dict:
 
 
 class _Freeze:
-  """Tracks how long a counter has been pinned at one value."""
+  """Tracks how long a counter has been pinned at one value.
+
+  Held time is ACCUMULATED across confirmed-consecutive samples rather than
+  computed as `now - first_seen`. The difference only shows up when a read
+  fails, and there it is the whole ballgame:
+
+    A failed read is not evidence that the counter held, and it is not
+    evidence that it moved. It is the absence of evidence.
+
+  Charging the unobserved interval to `held` manufactures a freeze the tool
+  never saw -- and since a hub that is timing out is precisely when reads
+  fail, that inflates the very number this script reports. Resetting the run
+  instead (`value = since = None`) is the opposite error and the worse one: a
+  single dropped read would zero a genuine multi-hour freeze, suppressing the
+  finding the script exists to produce.
+
+  So: on a failed read, hold the run open, credit nothing, and remember that
+  the window has a hole in it. `gaps` is reported at the end so a freeze
+  measured across a lossy window is never mistaken for a clean one.
+  """
 
   def __init__(self):
+    """Start with no observation, no accumulated hold, and no gaps."""
     self.value = None
-    self.since = None
+    self.held = 0.0
     self.worst = 0.0
+    self.gaps = 0
+    self._last_seen = None   # timestamp of the last SUCCESSFUL sample
+    self._gap = False        # has a read failed since that sample?
 
   def update(self, value, now: float) -> float:
+    """Fold one sample in and return the confirmed hold time in seconds.
+
+    `value` is None when the read failed. Returns the last confirmed hold
+    rather than 0.0 in that case, because the run has not ended -- only the
+    observation is missing.
+    """
     if value is None:
-      return 0.0
+      if not self._gap:
+        self.gaps += 1
+      self._gap = True
+      return self.held
     if value != self.value:
-      self.value, self.since = value, now
-      return 0.0
-    held = now - (self.since or now)
-    self.worst = max(self.worst, held)
-    return held
+      self.value = value
+      self.held = 0.0
+    elif not self._gap:
+      # Two successive observations of the same value: this interval is the
+      # only kind we are entitled to count.
+      self.held += now - self._last_seen
+    # else: same value seen either side of a gap. The run continues, but the
+    # unobserved interval is not credited to it.
+    self._gap = False
+    self._last_seen = now
+    self.worst = max(self.worst, self.held)
+    return self.held
 
 
 def main() -> int:
+  """Sample the three counters on a fixed interval until stopped.
+
+  Returns 0 on a clean exit (duration elapsed, or Ctrl-C) and 2 on a bad
+  invocation. A drift finding is reported, not returned as failure: this
+  measures a window, it does not gate anything.
+  """
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument("--kubeconfig")
   p.add_argument("--hub-context", required=True)
@@ -231,6 +292,35 @@ def main() -> int:
                       "quiet rather than wrong.")
   p.add_argument("--out", help="Append samples to this CSV.")
   args = p.parse_args()
+
+  # This loop reads the hub, the member, and a full /metrics scrape once per
+  # interval, and it is pointed at production clusters under a 200k fill. Every
+  # one of these values has a way of turning that into a tight loop or a hang,
+  # and none of them announces itself:
+  #   --interval 0 / nan   -> sleep(0), i.e. an unthrottled read storm against
+  #                           an apiserver that is already the bottleneck. nan
+  #                           gets there quietly, because max(0.0, nan) is 0.0.
+  #   --interval inf       -> time.sleep raises OverflowError mid-run, after
+  #                           the first sample, taking the CSV with it.
+  #   --duration < 0       -> the `elapsed >= duration` break fires on sample
+  #                           one, so the run looks complete and measures
+  #                           nothing.
+  #   --max-report-age <= 0-> every cluster is permanently not-eligible, which
+  #                           suppresses every FRESH-BUT-WRONG verdict.
+  #   --drift-threshold < 0-> the reverse: every quiet counter is a finding.
+  bad = []
+  if not math.isfinite(args.interval) or args.interval <= 0:
+    bad.append("--interval must be a finite number greater than 0")
+  if not math.isfinite(args.duration) or args.duration < 0:
+    bad.append("--duration must be a finite number >= 0 (0 = until Ctrl-C)")
+  if not math.isfinite(args.max_report_age) or args.max_report_age <= 0:
+    bad.append("--max-report-age must be a finite number greater than 0")
+  if args.drift_threshold < 0:
+    bad.append("--drift-threshold must be >= 0")
+  if bad:
+    for msg in bad:
+      print(f"error: {msg}", file=sys.stderr)
+    return 2
 
   hub = _api(args.kubeconfig, args.hub_context)
   member = _api(args.kubeconfig, args.member_context)
@@ -316,6 +406,7 @@ def main() -> int:
         worst_lie = max(worst_lie, abs(truth - pub["pub_ready"]))
 
       def s(v, w, fmt="{:,}"):
+        """Right-align one cell, rendering an unmeasured value as '-'."""
         return f"{'-':>{w}}" if v is None else f"{fmt.format(v):>{w}}"
 
       print(f"{now - t0:>7.0f}s {s(hb, 6, '{:.0f}')}s {s(pub['pub_ready'], 10)} "
@@ -340,8 +431,19 @@ def main() -> int:
     if fh:
       fh.close()
 
-  print(f"\nworst published-counter freeze: {pub_freeze.worst:.0f}s")
-  print(f"worst SWP-status freeze:        {obs_freeze.worst:.0f}s")
+  def gapnote(f):
+    """Qualify a freeze number with the read outages it was measured across."""
+    # A freeze number carries a different weight depending on whether the
+    # window it was measured over was fully observed. Say which.
+    return "" if not f.gaps else (
+        f"  (measured across {f.gaps} read outage"
+        f"{'' if f.gaps == 1 else 's'}; unobserved intervals are NOT counted, "
+        f"so this is a lower bound)")
+
+  print(f"\nworst published-counter freeze: {pub_freeze.worst:.0f}s"
+        f"{gapnote(pub_freeze)}")
+  print(f"worst SWP-status freeze:        {obs_freeze.worst:.0f}s"
+        f"{gapnote(obs_freeze)}")
   print(f"largest gap between the planner's number and etcd, while the "
         f"planner considered this cluster fresh: {worst_lie:,} sandboxes")
   return 0

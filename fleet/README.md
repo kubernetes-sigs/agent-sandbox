@@ -148,10 +148,12 @@ new per-member GSA, and that redirects *every* Google API call from the pod,
 including the bucket writes the fleet already depends on.
 
 ```bash
-# 2. give EVERY member a credential-free kubeconfig for the hub
+# 2. give EVERY member a credential-free kubeconfig for the hub.
+#    This emits the PUBLIC hub endpoint; add --private-endpoint only for
+#    members that share a VPC with the hub (see below).
 ./deploy/gen-hub-kubeconfig.sh \
   --hub-cluster my-hub --hub-location us-central1-a --project my-project \
-  --private-endpoint > hub-cm.yaml
+  > hub-cm.yaml
 for ctx in cluster-a cluster-b cluster-c; do
   kubectl --context "$ctx" apply -f hub-cm.yaml
 done
@@ -167,11 +169,20 @@ added afterwards.
 The ConfigMap holds only an address and a CA certificate — no token, no key.
 Authentication happens at runtime via `--hub-token-source=gke-metadata`.
 
-Use `--private-endpoint` when members and hub share a VPC. Reachability is the
-usual failure here and it looks like an auth problem: if the member's bucket
-writes keep working while every hub call times out, it is routing, not
-credentials. A GKE control plane's public IP is not a Google API endpoint, so
-Private Google Access does not cover it. Members read this ConfigMap once at
+Endpoint mode follows the network path, and it is **not necessarily uniform
+across a fleet** — it is a property of each member's route to the hub, not of
+the fleet as a whole. Add `--private-endpoint` for members that share a VPC
+with the hub; leave it off for a member that reaches the hub over the internet,
+for example one in a separate VPC egressing through Cloud NAT, where the
+private address is simply unroutable. A hub whose private endpoint must serve
+members in other regions also needs `--enable-master-global-access` before the
+private form works at all. If a fleet spans both kinds, generate two ConfigMaps
+and apply each to its own set of contexts.
+
+Reachability is the usual failure here and it looks like an auth problem: if
+the member's bucket writes keep working while every hub call times out, it is
+routing, not credentials. A GKE control plane's public IP is not a Google API
+endpoint, so Private Google Access does not cover it. Members read this ConfigMap once at
 startup, so after any change restart all of them — a partial restart leaves the
 fleet split across two hub addresses:
 
@@ -183,17 +194,28 @@ done
 ```
 
 ```bash
-# 3. turn on publishing, on every member
-for ctx in cluster-a cluster-b cluster-c; do
-  CLUSTER_NAME="$ctx" FLEET_BUCKET="$FLEET_BUCKET" SANDBOX_CAPACITY=50000 \
+# 3. turn on publishing, on every member. The capacity is PER CLUSTER --
+#    substitute each cluster's own measured ceiling, not one figure for all.
+declare -A CAPACITY=( [cluster-a]=50000 [cluster-b]=50000 [cluster-c]=20000 )
+for ctx in "${!CAPACITY[@]}"; do
+  CLUSTER_NAME="$ctx" FLEET_BUCKET="$FLEET_BUCKET" \
+  SANDBOX_CAPACITY="${CAPACITY[$ctx]}" \
     ./deploy/render.sh deploy/fleet-member-clusterprofile-patch.yaml \
     | kubectl --context "$ctx" patch deployment fleet-member \
         -n multi-cluster-fleet --patch-file /dev/stdin
 done
 ```
 
-`SANDBOX_CAPACITY` is per cluster, not fleet-wide. Leaving a member out of this
-loop is the failure described under
+`SANDBOX_CAPACITY` is how many sandboxes *that* cluster can hold — schedulable
+nodes times pods per node, whichever of max-pods or CPU/memory requests binds
+first — so it differs per cluster whenever the node pools do. Copying one
+number across a heterogeneous fleet overstates the small clusters, and an
+overstated cluster is weighted as if it were large: it is assigned replicas it
+cannot make Ready, which is the same underfill as publishing nothing at all,
+just harder to spot because a value *is* present. When in doubt, understate it;
+an under-weighted cluster costs you distribution, not readiness.
+
+Leaving a member out of this loop is the failure described under
 [Two things that will bite you](#two-things-that-will-bite-you): it publishes no
 `sandbox-capacity`, is weighted 1.0 rather than dropped, and quietly absorbs a
 share of the fleet it cannot hold.

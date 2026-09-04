@@ -118,6 +118,8 @@ The Python SDK lives at [clients/python/agentic-sandbox-client/](clients/python/
 ## Pull requests and CI
 
 - This is a Kubernetes SIG project: contributors must have a signed [CNCF CLA](https://git.k8s.io/community/CLA.md). PRs without one are not reviewed.
+- **One idea per PR.** A good PR is short and easily reviewable: a single logical change, with the tests and docs that belong to it. Split independent ideas into separate PRs (stacked if they depend on each other) rather than bundling them.
+- **Commits are for the reviewer, not a diary.** Use multiple commits in a PR only to separate things that are easier to review apart — a large slab of generated code, a mechanical move or rename distinct from a behavior change. Do not leave a chronological series of iterations and review fixups ("address comments", successive rewrites of the same code); squash those into the commit they amend before review, and re-squash as the PR evolves.
 - CI runs through Prow (configured in [kubernetes/test-infra](https://github.com/kubernetes/test-infra)). The `k8s-ci-robot` merges PRs once they have `lgtm` + `approve` and presubmits pass. Default merge mode is squash; use `/label tide/merge-method-rebase` only when distinct commits matter.
 - A bot may auto-assign GitHub Copilot as a first-pass reviewer. **Never click "Commit suggestion" in the GitHub UI** — that adds Copilot as a co-author, and Copilot cannot sign the Kubernetes CLA, so the CLA check will fail and block the PR. Instead: read the suggestion, apply the change manually in your local checkout, and push it as a normal commit authored by you.
 - Inactive PRs go stale after 30 days and close after 15 more. Reopen freely if you return to the work.

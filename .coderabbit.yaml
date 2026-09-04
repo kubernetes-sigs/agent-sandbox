@@ -47,6 +47,10 @@ reviews:
       instructions: |
         Focus on technical accuracy, clarity, and markdown formatting. Verify that code snippets and configuration examples match current CRD definitions.
 
+    - path: "examples/**"
+      instructions: |
+        Examples are demonstration code held to a lighter standard than the controllers and SDKs. Flag real bugs and security issues. Do not require test coverage of example code, do not ask for tests of tests or test fixtures, and skip theoretical findings (micro-optimizations, memory retention in short-lived processes, hypothetical scale concerns).
+
   auto_review:
     base_branches:
       - ".*"

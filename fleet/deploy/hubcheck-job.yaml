@@ -1,0 +1,79 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# One-shot proof that a pod on THIS cluster can publish to, and own fields on,
+# the hub. Run it before turning on --publish-clusterprofile.
+#
+# It exists because the member deliberately swallows hub failures (so a broken
+# hub can never break the GCS path), which makes every misconfiguration in this
+# path silent. This Job is loud: it exits non-zero and says which link broke.
+#
+# It also covers the one thing that cannot be tested anywhere else. kind has no
+# metadata server, so --hub-token-source=gke-metadata is unexercised by the
+# unit suite and by every local rehearsal; the first real test of it is a pod
+# on GKE. That pod is this one.
+#
+#   envsubst < deploy/hubcheck-job.yaml | kubectl --context <member> apply -f -
+#   kubectl --context <member> logs -n multi-cluster-fleet job/fleet-hubcheck -f
+#
+# envsubst variables:
+#   ${FLEET_MEMBER_IMAGE}  the fleet member image -- any image that provides
+#                          the `fleet-hubcheck` entrypoint. Use the same ref
+#                          deployment/fleet-member is running, since the point
+#                          is to check the identity and client that will do
+#                          the publishing. Read it off the running member:
+#                            kubectl -n multi-cluster-fleet get deploy/fleet-member \
+#                              -o jsonpath='{.spec.template.spec.containers[0].image}'
+#                          (deploy/build-push.sh prints one if you are building.)
+#   ${CLUSTER_NAME}        this cluster's name; must match its ClusterProfile
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fleet-hubcheck
+  namespace: multi-cluster-fleet
+spec:
+  # Do not retry. A failure here is a configuration error, and a retry loop
+  # just buries the first (most informative) error under identical repeats.
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      # Same ServiceAccount the real member uses -- that is the whole point.
+      # Checking with a different identity would prove nothing about the one
+      # that will actually be publishing.
+      serviceAccountName: fleet-member
+      containers:
+        - name: hubcheck
+          image: ${FLEET_MEMBER_IMAGE}
+          # Always, even where the tag is content-addressed and IfNotPresent
+          # would be safe. This Job is the thing you reach for when something
+          # is already wrong, often after a hand-tagged rebuild, and "the node
+          # served a stale layer" is the single most misleading answer it
+          # could give you. One extra pull per diagnostic run is a trade worth
+          # making.
+          imagePullPolicy: Always
+          command: ["fleet-hubcheck"]
+          args:
+            - --cluster-name=${CLUSTER_NAME}
+            - --hub-kubeconfig=/etc/fleet-hub/kubeconfig
+            - --hub-namespace=fleet-system
+            - --hub-token-source=gke-metadata
+            - --hub-api-version=v1alpha1
+            # 1, not a realistic capacity. If this Job is forgotten and the
+            # planner is later pointed at the hub, a capacity of 1 makes the
+            # cluster unattractive and obvious. A plausible number would
+            # quietly skew placement instead.
+            - --sandbox-capacity=1
+          volumeMounts:
+            - name: hub-kubeconfig
+              mountPath: /etc/fleet-hub
+              readOnly: true
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits:   {cpu: 200m, memory: 256Mi}
+      volumes:
+        - name: hub-kubeconfig
+          configMap:
+            name: hub-kubeconfig

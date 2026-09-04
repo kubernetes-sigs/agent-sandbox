@@ -89,6 +89,11 @@ The **R2E-Gym adapter** (`adapters.r2egym`) needs R2E-Gym, which isn't on PyPI �
 install it from its checkout (`pip install -e path/to/R2E-Gym`); the adapter
 raises a clear error if it's missing. (No `r2egym` extra for that reason.)
 
+The **OpenHands adapter** (`adapters.openhands`) likewise imports lazily and
+needs the [`openhands-k8s-agent-sandbox`](../../clients/integrations/openhands)
+integration (`pip install openhands-k8s-agent-sandbox`), which pulls the
+OpenHands agent SDK — note the SDK requires **Python >= 3.12**.
+
 ### 4. Verify
 
 ```bash
@@ -166,7 +171,7 @@ python run_swebench_fleet.py
 | **Placement** | Which cluster serves an image: `round-robin`, `least-loaded`, `capacity-weighted`, `image-affinity`. |
 | **Strategy** | *When* pools exist: `none`, `naive`, `sliding`, `pipelined`. |
 | **Recycling** | *Reuse* one sandbox across same-image tasks (reset between): `run(recycle=True)` — orthogonal to strategy — backed by `reuse_git_restore_sandbox` + `GitRestoreReset` (claims scale ÷ tasks-per-image). |
-| **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`). |
+| **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`), `adapters.openhands` (`make_fleet_workspace`/`make_handle_workspace` put OpenHands agent-SDK workspaces on fleet pods). |
 
 ## Warm-pool strategies
 

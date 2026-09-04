@@ -50,7 +50,7 @@ metadata:
   namespace: multi-cluster-fleet
   # No ClusterRole/RoleBinding — the planner only touches GCS, not the k8s API.
   # GCS auth comes via Workload Identity binding on the ServiceAccount
-  # annotation (see TESTING.md §3c).
+  # annotation; deploy/setup-hub.sh creates the GSA and the binding.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -58,8 +58,8 @@ metadata:
   name: fleet-spec
   namespace: multi-cluster-fleet
 data:
-  # Replace this with your real FleetSpec — see demo/fleet-spec-xs.yaml for
-  # a minimal working example.
+  # Replace this with your real FleetSpec — see demo/fleet-spec.yaml for a
+  # minimal working example.
   fleet-spec.yaml: |
     max_concurrent: 300
     max_pool: 100
@@ -101,6 +101,28 @@ spec:
         - name: planner
           image: ${FLEET_MEMBER_IMAGE}
           imagePullPolicy: IfNotPresent
+          # The image ships USER fleet, but ${FLEET_MEMBER_IMAGE} is
+          # operator-supplied, so that is a convention rather than a
+          # boundary. Assert it here instead. The planner reads a ConfigMap
+          # and talks to GCS; it needs no capabilities of any kind.
+          #
+          # runAsUser is set EXPLICITLY rather than left to the image. The
+          # kubelet enforces runAsNonRoot by inspecting the image's user
+          # field, and a NON-NUMERIC one -- `USER fleet`, which is what this
+          # image shipped -- cannot be resolved to a uid at admission. The
+          # container is then refused with CreateContainerConfigError:
+          # "image has non-numeric user (fleet), cannot verify user is
+          # non-root", which reads as a broken manifest rather than a broken
+          # image. Pinning the uid here makes the assertion hold whatever
+          # ${FLEET_MEMBER_IMAGE} turns out to be.
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           # Override the image's default ENTRYPOINT (`fleet-member`) so we
           # run the fleetctl CLI in loop mode instead. Same wheel, different
           # console_script.

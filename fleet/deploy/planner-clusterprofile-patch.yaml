@@ -57,10 +57,18 @@ spec:
             - --loop-interval=${LOOP_INTERVAL}
             - --inventory=clusterprofile
             - --hub-kubeconfig=/etc/fleet-hub/kubeconfig
-            - --hub-namespace=fleet-system
+            # Must match setup-hub.sh's --hub-namespace (HUB_NS), and the
+            # members'. A mismatch does not error: the planner finds an empty
+            # namespace, reads an inventory of zero clusters, and plans
+            # accordingly -- the same "capacity-less fleet" outcome as flipping
+            # this on too early, arrived at by a different route.
+            - --hub-namespace=${HUB_NAMESPACE}
             - --hub-token-source=gke-metadata
-            # Must match the members' --hub-api-version.
-            - --hub-api-version=v1alpha1
+            # Must match the members' --hub-api-version. render.sh defaults
+            # both to v1alpha1; override HUB_API_VERSION on BOTH sides
+            # together or ownership splits across two managedFields
+            # entries under one manager name.
+            - --hub-api-version=${HUB_API_VERSION}
             # Only read profiles this fleet's cluster manager owns, so a hub
             # shared with another fleet does not leak clusters into placement.
             - --cluster-manager=${CLUSTER_MANAGER}

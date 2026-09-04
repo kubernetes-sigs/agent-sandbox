@@ -16,19 +16,24 @@
 #   ./deploy/gen-hub-kubeconfig.sh --hub-cluster fleet-hub \
 #       --hub-location us-central1 | kubectl apply -f -
 #
-#   CLUSTER=cluster-a
-#   sed "s/\${CLUSTER_NAME}/$CLUSTER/g" \
-#     deploy/fleet-member-clusterprofile-patch.yaml \
+#   CLUSTER_NAME=cluster-a FLEET_BUCKET=my-bucket SANDBOX_CAPACITY=50000 \
+#     ./deploy/render.sh deploy/fleet-member-clusterprofile-patch.yaml \
 #     | kubectl patch deployment fleet-member -n multi-cluster-fleet \
 #         --patch-file /dev/stdin
+#
+#   HUB_NAMESPACE and HUB_API_VERSION are templated too; render.sh defaults
+#   them to fleet-system and v1alpha1, which is what setup-hub.sh installs
+#   unless you passed --hub-namespace / --hub-api-version. If you did, set
+#   the same values here -- see the --hub-api-version note below for what a
+#   mismatch actually does.
 #
 # VERIFY -- publishing is wrapped in try/except so the member survives a broken
 # hub, which also means a misconfiguration is quiet. Check all three:
 #
 #   kubectl logs -n multi-cluster-fleet deploy/fleet-member | grep -i clusterprofile
-#   kubectl --context hub get clusterprofile $CLUSTER -n fleet-system \
+#   kubectl --context hub get clusterprofile <cluster> -n fleet-system \
 #     -o jsonpath='{.status.properties}' | tr ',' '\n' | grep agents.x-k8s.io
-#   kubectl --context hub get clusterprofile $CLUSTER -n fleet-system \
+#   kubectl --context hub get clusterprofile <cluster> -n fleet-system \
 #     -o jsonpath='{.metadata.managedFields[*].manager}'
 #
 # The last one is the real check. If `agent-sandbox-fleet-member` is not in
@@ -56,7 +61,7 @@ spec:
             # -- ClusterProfile publishing ---------------------------------- #
             - --publish-clusterprofile
             - --hub-kubeconfig=/etc/fleet-hub/kubeconfig
-            - --hub-namespace=fleet-system
+            - --hub-namespace=${HUB_NAMESPACE}
             # No credentials in that kubeconfig; the token comes from the GKE
             # metadata server as this pod's Workload Identity GSA.
             - --hub-token-source=gke-metadata
@@ -64,7 +69,7 @@ spec:
             # error -- with no conversion webhook the apiserver serves the same
             # object under either version -- it just splits ownership across
             # two managedFields entries under one manager name.
-            - --hub-api-version=v1alpha1
+            - --hub-api-version=${HUB_API_VERSION}
             # How many sandboxes this cluster can hold. A member cannot infer
             # this, and the planner derives placement weights from it, so a
             # wrong number here silently skews the whole fleet's placement.

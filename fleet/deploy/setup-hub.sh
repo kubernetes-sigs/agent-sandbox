@@ -28,6 +28,21 @@
 #
 #   # same command without --dry-run to apply
 #
+# FLAGS WORTH KNOWING ABOUT
+#   --planner-cluster C        Where the planner runs; defaults to the first
+#                              member. May be a cluster outside --members.
+#   --private-endpoint         Write the hub's PRIVATE address into the
+#                              kubeconfig ConfigMap. Use this whenever the
+#                              members have no route to the public endpoint --
+#                              private nodes with no Cloud NAT is the usual
+#                              case, and it presents as a TLS timeout, not a
+#                              403.
+#   --crd-ref REF              Upstream cluster-inventory-api tag to install
+#                              the ClusterProfile CRD from (default v0.1.3).
+#   --unconditional-bucket-iam Grant members bucket-wide objectAdmin instead of
+#                              a per-object condition. Only for buckets without
+#                              uniform bucket-level access.
+#
 # Idempotent: re-running is how you add a member. Each step tolerates the
 # object already existing.
 #
@@ -64,9 +79,19 @@ PLANNER_KSA="${PLANNER_KSA:-fleet-planner}"
 PLANNER_CLUSTER=""
 CLUSTER_MANAGER="${CLUSTER_MANAGER:-agent-sandbox-fleet}"
 API_VERSION="${API_VERSION:-v1alpha1}"
+# Git ref for the upstream ClusterProfile CRD. A TAG, never a branch -- see the
+# comment above CRD_URL in step 1 for why. Bump deliberately, and bump
+# API_VERSION with it if the new tag changes which version is served.
+CRD_REF="${CRD_REF:-v0.1.3}"
 CONTEXT_TEMPLATE="${CONTEXT_TEMPLATE:-%s}"
 HUB_CONTEXT=""
 DRY_RUN=0
+# Reach the hub on its private endpoint (intra-VPC) instead of its public one.
+# Forwarded to gen-hub-kubeconfig.sh, which is the thing that actually resolves
+# an address; see the reachability note in that script's header.
+PRIVATE_ENDPOINT=0
+# Escape hatch for buckets that still use ACLs -- see grant_bucket_access.
+UNCONDITIONAL_BUCKET_IAM=0
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -96,8 +121,15 @@ while [[ $# -gt 0 ]]; do
     --context-template) CONTEXT_TEMPLATE="$2"; shift 2 ;;
     --cluster-manager)  CLUSTER_MANAGER="$2"; shift 2 ;;
     --api-version)      API_VERSION="$2"; shift 2 ;;
+    --crd-ref)          CRD_REF="$2"; shift 2 ;;
+    --private-endpoint) PRIVATE_ENDPOINT=1; shift ;;
+    --unconditional-bucket-iam) UNCONDITIONAL_BUCKET_IAM=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
-    -h|--help)          sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Bounded by the `set -euo pipefail` line rather than a hardcoded 40, so
+    # editing the header cannot silently truncate --help. Matches
+    # gen-hub-kubeconfig.sh.
+    -h|--help)          sed -n '3,/^set -euo/p' "$0" \
+                          | sed 's/^# \{0,1\}//;/^set -euo/d'; exit 0 ;;
     *) die "unknown flag: $1" ;;
   esac
 done
@@ -130,14 +162,33 @@ kubectl --context "$HUB_CONTEXT" version -o yaml >/dev/null 2>&1 \
 # is preserve-unknown-fields, which means it silently accepts a misspelled
 # property name AND makes status.properties atomic under SSA -- so it will pass
 # tests that a real hub fails. It exists for kind, not for this.
+#
+# PINNED TO A TAG, NOT main. Fetching an upstream branch means the schema the
+# hub ends up with depends on the day the script ran. That is not theoretical
+# here: cluster-inventory-api's main has since gained a v1alpha2, so a hub
+# built today and a hub built when this was written no longer agree on the
+# storage version, while API_VERSION below still says v1alpha1 in both. The
+# result is a fleet whose members apply to a version the hub is quietly
+# converting under them.
+#
+# v0.1.3 serves exactly v1alpha1, which is what API_VERSION defaults to. If you
+# bump --crd-ref, check what the new ref serves and bump --api-version to match.
 # --------------------------------------------------------------------------- #
-CRD_URL="https://raw.githubusercontent.com/kubernetes-sigs/cluster-inventory-api/main/config/crd/bases/multicluster.x-k8s.io_clusterprofiles.yaml"
-log "1/6 installing the upstream ClusterProfile CRD"
+CRD_URL="https://raw.githubusercontent.com/kubernetes-sigs/cluster-inventory-api/${CRD_REF}/config/crd/bases/multicluster.x-k8s.io_clusterprofiles.yaml"
+log "1/6 installing the upstream ClusterProfile CRD (ref $CRD_REF)"
 if [[ "$DRY_RUN" == "1" ]]; then
   printf "\033[0;90m  would run:\033[0m kubectl --context %s apply -f %s\n" "$HUB_CONTEXT" "$CRD_URL"
 else
   kubectl --context "$HUB_CONTEXT" apply -f "$CRD_URL" \
     || die "could not install the CRD from $CRD_URL"
+  # apply succeeds against a CRD that does not serve the version everything
+  # else in this script writes. That skew surfaces much later, as a 404 on a
+  # member's first publish, which reads like a broken hub rather than a
+  # mismatched ref. Check it here, where the ref is still on screen.
+  kubectl --context "$HUB_CONTEXT" get crd clusterprofiles.multicluster.x-k8s.io \
+      -o jsonpath='{range .spec.versions[?(@.served)]}{.name}{"\n"}{end}' \
+    | grep -qx "$API_VERSION" \
+    || die "the CRD at ref $CRD_REF does not serve $API_VERSION; pass a matching --crd-ref / --api-version"
 fi
 if [[ "$DRY_RUN" == "1" ]]; then
   printf "\033[0;90m  would ensure namespace %s exists on the hub\033[0m\n" "$HUB_NS"
@@ -233,11 +284,65 @@ grant_cluster_access() {
 
 # Bucket-scoped, not project-scoped: the member writes exactly one object path
 # and there is no reason for it to reach the rest of the project's storage.
+#
+# AND OBJECT-SCOPED FOR MEMBERS. Bucket-wide objectAdmin -- which is what this
+# granted before -- lets any member overwrite or delete every OTHER member's
+# fleet/capacity/*.json, and fleet/assignments.json along with it. Since the
+# planner derives placement weights from those capacity reports, that is
+# exactly the "one member pulls the whole fleet's workload onto itself" attack
+# the per-member hub Role in step 4 exists to prevent. Locking the hub down and
+# leaving the bucket open just moves the door.
+#
+# So members get two bindings:
+#   objectViewer, unconditional -- a member legitimately reads
+#     fleet/assignments.json and the weights/ objects, and read-only access
+#     cannot redirect anything.
+#   objectAdmin, conditioned on the one object it owns,
+#     fleet/capacity/<cluster>.json.
+#
+# The planner is called with no cluster argument and keeps the broader
+# bucket-wide grant: it writes fleet/spec.json and fleet/assignments.json and
+# reads every capacity report, so a per-object condition would have to
+# enumerate the fleet and be re-applied on every membership change.
+#
+# ON AN EXISTING FLEET, RE-RUNNING THIS IS NOT ENOUGH. add-iam-policy-binding
+# is additive: a member that was already granted bucket-wide objectAdmin by an
+# earlier run keeps it, and the wider binding wins. Re-running narrows nothing.
+# Strip the old grant per member:
+#
+#   gcloud storage buckets remove-iam-policy-binding gs://BUCKET \
+#     --member serviceAccount:fleet-member-CLUSTER@PROJECT.iam.gserviceaccount.com \
+#     --role roles/storage.objectAdmin --condition=None
+#
+# REQUIRES UNIFORM BUCKET-LEVEL ACCESS. IAM conditions are not evaluated on a
+# bucket still using object ACLs. On such a bucket, either turn UBLA on
+#   gcloud storage buckets update gs://BUCKET --uniform-bucket-level-access
+# or pass --unconditional-bucket-iam and accept the wider grant knowingly.
 grant_bucket_access() {
+  local member="$1" cluster="${2:-}"
   [[ -n "$FLEET_BUCKET" ]] || return 0
+
+  if [[ -z "$cluster" || "$UNCONDITIONAL_BUCKET_IAM" == "1" ]]; then
+    run gcloud storage buckets add-iam-policy-binding "gs://${FLEET_BUCKET}" \
+        --member "serviceAccount:${member}" \
+        --role roles/storage.objectAdmin \
+        --condition=None
+    return 0
+  fi
+
   run gcloud storage buckets add-iam-policy-binding "gs://${FLEET_BUCKET}" \
-      --member "serviceAccount:$1" \
-      --role roles/storage.objectAdmin
+      --member "serviceAccount:${member}" \
+      --role roles/storage.objectViewer \
+      --condition=None
+
+  # Path must match objectstore.Paths.capacity(); it is the only object a
+  # member writes. Keep the two in sync -- a mismatch here fails as a 403 on
+  # the capacity write, which the member swallows and retries forever.
+  local object="projects/_/buckets/${FLEET_BUCKET}/objects/fleet/capacity/${cluster}.json"
+  run gcloud storage buckets add-iam-policy-binding "gs://${FLEET_BUCKET}" \
+      --member "serviceAccount:${member}" \
+      --role roles/storage.objectAdmin \
+      --condition="title=fleet-capacity-${cluster},description=write only ${cluster}'s own capacity report,expression=resource.type == \"storage.googleapis.com/Object\" && resource.name == \"${object}\""
 }
 
 for m in "${MEMBER_LIST[@]}"; do
@@ -248,7 +353,7 @@ for m in "${MEMBER_LIST[@]}"; do
       --member "serviceAccount:${PROJECT}.svc.id.goog[${MEMBER_NS}/${KSA}]" \
       --condition=None
   grant_cluster_access "$email"
-  grant_bucket_access "$email"
+  grant_bucket_access "$email" "$m"
   ensure_ksa "$(member_ctx "$m")" "$KSA"
   run kubectl --context "$(member_ctx "$m")" annotate serviceaccount "$KSA" \
       -n "$MEMBER_NS" --overwrite \
@@ -270,8 +375,9 @@ run gcloud iam service-accounts add-iam-policy-binding "$PLANNER_GSA" \
     --member "serviceAccount:${PROJECT}.svc.id.goog[${MEMBER_NS}/${PLANNER_KSA}]" \
     --condition=None
 grant_cluster_access "$PLANNER_GSA"
-# The planner reads the registry from GCS and writes placement back, so it
-# needs the same bucket access for the same reason the members do.
+# The planner reads every capacity report and writes fleet/spec.json and
+# fleet/assignments.json, so it gets the bucket-wide grant -- no cluster
+# argument. This is the ONE identity that needs it; see grant_bucket_access.
 grant_bucket_access "$PLANNER_GSA"
 ensure_ksa "$(member_ctx "$PLANNER_CLUSTER")" "$PLANNER_KSA"
 run kubectl --context "$(member_ctx "$PLANNER_CLUSTER")" \
@@ -327,13 +433,31 @@ YAML
 done
 
 # --------------------------------------------------------------------------- #
-# 6. The credential-free hub kubeconfig, on every member and on the planner.
+# 6. The credential-free hub kubeconfig, on every member AND on the planner.
+#
+# "And on the planner" is not decoration. --planner-cluster may name a cluster
+# that is not in --members -- a dedicated management cluster is the documented
+# reason to pass the flag at all -- and the planner Pod mounts this exact
+# ConfigMap. Distributing to MEMBER_LIST alone leaves that Pod stuck in
+# ContainerCreating on a missing volume, hours after this script exited 0.
+#
+# gen-hub-kubeconfig.sh defaults to the hub's PUBLIC endpoint, which is
+# unroutable from a private fleet with no Cloud NAT (see that script's header,
+# case (b)). --private-endpoint is forwarded rather than reimplemented.
 # --------------------------------------------------------------------------- #
 log "6/6 distributing the hub kubeconfig ConfigMap"
-CM_YAML="$("$HERE/gen-hub-kubeconfig.sh" \
-  --hub-cluster "$HUB_CLUSTER" --hub-location "$HUB_LOCATION" \
-  --project "$PROJECT" --namespace "$MEMBER_NS")"
-for m in "${MEMBER_LIST[@]}"; do
+KUBECONFIG_ARGS=(--hub-cluster "$HUB_CLUSTER" --hub-location "$HUB_LOCATION"
+                 --project "$PROJECT" --namespace "$MEMBER_NS")
+[[ "$PRIVATE_ENDPOINT" == "1" ]] && KUBECONFIG_ARGS+=(--private-endpoint)
+CM_YAML="$("$HERE/gen-hub-kubeconfig.sh" "${KUBECONFIG_ARGS[@]}")"
+
+# Union, de-duplicated: PLANNER_CLUSTER defaults to MEMBER_LIST[0], so it is
+# usually already in the list and applying twice would just be noise.
+CM_TARGETS=("${MEMBER_LIST[@]}")
+printf '%s\n' "${MEMBER_LIST[@]}" | grep -qxF "$PLANNER_CLUSTER" \
+  || CM_TARGETS+=("$PLANNER_CLUSTER")
+
+for m in "${CM_TARGETS[@]}"; do
   if [[ "$DRY_RUN" == "1" ]]; then
     printf "\033[0;90m  would apply hub-kubeconfig ConfigMap to %s\033[0m\n" "$(member_ctx "$m")"
   else
@@ -404,11 +528,15 @@ Next, in this order — the order matters:
   1. Turn on publishing, one member at a time:
 
        CLUSTER=${MEMBER_LIST[0]}
-       sed "s/\\\${CLUSTER_NAME}/\$CLUSTER/g; s/\\\${FLEET_BUCKET}/\$FLEET_BUCKET/g; \\
-            s/\\\${SANDBOX_CAPACITY}/200000/g" \\
-         deploy/fleet-member-clusterprofile-patch.yaml \\
+       CLUSTER_NAME=\$CLUSTER FLEET_BUCKET=$FLEET_BUCKET SANDBOX_CAPACITY=200000 \\
+       HUB_NAMESPACE=$HUB_NS HUB_API_VERSION=$API_VERSION \\
+         ./deploy/render.sh deploy/fleet-member-clusterprofile-patch.yaml \\
          | kubectl --context \$(printf "$CONTEXT_TEMPLATE" "\$CLUSTER") \\
              patch deployment fleet-member -n $MEMBER_NS --patch-file /dev/stdin
+
+     render.sh, not sed: the patch templates five variables and sed here only
+     ever substituted three. envsubst would have blanked the other two without
+     a word; render.sh refuses to emit the file at all.
 
   2. Confirm the applies own their fields. managedFields is the ground truth —
      a merge-patch would land the data and own nothing:

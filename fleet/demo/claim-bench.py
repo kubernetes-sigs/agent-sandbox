@@ -119,13 +119,26 @@ def main() -> int:
 
     if not args.bucket:
         ap.error("--bucket / $FLEET_BUCKET is required")
+    if args.claims < 1:
+        ap.error("--claims must be >= 1")
+    if args.concurrency < 1:
+        # ThreadPoolExecutor(max_workers=0) raises ValueError from deep inside
+        # the run; fail here with a message that names the flag.
+        ap.error("--concurrency must be >= 1")
+    if args.pool_maxsize < 0:
+        ap.error("--pool-maxsize must be >= 0 (0 = derive from --concurrency)")
     if "KUBECONFIG" not in os.environ:
         print("WARNING: KUBECONFIG unset. This fleet keeps one kubeconfig per "
               "cluster, so contexts for BOTH clusters must be visible:\n"
               "  export KUBECONFIG=$HOME/.kube/config-a:$HOME/.kube/config-b",
               file=sys.stderr)
 
-    overrides = dict(kv.split("=", 1) for kv in args.context)
+    overrides: dict[str, str] = {}
+    for kv in args.context:
+        cluster, sep, context = kv.partition("=")
+        if not sep or not cluster or not context:
+            ap.error(f"--context expects CLUSTER=CONTEXT, got {kv!r}")
+        overrides[cluster] = context
 
     # Read assignments directly to build the template work-list. Sorting then
     # interleaving by cluster keeps the offered load balanced across clusters
@@ -298,9 +311,22 @@ def main() -> int:
     # Routing spread is the multi-cluster assertion: a run that lands entirely
     # on one cluster is the known per-cluster-client-collision bug resurfacing
     # (resolver.py _build_client docstring), not a fast fleet.
-    if len(routed) < len([c for c, v in per_cluster.items() if v]):
-        print("WARNING: claims did not reach every cluster with pools — "
+    #
+    # Compare the NAMES, not the counts. {a, b} expected against {a, "?"}
+    # routed has the same cardinality but means no claim reached b at all.
+    expected = {c for c, v in per_cluster.items() if v}
+    actual = set(routed)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected - {"?"})
+    if missing:
+        print(f"WARNING: no claim reached {', '.join(missing)} — "
               "check per-cluster client pinning", file=sys.stderr)
+    if unexpected:
+        print(f"WARNING: claims routed to clusters absent from the assignment: "
+              f"{', '.join(unexpected)}", file=sys.stderr)
+    if "?" in actual:
+        print(f"WARNING: {routed['?']} claim(s) bound but the resolver could "
+              "not name their cluster", file=sys.stderr)
     return 0 if ok == args.claims else 1
 
 

@@ -3,7 +3,7 @@
 #
 # Workload Identity variant of fleet-member-deployment.yaml.
 #
-# Use this on GKE clusters created with --workload-pool=$PROJECT.svc.id.goog.
+# Use this on GKE clusters created with --workload-pool=PROJECT_ID.svc.id.goog.
 # The ServiceAccount must be annotated with iam.gke.io/gcp-service-account.
 # GCS auth flows via the GKE metadata server (ADC), no key file mounted.
 #
@@ -46,6 +46,29 @@ spec:
         - name: fleet-member
           image: ${FLEET_MEMBER_IMAGE}
           imagePullPolicy: IfNotPresent
+          # The image ships USER fleet, but ${FLEET_MEMBER_IMAGE} is
+          # operator-supplied, so that is a convention rather than a boundary.
+          # Assert it here. This pod holds the fleet's Kubernetes credentials
+          # and its Workload Identity binding, so it is the one that most
+          # needs the assertion.
+          #
+          # runAsUser is set EXPLICITLY rather than left to the image. The
+          # kubelet enforces runAsNonRoot by inspecting the image's user
+          # field, and a NON-NUMERIC one -- `USER fleet`, which is what this
+          # image shipped -- cannot be resolved to a uid at admission. The
+          # container is then refused with CreateContainerConfigError:
+          # "image has non-numeric user (fleet), cannot verify user is
+          # non-root", which reads as a broken manifest rather than a broken
+          # image. Pinning the uid here makes the assertion hold whatever
+          # ${FLEET_MEMBER_IMAGE} turns out to be.
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           args:
             - --cluster-name=${CLUSTER_NAME}
             - --bucket=${FLEET_BUCKET}

@@ -47,14 +47,21 @@ command -v envsubst >/dev/null 2>&1 || die "envsubst not found (apt install gett
 : "${LOOP_INTERVAL:=60}"
 : "${CLUSTER_MANAGER:=agent-sandbox-fleet}"   # matches setup-hub.sh
 : "${HUB_NAMESPACE:=fleet-system}"
+: "${HUB_API_VERSION:=v1alpha1}"
 : "${SANDBOX_CAPACITY:=200}"
-export LOOP_INTERVAL CLUSTER_MANAGER HUB_NAMESPACE SANDBOX_CAPACITY
+export LOOP_INTERVAL CLUSTER_MANAGER HUB_NAMESPACE HUB_API_VERSION SANDBOX_CAPACITY
 
 # Everything the file actually references, minus what is now set.
+#
+# envsubst expands BOTH ${VAR} and bare $VAR, so both forms have to be
+# collected here. Scanning only the braced form let an unbraced $FLEET_BUCKET
+# through: envsubst blanked it and this script reported nothing missing --
+# exactly the failure the file exists to prevent.
 missing=()
 while read -r var; do
   [[ -n "${!var:-}" ]] || missing+=("$var")
-done < <(grep -oh '\${[A-Za-z_][A-Za-z0-9_]*}' "$FILE" | tr -d '${}' | sort -u)
+done < <(grep -ohE '\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*' "$FILE" \
+           | tr -d '${}' | sort -u)
 
 if [[ ${#missing[@]} -gt 0 ]]; then
   die "$FILE needs these, and they are unset: ${missing[*]}

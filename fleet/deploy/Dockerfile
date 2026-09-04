@@ -31,8 +31,10 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_K8S_AGENT_SANDBOX=0.0.0+docker
 COPY clients/python/agentic-sandbox-client /src/sdk
 RUN pip install --no-cache-dir /src/sdk
 
-# Copy the fleet planner package and install it. --no-deps because we already
-# have k8s-agent-sandbox from the local path above; pip should not try PyPI.
+# Copy the fleet planner package and install it. Deliberately NOT --no-deps:
+# the package needs google-cloud-storage, pydantic, pyyaml and kubernetes from
+# PyPI. Its k8s-agent-sandbox requirement is unpinned and already satisfied by
+# the local install above, so pip resolves it without reaching for PyPI.
 COPY fleet/python /src/fleet
 RUN pip install --no-cache-dir /src/fleet
 
@@ -56,5 +58,11 @@ COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3
 COPY --from=build /usr/local/bin/fleet-member   /usr/local/bin/fleet-member
 COPY --from=build /usr/local/bin/fleetctl       /usr/local/bin/fleetctl
 COPY --from=build /usr/local/bin/fleet-hubcheck /usr/local/bin/fleet-hubcheck
-USER fleet
+# NUMERIC, not `USER fleet`. The manifests set runAsNonRoot: true, and the
+# kubelet enforces that by inspecting the image's user field: a NAME is
+# unresolvable to a uid at admission, so the container never starts --
+# "image has non-numeric user (fleet), cannot verify user is non-root",
+# reported as CreateContainerConfigError, which looks like a bad manifest
+# rather than a bad image. Same uid as the useradd above.
+USER 1000
 ENTRYPOINT ["python", "-u", "-m", "agent_sandbox_fleet.fleet_member"]

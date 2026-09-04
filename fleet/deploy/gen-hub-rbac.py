@@ -119,8 +119,20 @@ def main() -> int:
   else:
     tmpl = "fleet-member-{cluster}"
 
+  # The planner subject is derived by name-substitution on the default
+  # template. A custom --subject-template need not contain the string being
+  # substituted, in which case the derivation silently returns the template
+  # unchanged and the planner RoleBinding is emitted with a literal
+  # "{cluster}" in it. That binding matches no identity, so the planner's
+  # inventory reads fail with an RBAC denial well after apply time.
+  if args.subject_template and not args.planner_subject:
+    sys.exit("--planner-subject is required with --subject-template: the "
+             "planner identity cannot be derived from a custom template")
   planner = args.planner_subject or (
       tmpl.replace("fleet-member-{cluster}", "fleet-planner"))
+  if "{" in planner:
+    sys.exit(f"planner subject is not fully resolved: {planner!r}; "
+             "pass --planner-subject")
 
   extra = (f"    namespace: {args.sa_namespace}\n"
            if args.subject_kind == "ServiceAccount" else "")

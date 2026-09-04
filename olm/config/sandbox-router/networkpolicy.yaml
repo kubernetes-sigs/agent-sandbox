@@ -1,10 +1,15 @@
-# Example NetworkPolicy. Adjust the ingress source — most deployments have
-# the router behind a Gateway in a specific namespace; tighten the from:
-# selector to that namespace + labels to prevent direct cluster-wide ingress.
+# Default NetworkPolicy for the sandbox-router.
 #
-# Egress is intentionally broad because the router dials arbitrary sandbox
-# pods in tenant namespaces — narrow it via labels if your tenancy model
-# constrains which pods/namespaces are valid targets.
+# Ingress is open to all namespaces on the proxy port because the router is the
+# entry point for sandbox traffic — clients, SDKs, and Gateway controllers can
+# live in any namespace. The authz layer (--authz-mode) is the security
+# boundary; tighten the from: clause if your deployment constrains callers to a
+# known set of namespaces.
+#
+# Egress to sandbox pods is unrestricted on port because the upstream port is
+# caller-specified (X-Sandbox-Port header, default 8888) and sandboxes can live
+# in any namespace. Tighten via namespaceSelector/podSelector if your tenancy
+# model constrains valid targets.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,7 +25,7 @@ spec:
       app.kubernetes.io/component: sandbox-router
   policyTypes: ["Ingress", "Egress"]
   ingress:
-  # Proxy traffic — replace this from: clause with your Gateway namespace.
+  # Proxy traffic — open to all namespaces; see header comment.
   - from:
     - namespaceSelector: {}
     ports:
@@ -37,7 +42,7 @@ spec:
     ports:
     - protocol: TCP
       port: 9090
-  # Kubelet probes hit the pod IP directly; allow all.
+  # Kubelet probes hit the pod IP directly; allow all sources.
   - ports:
     - protocol: TCP
       port: 8081
@@ -52,13 +57,11 @@ spec:
       port: 53
     - protocol: TCP
       port: 53
-  # Allow forwarding to sandbox pods on the agreed sandbox port. Tighten
-  # via namespaceSelector/podSelector if your tenancy model permits.
+  # Forward traffic to sandbox pods. The upstream port is caller-specified
+  # (X-Sandbox-Port header, default 8888) and sandboxes can live in any
+  # namespace, so neither destination nor port is restricted.
   - to:
     - namespaceSelector: {}
-    ports:
-    - protocol: TCP
-      port: 8888
   # OTel collector (if --enable-tracing or --enable-otel-metrics). Tighten
   # to your collector's namespace/pod selector.
   - to:
@@ -67,21 +70,15 @@ spec:
     - protocol: TCP
       port: 4317
   # Kubernetes API server — required when --cache-enabled or
-  # --authz-mode=tokenreview. The cache informer LIST/WATCHes Pods and
-  # the TokenReview authorizer POSTs to authentication.k8s.io. Without
-  # this rule, cache sync hangs and tokenreview every-request fails
-  # closed. The apiserver lives at the cluster-wide kubernetes service;
-  # NetworkPolicy can't name it directly, so we allow egress to the
-  # default namespace on the standard API port. Many clusters also
-  # accept apiserver traffic over the public LB IP — if your cluster
-  # routes that way, add an ipBlock for the LB CIDR alongside this
-  # rule. Skip this rule entirely when running with --cache-enabled=false
-  # AND --authz-mode=allow-all.
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: default
-    ports:
+  # --authz-mode=tokenreview. The API server typically runs on host-network
+  # control plane nodes, not as regular pods, so a namespaceSelector cannot
+  # target it. This port-only rule (no "to" restriction) allows egress on
+  # the standard API ports to any destination. Tighten with an ipBlock for
+  # your API server ClusterIP if desired:
+  #   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+  # Skip this rule entirely when running with --cache-enabled=false AND
+  # --authz-mode=allow-all (the OLM default).
+  - ports:
     - protocol: TCP
       port: 443
     - protocol: TCP

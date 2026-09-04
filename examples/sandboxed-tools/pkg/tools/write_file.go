@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
@@ -63,7 +63,7 @@ func (t *WriteFileTool) Run(ctx context.Context, sandbox Sandbox) (llm.Message, 
 		return llm.Message{}, fmt.Errorf("path is required")
 	}
 
-	dir := filepath.Dir(p)
+	dir := path.Dir(p)
 	log.Info("creating directory in sandbox", "dir", dir)
 	if _, err := sandbox.ExecCommand(ctx, ExecCommandOptions{
 		// The -- separator makes execution more robust e.g. if path is "--help"

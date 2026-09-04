@@ -230,8 +230,13 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                 stderr=subprocess.PIPE
             )
 
+            # Record the start of the port-forward readiness wait separately so that
+            # preflight check latency (up to 10 s on slow API responses or network
+            # stalls) does not eat into the port_forward_ready_timeout budget.
+            port_forward_start = time.monotonic()
+
             logging.info("Waiting for port-forwarding to be ready...")
-            while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
+            while time.monotonic() - port_forward_start < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
                     _, stderr = self.port_forward_process.communicate()
                     stderr_text = stderr.decode(errors="replace")

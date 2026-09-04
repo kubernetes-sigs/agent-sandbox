@@ -429,6 +429,42 @@ class TestLocalTunnelPreflightCheck(unittest.TestCase):
         strategy._preflight_check_router_service()
 
     @patch("subprocess.run")
+    def test_preflight_latency_does_not_consume_port_forward_timeout(self, mock_run):
+        """Preflight check duration must not eat into port_forward_ready_timeout.
+
+        A slow preflight (simulated by advancing time before Popen starts) should
+        leave the full port_forward_ready_timeout available for the readiness loop.
+        """
+        # Preflight passes.
+        mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+        # Use a tight timeout so any budget erosion would cause a real timeout.
+        config = SandboxLocalTunnelConnectionConfig(
+            router_namespace="ns", port_forward_ready_timeout=1
+        )
+        strategy = LocalTunnelConnectionStrategy(
+            sandbox_id="sb", namespace="default", config=config
+        )
+
+        mock_proc = MagicMock()
+        # Process is alive (poll returns None) and port opens on first check.
+        mock_proc.poll.return_value = None
+
+        time_calls = iter([
+            0.0,    # start_time (metrics)
+            8.0,    # port_forward_start (after simulated 8 s preflight)
+            8.1,    # first monotonic() in while condition — well within 1 s budget
+            8.2,    # finally-block monotonic() for end-to-end latency measurement
+        ])
+
+        with patch("k8s_agent_sandbox.connector.time.monotonic", side_effect=time_calls), \
+             patch("subprocess.Popen", return_value=mock_proc), \
+             patch.object(strategy, "_get_free_port", return_value=19877), \
+             patch.object(strategy, "_is_port_open", return_value=True):
+            url = strategy.connect()
+
+        self.assertEqual(url, "http://127.0.0.1:19877")
+
+    @patch("subprocess.run")
     def test_connect_error_message_includes_namespace(self, mock_run):
         """When port-forward crashes, the error message must include router_namespace."""
         # Pre-flight passes, then the Popen process crashes immediately.

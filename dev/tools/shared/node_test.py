@@ -17,6 +17,7 @@
 import os
 import sys
 import unittest
+import urllib.error
 from unittest import mock
 
 # Make the test importable regardless of how it is invoked (python -m unittest,
@@ -41,10 +42,11 @@ class InstallNodeDownloadRetryTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         patcher.start()
 
-        # Avoid sleeping for real during retries.
+        # Avoid sleeping for real during retries; kept so tests can assert on
+        # the retry-delay calls.
         patcher = mock.patch("node.time.sleep")
         self.addCleanup(patcher.stop)
-        patcher.start()
+        self.sleep = patcher.start()
 
         # Skip touching the real filesystem for the tar extraction path.
         patcher = mock.patch("node.os.makedirs")
@@ -62,7 +64,7 @@ class InstallNodeDownloadRetryTest(unittest.TestCase):
     def test_retries_after_transient_failure_then_succeeds(self):
         with mock.patch(
             "node.urllib.request.urlretrieve",
-            side_effect=[OSError("connection reset"), None],
+            side_effect=[urllib.error.URLError("connection reset"), None],
         ) as urlretrieve, mock.patch(
             "node._verify_sha256"
         ), mock.patch(
@@ -71,17 +73,34 @@ class InstallNodeDownloadRetryTest(unittest.TestCase):
             bin_dir = node.install_node("/fake/install/dir")
 
         self.assertEqual(urlretrieve.call_count, 2)
+        self.sleep.assert_called_once_with(node._DOWNLOAD_RETRY_DELAY_SECONDS)
         self.assertIsNotNone(bin_dir)
 
     def test_gives_up_after_exhausting_all_attempts(self):
         with mock.patch(
             "node.urllib.request.urlretrieve",
-            side_effect=OSError("connection reset"),
+            side_effect=urllib.error.URLError("connection reset"),
         ) as urlretrieve:
             result = node.install_node("/fake/install/dir")
 
         self.assertIsNone(result)
         self.assertEqual(urlretrieve.call_count, node._DOWNLOAD_ATTEMPTS)
+        self.assertEqual(
+            self.sleep.call_args_list,
+            [mock.call(node._DOWNLOAD_RETRY_DELAY_SECONDS)]
+            * (node._DOWNLOAD_ATTEMPTS - 1),
+        )
+
+    def test_does_not_retry_non_network_errors(self):
+        with mock.patch(
+            "node.urllib.request.urlretrieve",
+            side_effect=PermissionError("permission denied"),
+        ) as urlretrieve:
+            result = node.install_node("/fake/install/dir")
+
+        self.assertIsNone(result)
+        self.assertEqual(urlretrieve.call_count, 1)
+        self.sleep.assert_not_called()
 
 
 if __name__ == "__main__":

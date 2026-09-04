@@ -36,7 +36,6 @@ CONCURRENCY = 3
 SERIAL_FRACTION_LIMIT = 0.6
 # Below this serialized-time estimate, jitter dominates the fraction check.
 MEASURABLE_SERIALISED_S = 3.0
-FAST_PATH_SLACK_S = 1.0
 TICKER_INTERVAL_S = 0.02
 TICKER_GAP_LIMIT_S = 0.5
 ROUTABLE_PROBE_PATH = "routability-probe"
@@ -92,12 +91,21 @@ def _run_with_client(scenario, warmpool_name, namespace):
 async def _assert_concurrent_creates_overlap(client, warmpool_name, namespace):
     """Concurrent creates must run in parallel, not serialise behind each other.
 
-    Times one create on its own, then runs ``CONCURRENCY`` creates in a single
-    ``asyncio.gather`` and compares the concurrent wall-clock against that
-    baseline. Parallel creates finish in roughly the time of one; serialised
-    ones take ``CONCURRENCY`` times as long, whether the serialisation comes
-    from sync IO blocking the event loop or from the backend processing claims
-    one at a time.
+    Two complementary signals, because neither alone covers both failure
+    modes at every speed:
+
+    - In-flight overlap: each create records its ``(start, end)`` interval,
+      and ``max(starts) < min(ends)`` requires a moment when every create was
+      simultaneously in flight. This catches event-loop serialisation (sync
+      IO blocking the loop) with no wall-clock threshold, so it stays
+      conclusive at warm-pool speeds where timing jitter drowns any ratio.
+    - Serialised-fraction wall clock: overlap alone cannot see the backend
+      processing claims one at a time while all requests wait in flight, so
+      the concurrent wall clock is also compared against ``CONCURRENCY``
+      times a solo-create baseline — but only when that serialised estimate
+      is large enough to measure (a ~0.2s warm-adopt baseline puts the
+      fraction limit at ~0.36s, inside normal jitter; a presubmit flaked at
+      0.39s).
 
     The per-create durations cannot serve as the baseline. ``gather`` starts
     every coroutine at the same instant, so each duration runs from that shared
@@ -108,13 +116,14 @@ async def _assert_concurrent_creates_overlap(client, warmpool_name, namespace):
     print(f"\n--- Testing Concurrent Sandbox Creation (n={CONCURRENCY}) ---")
 
     async def _create():
-        t0 = time.perf_counter()
+        start = time.perf_counter()
         sandbox = await client.create_sandbox(
             warmpool=warmpool_name, namespace=namespace
         )
-        return sandbox, time.perf_counter() - t0
+        return sandbox, start, time.perf_counter()
 
-    baseline, t_baseline = await _create()
+    baseline, baseline_start, baseline_end = await _create()
+    t_baseline = baseline_end - baseline_start
     await client.delete_sandbox(baseline.claim_name, namespace=namespace)
     print(f"Baseline single create (discarded): {t_baseline:.2f}s")
 
@@ -122,14 +131,15 @@ async def _assert_concurrent_creates_overlap(client, warmpool_name, namespace):
     results = await asyncio.gather(*[_create() for _ in range(CONCURRENCY)])
     t_concurrent = time.perf_counter() - t0
 
-    sandboxes = [sandbox for sandbox, _ in results]
+    sandboxes = [sandbox for sandbox, _, _ in results]
     try:
-        completions = sorted(duration for _, duration in results)
+        starts = [start - t0 for _, start, _ in results]
+        ends = [end - t0 for _, _, end in results]
         t_serialised = t_baseline * CONCURRENCY
 
         print(
             f"Concurrent ({CONCURRENCY} sandboxes): {t_concurrent:.2f}s "
-            f"(completions at {', '.join(f'{c:.2f}s' for c in completions)}; "
+            f"(completions at {', '.join(f'{end:.2f}s' for end in sorted(ends))}; "
             f"~{t_serialised:.2f}s if serialised)"
         )
 
@@ -137,23 +147,20 @@ async def _assert_concurrent_creates_overlap(client, warmpool_name, namespace):
             f"Expected {CONCURRENCY} sandboxes, got {len(sandboxes)}"
         )
 
-        # The serial-fraction check is only meaningful when creates take
-        # long enough that fixed overhead (API round-trips, watch latency)
-        # doesn't dominate: a ~0.2s warm-adopt baseline puts the fraction
-        # limit at ~0.36s, inside normal jitter (observed presubmit flake
-        # at 0.39s). Below the floor, use a loose absolute bound instead —
-        # genuine serialization still exceeds it once creates are slow
-        # enough for the comparison to mean anything.
+        assert max(starts) < min(ends), (
+            f"Creates never overlapped: the last one started at "
+            f"{max(starts):.2f}s, after the first finished at "
+            f"{min(ends):.2f}s — the event loop is serialising them."
+        )
+
         if t_serialised >= MEASURABLE_SERIALISED_S:
             limit = t_serialised * SERIAL_FRACTION_LIMIT
-        else:
-            limit = t_serialised + FAST_PATH_SLACK_S
-        assert t_concurrent < limit, (
-            f"Concurrent creation of {CONCURRENCY} sandboxes took "
-            f"{t_concurrent:.2f}s against a {t_baseline:.2f}s single create "
-            f"(~{t_serialised:.2f}s if fully serialised) — expected less than "
-            f"{limit:.2f}s if parallel."
-        )
+            assert t_concurrent < limit, (
+                f"Concurrent creation of {CONCURRENCY} sandboxes took "
+                f"{t_concurrent:.2f}s against a {t_baseline:.2f}s single "
+                f"create (~{t_serialised:.2f}s if fully serialised) — "
+                f"expected less than {limit:.2f}s if parallel."
+            )
         print("--- Concurrent Sandbox Creation Test Passed! ---")
     finally:
         await asyncio.gather(

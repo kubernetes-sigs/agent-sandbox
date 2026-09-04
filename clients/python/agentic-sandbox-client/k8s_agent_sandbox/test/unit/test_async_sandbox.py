@@ -162,6 +162,7 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
             connection_config=mock_connection_config,
             k8s_helper=mock_k8s_helper_instance,
             get_pod_ip=sandbox.get_pod_ip,
+            get_pod_name=sandbox.get_pod_name,
         )
 
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
@@ -295,6 +296,17 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.sandbox.is_active)
         self.sandbox._is_closed = True
         self.assertFalse(self.sandbox.is_active)
+
+    def test_close_for_atexit(self):
+        """Atexit cleanup delegates without awaiting the connector."""
+        self.mock_connector._close_for_atexit = MagicMock()
+
+        self.sandbox._close_for_atexit()
+
+        self.mock_connector._close_for_atexit.assert_called_once_with()
+        self.assertIsNone(self.sandbox.commands)
+        self.assertIsNone(self.sandbox.files)
+        self.assertTrue(self.sandbox._is_closed)
 
     async def test_close_connection(self):
         """Tests the public close_connection method."""

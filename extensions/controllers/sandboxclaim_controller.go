@@ -58,8 +58,6 @@ import (
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-
 const (
 	immediateRequeueDelay = time.Millisecond
 	// warmCandidateGracePeriod gives a newly created claim two seconds for a

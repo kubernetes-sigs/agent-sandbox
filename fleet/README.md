@@ -196,10 +196,9 @@ done
 ```bash
 # 3. turn on publishing, on every member. The capacity is PER CLUSTER --
 #    substitute each cluster's own measured ceiling, not one figure for all.
-declare -A CAPACITY=( [cluster-a]=50000 [cluster-b]=50000 [cluster-c]=20000 )
-for ctx in "${!CAPACITY[@]}"; do
-  CLUSTER_NAME="$ctx" FLEET_BUCKET="$FLEET_BUCKET" \
-  SANDBOX_CAPACITY="${CAPACITY[$ctx]}" \
+for pair in cluster-a:50000 cluster-b:50000 cluster-c:20000; do
+  ctx="${pair%%:*}" cap="${pair##*:}"
+  CLUSTER_NAME="$ctx" FLEET_BUCKET="$FLEET_BUCKET" SANDBOX_CAPACITY="$cap" \
     ./deploy/render.sh deploy/fleet-member-clusterprofile-patch.yaml \
     | kubectl --context "$ctx" patch deployment fleet-member \
         -n multi-cluster-fleet --patch-file /dev/stdin

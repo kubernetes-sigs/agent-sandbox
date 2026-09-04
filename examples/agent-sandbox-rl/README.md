@@ -435,7 +435,8 @@ agent_sandbox_rl.reaper` is the recovery path — sweeping an orphaned run by la
 for footprint/concurrency beyond what the control plane comfortably absorbs.
 
 **ClusterConfig:** `name`, `kubeconfig`, `context`, `in_cluster`, `namespace`,
-`node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`.
+`node_selector`, `runtime_class`, `image_pull_secret`, `weight`, `max_replicas`,
+`snapshots` (False — GKE Pod Snapshots; see [Snapshots](#snapshots--suspend--resume--restore-gke-opt-in)).
 
 **TemplateSpec:** `resources` (cpu/memory), `keepalive_command` (`sleep infinity`),
 `runtime_class`, `node_selector`, `image_pull_secret`, `image_pull_policy`
@@ -458,7 +459,9 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
 
 - **Preflight** (`fleet.preflight()`): per-cluster reachability, v1beta1 CRD
   versions, controller, namespace, and (if configured) runtime class + pull
-  secret. Hard failures raise `PreflightError`; soft issues are warnings.
+  secret; on clusters with `snapshots=True` also the PodSnapshot CRDs, a gVisor
+  runtime class, and (warning) a `PodSnapshotPolicy` in the namespace. Hard
+  failures raise `PreflightError`; soft issues are warnings.
 - **Pre-pull** (`fleet.prepull()` / `setup(prepull=True)`): a DaemonSet caches
   task images on every node so warm pools skip the multi-GB pull. This is where
   cold-start time goes — `wait_pool_ready` dominates a cold run (the sample report
@@ -470,6 +473,79 @@ fleet.load_tasks(source, image_rewrite=make_rewriter(
   reconnecting and falling back to a short re-check on watch drops.
 - **Cleanup**: everything created is labeled `app=agent-sandbox-rl`; `teardown`
   sweeps claims → pools → templates (defensive against stray claims).
+
+### Snapshots — suspend / resume / restore (GKE, opt-in)
+
+On GKE clusters with [Pod Snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/pod-snapshots)
+a claimed sandbox can be **snapshotted (memory + filesystem), suspended, resumed,
+and restored** — park a long-running episode between turns and free the node, or
+checkpoint an episode at a decision point and roll back to it. The fleet exposes
+the `k8s-agent-sandbox` SDK's GKE extension on its handles; nothing about pools,
+sizing, or strategies changes.
+
+**Prerequisites** (cluster side; the SDK creates only the per-snapshot triggers):
+a GKE cluster on **1.35.3-gke.1234000 or later** with Pod Snapshots enabled (see
+[Prepare for Pod snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots-prepare))
+and a **gVisor** runtime class;
+a `PodSnapshotStorageConfig` (GCS bucket, `tokenSource: podKSA`) and a
+`PodSnapshotPolicy` whose grouping rules include `agents.x-k8s.io/sandbox-name-hash`
+and whose selector matches your template's pod labels (every fleet pod carries
+`app=agent-sandbox-rl` and `sandbox=<template-name>`); a pod ServiceAccount with the
+Workload Identity bucket grants (`storage.bucketViewer` + `storage.objectUser`). See
+the SDK extension's README and the
+[site docs](https://agent-sandbox.sigs.k8s.io/docs/sandbox/snapshots/) for manifests.
+
+```python
+fleet = SandboxFleet(FleetConfig(
+    clusters=[ClusterConfig(name="gke", namespace="rl", snapshots=True)],   # snapshot-capable client
+    template=TemplateSpec(runtime_class="gvisor",
+                          extra_pod_spec={"serviceAccountName": "podsnap-sa"})))
+fleet.load_tasks(["python:3.12"]); fleet.setup()
+
+h = fleet.acquire(fleet.tasks[0])
+h.exec("echo hello > /tmp/state && nohup bash -c 'while sleep 1; do :; done' >/dev/null 2>&1 &")
+uid = fleet.snapshot(h, "checkpoint")      # memory + filesystem, sandbox keeps running
+fleet.suspend(h)                           # snapshot again, then delete the pod (claim kept)
+fleet.resume(h)                            # new pod restored from the LATEST snapshot
+h.exec("cat /tmp/state")                   # -> hello ; the loop is still running
+fleet.suspend(h, snapshot=False)
+fleet.restore(h, uid)                      # roll back to the named checkpoint
+fleet.release(h, delete_snapshots=True)    # snapshots outlive the claim otherwise
+```
+
+The same methods exist on the handle (`h.snapshot()`, `h.suspend()`, `h.resume()`,
+`h.restore(uid)`, `h.list_snapshots()`, `h.delete_snapshots()`, `h.is_suspended`); the
+fleet wrappers add run-report phases (`snapshot`/`suspend`/`resume`/`restore`) and a
+`restored`/`cold` resume count. Outside `fleet.run()`, wrap primitive calls in
+`with fleet.recording("label") as report:` to get that report.
+`examples/run_snapshot_demo.py` runs this flow end to end and asserts that both the
+rootfs file and a background process survive.
+
+What to know:
+
+- **A resume or restore is a new pod.** `pod_name` and `pod_ip` change (the handle
+  `refresh()`es itself); `hostname` / `sandbox_id` / `claim_name` are stable. A
+  persistent exec session is dropped — `exec()` falls back to one-shot, call
+  `open_session()` again to re-attach. Code that cached `pod_name` itself must re-read it.
+- **Quiesce before suspending.** An in-flight command is frozen inside the snapshot and
+  resumes into whatever timeout it had.
+- **Failures raise.** The SDK returns result objects; the fleet raises `SnapshotError`
+  with the extension's reason, and `SnapshotsUnavailable` on a cluster/handle without
+  the snapshot client.
+- **Pinning.** `fleet.acquire(task, snapshot_uid=uid)` stamps
+  `podsnapshot.gke.io/ps-name` on the pod so a claim boots from that snapshot instead
+  of the group's latest. It applies at pod creation: a cold start honors it, an adopted
+  already-running warm member does not (until its next pod).
+- **Bookkeeping.** A suspended handle stays tracked and its claim counted; node capacity
+  freed by suspension is not modeled. Snapshots persist after release unless
+  `delete_snapshots=True`; the policy's retention bounds them per sandbox.
+- **Async.** The SDK calls block. `AsyncSandboxFleet` has the same `snapshot` /
+  `suspend` / `resume` / `restore` (and `acquire(snapshot_uid=…)`,
+  `release(delete_snapshots=…)`) running on its thread pool — use those rather than
+  the handle methods from an event loop.
+- **Scope.** GKE only. Restore targets a sandbox's *own* snapshots; sharing one
+  snapshot across a warm pool is a policy-level pattern (see upstream
+  `examples/podsnapshot-golden-warmpool`).
 
 ## Observability
 

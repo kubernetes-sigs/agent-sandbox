@@ -143,10 +143,13 @@ class RunReport:
   warm_total: int = 0
   peak_warm: int = 0
   environment: dict = field(default_factory=dict)   # per-cluster details
+  # GKE Pod Snapshot resumes/restores: came back from a snapshot vs cold-booted.
+  snap_restored: int = 0
+  snap_cold: int = 0
 
   _ORDER = ("preflight", "plan", "prepull", "create_warmpool", "wait_pool_ready",
-            "prefetch", "claim", "process", "reset", "quarantine", "rotate",
-            "release", "teardown")
+            "prefetch", "claim", "process", "snapshot", "suspend", "resume",
+            "restore", "reset", "quarantine", "rotate", "release", "teardown")
 
   def add_phase(self, name: str, dur: float) -> None:
     c = self.phases.setdefault(name, [0, 0.0, 0.0])
@@ -163,6 +166,12 @@ class RunReport:
   def add_claim(self) -> None:
     self.claims += 1
 
+  def add_restore(self, restored: bool) -> None:
+    if restored:
+      self.snap_restored += 1
+    else:
+      self.snap_cold += 1
+
   def _ordered(self):
     seen = list(self._ORDER) + [p for p in self.phases if p not in self._ORDER]
     return [(p, self.phases[p]) for p in seen if p in self.phases]
@@ -178,6 +187,7 @@ class RunReport:
         "tasks_err": self.tasks_err,
         "warm_replicas_total": self.warm_total,
         "warm_replicas_peak": self.peak_warm,
+        "snapshots": {"restored": self.snap_restored, "cold": self.snap_cold},
         "environment": self.environment,
     }
 
@@ -207,6 +217,9 @@ class RunReport:
     lines.append(f"  {'TOTAL':<18} {self.total_s:8.2f}s")
     lines.append(f"  claims={self.claims}  tasks={self.tasks_ok}ok/{self.tasks_err}err"
                  f"  warm_replicas total={self.warm_total} peak={self.peak_warm}")
+    if self.snap_restored or self.snap_cold:
+      lines.append(f"  snapshot resumes: restored={self.snap_restored} "
+                   f"cold={self.snap_cold}")
     return "\n".join(lines)
 
 
@@ -308,6 +321,12 @@ class Observer:
     if self.report is not None and status == "ok":
       with self._lock:
         self.report.add_claim()
+
+  def restored(self, cluster: str, restored: bool) -> None:
+    """Record a resume/restore outcome (from a snapshot vs cold boot)."""
+    if self.report is not None:
+      with self._lock:
+        self.report.add_restore(bool(restored))
 
   def warm_add(self, cluster: str, n: int) -> None:
     # Gauge set inside the lock so concurrent add/remove can't lose an update.

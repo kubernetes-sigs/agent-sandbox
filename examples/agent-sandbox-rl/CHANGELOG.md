@@ -5,6 +5,36 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (GKE Pod Snapshots — primitives, opt-in)
+- **`ClusterConfig(snapshots=True)`** builds the SDK's GKE PodSnapshot-capable client
+  for that cluster (bound to the cluster's own context *before* the extension's CRD
+  check, so multi-context fleets check the right cluster). Everything else is unchanged
+  when unset.
+- **`SandboxHandle.snapshot() / suspend() / resume() / restore(uid) / list_snapshots()
+  / delete_snapshot(uid) / delete_snapshots() / is_suspended / refresh()`** — thin
+  wrappers over the SDK
+  extension. Resume/restore bring up a new pod: the handle refreshes `pod_name` /
+  `pod_ip` and drops its exec session; identity (`hostname` / `sandbox_id` /
+  `claim_name`) is stable. Extension result objects map to `SnapshotError`
+  (`error_reason` preserved); a non-snapshot sandbox raises `SnapshotsUnavailable`.
+- **`SandboxFleet.snapshot / suspend / resume / restore`** — timed wrappers (run-report
+  phases `snapshot` / `suspend` / `resume` / `restore`, plus a `restored` / `cold`
+  resume count in the report). **`fleet.acquire(task, snapshot_uid=…,
+  pod_annotations=…)`** pins a claim's pod to one snapshot
+  (`podsnapshot.gke.io/ps-name`) — honored on cold start. **`fleet.release(handle,
+  delete_snapshots=True)`** cleans up the sandbox's snapshots (they outlive the claim
+  otherwise; failures are logged, never block release).
+- **Preflight** (only for clusters with `snapshots=True`): PodSnapshot CRDs served and
+  a gVisor runtime class configured are hard failures; a missing `PodSnapshotPolicy`
+  in the namespace is a warning. `agent_sandbox_rl.snapshots.pod_restore_status()`
+  reads a pod's `PodRestored` condition (never raises).
+- **`AsyncSandboxFleet`** mirrors the wrappers (`snapshot / suspend / resume / restore`,
+  `acquire(snapshot_uid=…, pod_annotations=…)`, `release(delete_snapshots=…)`) on its
+  thread pool. **`fleet.recording(label)`** records a `RunReport` around primitive
+  calls made outside `run()` (sets `fleet.report`).
+- README → *Snapshots — suspend / resume / restore* (prerequisites, semantics, limits);
+  `examples/run_snapshot_demo.py` (claim → snapshot → suspend → resume → verify).
+
 ### Changed (docs / guidance)
 - **Warm-pool worker guidance updated for Agent Sandbox v0.5.4**: the #1215
   over-creation churn is fixed upstream by

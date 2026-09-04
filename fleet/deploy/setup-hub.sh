@@ -229,6 +229,55 @@ if [[ -z "$FLEET_BUCKET" ]]; then
   warn "using the GCS path will start failing with 403 storage.objects.create."
 fi
 
+# IAM conditions are only evaluated on a bucket with Uniform Bucket-Level
+# Access. On a bucket still using object ACLs the conditional binding in
+# grant_bucket_access is rejected -- and it is rejected AFTER the unconditional
+# objectViewer grant that precedes it has already landed, so the failure mode is
+# a fleet of members that authenticate, read fine, and 403 on every capacity
+# write. Check once here rather than discovering it one member into the loop
+# with the project already half-mutated.
+#
+# Read-only, so it runs under --dry-run too: a dry run that cannot tell you this
+# is not worth much.
+#
+# An INDETERMINATE answer is a warning, not a stop. Missing storage.buckets.get,
+# a bucket in another project, or an older gcloud all yield an empty string, and
+# refusing to proceed because we could not READ the policy would block setups
+# that are perfectly fine. A definite `false` does stop -- that one is known bad.
+check_bucket_ubla() {
+  [[ -n "$FLEET_BUCKET" ]] || return 0
+  [[ "$UNCONDITIONAL_BUCKET_IAM" == "1" ]] && return 0
+
+  local ubla
+  ubla="$(gcloud storage buckets describe "gs://${FLEET_BUCKET}" \
+            --format='value(uniform_bucket_level_access)' 2>/dev/null)"
+  # Older gcloud surfaces it under the JSON API spelling instead.
+  if [[ -z "$ubla" ]]; then
+    ubla="$(gcloud storage buckets describe "gs://${FLEET_BUCKET}" \
+              --format='value(iamConfiguration.uniformBucketLevelAccess.enabled)' \
+              2>/dev/null)"
+  fi
+  ubla="$(printf '%s' "$ubla" | tr '[:upper:]' '[:lower:]')"
+
+  [[ "$ubla" == "true" ]] && return 0
+
+  if [[ -z "$ubla" ]]; then
+    warn "could not read the access policy of gs://${FLEET_BUCKET} (no"
+    warn "storage.buckets.get, another project, or an older gcloud). Proceeding,"
+    warn "but if Uniform Bucket-Level Access is off the per-member grant below"
+    warn "will fail -- re-run with --unconditional-bucket-iam if it does."
+    return 0
+  fi
+
+  die "gs://${FLEET_BUCKET} does not have Uniform Bucket-Level Access enabled.
+     IAM conditions are ignored on ACL buckets, so the per-member scoped grant
+     cannot be created. Enable it:
+       gcloud storage buckets update gs://${FLEET_BUCKET} --uniform-bucket-level-access
+     or re-run with --unconditional-bucket-iam to grant every member bucket-wide
+     objectAdmin knowingly."
+}
+check_bucket_ubla
+
 # The KSA must exist before it can be annotated, and annotating a missing one
 # aborts under `set -e` -- after the GSAs and IAM bindings above have already
 # been created, leaving a half-configured project. deploy/rbac.yaml creates
@@ -318,6 +367,7 @@ grant_cluster_access() {
 # bucket still using object ACLs. On such a bucket, either turn UBLA on
 #   gcloud storage buckets update gs://BUCKET --uniform-bucket-level-access
 # or pass --unconditional-bucket-iam and accept the wider grant knowingly.
+# check_bucket_ubla() in step 3 enforces this before anything is mutated.
 grant_bucket_access() {
   local member="$1" cluster="${2:-}"
   [[ -n "$FLEET_BUCKET" ]] || return 0

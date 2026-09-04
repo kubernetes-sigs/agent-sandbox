@@ -8,6 +8,15 @@ rules:
   - ""
   resources:
   - persistentvolumeclaims
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - pods
   - services
   verbs:
@@ -31,12 +40,10 @@ rules:
   resources:
   - sandboxes
   verbs:
-  - create
   - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - agents.x-k8s.io

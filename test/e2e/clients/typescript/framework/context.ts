@@ -112,7 +112,7 @@ export class TestContext {
     try {
       const result = execFileSync(
         "kubectl",
-        ["apply", "-f", "-", "-n", ns],
+        ["--kubeconfig", this.kubeconfigPath, "apply", "-f", "-", "-n", ns],
         {
           input: manifestText,
           encoding: "utf-8",
@@ -195,12 +195,18 @@ export class TestContext {
           const resourceType = watchPath.split("/").pop() ?? "object";
           const desc = execFileSync(
             "kubectl",
-            ["describe", resourceType, name, "-n", namespace],
+            [
+              "--kubeconfig", this.kubeconfigPath,
+              "describe", resourceType, name, "-n", namespace,
+            ],
             { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 },
           );
           const pods = execFileSync(
             "kubectl",
-            ["get", "pods", "-n", namespace, "-o", "wide"],
+            [
+              "--kubeconfig", this.kubeconfigPath,
+              "get", "pods", "-n", namespace, "-o", "wide",
+            ],
             { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 },
           );
           console.error(

@@ -80,6 +80,7 @@ func main() {
 	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
+	var watchNamespaces string
 	var printVersion bool
 	var disableClaimEvents bool
 	var disableClaimObservabilityAnnotations bool
@@ -145,6 +146,11 @@ func main() {
 			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
 			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
 			"this flag is enabled.")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Comma-separated list of namespaces to watch. When set, the controller's informer cache is restricted "+
+			"to the specified namespaces via cache.Options.DefaultNamespaces; deploying with namespace-scoped "+
+			"Role+RoleBinding (instead of a ClusterRoleBinding) additionally requires matching RBAC manifests. "+
+			"When empty (default), the controller watches all namespaces (cluster-wide, backwards compatible).")
 	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large claim bursts. Default false (events enabled).")
@@ -341,12 +347,21 @@ func main() {
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
 	// managedFields stripping, the Pod spec diet, and (optionally) the
 	// tracking-label scoping; see buildCacheOptions for the rationale.
-	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)
+	watchNS, err := parseWatchNamespaces(watchNamespaces)
+	if err != nil {
+		setupLog.Error(err, "invalid --watch-namespaces value", "raw", watchNamespaces)
+		os.Exit(1)
+	}
+	cacheOpts, err := buildCacheOptions(cacheLabelSelectors, watchNS)
 	if err != nil {
 		setupLog.Error(err, "unable to build cache options")
 		os.Exit(1)
 	}
 	mgrOpts.Cache = cacheOpts
+	if len(watchNS) > 0 {
+		setupLog.Info("informer cache restricted to specified namespaces (--watch-namespaces)",
+			"namespaces", watchNS)
+	}
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
 			"label", controllers.SandboxNameHashLabel)

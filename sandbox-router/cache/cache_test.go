@@ -460,6 +460,92 @@ func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
 	}
 }
 
+func TestCache_StaleDeleteDoesNotEvictReplacementForSameSandbox(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-recreated")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	oldPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	oldPod.UID = types.UID("old-pod")
+	replacementPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP2, true)
+	replacementPod.UID = types.UID("replacement-pod")
+
+	c.onAddOrUpdate(oldPod)
+	c.onAddOrUpdate(replacementPod)
+	c.onDelete(oldPod)
+
+	e, ok := c.Get(sandboxUID)
+	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
+		t.Fatalf("stale delete evicted replacement entry: %+v, found=%v", e, ok)
+	}
+}
+
+func TestCache_StaleNotReadyDoesNotEvictReplacementForSameSandbox(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-recreated")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	oldPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	oldPod.UID = types.UID("old-pod")
+	replacementPod := makePod(testPodName, testPodNS, sandboxUID, testPodIP2, true)
+	replacementPod.UID = types.UID("replacement-pod")
+
+	c.onAddOrUpdate(oldPod)
+	c.onAddOrUpdate(replacementPod)
+	oldPodNotReady := oldPod.DeepCopy()
+	oldPodNotReady.Status.Conditions[0].Status = corev1.ConditionFalse
+	c.onAddOrUpdate(oldPodNotReady)
+
+	e, ok := c.Get(sandboxUID)
+	if !ok || e.PodUID != replacementPod.UID || e.PodIP != testPodIP2 {
+		t.Fatalf("stale NotReady event evicted replacement entry: %+v, found=%v", e, ok)
+	}
+}
+
+func TestCache_CurrentPodDeleteEvictsEntry(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-current")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	pod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	pod.UID = types.UID("current-pod")
+	c.onAddOrUpdate(pod)
+	c.onDelete(pod)
+
+	if _, ok := c.Get(sandboxUID); ok {
+		t.Fatal("current Pod delete must evict the cache entry")
+	}
+}
+
+func TestCache_CurrentPodNotReadyEvictsEntry(t *testing.T) {
+	const sandboxUID = types.UID("sandbox-current")
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+
+	pod := makePod(testPodName, testPodNS, sandboxUID, testPodIP, true)
+	pod.UID = types.UID("current-pod")
+	c.onAddOrUpdate(pod)
+	podNotReady := pod.DeepCopy()
+	podNotReady.Status.Conditions[0].Status = corev1.ConditionFalse
+	c.onAddOrUpdate(podNotReady)
+
+	if _, ok := c.Get(sandboxUID); ok {
+		t.Fatal("current Pod NotReady update must evict the cache entry")
+	}
+}
+
 func TestCache_InvalidateByName(t *testing.T) {
 	pod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
 	c, _, cancel := newCache(t, pod)

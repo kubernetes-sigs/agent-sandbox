@@ -76,6 +76,11 @@ const (
 // (e.g. ready timestamp, ownership labels for authz) can be added without
 // breaking call sites.
 type Entry struct {
+	// PodUID identifies the Pod that supplied PodIP. It fences delayed
+	// delete and NotReady events from an older Pod after the Sandbox has
+	// been recreated with the same owner UID.
+	PodUID types.UID
+
 	// PodIP is the IPv4/IPv6 address of the sandbox Pod. The ext_proc
 	// handler combines this with the inbound X-Sandbox-Port to build the
 	// upstream target.
@@ -244,7 +249,7 @@ func (c *Cache) onAddOrUpdate(obj any) {
 		return
 	}
 	if !podReady(pod) || pod.Status.PodIP == "" {
-		c.remove(uid)
+		c.removePod(uid, pod.UID)
 		return
 	}
 	// Unclaimed warm-pool Pods stay out of the name index: before the
@@ -255,6 +260,7 @@ func (c *Cache) onAddOrUpdate(obj any) {
 	// label, and the resulting Pod update indexes the entry.
 	_, unclaimed := pod.Labels[PodWarmPoolLabel]
 	c.upsert(uid, Entry{
+		PodUID:      pod.UID,
 		PodIP:       pod.Status.PodIP,
 		SandboxName: pod.Name,
 		Namespace:   pod.Namespace,
@@ -272,7 +278,7 @@ func (c *Cache) onDelete(obj any) {
 		return
 	}
 	if uid, ok := sandboxUIDOf(pod); ok {
-		c.remove(uid)
+		c.removePod(uid, pod.UID)
 	}
 }
 
@@ -305,7 +311,21 @@ func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 }
 
 func (c *Cache) remove(uid types.UID) {
+	c.removePod(uid, "")
+}
+
+// removePod removes the entry for uid only when podUID is empty (an internal
+// unconditional eviction) or matches the Pod that currently supplies the
+// entry. Matching the Pod UID prevents a delayed delete or NotReady event for
+// an older Pod from evicting a replacement Pod with the same Sandbox owner.
+func (c *Cache) removePod(uid, podUID types.UID) {
 	c.mu.Lock()
+	if podUID != "" {
+		if entry, ok := c.entries[uid]; !ok || entry.PodUID != podUID {
+			c.mu.Unlock()
+			return
+		}
+	}
 	existed := c.removeLocked(uid)
 	c.mu.Unlock()
 	if existed {

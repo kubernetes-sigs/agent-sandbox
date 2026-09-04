@@ -15,83 +15,9 @@
 package authz
 
 import (
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"net/http"
-	"net/url"
-	"reflect"
 	"testing"
 )
-
-func leaf(uris []string, dns []string, cn string, org []string) *x509.Certificate {
-	parsedURIs := make([]*url.URL, 0, len(uris))
-	for _, u := range uris {
-		pu, _ := url.Parse(u)
-		parsedURIs = append(parsedURIs, pu)
-	}
-	return &x509.Certificate{
-		URIs:     parsedURIs,
-		DNSNames: dns,
-		Subject:  pkix.Name{CommonName: cn, Organization: org},
-	}
-}
-
-func stateWith(c *x509.Certificate) *tls.ConnectionState {
-	return &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{c}}}
-}
-
-func TestIdentityFromTLS(t *testing.T) {
-	cases := []struct {
-		name  string
-		state *tls.ConnectionState
-		want  Identity
-	}{
-		{
-			name:  "nil state",
-			state: nil,
-			want:  Identity{},
-		},
-		{
-			name:  "no verified chain",
-			state: &tls.ConnectionState{},
-			want:  Identity{},
-		},
-		{
-			name:  "spiffe URI wins over DNS and CN",
-			state: stateWith(leaf([]string{"spiffe://example.com/ns/team/sa/agent"}, []string{"agent.team.svc"}, "agent", nil)),
-			want:  Identity{Source: "tls", Username: "spiffe://example.com/ns/team/sa/agent"},
-		},
-		{
-			name:  "DNS SAN beats CN when no SPIFFE",
-			state: stateWith(leaf(nil, []string{"agent.team.svc.cluster.local"}, "agent-cn", nil)),
-			want:  Identity{Source: "tls", Username: "agent.team.svc.cluster.local"},
-		},
-		{
-			name:  "CN fallback",
-			state: stateWith(leaf(nil, nil, "cn-only", nil)),
-			want:  Identity{Source: "tls", Username: "cn-only"},
-		},
-		{
-			name:  "Organization becomes groups",
-			state: stateWith(leaf(nil, nil, "u", []string{"system:masters", "ops"})),
-			want:  Identity{Source: "tls", Username: "u", Groups: []string{"system:masters", "ops"}},
-		},
-		{
-			name:  "non-spiffe URI is ignored, falls back to DNS",
-			state: stateWith(leaf([]string{"https://example.com/ignored"}, []string{"agent.svc"}, "cn", nil)),
-			want:  Identity{Source: "tls", Username: "agent.svc"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := IdentityFromTLS(tc.state)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("got %+v want %+v", got, tc.want)
-			}
-		})
-	}
-}
 
 func TestBearerTokenFromRequest(t *testing.T) {
 	cases := []struct {

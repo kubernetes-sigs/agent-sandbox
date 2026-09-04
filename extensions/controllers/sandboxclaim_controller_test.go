@@ -1703,7 +1703,7 @@ func TestSandboxClaimTTLCleanupRequiresPersistedExpiredStatus(t *testing.T) {
 			Namespace: "default",
 			UID:       "stale-ttl-claim",
 			Annotations: map[string]string{
-				ObservabilityAnnotation: time.Now().Format(time.RFC3339Nano),
+				asmetrics.ObservabilityAnnotation: time.Now().Format(time.RFC3339Nano),
 			},
 		},
 		Spec: extensionsv1beta1.SandboxClaimSpec{

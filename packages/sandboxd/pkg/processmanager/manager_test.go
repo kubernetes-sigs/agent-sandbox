@@ -67,7 +67,10 @@ func TestRegisterGetRemove(t *testing.T) {
 func TestSignalCompletedProcessIsNoop(t *testing.T) {
 	p := &ManagedProcess{ID: 1, Done: make(chan struct{})}
 	p.SetExitCode(0)
-	require.True(t, p.IsCompleted())
+	p.mu.Lock()
+	completed := p.completed
+	p.mu.Unlock()
+	require.True(t, completed)
 	// Cmd is nil; must not panic and must not error.
 	require.NoError(t, p.Signal(syscall.SIGTERM))
 }
@@ -84,5 +87,8 @@ func TestSignalAllSkipsCompleted(_ *testing.T) {
 func TestExitCodeRoundTrip(t *testing.T) {
 	p := &ManagedProcess{ID: 1, Done: make(chan struct{})}
 	p.SetExitCode(42)
-	require.Equal(t, int32(42), p.ExitCode())
+	p.mu.Lock()
+	exitCode := p.exitCode
+	p.mu.Unlock()
+	require.Equal(t, int32(42), exitCode)
 }

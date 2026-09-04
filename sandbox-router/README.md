@@ -175,7 +175,7 @@ type Authorizer interface {
 }
 ```
 
-Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (TLS client cert via `authz.IdentityFromTLS`, Bearer token via `authz.BearerTokenFromRequest`, custom header) directly off the request.
+Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (Bearer token via `authz.BearerTokenFromRequest`, TLS client cert, custom header) directly off the request.
 
 The `sandbox_router_authz_decisions_total{decision="allow|deny",sandbox_namespace="…"}` counter records every verdict so deployments can see whether `AllowAll` is actually allowing the traffic shape they expect.
 

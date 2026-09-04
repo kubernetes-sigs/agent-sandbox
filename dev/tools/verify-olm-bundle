@@ -90,7 +90,7 @@ if [ "${dirty}" = true ]; then
   fi
   # Restore the working tree so the script leaves no mutations behind.
   git checkout -- olm/bundle/ olm/config/ 2>/dev/null || true
-  git clean -fd olm/bundle/ 2>/dev/null || true
+  git clean -fd olm/bundle/ olm/config/ 2>/dev/null || true
   exit 1
 fi
 

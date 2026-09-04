@@ -16,6 +16,7 @@ package observability
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"net/http"
 	"time"
@@ -49,6 +50,28 @@ func (r *accessLogRecorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
 	r.bytes += int64(n)
 	return n, err
+}
+
+// ReadFrom implements io.ReaderFrom so the same sendfile / splice fast
+// paths the underlying ResponseWriter exposes cannot bypass the bytes
+// counter. Mirrors statusRecorder.ReadFrom in metrics.go: delegate when
+// the inner writer supports it, otherwise copy through our own Write via
+// an io.Writer-only view to prevent io.Copy from recursing.
+func (r *accessLogRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(src)
+		// The delegate path commits the response (an implicit 200 when
+		// no explicit WriteHeader preceded it). Record that so a later
+		// WriteHeader on an error path cannot silently overwrite the
+		// status the underlying ResponseWriter already sent.
+		if n > 0 && !r.wroteHeader {
+			r.status = http.StatusOK
+			r.wroteHeader = true
+		}
+		r.bytes += n
+		return n, err
+	}
+	return io.Copy(struct{ io.Writer }{r}, src)
 }
 
 // Flush forwards to the underlying ResponseWriter so streaming responses

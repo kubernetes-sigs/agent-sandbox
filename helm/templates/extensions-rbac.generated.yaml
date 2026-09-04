@@ -11,8 +11,6 @@ rules:
   verbs:
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - ""
@@ -22,7 +20,6 @@ rules:
   verbs:
   - create
   - patch
-  - update
 - apiGroups:
   - agents.x-k8s.io
   resources:
@@ -41,7 +38,6 @@ rules:
   - leases
   verbs:
   - create
-  - delete
   - get
   - list
   - patch
@@ -51,10 +47,7 @@ rules:
   - extensions.agents.x-k8s.io
   resources:
   - sandboxclaims
-  - sandboxtemplates
-  - sandboxwarmpools
   verbs:
-  - create
   - delete
   - get
   - list
@@ -74,6 +67,23 @@ rules:
   - patch
   - update
 - apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxtemplates
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxwarmpools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - networking.k8s.io
   resources:
   - networkpolicies
@@ -82,6 +92,5 @@ rules:
   - delete
   - get
   - list
-  - patch
   - update
   - watch

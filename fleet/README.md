@@ -79,13 +79,17 @@ IMAGE=us-docker.pkg.dev/my-project/fleet/fleet-member:dev ./deploy/build-push.sh
 The image build context is the **repo root**, not `fleet/` — the Dockerfile
 copies both the in-repo Python SDK and `fleet/python`.
 
-Deploy one member per cluster:
+Deploy one member per cluster. `CLUSTER_NAME` must match the context it is
+applied to — it is the identity the member reports capacity under, so a
+mismatch makes two clusters overwrite one capacity object:
 
 ```bash
-CLUSTER_NAME=cluster-a FLEET_BUCKET="$FLEET_BUCKET" \
-IMAGE=us-docker.pkg.dev/my-project/fleet/fleet-member:dev \
-  ./deploy/render.sh deploy/fleet-member-deployment-wi.yaml \
-  | kubectl --context cluster-a apply -f -
+for ctx in cluster-a cluster-b cluster-c; do
+  CLUSTER_NAME="$ctx" FLEET_BUCKET="$FLEET_BUCKET" \
+  IMAGE=us-docker.pkg.dev/my-project/fleet/fleet-member:dev \
+    ./deploy/render.sh deploy/fleet-member-deployment-wi.yaml \
+    | kubectl --context "$ctx" apply -f -
+done
 ```
 
 Render with `render.sh`, never bare `envsubst`: it refuses to emit a manifest
@@ -100,9 +104,17 @@ fleetctl status
 kubectl --context cluster-a -n multi-cluster-fleet get sandboxwarmpools
 ```
 
-Within about 30 s you should see `SandboxWarmPool` objects on each cluster whose
-replica counts sum to each image's `target_replicas`, and `fleetctl status`
-reporting per-cluster depth and claim-latency P90.
+Within about 30 s you should see `SandboxWarmPool` objects on each cluster, and
+`fleetctl status` reporting per-cluster depth and claim-latency P90.
+
+Their **requested** replicas (`spec.replicas`) sum to exactly each image's
+`target_replicas`; the largest-remainder split guarantees that whatever the
+clusters report. **Ready** replicas are a separate question — they trail while
+pods pull and start, and they stay short if a cluster was assigned more than it
+can actually hold, which is precisely what a cluster publishing no
+`sandbox-capacity` causes. A plan that sums correctly and a fleet that is
+actually full are not the same claim; see
+[Two things that will bite you](#two-things-that-will-bite-you).
 
 Tear the fleet down **through the fleet layer**, with the zero-model spec:
 
@@ -136,12 +148,21 @@ new per-member GSA, and that redirects *every* Google API call from the pod,
 including the bucket writes the fleet already depends on.
 
 ```bash
-# 2. give each member a credential-free kubeconfig for the hub
+# 2. give EVERY member a credential-free kubeconfig for the hub
 ./deploy/gen-hub-kubeconfig.sh \
   --hub-cluster my-hub --hub-location us-central1-a --project my-project \
   --private-endpoint > hub-cm.yaml
-kubectl --context cluster-a apply -f hub-cm.yaml
+for ctx in cluster-a cluster-b cluster-c; do
+  kubectl --context "$ctx" apply -f hub-cm.yaml
+done
 ```
+
+Every member, not just the first: a member without this ConfigMap cannot reach
+the hub, so its `ClusterProfile` is never updated and it drops out of the
+inventory — while still writing capacity to the bucket, so it looks alive.
+`setup-hub.sh` distributes the same ConfigMap itself, to the members *and* to
+the planner's cluster if that is not one of them; this step is for members
+added afterwards.
 
 The ConfigMap holds only an address and a CA certificate — no token, no key.
 Authentication happens at runtime via `--hub-token-source=gke-metadata`.
@@ -151,15 +172,31 @@ usual failure here and it looks like an auth problem: if the member's bucket
 writes keep working while every hub call times out, it is routing, not
 credentials. A GKE control plane's public IP is not a Google API endpoint, so
 Private Google Access does not cover it. Members read this ConfigMap once at
-startup — `kubectl rollout restart deployment/fleet-member` after any change.
+startup, so after any change restart all of them — a partial restart leaves the
+fleet split across two hub addresses:
 
 ```bash
-# 3. turn on publishing, per member
-CLUSTER_NAME=cluster-a FLEET_BUCKET="$FLEET_BUCKET" SANDBOX_CAPACITY=50000 \
-  ./deploy/render.sh deploy/fleet-member-clusterprofile-patch.yaml \
-  | kubectl --context cluster-a patch deployment fleet-member \
-      -n multi-cluster-fleet --patch-file /dev/stdin
+for ctx in cluster-a cluster-b cluster-c; do
+  kubectl --context "$ctx" -n multi-cluster-fleet \
+    rollout restart deployment/fleet-member
+done
 ```
+
+```bash
+# 3. turn on publishing, on every member
+for ctx in cluster-a cluster-b cluster-c; do
+  CLUSTER_NAME="$ctx" FLEET_BUCKET="$FLEET_BUCKET" SANDBOX_CAPACITY=50000 \
+    ./deploy/render.sh deploy/fleet-member-clusterprofile-patch.yaml \
+    | kubectl --context "$ctx" patch deployment fleet-member \
+        -n multi-cluster-fleet --patch-file /dev/stdin
+done
+```
+
+`SANDBOX_CAPACITY` is per cluster, not fleet-wide. Leaving a member out of this
+loop is the failure described under
+[Two things that will bite you](#two-things-that-will-bite-you): it publishes no
+`sandbox-capacity`, is weighted 1.0 rather than dropped, and quietly absorbs a
+share of the fleet it cannot hold.
 
 An empty `--cluster-manager=` is falsy, which drops the label selector and
 quietly inventories every `ClusterProfile` on the hub — including other fleets'.
@@ -169,9 +206,12 @@ Verify **ownership**, not just that the value is present — a client-side apply
 would land the data and own nothing:
 
 ```bash
-kubectl --context my-hub get clusterprofile cluster-a -n fleet-system \
-  -o jsonpath='{.metadata.managedFields[*].manager}'
-# must contain agent-sandbox-fleet-member
+for c in cluster-a cluster-b cluster-c; do
+  printf '%s: ' "$c"
+  kubectl --context my-hub get clusterprofile "$c" -n fleet-system \
+    -o jsonpath='{.metadata.managedFields[*].manager}{"\n"}'
+done
+# every line must contain agent-sandbox-fleet-member
 ```
 
 ```bash
@@ -193,8 +233,10 @@ Properties the members publish, all under `agents.x-k8s.io/`:
 
 **A cluster with no `sandbox-capacity` property does not drop out — it gets
 weight 1.0.** It stays eligible, receives pools, and takes a rounding-error
-share of the fleet. The plan succeeds, no error is raised, and the fleet lands
-short. Check the published properties on every profile before a large apply.
+share of the fleet. The plan succeeds and no error is raised — the assignment
+still sums to `target_replicas` — but the cluster cannot fill what it was
+given, so the fleet lands short on *ready* capacity.
+Check the published properties on every profile before a large apply.
 Note that `fleetctl show-registry` always describes the *published* spec and
 takes no `-f`, so it answers "is every member fresh?" and not "what will this
 spec do?".

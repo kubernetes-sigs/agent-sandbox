@@ -341,26 +341,25 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		return sb
 	}
 
-	podWithScheduled := func(name string, status corev1.ConditionStatus, reason string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: poolNamespace},
-			Status: corev1.PodStatus{
-				Conditions: []corev1.PodCondition{{
-					Type:   corev1.PodScheduled,
-					Status: status,
-					Reason: reason,
-				}},
-			},
-		}
+	// withPodScheduled appends the mirrored PodScheduled condition the sandbox
+	// controller copies off the backing Pod. The pool now reads this instead of
+	// fetching the Pod, so the signal belongs on the Sandbox.
+	withPodScheduled := func(sb *sandboxv1beta1.Sandbox, status metav1.ConditionStatus, reason string) *sandboxv1beta1.Sandbox {
+		sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             status,
+			Reason:             reason,
+			LastTransitionTime: metav1.Now(),
+		})
+		return sb
 	}
 
 	t.Run("unschedulable sandbox is held, not replaced", func(t *testing.T) {
 		warmPool := newPool()
-		sb := agedSandbox("-unsched")
-		pod := podWithScheduled(sb.Name, corev1.ConditionFalse, corev1.PodReasonUnschedulable)
+		sb := withPodScheduled(agedSandbox("-unsched"), metav1.ConditionFalse, corev1.PodReasonUnschedulable)
 
 		recorder := events.NewFakeRecorder(16)
-		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb, pod))
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
 		r := SandboxWarmPoolReconciler{
 			Client:       lc,
 			Scheme:       newTestScheme(),
@@ -398,12 +397,21 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		default:
 		}
 
-		// Capacity frees up: the pod schedules and the sandbox goes Ready.
-		// The hold clears and a WarmPoolProgressing event is emitted.
-		got.Status.Conditions = []metav1.Condition{{
-			Type:   string(sandboxv1beta1.SandboxConditionReady),
-			Status: metav1.ConditionTrue,
-		}}
+		// Capacity frees up: the pod schedules and the sandbox goes Ready. The
+		// mirrored PodScheduled flips to True in the same pass, so the hold
+		// clears and a WarmPoolProgressing event is emitted.
+		got.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionTrue,
+				Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
+				LastTransitionTime: metav1.Now(),
+			},
+		}
 		// Plain Update: the fake client only registers a status subresource
 		// for SandboxWarmPool, so sandbox status is part of the main object.
 		require.NoError(t, r.Update(ctx, got))
@@ -422,11 +430,10 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 
 	t.Run("genuinely stuck sandbox (pod scheduled) is still replaced", func(t *testing.T) {
 		warmPool := newPool()
-		sb := agedSandbox("-stuck")
 		// The pod scheduled fine; the sandbox is stuck for some other reason.
-		pod := podWithScheduled(sb.Name, corev1.ConditionTrue, "")
+		sb := withPodScheduled(agedSandbox("-stuck"), metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled)
 
-		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb, pod))
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
 		r := SandboxWarmPoolReconciler{
 			Client:       lc,
 			Scheme:       newTestScheme(),
@@ -466,6 +473,98 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		err = r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{})
 		require.True(t, client.IgnoreNotFound(err) == nil && err != nil, "sandbox without a pod should be deleted")
 	})
+
+	// A terminating sandbox keeps its last mirrored PodScheduled condition until
+	// the sandbox controller observes the Pod's absence, so a stale Unschedulable
+	// must not hold a pool slot on an object that is already going away. The
+	// previous implementation got this from the backing Pod's DeletionTimestamp;
+	// reading the mirror requires checking the Sandbox's instead.
+	t.Run("terminating sandbox with a stale unschedulable condition is not held", func(t *testing.T) {
+		sb := withPodScheduled(agedSandbox("-terminating"), metav1.ConditionFalse, corev1.PodReasonUnschedulable)
+		now := metav1.Now()
+		sb.DeletionTimestamp = &now
+		sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
+
+		require.False(t, isSandboxPodUnschedulable(sb),
+			"a terminating sandbox must not be treated as unschedulable-and-held")
+	})
+}
+
+// TestIsSandboxPodUnschedulable pins the decision table of the mirrored-condition
+// read directly, independent of reconcilePool. Only PodScheduled=False with reason
+// Unschedulable is a hold signal: a missing condition and an Unknown status are the
+// two shapes the mirror uses for "Pod absent" and "Pod state unknown", and any
+// other False reason (SchedulingGated) is a state the scheduler resolves itself, so
+// all of them must fall through to the stuck-sandbox path.
+func TestIsSandboxPodUnschedulable(t *testing.T) {
+	deleting := metav1.Now()
+
+	cond := func(status metav1.ConditionStatus, reason string) []metav1.Condition {
+		return []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             status,
+			Reason:             reason,
+			LastTransitionTime: metav1.Now(),
+		}}
+	}
+
+	tests := []struct {
+		name       string
+		conditions []metav1.Condition
+		deleting   bool
+		want       bool
+	}{
+		{
+			name:       "no PodScheduled condition (mirror removed: Pod confirmed absent)",
+			conditions: nil,
+			want:       false,
+		},
+		{
+			name:       "other conditions but no PodScheduled",
+			conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "NotReady", LastTransitionTime: metav1.Now()}},
+			want:       false,
+		},
+		{
+			name:       "Unknown (transient Pod lookup failure)",
+			conditions: cond(metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonPodSchedulingUnknown),
+			want:       false,
+		},
+		{
+			name:       "True/PodScheduled (scheduled fine; stuck for another reason)",
+			conditions: cond(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled),
+			want:       false,
+		},
+		{
+			name:       "False/SchedulingGated (scheduler resolves this itself)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulingGated),
+			want:       false,
+		},
+		{
+			name:       "False/Unschedulable (the hold signal)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			want:       true,
+		},
+		{
+			name:       "deleting sandbox with a stale False/Unschedulable",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			deleting:   true,
+			want:       false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
+				Status:     sandboxv1beta1.SandboxStatus{Conditions: tc.conditions},
+			}
+			if tc.deleting {
+				sb.DeletionTimestamp = &deleting
+				sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
+			}
+			require.Equal(t, tc.want, isSandboxPodUnschedulable(sb))
+		})
+	}
 }
 
 // phantomListClient wraps the fake client to model the opposite staleness of
@@ -749,21 +848,19 @@ func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
 		UID:        warmPool.UID,
 		Controller: &controller,
 	}}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: poolNamespace},
-		Status: corev1.PodStatus{
-			Conditions: []corev1.PodCondition{{
-				Type:   corev1.PodScheduled,
-				Status: corev1.ConditionFalse,
-				Reason: corev1.PodReasonUnschedulable,
-			}},
-		},
-	}
+	// The pool reads the PodScheduled condition the sandbox controller mirrors
+	// onto Sandbox.status, so the unschedulable signal belongs on the Sandbox.
+	sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+		Status:             metav1.ConditionFalse,
+		Reason:             corev1.PodReasonUnschedulable,
+		LastTransitionTime: metav1.Now(),
+	})
 
 	current := base
 	recorder := events.NewFakeRecorder(16)
 	scheme := newTestScheme()
-	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb, pod))
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb))
 	r := SandboxWarmPoolReconciler{
 		Client:       lc,
 		Scheme:       scheme,
@@ -859,21 +956,19 @@ func TestReconcilePool_ConfigurableGraceAndRecheck(t *testing.T) {
 		UID:        warmPool.UID,
 		Controller: &controller,
 	}}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: poolNamespace},
-		Status: corev1.PodStatus{
-			Conditions: []corev1.PodCondition{{
-				Type:   corev1.PodScheduled,
-				Status: corev1.ConditionFalse,
-				Reason: corev1.PodReasonUnschedulable,
-			}},
-		},
-	}
+	// The pool reads the PodScheduled condition the sandbox controller mirrors
+	// onto Sandbox.status, so the unschedulable signal belongs on the Sandbox.
+	sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+		Status:             metav1.ConditionFalse,
+		Reason:             corev1.PodReasonUnschedulable,
+		LastTransitionTime: metav1.Now(),
+	})
 
 	current := base
 	recorder := events.NewFakeRecorder(16)
 	scheme := newTestScheme()
-	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb, pod))
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb))
 	r := SandboxWarmPoolReconciler{
 		Client:                       lc,
 		Scheme:                       scheme,

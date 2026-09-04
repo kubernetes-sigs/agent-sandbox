@@ -67,12 +67,38 @@ CT="--connect-timeout 10 --max-time 30"
 SRV=\$(grep -m1 'server:' \$KC | sed 's/.*server:[[:space:]]*//' | tr -d '"'"'"'"\r')
 CA=\$(grep -m1 'certificate-authority-data:' \$KC | sed 's/.*certificate-authority-data:[[:space:]]*//' | tr -d '"'"'"'"\r')
 echo "\$CA" | base64 -d > /tmp/ca.crt
-TOK=\$(curl -s \$CT -H 'Metadata-Flavor: Google' \$M/token \
-  | sed -e 's/.*"access_token":"//' -e 's/".*//')
+# The one request whose failure is silent by construction. Piping straight into
+# sed discards both the status and the exit code, and a 403, a 404 and a
+# blackholed metadata server all leave TOK empty in exactly the same way. An
+# empty bearer token then arrives at the hub as a 401 -- sending the operator to
+# IAM and the hub's RBAC for a fault that never left this node. Report it like
+# every other request, keep it non-fatal so the checks below still run, and say
+# plainly that they cannot mean anything if it failed.
+MD=\$(curl -s \$CT -o /tmp/token.json \
+  -w 'http %{http_code} (curl %{exitcode})' \
+  -H 'Metadata-Flavor: Google' "\$M/token") || true
+# Match-or-nothing, not strip-and-hope. The old two-expression form ran on the
+# body whatever it was: given metadata's 403 payload {"error":"forbidden"} the
+# first expression finds no access_token and does nothing, the second truncates
+# at the first quote, and TOK becomes a single open-brace character. Non-empty,
+# so the check below stays quiet, and an Authorization header carrying that
+# brace goes to the hub -- which answers 401, the exact wrong place to start
+# looking. -n with a capture emits nothing unless there really was a token.
+#
+# (No backticks in this comment on purpose: PROBE is an unquoted here-document,
+# so a backtick pair here would run as a command at generation time.)
+TOK=\$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' /tmp/token.json 2>/dev/null)
 
 echo "server       : \$SRV"
 echo "ca bytes     : \$(wc -c < /tmp/ca.crt)"
+echo "metadata     : \$MD"
 echo "token length : \$(printf %s "\$TOK" | wc -c)"
+if [ -z "\$TOK" ]; then
+  echo "  !! No token. Every authenticated check below will fail, and NOT"
+  echo "     because of IAM or hub RBAC -- nothing ever left this node. A 403"
+  echo "     here is the Workload Identity binding on the ${MEMBER_NS}/${KSA}"
+  echo "     KSA; curl 28 or 7 is the metadata server itself."
+fi
 echo
 echo "--- tokeninfo: what Google says this token is -----------------------"
 curl -s \$CT -o /tmp/o0 -w 'http %{http_code} (curl %{exitcode})\n' \

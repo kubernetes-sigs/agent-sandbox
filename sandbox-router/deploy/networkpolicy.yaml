@@ -72,6 +72,8 @@ spec:
         matchExpressions:
         - key: agents.x-k8s.io/sandbox-name-hash
           operator: Exists
+    ports:
+    - protocol: TCP
   # OTel collector (if --enable-tracing or --enable-otel-metrics). Tighten
   # to your collector's namespace/pod selector.
   - to:

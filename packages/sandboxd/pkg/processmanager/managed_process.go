@@ -52,6 +52,20 @@ func (p *ManagedProcess) SetExitCode(code int32) {
 	p.completed = true
 }
 
+// ExitCode returns the recorded exit code. Only meaningful after Done is closed.
+func (p *ManagedProcess) ExitCode() int32 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.exitCode
+}
+
+// IsCompleted reports whether the process has exited.
+func (p *ManagedProcess) IsCompleted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.completed
+}
+
 // Signal delivers sig to the process group when possible (-pid), falling
 // back to the single process. Signalling an already-completed process is a
 // no-op so shutdown sweeps don't race with process exit.

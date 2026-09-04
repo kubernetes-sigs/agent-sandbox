@@ -1980,6 +1980,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
 				Namespace:         "default",
+				Generation:        1,
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
 					warmPoolSandboxLabel:                  poolNameHash,
@@ -2015,9 +2016,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			Status: sandboxv1beta1.SandboxStatus{
 				Conditions: []metav1.Condition{
 					{
-						Type:   string(sandboxv1beta1.SandboxConditionReady),
-						Status: conditionStatus,
-						Reason: "DependenciesReady",
+						Type:               string(sandboxv1beta1.SandboxConditionReady),
+						Status:             conditionStatus,
+						ObservedGeneration: 1,
+						Reason:             "DependenciesReady",
 					},
 				},
 				// PodIPs marks that the backing Pod exists and is networked.
@@ -2176,15 +2178,31 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
-			name: "adopts first available non-ready sandbox from queue",
+			name: "creates new sandbox when all warm pool sandboxes are non-ready",
 			existingObjects: []client.Object{
 				template,
 				claim,
 				createWarmPoolSandbox("not-ready-1", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false),
 				createWarmPoolSandbox("not-ready-2", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
 			},
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
+		},
+		{
+			name: "skips stale ready condition and adopts current ready sandbox",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				func() client.Object {
+					sb := createWarmPoolSandbox("stale-ready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, true)
+					sb.Generation = 2
+					sb.Status.Conditions[0].ObservedGeneration = 1
+					return sb
+				}(),
+				createWarmPoolSandbox("current-ready", metav1.Now(), true),
+			},
 			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "not-ready-1",
+			expectedAdoptedSandbox:  "current-ready",
 			expectNewSandboxCreated: false,
 		},
 		{
@@ -2199,16 +2217,15 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: true,
 		},
 		{
-			name: "adopts not-ready sandbox with backing pod, skipping rotating sandboxes without pods",
+			name: "creates new sandbox when networked warm pool sandbox is not ready",
 			existingObjects: []client.Object{
 				template,
 				claim,
 				createRotatingSandbox("rotating-sb", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}),
 				createWarmPoolSandbox("not-ready-with-pod", metav1.Time{Time: metav1.Now().Add(-1 * time.Hour)}, false),
 			},
-			expectSandboxAdoption:   true,
-			expectedAdoptedSandbox:  "not-ready-with-pod",
-			expectNewSandboxCreated: false,
+			expectSandboxAdoption:   false,
+			expectNewSandboxCreated: true,
 		},
 		{
 			name: "resolves adoption-patch conflict on the same candidate",
@@ -2585,7 +2602,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 	}
 }
 
-func TestSandboxClaimPreservesAssignedWarmPoolSandboxWithoutPodIPs(t *testing.T) {
+func TestSandboxClaimClearsAssignedWarmPoolSandboxThatIsNotReady(t *testing.T) {
 	scheme := newScheme(t)
 	ctx := context.Background()
 	warmPoolUID := types.UID("warmpool-uid-123")
@@ -2664,16 +2681,77 @@ func TestSandboxClaimPreservesAssignedWarmPoolSandboxWithoutPodIPs(t *testing.T)
 	}
 
 	assigned, err := reconciler.getOrCreateSandbox(ctx, claim, template)
-	require.NoError(t, err)
-	require.Equal(t, rotatingSandbox.Name, assigned.Name)
+	require.Nil(t, assigned)
+	require.ErrorIs(t, err, errAdoptionConflict)
 
 	var updatedClaim extensionsv1beta1.SandboxClaim
 	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, &updatedClaim))
-	require.Equal(t, rotatingSandbox.Name, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+	require.NotContains(t, updatedClaim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
 
 	var updatedSandbox sandboxv1beta1.Sandbox
 	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: rotatingSandbox.Name, Namespace: rotatingSandbox.Namespace}, &updatedSandbox))
-	require.True(t, metav1.IsControlledBy(&updatedSandbox, claim))
+	controllerRef := metav1.GetControllerOf(&updatedSandbox)
+	require.NotNil(t, controllerRef)
+	require.Equal(t, extensionsv1beta1.SandboxWarmPoolKind, controllerRef.Kind)
+}
+
+func TestSandboxClaimResolvesAssignedSandboxReadinessAuthoritatively(t *testing.T) {
+	scheme := newScheme(t)
+	ctx := context.Background()
+	_, template, warmPool, _ := newOptimisticLockTestObjects()
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid-123",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "rotating-sb",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name}},
+	}
+	serverSandbox := newPoolCandidateSandbox("rotating-sb")
+	staleSandbox := serverSandbox.DeepCopy()
+	ready := meta.FindStatusCondition(staleSandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	ready.Status = metav1.ConditionFalse
+	ready.Reason = "DependenciesNotReady"
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, serverSandbox).
+		Build()
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && key.Name == staleSandbox.Name {
+				staleSandbox.DeepCopyInto(sb)
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        rawClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	assigned, err := reconciler.getOrCreateSandbox(ctx, claim, template)
+	require.NoError(t, err)
+	require.Equal(t, serverSandbox.Name, assigned.Name)
+
+	updatedClaim := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(ctx, client.ObjectKeyFromObject(claim), updatedClaim))
+	require.Equal(t, serverSandbox.Name, updatedClaim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation],
+		"a stale unready cache view must not clear the committed assignment")
+
+	updatedSandbox := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, rawClient.Get(ctx, client.ObjectKeyFromObject(serverSandbox), updatedSandbox))
+	require.True(t, metav1.IsControlledBy(updatedSandbox, claim),
+		"the authoritative ready candidate must complete adoption")
 }
 
 func TestGetCandidateRequeuesUnnetworkedWarmPoolSandboxes(t *testing.T) {
@@ -4629,9 +4707,10 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 
 	adoptedSandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "adopted-sb",
-			Namespace: "default",
-			UID:       "adopted-sb-uid",
+			Name:       "adopted-sb",
+			Namespace:  "default",
+			UID:        "adopted-sb-uid",
+			Generation: 1,
 			Labels: map[string]string{
 				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
 				sandboxTemplateRefHash:           sandboxcontrollers.NameHash("test-template"),
@@ -4653,7 +4732,15 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 			},
 		}},
 		},
-		Status: sandboxv1beta1.SandboxStatus{PodIPs: []string{testNetworkedPodIP}},
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{testNetworkedPodIP},
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             "Ready",
+			}},
+		},
 	}
 
 	// Another sandbox in the warm pool that we want to make sure doesn't get adopted
@@ -4745,14 +4832,13 @@ func TestSandboxClaimPreventsDuplicateAdoptionDuringCacheLag(t *testing.T) {
 		t.Errorf("expected claim status to be finalized with 'adopted-sb' in the adoption pass, got %q", updatedClaim.Status.SandboxStatus.Name)
 	}
 
-	// Adoption is finalized but the sandbox is not Ready yet; the condition reflects
-	// sandbox state, not a reconciler failure.
+	// Adoption is finalized from a Ready warm-pool candidate.
 	readyCondition := meta.FindStatusCondition(updatedClaim.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	if readyCondition == nil {
 		t.Fatal("expected Ready condition to be set after the adoption pass")
 	}
-	if readyCondition.Reason != "SandboxNotReady" {
-		t.Errorf("expected Ready condition reason %q after the adoption pass, got %q (message: %q)", "SandboxNotReady", readyCondition.Reason, readyCondition.Message)
+	if readyCondition.Reason != "Ready" {
+		t.Errorf("expected Ready condition reason %q after the adoption pass, got %q (message: %q)", "Ready", readyCondition.Reason, readyCondition.Message)
 	}
 
 	// Verify that the extra warm sandbox was NOT adopted (it should still have its warm pool labels)
@@ -4864,9 +4950,10 @@ func TestSandboxClaimAdoptionCacheLagRepatchesIdempotently(t *testing.T) {
 
 	adoptedSandbox := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "adopted-sb",
-			Namespace: "default",
-			UID:       "adopted-sb-uid",
+			Name:       "adopted-sb",
+			Namespace:  "default",
+			UID:        "adopted-sb-uid",
+			Generation: 1,
 			Labels: map[string]string{
 				extensionsv1beta1.SandboxIDLabel: "claim-uid-123",
 				sandboxTemplateRefHash:           sandboxcontrollers.NameHash("test-template"),
@@ -4887,6 +4974,15 @@ func TestSandboxClaimAdoptionCacheLagRepatchesIdempotently(t *testing.T) {
 				},
 			},
 		}},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{testNetworkedPodIP},
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             "Ready",
+			}},
 		},
 	}
 
@@ -5854,6 +5950,7 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
 				Namespace:         "default",
+				Generation:        1,
 				CreationTimestamp: creationTime,
 				Labels: map[string]string{
 					warmPoolSandboxLabel:   poolNameHash,
@@ -5880,9 +5977,10 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 				PodIPs:   []string{testNetworkedPodIP},
 				Conditions: []metav1.Condition{
 					{
-						Type:   string(sandboxv1beta1.SandboxConditionReady),
-						Status: conditionStatus,
-						Reason: "DependenciesReady",
+						Type:               string(sandboxv1beta1.SandboxConditionReady),
+						Status:             conditionStatus,
+						ObservedGeneration: 1,
+						Reason:             "DependenciesReady",
 					},
 				},
 			},
@@ -5909,6 +6007,7 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 		existingSandboxes      []*sandboxv1beta1.Sandbox
 		otherObjects           []client.Object
 		expectedAdoptedSandbox string
+		expectColdStart        bool
 		expectedRemainingKeys  []string
 	}{
 		{
@@ -5929,6 +6028,15 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			},
 			expectedAdoptedSandbox: "sb-young-ready",
 			expectedRemainingKeys:  []string{"sb-old-unready"},
+		},
+		{
+			name: "cold starts and preserves queue when all sandboxes are unready",
+			existingSandboxes: []*sandboxv1beta1.Sandbox{
+				createWarmPoolSandboxWithNode("sb-old-unready", metav1.Time{Time: metav1.Now().Add(-2 * time.Hour)}, false, "node-2"),
+				createWarmPoolSandboxWithNode("sb-young-unready", metav1.Now(), false, "node-1"),
+			},
+			expectColdStart:       true,
+			expectedRemainingKeys: []string{"sb-old-unready", "sb-young-unready"},
 		},
 		{
 			name: "picks sandbox on the node with most remaining warmpool sandboxes (NodeSpread balancing)",
@@ -5996,13 +6104,20 @@ func TestSandboxClaimAdoptionStrategy(t *testing.T) {
 			_, err := reconciler.Reconcile(context.Background(), req)
 			require.NoError(t, err)
 
-			var adoptedSandbox sandboxv1beta1.Sandbox
-			err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: tc.expectedAdoptedSandbox}, &adoptedSandbox)
-			require.NoError(t, err)
+			if tc.expectColdStart {
+				var coldSandbox sandboxv1beta1.Sandbox
+				err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: claim.Name}, &coldSandbox)
+				require.NoError(t, err)
+				require.Equal(t, sandboxv1beta1.SandboxLaunchTypeCold, coldSandbox.Labels[sandboxv1beta1.SandboxLaunchTypeLabel])
+			} else {
+				var adoptedSandbox sandboxv1beta1.Sandbox
+				err = fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: tc.expectedAdoptedSandbox}, &adoptedSandbox)
+				require.NoError(t, err)
 
-			controllerRef := metav1.GetControllerOf(&adoptedSandbox)
-			require.NotNil(t, controllerRef)
-			require.Equal(t, claim.UID, controllerRef.UID)
+				controllerRef := metav1.GetControllerOf(&adoptedSandbox)
+				require.NotNil(t, controllerRef)
+				require.Equal(t, claim.UID, controllerRef.UID)
+			}
 
 			// Verify that the expected remaining sandbox keys are still queued properly (regression test)
 			var actualRemaining []string
@@ -7193,9 +7308,10 @@ func TestSandboxClaimAdoptionConflictRetriedInPass(t *testing.T) {
 func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {
 	return &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: "default",
-			UID:       types.UID(name + "-uid"),
+			Name:       name,
+			Namespace:  "default",
+			UID:        types.UID(name + "-uid"),
+			Generation: 1,
 			Labels: map[string]string{
 				warmPoolSandboxLabel:   sandboxcontrollers.NameHash("test-pool"),
 				sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
@@ -7214,9 +7330,10 @@ func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {
 		Status: sandboxv1beta1.SandboxStatus{
 			PodIPs: []string{testNetworkedPodIP},
 			Conditions: []metav1.Condition{{
-				Type:   string(sandboxv1beta1.SandboxConditionReady),
-				Status: metav1.ConditionTrue,
-				Reason: "Ready",
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             "Ready",
 			}},
 		},
 	}
@@ -7304,6 +7421,129 @@ func TestSandboxClaimAdoptionCompletionConflictDoesNotSwitchCandidates(t *testin
 	require.Equal(t, "SandboxWarmPool", untouchedRef.Kind, "the second candidate must not be touched")
 	require.Zero(t, patchAttempts["pool-sb-2"], "no adoption patch may be issued against the next candidate")
 	require.Equal(t, 2, patchAttempts["pool-sb-1"], "exactly one doomed patch plus one fresh-base re-patch")
+}
+
+// TestSandboxClaimDoesNotAdoptCandidateThatBecomesUnreadyAfterAssignment
+// verifies that the authoritative conflict path revalidates readiness without
+// switching to another candidate in the same reconcile pass.
+func TestSandboxClaimDoesNotAdoptCandidateThatBecomesUnreadyAfterAssignment(t *testing.T) {
+	scheme := newScheme(t)
+	_, template, warmPool, _ := newOptimisticLockTestObjects()
+
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid-123"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-pool"}},
+	}
+	sb1 := newPoolCandidateSandbox("pool-sb-1")
+	sb2 := newPoolCandidateSandbox("pool-sb-2")
+
+	conflict := k8errors.NewConflict(
+		schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"},
+		sb1.Name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+
+	rawClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(template, warmPool, claim, sb1, sb2).
+		WithStatusSubresource(claim).
+		Build()
+
+	becameUnready := false
+	patchAttempts := map[string]int{}
+	cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			sb, ok := obj.(*sandboxv1beta1.Sandbox)
+			if !ok {
+				return c.Patch(ctx, obj, patch, opts...)
+			}
+			patchAttempts[sb.Name]++
+			if sb.Name == sb1.Name && !becameUnready {
+				becameUnready = true
+				fresh := &sandboxv1beta1.Sandbox{}
+				if err := rawClient.Get(ctx, client.ObjectKeyFromObject(sb1), fresh); err != nil {
+					return err
+				}
+				ready := meta.FindStatusCondition(fresh.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+				if ready == nil {
+					return errors.New("candidate is missing Ready condition")
+				}
+				ready.Status = metav1.ConditionFalse
+				ready.Reason = "DependenciesNotReady"
+				ready.ObservedGeneration = fresh.Generation
+				if err := rawClient.Update(ctx, fresh); err != nil {
+					return err
+				}
+				return conflict
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	warmSandboxQueue := queue.NewSimpleSandboxQueue()
+	poolKey := queue.GetNamespacedWarmPoolName("default", "test-pool")
+	warmSandboxQueue.Add(poolKey, queue.SandboxKey{Namespace: "default", Name: sb1.Name})
+	warmSandboxQueue.Add(poolKey, queue.SandboxKey{Namespace: "default", Name: sb2.Name})
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        rawClient,
+		Scheme:           scheme,
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+		WarmSandboxQueue: warmSandboxQueue,
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.ErrorIs(t, err, errAdoptionConflict)
+
+	afterConflict := &extensionsv1beta1.SandboxClaim{}
+	require.NoError(t, rawClient.Get(context.Background(), req.NamespacedName, afterConflict))
+	require.NotContains(t, afterConflict.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+	require.Empty(t, afterConflict.Status.SandboxStatus.Name, "the conflicted pass must not bind another candidate")
+
+	unready := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, rawClient.Get(context.Background(), client.ObjectKeyFromObject(sb1), unready))
+	unreadyRef := metav1.GetControllerOf(unready)
+	require.NotNil(t, unreadyRef)
+	require.Equal(t, extensionsv1beta1.SandboxWarmPoolKind, unreadyRef.Kind)
+	require.False(t, isSandboxReady(unready))
+	require.Equal(t, 1, patchAttempts[sb1.Name], "the fresh unready candidate must not be re-patched")
+	require.Zero(t, patchAttempts[sb2.Name], "the conflicted pass must not switch candidates")
+
+	readyAgain := unready.DeepCopy()
+	readyCondition := meta.FindStatusCondition(readyAgain.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, readyCondition)
+	readyCondition.Status = metav1.ConditionTrue
+	readyCondition.Reason = "Ready"
+	readyCondition.ObservedGeneration = readyAgain.Generation
+	require.NoError(t, rawClient.Update(context.Background(), readyAgain))
+
+	handler := &sandboxEventHandler{sandboxQueue: warmSandboxQueue}
+	handler.Update(context.Background(), event.UpdateEvent{ObjectOld: unready, ObjectNew: readyAgain}, nil)
+	var queuedKeys []queue.SandboxKey
+	var queuedNames []string
+	for {
+		key, ok := warmSandboxQueue.Get(poolKey)
+		if !ok {
+			break
+		}
+		queuedKeys = append(queuedKeys, key)
+		queuedNames = append(queuedNames, key.Name)
+	}
+	require.ElementsMatch(t, []string{sb1.Name, sb2.Name}, queuedNames,
+		"a candidate that becomes ready again must return to the warm-pool queue")
+	for _, key := range queuedKeys {
+		warmSandboxQueue.Add(poolKey, key)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("expected the converged pass to adopt the next ready candidate: %v", err)
+	}
+	adopted := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, rawClient.Get(context.Background(), client.ObjectKeyFromObject(sb2), adopted))
+	require.True(t, metav1.IsControlledBy(adopted, claim))
 }
 
 // TestSandboxClaimStaleAdoptionRepatchIdempotentWithoutWrite verifies a stale

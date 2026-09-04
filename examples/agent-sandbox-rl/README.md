@@ -408,6 +408,44 @@ across pools freely, use a single config with no `node_selector` and a node
 affinity in `TemplateSpec.extra_pod_spec` — simpler, but you lose control of the
 split across pools with different pod caps.)
 
+### Adopting warm pools someone else provisioned
+
+If the pools are already standing — put there by the multi-cluster fleet layer, a
+platform team, or an earlier run — set `adopt_existing=True` and this package will
+use them instead of building its own:
+
+```python
+fleet = SandboxFleet(FleetConfig(clusters=[...], adopt_existing=True))
+fleet.load_tasks(source)
+fleet.setup()          # discovers, verifies, creates nothing
+```
+
+Matching is **by image**, not by name: every SandboxWarmPool in the namespace is
+resolved through its `sandboxTemplateRef` to the image its template runs, so a
+pool named by any scheme is found. (This matters — the fleet layer names pools
+`<template>-pool` while this package names them `pool-<template>`, so a harness
+that only knew its own scheme found none of them.)
+
+In adopt mode nothing in the namespace is written: no template is created or
+relabelled, no pool is created, scaled or deleted, and teardown leaves both in
+place while still releasing the claims this run made. A task image that **no**
+pool serves raises `PoolNotFoundError` at `plan()`, naming the images and the
+pool count found per cluster, rather than quietly provisioning a size-1 pool per
+image — a working-but-far-slower run alongside warm pods it never touched.
+
+Two consequences worth knowing: adopted replicas don't count towards
+`active_replicas` or the circuit breaker's intent ceiling (they aren't this run's
+to over-create, and their pods carry the provisioner's labels, not its run-id —
+only an explicit `max_live_sandboxes` still applies), and `set_pool_replicas` /
+`unwarm_image` become no-ops, so `recycle(scale_on_hold=True)` and the sliding
+window won't resize a pool they don't own.
+
+If you'd rather keep creating pools but line their **names** up with an existing
+convention, set `pool_name_format` on its own — `"{template}-pool"` for the fleet
+layer's scheme, `"warm-{image_hash}"` for a bare digest. Override
+`FleetConfig.pool_name(image)` in a subclass for anything the format string can't
+express; every pool name in the SDK goes through it.
+
 ## Configuration reference
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
@@ -416,7 +454,10 @@ split across pools with different pod caps.)
 the warm fill in waves of ≤ N sandbox creates in flight to bound the controller's
 create burst; on controllers ≤ v0.5.3 also pair with a low
 `--sandbox-warm-pool-concurrent-workers` to dodge #1215; `0` = warm all at once), `template`
-(`TemplateSpec`), `template_name_prefix` (`r2e-img-`), `labels`. Disk-aware sizing (optional):
+(`TemplateSpec`), `template_name_prefix` (`r2e-img-`), `pool_name_format`
+(`pool-{template}`; `{image_hash}` also available), `adopt_existing` (False — use
+pools that already exist and fail loudly on a miss, see
+[above](#adopting-warm-pools-someone-else-provisioned)), `labels`. Disk-aware sizing (optional):
 `avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
 (None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
 images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct images

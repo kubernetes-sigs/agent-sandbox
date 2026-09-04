@@ -234,9 +234,15 @@ phase3() {
        recreate it (PHASE=2 USE_GVISOR=yes) or follow the header of
        deploy/example-templates-xs.yaml to strip runtimeClassName and the
        tolerations block, then re-run with USE_GVISOR=no."
-    else
-      grep -q 'runtimeClassName: gvisor' "$POC_ROOT/deploy/example-templates-xs.yaml" \
-        && die "[$c] USE_GVISOR=no but deploy/example-templates-xs.yaml still
+    # Anchored to an ACTIVE yaml field, not to the string. That file's own
+    # header explains the field in a comment --
+    #   "#   1. runtimeClassName: gvisor -- required so containerd ..."
+    # -- so an unanchored grep matches the very instructions for removing it,
+    # and USE_GVISOR=no could never pass however correctly the templates were
+    # stripped. Leading whitespace only, optional trailing comment.
+    elif grep -Eq '^[[:space:]]*runtimeClassName:[[:space:]]*gvisor[[:space:]]*(#.*)?$' \
+      "$POC_ROOT/deploy/example-templates-xs.yaml"; then
+      die "[$c] USE_GVISOR=no but deploy/example-templates-xs.yaml still
        requests runtimeClassName: gvisor. Those pods will never schedule onto a
        non-gVisor pool. Remove runtimeClassName and the tolerations block from
        every template (see that file's header), or re-run with USE_GVISOR=yes."

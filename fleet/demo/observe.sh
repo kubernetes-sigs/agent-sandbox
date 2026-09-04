@@ -66,6 +66,60 @@ switch_context() {
   fi
 }
 
+# --fail-modes deliberately breaks a live fleet and then puts it back. Between
+# those two points the script can end without reaching the recovery: a failed
+# `fleetctl apply`, switch_context exiting on a get-credentials failure, `read`
+# hitting EOF under `set -e`, or -- much the likeliest -- the operator pressing
+# Ctrl-C at one of the two prompts, which are the only places this script waits.
+# Any of those leaves the fleet injected and says nothing about it. These two
+# variables record what is currently broken, and restore() runs off a trap so
+# the recovery is not on the happy path.
+_RESTORE_MEMBER=""   # cluster whose fleet-member is scaled to 0
+_RESTORE_ASSIGN=""   # spec to re-apply while assignments.json is corrupt
+
+restore() {
+  local rc=$?
+  trap - EXIT INT TERM      # never re-enter, whatever happens below
+  [[ -n "$_RESTORE_MEMBER" || -n "$_RESTORE_ASSIGN" ]] || exit "$rc"
+
+  section "restoring injected fail-mode state"
+  local failed=""
+  if [[ -n "$_RESTORE_MEMBER" ]]; then
+    # switch_context exits 1 on a get-credentials failure, which from inside a
+    # trap would abandon the assignments restore below. Run it in a subshell so
+    # it cannot -- which still does the job, because both of its branches write
+    # the current context to the kubeconfig FILE, not to shell state.
+    if ( switch_context "$_RESTORE_MEMBER" ) \
+       && kubectl -n "$NS" scale deployment/fleet-member --replicas=1; then
+      _RESTORE_MEMBER=""
+    else
+      failed=yes
+    fi
+  fi
+  if [[ -n "$_RESTORE_ASSIGN" ]]; then
+    if fleetctl apply -f "$_RESTORE_ASSIGN"; then
+      _RESTORE_ASSIGN=""
+    else
+      failed=yes
+    fi
+  fi
+
+  if [[ -n "$failed" ]]; then
+    printf "\n\033[1;31m== COULD NOT RESTORE — the fleet is STILL broken ==\033[0m\n" >&2
+    [[ -z "$_RESTORE_MEMBER" ]] || printf '%s\n' \
+      "  fleet-member on $_RESTORE_MEMBER is still scaled to 0. Point kubectl" \
+      "  at $_RESTORE_MEMBER and run:" \
+      "    kubectl -n $NS scale deployment/fleet-member --replicas=1" >&2
+    [[ -z "$_RESTORE_ASSIGN" ]] || printf '%s\n' \
+      "  gs://${FLEET_BUCKET:-<bucket>}/fleet/assignments.json is still the" \
+      "  corrupted placeholder; every member is running on last-known-good." \
+      "  Recover with:" \
+      "    fleetctl apply -f $_RESTORE_ASSIGN" >&2
+    exit 1
+  fi
+  exit "$rc"
+}
+
 fail_modes() {
   local first="${CLUSTERS[0]}"
   local second="${CLUSTERS[1]:-$first}"
@@ -90,8 +144,13 @@ fail_modes() {
   command -v fleetctl >/dev/null 2>&1 \
     || { echo "fleetctl is not on PATH — 'pip install -e ./python' first" >&2; exit 1; }
 
+  # Armed only after the preflight above, so a bad invocation exits before
+  # anything is owed.
+  trap restore EXIT INT TERM
+
   section "FAIL MODE 1 — kill $second's fleet-member, wait 100s, re-apply, expect it out of assignments"
   switch_context "$second"
+  _RESTORE_MEMBER="$second"
   kubectl -n "$NS" scale deployment/fleet-member --replicas=0
   echo "sleeping 100s for capacity report to age out (>90s threshold)"
   sleep 100
@@ -101,6 +160,7 @@ fail_modes() {
   read -rp "press enter to restore $second's fleet-member..."
   switch_context "$second"
   kubectl -n "$NS" scale deployment/fleet-member --replicas=1
+  _RESTORE_MEMBER=""
   kubectl -n "$NS" rollout status deployment/fleet-member
 
   section "FAIL MODE 2 — hand-delete a warmpool on $first; fleet-member should recreate it"
@@ -114,14 +174,19 @@ fail_modes() {
   kubectl -n "$NS" get swp
 
   section "FAIL MODE 3 — corrupt assignments.json; fleet-member should log parse error and keep last-known-good"
+  # Context first. switch_context exits on a get-credentials failure, and there
+  # is no reason for that to happen with the bucket already corrupted.
+  switch_context "$first"
+  _RESTORE_ASSIGN="$FLEET_SPEC"
   echo '{"this":"is not a valid Assignments"}' \
     | gcloud storage cp - "gs://$FLEET_BUCKET/fleet/assignments.json"
   echo "sleeping 45s; check fleet-member logs for parse error:"
-  switch_context "$first"
+  sleep 45
   kubectl -n "$NS" logs deployment/fleet-member --tail=20 || true
   echo
   read -rp "press enter to restore assignments (re-apply spec)..."
   fleetctl apply -f "$FLEET_SPEC"
+  _RESTORE_ASSIGN=""
   return 0
 }
 

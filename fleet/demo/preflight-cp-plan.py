@@ -124,10 +124,23 @@ def main() -> int:
                       "blast radius of a half-configured member")
   p.add_argument("--drop", default="",
                  help="comma-separated clusters that do not appear on the hub "
-                      "at all")
+                      "at all. Always exits 1 -- a fleet with a member missing "
+                      "is not the fleet the spec names, whatever the totals "
+                      "come out to.")
   args = p.parse_args()
 
-  spec = planner.FleetSpec(**yaml.safe_load(args.spec.read_text()))
+  # Same reasoning as the --capacities parse below: a bad spec is a wrong
+  # invocation (exit 2), not a plan that came out wrong (exit 1), and a raw
+  # pydantic/yaml traceback out of a preflight tool reads as the tool being
+  # broken. The validation error itself is the useful part, so it is printed
+  # rather than summarised.
+  try:
+    spec = planner.FleetSpec(**yaml.safe_load(args.spec.read_text()))
+  except (OSError, yaml.YAMLError, TypeError, ValueError) as e:
+    print(f"error: {args.spec} is not a loadable FleetSpec:\n{e}",
+          file=sys.stderr)
+    return 2
+
   n = spec.min_clusters
   # min_clusters>0 is what makes a per-cluster total derivable; see the two
   # modes in the module docstring.
@@ -149,7 +162,24 @@ def main() -> int:
         print(f"error: --capacities entry {kv.strip()!r} is not NAME=VALUE",
               file=sys.stderr)
         return 2
-      caps[k] = int(v)
+      # int() raises on anything non-numeric, and the operator's most likely
+      # slip here is a units suffix -- 199k, 199000i, 2e5 -- copied out of a
+      # sizing note. An uncaught ValueError reports it as a traceback from
+      # inside a preflight tool, which reads as the tool being broken rather
+      # than the flag being wrong.
+      try:
+        caps[k] = int(v)
+      except ValueError:
+        print(f"error: --capacities entry {kv.strip()!r} has a non-integer "
+              f"value {v!r}. This stands in for the published "
+              f"{inventory.PROP_SANDBOX_CAPACITY} property, which is a plain "
+              "sandbox count -- no units, no suffix.", file=sys.stderr)
+        return 2
+      if caps[k] < 0:
+        print(f"error: --capacities entry {kv.strip()!r} is negative. A "
+              "capacity is a count; 0 is allowed and means a cluster that "
+              "publishes no headroom.", file=sys.stderr)
+        return 2
     names = sorted(caps)
   elif spec.cluster_weights:
     # The spec names its clusters, so there is nothing to stand in for. Publish
@@ -174,6 +204,18 @@ def main() -> int:
 
   omit = {c for c in args.omit.split(",") if c}
   drop = {c for c in args.drop.split(",") if c}
+
+  # A name in --omit/--drop that is not in the cluster set is a typo, and a
+  # silent one: the tool would model the fleet the operator did NOT ask about
+  # and then print OK. Both flags exist to make a failure visible, so failing
+  # to apply one has to be louder than the failure it was simulating.
+  unknown = sorted((omit | drop) - set(names))
+  if unknown:
+    print(f"error: --omit/--drop names {unknown} are not in the cluster set "
+          f"{names}. Nothing would have been omitted or dropped, and the run "
+          "would have reported on a healthy fleet.", file=sys.stderr)
+    return 2
+
   now = _dt.datetime.now(_dt.timezone.utc).isoformat()
 
   profiles = [
@@ -199,37 +241,74 @@ def main() -> int:
   intended = (dict(zip(fresh, slot_totals))
               if hub_driven and len(fresh) == n else {})
 
-  print(f"  {'cluster':<16}{'weight':>12}{'pools':>8}{'planned':>12}"
-        f"{'intended':>12}{'delta':>10}")
+  # One row per cluster ANY of the three sources knows about, not just the ones
+  # the planner emitted an assignment for. A --drop'ped cluster is absent from
+  # `profiles`, so it is absent from the registry and from `fresh`; iterating
+  # `assignments.clusters` alone would drop it from the report entirely under a
+  # hub-driven spec -- the opposite of what --drop was asked to demonstrate.
+  row = "  {:<16}{:>12}{:>8}{:>12}{:>12}{:>10}  {}"
+  print(row.format("cluster", "weight", "pools", "planned", "intended",
+                   "delta", "note"))
   ok = True
   total = 0
-  for name in sorted(assignments.clusters):
-    ca = assignments.clusters[name]
-    got = sum(pool.replicas for pool in ca.pools)
+  unplaced: list[str] = []
+  absent: list[str] = []
+  for name in sorted(set(assignments.clusters) | set(fresh) | set(names)):
+    ca = assignments.clusters.get(name)
+    got = sum(pool.replicas for pool in ca.pools) if ca else 0
     total += got
     want = intended.get(name)
     delta = "" if want is None else f"{got - want:+,}"
     if want is not None and got != want:
       ok = False
-    print(f"  {name:<16}{registry.get(name).weight:>12,.0f}"
-          f"{len(ca.pools):>8}{got:>12,}"
-          f"{(f'{want:,}' if want is not None else '?'):>12}{delta:>10}")
+    notes = []
+    if name in drop:
+      # Not idle. Not there. Worth its own word, because the two are fixed by
+      # completely different things.
+      notes.append("NOT ON HUB")
+      absent.append(name)
+    if got == 0:
+      notes.append("no pools")
+      unplaced.append(name)
+    entry = registry.clusters.get(name)
+    print(row.format(name, f"{entry.weight:,.0f}" if entry else "-",
+                     len(ca.pools) if ca else 0, f"{got:,}",
+                     f"{want:,}" if want is not None else "?", delta,
+                     ", ".join(notes)))
 
-  # A fresh cluster that received no pools. Under a hub-driven spec that is an
-  # error -- min_clusters says every slot is filled. Under a spec-driven one it
-  # can be a legitimate outcome (image-affinity hashes six templates onto three
+  # A cluster that received no pools. Under a hub-driven spec that is an error
+  # -- min_clusters says every slot is filled. Under a spec-driven one it can be
+  # a legitimate outcome (image-affinity hashes six templates onto three
   # clusters; nothing promises a cluster wins one), so it is reported and left
   # to the operator rather than failing the run.
-  missing = [c for c in fresh if c not in assignments.clusters]
-  for name in missing:
-    if hub_driven:
-      ok = False
-    print(f"  {name:<16}{'-':>12}{0:>8}{0:>12}{'-':>12}"
-          f"{'NOT PLACED' if hub_driven else 'NO POOLS':>10}")
+  #
+  # "Received no pools" has two shapes and this used to catch only one: a fresh
+  # cluster missing from assignments entirely. The other is an assignment that
+  # is present but EMPTY, which is exactly what a named-but-not-fresh cluster
+  # gets -- and because its name was in the dict, it counted as placed. The run
+  # then printed "every named cluster is placed" over a table showing it with
+  # zero. A cluster holding nothing is not placed, however it got there.
+  if hub_driven and unplaced:
+    ok = False
 
-  print(f"  {'FLEET':<16}{'':>12}{'':>8}{total:>12,}"
-        f"{spec.max_concurrent:>12,}{total - spec.max_concurrent:>+10,}")
+  print(row.format("FLEET", "", "", f"{total:,}", f"{spec.max_concurrent:,}",
+                   f"{total - spec.max_concurrent:+,}", ""))
   print()
+
+  # Checked in BOTH modes, and before the totals. Hub-driven already fails a
+  # dropped cluster, but only via len(fresh) != n -> INCONCLUSIVE, which blames
+  # the round-robin for something much simpler. Spec-driven did not fail it at
+  # all: the surviving clusters absorb the budget, the fleet total comes out at
+  # exactly max_concurrent, and the run reports OK for a fleet that is a member
+  # short of the one being asked about. The total is the wrong thing to check
+  # this with, so it is checked separately from it.
+  if absent:
+    print(f"MISSING FROM HUB: {', '.join(absent)} published no ClusterProfile "
+          "at all, so everything above is a plan for a smaller fleet than the "
+          "spec names. The fleet total may still come out exactly right — the "
+          "remaining clusters absorb the budget — and that is precisely why it "
+          "cannot be the check.")
+    return 1
 
   if hub_driven:
     if not intended:
@@ -256,9 +335,9 @@ def main() -> int:
           "pools the per-pool cap may be binding before the budget is spent — "
           "raise max_pool, add clusters, or lower max_concurrent.")
     return 1
-  if missing:
+  if unplaced:
     print(f"OK (with a caveat): the fleet total is exactly "
-          f"{spec.max_concurrent:,}, but {', '.join(missing)} received no "
+          f"{spec.max_concurrent:,}, but {', '.join(unplaced)} received no "
           f"pools. Under placement_policy={spec.placement_policy} that can be "
           "correct — the distribution is chosen per pool, not per cluster — "
           "but an idle member in a fleet you are paying for is worth a look.")

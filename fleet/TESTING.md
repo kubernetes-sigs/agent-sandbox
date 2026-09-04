@@ -18,8 +18,12 @@ two single-node clusters on one laptop.
 gcloud auth login
 gcloud auth application-default login
 gcloud config set project <YOUR_PROJECT>
-gcloud services enable container.googleapis.com storage.googleapis.com iam.googleapis.com
+gcloud services enable container.googleapis.com storage.googleapis.com \
+  iam.googleapis.com artifactregistry.googleapis.com
 ```
+
+`artifactregistry.googleapis.com` is needed by §3d and by the XS driver's
+Phase 3, both of which push the fleet-member image to Artifact Registry.
 
 Local: `python` 3.10+, `kubectl` 1.31+, `docker` 26+, gcloud SDK 500+.
 
@@ -54,24 +58,43 @@ real `planner.plan()` against synthetic profiles — only `list_profiles()` is
 substituted, so the Hamilton split, `compute_replicas`, the spread-first
 pre-pass and the `min_clusters` round-robin all execute as they will on the day.
 
+It runs in one of two modes, chosen from the spec rather than from a flag:
+
+| spec shape | mode | `--capacities` | what is asserted |
+|---|---|---|---|
+| `min_clusters: N > 0`, `cluster_weights: {}` | hub-driven | **required** — the spec names no clusters | planned == the spec's own per-cluster arithmetic |
+| `min_clusters: 0`, `cluster_weights` populated | spec-driven | optional, defaults to the named clusters | the fleet total, and that no named cluster is left empty |
+
+`demo/fleet-spec-xs.yaml` is the second kind: it names three clusters and uses
+`placement_policy: image-affinity`, which decides per pool by hashing the
+image. There is deliberately no per-cluster figure to check against — that is
+what `image-affinity` is for — so the per-cluster split is reported and the
+fleet total is what gets asserted.
+
 ```bash
-# does the intended publication reproduce the intended plan?
+# spec-driven: runs as shipped
 ./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml
 
-# what is actually published — what would it really do?
+# state what is actually published instead of the spec's own cluster set
 ./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml \
-  --capacities cluster-a=199000,cluster-b=199000,cluster-c=199000
+  --capacities std-multi-1=199000,std-multi-2=199000,std-multi-3=199000
 
 # what happens if one member never publishes?
-./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml --omit cluster-c
+./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml --omit std-multi-3
 ```
 
-Exit 0 = the plan matches the spec's own arithmetic. Exit 1 = it does not, and
-the per-cluster diff is printed.
+Exit 0 = the plan matches what the spec describes. Exit 1 = it does not, and
+the per-cluster diff is printed. Exit 2 = the invocation is wrong (a hub-driven
+spec without `--capacities`, or a count that disagrees with `min_clusters`).
 
-Run the `--omit` case at least once. A cluster with no `sandbox-capacity`
-property does **not** drop out — it gets weight 1.0, stays eligible, and takes
-a rounding-error share. Nothing errors; the fleet simply lands short.
+Run the `--omit` case at least once **against a hub-driven spec**. A cluster
+with no `sandbox-capacity` property does not drop out — it gets weight 1.0,
+stays eligible, and takes a rounding-error share. Nothing errors; the fleet
+simply lands short. Note that `--omit` is a no-op on a spec that sets
+`cluster_weights` explicitly, as `fleet-spec-xs.yaml` does: the spec's weight
+wins, so there is nothing for a missing property to change. Omitting a member
+only has consequences where the hub is the source of the weights, which is
+precisely why the hub-driven case is the one worth rehearsing.
 
 ## 3. Real GKE — by hand
 
@@ -83,10 +106,16 @@ export REGION=us-central1
 export FLEET_BUCKET=agent-sandbox-fleet-$USER
 export GSA_EMAIL=fleet-agent@$PROJECT.iam.gserviceaccount.com
 
-gsutil mb -p $PROJECT -l $REGION gs://$FLEET_BUCKET
+gcloud storage buckets create gs://$FLEET_BUCKET --project=$PROJECT --location=$REGION
 gcloud iam service-accounts create fleet-agent --display-name="Fleet member GCS access"
-gsutil iam ch serviceAccount:$GSA_EMAIL:objectAdmin gs://$FLEET_BUCKET
+gcloud storage buckets add-iam-policy-binding gs://$FLEET_BUCKET \
+    --member="serviceAccount:$GSA_EMAIL" --role=roles/storage.objectAdmin
 ```
+
+`gcloud storage`, not `gsutil`, throughout. On a Compute Engine VM gsutil's own
+credential lookup order (metadata SA → `.boto` → legacy_credentials) diverges
+from gcloud's, so it can report invalid credentials while every other command
+in this guide works. The scripts follow the same rule.
 
 ### 3b. Clusters
 
@@ -106,6 +135,17 @@ test. `deploy/create-gke-standard-fleet.sh` builds Standard clusters with image
 streaming enabled instead, which is what you want once you start caring about
 warm-pool fill time rather than correctness.
 
+**`deploy/example-templates-xs.yaml` does not fit this path.** Those templates
+are written for the XS driver's Standard clusters and pin
+`nodeSelector: cloud.google.com/gke-nodepool: sandbox-pool` plus
+`runtimeClassName: gvisor` and a toleration for the gVisor node taint — none of
+which exist on an Autopilot cluster, so every sandbox pod stays `Pending` and
+the warm pools never fill. Either drop those three stanzas from a local copy,
+or take the Standard path in §4 and use the file as shipped. Whichever you
+choose, §3g's `fleetctl apply` assumes the `SandboxTemplate` CRs already exist:
+templates are operator-managed, and the fleet-member verifies them rather than
+creating them.
+
 ### 3c. agent-sandbox, RBAC, and Workload Identity, per cluster
 
 ```bash
@@ -117,6 +157,10 @@ for c in "${CLUSTERS[@]}"; do
   kubectl apply -f ../k8s/crds/
 
   kubectl apply -f deploy/rbac.yaml
+
+  # SandboxTemplates are operator-managed — the fleet-member checks that they
+  # exist and will not create them. Use your edited copy on Autopilot; see §3b.
+  kubectl apply -f deploy/example-templates-xs.yaml
 
   gcloud iam service-accounts add-iam-policy-binding $GSA_EMAIL \
       --role=roles/iam.workloadIdentityUser \
@@ -159,8 +203,8 @@ member inventories every `ClusterProfile` on the hub — including other fleets'
 ### 3f. Verify the members are reporting
 
 ```bash
-gsutil ls gs://$FLEET_BUCKET/fleet/capacity/
-gsutil cat gs://$FLEET_BUCKET/fleet/capacity/fleet-a.json | jq
+gcloud storage ls gs://$FLEET_BUCKET/fleet/capacity/
+gcloud storage cat gs://$FLEET_BUCKET/fleet/capacity/fleet-a.json | jq
 ```
 
 Expected: one `fleet/capacity/<cluster>.json` per cluster, `updated_at` within
@@ -174,14 +218,19 @@ Edit `demo/fleet-spec-xs.yaml` so `cluster_weights` names your clusters, then:
 pip install -e ./python
 fleetctl apply -f demo/fleet-spec-xs.yaml
 fleetctl status
-gsutil cat gs://$FLEET_BUCKET/fleet/assignments.json | jq
+gcloud storage cat gs://$FLEET_BUCKET/fleet/assignments.json | jq
 
 CLUSTERS="${CLUSTERS[*]}" PROJECT=$PROJECT REGION=$REGION ./demo/observe.sh
 ```
 
-`observe.sh` prints a per-cluster snapshot plus the GCS side. Note that bash
-does not export arrays — pass `CLUSTERS="${CLUSTERS[*]}"` as shown, or the
-script silently falls back to its two-cluster default.
+`observe.sh` prints a per-cluster snapshot plus the GCS side. Two inputs to get
+right:
+
+- Bash does not export arrays — pass `CLUSTERS="${CLUSTERS[*]}"` as shown, or
+  the script silently falls back to its two-cluster default.
+- Set `REGION` for the regional (Autopilot) clusters above, or `ZONE` for zonal
+  Standard clusters such as the XS driver's. `get-credentials` does not find a
+  zonal cluster by region, and vice versa.
 
 Expected: `assignments.json` in the bucket, members reconcile within 30 s, and
 per-image replica counts across clusters sum to each image's `target_replicas`.
@@ -189,8 +238,15 @@ per-image replica counts across clusters sum to each image's `target_replicas`.
 ### 3h. Failure injection
 
 ```bash
-./demo/observe.sh --fail-modes
+FLEET_SPEC=demo/fleet-spec-xs.yaml CLUSTERS="${CLUSTERS[*]}" \
+  PROJECT=$PROJECT REGION=$REGION FLEET_BUCKET=$FLEET_BUCKET \
+  ./demo/observe.sh --fail-modes
 ```
+
+`FLEET_SPEC` is required and must be the **same spec this fleet was built
+from**. Fail modes 1 and 3 recover by re-applying it; pointing it at a
+different spec replaces the live assignment instead of restoring it, and the
+recovery you then observe is a re-plan of something else.
 
 Runs all three: kill a member (its capacity report ages out, the next `apply`
 shifts assignments away), hand-delete a warm pool (the member recreates it on
@@ -220,8 +276,8 @@ Then:
 for c in "${CLUSTERS[@]}"; do
   gcloud container clusters delete $c --region=$REGION --project=$PROJECT --quiet
 done
-gsutil rm -r gs://$FLEET_BUCKET/**
-gsutil rb gs://$FLEET_BUCKET
+gcloud storage rm -r "gs://$FLEET_BUCKET/**"
+gcloud storage buckets delete gs://$FLEET_BUCKET
 gcloud iam service-accounts delete $GSA_EMAIL --quiet
 ```
 
@@ -245,16 +301,22 @@ PROJECT=my-proj FLEET_BUCKET=my-bucket ./demo/run-xs-e2e.sh
 | 6 | optional `--spindown` — node pools to zero, control planes left up |
 
 Overridable: `ZONE`, `CLUSTER_PREFIX`, `N_CLUSTERS`, `FLEET_MEMBER_IMAGE`,
-`STRESS_RATE`, `STRESS_DURATION`, `SKIP_STRESS`, `SKIP_TEARDOWN`, and `PHASE`
-to run exactly one phase.
+`USE_GVISOR`, `STRESS_RATE`, `STRESS_DURATION`, `SKIP_STRESS`, `SKIP_TEARDOWN`,
+and `PHASE` to run exactly one phase.
+
+`USE_GVISOR` defaults to `yes` and must agree with
+`deploy/example-templates-xs.yaml`, which ships requesting
+`runtimeClassName: gvisor`. Phase 3 checks both directions and stops if they
+disagree — otherwise the mismatch only shows up as Phase 4 timing out after 15
+minutes on pods that could never be admitted.
 
 Phase 6 does not delete anything — it scales node pools to zero and leaves the
 control planes billing at roughly $0.30/hr. For a real teardown use
 `./deploy/create-gke-standard-fleet.sh delete`.
 
 `deploy/example-templates-xs.yaml` holds the `SandboxTemplate` CRs the XS spec
-expects. Templates are operator-managed; the fleet-member only verifies they
-exist and will not create them for you.
+expects, and Phase 3 applies them. Templates are operator-managed; the
+fleet-member only verifies they exist and will not create them for you.
 
 ## 5. Claim load test
 
@@ -271,37 +333,58 @@ python ../demo/stress-e2e.py --rate 5 --duration 60
 
 It reads the current `assignments.json`, rotates through every pool weighted by
 size, refreshes kubeconfig contexts itself, and cleans up after itself unless
-told otherwise. It prints per-cluster counts, latency percentiles, and a
-warm-hit rate.
+told otherwise. It prints per-cluster counts and latency percentiles.
 
 - `--rate` claims/sec. Ramp to 20+ to stress warm-pool replenishment.
-- `--duration` seconds. `--rate 20 --duration 300` ≈ 6k claims.
+- `--duration` seconds. `--rate 20 --duration 300` ≈ 6k claims — but see
+  `--max-outstanding`: the *offered* rate is what you set, and the summary
+  reports how much of it was actually served.
 - `--keep-claims` leaves the `SandboxClaim`s in place for inspection.
-- `--concurrency` in-flight operations, default 32.
+- `--concurrency` worker threads, default 128. This is a worker count, not a
+  rate limit.
+- `--per-cluster-concurrency` in-flight claims per cluster, default 20. This is
+  the one that protects a single control plane.
+- `--max-outstanding` cap on total in-flight claims, default `4 ×
+  --concurrency`. Once it is reached, further ticks are **skipped and counted**
+  rather than queued, so a rate the fleet cannot drain shows up as
+  `ticks SKIPPED` instead of silently extending the run past `--duration`.
+- `--strategy` defaults to `hash`. `round-robin` is refused at startup when any
+  template is hosted on more than one cluster: `create_sandbox` resolves again
+  internally, and a stateful strategy makes that second resolution disagree
+  with the one this harness used to pick a semaphore, so claims land on a
+  different cluster than the summary reports.
+
+Check the `claims LEAKED` line before trusting anything else. A failed delete
+leaves a claim holding a warm sandbox for the remainder of the run, so the pool
+drains and the latency numbers after that point are measuring cold creation.
 
 Watch `fleetctl status` in another terminal: `wp_depth` should stay roughly
 constant, `wp_ready` may dip and recover, and `active_claims` should climb to a
 plateau and return to 0 afterwards.
 
-**Read the warm-hit rate, not the latency.** Above 90% means claims are being
-served from the pre-warmed pool. Below 50% means the pool is draining faster
-than the `SandboxWarmPool` controller replenishes it, and every latency number
-in the summary is then measuring cold sandbox creation instead of the fleet.
+**Watch `wp_ready` in `fleetctl status`, not just the latency.** The harness
+does not compute a warm-hit rate; `wp_ready` holding up is the signal that
+claims are being served from the pre-warmed pool. If it collapses, the pool is
+draining faster than the `SandboxWarmPool` controller replenishes it, and every
+latency number in the summary is then measuring cold sandbox creation instead
+of the fleet.
 
 ## 6. Acceptance checklist
 
 - [ ] `pytest -v` in `fleet/python` — 100% pass
 - [ ] `python -m agent_sandbox_fleet.fleet_member --help` — entrypoint works
 - [ ] `IMAGE=... ./deploy/build-push.sh` — image builds from the repo root
-- [ ] `./demo/preflight-cp-plan.py <spec>` — exit 0; and `--omit <cluster>`
-      shows the short landing rather than an error
+- [ ] `./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml` — exit 0
+- [ ] the same against a hub-driven spec, which needs `--capacities`, and
+      `--omit <cluster>` there shows the short landing rather than an error
 - [ ] 3+ clusters, one member each, all publishing capacity within 60 s
 - [ ] `fleetctl apply` on a 3-image spec spreads pools per the selected policy,
       and per-image totals sum **exactly** to `target_replicas`
 - [ ] Fail-mode 1 (kill member): assignments shift on the next `apply`
 - [ ] Fail-mode 2 (delete pool): member recreates within 60 s
 - [ ] Fail-mode 3 (corrupt JSON): member logs the error and keeps serving
-- [ ] `stress-e2e.py --rate 5 --duration 60` — >95% success, warm-hit >80%
+- [ ] `stress-e2e.py --rate 5 --duration 60` — >95% success, 0 leaked claims,
+      0 skipped ticks at this rate
 - [ ] `active_claims` climbs during the stress run and returns to 0
 - [ ] Member memory stays under 200 MiB with 50 `SandboxWarmPool`s managed
 - [ ] A second `fleetctl apply` while the first is in flight loses with

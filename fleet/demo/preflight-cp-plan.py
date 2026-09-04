@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 The Kubernetes Authors.
 # Licensed under the Apache License, Version 2.0.
-"""Prove a hub-driven FleetSpec plans to the totals you intended — offline.
+"""Prove a FleetSpec plans to the totals you intended — offline.
 
 WHY THIS EXISTS: a spec with `cluster_weights: {}` moves the budget split out
 of the file and into whatever the members publish as
@@ -16,20 +16,42 @@ It runs the REAL `ClusterProfileInventory.load()` and the REAL `planner.plan()`
 the spread-first pre-pass and the min_clusters round-robin are all exercised as
 they will be on the day. No cluster, no hub, no credentials.
 
+TWO MODES, picked from the spec rather than from a flag:
+
+  hub-driven  (`min_clusters: N > 0`)
+      The spec names no clusters, so `--capacities` is REQUIRED — it stands in
+      for what the members would publish. `min_clusters` pins model i to
+      sorted-fresh cluster i % N, which gives a per-cluster total the spec
+      implies on its own; the check is planned == that total, per cluster.
+
+  spec-driven (`min_clusters: 0`, `cluster_weights` non-empty)
+      The spec names its clusters and the placement policy picks where each
+      pool lands, so there is no per-cluster figure to check against — an
+      `image-affinity` spec is deliberately letting the image hash decide.
+      `--capacities` is optional (it defaults to the named clusters); the check
+      is the fleet total and that no named cluster is left empty. The
+      per-cluster distribution is reported, not asserted.
+
 Usage:
-  # capacities default to "whatever makes the spec exact", i.e. the check is
-  # "does the intended publication reproduce the intended plan"
+  # spec-driven: demo/fleet-spec-xs.yaml names three clusters and uses
+  # image-affinity, so this runs as-is
   ./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml
 
-  # or state what is actually published, and see what it would really do
+  # state what is actually published instead, and see what it would really do
   ./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml \
-    --capacities cluster-a=199000,cluster-b=199000,...
+    --capacities std-multi-1=199000,std-multi-2=199000,std-multi-3=199000
 
-  # what happens if F never publishes?
-  ./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml --omit cluster-f
+  # either mode: what happens if a member never publishes capacity?
+  ./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml --omit std-multi-3
 
-Exit 0 = the plan matches the spec's own arithmetic. Exit 1 = it does not, and
-the diff is printed per cluster.
+  # hub-driven spec (cluster_weights: {}, min_clusters: 6) — --capacities is
+  # not optional there, because the spec names nobody
+  ./demo/preflight-cp-plan.py my-hub-spec.yaml \
+    --capacities cluster-a=199000,cluster-b=199000,cluster-c=199000,\
+cluster-d=199000,cluster-e=199000,cluster-f=199000
+
+Exit 0 = the plan matches what the spec describes. Exit 1 = it does not, and
+the diff is printed per cluster. Exit 2 = the invocation itself is wrong.
 """
 
 from __future__ import annotations
@@ -91,8 +113,11 @@ def main() -> int:
   p = argparse.ArgumentParser()
   p.add_argument("spec", type=pathlib.Path)
   p.add_argument("--capacities", default="",
-                 help="comma-separated name=value. Default: the per-cluster "
-                      "totals the spec itself implies, i.e. the exact-A/B case.")
+                 help="comma-separated name=value standing in for what the "
+                      "members publish. REQUIRED for a hub-driven spec "
+                      "(min_clusters>0), which names no clusters. Optional for "
+                      "a spec that names its own cluster_weights, where it "
+                      "defaults to those clusters.")
   p.add_argument("--omit", default="",
                  help="comma-separated clusters that publish NO capacity "
                       "property (weight falls back to 1.0) -- use to see the "
@@ -104,33 +129,45 @@ def main() -> int:
 
   spec = planner.FleetSpec(**yaml.safe_load(args.spec.read_text()))
   n = spec.min_clusters
-  if not n:
-    print("error: this preflight is for min_clusters>0 hub-driven specs; "
-          "with 0 the cluster set is scored, not round-robin, and there is no "
-          "spec-implied per-cluster total to check against", file=sys.stderr)
-    return 2
+  # min_clusters>0 is what makes a per-cluster total derivable; see the two
+  # modes in the module docstring.
+  hub_driven = bool(n)
 
-  # The spec's OWN arithmetic: min_clusters pins model i to sorted-by-name
-  # fresh cluster i % n, so the intended total for slot j is the sum of
-  # target_tasks over models j, j+n, j+2n, ... Derived, never restated by the
-  # operator -- restating it would only prove the operator can add.
+  # The spec's OWN arithmetic, hub-driven only: min_clusters pins model i to
+  # sorted-by-name fresh cluster i % n, so the intended total for slot j is the
+  # sum of target_tasks over models j, j+n, j+2n, ... Derived, never restated
+  # by the operator -- restating it would only prove the operator can add.
   slot_totals = [
       sum(m.target_tasks for m in spec.models[j::n]) for j in range(n)
-  ]
+  ] if hub_driven else []
 
   if args.capacities:
     caps = {}
     for kv in args.capacities.split(","):
       k, _, v = kv.strip().partition("=")
+      if not k or not v:
+        print(f"error: --capacities entry {kv.strip()!r} is not NAME=VALUE",
+              file=sys.stderr)
+        return 2
       caps[k] = int(v)
     names = sorted(caps)
+  elif spec.cluster_weights:
+    # The spec names its clusters, so there is nothing to stand in for. Publish
+    # the same capacity everywhere and let cluster_weights carry the
+    # distribution -- that is what the spec is asking for. max_concurrent is
+    # used as the value because it is by construction large enough never to be
+    # the binding constraint, so the report shows the policy's choice rather
+    # than an artificial capacity ceiling.
+    names = sorted(spec.cluster_weights)
+    caps = {nm: spec.max_concurrent for nm in names}
   else:
-    print("error: --capacities is required (the spec names no clusters when "
-          "cluster_weights is empty -- that is the whole point of it)",
+    print("error: --capacities is required for this spec (min_clusters="
+          f"{n} with cluster_weights empty, so the spec names no clusters at "
+          "all -- that is the whole point of a hub-driven spec)",
           file=sys.stderr)
     return 2
 
-  if len(names) != n:
+  if hub_driven and len(names) != n:
     print(f"error: {len(names)} capacities but min_clusters={n}",
           file=sys.stderr)
     return 2
@@ -159,7 +196,8 @@ def main() -> int:
   print()
 
   fresh = sorted(c.name for c in registry.fresh())
-  intended = dict(zip(fresh, slot_totals)) if len(fresh) == n else {}
+  intended = (dict(zip(fresh, slot_totals))
+              if hub_driven and len(fresh) == n else {})
 
   print(f"  {'cluster':<16}{'weight':>12}{'pools':>8}{'planned':>12}"
         f"{'intended':>12}{'delta':>10}")
@@ -177,29 +215,59 @@ def main() -> int:
           f"{len(ca.pools):>8}{got:>12,}"
           f"{(f'{want:,}' if want is not None else '?'):>12}{delta:>10}")
 
+  # A fresh cluster that received no pools. Under a hub-driven spec that is an
+  # error -- min_clusters says every slot is filled. Under a spec-driven one it
+  # can be a legitimate outcome (image-affinity hashes six templates onto three
+  # clusters; nothing promises a cluster wins one), so it is reported and left
+  # to the operator rather than failing the run.
   missing = [c for c in fresh if c not in assignments.clusters]
   for name in missing:
-    ok = False
-    print(f"  {name:<16}{'-':>12}{0:>8}{0:>12}{'-':>12}{'NOT PLACED':>10}")
+    if hub_driven:
+      ok = False
+    print(f"  {name:<16}{'-':>12}{0:>8}{0:>12}{'-':>12}"
+          f"{'NOT PLACED' if hub_driven else 'NO POOLS':>10}")
 
   print(f"  {'FLEET':<16}{'':>12}{'':>8}{total:>12,}"
         f"{spec.max_concurrent:>12,}{total - spec.max_concurrent:>+10,}")
   print()
 
-  if not intended:
-    print(f"INCONCLUSIVE: {len(fresh)} fresh clusters but min_clusters={n}. "
-          "The round-robin lands on a different set than the spec was "
-          "generated for, so every per-model target_tasks is on the wrong "
-          "cluster. This is the failure the runbook's fresh=true check "
-          "prevents -- it is not a rounding issue.")
+  if hub_driven:
+    if not intended:
+      print(f"INCONCLUSIVE: {len(fresh)} fresh clusters but min_clusters={n}. "
+            "The round-robin lands on a different set than the spec was "
+            "generated for, so every per-model target_tasks is on the wrong "
+            "cluster. This is the failure the runbook's fresh=true check "
+            "prevents -- it is not a rounding issue.")
+      return 1
+    if ok and total == spec.max_concurrent:
+      print("OK: published capacity reproduces the spec's own arithmetic "
+            "exactly. Safe to apply.")
+      return 0
+    print("MISMATCH: the plan is not what the spec's target_tasks describe. "
+          "Applying this places a different number of sandboxes than intended.")
     return 1
-  if ok and total == spec.max_concurrent:
-    print("OK: published capacity reproduces the spec's own arithmetic "
-          "exactly. Safe to apply.")
+
+  # Spec-driven. The per-cluster split is the policy's to choose, so the only
+  # things assertable are that the fleet total is what was asked for and that
+  # the plan is non-degenerate.
+  if total != spec.max_concurrent:
+    print("MISMATCH: the fleet total is not max_concurrent. With "
+          f"max_pool={spec.max_pool} and {sum(len(ca.pools) for ca in assignments.clusters.values())} "
+          "pools the per-pool cap may be binding before the budget is spent — "
+          "raise max_pool, add clusters, or lower max_concurrent.")
+    return 1
+  if missing:
+    print(f"OK (with a caveat): the fleet total is exactly "
+          f"{spec.max_concurrent:,}, but {', '.join(missing)} received no "
+          f"pools. Under placement_policy={spec.placement_policy} that can be "
+          "correct — the distribution is chosen per pool, not per cluster — "
+          "but an idle member in a fleet you are paying for is worth a look.")
     return 0
-  print("MISMATCH: the plan is not what the spec's target_tasks describe. "
-        "Applying this places a different number of sandboxes than intended.")
-  return 1
+  print(f"OK: every named cluster is placed and the fleet total is exactly "
+        f"{spec.max_concurrent:,}. The per-cluster split above is "
+        f"placement_policy={spec.placement_policy}'s to choose; it is reported, "
+        "not asserted.")
+  return 0
 
 
 if __name__ == "__main__":

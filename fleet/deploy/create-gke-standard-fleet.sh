@@ -316,11 +316,20 @@ do_scale() {
         --zone="$ZONE" --project="$PROJECT" --quiet \
         >"/tmp/scale-${c}.log" 2>&1 \
         && ok "$c sandbox pool → $target_count" \
-        || err "$c scale failed; see /tmp/scale-${c}.log"
+        || { err "$c scale failed; see /tmp/scale-${c}.log"; exit 1; }
     ) &
     pids+=($!)
   done
-  for pid in "${pids[@]}"; do wait "$pid" || true; done
+  # `wait || true` would report success after a partial scale. That matters most
+  # for scale-down, where the caller's next move is usually to stop paying
+  # attention -- a cluster left at full size keeps billing silently.
+  local rc=0
+  for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+  if [[ $rc -ne 0 ]]; then
+    err "one or more resize jobs failed — some clusters may still be at their previous size."
+    err "Re-run this mode (it is idempotent) or check /tmp/scale-*.log."
+    return 1
+  fi
 }
 
 do_delete() {
@@ -335,11 +344,20 @@ do_delete() {
         --zone="$ZONE" --project="$PROJECT" --quiet \
         >"/tmp/delete-${c}.log" 2>&1 \
         && ok "deleted $c" \
-        || err "$c delete failed"
+        || { err "$c delete failed; see /tmp/delete-${c}.log"; exit 1; }
     ) &
     pids+=($!)
   done
-  for pid in "${pids[@]}"; do wait "$pid" || true; done
+  # Same reasoning as do_scale, with a sharper edge: a teardown that exits 0
+  # having deleted two of three clusters bills for the third indefinitely,
+  # because nobody re-checks a command that said it succeeded.
+  local rc=0
+  for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+  if [[ $rc -ne 0 ]]; then
+    err "one or more deletes failed — SOME CLUSTERS ARE STILL RUNNING AND BILLING."
+    err "Check /tmp/delete-*.log, then re-run: $0 delete"
+    return 1
+  fi
 }
 
 do_status() {

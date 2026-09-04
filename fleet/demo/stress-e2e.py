@@ -73,6 +73,7 @@ class ClaimResult:
   ready_at: Optional[float] = None
   claim_name: Optional[str] = None
   error: Optional[str] = None
+  cleanup_error: Optional[str] = None
 
   @property
   def latency_ms(self) -> Optional[float]:
@@ -142,6 +143,16 @@ def dispatch(
   ONE cluster's apiserver can still saturate under too many concurrent watches
   (the 2026-07-14 lesson). We resolve first to learn which cluster we're
   targeting, then acquire that cluster's semaphore, then dispatch.
+
+  This is only sound because ``create_sandbox`` resolves AGAIN internally, and
+  ``main`` has guaranteed that the strategy in use is a pure function of
+  (template, matches) -- ``first`` or ``hash``, or any strategy where every
+  template has exactly one match. Under a stateful strategy the two
+  resolutions disagree: the semaphore guards one cluster while the claim lands
+  on another, the per-cluster table attributes every claim to the wrong place,
+  and the shared round-robin cursor advances twice per dispatch, so with an
+  even number of matches half the clusters never receive a claim at all. See
+  the startup check in ``main``.
   """
   result = ClaimResult(template=target.template, cluster=None,
                        requested_at=time.time())
@@ -180,8 +191,14 @@ def dispatch(
       if cleanup and result.claim_name:
         try:
           fleet.delete_sandbox(result.claim_name, namespace=NAMESPACE)
-        except Exception:  # noqa: BLE001
-          pass
+        except Exception as e:  # noqa: BLE001
+          # Recorded, not swallowed. A delete that fails leaves a claim holding
+          # a warm sandbox for the rest of the run, so the pool drains and
+          # every later latency number measures cold creation instead -- the
+          # exact misreading the "read the warm-hit rate" note warns about.
+          # Counting the claim as a clean success while leaking it hides the
+          # cause of the number that follows.
+          result.cleanup_error = f"{type(e).__name__}: {e}"[:200]
   return result
 
 
@@ -197,7 +214,8 @@ def percentile(values: list[float], p: float) -> float:
   return s[k]
 
 
-def print_summary(results: list[ClaimResult], duration_s: float) -> None:
+def print_summary(results: list[ClaimResult], duration_s: float,
+                  skipped: int = 0) -> None:
   n = len(results)
   ok = [r for r in results if r.error is None and r.ready_at is not None]
   err = [r for r in results if r.error is not None]
@@ -211,6 +229,13 @@ def print_summary(results: list[ClaimResult], duration_s: float) -> None:
   print(f"  claims succeeded   : {len(ok)}  ({100*len(ok)/max(1,n):.1f}%)")
   print(f"  claims failed      : {len(err)}")
   print(f"  achieved rate      : {n/duration_s:.1f}/s dispatched")
+  if skipped:
+    print(f"  ticks SKIPPED      : {skipped}  (backpressure — the requested "
+          f"rate exceeded what the fleet drained)")
+  leaked = [r for r in results if r.cleanup_error is not None]
+  if leaked:
+    print(f"  claims LEAKED      : {len(leaked)}  (delete failed; these still "
+          f"hold warm sandboxes)")
   if lat:
     print(f"  latency P50 (ms)   : {percentile(lat, 50):.1f}")
     print(f"  latency P90 (ms)   : {percentile(lat, 90):.1f}")
@@ -238,6 +263,14 @@ def print_summary(results: list[ClaimResult], duration_s: float) -> None:
     print(f"  first {min(3,len(err))} failures:")
     for r in err[:3]:
       print(f"    - {r.template} on {r.cluster or '?'}: {r.error}")
+  if leaked:
+    print()
+    print(f"  first {min(3,len(leaked))} cleanup failures — these claims were "
+          f"NOT deleted:")
+    for r in leaked[:3]:
+      print(f"    - {r.claim_name} on {r.cluster or '?'}: {r.cleanup_error}")
+    print("  Delete them by hand before re-running, or the next run starts "
+          "against a partly-drained pool.")
 
 
 # ---------------------------------------------------------------------------
@@ -266,23 +299,78 @@ def main() -> int:
                   help="Seconds to wait for a claim to become Ready")
   ap.add_argument("--keep-claims", action="store_true",
                   help="Don't delete claims after Ready")
-  ap.add_argument("--strategy", default="round-robin",
+  ap.add_argument("--strategy", default="hash",
                   choices=["first", "round-robin", "hash"],
-                  help="Multi-cluster resolution strategy (default: round-robin)")
+                  help="Multi-cluster resolution strategy (default: hash). "
+                       "See the startup check for why round-robin is only "
+                       "usable when every template lives on one cluster.")
+  ap.add_argument("--max-outstanding", type=int, default=0,
+                  help="Cap on in-flight claims; further ticks are skipped "
+                       "rather than queued. Default: 4x --concurrency.")
   args = ap.parse_args()
+  if args.max_outstanding <= 0:
+    args.max_outstanding = 4 * args.concurrency
 
   if not args.bucket:
     ap.error("--bucket or $FLEET_BUCKET is required")
   if not args.kind and not args.project:
     ap.error("--project or $PROJECT is required (or pass --kind for local dev)")
 
+  # Bounds, because the failure modes are all silent or confusing rather than
+  # loud: --concurrency 0 raises ValueError from ThreadPoolExecutor a few lines
+  # after setup has already primed kubeconfig for every cluster;
+  # --per-cluster-concurrency 0 builds Semaphore(0) and the run hangs forever
+  # on the first acquire with no output; --rate 0 is silently clamped to 0.1/s
+  # by the max() below, so the operator waits out the whole --duration
+  # wondering why nothing dispatched.
+  if args.concurrency < 1:
+    ap.error("--concurrency must be >= 1")
+  if args.per_cluster_concurrency < 1:
+    ap.error("--per-cluster-concurrency must be >= 1 "
+             "(0 builds a semaphore nothing can ever acquire)")
+  if args.rate <= 0:
+    ap.error("--rate must be > 0")
+  if args.duration <= 0:
+    ap.error("--duration must be > 0")
+  if args.claim_timeout <= 0:
+    ap.error("--claim-timeout must be > 0")
+  if args.max_outstanding < args.concurrency:
+    ap.error(f"--max-outstanding ({args.max_outstanding}) must be >= "
+             f"--concurrency ({args.concurrency})")
+
   # 1) Read assignment → target list.
   print(f"[setup] loading assignment targets from gs://{args.bucket}/fleet/assignments.json")
   targets = load_targets(args.bucket)
   # Get the current cluster set so we can prime kubeconfig up front.
-  resolver = ClusterResolver(args.bucket)
+  resolver = resolver_probe = ClusterResolver(args.bucket)
   all_clusters = sorted({m.cluster for t in targets
                          for m in resolver.list_matches(t.template)})
+  # `create_sandbox` resolves internally, so a pre-resolve in dispatch() is
+  # only trustworthy when resolution is a pure function of (template, matches).
+  # `first` and `hash` are; `round-robin` is not -- it advances a shared
+  # per-template cursor, so the two resolutions land on different clusters and
+  # the cursor moves twice per dispatch. With two matches that sends 100% of
+  # the claims to one cluster while the summary attributes 100% to the other.
+  # Harmless when every template has a single match (the image-affinity case),
+  # so gate on that rather than banning the flag.
+  if args.strategy == "round-robin":
+    multi = sorted(t.template for t in targets
+                   if len(resolver_probe.list_matches(t.template)) > 1)
+    if multi:
+      sys.exit(
+          "--strategy round-robin is unsound here: "
+          f"{len(multi)} template(s) are hosted on more than one cluster "
+          f"({', '.join(multi[:3])}{'...' if len(multi) > 3 else ''}).\n"
+          "FleetSandboxClient.create_sandbox() re-resolves internally, and "
+          "round-robin is stateful, so this harness would guard one cluster's "
+          "semaphore while the claim lands on another, double-advance the "
+          "shared cursor, and report every claim against the wrong cluster.\n"
+          "Use --strategy hash (deterministic per template, spreads across "
+          "clusters by template mix) or --strategy first. Pinning a resolved "
+          "cluster through the facade needs a client-side API that does not "
+          "exist yet."
+      )
+
   print(f"[setup] targets: {len(targets)} templates across {len(all_clusters)} clusters")
   for t in targets:
     matches = resolver.list_matches(t.template)
@@ -320,6 +408,7 @@ def main() -> int:
   print(f"[run] rate={args.rate}/s duration={args.duration:.0f}s "
         f"concurrency={args.concurrency} "
         f"per_cluster_concurrency={args.per_cluster_concurrency} "
+        f"max_outstanding={args.max_outstanding} "
         f"strategy={args.strategy} cleanup={not args.keep_claims}")
 
   # 5) Dispatch loop — one claim per `1/rate` seconds.
@@ -329,8 +418,20 @@ def main() -> int:
   results: list[ClaimResult] = []
   idx = 0
 
+  skipped = 0
   with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-    futures = []
+    # Pending futures only. Completed ones are harvested into `results` as we
+    # go, so this stays bounded and `len(pending)` is a true in-flight count.
+    #
+    # Submitting unconditionally is what made a --rate the fleet cannot drain
+    # turn into a run far longer than --duration: the executor queues every
+    # tick, dispatch stops at the deadline, and then the harness sits through
+    # the whole backlog at up to --claim-timeout each. The queue depth also
+    # made --concurrency look like a rate limit when it is a worker count, so
+    # the achieved-rate line reported the offered rate rather than the served
+    # one. Skipping a tick instead keeps the run inside its stated duration and
+    # makes saturation visible in the summary.
+    pending: list[concurrent.futures.Future] = []
     next_fire = start
     last_progress = 0
     while time.time() < deadline:
@@ -338,28 +439,43 @@ def main() -> int:
       if now < next_fire:
         time.sleep(min(next_fire - now, 0.05))
         continue
-      target = weighted[idx % len(weighted)]
-      idx += 1
-      futures.append(ex.submit(
-          dispatch, fleet, per_cluster_sems, sem_lock,
-          args.per_cluster_concurrency, target,
-          not args.keep_claims, args.claim_timeout,
-      ))
+
+      still: list[concurrent.futures.Future] = []
+      for f in pending:
+        if f.done():
+          results.append(f.result())
+        else:
+          still.append(f)
+      pending = still
+
+      if len(pending) >= args.max_outstanding:
+        # Saturated: drop this tick rather than queue it. next_fire still
+        # advances, so the offered rate is unchanged and the shortfall is
+        # reported instead of being absorbed as latency.
+        skipped += 1
+      else:
+        target = weighted[idx % len(weighted)]
+        idx += 1
+        pending.append(ex.submit(
+            dispatch, fleet, per_cluster_sems, sem_lock,
+            args.per_cluster_concurrency, target,
+            not args.keep_claims, args.claim_timeout,
+        ))
       next_fire += interval
       elapsed = int(now - start)
       if elapsed >= last_progress + 10:
-        done = sum(1 for f in futures if f.done())
-        print(f"[run] t+{elapsed:>3}s  dispatched={idx}  completed={done}  "
-              f"in-flight={len(futures)-done}")
+        print(f"[run] t+{elapsed:>3}s  dispatched={idx}  "
+              f"completed={len(results)}  in-flight={len(pending)}"
+              + (f"  skipped={skipped}" if skipped else ""))
         last_progress = elapsed
 
     print(f"[run] dispatch done at t+{time.time() - start:.1f}s; waiting for "
-          f"{sum(1 for f in futures if not f.done())} in-flight "
+          f"{len(pending)} in-flight "
           f"(up to --claim-timeout={args.claim_timeout:.0f}s)")
-    for f in concurrent.futures.as_completed(futures):
+    for f in concurrent.futures.as_completed(pending):
       results.append(f.result())
 
-  print_summary(results, time.time() - start)
+  print_summary(results, time.time() - start, skipped=skipped)
   return 0
 
 

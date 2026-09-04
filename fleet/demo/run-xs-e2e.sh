@@ -25,6 +25,12 @@
 #   CLUSTER_PREFIX       Cluster name prefix   (default: std-multi)
 #   N_CLUSTERS           Cluster count         (default: 3)
 #   FLEET_MEMBER_IMAGE   Fleet-member image    (default: built + pushed to Artifact Registry)
+#   USE_GVISOR           "yes" or "no"         (default: yes)
+#                        Must match deploy/example-templates-xs.yaml, which
+#                        ships with runtimeClassName: gvisor and a toleration
+#                        for the gVisor node taint. Phase 3 verifies this
+#                        rather than letting Phase 4 wait 15 min on pods that
+#                        can never schedule.
 #   STRESS_RATE          Stress claims/s       (default: 5)
 #   STRESS_DURATION      Stress duration (s)   (default: 60)
 #   SKIP_STRESS          Set to skip Phase 5   (default: unset)
@@ -48,6 +54,10 @@ set -euo pipefail
 : "${STRESS_RATE:=5}"
 : "${STRESS_DURATION:=60}"
 : "${SKIP_TEARDOWN:=1}"
+# Default yes: the templates in deploy/example-templates-xs.yaml request
+# runtimeClassName: gvisor, so a non-gVisor pool leaves every sandbox pod
+# Pending and Phase 4 measures a wall clock that never arrives.
+: "${USE_GVISOR:=yes}"
 
 REGION="${ZONE%-*}"  # us-central1-a → us-central1
 NS="multi-cluster-fleet"
@@ -118,9 +128,9 @@ phase1() {
 # --- PHASE 2: Clusters --------------------------------------------------
 
 phase2() {
-  section "Phase 2 — create 3 XS GKE clusters with image streaming"
+  section "Phase 2 — create $N_CLUSTERS XS GKE clusters with image streaming (gvisor=$USE_GVISOR)"
   PROJECT="$PROJECT" ZONE="$ZONE" CLUSTER_PREFIX="$CLUSTER_PREFIX" \
-    N_CLUSTERS="$N_CLUSTERS" PROFILE=xs USE_GVISOR=no \
+    N_CLUSTERS="$N_CLUSTERS" PROFILE=xs USE_GVISOR="$USE_GVISOR" \
     ENABLE_IMAGE_STREAMING=yes \
     "$POC_ROOT/deploy/create-gke-standard-fleet.sh" create
   ok "clusters ready"
@@ -196,20 +206,52 @@ phase3() {
     kubectl --context "$ctx" apply -f "$POC_ROOT/deploy/rbac.yaml" >/dev/null
 
     info "[$c] binding KSA↔GSA via Workload Identity"
+    # NOT `|| true`. Without this binding the member authenticates as nobody and
+    # every bucket write 403s, which surfaces in Phase 4 as "only 0/3 capacity
+    # reports after 120s" -- 2 minutes of waiting to be told nothing useful.
+    # add-iam-policy-binding is idempotent, so re-running is safe and a
+    # non-zero exit here is a real failure worth stopping on.
     gcloud iam service-accounts add-iam-policy-binding "$GSA_EMAIL" \
       --project="$PROJECT" --role=roles/iam.workloadIdentityUser \
       --member="serviceAccount:${PROJECT}.svc.id.goog[${NS}/fleet-member]" \
-      >/dev/null 2>&1 || true
+      >/dev/null \
+      || die "[$c] Workload Identity binding failed for $GSA_EMAIL. Without it
+       the fleet-member cannot write to gs://$FLEET_BUCKET and Phase 4 will
+       time out waiting for capacity reports. Check you have
+       roles/iam.serviceAccountAdmin on $PROJECT."
     kubectl --context "$ctx" annotate serviceaccount fleet-member -n "$NS" \
       "iam.gke.io/gcp-service-account=$GSA_EMAIL" --overwrite >/dev/null
+
+    # The shipped templates request runtimeClassName: gvisor. If the pool was
+    # built without --sandbox type=gvisor there is no such RuntimeClass, so
+    # every Sandbox pod is rejected at admission and the warm pools sit at 0 --
+    # which Phase 4 can only report as a 15-minute timeout. Check it here, once
+    # per cluster, while the fix is still cheap.
+    if [[ "$USE_GVISOR" == "yes" ]]; then
+      kubectl --context "$ctx" get runtimeclass gvisor >/dev/null 2>&1 \
+        || die "[$c] USE_GVISOR=yes but this cluster has no 'gvisor' RuntimeClass.
+       The sandbox pool was created without --sandbox type=gvisor. Either
+       recreate it (PHASE=2 USE_GVISOR=yes) or follow the header of
+       deploy/example-templates-xs.yaml to strip runtimeClassName and the
+       tolerations block, then re-run with USE_GVISOR=no."
+    else
+      grep -q 'runtimeClassName: gvisor' "$POC_ROOT/deploy/example-templates-xs.yaml" \
+        && die "[$c] USE_GVISOR=no but deploy/example-templates-xs.yaml still
+       requests runtimeClassName: gvisor. Those pods will never schedule onto a
+       non-gVisor pool. Remove runtimeClassName and the tolerations block from
+       every template (see that file's header), or re-run with USE_GVISOR=yes."
+    fi
 
     info "[$c] applying XS templates"
     kubectl --context "$ctx" apply -f "$POC_ROOT/deploy/example-templates-xs.yaml" >/dev/null
 
     info "[$c] deploying fleet-member (WI, controller-pool if present)"
+    # render.sh, not bare envsubst: envsubst expands an unset variable to the
+    # empty string and emits the manifest anyway, which here would silently
+    # deploy a member with --cluster-name= and no bucket.
     CLUSTER_NAME="$c" FLEET_MEMBER_IMAGE="$FLEET_MEMBER_IMAGE" \
       FLEET_BUCKET="$FLEET_BUCKET" \
-      envsubst < "$POC_ROOT/deploy/fleet-member-deployment-wi.yaml" \
+      "$POC_ROOT/deploy/render.sh" "$POC_ROOT/deploy/fleet-member-deployment-wi.yaml" \
       | kubectl --context "$ctx" apply -f - >/dev/null
     kubectl --context "$ctx" -n "$NS" rollout status deployment/fleet-member --timeout=120s
     ok "[$c] fleet-member Ready"
@@ -246,8 +288,20 @@ phase4() {
   FLEET_BUCKET="$FLEET_BUCKET" fleetctl apply -f "$POC_ROOT/demo/fleet-spec-xs.yaml" --quiet
   ok "spec applied at t+$(( $(date +%s) - t0 ))s"
 
-  # Target warm total = max_concurrent from the spec.
-  local target_warm=300
+  # Target warm total = max_concurrent from the spec. Read it rather than
+  # restating it -- a hardcoded 300 silently becomes wrong the moment anyone
+  # edits the spec, and the failure is a wall-clock number that looks fine.
+  local target_warm
+  target_warm=$(python3 -c '
+import re, sys
+for line in open(sys.argv[1]):
+    m = re.match(r"^max_concurrent:\s*(\d+)", line)
+    if m:
+        print(m.group(1)); break
+else:
+    sys.exit("no max_concurrent in spec")
+' "$POC_ROOT/demo/fleet-spec-xs.yaml") \
+    || die "could not read max_concurrent from demo/fleet-spec-xs.yaml"
   info "waiting for wp_ready to reach $target_warm across the fleet..."
   local warm=0
   while true; do
@@ -300,7 +354,7 @@ phase5() {
     python3 "$POC_ROOT/demo/stress-e2e.py" \
       --rate "$STRESS_RATE" --duration "$STRESS_DURATION" \
       --per-cluster-concurrency 20 --concurrency 128 \
-      --strategy round-robin
+      --strategy hash
 }
 
 # --- PHASE 6: Spindown --------------------------------------------------

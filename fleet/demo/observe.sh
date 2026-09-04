@@ -14,13 +14,21 @@
 #   PROJECT   GKE project. When set, the script runs `gcloud container
 #             clusters get-credentials` per cluster to switch current-context
 #             (GKE mode). Unset = kind mode (uses --context kind-<name>).
-#   REGION    GKE region (required when PROJECT is set)
+#   ZONE      GKE zone for ZONAL clusters (Standard, e.g. us-central1-a).
+#   REGION    GKE region for REGIONAL clusters (Autopilot, e.g. us-central1).
+#             Exactly one of ZONE/REGION is required when PROJECT is set; ZONE
+#             wins if both are set. The XS driver builds zonal clusters, so
+#             --region alone silently fails to find them.
 #   FLEET_BUCKET  GCS bucket for the fleet hub (used in --fail-modes + summary)
+#   FLEET_SPEC    Path to the spec to re-apply in --fail-modes. REQUIRED for
+#                 --fail-modes; see the note on fail_modes() below.
 #
 # Examples:
 #   ./demo/observe.sh                                      # kind 2-cluster demo
 #   CLUSTERS="cluster-a cluster-b cluster-c" \
-#     PROJECT=my-proj REGION=us-central1 ./demo/observe.sh # live GKE fleet
+#     PROJECT=my-proj REGION=us-central1 ./demo/observe.sh # regional (Autopilot)
+#   CLUSTERS="std-multi-1 std-multi-2 std-multi-3" \
+#     PROJECT=my-proj ZONE=us-central1-a ./demo/observe.sh # zonal (XS driver)
 set -euo pipefail
 
 CLUSTERS_STR="${CLUSTERS:-fleet-a fleet-b}"
@@ -35,9 +43,24 @@ section() { printf "\n\033[1;36m== %s ==\033[0m\n" "$*"; }
 switch_context() {
   local c="$1"
   if [[ -n "${PROJECT:-}" ]]; then
-    : "${REGION:?REGION must be set when PROJECT is set (GKE mode)}"
+    # A zonal cluster is not found by --region and vice versa; get-credentials
+    # exits non-zero and, because the call is >/dev/null 2>&1, every kubectl
+    # below would then silently report on whatever context happened to be
+    # current. Pick the flag from whichever of ZONE/REGION is set, and let the
+    # failure surface.
+    local loc_flag loc_value
+    if [[ -n "${ZONE:-}" ]]; then
+      loc_flag="--zone"; loc_value="$ZONE"
+    elif [[ -n "${REGION:-}" ]]; then
+      loc_flag="--region"; loc_value="$REGION"
+    else
+      echo "ZONE or REGION must be set when PROJECT is set (GKE mode)" >&2
+      exit 1
+    fi
     gcloud container clusters get-credentials "$c" \
-      --region="$REGION" --project="$PROJECT" >/dev/null 2>&1
+      "$loc_flag=$loc_value" --project="$PROJECT" >/dev/null 2>&1 \
+      || { echo "get-credentials failed for $c ($loc_flag=$loc_value)." \
+                "Zonal clusters need ZONE, regional need REGION." >&2; exit 1; }
   else
     kubectl config use-context "kind-$c" >/dev/null 2>&1
   fi
@@ -47,12 +70,32 @@ fail_modes() {
   local first="${CLUSTERS[0]}"
   local second="${CLUSTERS[1]:-$first}"
 
+  # Preflight EVERYTHING before the first mutation. FAIL MODE 1 scales
+  # fleet-member to zero and then sleeps 100s; discovering a missing spec or an
+  # absent fleetctl after that point leaves the member down and the operator
+  # holding a half-injected fleet.
+  #
+  # FLEET_SPEC has no default on purpose. This script used to hardcode
+  # `fleet-spec.yaml` next to itself, so running it against a fleet built from
+  # any other spec (the XS driver uses fleet-spec-xs.yaml) did not restore the
+  # fleet -- it silently REPLACED the live assignment with a different plan, and
+  # the "recovery" the fail mode claims to demonstrate was a re-plan of
+  # something else. Naming the spec is cheap; guessing it is not.
+  : "${FLEET_SPEC:?FLEET_SPEC must be set for --fail-modes -- the path to the
+     SAME spec this fleet was built from (e.g. demo/fleet-spec-xs.yaml).
+     Fail modes 1 and 3 re-apply it to recover; applying a different spec
+     replaces the assignment instead of restoring it.}"
+  [[ -f "$FLEET_SPEC" ]] || { echo "FLEET_SPEC=$FLEET_SPEC does not exist" >&2; exit 1; }
+  : "${FLEET_BUCKET:?FLEET_BUCKET must be set for --fail-modes (FAIL MODE 3)}"
+  command -v fleetctl >/dev/null 2>&1 \
+    || { echo "fleetctl is not on PATH — 'pip install -e ./python' first" >&2; exit 1; }
+
   section "FAIL MODE 1 — kill $second's fleet-member, wait 100s, re-apply, expect it out of assignments"
   switch_context "$second"
   kubectl -n "$NS" scale deployment/fleet-member --replicas=0
   echo "sleeping 100s for capacity report to age out (>90s threshold)"
   sleep 100
-  fleetctl apply -f "$(dirname "${BASH_SOURCE[0]}")/fleet-spec.yaml"
+  fleetctl apply -f "$FLEET_SPEC"
   fleetctl show-assignments
   echo
   read -rp "press enter to restore $second's fleet-member..."
@@ -71,15 +114,14 @@ fail_modes() {
   kubectl -n "$NS" get swp
 
   section "FAIL MODE 3 — corrupt assignments.json; fleet-member should log parse error and keep last-known-good"
-  : "${FLEET_BUCKET:?FLEET_BUCKET must be set for FAIL MODE 3}"
   echo '{"this":"is not a valid Assignments"}' \
-    | gsutil cp - "gs://$FLEET_BUCKET/fleet/assignments.json"
+    | gcloud storage cp - "gs://$FLEET_BUCKET/fleet/assignments.json"
   echo "sleeping 45s; check fleet-member logs for parse error:"
   switch_context "$first"
   kubectl -n "$NS" logs deployment/fleet-member --tail=20 || true
   echo
   read -rp "press enter to restore assignments (re-apply spec)..."
-  fleetctl apply -f "$(dirname "${BASH_SOURCE[0]}")/fleet-spec.yaml"
+  fleetctl apply -f "$FLEET_SPEC"
   return 0
 }
 
@@ -105,7 +147,8 @@ done
 
 section "GCS state"
 if [[ -n "${FLEET_BUCKET:-}" ]]; then
-  gsutil ls -r "gs://$FLEET_BUCKET/" 2>/dev/null || echo "(bucket empty or no gsutil)"
+  gcloud storage ls -r "gs://$FLEET_BUCKET/**" 2>/dev/null \
+    || echo "(bucket empty, or no access with the current gcloud credentials)"
 else
   echo "FLEET_BUCKET not set — skipping GCS inspection"
 fi

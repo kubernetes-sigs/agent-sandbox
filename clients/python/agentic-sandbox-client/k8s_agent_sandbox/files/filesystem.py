@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Synchronous filesystem operations for legacy and sandboxd runtimes."""
+
 import logging
 import posixpath
 import urllib.parse
@@ -25,7 +27,15 @@ from k8s_agent_sandbox.trace_manager import trace, trace_span
 
 def _sandboxd_files_endpoint(path: str) -> str:
     """Return the sandboxd REST path for a sandbox-relative file path."""
-    return f"v1/files/{urllib.parse.quote(path, safe='')}"
+    encoded = []
+    for segment in path.split("/"):
+        if segment == ".":
+            encoded.append("%2E")
+        elif segment == "..":
+            encoded.append("%2E%2E")
+        else:
+            encoded.append(urllib.parse.quote(segment, safe=""))
+    return f"v1/files/{'%2F'.join(encoded)}"
 
 
 class Filesystem:
@@ -50,6 +60,7 @@ class Filesystem:
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
     ):
+        """Write bytes or UTF-8 text to a sandbox-relative path."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -121,6 +132,7 @@ class Filesystem:
         allow_unsafe_paths: bool = False,
 
     ) -> bytes:
+        """Read a sandbox-relative file and return its raw bytes."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -142,6 +154,7 @@ class Filesystem:
 
     @trace_span("list")
     def list(self, path: str, timeout: int = 60) -> List[FileEntry]:
+        """List files and directories at a sandbox-relative path."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -189,6 +202,7 @@ class Filesystem:
 
     @trace_span("exists")
     def exists(self, path: str, timeout: int = 60) -> bool:
+        """Return whether a path exists without downloading its contents."""
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -197,8 +211,8 @@ class Filesystem:
         if self.connector.is_sandboxd():
             # sandboxd has no exists endpoint: HEAD answers existence
             # (200 vs 404) without transferring the body. 404 is passed via
-            # allowed_statuses so it is returned instead of raising — a raise
-            # would tear down the connection (connector closes on error).
+            # allowed_statuses so it is returned instead of becoming a
+            # SandboxRequestError.
             response = self.connector.send_request(
                 "HEAD", _sandboxd_files_endpoint(path),
                 timeout=timeout, allowed_statuses={404})
@@ -234,6 +248,8 @@ class Filesystem:
                 "delete() is only supported by the sandboxd runtime; the legacy "
                 "python-runtime has no delete endpoint"
             )
+        if path == "":
+            raise ValueError("delete: path must not be empty")
         endpoint = _sandboxd_files_endpoint(path)
         if recursive:
             endpoint += "?recursive=true"

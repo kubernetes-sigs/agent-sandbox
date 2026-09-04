@@ -1,0 +1,12 @@
+title: Intelligent Auto-Suspend and Resume Architecture
+kep-number: 0968
+authors:
+  - "@janetkuo"
+status: implementable
+creation-date: 2026-06-10
+reviewers:
+  - "@justinsb"
+approvers:
+  - "@justinsb"
+see-also:
+  - "/keps/694-kep-for-suspend-and-resume-for-beta"

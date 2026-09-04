@@ -202,7 +202,10 @@ best-effort telemetry, not for security, billing, workload control, or strict SL
 | `admissionObservedTime` | `*metav1.MicroTime` | Optional time when the admission webhook received CREATE. |
 | `controllerObservedTime` | `*metav1.MicroTime` | Earliest known observation by an active Claim controller. |
 | `firstReadyTime` | `*metav1.MicroTime` | First time the Claim controller computed `Ready=True`. |
-| `firstReadyTimeUnavailable` | `bool` | Optional true-only marker used when legacy evidence proves First Ready but no trustworthy timestamp can be recovered. |
+| `firstReadyTimeUnavailable` | `*bool` | Optional true-only marker used when legacy evidence proves First Ready but no trustworthy timestamp can be recovered. |
+
+`firstReadyTimeUnavailable` uses `omitempty`; status writes omit the field until the controller
+sets it to `true`.
 
 All three fields use `metav1.MicroTime` because the persisted values feed
 millisecond-resolution histograms. `metav1.Time` serializes JSON at whole-second precision;
@@ -298,6 +301,11 @@ RFC3339Nano timestamp. This proposal leaves the annotation unchanged.
 
 Sandbox Creation keeps its current inputs and precision: both values already come from persisted
 `metav1.Time` fields.
+
+If the Sandbox `Ready` condition transitions from `True` to `False` and back to `True` before the
+observer records the sample, `lastTransitionTime` reflects the later `True` transition and may
+overstate Sandbox Creation latency. This KEP accepts the limitation under the best-effort metric
+contract.
 
 The observer validates each Claim interval independently. A missing or invalid input skips only the
 corresponding histogram. Negative intervals are invalid. Claim intervals use 240s as their highest

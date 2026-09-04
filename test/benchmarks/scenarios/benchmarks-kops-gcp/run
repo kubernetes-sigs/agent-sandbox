@@ -285,6 +285,14 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubelet.eventQPS=5 \
   --set cluster.spec.kubelet.eventBurst=50
 
+# kindnet.networkPolicies=false: kindnet ships a NetworkPolicy engine,
+# and it requires watching every Pod from every Node.
+# We don't use NetworkPolicy in our tests.
+if [[ "${CNI}" == "kindnet" && "${STRESS_KINDNET_NETWORK_POLICIES:-false}" != "true" ]]; then
+  echo "Disabling kindnet network policies"
+  kops edit cluster --name "${CLUSTER_NAME}" \
+    --set cluster.spec.networking.kindnet.networkPolicies=false
+fi
 
 if [[ "${CNI}" == "cilium" ]]; then
   # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the

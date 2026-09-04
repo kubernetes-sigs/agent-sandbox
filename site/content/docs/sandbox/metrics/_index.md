@@ -5,6 +5,8 @@ weight: 15
 description: >
   Create a Sandbox and check its metrics.
 ---
+This page covers client-side telemetry. For the Prometheus metrics the controller itself exposes, see the [Controller Metrics Reference]({{< ref "/docs/metrics" >}}).
+
 ## Local Observability and Telemetry Gathering
 
 When building agentic workflows, you often need to inspect the latency, execution times, and network spans of your sandbox interactions. The `k8s_agent_sandbox` SDK integrates seamlessly with OpenTelemetry (OTel). 

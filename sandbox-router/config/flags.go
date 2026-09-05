@@ -148,8 +148,14 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"projected ServiceAccount tokens minted with --audience.")
 	fs.StringVar(&c.AuthzScopedTokenSecretFile, "authz-scoped-token-secret-file", c.AuthzScopedTokenSecretFile,
 		"Path to a file holding the shared HMAC-SHA256 secret used to verify "+
-			"scoped tokens (see authz.MintScopedToken). Required when "+
-			"--authz-mode=scoped-token; must match whatever mints the tokens.")
+			"legacy v1 scoped tokens (see authz.MintScopedToken). Required when "+
+			"--authz-mode=scoped-token unless v2 verification keys are configured.")
+	fs.StringVar(&c.AuthzScopedTokenVerificationKeysFile, "authz-scoped-token-verification-keys-file", c.AuthzScopedTokenVerificationKeysFile,
+		"Path to a JSON key set containing Ed25519 public keys for scoped-token "+
+			"v2 verification. Enables v2 and requires --cache-enabled.")
+	fs.StringVar(&c.AuthzScopedTokenV1AcceptUntil, "authz-scoped-token-v1-accept-until", c.AuthzScopedTokenV1AcceptUntil,
+		"Exclusive RFC3339 cutoff for legacy v1 HMAC verification during a v2 "+
+			"rollout. Required when v1 and v2 verification are both configured.")
 	fs.StringVar(&c.AuthzCookieName, "authz-cookie-name", c.AuthzCookieName,
 		"Name of a cookie the configured Authorizer additionally accepts a "+
 			"credential from — the only channel a browser attaches "+

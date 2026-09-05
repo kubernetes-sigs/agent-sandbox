@@ -27,7 +27,86 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 )
+
+// AuthorizationTarget is the canonical request identity an Authorizer
+// evaluates. The proxy constructs it only after routing has selected the
+// sandbox and stripped any path-routing prefix, so Path is the path the
+// upstream sandbox will receive rather than the router-facing path.
+type AuthorizationTarget struct {
+	Namespace   string
+	SandboxName string
+	SandboxUID  string
+	Port        int
+	Method      string
+	Path        string
+}
+
+// NormalizeAuthorizationTarget returns the stable representation used in
+// scoped-token claims and request comparisons.
+func NormalizeAuthorizationTarget(target AuthorizationTarget) (AuthorizationTarget, error) {
+	target.Method = strings.ToUpper(strings.TrimSpace(target.Method))
+	if !validHTTPMethod(target.Method) {
+		return AuthorizationTarget{}, errors.New("authorization target: invalid HTTP method")
+	}
+	if target.Namespace == "" || target.SandboxName == "" {
+		return AuthorizationTarget{}, errors.New("authorization target: namespace and sandbox name are required")
+	}
+	if target.Port < 1 || target.Port > 65535 {
+		return AuthorizationTarget{}, errors.New("authorization target: port must be between 1 and 65535")
+	}
+	if target.Path == "" {
+		target.Path = "/"
+	}
+	if !strings.HasPrefix(target.Path, "/") {
+		return AuthorizationTarget{}, errors.New("authorization target: path must be absolute")
+	}
+	decodedPath, err := url.PathUnescape(target.Path)
+	if err != nil {
+		return AuthorizationTarget{}, errors.New("authorization target: path has invalid percent-encoding")
+	}
+	pathURL := &url.URL{Path: decodedPath, RawPath: target.Path}
+	target.Path = uppercasePercentEncoding(pathURL.EscapedPath())
+	return target, nil
+}
+
+func uppercasePercentEncoding(value string) string {
+	encoded := []byte(value)
+	for i := 0; i+2 < len(encoded); i++ {
+		if encoded[i] != '%' {
+			continue
+		}
+		encoded[i+1] = uppercaseHex(encoded[i+1])
+		encoded[i+2] = uppercaseHex(encoded[i+2])
+		i += 2
+	}
+	return string(encoded)
+}
+
+func uppercaseHex(value byte) byte {
+	if value >= 'a' && value <= 'f' {
+		return value - ('a' - 'A')
+	}
+	return value
+}
+
+func validHTTPMethod(method string) bool {
+	if method == "" {
+		return false
+	}
+	for i := range len(method) {
+		c := method[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)):
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // Authorizer decides whether the principal carried by an inbound
 // request may access a particular sandbox. Implementations must be
@@ -44,7 +123,7 @@ import (
 // errors declared in this package so the caller can map it to the
 // right HTTP status code.
 type Authorizer interface {
-	Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error
+	Authorize(ctx context.Context, r *http.Request, target AuthorizationTarget) error
 }
 
 // Sentinel errors returned by Authorizer implementations. The proxy
@@ -83,6 +162,6 @@ func HTTPStatusFor(err error) int {
 type AllowAll struct{}
 
 // Authorize always returns nil.
-func (AllowAll) Authorize(_ context.Context, _ *http.Request, _, _ string) error {
+func (AllowAll) Authorize(_ context.Context, _ *http.Request, _ AuthorizationTarget) error {
 	return nil
 }

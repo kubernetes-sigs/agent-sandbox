@@ -26,7 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHART_FILE = REPO_ROOT / "helm" / "Chart.yaml"
 
-VERSION_RE = re.compile(r"^(version:\s*)(\d+)\.(\d+)\.(\d+)[ \t]*$", re.MULTILINE)
+VERSION_RE = re.compile(r"^(version:\s*[\"']?)(\d+)\.(\d+)\.(\d+)([\"']?[ \t]*)$", re.MULTILINE)
 
 
 def main():
@@ -44,12 +44,12 @@ def main():
         )
         return 1
 
-    prefix, major, minor, patch = match.groups()
+    prefix, major, minor, patch, suffix = match.groups()
     old = f"{major}.{minor}.{patch}"
     new = f"{major}.{minor}.{int(patch) + 1}"
 
     CHART_FILE.write_text(
-        text[: match.start()] + prefix + new + text[match.end():]
+        text[: match.start()] + prefix + new + suffix + text[match.end():]
     )
     print(f"Bumped chart version: {old} -> {new}")
     return 0

@@ -42,7 +42,7 @@ GENERATED_CHART_PATHS = [
     "helm/templates/extensions-rbac.generated.yaml",
 ]
 
-VERSION_RE = re.compile(r"^version:\s*(\d+)\.(\d+)\.(\d+)\s*$", re.MULTILINE)
+VERSION_RE = re.compile(r"^version:\s*[\"']?(\d+)\.(\d+)\.(\d+)[\"']?\s*$", re.MULTILINE)
 
 
 def running_in_ci():
@@ -80,10 +80,15 @@ def base_ref():
 def resolve_merge_base(repo_root, ref):
     """Finds the merge base with the base branch.
 
-    actions/checkout does not create origin/<base_ref> even at fetch-depth: 0,
-    so fetch it if it is missing rather than silently skipping the check.
+    In Prow presubmits PULL_BASE_SHA is guaranteed to be present locally via
+    clonerefs. Outside CI fall back to origin/<ref> (fetching it if missing)
+    and then the local branch.
     Returns None if no comparison base can be established.
     """
+    pull_base_sha = os.environ.get("PULL_BASE_SHA")
+    if pull_base_sha:
+        return pull_base_sha
+
     remote_ref = f"origin/{ref}"
 
     result = git(["merge-base", "HEAD", remote_ref], repo_root, check=False)

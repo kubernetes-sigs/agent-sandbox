@@ -63,6 +63,7 @@ func main() {
 	var enableTracing bool
 	var enablePprof bool
 	var enablePprofDebug bool
+	var enableRESTClientMetrics bool
 	var pprofBlockProfileRate int
 	var pprofMutexProfileFraction int
 	var kubeAPIQPS float64
@@ -100,6 +101,10 @@ func main() {
 	flag.BoolVar(&enablePprofDebug, "enable-pprof-debug", false,
 		"Enable all pprof endpoints including sensitive ones (cmdline, symbol, heap, goroutine, etc). "+
 			"Implies --enable-pprof. WARNING: May expose sensitive information and comes with performance overhead.")
+	flag.BoolVar(&enableRESTClientMetrics, "enable-rest-client-metrics", true,
+		"Enable client-go REST client metrics (request latency, DNS resolution latency, request/response sizes, "+
+			"rate limiter latency, request retries). These metrics provide visibility into Kubernetes API client health. "+
+			"Set to false to disable if the additional histogram overhead is not acceptable.")
 	flag.IntVar(&pprofBlockProfileRate, "pprof-block-profile-rate", 1000000,
 		"Block profile sampling rate for /debug/pprof/block when --enable-pprof-debug is set. "+
 			"<=0 disables; 1 samples all blocking events; >=2 sets the rate in nanoseconds (e.g. 1000000 ~= 1ms).")
@@ -258,15 +263,19 @@ func main() {
 
 	// Register client-go REST client metrics.
 	// These metrics provide visibility into API server interactions.
-	setupLog.Info("client-go REST client metrics enabled")
-	metrics.RegisterRESTClientMetrics(
-		metrics.MetricRequestLatency,
-		metrics.MetricDNSResolutionLatency,
-		metrics.MetricRequestSize,
-		metrics.MetricResponseSize,
-		metrics.MetricRateLimiterLatency,
-		metrics.MetricRequestRetry,
-	)
+	if enableRESTClientMetrics {
+		setupLog.Info("client-go REST client metrics enabled")
+		metrics.RegisterRESTClientMetrics(
+			metrics.MetricRequestLatency,
+			metrics.MetricDNSResolutionLatency,
+			metrics.MetricRequestSize,
+			metrics.MetricResponseSize,
+			metrics.MetricRateLimiterLatency,
+			metrics.MetricRequestRetry,
+		)
+	} else {
+		setupLog.Info("client-go REST client metrics disabled (--enable-rest-client-metrics=false)")
+	}
 
 	// Importing net/http/pprof registers handlers on the global DefaultServeMux.
 	// Reset it to avoid accidentally exposing pprof via any server that uses the default mux.

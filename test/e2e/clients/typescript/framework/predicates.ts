@@ -15,6 +15,20 @@ limitations under the License.
 */
 
 /**
+ * Predicate to check if an object's status.conditions has a "Ready" condition
+ * set to "True" (matches the Go framework's predicates.ReadyConditionIsTrue,
+ * e.g. for Sandbox and Pod objects).
+ */
+export function readyConditionIsTrue(): (obj: Record<string, any>) => boolean {
+  return (obj: Record<string, any>): boolean => {
+    const conditions = obj?.status?.conditions ?? [];
+    return conditions.some(
+      (c: Record<string, any>) => c?.type === "Ready" && c?.status === "True",
+    );
+  };
+}
+
+/**
  * Predicate to check if a SandboxWarmPool (CR) has all the required number of ready sandboxes.
  */
 export function warmPoolReady(): (

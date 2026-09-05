@@ -99,12 +99,18 @@ func TestPodCreateRejectedUnsupportedFields(t *testing.T) {
 
 	// Simulate an older API server that rejects Pod creation because of the
 	// bindMountOptions field. The error message mirrors the real API server
-	// response for unknown fields.
+	// response for unknown fields. Verify the field is actually present on the
+	// submitted Pod so a regression that drops BindMountOptions during Pod
+	// construction fails the test instead of silently passing.
 	inner := newFakeClient(sandbox)
 	rejectingClient := interceptor.NewClient(inner, interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, isPod := obj.(*corev1.Pod); isPod {
-				return newInvalidFieldError("Pod", obj.GetName(), "spec.containers[0].volumeMounts[0].bindMountOptions")
+			if pod, isPod := obj.(*corev1.Pod); isPod {
+				require.NotEmpty(t, pod.Spec.Containers, "Pod must have containers")
+				require.NotEmpty(t, pod.Spec.Containers[0].VolumeMounts, "container must have volumeMounts")
+				require.NotEmpty(t, pod.Spec.Containers[0].VolumeMounts[0].BindMountOptions,
+					"regression: BindMountOptions missing from submitted Pod — field copy is broken")
+				return newInvalidFieldError("Pod", pod.GetName(), "spec.containers[0].volumeMounts[0].bindMountOptions")
 			}
 			return c.Create(ctx, obj, opts...)
 		},
@@ -129,7 +135,8 @@ func TestPodCreateRejectedUnsupportedFields(t *testing.T) {
 		"error message should reference the unsupported field")
 
 	// Even on error, the reconciler must update the Sandbox status so the
-	// operator can see why the Pod failed to create.
+	// operator can see why the Pod failed to create. The error must propagate
+	// into the Ready condition's Reason and Message.
 	updatedSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, rejectingClient.Get(t.Context(), req.NamespacedName, updatedSandbox))
 
@@ -137,6 +144,10 @@ func TestPodCreateRejectedUnsupportedFields(t *testing.T) {
 	require.NotNil(t, ready, "Ready condition must be set even when Pod creation fails")
 	require.Equal(t, metav1.ConditionFalse, ready.Status,
 		"Ready must be False when Pod creation is rejected")
+	require.Equal(t, "ReconcilerError", ready.Reason,
+		"Ready reason must be ReconcilerError when Pod creation fails")
+	require.Contains(t, ready.Message, "bindMountOptions",
+		"Ready message must reference the unsupported field")
 }
 
 // TestPodCreateRejectedEvictionResponders verifies that evictionResponders
@@ -176,8 +187,10 @@ func TestPodCreateRejectedEvictionResponders(t *testing.T) {
 	inner := newFakeClient(sandbox)
 	rejectingClient := interceptor.NewClient(inner, interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, isPod := obj.(*corev1.Pod); isPod {
-				return newInvalidFieldError("Pod", obj.GetName(), "spec.evictionResponders")
+			if pod, isPod := obj.(*corev1.Pod); isPod {
+				require.NotEmpty(t, pod.Spec.EvictionResponders,
+					"regression: EvictionResponders missing from submitted Pod — field copy is broken")
+				return newInvalidFieldError("Pod", pod.GetName(), "spec.evictionResponders")
 			}
 			return c.Create(ctx, obj, opts...)
 		},
@@ -206,4 +219,8 @@ func TestPodCreateRejectedEvictionResponders(t *testing.T) {
 	require.NotNil(t, ready, "Ready condition must be set even when Pod creation fails")
 	require.Equal(t, metav1.ConditionFalse, ready.Status,
 		"Ready must be False when Pod creation is rejected")
+	require.Equal(t, "ReconcilerError", ready.Reason,
+		"Ready reason must be ReconcilerError when Pod creation fails")
+	require.Contains(t, ready.Message, "evictionResponders",
+		"Ready message must reference the unsupported field")
 }

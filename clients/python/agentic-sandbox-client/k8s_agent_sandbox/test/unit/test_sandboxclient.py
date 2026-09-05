@@ -25,6 +25,7 @@ from urllib3.util.retry import Retry
 
 from kubernetes import config as k8s_config
 from kubernetes.client import ApiException
+from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.pod_metadata import validate_labels
@@ -63,6 +64,19 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
+        default_claim_response = object()
+        claim_getter = self.mock_k8s_helper.get_sandbox_claim
+        claim_getter.return_value = default_claim_response
+
+        def get_claim(claim_name, namespace):
+            configured_response = claim_getter.return_value
+            if configured_response is not default_claim_response:
+                return configured_response
+            return claim_for_request(
+                claim_name=claim_name, namespace=namespace
+            )
+
+        claim_getter.side_effect = get_claim
 
     @patch('uuid.uuid4')
     def test_create_sandbox_success(self, mock_uuid):
@@ -118,6 +132,33 @@ class TestSandboxClient(unittest.TestCase):
             # Ensure delete_sandbox_claim is called to cleanup orphan claim on failure
             self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
 
+    @patch("uuid.uuid4")
+    def test_failed_creation_preserves_original_error_when_close_fails(
+        self, mock_uuid
+    ):
+        mock_uuid.return_value.hex = "1234abcd"
+        claim_name = "sandbox-claim-1234abcd"
+        created_claim = claim_for_request(claim_name=claim_name)
+        created_claim["metadata"]["uid"] = "created-uid"
+        self.mock_k8s_helper.create_sandbox_claim.return_value = created_claim
+        self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
+        candidate = MagicMock()
+        candidate.close_connection.side_effect = RuntimeError("close failed")
+        self.mock_sandbox_class.return_value = candidate
+
+        with patch.object(
+            self.client,
+            "_register_created_handle",
+            side_effect=RuntimeError("registration failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "registration failed"):
+                self.client.create_sandbox(WARMPOOL, NAMESPACE)
+
+        candidate.close_connection.assert_called_once_with()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            claim_name, NAMESPACE, expected_uid="created-uid"
+        )
+
     def test_create_sandbox_uses_explicit_claim_name(self):
         self.mock_k8s_helper.create_sandbox_claim.return_value = claim_for_request(
             claim_name="sandbox-workflow-123",
@@ -146,7 +187,9 @@ class TestSandboxClient(unittest.TestCase):
 
     def test_explicit_claim_replaces_stale_generated_ownership(self):
         key = ("test-namespace", "sandbox-workflow-123")
-        self.client._active_connection_sandboxes[key] = MagicMock()
+        stale_handle = MagicMock()
+        stale_handle.is_active = False
+        self.client._active_connection_sandboxes[key] = stale_handle
         self.client._automatic_cleanup_claims.add(key)
         self.mock_k8s_helper.create_sandbox_claim.return_value = claim_for_request(
             claim_name="sandbox-workflow-123",
@@ -162,7 +205,116 @@ class TestSandboxClient(unittest.TestCase):
         )
 
         self.assertIs(self.client._active_connection_sandboxes[key], sandbox)
+        stale_handle.close_connection.assert_called_once_with()
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    def test_adoption_replaces_active_handle_for_recreated_claim(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        active_handle = MagicMock()
+        active_handle.claim_name = CLAIM_NAME
+        active_handle.is_active = True
+        active_handle.sandbox_id = "stable-sandbox"
+        candidate_handle = MagicMock()
+        candidate_handle.sandbox_id = "stable-sandbox"
+        self.client._active_connection_sandboxes[key] = active_handle
+        self.client._active_claim_uids[key] = "old-uid"
+        recreated_claim = claim_for_request(resource_version="replacement-rv")
+        recreated_claim["metadata"]["uid"] = "replacement-uid"
+        recreated_claim["status"] = {
+            "conditions": [
+                {"type": "Ready", "status": "True", "observedGeneration": 1}
+            ],
+            "sandbox": {"name": "stable-sandbox"},
+        }
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = ApiException(
+            status=409
+        )
+        self.mock_k8s_helper.get_sandbox_claim.return_value = recreated_claim
+        self.mock_sandbox_class.return_value = candidate_handle
+
+        sandbox = self.client.create_sandbox(
+            WARMPOOL,
+            NAMESPACE,
+            claim_name=CLAIM_NAME,
+            adopt_existing=True,
+        )
+
+        self.assertIs(sandbox, candidate_handle)
+        self.assertIs(self.client._active_connection_sandboxes[key], candidate_handle)
+        active_handle.close_connection.assert_called_once_with()
+        self.assertIsNone(active_handle.claim_name)
+        candidate_handle.close_connection.assert_not_called()
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    def test_stale_adoption_cannot_replace_concurrent_claim_incarnation(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        initial_handle = MagicMock(is_active=True, sandbox_id="initial-sandbox")
+        old_handle = MagicMock(is_active=True, sandbox_id="stable-sandbox")
+        old_handle.claim_name = CLAIM_NAME
+        new_handle = MagicMock(is_active=True, sandbox_id="stable-sandbox")
+        self.client._active_connection_sandboxes[key] = initial_handle
+        self.client._active_claim_uids[key] = "initial-uid"
+        old_claim = claim_for_request(resource_version="old-rv")
+        old_claim["metadata"]["uid"] = "old-uid"
+        new_claim = claim_for_request(resource_version="new-rv")
+        new_claim["metadata"]["uid"] = "new-uid"
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = ApiException(
+            status=409
+        )
+        self.mock_k8s_helper.get_sandbox_claim.side_effect = [old_claim, new_claim]
+        old_wait_started = threading.Event()
+        release_old_wait = threading.Event()
+
+        def wait_for_ready(*_args, resource_version, **_kwargs):
+            if resource_version == "old-rv":
+                old_wait_started.set()
+                release_old_wait.wait(timeout=5)
+            return "stable-sandbox"
+
+        handles = iter((new_handle, old_handle))
+
+        def build_handle(*_args, **_kwargs):
+            return next(handles)
+
+        stale_errors = []
+
+        def adopt_old_claim():
+            try:
+                self.client.create_sandbox(
+                    WARMPOOL,
+                    NAMESPACE,
+                    claim_name=CLAIM_NAME,
+                    adopt_existing=True,
+                )
+            except Exception as error:
+                stale_errors.append(error)
+
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = wait_for_ready
+        self.mock_sandbox_class.side_effect = build_handle
+        stale_thread = threading.Thread(target=adopt_old_claim)
+        stale_thread.start()
+        self.assertTrue(old_wait_started.wait(timeout=5))
+        try:
+            current = self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=CLAIM_NAME,
+                adopt_existing=True,
+            )
+        finally:
+            release_old_wait.set()
+            stale_thread.join(timeout=5)
+
+        self.assertFalse(stale_thread.is_alive())
+        self.assertIs(current, new_handle)
+        self.assertEqual(len(stale_errors), 1)
+        self.assertIsInstance(stale_errors[0], RuntimeError)
+        self.assertIn("changed concurrently", str(stale_errors[0]))
+        self.assertIs(self.client._active_connection_sandboxes[key], new_handle)
+        self.assertEqual(self.client._active_claim_uids[key], "new-uid")
+        old_handle.close_connection.assert_called_once_with()
+        self.assertIsNone(old_handle.claim_name)
+        new_handle.close_connection.assert_not_called()
 
     def test_adopt_existing_requires_explicit_claim_name(self):
         with self.assertRaisesRegex(ValueError, "explicit claim_name"):
@@ -700,10 +852,287 @@ class TestSandboxClient(unittest.TestCase):
             "sandbox-claim-1234abcd", NAMESPACE
         )
 
+    @patch("uuid.uuid4")
+    def test_generated_claim_conflict_does_not_delete_existing_claim(
+        self, mock_uuid
+    ):
+        mock_uuid.return_value.hex = "1234abcd"
+        conflict = ApiException(status=409)
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = conflict
+
+        with self.assertRaises(ApiException) as context:
+            self.client.create_sandbox(WARMPOOL, NAMESPACE)
+
+        self.assertIs(context.exception, conflict)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_deferred_generated_cleanup_cannot_mask_explicit_failure(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        conflict = ApiException(status=409)
+
+        def fail_with_deferred_cleanup(*_args, **_kwargs):
+            with self.client._lock:
+                self.client._claim_ownership.failed_generated_needs_delete(
+                    key,
+                    has_registered_handle=False,
+                    claim_uid="generated-uid",
+                )
+            raise conflict
+
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = (
+            fail_with_deferred_cleanup
+        )
+        self.mock_k8s_helper.delete_sandbox_claim.side_effect = RuntimeError(
+            "deferred cleanup failed"
+        )
+
+        with self.assertRaises(ApiException) as context:
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=CLAIM_NAME,
+            )
+
+        self.assertIs(context.exception, conflict)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            CLAIM_NAME,
+            NAMESPACE,
+            expected_uid="generated-uid",
+        )
+        self.assertIn(key, self.client._automatic_cleanup_claims)
+
+    def test_rejected_explicit_claim_keeps_generated_cleanup_ownership(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        generated_handle = MagicMock(is_active=True, sandbox_id="generated")
+        self.client._active_connection_sandboxes[key] = generated_handle
+        self.client._automatic_cleanup_claims.add(key)
+        conflict = ApiException(status=409)
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = conflict
+
+        with self.assertRaises(ApiException) as context:
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=CLAIM_NAME,
+            )
+
+        self.assertIs(context.exception, conflict)
+        self.assertIn(key, self.client._automatic_cleanup_claims)
+        self.assertNotIn(key, self.client._caller_owned_claims)
+
+    @patch("uuid.uuid4")
+    def test_restored_generated_cleanup_uses_original_claim_uid(self, mock_uuid):
+        mock_uuid.return_value.hex = "1234abcd"
+        claim_name = "sandbox-claim-1234abcd"
+        key = (NAMESPACE, claim_name)
+        generated_handle = MagicMock(is_active=True, sandbox_id="old-sandbox")
+        created_claim = claim_for_request(claim_name=claim_name)
+        created_claim["metadata"]["uid"] = "original-uid"
+        self.mock_k8s_helper.create_sandbox_claim.return_value = created_claim
+        self.mock_k8s_helper.wait_for_claim_ready.return_value = "old-sandbox"
+        self.mock_sandbox_class.return_value = generated_handle
+        self.client.create_sandbox(WARMPOOL, NAMESPACE)
+
+        replacement = claim_for_request(claim_name=claim_name)
+        replacement["metadata"]["uid"] = "replacement-uid"
+        replacement["spec"]["warmPoolRef"]["name"] = "other-pool"
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = ApiException(
+            status=409
+        )
+        self.mock_k8s_helper.get_sandbox_claim.return_value = replacement
+
+        with self.assertRaisesRegex(ValueError, "warmPoolRef"):
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=claim_name,
+                adopt_existing=True,
+            )
+
+        self.client._delete_automatic_cleanup_claims()
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            claim_name,
+            NAMESPACE,
+            expected_uid="original-uid",
+        )
+        generated_handle.terminate.assert_not_called()
+        generated_handle.close_connection.assert_called_once_with()
+        self.assertNotIn(key, self.client._active_connection_sandboxes)
+
+    def test_automatic_cleanup_skips_caller_protected_generated_registration(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        generated_handle = MagicMock(is_active=True, sandbox_id="generated")
+        self.client._active_connection_sandboxes[key] = generated_handle
+        with self.client._lock:
+            self.client._claim_ownership.begin_explicit(key)
+            self.client._claim_ownership.register_automatic(key, "generated-uid")
+
+        self.client._delete_automatic_cleanup_claims()
+
+        generated_handle.terminate.assert_not_called()
+        generated_handle.close_connection.assert_not_called()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+        self.assertIs(self.client._active_connection_sandboxes[key], generated_handle)
+
+    def test_delete_during_explicit_operation_invalidates_ownership_restore(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        generated_handle = MagicMock(is_active=True, sandbox_id="generated")
+        self.client._active_connection_sandboxes[key] = generated_handle
+        self.client._claim_ownership.register_automatic(key, "generated-uid")
+        with self.client._lock:
+            operation = self.client._claim_ownership.begin_explicit(key)
+
+        self.client.delete_sandbox(CLAIM_NAME, NAMESPACE)
+        self.client._finish_explicit_claim_operation(
+            key, operation, committed=False
+        )
+
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+        self.assertNotIn(key, self.client._caller_owned_claims)
+        generated_handle.terminate.assert_called_once_with()
+
+    @patch("uuid.uuid4")
+    def test_late_generated_claim_keeps_explicit_ownership(self, mock_uuid):
+        mock_uuid.return_value.hex = "1234abcd"
+        claim_name = "sandbox-claim-1234abcd"
+        key = (NAMESPACE, claim_name)
+        generated_wait_started = threading.Event()
+        release_generated_wait = threading.Event()
+        generated_handle = MagicMock()
+        generated_handle.is_active = True
+        explicit_handle = MagicMock()
+        explicit_handle.is_active = True
+        generated_results = []
+        generated_errors = []
+
+        created_claim = claim_for_request(claim_name=claim_name)
+        existing_claim = claim_for_request(
+            claim_name=claim_name, resource_version="existing-rv"
+        )
+        existing_claim["status"] = {
+            "conditions": [
+                {"type": "Ready", "status": "True", "observedGeneration": 1}
+            ],
+            "sandbox": {"name": "explicit-sandbox"},
+        }
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = [
+            created_claim,
+            ApiException(status=409),
+        ]
+        self.mock_k8s_helper.get_sandbox_claim.return_value = existing_claim
+
+        def wait_for_ready(*_args, **_kwargs):
+            generated_wait_started.set()
+            release_generated_wait.wait(timeout=5)
+            return "generated-sandbox"
+
+        def build_handle(*_args, sandbox_id, **_kwargs):
+            if sandbox_id == "explicit-sandbox":
+                return explicit_handle
+            return generated_handle
+
+        def create_generated_claim():
+            try:
+                generated_results.append(
+                    self.client.create_sandbox(WARMPOOL, NAMESPACE)
+                )
+            except Exception as error:
+                generated_errors.append(error)
+
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = wait_for_ready
+        self.mock_sandbox_class.side_effect = build_handle
+        generated_thread = threading.Thread(target=create_generated_claim)
+        generated_thread.start()
+        self.assertTrue(generated_wait_started.wait(timeout=5))
+        try:
+            explicit_result = self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=claim_name,
+                adopt_existing=True,
+            )
+        finally:
+            release_generated_wait.set()
+            generated_thread.join(timeout=5)
+
+        self.assertFalse(generated_thread.is_alive())
+        self.assertEqual(len(generated_errors), 1)
+        self.assertIsInstance(generated_errors[0], RuntimeError)
+        self.assertIn("changed concurrently", str(generated_errors[0]))
+        self.assertIs(explicit_result, explicit_handle)
+        self.assertEqual(generated_results, [])
+        self.assertIs(self.client._active_connection_sandboxes[key], explicit_handle)
+        generated_handle.close_connection.assert_called_once_with()
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    @patch("uuid.uuid4")
+    def test_late_generated_failure_cannot_delete_explicit_claim(self, mock_uuid):
+        mock_uuid.return_value.hex = "1234abcd"
+        claim_name = "sandbox-claim-1234abcd"
+        key = (NAMESPACE, claim_name)
+        generated_wait_started = threading.Event()
+        release_generated_wait = threading.Event()
+        explicit_handle = MagicMock()
+        generated_errors = []
+
+        existing_claim = claim_for_request(
+            claim_name=claim_name, resource_version="existing-rv"
+        )
+        existing_claim["status"] = {
+            "conditions": [
+                {"type": "Ready", "status": "True", "observedGeneration": 1}
+            ],
+            "sandbox": {"name": "explicit-sandbox"},
+        }
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = [
+            claim_for_request(claim_name=claim_name),
+            ApiException(status=409),
+        ]
+        self.mock_k8s_helper.get_sandbox_claim.return_value = existing_claim
+
+        def wait_for_ready(*_args, **_kwargs):
+            generated_wait_started.set()
+            release_generated_wait.wait(timeout=5)
+            raise TimeoutError("generated wait timed out")
+
+        def create_generated_claim():
+            try:
+                self.client.create_sandbox(WARMPOOL, NAMESPACE)
+            except Exception as error:
+                generated_errors.append(error)
+
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = wait_for_ready
+        self.mock_sandbox_class.return_value = explicit_handle
+        generated_thread = threading.Thread(target=create_generated_claim)
+        generated_thread.start()
+        self.assertTrue(generated_wait_started.wait(timeout=5))
+        try:
+            explicit_result = self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=claim_name,
+                adopt_existing=True,
+            )
+        finally:
+            release_generated_wait.set()
+            generated_thread.join(timeout=5)
+
+        self.assertFalse(generated_thread.is_alive())
+        self.assertEqual(len(generated_errors), 1)
+        self.assertIsInstance(generated_errors[0], TimeoutError)
+        self.assertIs(explicit_result, explicit_handle)
+        self.assertIs(self.client._active_connection_sandboxes[key], explicit_handle)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
     def test_get_sandbox_existing_active(self):
+        key = ("test-namespace", "test-claim")
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
-        self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
+        mock_sandbox.sandbox_id = "resolved-id"
+        self.client._active_connection_sandboxes[key] = mock_sandbox
+        self.client._active_claim_uids[key] = "claim-uid"
         
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
         self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
@@ -713,6 +1142,147 @@ class TestSandboxClient(unittest.TestCase):
         self.assertEqual(sandbox, mock_sandbox)
         self.mock_sandbox_class.assert_not_called()
 
+    def test_get_sandbox_replaces_active_handle_for_recreated_claim(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        old_handle = MagicMock(is_active=True, sandbox_id="stable-sandbox")
+        old_handle.claim_name = CLAIM_NAME
+        new_handle = MagicMock(is_active=True, sandbox_id="stable-sandbox")
+        self.client._active_connection_sandboxes[key] = old_handle
+        self.client._active_claim_uids[key] = "old-uid"
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "stable-sandbox"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        self.mock_sandbox_class.return_value = new_handle
+
+        sandbox = self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+
+        self.assertIs(sandbox, new_handle)
+        self.assertIs(self.client._active_connection_sandboxes[key], new_handle)
+        old_handle.close_connection.assert_called_once_with()
+        self.assertIsNone(old_handle.claim_name)
+        self.assertEqual(self.client._active_claim_uids[key], "claim-uid")
+
+    def test_get_sandbox_stale_lookup_cannot_return_concurrent_handle(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        initial_handle = MagicMock(is_active=True, sandbox_id="initial-sandbox")
+        initial_handle.claim_name = CLAIM_NAME
+        concurrent_handle = MagicMock(is_active=True, sandbox_id="stable-sandbox")
+        self.client._active_connection_sandboxes[key] = initial_handle
+        self.client._active_claim_uids[key] = "claim-uid"
+        self.client._claim_ownership.register_automatic(key, "claim-uid")
+        lookup_started = threading.Event()
+        release_lookup = threading.Event()
+        lookup_errors = []
+
+        def resolve_sandbox(*_args, **_kwargs):
+            lookup_started.set()
+            release_lookup.wait(timeout=5)
+            return "stable-sandbox"
+
+        def run_lookup():
+            try:
+                self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+            except RuntimeError as error:
+                lookup_errors.append(error)
+
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = resolve_sandbox
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        lookup_thread = threading.Thread(target=run_lookup)
+        lookup_thread.start()
+        self.assertTrue(lookup_started.wait(timeout=5))
+        self.client._active_connection_sandboxes[key] = concurrent_handle
+        self.client._active_claim_uids[key] = "replacement-uid"
+        self.client._claim_ownership.register_automatic(key, "replacement-uid")
+        release_lookup.set()
+        lookup_thread.join(timeout=5)
+
+        self.assertFalse(lookup_thread.is_alive())
+        self.assertEqual(len(lookup_errors), 1)
+        self.assertIn("changed concurrently", str(lookup_errors[0]))
+        self.assertIs(
+            self.client._active_connection_sandboxes[key], concurrent_handle
+        )
+        initial_handle.close_connection.assert_called_once_with()
+        self.assertIsNone(initial_handle.claim_name)
+        concurrent_handle.close_connection.assert_not_called()
+        self.assertEqual(
+            self.client._claim_ownership.automatic_cleanup_uid(key),
+            "replacement-uid",
+        )
+
+    def test_stale_lookup_cannot_reuse_different_sandbox_binding(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        expected_handle = MagicMock(
+            is_active=True, sandbox_id="initial-sandbox"
+        )
+        expected_handle.claim_name = CLAIM_NAME
+        current_handle = MagicMock(
+            is_active=True, sandbox_id="old-binding"
+        )
+        self.client._active_connection_sandboxes[key] = expected_handle
+        self.client._active_claim_uids[key] = "claim-uid"
+        with self.client._lock:
+            lookup_operation = self.client._claim_ownership.begin_lookup(key)
+            self.client._active_connection_sandboxes[key] = current_handle
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "changed concurrently"):
+                self.client._reuse_or_replace_resolved_handle(
+                    key,
+                    expected_handle,
+                    lookup_operation,
+                    CLAIM_NAME,
+                    "new-binding",
+                    NAMESPACE,
+                    "claim-uid",
+                )
+        finally:
+            with self.client._lock:
+                self.client._claim_ownership.finish_lookup(
+                    key, lookup_operation
+                )
+
+        self.assertIs(self.client._active_connection_sandboxes[key], current_handle)
+        current_handle.close_connection.assert_not_called()
+
+    def test_get_sandbox_cannot_restore_claim_deleted_during_lookup(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        lookup_started = threading.Event()
+        release_lookup = threading.Event()
+        lookup_errors = []
+        claim = claim_for_request()
+        claim["metadata"]["uid"] = "deleted-uid"
+        self.mock_k8s_helper.get_sandbox_claim.return_value = claim
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+
+        def resolve_sandbox(*_args, **_kwargs):
+            lookup_started.set()
+            release_lookup.wait(timeout=5)
+            return "deleted-sandbox"
+
+        def run_lookup():
+            try:
+                self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+            except RuntimeError as error:
+                lookup_errors.append(error)
+
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = resolve_sandbox
+        lookup_thread = threading.Thread(target=run_lookup)
+        lookup_thread.start()
+        self.assertTrue(lookup_started.wait(timeout=5))
+
+        self.client.delete_sandbox(CLAIM_NAME, NAMESPACE)
+        release_lookup.set()
+        lookup_thread.join(timeout=5)
+
+        self.assertFalse(lookup_thread.is_alive())
+        self.assertEqual(len(lookup_errors), 1)
+        self.assertIn("changed concurrently", str(lookup_errors[0]))
+        self.assertNotIn(key, self.client._active_connection_sandboxes)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+        self.mock_sandbox_class.assert_not_called()
+        self.assertEqual(self.client._claim_ownership._lookup_operations, {})
+
+    def test_get_sandbox_inactive_reattaches(self):
         mock_inactive_sandbox = MagicMock()
         mock_inactive_sandbox.is_active = False
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_inactive_sandbox
@@ -752,35 +1322,103 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
         self.assertNotIn(key, self.client._active_connection_sandboxes)
 
-    def test_get_sandbox_failure_terminates_generated_handle(self):
+    def test_get_sandbox_failure_deletes_generated_claim_by_uid(self):
         key = ("test-namespace", "test-claim")
         generated_handle = MagicMock()
+        generated_handle.claim_name = "test-claim"
         self.client._active_connection_sandboxes[key] = generated_handle
-        self.client._automatic_cleanup_claims.add(key)
+        self.client._claim_ownership.register_automatic(key, "generated-uid")
         self.mock_k8s_helper.resolve_sandbox_name.side_effect = Exception("missing")
 
         with self.assertRaises(SandboxNotFoundError):
             self.client.get_sandbox("test-claim", "test-namespace")
 
-        generated_handle.terminate.assert_called_once_with()
-        generated_handle.close_connection.assert_not_called()
+        generated_handle.terminate.assert_not_called()
+        generated_handle.close_connection.assert_called_once_with()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-namespace", expected_uid="generated-uid"
+        )
         self.assertNotIn(key, self.client._active_connection_sandboxes)
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
+        self.assertIsNone(generated_handle.claim_name)
 
-    def test_automatic_cleanup_skips_reattached_claim(self):
+    def test_automatic_cleanup_deletes_reattached_claim_by_observed_uid(self):
         key = (NAMESPACE, CLAIM_NAME)
         reattached_handle = MagicMock()
+        reattached_handle.claim_name = CLAIM_NAME
         self.mock_sandbox_class.return_value = reattached_handle
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
         self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        claim = claim_for_request()
+        claim["metadata"]["uid"] = "reattached-uid"
+        self.mock_k8s_helper.get_sandbox_claim.return_value = claim
 
         self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
         self.client._delete_automatic_cleanup_claims()
 
         reattached_handle.terminate.assert_not_called()
-        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
-        self.assertIs(self.client._active_connection_sandboxes[key], reattached_handle)
+        reattached_handle.close_connection.assert_called_once_with()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="reattached-uid"
+        )
+        self.assertNotIn(key, self.client._active_connection_sandboxes)
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
+        self.assertIsNone(reattached_handle.claim_name)
+
+    def test_retained_handle_cannot_delete_recreated_claim_after_cleanup(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        retained_handle = Sandbox.__new__(Sandbox)
+        retained_handle.claim_name = CLAIM_NAME
+        retained_handle.namespace = NAMESPACE
+        retained_handle.k8s_helper = self.mock_k8s_helper
+        retained_handle._is_closed = True
+        self.mock_k8s_helper.delete_sandbox_claim.side_effect = ApiException(
+            status=409
+        )
+        self.client._active_connection_sandboxes[key] = retained_handle
+        self.client._claim_ownership.register_automatic(key, "original-uid")
+
+        self.client._delete_automatic_cleanup_claims()
+        retained_handle.terminate()
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="original-uid"
+        )
+        self.assertIsNone(retained_handle.claim_name)
+        self.assertNotIn(key, self.client._active_connection_sandboxes)
+        self.assertIn(key, self.client._automatic_cleanup_claims)
+
+    def test_get_sandbox_rejects_claim_recreated_during_resolution(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        original_handle = MagicMock()
+        original_handle.claim_name = CLAIM_NAME
+        self.client._active_connection_sandboxes[key] = original_handle
+        self.client._claim_ownership.register_automatic(key, "original-uid")
+        original = claim_for_request()
+        original["metadata"]["uid"] = "original-uid"
+        replacement = claim_for_request()
+        replacement["metadata"]["uid"] = "replacement-uid"
+        self.mock_k8s_helper.get_sandbox_claim.return_value = original
+        self.mock_k8s_helper.delete_sandbox_claim.side_effect = ApiException(
+            status=409
+        )
+
+        def resolve_sandbox(*_args, claim_validator, **_kwargs):
+            claim_validator(replacement)
+            return "replacement-sandbox"
+
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = resolve_sandbox
+
+        with self.assertRaisesRegex(SandboxNotFoundError, "metadata.uid"):
+            self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+
+        self.mock_k8s_helper.get_sandbox.assert_not_called()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="original-uid"
+        )
+        self.assertIsNone(original_handle.claim_name)
+        self.assertNotIn(key, self.client._active_connection_sandboxes)
+        self.assertIn(key, self.client._automatic_cleanup_claims)
 
     def test_get_sandbox_failure_cannot_remove_concurrently_explicit_handle(self):
         key = (NAMESPACE, CLAIM_NAME)
@@ -854,6 +1492,117 @@ class TestSandboxClient(unittest.TestCase):
         
         self.assertEqual(active_list, [("ns1", "active-claim")])
         self.assertNotIn(("ns2", "inactive-claim"), self.client._active_connection_sandboxes)
+
+    def test_list_active_retires_inactive_automatic_handle(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        retained_handle = Sandbox.__new__(Sandbox)
+        retained_handle.claim_name = CLAIM_NAME
+        retained_handle.namespace = NAMESPACE
+        retained_handle.k8s_helper = self.mock_k8s_helper
+        retained_handle._is_closed = True
+        self.client._active_connection_sandboxes[key] = retained_handle
+        self.client._active_claim_uids[key] = "old-uid"
+        self.client._claim_ownership.register_automatic(key, "old-uid")
+
+        self.assertEqual(self.client.list_active_sandboxes(), [])
+        self.client._delete_automatic_cleanup_claims()
+        retained_handle.terminate()
+
+        self.assertIsNone(retained_handle.claim_name)
+        self.assertNotIn(key, self.client._active_claim_uids)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="old-uid"
+        )
+
+    def test_list_active_retires_automatic_handle_during_explicit_operation(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        retained_handle = Sandbox.__new__(Sandbox)
+        retained_handle.claim_name = CLAIM_NAME
+        retained_handle.namespace = NAMESPACE
+        retained_handle.k8s_helper = self.mock_k8s_helper
+        retained_handle._is_closed = True
+        self.client._active_connection_sandboxes[key] = retained_handle
+        self.client._active_claim_uids[key] = "old-uid"
+        self.client._claim_ownership.register_automatic(key, "old-uid")
+        with self.client._lock:
+            operation = self.client._claim_ownership.begin_explicit(key)
+
+        self.assertEqual(self.client.list_active_sandboxes(), [])
+        with self.client._lock:
+            self.client._claim_ownership.finish_explicit(
+                key,
+                operation,
+                committed=False,
+                has_registered_handle=False,
+            )
+        self.client._delete_automatic_cleanup_claims()
+        retained_handle.terminate()
+
+        self.assertIsNone(retained_handle.claim_name)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="old-uid"
+        )
+
+    def test_failed_lookup_retires_automatic_handle_during_explicit_operation(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        retained_handle = Sandbox.__new__(Sandbox)
+        retained_handle.claim_name = CLAIM_NAME
+        retained_handle.namespace = NAMESPACE
+        retained_handle.k8s_helper = self.mock_k8s_helper
+        retained_handle._is_closed = True
+        self.client._active_connection_sandboxes[key] = retained_handle
+        self.client._active_claim_uids[key] = "old-uid"
+        self.client._claim_ownership.register_automatic(key, "old-uid")
+        with self.client._lock:
+            operation = self.client._claim_ownership.begin_explicit(key)
+
+        self.client._detach_failed_lookup(key, retained_handle)
+        with self.client._lock:
+            self.client._claim_ownership.finish_explicit(
+                key,
+                operation,
+                committed=False,
+                has_registered_handle=False,
+            )
+        self.client._delete_automatic_cleanup_claims()
+        retained_handle.terminate()
+
+        self.assertIsNone(retained_handle.claim_name)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="old-uid"
+        )
+
+    def test_failed_lookup_cannot_delete_claim_adopted_concurrently(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        retained_handle = Sandbox.__new__(Sandbox)
+        retained_handle.claim_name = CLAIM_NAME
+        retained_handle.namespace = NAMESPACE
+        retained_handle.k8s_helper = self.mock_k8s_helper
+        retained_handle._is_closed = True
+        self.client._active_connection_sandboxes[key] = retained_handle
+        self.client._active_claim_uids[key] = "old-uid"
+        self.client._claim_ownership.register_automatic(key, "old-uid")
+        with self.client._lock:
+            operation = self.client._claim_ownership.begin_explicit(key)
+
+        self.client._detach_failed_lookup(key, retained_handle)
+
+        with self.client._lock:
+            self.assertTrue(
+                self.client._claim_ownership.explicit_is_valid(key, operation)
+            )
+            self.client._claim_ownership.finish_explicit(
+                key,
+                operation,
+                committed=True,
+                has_registered_handle=False,
+            )
+        self.client._delete_automatic_cleanup_claims()
+        retained_handle.terminate()
+
+        self.assertIsNone(retained_handle.claim_name)
+        self.assertIn(key, self.client._caller_owned_claims)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
     def test_list_all_sandboxes(self):
         self.mock_k8s_helper.list_sandbox_claims.return_value = ["sandbox-1", "sandbox-2"]

@@ -468,6 +468,18 @@ class TestAsyncK8sHelperDeleteSandboxClaim(unittest.IsolatedAsyncioTestCase):
             await self.helper.delete_sandbox_claim("claim", "default")
         self.assertEqual(ctx.exception.status, 403)
 
+    async def test_delete_uses_uid_precondition(self):
+        self.helper.custom_objects_api.delete_namespaced_custom_object = AsyncMock()
+
+        await self.helper.delete_sandbox_claim(
+            "claim", "default", expected_uid="original-uid"
+        )
+
+        body = self.helper.custom_objects_api.delete_namespaced_custom_object.call_args.kwargs[
+            "body"
+        ]
+        self.assertEqual(body.preconditions.uid, "original-uid")
+
 
 class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
 

@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Unit tests for deterministic SandboxClaim name validation."""
+
 import unittest
 
 from k8s_agent_sandbox.claim_adoption import validate_claim_name
+from k8s_agent_sandbox.claim_ownership import ClaimOwnership
 
 
 class TestClaimNameValidation(unittest.TestCase):
@@ -33,3 +36,27 @@ class TestClaimNameValidation(unittest.TestCase):
             with self.subTest(claim_name=claim_name):
                 with self.assertRaisesRegex(ValueError, "DNS-1123"):
                     validate_claim_name(claim_name)
+
+
+class TestClaimOwnership(unittest.TestCase):
+
+    def test_invalidated_operation_cannot_erase_new_epoch_ownership(self):
+        ownership = ClaimOwnership()
+        key = ("test-namespace", "test-claim")
+        old_operation = ownership.begin_explicit(key)
+
+        ownership.discard(key)
+        ownership.register_automatic(key, "replacement-uid")
+        should_delete, expected_uid = ownership.finish_explicit(
+            key,
+            old_operation,
+            committed=False,
+            has_registered_handle=True,
+        )
+
+        self.assertFalse(should_delete)
+        self.assertIsNone(expected_uid)
+        self.assertIn(key, ownership.automatic_cleanup_claims)
+        self.assertEqual(
+            ownership.automatic_cleanup_uid(key), "replacement-uid"
+        )

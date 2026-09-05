@@ -443,6 +443,18 @@ class TestK8sHelperDeleteSandboxClaim(unittest.TestCase):
 
         self.assertEqual(mock_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
 
+    def test_delete_uses_uid_precondition(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.delete_sandbox_claim(
+            "claim", "default", expected_uid="original-uid"
+        )
+
+        body = mock_api.delete_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body.preconditions.uid, "original-uid")
+
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")

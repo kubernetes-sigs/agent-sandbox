@@ -117,7 +117,14 @@ class K8sHelper:
             body=manifest
         )
 
-    def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+    def resolve_sandbox_name(
+        self,
+        claim_name: str,
+        namespace: str,
+        timeout: int,
+        resource_version: str | None = None,
+        claim_validator: Callable[[dict], object] | None = None,
+    ) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
@@ -128,8 +135,14 @@ class K8sHelper:
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
         """
-        return self._watch_claim(claim_name, namespace, timeout, require_ready=False,
-                                 resource_version=resource_version)
+        return self._watch_claim(
+            claim_name,
+            namespace,
+            timeout,
+            require_ready=False,
+            resource_version=resource_version,
+            claim_validator=claim_validator,
+        )
 
     def wait_for_claim_ready(
         self,
@@ -328,14 +341,26 @@ class K8sHelper:
                     raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
 
     def delete_sandbox_claim(
-        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
+        self,
+        name: str,
+        namespace: str,
+        _request_timeout: float | tuple[float, float] | None = None,
+        *,
+        expected_uid: str | None = None,
     ) -> None:
         """Deletes a SandboxClaim custom resource.
 
         Args:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3-based request.
+            expected_uid: Optional Kubernetes UID precondition. The apiserver
+                refuses to delete a same-name replacement with a different UID.
         """
+        delete_kwargs: dict[str, object] = {}
+        if expected_uid is not None:
+            delete_kwargs["body"] = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(uid=expected_uid)
+            )
         try:
             self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -344,6 +369,7 @@ class K8sHelper:
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
                 _request_timeout=_request_timeout,
+                **delete_kwargs,
             )
             logging.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:

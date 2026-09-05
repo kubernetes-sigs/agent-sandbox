@@ -365,26 +365,15 @@ recreated with a different identity or contract.
 Explicit names also define a different cleanup ownership boundary. The client
 never automatically deletes an explicitly named claim, whether creation fails
 or succeeds; the caller owns that claim and may safely retry or inspect it.
-Context-manager and `atexit` cleanup select only internally generated claims.
-The explicit `delete_sandbox` and `delete_all` methods remain available for
-deliberate deletion; `delete_all` preserves its existing behavior of deleting
-every tracked handle. Randomly generated claims retain the existing
-best-effort cleanup behavior. Because `shutdown_after_seconds` produces a
-different absolute shutdown time on every retry, it cannot be combined with
-`adopt_existing=True`.
-
-#### Cleanup migration for reattached Claims
-
-This ownership boundary changes the historical cleanup behavior for handles
-returned by `get_sandbox()`. Older clients could delete every tracked handle
-from synchronous `cleanup=True` or async context-manager cleanup, including a
-Claim that the current process only reattached to. Reattached Claims are now
-caller-owned: automatic cleanup closes the local connection but does not delete
-the Claim.
-
-Applications that intentionally relied on the old deletion behavior must call
-`delete_sandbox(claim_name, namespace)` for one Claim or `delete_all()` for all
-tracked Claims. Do not use automatic cleanup as proof of resource ownership.
+Context-manager and `atexit` cleanup select internally generated claims and
+handles returned by `get_sandbox()`, preserving the existing reattachment
+behavior. Each successful create or reattachment records the observed
+Kubernetes UID, and automatic deletion uses that UID as a precondition so it
+cannot delete a same-name replacement. The explicit `delete_sandbox` and
+`delete_all` methods remain available for deliberate deletion; `delete_all`
+preserves its existing behavior of deleting every tracked handle. Because
+`shutdown_after_seconds` produces a different absolute shutdown time on every
+retry, it cannot be combined with `adopt_existing=True`.
 
 ### 9. Custom Volume Claim Templates
 

@@ -50,8 +50,7 @@ kubectl get crd | grep agents.x-k8s.io        # expect the 4 CRDs
 kubectl get pods -n agent-sandbox-system       # controller Running
 ```
 
-Create the namespace your fleet runs in. The rest of this README uses
-`agent-sandbox-rl`:
+Create the namespace your fleet runs in, if it doesn't already exist:
 
 ```bash
 kubectl create namespace agent-sandbox-rl
@@ -257,7 +256,7 @@ behavior is unchanged):
 
 ```python
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="rl", namespace="rl")],
+    clusters=[ClusterConfig(name="rl", namespace="agent-sandbox-rl")],
     max_concurrent=50, max_warmpool_size=16,
     warm_per_task=True,                          # 1 warm replica per task
     template=TemplateSpec(colocate_replicas=True)))  # pack a pool's replicas on one node

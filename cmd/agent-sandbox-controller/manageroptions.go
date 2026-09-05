@@ -33,11 +33,7 @@ func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Optio
 		// LeaseDuration with no active controller — at a sustained 500
 		// claims/s that gap is ~7,500 claims queueing during a routine
 		// deploy. Crash failover still pays lease expiry by design
-		// (split-brain safety); only clean exits release early. Safe here:
-		// controller-runtime requires the binary to exit promptly once the
-		// manager stops; mgr.Start is the last explicit statement in main(),
-		// and any deferred shutdown work (e.g. tracing cleanup) must stay
-		// bounded so the process still exits promptly.
+		// (split-brain safety); only clean exits release early.
 		LeaderElectionReleaseOnCancel: true,
 	}
 }

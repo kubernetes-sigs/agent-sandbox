@@ -32,6 +32,8 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -39,9 +41,11 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
+	internalconfig "sigs.k8s.io/agent-sandbox/internal/config"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -169,6 +173,32 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Resolve the controller namespace early: needed to fetch the ConfigMap.
+	controllerNamespace := leaderElectionNamespace
+	if controllerNamespace == "" {
+		if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+			controllerNamespace = ns
+		} else {
+			controllerNamespace = "agent-sandbox-system"
+		}
+	}
+
+	// Apply ConfigMap overrides from the API server.
+	configMapData, err := fetchConfigMapData(controllerNamespace)
+	if err != nil {
+		setupLog.Error(err, "failed to read controller ConfigMap")
+		os.Exit(1)
+	}
+	if overrides, err := internalconfig.ApplyConfigMapData(configMapData, flag.CommandLine); err != nil {
+		setupLog.Error(err, "failed to parse controller config from ConfigMap")
+		os.Exit(1)
+	} else if len(overrides) > 0 {
+		for _, o := range overrides {
+			setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)
+		}
+	}
+
 	if sandboxWarmPoolReadinessGracePeriod <= 0 {
 		setupLog.Error(nil, "--sandbox-warm-pool-readiness-grace-period must be a positive duration", "value", sandboxWarmPoolReadinessGracePeriod)
 		os.Exit(1)
@@ -241,19 +271,19 @@ func main() {
 
 	// Initialize Tracing Provider
 	var instrumenter = asmetrics.NewNoOp()
+	var tracingCleanup func()
 	if enableTracing {
-		var cleanup func()
 		var err error
 		// Use a timeout context for initialization to prevent blocking
 		initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
-		instrumenter, cleanup, err = asmetrics.SetupOTel(initCtx, "agent-sandbox-controller")
+		instrumenter, tracingCleanup, err = asmetrics.SetupOTel(initCtx, "agent-sandbox-controller")
 		if err != nil {
 			setupLog.Error(err, "unable to initialize tracing")
 			os.Exit(1)
 		}
-		defer cleanup()
+		defer tracingCleanup()
 	}
 
 	// Register client-go REST client metrics.
@@ -352,8 +382,6 @@ func main() {
 	}
 
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
-	// managedFields stripping, the Pod spec diet, and (optionally) the
-	// tracking-label scoping; see buildCacheOptions for the rationale.
 	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)
 	if err != nil {
 		setupLog.Error(err, "unable to build cache options")
@@ -489,8 +517,38 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctx); err != nil {
+	if err = mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// fetchConfigMapData reads the agent-sandbox-config ConfigMap from the
+// API server. Returns (nil, nil) if the ConfigMap does not exist (it is
+// optional). Returns a non-nil error on any other failure (RBAC,
+// timeout, client construction) so the caller can exit and let the pod
+// restart rather than silently running on compiled defaults.
+func fetchConfigMapData(namespace string) (map[string]string, error) {
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get kubeconfig for ConfigMap fetch: %w", err)
+	}
+	// Bound client construction (RESTMapper discovery) and the Get so a
+	// slow/unreachable API server cannot hang startup indefinitely.
+	cfg.Timeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	c, err := client.New(cfg, client.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create client for ConfigMap fetch: %w", err)
+	}
+	var cm corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKey{Name: "agent-sandbox-config", Namespace: namespace}, &cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unable to fetch agent-sandbox-config ConfigMap: %w", err)
+	}
+	return cm.Data, nil
 }

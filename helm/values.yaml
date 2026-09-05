@@ -90,6 +90,17 @@ podSecurityContext: null
 #     type: RuntimeDefault
 containerSecurityContext: null
 
+# controllerConfig populates the agent-sandbox-config ConfigMap.
+# Keys that match tunable flag names override the compiled defaults.
+# ConfigMap values take precedence over CLI flags passed to the controller.
+# Helm value changes update the checksum/config annotation and roll the
+# Deployment. Live edits to the ConfigMap (outside Helm) require a manual
+# restart of the Deployment to take effect.
+controllerConfig: {}
+  # sandbox-concurrent-workers: "200"
+  # sandbox-warm-pool-max-batch-size: "500"
+  # enable-warm-pool-eviction: "false"
+
 service:
   # name sets the name of the controller Service that exposes the metrics endpoint.
   name: agent-sandbox-controller

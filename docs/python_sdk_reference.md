@@ -44,8 +44,9 @@ Initializes the SandboxClient.
 - `tracer_config` - Configuration for OpenTelemetry tracing.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
 - `cleanup` - If True, registers an atexit hook to automatically delete
-  internally named sandboxes when the program terminates. Explicitly
-  named claims remain caller-owned. Defaults to False.
+  managed sandboxes when the program terminates. This includes
+  internally named and reattached claims; explicitly named claims
+  created by this client remain caller-owned. Defaults to False.
 
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.create_sandbox"></a>
 
@@ -121,8 +122,8 @@ def get_sandbox(claim_name: str,
 
 Retrieves an existing sandbox handle given a sandbox claim name.
 If the handle is closed or missing, it re-attaches to the infrastructure.
-Reattached claims remain caller-owned: automatic cleanup never deletes
-them. Call ``delete_sandbox`` or ``delete_all`` for deliberate deletion.
+Reattached handles preserve the client's historical automatic cleanup
+behavior. Cleanup is constrained to the exact observed Claim UID.
 
 **Arguments**:
 

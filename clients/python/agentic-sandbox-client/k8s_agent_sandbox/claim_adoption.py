@@ -53,6 +53,44 @@ class ValidatedClaimIdentity:
     uid: str
 
 
+def validate_claim_identity(
+    claim: dict,
+    *,
+    claim_name: str,
+    namespace: str,
+    expected_uid: str | None = None,
+) -> ValidatedClaimIdentity:
+    """Validate the stable identity of a Claim observed by the client."""
+    if not isinstance(claim, dict):
+        _reject(claim_name, "object representation")
+
+    expected_api_version = f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}"
+    if claim.get("apiVersion") != expected_api_version:
+        _reject(claim_name, "apiVersion")
+    if claim.get("kind") != "SandboxClaim":
+        _reject(claim_name, "kind")
+
+    metadata = claim.get("metadata")
+    if not isinstance(metadata, dict):
+        _reject(claim_name, "metadata")
+    if metadata.get("name") != claim_name:
+        _reject(claim_name, "metadata.name")
+    if metadata.get("namespace") != namespace:
+        _reject(claim_name, "metadata.namespace")
+    if metadata.get("deletionTimestamp"):
+        _reject(claim_name, "metadata.deletionTimestamp")
+
+    resource_version = metadata.get("resourceVersion")
+    if not isinstance(resource_version, str) or not resource_version:
+        _reject(claim_name, "metadata.resourceVersion")
+    uid = metadata.get("uid")
+    if not isinstance(uid, str) or not uid:
+        _reject(claim_name, "metadata.uid")
+    if expected_uid is not None and uid != expected_uid:
+        _reject(claim_name, "metadata.uid")
+    return ValidatedClaimIdentity(resource_version=resource_version, uid=uid)
+
+
 def validate_claim_name(name: str) -> None:
     """Validates an explicit SandboxClaim name as a DNS-1123 subdomain."""
     if (
@@ -153,33 +191,13 @@ def validate_claim_for_adoption(
     Returns the existing object's identity for a watch that cannot miss a
     readiness transition or silently switch to a recreated object.
     """
-    if not isinstance(claim, dict):
-        _reject(claim_name, "object representation")
-
-    expected_api_version = f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}"
-    if claim.get("apiVersion") != expected_api_version:
-        _reject(claim_name, "apiVersion")
-    if claim.get("kind") != "SandboxClaim":
-        _reject(claim_name, "kind")
-
-    metadata = claim.get("metadata")
-    if not isinstance(metadata, dict):
-        _reject(claim_name, "metadata")
-    if metadata.get("name") != claim_name:
-        _reject(claim_name, "metadata.name")
-    if metadata.get("namespace") != namespace:
-        _reject(claim_name, "metadata.namespace")
-    if metadata.get("deletionTimestamp"):
-        _reject(claim_name, "metadata.deletionTimestamp")
-
-    resource_version = metadata.get("resourceVersion")
-    if not isinstance(resource_version, str) or not resource_version:
-        _reject(claim_name, "metadata.resourceVersion")
-    uid = metadata.get("uid")
-    if not isinstance(uid, str) or not uid:
-        _reject(claim_name, "metadata.uid")
-    if expected_uid is not None and uid != expected_uid:
-        _reject(claim_name, "metadata.uid")
+    identity = validate_claim_identity(
+        claim,
+        claim_name=claim_name,
+        namespace=namespace,
+        expected_uid=expected_uid,
+    )
+    metadata = claim["metadata"]
     generation = metadata.get("generation")
     if (
         not isinstance(generation, int)
@@ -218,4 +236,4 @@ def validate_claim_for_adoption(
         if _normalized_optional(spec.get(field)) != _normalized_optional(expected):
             _reject(claim_name, f"spec.{field}")
 
-    return ValidatedClaimIdentity(resource_version=resource_version, uid=uid)
+    return identity

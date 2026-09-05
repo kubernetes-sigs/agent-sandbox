@@ -140,7 +140,12 @@ class AsyncK8sHelper:
         )
 
     async def resolve_sandbox_name(
-        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None
+        self,
+        claim_name: str,
+        namespace: str,
+        timeout: int,
+        resource_version: str | None = None,
+        claim_validator: Callable[[dict], object] | None = None,
     ) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
@@ -152,8 +157,14 @@ class AsyncK8sHelper:
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
         """
-        return await self._watch_claim(claim_name, namespace, timeout, require_ready=False,
-                                       resource_version=resource_version)
+        return await self._watch_claim(
+            claim_name,
+            namespace,
+            timeout,
+            require_ready=False,
+            resource_version=resource_version,
+            claim_validator=claim_validator,
+        )
 
     async def wait_for_claim_ready(
         self,
@@ -394,10 +405,21 @@ class AsyncK8sHelper:
             finally:
                 await w.close()
 
-    async def delete_sandbox_claim(self, name: str, namespace: str) -> None:
-        """Deletes a SandboxClaim custom resource."""
+    async def delete_sandbox_claim(
+        self,
+        name: str,
+        namespace: str,
+        *,
+        expected_uid: str | None = None,
+    ) -> None:
+        """Delete a Claim, optionally constrained to its Kubernetes UID."""
         await self._ensure_initialized()
 
+        delete_kwargs: dict[str, object] = {}
+        if expected_uid is not None:
+            delete_kwargs["body"] = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(uid=expected_uid)
+            )
         try:
             await self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -405,6 +427,7 @@ class AsyncK8sHelper:
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
                 name=name,
+                **delete_kwargs,
             )
             logger.info(f"Terminated SandboxClaim: {name}")
         except client.ApiException as e:

@@ -99,12 +99,14 @@ PYTHON_TEST_SUITES = [
             (os.path.join("clients", "integrations", "deepagents"), "[test]"),
         ],
     },
+    # Keep this exact upper compatibility endpoint aligned with the latest
+    # supported published Deep Agents and SDK releases; review it per release.
     {
-        "name": "integrations-deepagents-0.7.11-sdk-1.0.0",
+        "name": "integrations-deepagents-0.7.13-sdk-1.0.1",
         "dir": os.path.join("clients", "integrations", "deepagents"),
         "resolver_requirements": [
-            "deepagents==0.7.11",
-            "k8s-agent-sandbox==1.0.0",
+            "deepagents==0.7.13",
+            "k8s-agent-sandbox==1.0.1",
         ],
         "editable_installs": [
             (os.path.join("clients", "integrations", "deepagents"), "[test]"),

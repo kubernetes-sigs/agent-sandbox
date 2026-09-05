@@ -28,18 +28,20 @@ jobs:
             package-directory: clients/integrations/deepagents
             python-version: "3.11"
             resolver-requirement: deepagents==0.7.10
-          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.11)
+          # Keep this upper endpoint aligned with the latest supported published
+          # Deep Agents 0.7 release when preparing a repository release.
+          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.13)
             package-directory: clients/integrations/deepagents
             python-version: "3.11"
-            resolver-requirement: deepagents==0.7.11
+            resolver-requirement: deepagents==0.7.13
           - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.10)
             package-directory: clients/integrations/deepagents
             python-version: "3.13"
             resolver-requirement: deepagents==0.7.10
-          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.11)
+          - package-name: deepagents-k8s-agent-sandbox (Deep Agents 0.7.13)
             package-directory: clients/integrations/deepagents
             python-version: "3.13"
-            resolver-requirement: deepagents==0.7.11
+            resolver-requirement: deepagents==0.7.13
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,7 +117,8 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.11", "3.13"]
-        deepagents-version: ["0.7.10", "0.7.11"]
+        # Keep this synchronized with the test job and dev/tools/test-unit.
+        deepagents-version: ["0.7.10", "0.7.13"]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

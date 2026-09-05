@@ -50,7 +50,7 @@ kubectl get crd | grep agents.x-k8s.io        # expect the 4 CRDs
 kubectl get pods -n agent-sandbox-system       # controller Running
 ```
 
-Create the namespace your fleet runs in, if it doesn't already exist:
+Run this if the namespace doesn't already exist:
 
 ```bash
 kubectl create namespace agent-sandbox-rl

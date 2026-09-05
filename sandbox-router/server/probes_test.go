@@ -85,3 +85,22 @@ func TestReadyzDefaultsToUnready(t *testing.T) {
 		t.Fatalf("default unready: got %d want 503", resp.StatusCode)
 	}
 }
+
+func TestReadyzRequiresDependencyCheckAfterMarkReady(t *testing.T) {
+	dependencyReady := false
+	p := NewProbesWithReadyCheck(func() bool { return dependencyReady })
+	p.MarkReady()
+
+	recorder := httptest.NewRecorder()
+	p.Readyz(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unsynced dependency: got %d want 503", recorder.Code)
+	}
+
+	dependencyReady = true
+	recorder = httptest.NewRecorder()
+	p.Readyz(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("synced dependency: got %d want 200", recorder.Code)
+	}
+}

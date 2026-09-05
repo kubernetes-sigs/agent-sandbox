@@ -161,12 +161,12 @@ func NewTokenReviewAuthorizer(o TokenReviewOptions) (*TokenReviewAuthorizer, err
 }
 
 // Authorize implements the Authorizer interface.
-func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error {
+func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, target AuthorizationTarget) error {
 	token, _, ok := TokenFromRequest(r, a.locs)
 	if !ok {
 		if a.require {
 			a.log.V(1).Info("authz deny: missing Bearer token",
-				"sandbox", sandboxName, "namespace", sandboxNamespace)
+				"sandbox", target.SandboxName, "namespace", target.Namespace)
 			return ErrUnauthenticated
 		}
 		// Token not required and not provided → allow. This matches the
@@ -178,7 +178,7 @@ func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, 
 	key := hashToken(token)
 	if v, hit := a.cache.Get(key); hit {
 		d := v.(*tokenDecision)
-		return a.decide(d, sandboxName, sandboxNamespace, true)
+		return a.decide(d, target.SandboxName, target.Namespace, true)
 	}
 
 	// Bound the TokenReview RPC; the proxy's per-request deadline still
@@ -202,7 +202,7 @@ func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, 
 		ttl := max(a.ttl/3, time.Second)
 		a.cache.Add(key, d, ttl)
 		a.log.Error(err, "tokenreview API call failed",
-			"sandbox", sandboxName, "namespace", sandboxNamespace)
+			"sandbox", target.SandboxName, "namespace", target.Namespace)
 		return fmt.Errorf("tokenreview: %w", err)
 	}
 	d.authenticated = out.Status.Authenticated
@@ -223,7 +223,7 @@ func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, 
 			"ttl", a.ttl,
 		)
 	}
-	return a.decide(d, sandboxName, sandboxNamespace, false)
+	return a.decide(d, target.SandboxName, target.Namespace, false)
 }
 
 // decide converts a tokenDecision into an authz error or nil. Logs at

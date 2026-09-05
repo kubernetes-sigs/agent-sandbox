@@ -23,13 +23,21 @@ import (
 // Readiness (/readyz) flips to 503 once MarkUnready is called, which lets
 // load balancers drain the pod ahead of shutdown.
 type Probes struct {
-	ready atomic.Bool
+	ready      atomic.Bool
+	readyCheck func() bool
 }
 
 // NewProbes returns a Probes initialized to not-yet-ready. Call MarkReady
 // once the proxy listener is accepting connections.
 func NewProbes() *Probes {
 	return &Probes{}
+}
+
+// NewProbesWithReadyCheck returns probes that require readyCheck to pass
+// after MarkReady. This keeps dependencies such as informer caches in the
+// readiness contract even if listener startup is later reordered.
+func NewProbesWithReadyCheck(readyCheck func() bool) *Probes {
+	return &Probes{readyCheck: readyCheck}
 }
 
 // MarkReady advertises the pod as ready.
@@ -52,7 +60,7 @@ func (p *Probes) Healthz(w http.ResponseWriter, _ *http.Request) {
 
 // Readyz returns 200 if ready, 503 otherwise.
 func (p *Probes) Readyz(w http.ResponseWriter, _ *http.Request) {
-	if p.ready.Load() {
+	if p.ready.Load() && (p.readyCheck == nil || p.readyCheck()) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 		return

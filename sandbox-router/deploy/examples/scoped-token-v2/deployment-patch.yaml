@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-router
+  namespace: agent-sandbox-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: sandbox-router
+        args:
+        - --http-bind-address=:8080
+        - --metrics-bind-address=:9090
+        - --health-probe-bind-address=:8081
+        - --cluster-domain=cluster.local
+        - --proxy-timeout=180s
+        - --upstream-max-retries=3
+        - --cache-enabled=true
+        - --authz-mode=scoped-token
+        - --authz-scoped-token-verification-keys-file=/var/run/secrets/sandbox-router/scoped-token/verification-keys.json
+        volumeMounts:
+        - name: scoped-token-verification-keys
+          mountPath: /var/run/secrets/sandbox-router/scoped-token
+          readOnly: true
+      volumes:
+      # Use a new immutable name for every reader-first key rotation. The
+      # Pod-template change triggers the restart required to load new keys.
+      - name: scoped-token-verification-keys
+        configMap:
+          name: sandbox-router-scoped-token-keys-v1
+          items:
+          - key: verification-keys.json
+            path: verification-keys.json

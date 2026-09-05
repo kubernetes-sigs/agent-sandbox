@@ -14,19 +14,15 @@
 """Validation for safely adopting an existing SandboxClaim."""
 
 import re
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
 
 from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CREATED_BY_LABEL,
-    TERMINAL_CLAIM_READY_REASONS,
 )
-from .exceptions import (
-    SandboxClaimFailedError,
-    SandboxTemplateNotFoundError,
-    SandboxWarmPoolNotFoundError,
-)
+from .claim_status import get_claim_sandbox_name
 from .utils import construct_sandbox_claim_env_spec
 
 
@@ -45,9 +41,10 @@ _DNS1123_SUBDOMAIN_RE = re.compile(
 _DNS1123_SUBDOMAIN_MAX_LENGTH = 253
 
 
-@dataclass(frozen=True)
-class ValidatedClaimIdentity:
+class ValidatedClaimIdentity(BaseModel):
     """Stable identity needed to continue watching a validated Claim."""
+
+    model_config = ConfigDict(frozen=True)
 
     resource_version: str
     uid: str
@@ -108,7 +105,7 @@ def validate_claim_name(name: str) -> None:
 
 def _reject(claim_name: str, field: str) -> None:
     raise ValueError(
-        f"SandboxClaim '{claim_name}' has a different {field}; refusing to adopt."
+        f"SandboxClaim '{claim_name}' has a different {field}; refusing to use it."
     )
 
 
@@ -125,48 +122,12 @@ def _serialized_env(env: dict[str, str] | None) -> list[dict]:
 
 def get_ready_sandbox_name(claim: dict, claim_name: str) -> str | None:
     """Returns the Sandbox already observed as Ready on an adopted Claim."""
-    metadata = claim.get("metadata") or {}
-    generation = metadata.get("generation")
-    status = claim.get("status") or {}
-    if not isinstance(status, dict):
-        return None
-
-    ready = False
-    for condition in status.get("conditions") or []:
-        if not isinstance(condition, dict):
-            continue
-        if condition.get("observedGeneration") != generation:
-            continue
-        reason = condition.get("reason")
-        ready_is_false = (
-            condition.get("type") == "Ready"
-            and condition.get("status") == "False"
-        )
-        if ready_is_false and reason == "TemplateNotFound":
-            raise SandboxTemplateNotFoundError(
-                "SandboxTemplate requested does not exist: "
-                f"{condition.get('message', 'Template not found')}"
-            )
-        if reason == "WarmPoolNotFound":
-            raise SandboxWarmPoolNotFoundError(
-                "SandboxWarmPool requested does not exist: "
-                f"{condition.get('message', 'WarmPool not found')}"
-            )
-        if ready_is_false and reason in TERMINAL_CLAIM_READY_REASONS:
-            raise SandboxClaimFailedError(
-                f"SandboxClaim '{claim_name}' failed with terminal reason "
-                f"{reason}: {condition.get('message', '')}"
-            )
-        if condition.get("type") == "Ready" and condition.get("status") == "True":
-            ready = True
-
-    sandbox_status = status.get("sandbox") or {}
-    if not isinstance(sandbox_status, dict):
-        return None
-    sandbox_name = sandbox_status.get("name") or sandbox_status.get("Name")
-    if ready and isinstance(sandbox_name, str) and sandbox_name:
-        return sandbox_name
-    return None
+    return get_claim_sandbox_name(
+        claim,
+        claim_name,
+        require_ready=True,
+        require_current_generation=True,
+    )
 
 
 def validate_claim_for_adoption(
@@ -220,8 +181,9 @@ def validate_claim_for_adoption(
     unsupported_fields = sorted(set(spec) - _SUPPORTED_SPEC_FIELDS)
     if unsupported_fields:
         raise ValueError(
-            f"SandboxClaim '{claim_name}' has unsupported spec fields; "
-            "refusing to adopt."
+            f"SandboxClaim '{claim_name}' has unsupported spec fields: "
+            f"{', '.join(unsupported_fields)}; "
+            "refusing to use it."
         )
     if spec.get("warmPoolRef") != {"name": warmpool}:
         _reject(claim_name, "spec.warmPoolRef")

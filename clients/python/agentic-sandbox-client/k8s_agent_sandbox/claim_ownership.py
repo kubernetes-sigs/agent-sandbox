@@ -13,14 +13,13 @@
 # limitations under the License.
 """Ownership bookkeeping for deterministic SandboxClaim operations."""
 
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 
 ClaimKey = tuple[str, str]
 
 
-@dataclass
-class ExplicitClaimOperations:
+class ExplicitClaimOperations(BaseModel):
     active: int
     caller_owned_before: bool
     automatic_cleanup_before: bool
@@ -30,11 +29,15 @@ class ExplicitClaimOperations:
     invalidated: bool = False
 
 
-@dataclass(eq=False)
-class ClaimLookupOperation:
+class ClaimLookupOperation(BaseModel):
     """Identity token invalidated when deliberate deletion wins a race."""
 
     invalidated: bool = False
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    __hash__ = object.__hash__
 
 
 class ClaimOwnership:
@@ -100,7 +103,6 @@ class ClaimOwnership:
         """Finish an explicit operation and report deferred deletion work."""
         state = self._explicit_operations.get(key)
         if state is not operation and operation.invalidated:
-            operation.active -= 1
             return False, None
         if state is not operation:
             raise RuntimeError("Explicit Claim ownership operation changed unexpectedly.")
@@ -119,6 +121,7 @@ class ClaimOwnership:
 
         should_delete = (
             state.generated_cleanup_pending
+            and state.generated_cleanup_uid is not None
             and key not in self.caller_owned_claims
             and not has_registered_handle
         )
@@ -138,7 +141,7 @@ class ClaimOwnership:
         claim_uid: str | None,
     ) -> bool:
         """Return whether a failed generated Claim can be deleted immediately."""
-        if has_registered_handle:
+        if has_registered_handle or claim_uid is None:
             return False
         state = self._explicit_operations.get(key)
         if state is not None:
@@ -205,3 +208,5 @@ class ClaimOwnership:
         elif state.caller_owned_before:
             self.automatic_cleanup_claims.discard(key)
             self.automatic_cleanup_claim_uids.pop(key, None)
+        # If neither owner existed before, preserve an automatic registration
+        # made by a generated operation while this explicit operation ran.

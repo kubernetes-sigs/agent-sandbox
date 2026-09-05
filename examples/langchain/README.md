@@ -64,14 +64,14 @@ export HF_TOKEN='your_huggingface_token_here'
 
 Get a token from [HuggingFace](https://huggingface.co/settings/tokens).
 
-### 3. Clone the repository and navigate to the examples, coding-agent directory
+### 3. Clone the repository and navigate to the examples/langchain directory
 
 ```bash
 # Clone the repository
 git clone https://github.com/kubernetes-sigs/agent-sandbox.git
 
-# Navigate to the examples/coding-agent directory
-cd examples/coding-agent
+# Navigate to the examples/langchain directory
+cd agent-sandbox/examples/langchain
 ```
 
 ### 4. Set your huggingface token (Optional)

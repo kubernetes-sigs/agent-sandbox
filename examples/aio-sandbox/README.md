@@ -19,8 +19,8 @@ Verify sandbox and pod are running:
 kubectl wait --for=condition=Ready sandbox aio-sandbox-example
 
 kubectl get sandbox
-# NAME                  AGE
-# aio-sandbox-example   41s
+# NAME                  READY   REASON              AGE
+# aio-sandbox-example   True    DependenciesReady   41s
 kubectl get pod aio-sandbox-example
 # NAME                  READY   STATUS    RESTARTS   AGE
 # aio-sandbox-example   1/1     Running   0          49s

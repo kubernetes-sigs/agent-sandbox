@@ -138,8 +138,8 @@ func AccessLogMiddleware(base logr.Logger, skip func(*http.Request) bool) func(h
 }
 
 // SkipHealthAndMetrics is a convenience skip function for the access log
-// middleware. The router's /healthz on the proxy port is hit by the Gateway
-// HealthCheckPolicy on every cycle; logging that flood would drown signal.
+// middleware. The router's /healthz on the proxy port is hit by the Gateway's
+// health checks on every cycle; logging that flood would drown signal.
 func SkipHealthAndMetrics(r *http.Request) bool {
 	switch r.URL.Path {
 	case "/healthz", "/readyz", "/metrics":

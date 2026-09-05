@@ -1,0 +1,11 @@
+# The primer session: the one sandbox whose state becomes the golden image.
+# No spec.env — env injection would force a cold start with a different pod
+# spec and take the primer (and its snapshot) out of the shared match group.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: podsnap-primer
+  namespace: default
+spec:
+  warmPoolRef:
+    name: podsnap-golden-pool

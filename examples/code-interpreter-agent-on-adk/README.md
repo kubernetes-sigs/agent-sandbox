@@ -4,9 +4,9 @@ The guide walks you through the process of creating a simple [ADK](https://googl
 
 ## Installation
 
-1. Install the Agent-Sandbox controller and CRDs to a cluster. You can follow the instructions from the [installation section from the Getting Started page](/README.md/#installation).
+1. Install the Agent-Sandbox controller and CRDs to a cluster. You can follow the instructions from the [installation section from the Getting Started page](../../README.md#installation).
 
-2. Install the Agent Sandbox [router](/clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router)
+2. Install the Agent Sandbox [router](../../clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router)
 
 3. Create a Python virtual environment:
    ```sh

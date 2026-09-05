@@ -326,7 +326,6 @@ func stringSliceVar(fs *flag.FlagSet, dst *[]string, name, usage string) {
 // surface syntax.
 type csvFlag struct {
 	dst *[]string
-	set bool
 }
 
 func (c *csvFlag) String() string {
@@ -337,7 +336,6 @@ func (c *csvFlag) String() string {
 }
 
 func (c *csvFlag) Set(v string) error {
-	c.set = true
 	if v == "" {
 		*c.dst = nil
 		return nil

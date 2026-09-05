@@ -206,11 +206,13 @@ hubble observe -n sandbox-demo --from-label demo.identity=team-b --verdict DROPP
 ## Optional: gateway routing (full ingress + egress path)
 
 The core demo proves egress via `kubectl exec`. To also exercise agent-sandbox's
-**ingress "gateway routing"** — an external client → **GKE Gateway** → **sandbox-router**
+**ingress "gateway routing"** — an external client → **Gateway** → **sandbox-router**
 → **sandbox** `/execute` → `git clone` — run the add-on. It builds two images with
 **Cloud Build** (no local docker needed), enables the GKE Gateway API, swaps the
 sandboxes to an HTTP exec-server image (same identities/policies), and deploys the
-router + Gateway.
+router + Gateway. (This script uses GKE's built-in Gateway API controller; on other
+clusters, you would use Istio or another Gateway API implementation — see the
+comments in `manifests/router/gateway.yaml`.)
 
 > ⚠️ **DEMO ONLY — do not run on a long-lived or shared cluster.** This add-on
 > fronts the sandbox-router with a **public** external L7 Gateway, so the sandbox

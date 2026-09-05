@@ -147,7 +147,7 @@ Apply the template:
 kubectl apply -f template-sandbox-binding.yaml
 ```
 
-This creates a new CRD called `K8sPreventSandboxServiceAccountBinding` that Gatekeeper will recognize. You can verify it by running the following:
+This creates a new CRD called `K8sPreventActiveServiceAccountBinding` that Gatekeeper will recognize. You can verify it by running the following:
 
 ```bash
 kubectl get crd k8spreventactiveserviceaccountbinding
@@ -295,7 +295,7 @@ The order in which you apply the gatekeeper yaml files (`Config` -> `ConstraintT
 kubectl delete config config -n gatekeeper-system
 
 # delete constrainttemplate
-kubectl delete constrainttemplate k8spreventsandboxserviceaccountbinding
+kubectl delete constrainttemplate k8spreventactiveserviceaccountbinding
 
 # delete the gatekeeper-controller-manager pod so that it restarts
 kubectl delete pod gatekeeper-controller-manager-xxxx-xxxx -n gatekeeper-system	
@@ -308,10 +308,10 @@ Wait for the gatekeeper-controller-manager pod to be up and running and then app
 
 ```bash
 # delete the constraint
-kubectl delete K8sPreventSandboxServiceAccountBinding prevent-sandbox-sa-binding
+kubectl delete K8sPreventActiveServiceAccountBinding prevent-active-sa-binding
 
 # delete constrainttemplate
-kubectl delete constrainttemplate k8spreventsandboxserviceaccountbinding
+kubectl delete constrainttemplate k8spreventactiveserviceaccountbinding
 
 # delete config
 kubectl delete config config -n gatekeeper-system

@@ -1,51 +1,71 @@
 version: 2
 updates:
-# TODO: tools.mod in the root directory is NOT tracked by Dependabot because 
-# Dependabot only supports files named exactly 'go.mod'. 
+# TODO: tools.mod in the root directory is NOT tracked by Dependabot because
+# Dependabot only supports files named exactly 'go.mod'.
 # Maintainers will need to manually update tools.mod when shared dependencies change.
 # See discussion in PR #629 and #588 for context.
+#
+# Every entry sets the ok-to-test label: Dependabot is not a Kubernetes
+# org member, so Prow holds all presubmits (including the autogen check)
+# until the label is present. Applying it from config lets the full test
+# suite run on Dependabot PRs without a member commenting /ok-to-test.
+# Note that setting labels replaces Dependabot's defaults, so
+# "dependencies" is listed explicitly to keep it.
+# Cover every Go module in the repo: "/" is the root module, and the
+# globstar pattern matches every subdirectory containing a go.mod, so
+# new Go modules are picked up automatically.
 - package-ecosystem: "gomod"
-  directory: "/"
+  directories:
+  - "/"
+  - "**/*"
   schedule:
-    interval: "weekly"
+    interval: "daily"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
+    # Kubernetes minor bumps (e.g. k8s.io/* 0.36 -> 0.37) track a new
+    # Kubernetes release and can carry API changes, so keep them out of
+    # the routine update group. Combined with the ignore rules below,
+    # only k8s patch releases are raised automatically; minor upgrades
+    # are done by hand as a coordinated migration.
+    kubernetes-dependencies:
+      patterns:
+      - "k8s.io/*"
+      - "sigs.k8s.io/*"
     gomod-dependencies:
       patterns:
       - "*"
-
-- package-ecosystem: "gomod"
-  directory: "/dev/tools"
-  schedule:
-    interval: "weekly"
-  groups:
-    gomod-dependencies:
-      patterns:
-      - "*"
-
-- package-ecosystem: "gomod"
-  directory: "/examples/chrome-sandbox"
-  schedule:
-    interval: "weekly"
-  groups:
-    gomod-dependencies:
-      patterns:
-      - "*"
-
-- package-ecosystem: "gomod"
-  directory: "/site"
-  schedule:
-    interval: "weekly"
-  groups:
-    gomod-dependencies:
-      patterns:
-      - "*"
+      exclude-patterns:
+      - "k8s.io/*"
+      - "sigs.k8s.io/*"
+  ignore:
+  - dependency-name: "k8s.io/*"
+    update-types: ["version-update:semver-major", "version-update:semver-minor"]
+  - dependency-name: "sigs.k8s.io/*"
+    update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
 - package-ecosystem: "pip"
   directory: "/clients/python/agentic-sandbox-client"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     python-dependencies:
+      patterns:
+      - "*"
+
+- package-ecosystem: "npm"
+  directory: "/site"
+  schedule:
+    interval: "daily"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
+  groups:
+    npm-dependencies:
       patterns:
       - "*"
 
@@ -53,6 +73,9 @@ updates:
   directory: "/"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     docker-dependencies:
       patterns:
@@ -62,6 +85,9 @@ updates:
   directory: "/clients/python/agentic-sandbox-client/sandbox-router"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     docker-dependencies:
       patterns:
@@ -71,6 +97,9 @@ updates:
   directory: "/examples/chrome-sandbox"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     docker-dependencies:
       patterns:
@@ -80,6 +109,9 @@ updates:
   directory: "/examples/gemini-cu-sandbox"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     docker-dependencies:
       patterns:
@@ -89,6 +121,9 @@ updates:
   directory: "/examples/hello-world-sandbox"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     docker-dependencies:
       patterns:
@@ -98,6 +133,9 @@ updates:
   directory: "/examples/python-runtime-sandbox"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     docker-dependencies:
       patterns:
@@ -107,6 +145,9 @@ updates:
   directory: "/"
   schedule:
     interval: "weekly"
+  labels:
+  - "dependencies"
+  - "ok-to-test"
   groups:
     github-actions:
       patterns:

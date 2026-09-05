@@ -1,13 +1,19 @@
-# GKE Gateway API ingress in front of the sandbox-router (the agent-sandbox
+# Gateway API ingress in front of the sandbox-router (the agent-sandbox
 # "gateway routing" path). Adapted from the repo's sandbox-router/gateway.yaml,
 # pinned to the demo namespace.
+#
+# The gatewayClassName below is GKE-specific because this demo runs on GKE
+# Standard with self-managed Cilium. On other clusters, swap it:
+#   Istio:   istio
+#   KinD:    cloud-provider-kind
+#   Envoy:   eg
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: external-http-gateway
   namespace: sandbox-demo
 spec:
-  gatewayClassName: gke-l7-global-external-managed # GKE-specific managed L7 LB
+  gatewayClassName: gke-l7-global-external-managed # GKE-specific; see comment above
   listeners:
     - name: http
       protocol: HTTP
@@ -16,6 +22,7 @@ spec:
         namespaces:
           from: Same
 ---
+# The HTTPRoute is identical across all Gateway API implementations.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -33,6 +40,8 @@ spec:
         - name: sandbox-router-svc
           port: 8080
 ---
+# GKE-specific: tells the GKE Gateway to use /healthz for backend health checks.
+# Skip this resource on non-GKE clusters.
 apiVersion: networking.gke.io/v1
 kind: HealthCheckPolicy
 metadata:

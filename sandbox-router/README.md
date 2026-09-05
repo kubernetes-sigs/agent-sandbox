@@ -61,7 +61,7 @@ The router validates the routing headers before constructing the upstream URL, m
 
 ### Endpoints
 
-- `GET /healthz` → `200 OK` with `{"status":"ok"}` (matches the Python contract; used by Gateway HealthCheckPolicy)
+- `GET /healthz` → `200 OK` with `{"status":"ok"}` (matches the Python contract; used by Gateway health checks, e.g. GKE HealthCheckPolicy)
 - Anything else → reverse-proxied to the resolved sandbox
 
 ### Error responses
@@ -175,7 +175,7 @@ type Authorizer interface {
 }
 ```
 
-Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (TLS client cert via `authz.IdentityFromTLS`, Bearer token via `authz.BearerTokenFromRequest`, custom header) directly off the request.
+Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (Bearer token via `authz.BearerTokenFromRequest`, TLS client cert, custom header) directly off the request.
 
 The `sandbox_router_authz_decisions_total{decision="allow|deny",sandbox_namespace="…"}` counter records every verdict so deployments can see whether `AllowAll` is actually allowing the traffic shape they expect.
 
@@ -374,7 +374,7 @@ The router today is a small, focused reverse proxy with a header-driven routing 
 - **Envoy as the edge** (TLS, mTLS, rate limit, circuit breaker, observability, JWT).
 - **This router as a backend** behind Envoy, owning only the sandbox-specific routing logic (header parsing → DNS construction → per-sandbox authz when that lands).
 
-The Python router's architecture already has this shape — a `Gateway` in front of the router. That `Gateway` can be Envoy, and you avoid rebuilding generic L7 concerns in Go.
+The Python router's architecture already has this shape — a Kubernetes Gateway API `Gateway` in front of the router. That Gateway can be backed by Istio, Envoy, a cloud-managed LB (GKE, ALB, etc.), or any conformant Gateway API controller — and you avoid rebuilding generic L7 concerns in Go.
 
 If you stay all-Go, the access log, OTel signals, hot-reloading certs, and retry/backoff give you the operational basics; the gaps (rate limit, circuit breaker, etc.) are tracked as future work.
 

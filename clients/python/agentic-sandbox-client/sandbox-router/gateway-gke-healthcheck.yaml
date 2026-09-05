@@ -1,0 +1,19 @@
+# GKE-specific: HealthCheckPolicy tells the GKE Gateway to use the router app
+# "/healthz" endpoint for its health checks instead of the default "/".
+# Apply this only on GKE clusters — most other Gateway implementations use
+# the HTTPRoute backend's readiness probe or their own health check defaults.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: router-health-check-policy
+  namespace: default
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: sandbox-router-svc
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /healthz

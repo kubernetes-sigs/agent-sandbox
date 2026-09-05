@@ -14,6 +14,10 @@
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -27,7 +31,7 @@ pytest.importorskip("kubernetes_asyncio")
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
-from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
+from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient, _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -261,26 +265,28 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             mock_atexit.register.assert_not_called()
 
     def test_atexit_cleanup_deletes_tracked_claims(self):
-        """_atexit_cleanup should open a fresh AsyncK8sHelper and delete all tracked claims."""
+        """_atexit_cleanup should open a fresh K8sHelper and delete all tracked claims."""
         self.client._active_connection_sandboxes = {
             ("default", "claim-abc"): MagicMock(),
             ("other-ns", "claim-xyz"): MagicMock(),
         }
         mock_helper_instance = MagicMock()
-        mock_helper_instance.delete_sandbox_claim = AsyncMock()
-        mock_helper_instance.close = AsyncMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
 
-        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
             self.client._atexit_cleanup()
 
-        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-abc", "default")
-        mock_helper_instance.delete_sandbox_claim.assert_any_call("claim-xyz", "other-ns")
-        mock_helper_instance.close.assert_called_once()
+        mock_helper_instance.delete_sandbox_claim.assert_any_call(
+            "claim-abc", "default", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+        )
+        mock_helper_instance.delete_sandbox_claim.assert_any_call(
+            "claim-xyz", "other-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+        )
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
         self.client._active_connection_sandboxes = {}
-        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper") as MockHelper:
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
             self.client._atexit_cleanup()
             MockHelper.assert_not_called()
 
@@ -289,15 +295,41 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         A warning is printed to stderr so the user knows a sandbox was orphaned."""
         self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
         mock_helper_instance = MagicMock()
-        mock_helper_instance.delete_sandbox_claim = AsyncMock(side_effect=Exception("network error"))
-        mock_helper_instance.close = AsyncMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock(side_effect=Exception("network error"))
 
-        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper", return_value=mock_helper_instance):
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
             with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
                 # Should not raise
                 self.client._atexit_cleanup()
                 # Should have printed a warning
                 mock_stderr.write.assert_called()
+
+    def test_atexit_cleanup_suppresses_helper_construction_errors(self):
+        """A failure constructing K8sHelper itself (e.g. no reachable kubeconfig)
+        must not escape _atexit_cleanup either — cleanup is best-effort."""
+        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", side_effect=Exception("no kubeconfig")):
+            with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
+                # Should not raise
+                self.client._atexit_cleanup()
+                # Should have printed a warning
+                mock_stderr.write.assert_called()
+
+    def test_atexit_cleanup_suppresses_claim_snapshot_errors(self):
+        """A failure snapshotting _active_connection_sandboxes itself (e.g. a
+        concurrent mutation raising "dictionary changed size during
+        iteration") must not escape _atexit_cleanup either — cleanup is
+        best-effort."""
+        mock_sandboxes = MagicMock()
+        mock_sandboxes.keys.side_effect = RuntimeError("dictionary changed size during iteration")
+        self.client._active_connection_sandboxes = mock_sandboxes
+
+        with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
+            # Should not raise
+            self.client._atexit_cleanup()
+            # Should have printed a warning
+            mock_stderr.write.assert_called()
 
     async def test_validate_labels_rejects_invalid_value(self):
         with self.assertRaises(ValueError):
@@ -847,21 +879,33 @@ class AsyncSandboxHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _start_stub_server(handler_cls):
+    """Starts handler_cls on a local HTTPServer on a daemon thread.
+
+    Returns (server, thread, port); pass to _stop_stub_server in tearDownClass.
+    """
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    port = server.server_address[1]
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, port
+
+
+def _stop_stub_server(server, thread):
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
 class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.server = HTTPServer(("127.0.0.1", 0), AsyncSandboxHandler)
-        cls.port = cls.server.server_address[1]
-        cls.server_thread = Thread(target=cls.server.serve_forever)
-        cls.server_thread.daemon = True
-        cls.server_thread.start()
+        cls.server, cls.server_thread, cls.port = _start_stub_server(AsyncSandboxHandler)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.server_thread.join(timeout=5)
+        _stop_stub_server(cls.server, cls.server_thread)
 
     def _make_connector(self) -> AsyncSandboxConnector:
         config = SandboxDirectConnectionConfig(
@@ -1211,6 +1255,109 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
                             "HTTPStatusError should clear gateway base_url cache")
         finally:
             await connector.close()
+
+
+class SandboxClaimDeleteHandler(BaseHTTPRequestHandler):
+    """Stub K8s apiserver; only handles the DELETE call atexit cleanup makes."""
+
+    received_deletes = []
+
+    def do_DELETE(self):
+        self.__class__.received_deletes.append(self.path)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        payload = b"{}"
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass  # silence BaseHTTPRequestHandler's default per-request access-log line
+
+
+class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
+    """Regression test for a bug where AsyncSandboxClient's atexit cleanup only failed at real interpreter shutdown: 
+    kubernetes_asyncio's aiohttp transport dispatches a per-request netrc lookup via a background thread, which fails
+    once Python's own thread-pool teardown has begun. No in-process test can reproduce that condition because the 
+    interpreter never actually exits mid-suite, so this spawns a real subprocess and lets it exit for real."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.server_thread, cls.port = _start_stub_server(SandboxClaimDeleteHandler)
+
+    @classmethod
+    def tearDownClass(cls):
+        _stop_stub_server(cls.server, cls.server_thread)
+
+    def setUp(self):
+        SandboxClaimDeleteHandler.received_deletes = []
+
+    def _write_fake_kubeconfig(self) -> str:
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(f"""\
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: http://127.0.0.1:{self.port}
+  name: test-cluster
+contexts:
+- context:
+    cluster: test-cluster
+    user: test-user
+  name: test-context
+current-context: test-context
+users:
+- name: test-user
+  user: {{}}
+""")
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_atexit_cleanup_deletes_claim_on_real_process_exit(self):
+        kubeconfig_path = self._write_fake_kubeconfig()
+        script = """
+import asyncio
+from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
+from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
+
+async def main():
+    client = AsyncSandboxClient(
+        connection_config=SandboxDirectConnectionConfig(api_url="http://unused:8080"),
+        cleanup=True,
+    )
+    client._active_connection_sandboxes[("default", "claim-abc")] = object()
+
+asyncio.run(main())
+# No explicit close()/delete_all() — relying entirely on the atexit hook.
+"""
+        # K8sHelper.__init__ tries load_incluster_config() before falling
+        # back to KUBECONFIG. If the parent process happens to be running
+        # inside a real pod (e.g. in CI), KUBERNETES_SERVICE_HOST/PORT are
+        # already set and inherited via os.environ, which would make the
+        # subprocess skip KUBECONFIG entirely and talk to the real in-cluster
+        # apiserver instead of this stub. Strip them so it deterministically
+        # falls through to the fake kubeconfig.
+        env = dict(os.environ)
+        for k in ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT", "KUBERNETES_PORT"):
+            env.pop(k, None)
+        env["KUBECONFIG"] = kubeconfig_path
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr, result.stderr)
+        self.assertEqual(
+            SandboxClaimDeleteHandler.received_deletes,
+            ["/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/default/sandboxclaims/claim-abc"],
+        )
 
 
 if __name__ == "__main__":

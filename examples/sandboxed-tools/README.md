@@ -53,11 +53,12 @@ The LLM has access to a powerful suite of tools configured in the registry (`pkg
 ## Fake LLM for Testing
 
 Setting `OPENAI_MODEL=fake-eliza` selects a built-in fake LLM instead of a real API, so the
-agent plumbing can be exercised without an API key or network access. The fake answers every
-message with a question reflecting the user's words back (`"What is the capital of France?"`
+agent plumbing can be exercised without an LLM API key or LLM endpoint access. The fake answers
+every message with a question reflecting the user's words back (`"What is the capital of France?"`
 => `"What do you think it means when you say 'What is the capital of France?'?"`), and knows
 one trick for testing the tool path end to end: a message of the form `run: <command>`
-makes it request a `run_command` tool call and report the result.
+makes it request a `run_command` tool call and report the result. Note that the `run:` tool
+path still needs Kubernetes connectivity: the command executes in an Agent Sandbox.
 
 ## Running the Example
 
@@ -68,7 +69,7 @@ Make sure your Kubernetes cluster is running and accessible via your active `kub
 export GEMINI_API_KEY="your-api-key-here"
 
 # Run the chat interface, specifying a session name
-go run ./examples/sandboxed-tools/main.go -session myfirstsession
+go run ./examples/sandboxed-tools/cmd/sandboxed-tools-cli -session myfirstsession
 ```
 
 ## Session Persistence, Sandbox Reuse & Inactivity Expiry
@@ -99,30 +100,14 @@ Type your message (or '/exit' or '/quit' to quit):
 
 User> Create a greeting file with 'Hello from Sandbox' under my home directory, then list the files there.
 
-I0530 12:00:00.123456   12345 main.go:918] launching sandbox for tool execution...
-I0530 12:00:05.123456   12345 main.go:933] restoring filesystem to sandbox... sandbox.name="myfirstsession"
-I0530 12:00:05.124000   12345 registry.go:75] llm invoking tool tool.name="write" tool.arguments="{\"content\":\"Hello from Sandbox\",\"path\":\"/home/clawtainer/greeting.txt\"}"
-I0530 12:00:05.125000   12345 write_file.go:67] creating directory in sandbox dir="/home/clawtainer"
-I0530 12:00:05.500000   12345 write_file.go:75] writing file in sandbox path="/home/clawtainer/greeting.txt"
-I0530 12:00:05.501000   12345 registry.go:94] tool result tool.name="write"
-
-I0530 12:00:05.600000   12345 registry.go:75] llm invoking tool tool.name="ls" tool.arguments="{\"path\":\"/home/clawtainer\"}"
-I0530 12:00:05.601000   12345 list_files.go:57] listing files in sandbox path="/home/clawtainer"
-I0530 12:00:05.700000   12345 registry.go:94] tool result tool.name="ls"
-
-I0530 12:00:05.710000   12345 main.go:895] snapshotting filesystem from sandbox... sandbox.name="myfirstsession"
-I0530 12:00:05.800000   12345 main.go:504] saved filesystem state to new backup backup="/home/user/.local/sandboxed-tools/myfirstsession/fs/backup-20260530T120005.tar.gz"
-
 Agent> I have created the file `greeting.txt` inside `/home/clawtainer` containing the message 'Hello from Sandbox'.
 When I listed the files inside `/home/clawtainer`, I found:
 - greeting.txt
 
 User> /exit
 
-I0530 12:05:00.123456   12345 main.go:729] deleting all sandboxes
-
 # (Later, resuming the same session after the sandbox was deleted)
-go run ./examples/sandboxed-tools/main.go -session myfirstsession
+go run ./examples/sandboxed-tools/cmd/sandboxed-tools-cli -session myfirstsession
 
 ================================================================================
 Resumed session "myfirstsession" with 4 messages in history:
@@ -133,14 +118,6 @@ When I listed the files inside `/home/clawtainer`, I found:
 - greeting.txt
 
 User> Read the greeting file.
-
-I0530 12:10:00.123456   12345 main.go:918] launching sandbox for tool execution...
-I0530 12:10:05.123456   12345 main.go:933] restoring filesystem to sandbox... sandbox.name="myfirstsession"
-I0530 12:10:05.124000   12345 main.go:424] restoring filesystem from latest backup backup="/home/user/.local/sandboxed-tools/myfirstsession/fs/backup-20260530T120005.tar.gz"
-I0530 12:10:05.125000   12345 registry.go:75] llm invoking tool tool.name="read" tool.arguments="{\"path\":\"/home/clawtainer/greeting.txt\"}"
-I0530 12:10:05.200000   12345 registry.go:94] tool result tool.name="read"
-I0530 12:10:05.210000   12345 main.go:895] snapshotting filesystem from sandbox... sandbox.name="myfirstsession"
-I0530 12:10:05.300000   12345 main.go:504] saved filesystem state to new backup backup="/home/user/.local/sandboxed-tools/myfirstsession/fs/backup-20260530T121005.tar.gz"
 
 Agent> The content of the greeting file is:
 Hello from Sandbox

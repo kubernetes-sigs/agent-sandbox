@@ -12,23 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// sandboxed-tools demonstrates launching an agent sandbox only for tool execution
-// and stopping it immediately after the tool execution completes.
-package main
+// Package agent implements the agentic loop of the sandboxed-tools example:
+// it sends the conversation to an LLM, and executes the tool calls the LLM
+// requests inside an Agent Sandbox, creating (and re-creating) the sandbox
+// on demand. It is shared by the interactive CLI (cmd/sandboxed-tools-cli)
+// and other front ends.
+package agent
 
 import (
 	"bytes"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"strings"
+	"slices"
 	"sync"
-	"syscall"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -51,55 +50,18 @@ import (
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/tools"
 )
 
-// We keep sandboxes around for 5 minutes after we last used them.
+// SandboxInactivityTimeout is how long we keep sandboxes around after we last used them.
 const SandboxInactivityTimeout = 5 * time.Minute
 
-// defaultToolTimeout bounds how long a single tool invocation may run before
+// DefaultToolTimeout bounds how long a single tool invocation may run before
 // it is cancelled, so a hung command (e.g. "sleep 99999") fails fast instead
 // of blocking the agent loop indefinitely.
-const defaultToolTimeout = 2 * time.Minute
+const DefaultToolTimeout = 2 * time.Minute
 
-func main() {
-	ctx := context.Background()
-
-	// Set up signal handling
-	signalCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	{
-		klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
-		klog.InitFlags(klogFlags)
-
-		// Add some (but not all) klog flags
-		klogFlags.VisitAll(func(f *flag.Flag) {
-			switch f.Name {
-			case "v":
-				flag.Var(f.Value, f.Name, f.Usage)
-			}
-		})
-	}
-
-	var opts RunOptions
-	opts.InitDefaults()
-	flag.StringVar(&opts.SessionName, "session", opts.SessionName, "session name")
-	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
-	flag.StringVar(&opts.Image, "image", opts.Image, "image")
-	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
-	flag.DurationVar(&opts.ToolTimeout, "tool-timeout", opts.ToolTimeout, "Maximum duration a single tool invocation may run before it is cancelled (Go duration syntax, e.g. \"30s\", \"2m\"). <= 0 disables the timeout.")
-	flag.Parse()
-
-	log := klog.FromContext(ctx)
-
-	if err := run(signalCtx, opts); err != nil {
-		if errors.Is(err, context.Canceled) {
-			fmt.Fprintf(os.Stderr, "\n")
-			log.V(1).Info("context cancelled")
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "sandboxed-tools: %v\n", err)
-		os.Exit(1)
-	}
-}
+// systemPrompt seeds every new session.
+const systemPrompt = "You are a helpful AI assistant with access to a sandboxed environment. " +
+	"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
+	"Always explain what you are doing."
 
 // SandboxClient is a simple low-level client for managing Sandbox resources directly.
 type SandboxClient struct {
@@ -114,6 +76,8 @@ type SandboxClient struct {
 	sandboxes map[types.NamespacedName]*Sandbox
 }
 
+// GetRESTConfig loads the kubernetes client configuration, preferring
+// in-cluster configuration and falling back to the local kubeconfig.
 func GetRESTConfig() (*rest.Config, error) {
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -128,7 +92,7 @@ func GetRESTConfig() (*rest.Config, error) {
 	return restConfig, nil
 }
 
-// NewSandboxClient initializes a new SandboxClient using the provided rest.Config or loading from environment.
+// NewSandboxClient initializes a new SandboxClient using the provided rest.Config.
 func NewSandboxClient(restConfig *rest.Config) (*SandboxClient, error) {
 	httpClient, err := rest.HTTPClientFor(restConfig)
 	if err != nil {
@@ -174,8 +138,18 @@ type Session struct {
 	// sandboxID is the ID of the sandbox we use.
 	// Note that the sandbox does not always exist (for example, when idle)
 	sandboxID types.NamespacedName
+
+	// activeSandbox is the sandbox currently provisioned for this session,
+	// or nil when no sandbox is running (e.g. before the first tool call).
+	activeSandbox *Sandbox
 }
 
+// Messages returns a copy of the messages in the session so far.
+func (s *Session) Messages() []llm.Message {
+	return slices.Clone(s.messages)
+}
+
+// AddMessages appends messages to the session, persisting them to the session store.
 func (s *Session) AddMessages(ctx context.Context, messages ...llm.Message) error {
 	if err := s.sessionStore.AppendMessages(ctx, s.Name, messages...); err != nil {
 		return fmt.Errorf("failed to persist messages: %w", err)
@@ -509,7 +483,7 @@ func (s *Sandbox) SnapshotFS(ctx context.Context) error {
 	return nil
 }
 
-// CreateSandbox creates a Sandbox resource.
+// CreateSandbox creates a Sandbox resource for the session.
 func (h *Harness) CreateSandbox(ctx context.Context, session *Session) (*Sandbox, error) {
 	agentsClient := h.sandboxClient.agentsClient
 
@@ -592,7 +566,9 @@ func (c *SandboxClient) DeleteSandbox(ctx context.Context, sb *Sandbox) error {
 		return nil
 	}
 	id := sb.NamespacedName()
-	if err := c.agentsClient.AgentsV1beta1().Sandboxes(id.Namespace).Delete(ctx, id.Name, metav1.DeleteOptions{}); err != nil {
+	// NotFound means the sandbox already expired (ShutdownPolicy Delete),
+	// which is success for our purposes.
+	if err := c.agentsClient.AgentsV1beta1().Sandboxes(id.Namespace).Delete(ctx, id.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete Sandbox: %w", err)
 	}
 	sb.created = false
@@ -624,31 +600,10 @@ func (c *SandboxClient) DeleteAllSandboxes(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// readLine reads a single line from os.Stdin.
-func readLine() ([]byte, error) {
-	var line []byte
-
-	buf := make([]byte, 1)
-	for {
-		_, err := os.Stdin.Read(buf)
-		if err != nil {
-			klog.Infof("failed to read line: %v", err)
-			return nil, fmt.Errorf("failed to read line: %w", err)
-		}
-		if buf[0] == '\n' {
-			return line, nil
-		}
-		if buf[0] != '\r' {
-			line = append(line, buf[0])
-		}
-	}
-}
-
-// RunOptions are the options for the run command.
+// RunOptions are the options for running the agent.
 type RunOptions struct {
-	SessionName string
-	Namespace   string
-	Image       string
+	Namespace string
+	Image     string
 
 	// HomeDir is the home directory inside the sandbox.
 	// This is currently the only path that we persist between execs in the sandbox.
@@ -658,16 +613,12 @@ type RunOptions struct {
 	ModelName string
 
 	// ToolTimeout bounds how long a single tool invocation may run before it
-	// is cancelled. <= 0 disables the timeout. Default: defaultToolTimeout.
+	// is cancelled. <= 0 disables the timeout. Default: DefaultToolTimeout.
 	ToolTimeout time.Duration
 }
 
+// InitDefaults populates the options from environment variables and defaults.
 func (o *RunOptions) InitDefaults() {
-	o.SessionName = os.Getenv("SESSION_NAME")
-	if o.SessionName == "" {
-		o.SessionName = "default"
-	}
-
 	o.Image = os.Getenv("SANDBOX_IMAGE")
 	if o.Image == "" {
 		o.Image = "debian:bookworm-slim"
@@ -692,75 +643,33 @@ func (o *RunOptions) InitDefaults() {
 	}
 	o.ModelName = modelName
 
-	o.ToolTimeout = defaultToolTimeout
+	o.ToolTimeout = DefaultToolTimeout
 }
 
-func run(ctx context.Context, opts RunOptions) error {
-	log := klog.FromContext(ctx)
+// TurnEvents receives progress callbacks while RunTurn processes a user
+// message. Implementations render them to a local console, or stream them
+// to a remote client (e.g. as ACP session/update notifications).
+type TurnEvents interface {
+	// AssistantMessage is called with the assistant's final text reply for
+	// the turn.
+	AssistantMessage(ctx context.Context, text string)
 
-	if opts.HomeDir == "" {
-		return fmt.Errorf("homeDir must not be empty")
-	}
+	// ApproveToolCall reports whether a requested tool call may execute.
+	// Returning false sends a denial to the LLM instead of running the
+	// tool; returning an error aborts the turn (for example, if the
+	// approver has disconnected).
+	ApproveToolCall(ctx context.Context, call llm.ToolCall) (bool, error)
 
-	if opts.SessionName == "" {
-		return fmt.Errorf("sessionName is required")
-	}
+	// ToolCallStarted is called immediately before an approved tool executes.
+	ToolCallStarted(ctx context.Context, call llm.ToolCall)
 
-	if err := sessions.ValidateSessionName(opts.SessionName); err != nil {
-		return fmt.Errorf("invalid sessionName %q: %w", opts.SessionName, err)
-	}
-
-	llmClient, err := llm.NewFromEnv(opts.ModelName)
-	if err != nil {
-		return fmt.Errorf("failed to initialize llm client: %w", err)
-	}
-
-	restConfig, err := GetRESTConfig()
-	if err != nil {
-		return fmt.Errorf("failed to get kubernetes configuration: %w", err)
-	}
-
-	sandboxClient, err := NewSandboxClient(restConfig)
-	if err != nil {
-		return fmt.Errorf("failed to initialize sandbox client: %w", err)
-	}
-
-	defer func() {
-		if err := sandboxClient.DeleteAllSandboxes(context.WithoutCancel(ctx)); err != nil {
-			log.Error(err, "failed to delete all sandboxes")
-		}
-	}()
-
-	toolsRegistry := tools.NewRegistry()
-	toolsRegistry.ToolTimeout = opts.ToolTimeout
-	toolsRegistry.Add(&tools.RunCommand{})
-
-	toolsRegistry.Add(&tools.ListFilesTool{})
-	toolsRegistry.Add(&tools.ReadFileTool{})
-	toolsRegistry.Add(&tools.WriteFileTool{})
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get user home directory: %w", err)
-	}
-	sessionsDir := filepath.Join(homeDir, ".local", "sandboxed-tools")
-	sessionStore := sessions.NewFileStore(sessionsDir)
-
-	harness := Harness{
-		llmClient:     llmClient,
-		sandboxClient: sandboxClient,
-		toolsRegistry: toolsRegistry,
-		opts:          opts,
-	}
-
-	session, err := harness.BuildSession(ctx, sessionStore)
-	if err != nil {
-		return fmt.Errorf("building session: %w", err)
-	}
-
-	return harness.RunSession(ctx, session)
+	// ToolCallFinished is called after a tool executes; err is non-nil if
+	// the tool failed.
+	ToolCallFinished(ctx context.Context, call llm.ToolCall, err error)
 }
 
+// Harness wires the LLM, the tool registry, and the sandbox client together
+// into an agentic loop.
 type Harness struct {
 	// llmClient is the client we use to talk to the llm.
 	llmClient llm.ChatClient
@@ -775,9 +684,27 @@ type Harness struct {
 	opts RunOptions
 }
 
-func (h *Harness) BuildSession(ctx context.Context, sessionStore sessions.Store) (*Session, error) {
+// NewHarness constructs a Harness.
+func NewHarness(llmClient llm.ChatClient, sandboxClient *SandboxClient, toolsRegistry *tools.Registry, opts RunOptions) *Harness {
+	return &Harness{
+		llmClient:     llmClient,
+		sandboxClient: sandboxClient,
+		toolsRegistry: toolsRegistry,
+		opts:          opts,
+	}
+}
+
+// BuildSession creates a Session named sessionName, loading any existing
+// history from the session store.
+func (h *Harness) BuildSession(ctx context.Context, sessionStore sessions.Store, sessionName string) (*Session, error) {
+	// Session names become Kubernetes object names and filesystem path
+	// components, so validate here even though front ends generally do too.
+	if err := sessions.ValidateSessionName(sessionName); err != nil {
+		return nil, fmt.Errorf("invalid session name %q: %w", sessionName, err)
+	}
+
 	session := &Session{
-		Name:         h.opts.SessionName,
+		Name:         sessionName,
 		client:       h.sandboxClient,
 		HomeDir:      h.opts.HomeDir,
 		sessionStore: sessionStore,
@@ -797,187 +724,158 @@ func (h *Harness) BuildSession(ctx context.Context, sessionStore sessions.Store)
 	return session, nil
 }
 
-func (h *Harness) RunSession(ctx context.Context, session *Session) error {
+// EnsureSystemPrompt seeds a new session with the system prompt. It is a
+// no-op for resumed sessions that already have history.
+func (h *Harness) EnsureSystemPrompt(ctx context.Context, session *Session) error {
+	if len(session.messages) > 0 {
+		return nil
+	}
+	prompt := systemPrompt
+	return session.AddMessages(ctx, llm.Message{Role: "system", Content: &prompt})
+}
+
+// RunTurn processes one user message: it calls the LLM, executes (approved)
+// tool calls in the session's sandbox, and repeats until the LLM produces a
+// final text reply, which is delivered via events.AssistantMessage.
+func (h *Harness) RunTurn(ctx context.Context, session *Session, input string, events TurnEvents) error {
 	log := klog.FromContext(ctx)
 
-	var activeSandbox *Sandbox
-
-	if len(session.messages) == 0 {
-		systemPrompt := "You are a helpful AI assistant with access to a sandboxed environment. " +
-			"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
-			"Always explain what you are doing."
-
-		sysMsg := llm.Message{
-			Role:    "system",
-			Content: &systemPrompt,
-		}
-		if err := session.AddMessages(ctx, sysMsg); err != nil {
-			return fmt.Errorf("adding system prompt: %w", err)
-		}
-
-		fmt.Println("================================================================================")
-		fmt.Println("Welcome to the Sandboxed Tools example!")
-		fmt.Printf("Session Name: %s\n", h.opts.SessionName)
-		fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
-		fmt.Println("================================================================================")
-	} else {
-		fmt.Println("================================================================================")
-		fmt.Printf("Resumed session %q with %d messages in history:\n", h.opts.SessionName, len(session.messages))
-		fmt.Println("================================================================================")
-		for _, msg := range session.messages {
-			if msg.Role == "user" {
-				fmt.Printf("User> %s\n", valueOf(msg.Content))
-			} else if msg.Role == "assistant" && msg.Content != nil && *msg.Content != "" {
-				fmt.Printf("Agent> %s\n", *msg.Content)
-			}
-		}
+	userMsg := llm.Message{Role: "user", Content: &input}
+	if err := session.AddMessages(ctx, userMsg); err != nil {
+		return fmt.Errorf("adding user message: %w", err)
 	}
 
-	sandboxID := session.sandboxID
-
+	shouldSnapshot := false
 	for {
-		fmt.Print("\nUser> ")
-		lineBytes, err := readLine()
+		req := llm.ChatCompletionRequest{
+			Model:    h.opts.ModelName,
+			Messages: session.messages,
+			Tools:    h.toolsRegistry.All(),
+		}
+
+		assistantResponse, err := h.llmClient.CreateChatCompletion(ctx, req)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			if errors.Is(err, context.Canceled) {
-				return err
-			}
-			return fmt.Errorf("error reading standard input: %w", err)
+			return fmt.Errorf("failed to call LLM: %w", err)
 		}
 
-		input := strings.TrimSpace(string(lineBytes))
-		if input == "" {
-			continue
-		}
-		if strings.ToLower(input) == "/exit" || strings.ToLower(input) == "/quit" {
-			break
+		if len(assistantResponse.Choices) == 0 {
+			return fmt.Errorf("LLM returned no choices: %v", assistantResponse)
 		}
 
-		userMsg := llm.Message{Role: "user", Content: &input}
-		if err := session.AddMessages(ctx, userMsg); err != nil {
-			return fmt.Errorf("adding user message: %w", err)
+		assistantMessage := assistantResponse.Choices[0].Message
+		if err := session.AddMessages(ctx, assistantMessage); err != nil {
+			return fmt.Errorf("adding assistant message: %w", err)
 		}
 
-		shouldSnapshot := false
-		for {
-			llmTools := h.toolsRegistry.All()
+		log.V(1).Info("got message from LLM", "msg", assistantMessage)
 
-			req := llm.ChatCompletionRequest{
-				Model:    h.opts.ModelName,
-				Messages: session.messages,
-				Tools:    llmTools,
+		// We keep iterating with the LLM as long as there are tool calls to respond to
+		if len(assistantMessage.ToolCalls) == 0 {
+			events.AssistantMessage(ctx, valueOf(assistantMessage.Content))
+
+			// We take a snapshot at these "boundaries", rather than after every tool call
+			if shouldSnapshot && session.activeSandbox != nil {
+				log.Info("snapshotting filesystem from sandbox...", "sandbox.name", session.activeSandbox.SandboxName())
+				if err := session.activeSandbox.SnapshotFS(ctx); err != nil {
+					log.Error(err, "failed to snapshot filesystem")
+				}
 			}
 
-			assistantResponse, err := h.llmClient.CreateChatCompletion(ctx, req)
+			return nil
+		}
+
+		for _, tc := range assistantMessage.ToolCalls {
+			approved, err := events.ApproveToolCall(ctx, tc)
 			if err != nil {
-				return fmt.Errorf("failed to call LLM: %w", err)
+				return fmt.Errorf("requesting tool call approval: %w", err)
 			}
 
-			if len(assistantResponse.Choices) == 0 {
-				return fmt.Errorf("LLM returned no choices: %v", assistantResponse)
-			}
-
-			assistantMessage := assistantResponse.Choices[0].Message
-			if err := session.AddMessages(ctx, assistantMessage); err != nil {
-				return fmt.Errorf("adding assistant message: %w", err)
-			}
-
-			log.V(1).Info("got message from LLM", "msg", assistantMessage)
-
-			// We keep iterating with LLM as long as there are tool calls to respond to
-			if len(assistantMessage.ToolCalls) == 0 {
-				fmt.Printf("\nAgent> %s\n", valueOf(assistantMessage.Content))
-
-				// We take a snapshot at these "boundaries", rather than after every tool call
-				if shouldSnapshot && activeSandbox != nil {
-					log.Info("snapshotting filesystem from sandbox...", "sandbox.name", activeSandbox.SandboxName())
-					if err := activeSandbox.SnapshotFS(ctx); err != nil {
-						log.Error(err, "failed to snapshot filesystem")
-					} else {
-						shouldSnapshot = false
-					}
-				}
-
-				break
-			}
-
-			if activeSandbox != nil {
-				if err := activeSandbox.ExtendLifecycle(ctx, SandboxInactivityTimeout); err != nil {
-					if k8serrors.IsNotFound(err) {
-						log.Info("Active sandbox was deleted or expired, will recreate it", "sandbox.name", sandboxID.Name)
-						activeSandbox = nil
-					} else {
-						return fmt.Errorf("extending sandbox TTL: %w", err)
-					}
-				}
-			}
-
-			if activeSandbox == nil {
-				log.Info("launching sandbox for tool execution...")
-
-				sb, err := h.CreateSandbox(ctx, session)
+			var toolMsg llm.Message
+			if !approved {
+				log.Info("tool call denied by user", "tool", tc.Function.Name)
+				content := fmt.Sprintf("The user denied permission to run tool %q.", tc.Function.Name)
+				toolMsg = llm.Message{Role: "tool", ToolCallID: tc.ID, Content: &content}
+			} else {
+				sandbox, err := h.ensureSandbox(ctx, session)
 				if err != nil {
-					return fmt.Errorf("failed to create sandbox: %w", err)
-				}
-
-				if err := sb.WaitForReady(ctx); err != nil {
-					log.Error(err, "sandbox not ready")
-					_ = h.sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
 					return err
 				}
 
-				log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+				events.ToolCallStarted(ctx, tc)
+				result, err := h.toolsRegistry.Call(ctx, sandbox, tc)
+				events.ToolCallFinished(ctx, tc, err)
 
-				log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
-				if err := sb.RestoreFS(ctx); err != nil {
-					log.Error(err, "failed to restore filesystem; starting with a fresh sandbox instead", "sandbox.name", sb.SandboxName())
-				}
+				// The filesystem may have changed (even on error), so
+				// snapshot at the next boundary to keep the persisted
+				// filesystem state consistent with the session state.
+				shouldSnapshot = true
 
-				activeSandbox = sb
-			}
-
-			for _, tc := range assistantMessage.ToolCalls {
-				result, err := h.toolsRegistry.Call(ctx, activeSandbox, tc)
-
-				var toolMsg llm.Message
 				if err != nil {
-					// We send errors to the LLM, so we want to snapshot the filesystem
-					// so that the filesystem state is consistent with the session state.
-					shouldSnapshot = true
-
 					log.Error(err, "error calling tool", "tool", tc.Function.Name)
 					content := fmt.Sprintf("Error calling tool %q: %v", tc.Function.Name, err)
-					toolMsg = llm.Message{
-						Role:       "tool",
-						ToolCallID: tc.ID,
-						Content:    &content,
-					}
+					toolMsg = llm.Message{Role: "tool", ToolCallID: tc.ID, Content: &content}
 				} else {
-					// The tool succeeded, so snapshot.
-					shouldSnapshot = true
-
 					toolMsg = result
-				}
-
-				if err := session.AddMessages(ctx, toolMsg); err != nil {
-					return fmt.Errorf("adding tool response: %w", err)
 				}
 
 				// The tool call could take a while, so extend the lifecycle.
 				// This might need more careful handling later; what if the command takes 20 minutes to run?
-				if err := activeSandbox.ExtendLifecycle(ctx, SandboxInactivityTimeout); err != nil {
+				if err := sandbox.ExtendLifecycle(ctx, SandboxInactivityTimeout); err != nil {
 					log.Error(err, "extending sandbox lifecycle")
 				}
 			}
 
-			// Here we continue the LLM loop, with the tool responses at the tail of the chat thread.
+			if err := session.AddMessages(ctx, toolMsg); err != nil {
+				return fmt.Errorf("adding tool response: %w", err)
+			}
+		}
+
+		// Here we continue the LLM loop, with the tool responses at the tail of the chat thread.
+	}
+}
+
+// ensureSandbox returns the session's running sandbox, creating it (and
+// restoring its filesystem from the latest snapshot) if it does not exist
+// or was cleaned up due to inactivity.
+func (h *Harness) ensureSandbox(ctx context.Context, session *Session) (*Sandbox, error) {
+	log := klog.FromContext(ctx)
+
+	if sb := session.activeSandbox; sb != nil {
+		if err := sb.ExtendLifecycle(ctx, SandboxInactivityTimeout); err != nil {
+			if k8serrors.IsNotFound(err) {
+				log.Info("Active sandbox was deleted or expired, will recreate it", "sandbox.name", session.sandboxID.Name)
+				session.activeSandbox = nil
+			} else {
+				return nil, fmt.Errorf("extending sandbox TTL: %w", err)
+			}
 		}
 	}
 
-	return nil
+	if session.activeSandbox == nil {
+		log.Info("launching sandbox for tool execution...")
+
+		sb, err := h.CreateSandbox(ctx, session)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create sandbox: %w", err)
+		}
+
+		if err := sb.WaitForReady(ctx); err != nil {
+			log.Error(err, "sandbox not ready")
+			_ = h.sandboxClient.DeleteSandbox(context.WithoutCancel(ctx), sb)
+			return nil, err
+		}
+
+		log.V(1).Info("sandbox ready", "sandbox.name", sb.SandboxName())
+
+		log.Info("restoring filesystem to sandbox...", "sandbox.name", sb.SandboxName())
+		if err := sb.RestoreFS(ctx); err != nil {
+			log.Error(err, "failed to restore filesystem; starting with a fresh sandbox instead", "sandbox.name", sb.SandboxName())
+		}
+
+		session.activeSandbox = sb
+	}
+
+	return session.activeSandbox, nil
 }
 
 // valueOf is a helper that safely gets a value from a pointer,

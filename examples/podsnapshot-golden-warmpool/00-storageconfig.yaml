@@ -1,0 +1,14 @@
+# Where GKE stores the snapshots. The bucket must exist and the pod's
+# Kubernetes ServiceAccount (10-sandboxtemplate.yaml) needs storage.bucketViewer +
+# storage.objectUser on it via Workload Identity — see the README.
+# Substitute ${SNAPSHOT_BUCKET} before applying (envsubst).
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: podsnap-golden-storage
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: ${SNAPSHOT_BUCKET}
+      path: podsnap-golden-warmpool
+      tokenSource: podKSA

@@ -77,7 +77,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning
     containerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.0
-    createdAt: "2026-08-28T22:16:21Z"
+    createdAt: "2026-09-04T04:06:53Z"
     operatorframework.io/suggested-namespace: agent-sandbox-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -287,6 +287,16 @@ spec:
           - update
           - watch
         serviceAccountName: agent-sandbox-controller
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          verbs:
+          - get
+          - list
+          - watch
+        serviceAccountName: sandbox-router
       deployments:
       - label:
           app: agent-sandbox-controller
@@ -326,6 +336,94 @@ spec:
                   name: agent-sandbox-config
                   optional: true
                 name: config-volume
+      - label:
+          app.kubernetes.io/component: sandbox-router
+          app.kubernetes.io/name: sandbox-router
+        name: sandbox-router
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app.kubernetes.io/component: sandbox-router
+              app.kubernetes.io/name: sandbox-router
+          strategy: {}
+          template:
+            metadata:
+              annotations:
+                prometheus.io/path: /metrics
+                prometheus.io/port: "9090"
+                prometheus.io/scrape: "true"
+              labels:
+                app.kubernetes.io/component: sandbox-router
+                app.kubernetes.io/name: sandbox-router
+            spec:
+              containers:
+              - args:
+                - --http-bind-address=:8080
+                - --metrics-bind-address=:9090
+                - --health-probe-bind-address=:8081
+                - --cluster-domain=cluster.local
+                - --proxy-timeout=180s
+                - --upstream-max-retries=3
+                - --cache-enabled=true
+                image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.0
+                imagePullPolicy: IfNotPresent
+                livenessProbe:
+                  failureThreshold: 3
+                  httpGet:
+                    path: /healthz
+                    port: healthz
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                name: sandbox-router
+                ports:
+                - containerPort: 8080
+                  name: proxy
+                  protocol: TCP
+                - containerPort: 9090
+                  name: metrics
+                  protocol: TCP
+                - containerPort: 8081
+                  name: healthz
+                  protocol: TCP
+                readinessProbe:
+                  failureThreshold: 2
+                  httpGet:
+                    path: /readyz
+                    port: healthz
+                  initialDelaySeconds: 1
+                  periodSeconds: 5
+                resources:
+                  limits:
+                    cpu: "2"
+                    memory: 1Gi
+                  requests:
+                    cpu: 250m
+                    memory: 256Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+                  readOnlyRootFilesystem: true
+                  runAsNonRoot: true
+                  seccompProfile:
+                    type: RuntimeDefault
+              serviceAccountName: sandbox-router
+              terminationGracePeriodSeconds: 45
+              topologySpreadConstraints:
+              - labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: sandbox-router
+                maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: ScheduleAnyway
+              - labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: sandbox-router
+                maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
     strategy: deployment
   installModes:
   - supported: false

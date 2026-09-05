@@ -81,4 +81,4 @@ kubectl delete -f openclaw-config.yaml
 kubectl delete secret openclaw-provider-keys --ignore-not-found
 ```
 
-Deleting the Sandbox does not delete the workspace `PersistentVolumeClaim`; remove it explicitly if you no longer need the agent's state.
+Deleting the Sandbox also deletes the workspace `PersistentVolumeClaim` (the PVC is owned by the Sandbox), taking the agent's state with it.

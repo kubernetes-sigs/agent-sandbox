@@ -55,6 +55,9 @@ OPM_VERSION ?= v1.55.0
 # Image URL for the agent-sandbox-controller (built from the repo root Dockerfile).
 IMG ?= registry.k8s.io/agent-sandbox/agent-sandbox-controller:v$(VERSION)
 
+# Image URL for the sandbox-router (built from sandbox-router/Dockerfile).
+ROUTER_IMG ?= registry.k8s.io/agent-sandbox/sandbox-router-go:v$(VERSION)
+
 # Parent repo root (one level above this module); holds the controller Dockerfile and source.
 REPO_ROOT ?= ..
 
@@ -108,14 +111,19 @@ copy-k8s-config: ## Copy ../k8s into config/ (CRDs, RBAC .generated.yaml → rol
 	mkdir -p $(CONFIG_DIR)/crd/bases
 	rm -rf $(CONFIG_DIR)/crd/bases/*
 	cp $(K8S_ROOT)/crds/*.yaml $(CONFIG_DIR)/crd/bases/
-	@{ \
-		echo 'resources:'; \
-		for f in $(CONFIG_DIR)/crd/bases/*.yaml; do echo "- bases/$$(basename "$$f")"; done; \
-	} > $(CONFIG_DIR)/crd/kustomization.yaml
 	cp $(K8S_ROOT)/rbac.generated.yaml $(CONFIG_DIR)/rbac/role.yaml
 	cp $(K8S_ROOT)/extensions-rbac.generated.yaml $(CONFIG_DIR)/rbac/extensions_role.yaml
 	cp $(K8S_ROOT)/extensions.yaml $(CONFIG_DIR)/rbac/extensions_role_binding.yaml
-	go run ./hack/sync-k8s-manifests -controller $(K8S_ROOT)/controller.yaml -extensions $(K8S_ROOT)/extensions.controller.yaml -support-out $(CONFIG_DIR)/rbac/support.yaml -manager-out $(CONFIG_DIR)/manager/manager.yaml
+	mkdir -p $(CONFIG_DIR)/sandbox-router
+	rm -rf $(CONFIG_DIR)/sandbox-router/*
+	cp $(REPO_ROOT)/sandbox-router/deploy/*.yaml $(CONFIG_DIR)/sandbox-router/
+	go run ./hack/sync-k8s-manifests \
+		-controller $(K8S_ROOT)/controller.yaml \
+		-extensions $(K8S_ROOT)/extensions.controller.yaml \
+		-support-out $(CONFIG_DIR)/rbac/support.yaml \
+		-manager-out $(CONFIG_DIR)/manager/manager.yaml \
+		-router-dir $(CONFIG_DIR)/sandbox-router \
+		-crd-dir $(CONFIG_DIR)/crd/bases
 
 .PHONY: manifests
 manifests: copy-k8s-config ## Refresh config/ YAML from $(K8S_ROOT) (same layout as manual copy from k8s/).
@@ -300,6 +308,7 @@ endif
 bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	cd config/default && $(KUSTOMIZE) edit set image registry.k8s.io/agent-sandbox/sandbox-router-go=$(ROUTER_IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	sed -i.bak 's|containerImage: .*|containerImage: $(IMG)|' bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml && rm -f bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml.bak
 	$(OPERATOR_SDK) bundle validate ./bundle

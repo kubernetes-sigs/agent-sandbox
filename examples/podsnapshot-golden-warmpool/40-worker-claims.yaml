@@ -1,0 +1,19 @@
+# Two worker sessions. Each adopts a pre-warmed pool member — which, if a
+# golden snapshot exists, already booted restored from it.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: podsnap-worker-1
+  namespace: default
+spec:
+  warmPoolRef:
+    name: podsnap-golden-pool
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: podsnap-worker-2
+  namespace: default
+spec:
+  warmPoolRef:
+    name: podsnap-golden-pool

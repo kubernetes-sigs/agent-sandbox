@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import os
 import sys
 import unittest
@@ -101,6 +102,39 @@ class InstallNodeDownloadRetryTest(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(urlretrieve.call_count, 1)
         self.sleep.assert_not_called()
+
+    def test_does_not_retry_deterministic_http_error(self):
+        with mock.patch(
+            "node.urllib.request.urlretrieve",
+            side_effect=urllib.error.HTTPError(
+                "https://nodejs.org/dist/bad", 404, "Not Found", {}, io.BytesIO()
+            ),
+        ) as urlretrieve:
+            result = node.install_node("/fake/install/dir")
+
+        self.assertIsNone(result)
+        self.assertEqual(urlretrieve.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_retries_transient_http_error(self):
+        with mock.patch(
+            "node.urllib.request.urlretrieve",
+            side_effect=[
+                urllib.error.HTTPError(
+                    "https://nodejs.org/dist/x", 503, "Service Unavailable", {}, io.BytesIO()
+                ),
+                None,
+            ],
+        ) as urlretrieve, mock.patch(
+            "node._verify_sha256"
+        ), mock.patch(
+            "node.tarfile.open"
+        ):
+            bin_dir = node.install_node("/fake/install/dir")
+
+        self.assertEqual(urlretrieve.call_count, 2)
+        self.sleep.assert_called_once_with(node._DOWNLOAD_RETRY_DELAY_SECONDS)
+        self.assertIsNotNone(bin_dir)
 
 
 if __name__ == "__main__":

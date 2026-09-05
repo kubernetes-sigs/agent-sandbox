@@ -133,13 +133,25 @@ def install_node(install_dir):
     # persistent outage (e.g. a bad version/URL, which fails every attempt).
     # Only network-shaped errors are retried, so a local/permanent failure
     # (e.g. a permission error writing tar_path) still fails on the first
-    # attempt instead of waiting out the retry delay.
+    # attempt instead of waiting out the retry delay. HTTPError is handled
+    # separately since it is a URLError subclass but a deterministic status
+    # like 404 (bad version/URL) will never succeed on retry, unlike a 429 or
+    # 5xx from the CDN.
     last_error = None
     for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
         try:
             urllib.request.urlretrieve(url, tar_path)
             last_error = None
             break
+        except urllib.error.HTTPError as e:
+            last_error = e
+            if e.code == 429 or e.code >= 500:
+                print(f"Failed to download Node.js (attempt {attempt} of {_DOWNLOAD_ATTEMPTS}): {e}")
+                if attempt < _DOWNLOAD_ATTEMPTS:
+                    time.sleep(_DOWNLOAD_RETRY_DELAY_SECONDS)
+            else:
+                print(f"Failed to download Node.js: {e}")
+                break
         except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
             last_error = e
             print(f"Failed to download Node.js (attempt {attempt} of {_DOWNLOAD_ATTEMPTS}): {e}")

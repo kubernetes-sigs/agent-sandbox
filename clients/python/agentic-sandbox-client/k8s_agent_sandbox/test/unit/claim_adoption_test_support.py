@@ -36,36 +36,60 @@ POD_LABELS = {"workflow": "workflow-123"}
 POD_ANNOTATIONS = {"owner": "workflow-123"}
 
 
-def matching_claim(env: dict[str, str] | None = None) -> dict:
-    """Returns a Claim matching every requested immutable field."""
+def claim_for_request(
+    *,
+    claim_name: str = CLAIM_NAME,
+    namespace: str = NAMESPACE,
+    warmpool: str = WARMPOOL,
+    labels: dict[str, str] | None = None,
+    lifecycle: dict | None = None,
+    volume_claim_templates: list[dict] | None = None,
+    pod_metadata: dict | None = None,
+    env: dict[str, str] | None = None,
+    resource_version: str = "created-rv",
+) -> dict:
+    """Returns an apiserver response matching one create request."""
     claim = {
         "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
         "kind": "SandboxClaim",
         "metadata": {
-            "name": CLAIM_NAME,
-            "namespace": NAMESPACE,
-            "resourceVersion": "existing-rv",
+            "name": claim_name,
+            "namespace": namespace,
+            "resourceVersion": resource_version,
             "uid": "claim-uid",
             "generation": 1,
             "labels": {
-                **REQUESTED_LABELS,
+                **(labels or {}),
                 CREATED_BY_LABEL: "python-client",
-                "controller-added": "allowed",
             },
         },
-        "spec": {
-            "warmPoolRef": {"name": WARMPOOL},
-            "volumeClaimTemplates": VOLUME_CLAIM_TEMPLATES,
-            "additionalPodMetadata": {
-                "labels": POD_LABELS,
-                "annotations": POD_ANNOTATIONS,
-            },
-        },
+        "spec": {"warmPoolRef": {"name": warmpool}},
     }
+    optional_fields = {
+        "lifecycle": lifecycle,
+        "volumeClaimTemplates": volume_claim_templates,
+        "additionalPodMetadata": pod_metadata,
+    }
+    claim["spec"].update(
+        {field: value for field, value in optional_fields.items() if value}
+    )
     if env:
         claim["spec"]["env"] = [
             {"name": name, "value": value} for name, value in env.items()
         ]
+    return claim
+
+
+def matching_claim(env: dict[str, str] | None = None) -> dict:
+    """Returns a Claim matching every requested immutable field."""
+    claim = claim_for_request(
+        labels=REQUESTED_LABELS,
+        volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+        pod_metadata={"labels": POD_LABELS, "annotations": POD_ANNOTATIONS},
+        env=env,
+        resource_version="existing-rv",
+    )
+    claim["metadata"]["labels"]["controller-added"] = "allowed"
     return claim
 
 

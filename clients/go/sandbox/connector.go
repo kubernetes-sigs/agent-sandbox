@@ -178,6 +178,8 @@ func (c *connector) Connect(ctx context.Context) error {
 		mode = "port-forward"
 	case *podTunnelStrategy:
 		mode = "sandboxd-pod-tunnel"
+	case *inClusterStrategy:
+		mode = "sandboxd-in-cluster"
 	}
 	c.log.Info("API URL discovered", "url", url, "mode", mode)
 	return nil
@@ -198,8 +200,10 @@ func (c *connector) SetGRPCTarget(target string) {
 }
 
 // GRPCConn returns a (lazily dialed) client connection to sandboxd's
-// ProcessService. The connection is plaintext: it only ever traverses the
-// port-forward tunnel to the pod's loopback listener.
+// ProcessService. The connection is plaintext, and what protects it depends on
+// the strategy that published the target: podTunnelStrategy only ever traverses
+// the port-forward tunnel to the pod's loopback listener. While inClusterStrategy
+// sends it across the pod network, where NetworkPolicy (or a mesh) confines it.
 func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

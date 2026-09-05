@@ -25,6 +25,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type Commands](<#Commands>)
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
+- [type Connectivity](<#Connectivity>)
 - [type DirectStrategy](<#DirectStrategy>)
   - [func \(s \*DirectStrategy\) Close\(\) error](<#DirectStrategy.Close>)
   - [func \(s \*DirectStrategy\) Connect\(\_ context.Context\) \(string, error\)](<#DirectStrategy.Connect>)
@@ -282,6 +283,32 @@ type ConnectionStrategy interface {
     Connect(ctx context.Context) (baseURL string, err error)
     Close() error
 }
+```
+
+<a name="Connectivity"></a>
+### type [Connectivity](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go>)
+
+Connectivity selects the transport used to reach the in\-sandbox runtime.
+
+```go
+type Connectivity string
+```
+
+<a name="ConnectivityPortForward"></a>
+
+```go
+const (
+    // RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
+    // GET /download|list|exists/{path}, POST /execute on port 8888),
+    // reached through the sandbox-router unless Connectivity selects a
+    // direct pod dial. Default.
+    RuntimeLegacyPython Runtime = "legacy-python"
+    // RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
+    // REST filesystem (/v1/files/...) on port 8080 plus gRPC
+    // ProcessService on port 9090. The SDK reaches the sandbox pod directly
+    // or over a port-forward (default), see Connectivity.
+    RuntimeSandboxd Runtime = "sandboxd"
+)
 ```
 
 <a name="DirectStrategy"></a>
@@ -545,10 +572,17 @@ type Options struct {
     WarmPoolName string
 
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-    // RuntimeSandboxd connects via a pod port-forward, so GatewayName is not
-    // supported with it. APIURL remains available as an advanced/testing
-    // escape hatch for the REST endpoint.
+    // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
+    // so GatewayName is not supported with it. APIURL remains available as an
+    // advanced/testing escape hatch for the REST endpoint.
     Runtime Runtime
+
+    // Connectivity selects the transport. Default: ConnectivityPortForward.
+    //
+    // ConnectivityInCluster works with either Runtime and conflicts with both
+    // GatewayName and APIURL. It requires that this process can route to pod
+    // IPs - i.e. that it runs inside the cluster.
+    Connectivity Connectivity
 
     // SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
     // REST API. Only used with RuntimeSandboxd. Default: 8080.
@@ -679,12 +713,13 @@ type Runtime string
 const (
     // RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
     // GET /download|list|exists/{path}, POST /execute on port 8888),
-    // reached through the sandbox-router. Default.
+    // reached through the sandbox-router unless Connectivity selects a
+    // direct pod dial. Default.
     RuntimeLegacyPython Runtime = "legacy-python"
     // RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
     // REST filesystem (/v1/files/...) on port 8080 plus gRPC
-    // ProcessService on port 9090. The SDK connects over a pod port-forward
-    // to the sandbox pod.
+    // ProcessService on port 9090. The SDK reaches the sandbox pod directly
+    // or over a port-forward (default), see Connectivity.
     RuntimeSandboxd Runtime = "sandboxd"
 )
 ```

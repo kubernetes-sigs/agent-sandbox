@@ -50,13 +50,29 @@ type Runtime string
 const (
 	// RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
 	// GET /download|list|exists/{path}, POST /execute on port 8888),
-	// reached through the sandbox-router. Default.
+	// reached through the sandbox-router unless Connectivity selects a
+	// direct pod dial. Default.
 	RuntimeLegacyPython Runtime = "legacy-python"
 	// RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
 	// REST filesystem (/v1/files/...) on port 8080 plus gRPC
-	// ProcessService on port 9090. The SDK connects over a pod port-forward
-	// to the sandbox pod.
+	// ProcessService on port 9090. The SDK reaches the sandbox pod directly
+	// or over a port-forward (default), see Connectivity.
 	RuntimeSandboxd Runtime = "sandboxd"
+)
+
+// Connectivity selects the transport used to reach the in-sandbox runtime.
+type Connectivity string
+
+const (
+	// ConnectivityPortForward reaches the sandbox over a SPDY port-forward
+	// brokered by the apiserver. Works from anywhere a kubeconfig does,
+	// including a laptop or CI runner. Default.
+	ConnectivityPortForward Connectivity = "port-forward"
+	// ConnectivityInCluster dials the sandbox pod IP directly, taking the
+	// apiserver, and the sandbox-router, off the data path. The port
+	// dialed is SandboxdRESTPort for RuntimeSandboxd and ServerPort for
+	// RuntimeLegacyPython.
+	ConnectivityInCluster Connectivity = "in-cluster"
 )
 
 // Options configures a Sandbox instance.
@@ -69,10 +85,17 @@ type Options struct {
 	WarmPoolName string
 
 	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-	// RuntimeSandboxd connects via a pod port-forward, so GatewayName is not
-	// supported with it. APIURL remains available as an advanced/testing
-	// escape hatch for the REST endpoint.
+	// RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
+	// so GatewayName is not supported with it. APIURL remains available as an
+	// advanced/testing escape hatch for the REST endpoint.
 	Runtime Runtime
+
+	// Connectivity selects the transport. Default: ConnectivityPortForward.
+	//
+	// ConnectivityInCluster works with either Runtime and conflicts with both
+	// GatewayName and APIURL. It requires that this process can route to pod
+	// IPs - i.e. that it runs inside the cluster.
+	Connectivity Connectivity
 
 	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
 	// REST API. Only used with RuntimeSandboxd. Default: 8080.
@@ -199,6 +222,9 @@ func (o *Options) setDefaults() {
 	}
 	if o.Runtime == "" {
 		o.Runtime = RuntimeLegacyPython
+	}
+	if o.Connectivity == "" {
+		o.Connectivity = ConnectivityPortForward
 	}
 	if o.ServerPort == 0 {
 		o.ServerPort = defaultServerPort
@@ -338,9 +364,20 @@ func (o *Options) validateCommon() error {
 	if o.Runtime != RuntimeLegacyPython && o.Runtime != RuntimeSandboxd {
 		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacyPython, RuntimeSandboxd, o.Runtime)
 	}
+	if o.Connectivity != ConnectivityPortForward && o.Connectivity != ConnectivityInCluster {
+		return fmt.Errorf("sandbox: Connectivity must be %q or %q, got %q", ConnectivityPortForward, ConnectivityInCluster, o.Connectivity)
+	}
+	if o.Connectivity == ConnectivityInCluster {
+		if o.APIURL != "" {
+			return fmt.Errorf("sandbox: ConnectivityInCluster cannot be combined with APIURL: both select an endpoint, so set only one")
+		}
+		if o.GatewayName != "" {
+			return fmt.Errorf("sandbox: ConnectivityInCluster cannot be combined with GatewayName: the gateway routes through the sandbox-router, which in-cluster connectivity bypasses")
+		}
+	}
 	if o.Runtime == RuntimeSandboxd {
 		if o.GatewayName != "" {
-			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd uses pod port-forward connectivity")
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd is reached on the sandbox pod, not through the sandbox-router")
 		}
 		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
 			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)

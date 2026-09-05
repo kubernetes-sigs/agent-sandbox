@@ -86,10 +86,25 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	switch {
 	case opts.APIURL != "":
 		strategy = &DirectStrategy{URL: opts.APIURL}
+	case opts.Connectivity == ConnectivityInCluster:
+		// Caller is on the pod network and has opted to dial
+		// the runtime on the pod IP.
+		ics := &inClusterStrategy{
+			httpPort: opts.ServerPort,
+			log:      opts.Logger,
+			tracer:   tracer,
+			svcName:  svcName,
+		}
+		if opts.Runtime == RuntimeSandboxd {
+			ics.httpPort = opts.SandboxdRESTPort
+			ics.grpcPort = opts.SandboxdGRPCPort
+		}
+		strategy = ics
 	case opts.Runtime == RuntimeSandboxd:
-		// sandboxd binds loopback-only inside the pod, so the only viable
-		// external transport is a port-forward directly to the sandbox pod
-		// (validated earlier: GatewayName is rejected with RuntimeSandboxd).
+		// sandboxd talks to the sandbox pod, not the sandbox-router, and the
+		// default transport reaches it without pod-network access: a
+		// port-forward directly to the pod (validated earlier: GatewayName is
+		// rejected with RuntimeSandboxd).
 		strategy = &podTunnelStrategy{
 			coreClient: k8s.CoreClient,
 			restConfig: k8s.RestConfig,
@@ -129,7 +144,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Strategy:            strategy,
 		Namespace:           opts.Namespace,
 		ServerPort:          opts.ServerPort,
-		RouterHeaders:       opts.Runtime != RuntimeSandboxd,
+		RouterHeaders:       opts.Runtime != RuntimeSandboxd && opts.Connectivity != ConnectivityInCluster,
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,
@@ -146,6 +161,9 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.connector = conn
+	}
+	if ics, ok := strategy.(*inClusterStrategy); ok {
+		ics.connector = conn
 	}
 
 	s := &Sandbox{
@@ -191,8 +209,12 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 
 	// The pod tunnel needs the resolved pod name at Connect time.
+	// The in-cluster strategy needs the pod IP.
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.getPodName = s.PodName
+	}
+	if ics, ok := strategy.(*inClusterStrategy); ok {
+		ics.getPodIP = s.PodIP
 	}
 
 	return s, nil

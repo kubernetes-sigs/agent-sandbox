@@ -92,3 +92,25 @@ func TestTimeLeft(t *testing.T) {
 		})
 	}
 }
+
+func TestIdleExpireAt(t *testing.T) {
+	now := time.Date(2026, time.April, 13, 12, 0, 0, 0, time.UTC)
+	activity := metav1.NewTime(now)
+
+	t.Run("nil lastActivityTime returns nil", func(t *testing.T) {
+		result := IdleExpireAt(nil, 600)
+		require.Nil(t, result)
+	})
+
+	t.Run("computes correct expiry", func(t *testing.T) {
+		result := IdleExpireAt(&activity, 600)
+		require.NotNil(t, result)
+		require.Equal(t, now.Add(600*time.Second), *result)
+	})
+
+	t.Run("zero TTL expires at activity time", func(t *testing.T) {
+		result := IdleExpireAt(&activity, 0)
+		require.NotNil(t, result)
+		require.Equal(t, now, *result)
+	})
+}

@@ -69,6 +69,16 @@ func ExpireAt(shutdownTime *metav1.Time, ttlSecondsAfterFinished *int32, finishe
 	return expireAt
 }
 
+// IdleExpireAt returns the time when the idle TTL expires based on
+// the last activity time and the configured TTL in seconds.
+func IdleExpireAt(lastActivityTime *metav1.Time, ttlSeconds int32) *time.Time {
+	if lastActivityTime == nil {
+		return nil
+	}
+	expireAt := lastActivityTime.Time.Add(time.Duration(ttlSeconds) * time.Second)
+	return &expireAt
+}
+
 // TimeLeft reports whether the resource has expired and, if not, how long remains.
 func TimeLeft(now time.Time, shutdownTime *metav1.Time, ttlSecondsAfterFinished *int32, finishedCondition *metav1.Condition) (bool, time.Duration) {
 	expireAt := ExpireAt(shutdownTime, ttlSecondsAfterFinished, finishedCondition)

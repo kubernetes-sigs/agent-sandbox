@@ -111,6 +111,42 @@ _Appears in:_
 | `metadata` _[PodMetadata](#podmetadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 
 
+#### ResourceResizePolicy
+
+
+
+ResourceResizePolicy defines the desired reconciliation behavior for CPU
+and memory changes in a running Sandbox PodTemplate.
+
+
+
+_Appears in:_
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[ResourceResizePolicyType](#resourceresizepolicytype)_ | type selects whether resource changes to a running backing Pod are<br />ignored or reconciled through the Pod resize subresource. |  | Enum: [Disabled InPlace] <br />Required: \{\} <br /> |
+
+
+#### ResourceResizePolicyType
+
+_Underlying type:_ _string_
+
+ResourceResizePolicyType controls how the controller reconciles CPU and
+memory changes in a running Sandbox PodTemplate.
+
+_Validation:_
+- Enum: [Disabled InPlace]
+
+_Appears in:_
+- [ResourceResizePolicy](#resourceresizepolicy)
+
+| Field | Description |
+| --- | --- |
+| `Disabled` | ResourceResizePolicyDisabled leaves a running Pod unchanged when its<br />template resources change. This is the safe default.<br /> |
+| `InPlace` | ResourceResizePolicyInPlace permits the controller to request a<br />restart-free CPU or memory update through the Pod resize subresource.<br /> |
+
+
 #### Sandbox
 
 
@@ -194,6 +230,7 @@ _Appears in:_
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time at which the Sandbox expires. When the current<br />time reaches shutdownTime, the controller tears down the underlying resources<br />(Pod and Service) and then applies shutdownPolicy to the Sandbox object itself.<br />If unset, the Sandbox never expires and lives until it is explicitly deleted. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the Sandbox object itself when it expires<br />(i.e. when shutdownTime is reached). The underlying resources (Pod, Service) are<br />always deleted on expiry regardless of this policy; shutdownPolicy governs only the<br />Sandbox object:<br />  - Retain (default): the Sandbox object is kept after its resources are torn down.<br />    Its live status fields are cleared and a Ready=False condition with reason<br />    SandboxExpired is set so the expiry is observable.<br />  - Delete: the Sandbox object is deleted once its underlying resources are removed.<br />This field has no effect while shutdownTime is unset, since the Sandbox never expires. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox:<br />  - Running (default): the controller keeps a backing Pod running.<br />  - Suspended: the controller terminates the backing Pod but retains the<br />    Sandbox object and its volumes so it can later be resumed.<br />This field declares intent only. The observed readiness of the Sandbox is<br />reported by the Ready condition, and the progress of a suspension by the<br />Suspended condition; a Sandbox in Running mode is not Ready until its Pod is<br />actually up (see SandboxConditionReady).<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
+| `resourceResizePolicy` _[ResourceResizePolicy](#resourceresizepolicy)_ | resourceResizePolicy controls CPU and memory reconciliation for an<br />already-running backing Pod. Disabled is the safe default: the<br />controller never replaces a Pod in response to resource changes.<br />InPlace manages only CPU and memory request or limit keys explicitly<br />present in the PodTemplate. An omitted key preserves the live Pod value,<br />including values added by admission, and does not request removal. | \{ type:Disabled \} | Optional: \{\} <br /> |
 
 
 #### SandboxStatus

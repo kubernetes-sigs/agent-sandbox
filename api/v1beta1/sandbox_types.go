@@ -122,6 +122,22 @@ const (
 	// and its underlying resources were torn down (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 
+	// SandboxConditionResourceResize reports the observed outcome of an
+	// opt-in in-place CPU or memory resize.
+	SandboxConditionResourceResize ConditionType = "ResourceResize"
+	// SandboxReasonResourceResizePending mirrors a PodResizePending condition.
+	SandboxReasonResourceResizePending = "PodResizePending"
+	// SandboxReasonResourceResizeInProgress mirrors a PodResizeInProgress condition.
+	SandboxReasonResourceResizeInProgress = "PodResizeInProgress"
+	// SandboxReasonResourceResizeCompleted confirms the desired CPU and memory
+	// resources have been enacted without controller-directed replacement.
+	SandboxReasonResourceResizeCompleted = "Completed"
+	// SandboxReasonResourceResizeUnsupported indicates that the backing Pod
+	// cannot perform a restart-free resize.
+	SandboxReasonResourceResizeUnsupported = "Unsupported"
+	// SandboxReasonResourceResizeFailed indicates a terminal API-server or
+	// kubelet resize failure.
+	SandboxReasonResourceResizeFailed = "Failed"
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
@@ -268,6 +284,29 @@ type SandboxBlueprint struct {
 	Service *bool `json:"service,omitempty"`
 }
 
+// ResourceResizePolicyType controls how the controller reconciles CPU and
+// memory changes in a running Sandbox PodTemplate.
+// +kubebuilder:validation:Enum=Disabled;InPlace
+type ResourceResizePolicyType string
+
+const (
+	// ResourceResizePolicyDisabled leaves a running Pod unchanged when its
+	// template resources change. This is the safe default.
+	ResourceResizePolicyDisabled ResourceResizePolicyType = "Disabled"
+	// ResourceResizePolicyInPlace permits the controller to request a
+	// restart-free CPU or memory update through the Pod resize subresource.
+	ResourceResizePolicyInPlace ResourceResizePolicyType = "InPlace"
+)
+
+// ResourceResizePolicy defines the desired reconciliation behavior for CPU
+// and memory changes in a running Sandbox PodTemplate.
+type ResourceResizePolicy struct {
+	// type selects whether resource changes to a running backing Pod are
+	// ignored or reconciled through the Pod resize subresource.
+	// +required
+	Type ResourceResizePolicyType `json:"type"`
+}
+
 // SandboxSpec defines the desired state of Sandbox.
 // volumeClaimTemplates is immutable after creation.
 // +kubebuilder:validation:XValidation:rule="has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates) && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates == oldSelf.volumeClaimTemplates)",message="volumeClaimTemplates is immutable"
@@ -297,6 +336,16 @@ type SandboxSpec struct {
 	// +kubebuilder:default=Running
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
+
+	// resourceResizePolicy controls CPU and memory reconciliation for an
+	// already-running backing Pod. Disabled is the safe default: the
+	// controller never replaces a Pod in response to resource changes.
+	// InPlace manages only CPU and memory request or limit keys explicitly
+	// present in the PodTemplate. An omitted key preserves the live Pod value,
+	// including values added by admission, and does not request removal.
+	// +kubebuilder:default={type:Disabled}
+	// +optional
+	ResourceResizePolicy *ResourceResizePolicy `json:"resourceResizePolicy,omitempty"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.

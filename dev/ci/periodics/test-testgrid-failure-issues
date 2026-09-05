@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Periodic job: files a GitHub issue for each TestGrid tab that is FAILING.
+
+Runs from GitHub Actions (.github/workflows/testgrid-failure-issues.yml).
+Reads the public TestGrid summary API (no auth needed) for each configured
+dashboard, and for every tab whose overall_status is FAILING, files (or
+leaves alone, if one is already open) a tracking issue in the tab's repo. A
+tab that recovers to PASSING gets its open tracking issue closed
+automatically; any other status (FLAKY, STALE, PENDING, ...) leaves an
+existing tracking issue open.
+
+Presubmit tabs (name prefix "presubmit-"/"pull-") are skipped: their
+failures are already surfaced as required checks on the PR in question, so
+filing a standing issue for them would just be noise.
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API_ROOT = "https://api.github.com"
+TESTGRID_ROOT = "https://testgrid.k8s.io"
+TOKEN_PATH = "/etc/github-token/token"
+MARKER_TEMPLATE = "<!-- testgrid-failure:{dashboard}/{tab} -->"
+LABEL = "kind/failing-test"
+SKIP_TAB_PREFIXES = ("presubmit-", "pull-")
+MAX_FAILING_TESTS_LISTED = 5
+MAX_FAILURE_MESSAGE_LENGTH = 200
+HTTP_TIMEOUT_SECONDS = 30
+
+# (testgrid dashboard, repo to file issues in). The repo must match the
+# repo this workflow runs in, since it authenticates with the GitHub
+# Actions default GITHUB_TOKEN, which can only write to that one repo.
+DASHBOARD_REPOS = [
+    ("sig-apps-agent-sandbox", "kubernetes-sigs/agent-sandbox"),
+]
+
+
+def _request(method, url, token, body=None):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "agent-sandbox-testgrid-failure-issues")
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _token():
+    """GITHUB_TOKEN env var (GitHub Actions) or mounted secret file (Prow)."""
+    env_token = os.environ.get("GITHUB_TOKEN")
+    if env_token is not None:
+        if env_token:
+            return env_token
+
+    try:
+        with open(TOKEN_PATH) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"no GitHub token found: GITHUB_TOKEN is unset and {TOKEN_PATH} "
+            "does not exist"
+        ) from None
+
+
+def fetch_summary(dashboard):
+    url = f"{TESTGRID_ROOT}/{dashboard}/summary"
+    with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def find_open_tracking_issue(repo, token, marker):
+    # Listing open LABEL-labeled issues directly (rather than querying
+    # GitHub's search API) keeps this deterministic: search indexing lag or
+    # tokenization of the marker's "/" and ":" characters could otherwise
+    # make a currently open tracking issue invisible to a search query,
+    # which would file a duplicate on the next run instead of finding the
+    # issue that's already there. Matches are still confirmed below by an
+    # exact substring check against the real body.
+    page = 1
+    while True:
+        url = (
+            f"{API_ROOT}/repos/{repo}/issues"
+            f"?labels={urllib.parse.quote(LABEL, safe='')}&state=open"
+            f"&per_page=100&page={page}"
+        )
+        items = _request("GET", url, token)
+        for item in items:
+            if "pull_request" not in item and marker in (item.get("body") or ""):
+                return item
+        if len(items) < 100:
+            return None
+        page += 1
+
+
+def issue_body(dashboard, tab, tab_data, marker):
+    tab_url = f"{TESTGRID_ROOT}/{dashboard}#{tab}"
+    lines = [
+        marker,
+        f"### TestGrid job failing: `{tab}`",
+        "",
+        f"Filed automatically by a periodic job that checks [TestGrid]({tab_url}) "
+        "for jobs that are consistently failing. If this issue is closed and the "
+        "job fails again, a new issue will be filed.",
+        "",
+        f"**Status:** {tab_data.get('status', 'unknown')}",
+    ]
+    tests = tab_data.get("tests") or []
+    if tests:
+        lines += ["", "**Failing tests:**"]
+        for t in tests[:MAX_FAILING_TESTS_LISTED]:
+            name = t.get("display_name") or t.get("test_name") or "unknown test"
+            message_lines = (t.get("failure_message") or "").strip().splitlines()
+            first_line = message_lines[0] if message_lines else ""
+            if len(first_line) > MAX_FAILURE_MESSAGE_LENGTH:
+                first_line = first_line[:MAX_FAILURE_MESSAGE_LENGTH] + "..."
+            entry = f"- `{name}`"
+            if first_line:
+                entry += f": {first_line}"
+            lines.append(entry)
+        if len(tests) > MAX_FAILING_TESTS_LISTED:
+            lines.append(f"- ...and {len(tests) - MAX_FAILING_TESTS_LISTED} more")
+    return "\n".join(lines)
+
+
+def file_issue(repo, token, dashboard, tab, tab_data, dry_run):
+    marker = MARKER_TEMPLATE.format(dashboard=dashboard, tab=tab)
+    body = {
+        "title": f"[TestGrid] {tab} is failing",
+        "body": issue_body(dashboard, tab, tab_data, marker),
+        "labels": [LABEL],
+    }
+    if dry_run:
+        print(f"[dry-run] would file issue in {repo}: {body['title']}")
+        return
+    _request("POST", f"{API_ROOT}/repos/{repo}/issues", token, body)
+    print(f"filed issue in {repo}: {body['title']}")
+
+
+def close_issue(repo, token, issue, dashboard, tab, dry_run):
+    marker = MARKER_TEMPLATE.format(dashboard=dashboard, tab=tab)
+    tab_url = f"{TESTGRID_ROOT}/{dashboard}#{tab}"
+    comment = "\n".join(
+        [marker, f"`{tab}` is passing again on [TestGrid]({tab_url}). Closing."]
+    )
+    if dry_run:
+        print(f"[dry-run] would close {repo}#{issue['number']} ({tab})")
+        return
+    _request(
+        "POST", f"{API_ROOT}/repos/{repo}/issues/{issue['number']}/comments", token, {"body": comment}
+    )
+    _request(
+        "PATCH", f"{API_ROOT}/repos/{repo}/issues/{issue['number']}", token, {"state": "closed"}
+    )
+    print(f"closed {repo}#{issue['number']} ({tab})")
+
+
+def handle_tab(repo, token, dashboard, tab, tab_data, dry_run):
+    status = tab_data.get("overall_status")
+    # Only FAILING and PASSING can change anything (file or close an issue).
+    # Skipping the lookup for every other status (FLAKY, STALE, PENDING,
+    # NO_RESULTS, ...) avoids an API call for tabs this run has no action
+    # for anyway.
+    if status not in ("FAILING", "PASSING"):
+        return
+    marker = MARKER_TEMPLATE.format(dashboard=dashboard, tab=tab)
+    issue = find_open_tracking_issue(repo, token, marker)
+    if status == "FAILING" and issue is None:
+        file_issue(repo, token, dashboard, tab, tab_data, dry_run)
+    elif status == "PASSING" and issue is not None:
+        close_issue(repo, token, issue, dashboard, tab, dry_run)
+
+
+def main():
+    dry_run = "--dry-run" in sys.argv[1:]
+    token = _token()
+    exit_code = 0
+
+    for dashboard, repo in DASHBOARD_REPOS:
+        try:
+            summary = fetch_summary(dashboard)
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError) as e:
+            print(f"error fetching TestGrid summary for {dashboard}: {e}", file=sys.stderr)
+            exit_code = 1
+            continue
+
+        for tab, tab_data in sorted(summary.items()):
+            if tab.startswith(SKIP_TAB_PREFIXES):
+                continue
+            try:
+                handle_tab(repo, token, dashboard, tab, tab_data, dry_run)
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+                print(f"error handling {dashboard}/{tab}: {e}", file=sys.stderr)
+                exit_code = 1
+
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

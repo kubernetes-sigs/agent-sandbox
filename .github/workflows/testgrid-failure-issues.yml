@@ -1,0 +1,32 @@
+name: "TestGrid failure issue filer"
+
+# Checks the sig-apps-agent-sandbox TestGrid dashboard for jobs whose
+# overall_status is FAILING and files a tracking issue in this repo for
+# each one (skipping presubmits, whose failures are already surfaced as PR
+# checks). Recovered jobs get their tracking issue closed automatically.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *" # hourly
+
+# Serialize runs instead of letting them overlap: two concurrent runs could
+# both search-then-create before either issue is search-indexed, filing a
+# duplicate. Let an in-flight run finish rather than cancel it.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  file-issues:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Check TestGrid and file/close issues"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: dev/ci/periodics/test-testgrid-failure-issues

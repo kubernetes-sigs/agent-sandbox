@@ -4499,14 +4499,30 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name        string
-		initialObjs []runtime.Object
-		expectErr   bool
-		errContains string
+		name                         string
+		sandboxMutator               func(*sandboxv1beta1.Sandbox)
+		initialObjs                  []runtime.Object
+		expectErr                    bool
+		errContains                  string
+		expectOwner                  bool
+		expectNonControllerOwnerRefs []metav1.OwnerReference
+		expectPreservedLabels        map[string]string
+		expectPreservedAnnotations   map[string]string
 	}{
 		{
-			name:      "creates new PVC when none exists",
-			expectErr: false,
+			name:        "creates new PVC when none exists",
+			expectErr:   false,
+			expectOwner: true,
+		},
+		{
+			name: "creates new PVC without owner when retention policy is Retain",
+			sandboxMutator: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			expectErr:   false,
+			expectOwner: false,
 		},
 		{
 			name: "uses existing PVC owned by this sandbox",
@@ -4528,7 +4544,60 @@ func TestReconcilePVCs(t *testing.T) {
 					},
 				},
 			},
-			expectErr: false,
+			expectErr:   false,
+			expectOwner: true,
+		},
+		{
+			name: "removes current sandbox owner from existing PVC when retention policy is Retain",
+			sandboxMutator: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "agents.x-k8s.io/v1beta1",
+								Kind:               "Sandbox",
+								Name:               sandboxName,
+								UID:                sandboxUID,
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
+							},
+							{
+								APIVersion: "v1",
+								Kind:       "ConfigMap",
+								Name:       "audit-marker",
+								UID:        "audit-marker-uid",
+							},
+						},
+						Labels: map[string]string{
+							"keep": "true",
+						},
+						Annotations: map[string]string{
+							"app.example.com/data": "preserve",
+						},
+					},
+				},
+			},
+			expectErr:   false,
+			expectOwner: false,
+			expectNonControllerOwnerRefs: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       "audit-marker",
+				UID:        "audit-marker-uid",
+			}},
+			expectPreservedLabels: map[string]string{
+				"keep": "true",
+			},
+			expectPreservedAnnotations: map[string]string{
+				"app.example.com/data": "preserve",
+			},
 		},
 		{
 			name: "refuses PVC owned by a different controller",
@@ -4566,7 +4635,29 @@ func TestReconcilePVCs(t *testing.T) {
 					},
 				},
 			},
-			expectErr: false,
+			expectErr:   false,
+			expectOwner: true,
+		},
+		{
+			name: "uses unowned PVC without adopting when retention policy is Retain",
+			sandboxMutator: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxAdoptableLabel: "true",
+						},
+					},
+				},
+			},
+			expectErr:   false,
+			expectOwner: false,
 		},
 		{
 			name: "adopts unowned PVC carrying legacy tracking label when adoptable label is absent",
@@ -4581,7 +4672,8 @@ func TestReconcilePVCs(t *testing.T) {
 					},
 				},
 			},
-			expectErr: false,
+			expectErr:   false,
+			expectOwner: true,
 		},
 		{
 			name: "refuses to adopt unowned PVC that lacks pool authorization label",
@@ -4599,6 +4691,10 @@ func TestReconcilePVCs(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			sandbox := sandbox.DeepCopy()
+			if tc.sandboxMutator != nil {
+				tc.sandboxMutator(sandbox)
+			}
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sandbox)...),
 				Scheme: Scheme,
@@ -4632,8 +4728,27 @@ func TestReconcilePVCs(t *testing.T) {
 			err = r.Get(t.Context(), types.NamespacedName{Name: pvcName, Namespace: sandboxNs}, livePVC)
 			require.NoError(t, err)
 			ownerRef := metav1.GetControllerOf(livePVC)
-			require.NotNil(t, ownerRef, "PVC should have a controller owner reference")
-			require.Equal(t, sandboxUID, ownerRef.UID, "PVC controller reference UID should match sandbox UID")
+			if tc.expectOwner {
+				require.NotNil(t, ownerRef, "PVC should have a controller owner reference")
+				require.Equal(t, sandboxUID, ownerRef.UID, "PVC controller reference UID should match sandbox UID")
+			} else {
+				require.Nil(t, ownerRef, "PVC should not have a controller owner reference")
+			}
+			if tc.expectNonControllerOwnerRefs != nil {
+				nonControllerOwnerRefs := make([]metav1.OwnerReference, 0, len(livePVC.OwnerReferences))
+				for _, ownerRef := range livePVC.OwnerReferences {
+					if ownerRef.Controller == nil || !*ownerRef.Controller {
+						nonControllerOwnerRefs = append(nonControllerOwnerRefs, ownerRef)
+					}
+				}
+				require.ElementsMatch(t, tc.expectNonControllerOwnerRefs, nonControllerOwnerRefs)
+			}
+			for key, expected := range tc.expectPreservedLabels {
+				require.Equal(t, expected, livePVC.Labels[key], "label %q should survive reconciliation", key)
+			}
+			for key, expected := range tc.expectPreservedAnnotations {
+				require.Equal(t, expected, livePVC.Annotations[key], "annotation %q should survive reconciliation", key)
+			}
 		})
 	}
 }

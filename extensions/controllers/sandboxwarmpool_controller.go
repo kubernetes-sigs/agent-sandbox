@@ -1241,12 +1241,20 @@ func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, ac
 	return true
 }
 
+func persistentVolumeClaimRetentionWhenDeleted(policy *sandboxv1beta1.PersistentVolumeClaimRetentionPolicy) sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType {
+	if policy == nil || policy.WhenDeleted == "" {
+		return sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete
+	}
+	return policy.WhenDeleted
+}
+
 // compareSandboxBlueprint checks if the sandbox blueprint in the sandbox is semantically equal to the template,
 // ignoring metadata differences and only comparing the fields that are relevant for staleness detection.
 func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
 	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
 		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
-		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
+		equality.Semantic.DeepEqual(template.Spec.SandboxBlueprint.Service, actualSandboxSpec.Service) &&
+		persistentVolumeClaimRetentionWhenDeleted(template.Spec.SandboxBlueprint.PersistentVolumeClaimRetentionPolicy) == persistentVolumeClaimRetentionWhenDeleted(actualSandboxSpec.PersistentVolumeClaimRetentionPolicy)
 }
 
 // sandboxWarmPoolLabelIndexer extracts the warmPoolSandboxLabel value for the

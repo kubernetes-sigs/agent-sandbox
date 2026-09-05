@@ -556,6 +556,10 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 					needsUpdate = true
 				}
 			}
+			if persistentVolumeClaimRetentionWhenDeleted(sandbox.Spec.PersistentVolumeClaimRetentionPolicy) != persistentVolumeClaimRetentionWhenDeleted(template.Spec.PersistentVolumeClaimRetentionPolicy) {
+				sandbox.Spec.PersistentVolumeClaimRetentionPolicy = template.Spec.PersistentVolumeClaimRetentionPolicy.DeepCopy()
+				needsUpdate = true
+			}
 
 			if needsUpdate {
 				logger.V(1).Info("Updating sandbox metadata to match claim", "claim", claim.Name, "sandbox", sandbox.Name)

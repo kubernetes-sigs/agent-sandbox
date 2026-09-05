@@ -159,6 +159,52 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         except (socket.timeout, ConnectionRefusedError):
             return False
 
+    def _preflight_check_router_service(self) -> None:
+        """Validates the router service exists in the configured namespace before port-forwarding.
+
+        Raises SandboxPortForwardError with namespace context and a remediation hint if the
+        service is definitively absent. Transient kubectl failures (e.g. network blip, RBAC
+        not covering 'get') are logged and silently ignored so they don't block a valid tunnel.
+        """
+        try:
+            result = subprocess.run(
+                ["kubectl", "get", ROUTER_SERVICE_NAME,
+                 "-n", self.config.router_namespace],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                stderr_text = result.stderr.decode(errors="replace").strip()
+                # Exit code 1 with "not found" in stderr is a definitive absence — raise early.
+                if "not found" in stderr_text.lower():
+                    raise SandboxPortForwardError(
+                        f"Router service '{ROUTER_SERVICE_NAME}' not found in namespace "
+                        f"'{self.config.router_namespace}'. "
+                        f"If the router is deployed in a different namespace, set "
+                        f"router_namespace accordingly, e.g. "
+                        f"SandboxLocalTunnelConnectionConfig(router_namespace=\"<your-namespace>\"). "
+                        f"kubectl stderr: {stderr_text}"
+                    )
+                # Any other non-zero exit (RBAC, transient) — log and proceed.
+                logging.warning(
+                    "Pre-flight check for router service could not confirm existence "
+                    "(kubectl exited %d). Proceeding with port-forward. "
+                    "kubectl stderr: %s",
+                    result.returncode,
+                    stderr_text,
+                )
+        except SandboxPortForwardError:
+            raise
+        except subprocess.TimeoutExpired:
+            logging.warning(
+                "Pre-flight check for router service timed out after 10s "
+                "(slow API server or network stall). Proceeding with port-forward."
+            )
+        except Exception as e:
+            # subprocess.run itself failed (e.g. kubectl not on PATH) — log and proceed.
+            logging.warning("Pre-flight check for router service skipped: %s", e)
+
     def connect(self) -> str:
         if self.base_url and self.port_forward_process and self.port_forward_process.poll() is None:
              return self.base_url
@@ -168,13 +214,15 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
 
         start_time = time.monotonic()
         status = "success"
-        
+
         try:
+            self._preflight_check_router_service()
+
             local_port = self._get_free_port()
 
             logging.info(
                 f"Starting tunnel for Sandbox {self.sandbox_id}")
-            
+
             self.port_forward_process = subprocess.Popen(
                 [
                     "kubectl", "port-forward",
@@ -186,12 +234,24 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                 stderr=subprocess.PIPE
             )
 
+            # Record the start of the port-forward readiness wait separately so that
+            # preflight check latency (up to 10 s on slow API responses or network
+            # stalls) does not eat into the port_forward_ready_timeout budget.
+            port_forward_start = time.monotonic()
+
             logging.info("Waiting for port-forwarding to be ready...")
-            while time.monotonic() - start_time < self.config.port_forward_ready_timeout:
+            while time.monotonic() - port_forward_start < self.config.port_forward_ready_timeout:
                 if self.port_forward_process.poll() is not None:
                     _, stderr = self.port_forward_process.communicate()
+                    stderr_text = stderr.decode(errors="replace")
                     raise SandboxPortForwardError(
-                        f"Tunnel crashed: {stderr.decode(errors='replace')}")
+                        f"Tunnel to router service '{ROUTER_SERVICE_NAME}' in namespace "
+                        f"'{self.config.router_namespace}' crashed. "
+                        f"If the router is deployed in a different namespace, set "
+                        f"router_namespace accordingly, e.g. "
+                        f"SandboxLocalTunnelConnectionConfig(router_namespace=\"<your-namespace>\"). "
+                        f"kubectl stderr: {stderr_text}"
+                    )
 
                 if self._is_port_open(local_port):
                     self.base_url = f"http://127.0.0.1:{local_port}"

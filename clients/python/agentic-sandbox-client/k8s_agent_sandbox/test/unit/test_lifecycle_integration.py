@@ -23,6 +23,7 @@ SandboxClient, and K8sHelper are wired correctly end-to-end.
 
 import unittest
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.k8s_helper import K8sHelper
@@ -62,6 +63,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
         sandbox_client._automatic_cleanup_claims = set()
+        sandbox_client._lock = RLock()
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
@@ -110,6 +112,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
         sandbox_client._automatic_cleanup_claims = set()
+        sandbox_client._lock = RLock()
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
@@ -142,6 +145,7 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
         sandbox_client._automatic_cleanup_claims = set()
+        sandbox_client._lock = RLock()
         sandbox_client.sandbox_class = MagicMock()
 
         with self.assertRaises(ValueError):

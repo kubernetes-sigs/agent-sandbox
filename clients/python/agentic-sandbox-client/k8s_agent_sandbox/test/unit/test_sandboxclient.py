@@ -48,6 +48,7 @@ from k8s_agent_sandbox.test.unit.claim_adoption_test_support import (
     REQUESTED_LABELS,
     VOLUME_CLAIM_TEMPLATES,
     WARMPOOL,
+    claim_for_request,
     matching_claim,
     mismatched_claims,
     terminal_claims,
@@ -118,9 +119,11 @@ class TestSandboxClient(unittest.TestCase):
             self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
 
     def test_create_sandbox_uses_explicit_claim_name(self):
-        self.mock_k8s_helper.create_sandbox_claim.return_value = {
-            "metadata": {"resourceVersion": "created-rv"}
-        }
+        self.mock_k8s_helper.create_sandbox_claim.return_value = claim_for_request(
+            claim_name="sandbox-workflow-123",
+            namespace="test-namespace",
+            warmpool="test-warmpool",
+        )
         self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
 
         self.client.create_sandbox(
@@ -145,9 +148,11 @@ class TestSandboxClient(unittest.TestCase):
         key = ("test-namespace", "sandbox-workflow-123")
         self.client._active_connection_sandboxes[key] = MagicMock()
         self.client._automatic_cleanup_claims.add(key)
-        self.mock_k8s_helper.create_sandbox_claim.return_value = {
-            "metadata": {"resourceVersion": "created-rv"}
-        }
+        self.mock_k8s_helper.create_sandbox_claim.return_value = claim_for_request(
+            claim_name="sandbox-workflow-123",
+            namespace="test-namespace",
+            warmpool="test-warmpool",
+        )
         self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
 
         sandbox = self.client.create_sandbox(
@@ -171,7 +176,7 @@ class TestSandboxClient(unittest.TestCase):
             "UPPERCASE",
             "-leading",
             "trailing-",
-            f"{'a' * 64}.valid",
+            "two..dots",
             "a" * 254,
         )
 
@@ -183,6 +188,21 @@ class TestSandboxClient(unittest.TestCase):
                     )
 
         self.mock_k8s_helper.create_sandbox_claim.assert_not_called()
+
+    def test_create_sandbox_accepts_native_valid_long_claim_names(self):
+        self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
+
+        for claim_name in ("a" * 64, "a" * 253):
+            with self.subTest(length=len(claim_name)):
+                self.mock_k8s_helper.create_sandbox_claim.return_value = (
+                    claim_for_request(claim_name=claim_name)
+                )
+
+                self.client.create_sandbox(
+                    WARMPOOL, NAMESPACE, claim_name=claim_name
+                )
+
+                self.assertIn((NAMESPACE, claim_name), self.client._active_connection_sandboxes)
 
     def test_create_sandbox_adopts_existing_claim_after_conflict(self):
         self.mock_k8s_helper.create_sandbox_claim.side_effect = ApiException(
@@ -373,6 +393,110 @@ class TestSandboxClient(unittest.TestCase):
 
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
+    def test_successful_explicit_create_revalidates_watch_contract(self):
+        self.mock_k8s_helper.create_sandbox_claim.return_value = matching_claim()
+
+        def wait_for_ready(*_args, claim_validator=None, **_kwargs):
+            self.assertIsNotNone(claim_validator)
+            changed_claim = matching_claim()
+            changed_claim["spec"]["warmPoolRef"] = {"name": "other-pool"}
+            claim_validator(changed_claim)
+            return "unreachable"
+
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = wait_for_ready
+
+        with self.assertRaisesRegex(ValueError, "spec.warmPoolRef"):
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                labels=REQUESTED_LABELS,
+                claim_name=CLAIM_NAME,
+                volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                pod_labels=POD_LABELS,
+                pod_annotations=POD_ANNOTATIONS,
+            )
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_successful_explicit_create_rejects_recreated_claim_during_watch(self):
+        self.mock_k8s_helper.create_sandbox_claim.return_value = matching_claim()
+
+        def wait_for_ready(*_args, claim_validator=None, **_kwargs):
+            self.assertIsNotNone(claim_validator)
+            recreated_claim = matching_claim()
+            recreated_claim["metadata"]["uid"] = "replacement-uid"
+            claim_validator(recreated_claim)
+            return "unreachable"
+
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = wait_for_ready
+
+        with self.assertRaisesRegex(ValueError, "metadata.uid"):
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                labels=REQUESTED_LABELS,
+                claim_name=CLAIM_NAME,
+                volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                pod_labels=POD_LABELS,
+                pod_annotations=POD_ANNOTATIONS,
+            )
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_successful_explicit_create_rejects_recreated_claim_after_410(
+        self, mock_watch_class
+    ):
+        created_claim = matching_claim()
+        recreated_claim = matching_claim()
+        recreated_claim["metadata"].update(
+            uid="replacement-uid", resourceVersion="replacement-rv"
+        )
+        recreated_claim["status"] = {
+            "sandbox": {"name": "replacement-sandbox"},
+            "conditions": [
+                {
+                    "type": "Ready",
+                    "status": "True",
+                    "observedGeneration": 1,
+                }
+            ],
+        }
+        real_helper = K8sHelper.__new__(K8sHelper)
+        real_helper.custom_objects_api = MagicMock()
+        first_watch = MagicMock()
+        first_watch.stream.side_effect = ApiException(status=410)
+        second_watch = MagicMock()
+        second_watch.stream.return_value = iter(
+            [{"type": "ADDED", "object": recreated_claim}]
+        )
+        mock_watch_class.side_effect = [first_watch, second_watch]
+        self.client.k8s_helper = real_helper
+
+        with patch.object(
+            self.client, "_create_claim", return_value=created_claim
+        ), patch.object(self.client, "_delete_claim") as delete_claim:
+            with self.assertRaisesRegex(ValueError, "metadata.uid"):
+                self.client.create_sandbox(
+                    WARMPOOL,
+                    NAMESPACE,
+                    labels=REQUESTED_LABELS,
+                    claim_name=CLAIM_NAME,
+                    adopt_existing=True,
+                    volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                    pod_labels=POD_LABELS,
+                    pod_annotations=POD_ANNOTATIONS,
+                )
+
+        first_call, second_call = (
+            first_watch.stream.call_args,
+            second_watch.stream.call_args,
+        )
+        self.assertEqual(first_call.kwargs["resource_version"], "existing-rv")
+        self.assertEqual(second_call.kwargs["resource_version"], "0")
+        delete_claim.assert_not_called()
+        self.mock_sandbox_class.assert_not_called()
+
     def test_create_sandbox_rejects_recreated_claim_during_watch(self):
         self.mock_k8s_helper.create_sandbox_claim.side_effect = ApiException(
             status=409
@@ -486,9 +610,7 @@ class TestSandboxClient(unittest.TestCase):
     def test_explicit_claim_is_not_deleted_when_wait_fails(self):
         key = (NAMESPACE, CLAIM_NAME)
         self.client._automatic_cleanup_claims.add(key)
-        self.mock_k8s_helper.create_sandbox_claim.return_value = {
-            "metadata": {"resourceVersion": "created-rv"}
-        }
+        self.mock_k8s_helper.create_sandbox_claim.return_value = claim_for_request()
         self.mock_k8s_helper.wait_for_claim_ready.side_effect = TimeoutError(
             "timed out"
         )
@@ -530,9 +652,7 @@ class TestSandboxClient(unittest.TestCase):
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
     def test_explicit_claim_is_not_deleted_by_automatic_cleanup(self):
-        self.mock_k8s_helper.create_sandbox_claim.return_value = {
-            "metadata": {"resourceVersion": "created-rv"}
-        }
+        self.mock_k8s_helper.create_sandbox_claim.return_value = claim_for_request()
         self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
 
         sandbox = self.client.create_sandbox(
@@ -545,7 +665,7 @@ class TestSandboxClient(unittest.TestCase):
         sandbox.terminate.assert_not_called()
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
-    def test_adoption_propagates_non_conflict_without_deleting_claim(self):
+    def test_explicit_create_failure_releases_stale_automatic_ownership(self):
         key = (NAMESPACE, CLAIM_NAME)
         self.client._automatic_cleanup_claims.add(key)
         server_error = ApiException(status=500)
@@ -562,7 +682,7 @@ class TestSandboxClient(unittest.TestCase):
         self.assertIs(context.exception, server_error)
         self.mock_k8s_helper.get_sandbox_claim.assert_not_called()
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
-        self.assertIn(key, self.client._automatic_cleanup_claims)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
     @patch("uuid.uuid4")
     def test_generated_claim_cleanup_survives_ambiguous_create_failure(
@@ -645,6 +765,70 @@ class TestSandboxClient(unittest.TestCase):
         generated_handle.terminate.assert_called_once_with()
         generated_handle.close_connection.assert_not_called()
         self.assertNotIn(key, self.client._active_connection_sandboxes)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    def test_automatic_cleanup_skips_reattached_claim(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        reattached_handle = MagicMock()
+        self.mock_sandbox_class.return_value = reattached_handle
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+
+        self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        self.client._delete_automatic_cleanup_claims()
+
+        reattached_handle.terminate.assert_not_called()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+        self.assertIs(self.client._active_connection_sandboxes[key], reattached_handle)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    def test_get_sandbox_failure_cannot_remove_concurrently_explicit_handle(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        lookup_started = threading.Event()
+        release_lookup = threading.Event()
+        lookup_errors = []
+        generated_handle = MagicMock()
+        adopted_handle = MagicMock()
+        self.client._active_connection_sandboxes[key] = generated_handle
+        self.client._automatic_cleanup_claims.add(key)
+
+        def fail_lookup(*_args, **_kwargs):
+            lookup_started.set()
+            release_lookup.wait(timeout=5)
+            raise RuntimeError("stale lookup failed")
+
+        def run_lookup():
+            try:
+                self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+            except SandboxNotFoundError as error:
+                lookup_errors.append(error)
+
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = fail_lookup
+        lookup_thread = threading.Thread(target=run_lookup)
+        lookup_thread.start()
+        self.assertTrue(lookup_started.wait(timeout=5))
+
+        self.mock_k8s_helper.create_sandbox_claim.return_value = matching_claim()
+        self.mock_k8s_helper.wait_for_claim_ready.return_value = "adopted-sandbox"
+        self.mock_sandbox_class.return_value = adopted_handle
+        self.client.create_sandbox(
+            WARMPOOL,
+            NAMESPACE,
+            labels=REQUESTED_LABELS,
+            claim_name=CLAIM_NAME,
+            volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+            pod_labels=POD_LABELS,
+            pod_annotations=POD_ANNOTATIONS,
+        )
+
+        release_lookup.set()
+        lookup_thread.join(timeout=5)
+
+        self.assertFalse(lookup_thread.is_alive())
+        self.assertEqual(len(lookup_errors), 1)
+        generated_handle.terminate.assert_not_called()
+        generated_handle.close_connection.assert_called_once_with()
+        self.assertIs(self.client._active_connection_sandboxes[key], adopted_handle)
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
     def test_get_sandbox_underlying_sandbox_not_found(self):

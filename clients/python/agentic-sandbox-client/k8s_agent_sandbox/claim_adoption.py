@@ -43,7 +43,6 @@ _DNS1123_SUBDOMAIN_RE = re.compile(
     r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 )
 _DNS1123_SUBDOMAIN_MAX_LENGTH = 253
-_DNS1123_LABEL_MAX_LENGTH = 63
 
 
 @dataclass(frozen=True)
@@ -61,16 +60,11 @@ def validate_claim_name(name: str) -> None:
         or not name
         or len(name) > _DNS1123_SUBDOMAIN_MAX_LENGTH
         or not _DNS1123_SUBDOMAIN_RE.fullmatch(name)
-        or any(
-            len(label) > _DNS1123_LABEL_MAX_LENGTH
-            for label in name.split(".")
-        )
     ):
         raise ValueError(
             f"Claim name '{name}' must be a valid DNS-1123 subdomain "
             "(lowercase alphanumerics, '-' and '.', starting and ending with an "
-            f"alphanumeric; max {_DNS1123_SUBDOMAIN_MAX_LENGTH} characters total, "
-            f"{_DNS1123_LABEL_MAX_LENGTH} per dot-separated label)."
+            f"alphanumeric; max {_DNS1123_SUBDOMAIN_MAX_LENGTH} characters)."
         )
 
 

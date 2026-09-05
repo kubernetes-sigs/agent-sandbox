@@ -341,8 +341,8 @@ sandbox = client.create_sandbox(
 
 The same keyword arguments are available on
 `AsyncSandboxClient.create_sandbox`. A deterministic name must be a valid
-Kubernetes DNS-1123 subdomain. `adopt_existing=True` requires an explicit
-`claim_name`.
+Kubernetes DNS-1123 subdomain of at most 253 characters.
+`adopt_existing=True` requires an explicit `claim_name`.
 
 Safe adoption happens only when the create request returns HTTP `409 Conflict`.
 The client reads that exact claim and validates its API identity, UID, name,
@@ -356,6 +356,12 @@ existing readiness watch from the observed resource version. Every watched
 object is revalidated against the same UID and request contract, including
 after an expired watch restarts.
 
+A successful create with an explicit name uses the same validation boundary.
+The canonical response returned by the apiserver must match the request, and
+its UID and resource version seed the readiness watch. This prevents an expired
+watch from silently attaching to a same-name Claim that was deleted and
+recreated with a different identity or contract.
+
 Explicit names also define a different cleanup ownership boundary. The client
 never automatically deletes an explicitly named claim, whether creation fails
 or succeeds; the caller owns that claim and may safely retry or inspect it.
@@ -366,6 +372,19 @@ every tracked handle. Randomly generated claims retain the existing
 best-effort cleanup behavior. Because `shutdown_after_seconds` produces a
 different absolute shutdown time on every retry, it cannot be combined with
 `adopt_existing=True`.
+
+#### Cleanup migration for reattached Claims
+
+This ownership boundary changes the historical cleanup behavior for handles
+returned by `get_sandbox()`. Older clients could delete every tracked handle
+from synchronous `cleanup=True` or async context-manager cleanup, including a
+Claim that the current process only reattached to. Reattached Claims are now
+caller-owned: automatic cleanup closes the local connection but does not delete
+the Claim.
+
+Applications that intentionally relied on the old deletion behavior must call
+`delete_sandbox(claim_name, namespace)` for one Claim or `delete_all()` for all
+tracked Claims. Do not use automatic cleanup as proof of resource ownership.
 
 ### 9. Custom Volume Claim Templates
 

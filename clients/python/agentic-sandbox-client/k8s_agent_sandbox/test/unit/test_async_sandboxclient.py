@@ -31,9 +31,13 @@ pytest.importorskip("kubernetes_asyncio")
 from kubernetes_asyncio.client import ApiException
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
+from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
-from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient, _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
-from k8s_agent_sandbox.exceptions import SandboxRequestError
+from k8s_agent_sandbox.async_sandbox_client import (
+    AsyncSandboxClient,
+    _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
+)
+from k8s_agent_sandbox.exceptions import SandboxNotFoundError, SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -49,6 +53,7 @@ from k8s_agent_sandbox.test.unit.claim_adoption_test_support import (
     REQUESTED_LABELS,
     VOLUME_CLAIM_TEMPLATES,
     WARMPOOL,
+    claim_for_request,
     matching_claim,
     mismatched_claims,
     terminal_claims,
@@ -161,7 +166,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_sandbox_uses_explicit_claim_name(self):
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
-            return_value={"metadata": {"resourceVersion": "created-rv"}}
+            return_value=claim_for_request(
+                claim_name="sandbox-workflow-123",
+                namespace="test-namespace",
+                warmpool="test-warmpool",
+            )
         )
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             return_value="resolved-id"
@@ -190,7 +199,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.client._active_connection_sandboxes[key] = MagicMock()
         self.client._automatic_cleanup_claims.add(key)
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
-            return_value={"metadata": {"resourceVersion": "created-rv"}}
+            return_value=claim_for_request(
+                claim_name="sandbox-workflow-123",
+                namespace="test-namespace",
+                warmpool="test-warmpool",
+            )
         )
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             return_value="resolved-id"
@@ -223,7 +236,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             "UPPERCASE",
             "-leading",
             "trailing-",
-            f"{'a' * 64}.valid",
+            "two..dots",
             "a" * 254,
         )
 
@@ -235,6 +248,23 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.mock_k8s_helper.create_sandbox_claim.assert_not_called()
+
+    async def test_create_sandbox_accepts_native_valid_long_claim_names(self):
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
+            return_value="resolved-id"
+        )
+
+        for claim_name in ("a" * 64, "a" * 253):
+            with self.subTest(length=len(claim_name)):
+                self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+                    return_value=claim_for_request(claim_name=claim_name)
+                )
+
+                await self.client.create_sandbox(
+                    WARMPOOL, NAMESPACE, claim_name=claim_name
+                )
+
+                self.assertIn((NAMESPACE, claim_name), self.client._active_connection_sandboxes)
 
     async def test_create_sandbox_adopts_existing_claim_after_conflict(self):
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
@@ -445,6 +475,131 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
+    async def test_successful_explicit_create_revalidates_watch_contract(self):
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            return_value=matching_claim()
+        )
+
+        async def wait_for_ready(*_args, claim_validator=None, **_kwargs):
+            self.assertIsNotNone(claim_validator)
+            changed_claim = matching_claim()
+            changed_claim["spec"]["warmPoolRef"] = {"name": "other-pool"}
+            claim_validator(changed_claim)
+            return "unreachable"
+
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
+            side_effect=wait_for_ready
+        )
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+
+        with self.assertRaisesRegex(ValueError, "spec.warmPoolRef"):
+            await self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                labels=REQUESTED_LABELS,
+                claim_name=CLAIM_NAME,
+                volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                pod_labels=POD_LABELS,
+                pod_annotations=POD_ANNOTATIONS,
+            )
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+    async def test_successful_explicit_create_rejects_recreated_claim_during_watch(self):
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            return_value=matching_claim()
+        )
+
+        async def wait_for_ready(*_args, claim_validator=None, **_kwargs):
+            self.assertIsNotNone(claim_validator)
+            recreated_claim = matching_claim()
+            recreated_claim["metadata"]["uid"] = "replacement-uid"
+            claim_validator(recreated_claim)
+            return "unreachable"
+
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
+            side_effect=wait_for_ready
+        )
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+
+        with self.assertRaisesRegex(ValueError, "metadata.uid"):
+            await self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                labels=REQUESTED_LABELS,
+                claim_name=CLAIM_NAME,
+                volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                pod_labels=POD_LABELS,
+                pod_annotations=POD_ANNOTATIONS,
+            )
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_successful_explicit_create_rejects_recreated_claim_after_410(
+        self, mock_watch_class
+    ):
+        created_claim = matching_claim()
+        recreated_claim = matching_claim()
+        recreated_claim["metadata"].update(
+            uid="replacement-uid", resourceVersion="replacement-rv"
+        )
+        recreated_claim["status"] = {
+            "sandbox": {"name": "replacement-sandbox"},
+            "conditions": [
+                {
+                    "type": "Ready",
+                    "status": "True",
+                    "observedGeneration": 1,
+                }
+            ],
+        }
+        stream_resource_versions = []
+
+        async def expired_stream(*_args, **kwargs):
+            stream_resource_versions.append(kwargs["resource_version"])
+            raise ApiException(status=410)
+            yield
+
+        async def replacement_stream(*_args, **kwargs):
+            stream_resource_versions.append(kwargs["resource_version"])
+            yield {"type": "ADDED", "object": recreated_claim}
+
+        first_watch = MagicMock()
+        first_watch.stream = expired_stream
+        first_watch.close = AsyncMock()
+        second_watch = MagicMock()
+        second_watch.stream = replacement_stream
+        second_watch.close = AsyncMock()
+        mock_watch_class.side_effect = [first_watch, second_watch]
+        real_helper = AsyncK8sHelper.__new__(AsyncK8sHelper)
+        real_helper._initialized = True
+        real_helper.custom_objects_api = MagicMock()
+        self.client.k8s_helper = real_helper
+
+        with patch.object(
+            self.client,
+            "_create_claim",
+            new=AsyncMock(return_value=created_claim),
+        ), patch.object(
+            self.client, "_delete_claim", new_callable=AsyncMock
+        ) as delete_claim:
+            with self.assertRaisesRegex(ValueError, "metadata.uid"):
+                await self.client.create_sandbox(
+                    WARMPOOL,
+                    NAMESPACE,
+                    labels=REQUESTED_LABELS,
+                    claim_name=CLAIM_NAME,
+                    adopt_existing=True,
+                    volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                    pod_labels=POD_LABELS,
+                    pod_annotations=POD_ANNOTATIONS,
+                )
+
+        self.assertEqual(stream_resource_versions, ["existing-rv", "0"])
+        delete_claim.assert_not_awaited()
+        self.mock_sandbox_class.assert_not_called()
+
     async def test_create_sandbox_rejects_recreated_claim_during_watch(self):
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
             side_effect=ApiException(status=409)
@@ -572,7 +727,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         key = (NAMESPACE, CLAIM_NAME)
         self.client._automatic_cleanup_claims.add(key)
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
-            return_value={"metadata": {"resourceVersion": "created-rv"}}
+            return_value=claim_for_request()
         )
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             side_effect=TimeoutError("timed out")
@@ -620,7 +775,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_claim_is_not_deleted_on_context_exit(self):
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
-            return_value={"metadata": {"resourceVersion": "created-rv"}}
+            return_value=claim_for_request()
         )
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             return_value="resolved-id"
@@ -646,7 +801,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         key = (NAMESPACE, CLAIM_NAME)
         self.client._automatic_cleanup_claims.add(key)
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
-            return_value={"metadata": {"resourceVersion": "created-rv"}}
+            return_value=claim_for_request()
         )
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             side_effect=asyncio.CancelledError()
@@ -663,7 +818,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
-    async def test_adoption_propagates_non_conflict_without_deleting_claim(self):
+    async def test_explicit_create_failure_releases_stale_automatic_ownership(self):
         key = (NAMESPACE, CLAIM_NAME)
         self.client._automatic_cleanup_claims.add(key)
         server_error = ApiException(status=500)
@@ -684,7 +839,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertIs(context.exception, server_error)
         self.mock_k8s_helper.get_sandbox_claim.assert_not_awaited()
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
-        self.assertIn(key, self.client._automatic_cleanup_claims)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
     @patch("uuid.uuid4")
     async def test_generated_claim_cleanup_survives_ambiguous_create_failure(
@@ -722,6 +877,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_inactive = MagicMock()
         mock_inactive.is_active = False
         mock_inactive.terminate = AsyncMock()
+        mock_inactive.close_connection = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_inactive
 
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
@@ -732,6 +888,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
         sandbox = await self.client.get_sandbox("test-claim", "test-namespace")
         self.assertEqual(sandbox, mock_new)
+        mock_inactive.close_connection.assert_awaited_once_with()
 
     async def test_get_sandbox_not_found(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
@@ -778,6 +935,134 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         generated_handle.terminate.assert_awaited_once_with()
         generated_handle.close_connection.assert_not_awaited()
         self.assertNotIn(key, self.client._active_connection_sandboxes)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    async def test_context_cleanup_skips_reattached_claim(self):
+        reattached_handle = MagicMock()
+        reattached_handle.close_connection = AsyncMock()
+        reattached_handle.terminate = AsyncMock()
+        self.mock_sandbox_class.return_value = reattached_handle
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            return_value="resolved-id"
+        )
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        self.mock_k8s_helper.close = AsyncMock()
+
+        await self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        await self.client.__aexit__(None, None, None)
+
+        reattached_handle.terminate.assert_not_awaited()
+        reattached_handle.close_connection.assert_awaited_once_with()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+    async def test_get_sandbox_failure_cannot_remove_concurrently_explicit_handle(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        lookup_started = asyncio.Event()
+        release_lookup = asyncio.Event()
+        generated_handle = MagicMock()
+        generated_handle.close_connection = AsyncMock()
+        generated_handle.terminate = AsyncMock()
+        adopted_handle = MagicMock()
+        self.client._active_connection_sandboxes[key] = generated_handle
+        self.client._automatic_cleanup_claims.add(key)
+
+        async def fail_lookup(*_args, **_kwargs):
+            lookup_started.set()
+            await release_lookup.wait()
+            raise RuntimeError("stale lookup failed")
+
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            side_effect=fail_lookup
+        )
+        lookup_task = asyncio.create_task(
+            self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        )
+        await lookup_started.wait()
+
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            return_value=matching_claim()
+        )
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
+            return_value="adopted-sandbox"
+        )
+        self.mock_sandbox_class.return_value = adopted_handle
+        await self.client.create_sandbox(
+            WARMPOOL,
+            NAMESPACE,
+            labels=REQUESTED_LABELS,
+            claim_name=CLAIM_NAME,
+            volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+            pod_labels=POD_LABELS,
+            pod_annotations=POD_ANNOTATIONS,
+        )
+
+        release_lookup.set()
+        with self.assertRaises(SandboxNotFoundError):
+            await lookup_task
+
+        generated_handle.terminate.assert_not_awaited()
+        generated_handle.close_connection.assert_awaited_once_with()
+        self.assertIs(self.client._active_connection_sandboxes[key], adopted_handle)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    async def test_automatic_cleanup_serializes_explicit_ownership_transfer(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        termination_started = asyncio.Event()
+        release_termination = asyncio.Event()
+        explicit_create_called = asyncio.Event()
+        generated_handle = MagicMock()
+
+        async def block_termination():
+            termination_started.set()
+            await release_termination.wait()
+
+        async def create_claim(*_args, **_kwargs):
+            explicit_create_called.set()
+            return matching_claim()
+
+        generated_handle.terminate = AsyncMock(side_effect=block_termination)
+        generated_handle.close_connection = AsyncMock()
+        adopted_handle = MagicMock()
+        self.client._active_connection_sandboxes[key] = generated_handle
+        self.client._automatic_cleanup_claims.add(key)
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            side_effect=create_claim
+        )
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
+            return_value="adopted-sandbox"
+        )
+        self.mock_sandbox_class.return_value = adopted_handle
+
+        cleanup_task = asyncio.create_task(
+            self.client._delete_automatic_cleanup_claims()
+        )
+        await termination_started.wait()
+        create_task = asyncio.create_task(
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                labels=REQUESTED_LABELS,
+                claim_name=CLAIM_NAME,
+                volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                pod_labels=POD_LABELS,
+                pod_annotations=POD_ANNOTATIONS,
+            )
+        )
+        scheduler_checkpoint = asyncio.Event()
+
+        async def mark_scheduler_checkpoint():
+            scheduler_checkpoint.set()
+
+        checkpoint_task = asyncio.create_task(mark_scheduler_checkpoint())
+        await scheduler_checkpoint.wait()
+        try:
+            self.assertFalse(explicit_create_called.is_set())
+        finally:
+            release_termination.set()
+            await asyncio.gather(cleanup_task, create_task, checkpoint_task)
+
+        self.assertIs(self.client._active_connection_sandboxes[key], adopted_handle)
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
     async def test_list_active_sandboxes(self):

@@ -121,6 +121,8 @@ def get_sandbox(claim_name: str,
 
 Retrieves an existing sandbox handle given a sandbox claim name.
 If the handle is closed or missing, it re-attaches to the infrastructure.
+Reattached claims remain caller-owned: automatic cleanup never deletes
+them. Call ``delete_sandbox`` or ``delete_all`` for deliberate deletion.
 
 **Arguments**:
 

@@ -22,6 +22,7 @@ import atexit
 import sys
 import logging
 from functools import partial
+from threading import RLock
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
 from kubernetes.client import ApiException
@@ -95,6 +96,7 @@ class SandboxClient(Generic[T]):
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         self._automatic_cleanup_claims: set[Tuple[str, str]] = set()
+        self._lock = RLock()
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
@@ -182,6 +184,21 @@ class SandboxClient(Generic[T]):
         key = (namespace, claim_name)
         adopted_sandbox_id = None
         claim_validator = None
+        validate_expected_claim = None
+        if not generated_claim_name:
+            validate_expected_claim = partial(
+                validate_claim_for_adoption,
+                claim_name=claim_name,
+                namespace=namespace,
+                warmpool=warmpool,
+                labels=labels,
+                lifecycle=lifecycle,
+                volume_claim_templates=volume_claim_templates,
+                pod_metadata=pod_metadata,
+                env=env,
+            )
+            with self._lock:
+                self._automatic_cleanup_claims.discard(key)
         try:
             try:
                 created_claim = self._create_claim(
@@ -194,33 +211,27 @@ class SandboxClient(Generic[T]):
                     pod_metadata=pod_metadata,
                     env=env,
                 )
-                if not generated_claim_name:
-                    self._automatic_cleanup_claims.discard(key)
-                claim_rv = None
-                if isinstance(created_claim, dict):
-                    claim_rv = (created_claim.get("metadata") or {}).get("resourceVersion")
+                if validate_expected_claim is None:
+                    claim_rv = None
+                    if isinstance(created_claim, dict):
+                        claim_rv = (created_claim.get("metadata") or {}).get("resourceVersion")
+                else:
+                    claim_identity = validate_expected_claim(created_claim)
+                    claim_rv = claim_identity.resource_version
+                    claim_validator = partial(
+                        validate_expected_claim,
+                        expected_uid=claim_identity.uid,
+                    )
             except ApiException as error:
                 if not (adopt_existing and error.status == 409):
                     raise
                 existing_claim = self.k8s_helper.get_sandbox_claim(
                     claim_name, namespace
                 )
-                validate_adopted_claim = partial(
-                    validate_claim_for_adoption,
-                    claim_name=claim_name,
-                    namespace=namespace,
-                    warmpool=warmpool,
-                    labels=labels,
-                    lifecycle=lifecycle,
-                    volume_claim_templates=volume_claim_templates,
-                    pod_metadata=pod_metadata,
-                    env=env,
-                )
-                claim_identity = validate_adopted_claim(existing_claim)
-                self._automatic_cleanup_claims.discard(key)
+                claim_identity = validate_expected_claim(existing_claim)
                 claim_rv = claim_identity.resource_version
                 claim_validator = partial(
-                    validate_adopted_claim,
+                    validate_expected_claim,
                     expected_uid=claim_identity.uid,
                 )
                 adopted_sandbox_id = get_ready_sandbox_name(
@@ -264,9 +275,10 @@ class SandboxClient(Generic[T]):
                 self._delete_claim(claim_name, namespace)
             raise
 
-        self._active_connection_sandboxes[key] = sandbox
-        if generated_claim_name:
-            self._automatic_cleanup_claims.add(key)
+        with self._lock:
+            self._active_connection_sandboxes[key] = sandbox
+            if generated_claim_name:
+                self._automatic_cleanup_claims.add(key)
         return sandbox
 
     def get_sandbox(
@@ -278,6 +290,8 @@ class SandboxClient(Generic[T]):
         """
         Retrieves an existing sandbox handle given a sandbox claim name.
         If the handle is closed or missing, it re-attaches to the infrastructure.
+        Reattached claims remain caller-owned: automatic cleanup never deletes
+        them. Call ``delete_sandbox`` or ``delete_all`` for deliberate deletion.
 
         Args:
             claim_name: Name of the SandboxClaim to attach to.
@@ -293,7 +307,8 @@ class SandboxClient(Generic[T]):
             >>> sandbox.commands.run("ls -la")
         """
         key = (namespace, claim_name)
-        existing = self._active_connection_sandboxes.get(key)
+        with self._lock:
+            existing = self._active_connection_sandboxes.get(key)
 
         # Check if the sandbox actually exists in Kubernetes
         try:
@@ -302,35 +317,59 @@ class SandboxClient(Generic[T]):
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
         except Exception as e:
-            if existing:
-                if key in self._automatic_cleanup_claims:
-                    existing.terminate()
-                    self._automatic_cleanup_claims.discard(key)
-                else:
-                    existing.close_connection()
-            self._active_connection_sandboxes.pop(key, None)
+            self._detach_failed_lookup(key, existing)
             raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
-        # If it's already in the registry and active (and verified on K8s), return the existing object
-        if existing and existing.is_active:
-            return existing
-
-        # If the sandbox is not active, pop it out from the tracking list
-        if existing:
-            self._active_connection_sandboxes.pop(key, None)
-
-        # Re-attach: Create a fresh handle for the existing ID
-        new_handle = self.sandbox_class(
-            claim_name=claim_name,
-            sandbox_id=sandbox_id,
-            namespace=namespace,
-            connection_config=self.connection_config,
-            tracer_config=self.tracer_config,
-            k8s_helper=self.k8s_helper
+        return self._reuse_or_replace_resolved_handle(
+            key, existing, claim_name, sandbox_id, namespace
         )
 
-        self._active_connection_sandboxes[key] = new_handle
-        return new_handle
+    def _detach_failed_lookup(
+        self, key: Tuple[str, str], expected_handle: T | None
+    ) -> None:
+        """Detach only the handle observed by the failed lookup."""
+        if expected_handle is None:
+            return
+        with self._lock:
+            current_handle = self._active_connection_sandboxes.get(key)
+            if current_handle is not expected_handle:
+                expected_handle.close_connection()
+                return
+            if key in self._automatic_cleanup_claims:
+                expected_handle.terminate()
+                self._automatic_cleanup_claims.discard(key)
+            else:
+                expected_handle.close_connection()
+            if self._active_connection_sandboxes.get(key) is expected_handle:
+                self._active_connection_sandboxes.pop(key, None)
+
+    def _reuse_or_replace_resolved_handle(
+        self,
+        key: Tuple[str, str],
+        expected_handle: T | None,
+        claim_name: str,
+        sandbox_id: str,
+        namespace: str,
+    ) -> T:
+        """Install a resolved handle without overwriting a concurrent replacement."""
+        with self._lock:
+            current_handle = self._active_connection_sandboxes.get(key)
+            if current_handle is not expected_handle and expected_handle is not None:
+                expected_handle.close_connection()
+            if current_handle is not None and current_handle.is_active:
+                return current_handle
+            if current_handle is not None:
+                current_handle.close_connection()
+            new_handle = self.sandbox_class(
+                claim_name=claim_name,
+                sandbox_id=sandbox_id,
+                namespace=namespace,
+                connection_config=self.connection_config,
+                tracer_config=self.tracer_config,
+                k8s_helper=self.k8s_helper,
+            )
+            self._active_connection_sandboxes[key] = new_handle
+            return new_handle
     
     def list_active_sandboxes(self) -> List[Tuple[str, str]]:
         """Returns a list of tuples containing (namespace, claim_name) currently managed by this client.
@@ -343,10 +382,11 @@ class SandboxClient(Generic[T]):
             [('default', 'sandbox-claim-1234abcd')]
         """
         # We only return IDs that are still active/initialized, and clean up inactive ones.
-        for key, obj in list(self._active_connection_sandboxes.items()):
-            if not obj.is_active:
-                self._active_connection_sandboxes.pop(key, None)
-        return list(self._active_connection_sandboxes.keys())
+        with self._lock:
+            for key, obj in list(self._active_connection_sandboxes.items()):
+                if not obj.is_active:
+                    self._active_connection_sandboxes.pop(key, None)
+            return list(self._active_connection_sandboxes.keys())
       
     def list_all_sandboxes(self, namespace: str = "default", label_selector: str | None = None) -> List[str]:
         """
@@ -377,14 +417,16 @@ class SandboxClient(Generic[T]):
             >>> client.delete_sandbox(sandbox.claim_name)
         """
         key = (namespace, claim_name)
-        sandbox = self._active_connection_sandboxes.get(key)
         try:
-            if sandbox:
-                sandbox.terminate()
-                self._active_connection_sandboxes.pop(key, None)
-            else:
-                self._delete_claim(claim_name, namespace)
-            self._automatic_cleanup_claims.discard(key)
+            with self._lock:
+                sandbox = self._active_connection_sandboxes.get(key)
+                if sandbox:
+                    sandbox.terminate()
+                    if self._active_connection_sandboxes.get(key) is sandbox:
+                        self._active_connection_sandboxes.pop(key, None)
+                else:
+                    self._delete_claim(claim_name, namespace)
+                self._automatic_cleanup_claims.discard(key)
         except Exception as e:
             logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
             
@@ -399,7 +441,9 @@ class SandboxClient(Generic[T]):
             >>> client.create_sandbox("python-sandbox-pool")
             >>> client.delete_all()
         """
-        for ns, claim_name in list(self._active_connection_sandboxes):
+        with self._lock:
+            claims = list(self._active_connection_sandboxes)
+        for ns, claim_name in claims:
             try:
                 self.delete_sandbox(claim_name, namespace=ns)
             except Exception as e:
@@ -409,13 +453,30 @@ class SandboxClient(Generic[T]):
 
     def _delete_automatic_cleanup_claims(self):
         """Best-effort cleanup of internally named claims only."""
-        for ns, claim_name in list(self._automatic_cleanup_claims):
+        with self._lock:
+            claims = list(self._automatic_cleanup_claims)
+        for ns, claim_name in claims:
             try:
-                self.delete_sandbox(claim_name, namespace=ns)
+                self._delete_automatic_cleanup_claim((ns, claim_name))
             except Exception as e:
                 logging.error(
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
+
+    def _delete_automatic_cleanup_claim(self, key: Tuple[str, str]) -> None:
+        """Delete a claim only while this client still owns its cleanup."""
+        with self._lock:
+            if key not in self._automatic_cleanup_claims:
+                return
+            namespace, claim_name = key
+            sandbox = self._active_connection_sandboxes.get(key)
+            if sandbox is None:
+                self._delete_claim(claim_name, namespace)
+            else:
+                sandbox.terminate()
+            if self._active_connection_sandboxes.get(key) is sandbox:
+                self._active_connection_sandboxes.pop(key, None)
+            self._automatic_cleanup_claims.discard(key)
 
     @trace_span("create_claim")
     def _create_claim(

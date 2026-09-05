@@ -102,7 +102,7 @@ def _replace(claim: dict, path: tuple[str, ...], value: object) -> None:
 
 def mismatched_claims():
     """Yields every immutable mismatch with its safe diagnostic field."""
-    yield None, "object representation"
+    yield [], "object representation"
     cases = (
         (("apiVersion",), "extensions.agents.x-k8s.io/v1alpha1", "apiVersion"),
         (("kind",), "OtherClaim", "kind"),

@@ -32,9 +32,9 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
     CREATED_BY_LABEL,
-    TERMINAL_CLAIM_READY_REASONS,
 )
-from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .claim_status import get_claim_sandbox_name
+from .exceptions import SandboxMetadataError, SandboxNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
     is_valid_gateway_hostname,
@@ -161,6 +161,7 @@ class AsyncK8sHelper:
             namespace,
             timeout,
             require_ready=False,
+            require_current_generation=True,
             resource_version=resource_version,
             claim_validator=claim_validator,
         )
@@ -193,6 +194,7 @@ class AsyncK8sHelper:
             namespace,
             timeout,
             require_ready=True,
+            require_current_generation=True,
             resource_version=resource_version,
             claim_validator=claim_validator,
         )
@@ -203,6 +205,7 @@ class AsyncK8sHelper:
         namespace: str,
         timeout: int,
         require_ready: bool,
+        require_current_generation: bool,
         resource_version: str | None = None,
         claim_validator: Callable[[dict], object] | None = None,
     ) -> str:
@@ -265,50 +268,16 @@ class AsyncK8sHelper:
                         seen_rv = (claim_object.get("metadata") or {}).get("resourceVersion")
                         if seen_rv:
                             rv = seen_rv
-                        metadata = claim_object.get("metadata") or {}
-                        generation = metadata.get("generation")
-                        status = claim_object.get("status") or {}
-
-                        ready = False
-                        for cond in status.get("conditions", []):
-                            if (
-                                claim_validator is not None
-                                and cond.get("observedGeneration") != generation
-                            ):
-                                continue
-                            if (
-                                cond.get("type") == "Ready"
-                                and cond.get("status") == "False"
-                                and cond.get("reason") == "TemplateNotFound"
-                            ):
-                                raise SandboxTemplateNotFoundError(
-                                    f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
-                                )
-                            elif cond.get("reason") == "WarmPoolNotFound":
-                                raise SandboxWarmPoolNotFoundError(
-                                    f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
-                                )
-                            elif (
-                                cond.get("type") == "Ready"
-                                and cond.get("status") == "False"
-                                and cond.get("reason") in TERMINAL_CLAIM_READY_REASONS
-                            ):
-                                # The controller reported a failure it will not
-                                # retry; waiting out the timeout cannot succeed.
-                                raise SandboxClaimFailedError(
-                                    f"SandboxClaim '{claim_name}' failed with terminal reason "
-                                    f"{cond.get('reason')}: {cond.get('message', '')}"
-                                )
-                            if cond.get("type") == "Ready" and cond.get("status") == "True":
-                                ready = True
-
-                        sandbox_status = status.get("sandbox", {})
-                        # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
-                        name = sandbox_status.get("name", "") or sandbox_status.get("Name", "")
-                        if name and (ready or not require_ready):
+                        name = get_claim_sandbox_name(
+                            claim_object,
+                            claim_name,
+                            require_ready=require_ready,
+                            require_current_generation=require_current_generation,
+                        )
+                        if name:
                             logger.info(
                                 f"Resolved sandbox name '{name}' from claim status"
-                                + (" (claim Ready)" if ready else "")
+                                + (" (claim Ready)" if require_ready else "")
                             )
                             return name
             except client.ApiException as e:

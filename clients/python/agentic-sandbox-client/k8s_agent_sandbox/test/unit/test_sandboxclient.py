@@ -107,7 +107,12 @@ class TestSandboxClient(unittest.TestCase):
             # no separate wait on the Sandbox resource. The watch starts at
             # the created claim's resourceVersion.
             self.mock_k8s_helper.wait_for_claim_ready.assert_called_once_with(
-                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345")
+                "sandbox-claim-1234abcd",
+                "test-namespace",
+                180,
+                resource_version="12345",
+                claim_validator=None,
+            )
             self.mock_k8s_helper.wait_for_sandbox_ready.assert_not_called()
             self.assertEqual(sandbox, mock_sandbox_instance)
             
@@ -125,12 +130,19 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper.wait_for_claim_ready.side_effect = Exception("Timeout Error")
 
         with patch.object(self.client, '_create_claim') as mock_create_claim:
+            mock_create_claim.return_value = claim_for_request(
+                claim_name="sandbox-claim-1234abcd"
+            )
             with self.assertRaises(Exception) as context:
                 self.client.create_sandbox("test-warmpool", "test-namespace")
                 
             self.assertEqual(str(context.exception), "Timeout Error")
             # Ensure delete_sandbox_claim is called to cleanup orphan claim on failure
-            self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
+            self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
+                "sandbox-claim-1234abcd",
+                "test-namespace",
+                expected_uid="claim-uid",
+            )
 
     @patch("uuid.uuid4")
     def test_failed_creation_preserves_original_error_when_close_fails(
@@ -395,6 +407,25 @@ class TestSandboxClient(unittest.TestCase):
             claim_validator=ANY,
         )
         self.assertEqual(sandbox, self.mock_sandbox_class.return_value)
+
+    def test_create_sandbox_reports_claim_deleted_after_adoption_conflict(self):
+        self.mock_k8s_helper.create_sandbox_claim.side_effect = ApiException(
+            status=409
+        )
+        self.mock_k8s_helper.get_sandbox_claim.return_value = None
+
+        with self.assertRaisesRegex(
+            SandboxNotFoundError, "disappeared after the create conflict"
+        ):
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=CLAIM_NAME,
+                adopt_existing=True,
+            )
+
+        self.mock_k8s_helper.wait_for_claim_ready.assert_not_called()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
     def test_create_sandbox_propagates_conflict_without_adoption(self):
         conflict = ApiException(status=409)
@@ -837,7 +868,7 @@ class TestSandboxClient(unittest.TestCase):
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
     @patch("uuid.uuid4")
-    def test_generated_claim_cleanup_survives_ambiguous_create_failure(
+    def test_generated_claim_without_uid_is_not_deleted_after_ambiguous_failure(
         self, mock_uuid
     ):
         mock_uuid.return_value.hex = "1234abcd"
@@ -848,9 +879,7 @@ class TestSandboxClient(unittest.TestCase):
             self.client.create_sandbox(WARMPOOL, NAMESPACE)
 
         self.assertIs(context.exception, server_error)
-        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with(
-            "sandbox-claim-1234abcd", NAMESPACE
-        )
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
     @patch("uuid.uuid4")
     def test_generated_claim_conflict_does_not_delete_existing_claim(
@@ -1654,7 +1683,11 @@ class TestSandboxClient(unittest.TestCase):
             mock_delete.assert_any_call("claim2", namespace="ns2")
 
     def test_cleanup_true_registers_generated_only_atexit_handler(self):
-        with patch("k8s_agent_sandbox.sandbox_client.atexit") as mock_atexit:
+        with patch(
+            "k8s_agent_sandbox.sandbox_client.atexit"
+        ) as mock_atexit, patch(
+            "k8s_agent_sandbox.sandbox_client.K8sHelper"
+        ):
             client = SandboxClient(cleanup=True)
 
         mock_atexit.register.assert_called_once_with(

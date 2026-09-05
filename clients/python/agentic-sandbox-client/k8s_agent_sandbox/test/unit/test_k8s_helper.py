@@ -935,6 +935,77 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
         claim_validator.assert_any_call(current_event["object"])
 
     @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_default_ready_watch_ignores_stale_generation(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        stale_event = self._ready_event(rv="8")
+        stale_event["object"]["metadata"]["generation"] = 2
+        stale_event["object"]["status"]["conditions"][0][
+            "observedGeneration"
+        ] = 1
+        stale_event["object"]["status"]["sandbox"]["name"] = "stale-sandbox"
+        current_event = self._ready_event(rv="9")
+        current_event["object"]["metadata"]["generation"] = 2
+        current_event["object"]["status"]["conditions"][0][
+            "observedGeneration"
+        ] = 2
+        mock_watch = MagicMock()
+        mock_watch.stream.return_value = [stale_event, current_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        name = helper.wait_for_claim_ready(
+            "test-claim", "default", timeout=5
+        )
+
+        self.assertEqual(name, "warm-sandbox-1")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_resolve_name_ignores_stale_terminal_condition(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        stale_event = self._ready_event(rv="8")
+        stale_event["object"]["metadata"]["generation"] = 2
+        stale_event["object"]["status"]["conditions"] = [
+            {
+                "type": "Ready",
+                "status": "False",
+                "reason": "TemplateNotFound",
+                "observedGeneration": 1,
+            }
+        ]
+        mock_watch = MagicMock()
+        mock_watch.stream.return_value = [stale_event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        name = helper.resolve_sandbox_name(
+            "test-claim", "default", timeout=5
+        )
+
+        self.assertEqual(name, "warm-sandbox-1")
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_watch_stops_when_claim_validator_rejects_event(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls
+    ):
+        mock_watch = MagicMock()
+        mock_watch.stream.return_value = [self._ready_event()]
+        mock_watch_class.return_value = mock_watch
+        claim_validator = MagicMock(side_effect=ValueError("invalid claim"))
+
+        helper = K8sHelper()
+        with self.assertRaisesRegex(ValueError, "invalid claim"):
+            helper.wait_for_claim_ready(
+                "test-claim",
+                "default",
+                timeout=5,
+                claim_validator=claim_validator,
+            )
+
+        mock_watch.stop.assert_called_once_with()
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
     def test_watch_non_410_api_exception_reraises(self, mock_watch_class, mock_config, mock_api_cls, mock_core_cls):
         mock_watch = MagicMock()
         mock_watch.stream.side_effect = client.ApiException(status=403)

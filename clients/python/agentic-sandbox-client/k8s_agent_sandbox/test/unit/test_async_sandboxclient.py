@@ -146,36 +146,58 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 env=env,
             )
             self.mock_k8s_helper.wait_for_claim_ready.assert_awaited_once_with(
-                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345"
+                "sandbox-claim-1234abcd",
+                "test-namespace",
+                180,
+                resource_version="12345",
+                claim_validator=None,
             )
 
     async def test_create_sandbox_failure_cleanup(self):
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             side_effect=Exception("Timeout")
         )
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock), \
-             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+        with patch.object(
+            self.client,
+            "_create_claim",
+            new_callable=AsyncMock,
+            return_value=claim_for_request(claim_name="generated-claim"),
+        ):
 
             with self.assertRaises(Exception) as ctx:
                 await self.client.create_sandbox("test-warmpool", "test-namespace")
 
             self.assertEqual(str(ctx.exception), "Timeout")
-            mock_delete.assert_called_once()
+            self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
+                ANY,
+                "test-namespace",
+                expected_uid="claim-uid",
+            )
 
     async def test_create_sandbox_cancellation_cleanup(self):
         """CancelledError (BaseException) should still trigger claim cleanup."""
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             side_effect=asyncio.CancelledError()
         )
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
 
-        with patch.object(self.client, "_create_claim", new_callable=AsyncMock), \
-             patch.object(self.client, "_delete_claim", new_callable=AsyncMock) as mock_delete:
+        with patch.object(
+            self.client,
+            "_create_claim",
+            new_callable=AsyncMock,
+            return_value=claim_for_request(claim_name="generated-claim"),
+        ):
 
             with self.assertRaises(asyncio.CancelledError):
                 await self.client.create_sandbox("test-warmpool", "test-namespace")
 
-            mock_delete.assert_called_once()
+            self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
+                ANY,
+                "test-namespace",
+                expected_uid="claim-uid",
+            )
 
     @patch("uuid.uuid4")
     async def test_cancelled_creation_still_cleans_up_when_close_fails(
@@ -233,7 +255,12 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             return candidate_handle
 
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
-            return_value={"metadata": {"resourceVersion": "created-rv"}}
+            return_value={
+                "metadata": {
+                    "resourceVersion": "created-rv",
+                    "uid": "created-uid",
+                }
+            }
         )
         self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
             side_effect=wait_for_ready
@@ -256,7 +283,9 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             await create_task
         candidate_handle.close_connection.assert_awaited_once_with()
         self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
-            "sandbox-claim-1234abcd", NAMESPACE
+            "sandbox-claim-1234abcd",
+            NAMESPACE,
+            expected_uid="created-uid",
         )
         self.assertEqual(self.client._active_connection_sandboxes, {})
         self.assertEqual(self.client._automatic_cleanup_claims, set())
@@ -519,6 +548,27 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             claim_validator=ANY,
         )
         self.assertEqual(sandbox, self.mock_sandbox_class.return_value)
+
+    async def test_create_sandbox_reports_claim_deleted_after_adoption_conflict(self):
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            side_effect=ApiException(status=409)
+        )
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value=None)
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock()
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+
+        with self.assertRaisesRegex(
+            SandboxNotFoundError, "disappeared after the create conflict"
+        ):
+            await self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=CLAIM_NAME,
+                adopt_existing=True,
+            )
+
+        self.mock_k8s_helper.wait_for_claim_ready.assert_not_awaited()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
     async def test_create_sandbox_propagates_conflict_without_adoption(self):
         conflict = ApiException(status=409)
@@ -1052,7 +1102,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
     @patch("uuid.uuid4")
-    async def test_generated_claim_cleanup_survives_ambiguous_create_failure(
+    async def test_generated_claim_without_uid_is_not_deleted_after_ambiguous_failure(
         self, mock_uuid
     ):
         mock_uuid.return_value.hex = "1234abcd"
@@ -1066,9 +1116,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             await self.client.create_sandbox(WARMPOOL, NAMESPACE)
 
         self.assertIs(context.exception, server_error)
-        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
-            "sandbox-claim-1234abcd", NAMESPACE
-        )
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
     @patch("uuid.uuid4")
     async def test_generated_claim_conflict_does_not_delete_existing_claim(
@@ -1789,18 +1837,14 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 pod_annotations=POD_ANNOTATIONS,
             )
         )
-        scheduler_checkpoint = asyncio.Event()
-
-        async def mark_scheduler_checkpoint():
-            scheduler_checkpoint.set()
-
-        checkpoint_task = asyncio.create_task(mark_scheduler_checkpoint())
-        await scheduler_checkpoint.wait()
         try:
-            self.assertFalse(explicit_create_called.is_set())
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    explicit_create_called.wait(), timeout=0.2
+                )
         finally:
             release_termination.set()
-            await asyncio.gather(cleanup_task, create_task, checkpoint_task)
+            await asyncio.gather(cleanup_task, create_task)
 
         self.assertIs(self.client._active_connection_sandboxes[key], adopted_handle)
         self.assertNotIn(key, self.client._automatic_cleanup_claims)

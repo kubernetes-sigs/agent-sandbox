@@ -318,6 +318,12 @@ class AsyncSandboxClient(Generic[T]):
                 existing_claim = await self.k8s_helper.get_sandbox_claim(
                     claim_name, namespace
                 )
+                if existing_claim is None:
+                    raise SandboxNotFoundError(
+                        f"SandboxClaim '{claim_name}' disappeared after the "
+                        "create conflict; retry the request."
+                    )
+                assert validate_expected_claim is not None
                 claim_identity = validate_expected_claim(existing_claim)
                 claim_uid = claim_identity.uid
                 explicit_ownership_committed = True
@@ -338,21 +344,13 @@ class AsyncSandboxClient(Generic[T]):
             # watch cache instead of a quorum etcd read per wait.
             sandbox_id = adopted_sandbox_id
             if sandbox_id is None:
-                if claim_validator is None:
-                    sandbox_id = await self._wait_for_claim_ready(
-                        claim_name,
-                        namespace,
-                        sandbox_ready_timeout,
-                        resource_version=claim_rv,
-                    )
-                else:
-                    sandbox_id = await self._wait_for_claim_ready(
-                        claim_name,
-                        namespace,
-                        sandbox_ready_timeout,
-                        resource_version=claim_rv,
-                        claim_validator=claim_validator,
-                    )
+                sandbox_id = await self._wait_for_claim_ready(
+                    claim_name,
+                    namespace,
+                    sandbox_ready_timeout,
+                    resource_version=claim_rv,
+                    claim_validator=claim_validator,
+                )
 
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
@@ -934,13 +932,6 @@ class AsyncSandboxClient(Generic[T]):
         claim_validator=None,
     ) -> str:
         """Waits for the SandboxClaim to be bound and Ready, returning the sandbox name."""
-        if claim_validator is None:
-            return await self.k8s_helper.wait_for_claim_ready(
-                claim_name,
-                namespace,
-                timeout,
-                resource_version=resource_version,
-            )
         return await self.k8s_helper.wait_for_claim_ready(
             claim_name,
             namespace,

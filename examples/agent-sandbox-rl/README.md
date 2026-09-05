@@ -50,6 +50,12 @@ kubectl get crd | grep agents.x-k8s.io        # expect the 4 CRDs
 kubectl get pods -n agent-sandbox-system       # controller Running
 ```
 
+Run this if the namespace doesn't already exist:
+
+```bash
+kubectl create namespace agent-sandbox-rl
+```
+
 `fleet.preflight()` checks all of this for you and raises `PreflightError` with a
 precise message if something is missing.
 
@@ -98,7 +104,7 @@ pytest examples/agent-sandbox-rl
 # import + reach your cluster
 python -c "import agent_sandbox_rl as a; print('agent-sandbox-rl', a.__version__)"
 python -c "from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig; \
-SandboxFleet(FleetConfig(clusters=[ClusterConfig(name='c', namespace='default')])).preflight()"
+SandboxFleet(FleetConfig(clusters=[ClusterConfig(name='c', namespace='agent-sandbox-rl')])).preflight()"
 ```
 
 A clean `preflight()` (no `PreflightError`) means you're ready for the Quickstart.
@@ -111,7 +117,7 @@ A clean `preflight()` (no `PreflightError`) means you're ready for the Quickstar
 from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig, SweBenchSource, swebench_probe
 
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="rl", namespace="rl-tunix-swebench")],
+    clusters=[ClusterConfig(name="rl", namespace="agent-sandbox-rl")],
     max_concurrent=8, max_warmpool_size=32, placement="image-affinity"))
 fleet.load_tasks(SweBenchSource(limit=8))
 
@@ -148,7 +154,7 @@ results = await fleet.run(async_or_sync_process_fn, strategy="naive", concurrenc
 
 ```bash
 cd examples
-WARMPOOL_STRATEGY=sliding TASKS_LIMIT=4 MAX_CONCURRENT=4 NAMESPACE=rl-tunix-swebench \
+WARMPOOL_STRATEGY=sliding TASKS_LIMIT=4 MAX_CONCURRENT=4 NAMESPACE=agent-sandbox-rl \
 NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool NODE_SELECTOR_VAL=e2-pool \
 python run_swebench_fleet.py
 ```
@@ -250,7 +256,7 @@ behavior is unchanged):
 
 ```python
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="rl", namespace="rl")],
+    clusters=[ClusterConfig(name="rl", namespace="agent-sandbox-rl")],
     max_concurrent=50, max_warmpool_size=16,
     warm_per_task=True,                          # 1 warm replica per task
     template=TemplateSpec(colocate_replicas=True)))  # pack a pool's replicas on one node
@@ -489,7 +495,7 @@ Three layers, mirroring the `k8s-agent-sandbox` SDK so traces/metrics interopera
    ```text
    ── Run report (strategy=naive) ──
      environment:
-       default: context=(ambient)  namespace=rl-tunix-swebench  k8s_version=v1.35...
+       default: context=(ambient)  namespace=agent-sandbox-rl  k8s_version=v1.35...
                 nodes=11  node_pools=[e2-pool,...]  region=us-central2
      preflight              1.35s  (n=1, max=1.35s)
      wait_pool_ready        8.44s  (n=2, max=4.22s)

@@ -22,7 +22,7 @@ the instant-claim levers so no rollout queues behind another:
 from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig, TemplateSpec
 
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    clusters=[ClusterConfig(name="c1", namespace="agent-sandbox-rl")],
     max_concurrent=64,
     max_warmpool_size=16,                 # >= rollouts per problem (G)
     warm_per_task=True,                   # one warm replica per rollout
@@ -53,7 +53,7 @@ from agent_sandbox_rl.sources import to_tasks
 # SHALLOW warm: recycle holds ~1 sandbox per problem, so 1 replica/pool is enough.
 # Do NOT deep-warm (warm_per_task) for recycling — that stresses the warm-pool controller.
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    clusters=[ClusterConfig(name="c1", namespace="agent-sandbox-rl")],
     max_concurrent=500,                                    # concurrent problems held
     template=TemplateSpec(resources=ResourceSpec(cpu="250m", memory="512Mi"))))
 
@@ -110,7 +110,7 @@ the SDK is fail-safe by default:
 from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig, SweBenchSource
 
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    clusters=[ClusterConfig(name="c1", namespace="agent-sandbox-rl")],
     max_concurrent=16, max_warmpool_size=32, placement="image-affinity"))
 fleet.load_tasks(SweBenchSource(limit=500))
 fleet.setup()                         # preflight + plan + warm pools
@@ -254,8 +254,8 @@ Give several `ClusterConfig`s (different `context`/`kubeconfig`) and a
 
 ```python
 FleetConfig(clusters=[
-    ClusterConfig(name="us-central2", context="ctx-a", namespace="rl"),
-    ClusterConfig(name="us-east1",   context="ctx-b", namespace="rl", weight=2.0),
+    ClusterConfig(name="us-central2", context="ctx-a", namespace="agent-sandbox-rl"),
+    ClusterConfig(name="us-east1",   context="ctx-b", namespace="agent-sandbox-rl", weight=2.0),
 ], placement="image-affinity", max_concurrent=128)
 ```
 

@@ -52,14 +52,15 @@ class ChartVersionTestCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.repo = Path(self._tmp.name)
 
-        # verify-chart-version reads GITHUB_BASE_REF/PULL_BASE_REF, and treats
-        # CI as fatal-on-missing-base. Pin the environment for determinism;
-        # empty is falsey, so it reads as "unset" to both checks.
+        # verify-chart-version reads GITHUB_BASE_REF/PULL_BASE_REF/PULL_BASE_SHA,
+        # and treats CI as fatal-on-missing-base. Pin the environment for
+        # determinism; empty is falsey, so it reads as "unset" to both checks.
         env_patch = mock.patch.dict(
             os.environ,
             {
                 "GITHUB_BASE_REF": "main",
                 "PULL_BASE_REF": "",
+                "PULL_BASE_SHA": "",
                 "CI": "",
                 "GITHUB_ACTIONS": "",
                 "PROW_JOB_ID": "",

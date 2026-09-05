@@ -147,6 +147,14 @@ lint-api:
 fix-api:
 	./dev/tools/lint-api --fix
 
+.PHONY: verify-chart-version
+verify-chart-version:
+	./dev/tools/verify-chart-version
+
+.PHONY: bump-chart-version
+bump-chart-version:
+	./dev/tools/bump-chart-version
+
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
 

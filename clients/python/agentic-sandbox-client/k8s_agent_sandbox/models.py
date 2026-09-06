@@ -60,6 +60,32 @@ class FileEntry(BaseModel):
             mode=entry.get("mode"),
         )
 
+class HealthStatus(BaseModel):
+    """Sandbox liveness/readiness reported by sandboxd's /v1/health endpoint."""
+    status: Literal["ok"]  # HealthResponse.status enum in the sandboxd spec.
+    uptime_seconds: Optional[int] = None  # Optional per the sandboxd spec.
+
+    @classmethod
+    def from_sandboxd(cls, payload: dict) -> "HealthStatus":
+        """Build from a sandboxd /v1/health response body."""
+        return cls(
+            status=payload["status"],
+            uptime_seconds=payload.get("uptime_seconds"),
+        )
+
+class RuntimeMetadata(BaseModel):
+    """Runtime environment metadata reported by sandboxd's /v1/metadata endpoint.
+
+    Only non-sensitive orchestrator-injected configuration is exposed here;
+    the sandboxd spec forbids serving credentials from /v1/metadata.
+    """
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @classmethod
+    def from_sandboxd(cls, payload: dict) -> "RuntimeMetadata":
+        """Build from a sandboxd /v1/metadata response body."""
+        return cls(env=payload.get("env") or {})
+
 class SandboxClaimEnvVar(BaseModel):
     """Represents an environment variable entry in a SandboxClaim spec."""
     name: str  # Name of the environment variable.

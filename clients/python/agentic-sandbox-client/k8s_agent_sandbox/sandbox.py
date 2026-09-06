@@ -14,9 +14,12 @@
 
 import logging
 from .trace_manager import create_tracer_manager
+from .trace_manager import trace_span
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
 from .models import (
+    HealthStatus,
+    RuntimeMetadata,
     SandboxConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxTracerConfig,
@@ -141,6 +144,39 @@ class Sandbox:
                     return "SandboxNotReady", message
 
         return "SandboxNotReady", "Unknown message"
+
+    @trace_span("health")
+    def health(self, timeout: int = 60) -> HealthStatus:
+        """Query sandboxd's /v1/health endpoint. sandboxd runtime only.
+
+        The legacy python-runtime has no equivalent endpoint and raises
+        ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "health() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = self.connector.send_request(
+            "GET", "v1/health", timeout=timeout)
+        return HealthStatus.from_sandboxd(response.json())
+
+    @trace_span("metadata")
+    def metadata(self, timeout: int = 60) -> RuntimeMetadata:
+        """Query sandboxd's /v1/metadata endpoint. sandboxd runtime only.
+
+        Returns orchestrator-injected, non-sensitive runtime configuration
+        (e.g. sandbox id, workspace path, env). The legacy python-runtime
+        has no equivalent endpoint and raises ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "metadata() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = self.connector.send_request(
+            "GET", "v1/metadata", timeout=timeout)
+        return RuntimeMetadata.from_sandboxd(response.json())
 
     @property
     def commands(self) -> CommandExecutor | None:

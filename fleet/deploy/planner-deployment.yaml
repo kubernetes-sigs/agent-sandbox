@@ -58,15 +58,20 @@ metadata:
   name: fleet-spec
   namespace: multi-cluster-fleet
 data:
-  # Replace this with your real FleetSpec — see demo/fleet-spec.yaml for a
-  # minimal working example.
+  # PLACEHOLDER — deliberately fails FleetSpec validation (`models` is
+  # required and absent), so applying this manifest unedited cannot publish
+  # anything: the loop errors on every iteration until a real spec is
+  # supplied. That is load-bearing. The "obvious" placeholder, `models: []`,
+  # is a VALID spec — the drain form — and the planner would publish an
+  # empty pool set for every reporting cluster, tearing down every warm
+  # pool in the fleet and re-draining it every loop interval. Replace with
+  # your real FleetSpec — see demo/fleet-spec.yaml for a minimal working
+  # example.
   fleet-spec.yaml: |
-    max_concurrent: 300
-    max_pool: 100
-    placement_policy: image-affinity
-    min_clusters: 0
-    cluster_weights: {}
-    models: []
+    PLACEHOLDER_NOT_A_FLEETSPEC: >-
+      Edit this ConfigMap with a real FleetSpec before the planner can run
+      (kubectl edit configmap fleet-spec -n multi-cluster-fleet); see
+      demo/fleet-spec.yaml for a minimal working example.
 ---
 apiVersion: apps/v1
 kind: Deployment

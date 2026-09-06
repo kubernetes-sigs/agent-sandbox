@@ -43,8 +43,9 @@ die() { printf "\033[1;31m[build] ERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 #
 # Two reasons, one of which already cost a debugging cycle:
 #
-#   1. fleet/ is currently untracked, so a git SHA says
-#      nothing whatsoever about the code in this image.
+#   1. A git SHA names a commit, not the tree the image was built from:
+#      the normal dev loop for this image builds from uncommitted edits,
+#      which a commit-based tag would misrepresent as an older revision.
 #   2. A tag that does not change when the code does is actively dangerous
 #      with imagePullPolicy: IfNotPresent. The node keeps its cached layer,
 #      the pod runs the OLD binary, and the symptom is a bug you already

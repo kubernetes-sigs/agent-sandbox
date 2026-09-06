@@ -212,12 +212,15 @@ def main() -> int:
             return
         now = time.perf_counter()
         elapsed = now - t0
-        # Ask the resolver where it went rather than assuming — this is the
-        # routing assertion, not decoration.
-        try:
-            cluster = client.resolve(template).cluster
-        except Exception:
-            cluster = "?"
+        # Ask the client where this claim actually LANDED, not the resolver
+        # where the NEXT one would go: resolve() advances the shared
+        # round-robin cursor, so calling it here both mis-reports (with two
+        # hosting clusters it would always name the other one) and perturbs
+        # the rotation for every later claim. create_sandbox records the
+        # real placement; cluster_for() reads it without touching the cursor.
+        name = (getattr(sandbox, "claim_name", None)
+                or getattr(sandbox, "name", None))
+        cluster = (client.cluster_for(name) or "?") if name else "?"
         with lock:
             lat.append(elapsed)
             create_done.append(now - started)
@@ -226,7 +229,6 @@ def main() -> int:
                         "lat": round(elapsed, 3), "cluster": cluster,
                         "template": template})
         if not args.no_delete:
-            name = getattr(sandbox, "claim_name", None) or getattr(sandbox, "name", None)
             if name:
                 d0 = time.perf_counter()
                 try:

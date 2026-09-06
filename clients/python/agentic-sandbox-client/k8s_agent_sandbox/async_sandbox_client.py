@@ -844,33 +844,24 @@ class AsyncSandboxClient(Generic[T]):
         best-effort.
         """
         try:
-            claims = [
-                key
+            claims_with_uids = [
+                (key, expected_uid)
                 for key in self._automatic_cleanup_claims
                 if key not in self._caller_owned_claims
+                if (expected_uid := self._automatic_cleanup_claim_uids.get(key))
             ]
-            if not claims:
+            if not claims_with_uids:
                 return
 
             helper = K8sHelper()
-            for ns, claim_name in claims:
+            for (ns, claim_name), expected_uid in claims_with_uids:
                 try:
-                    expected_uid = self._automatic_cleanup_claim_uids.get(
-                        (ns, claim_name)
+                    helper.delete_sandbox_claim(
+                        claim_name,
+                        ns,
+                        _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
+                        expected_uid=expected_uid,
                     )
-                    if expected_uid is None:
-                        helper.delete_sandbox_claim(
-                            claim_name,
-                            ns,
-                            _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
-                        )
-                    else:
-                        helper.delete_sandbox_claim(
-                            claim_name,
-                            ns,
-                            _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
-                            expected_uid=expected_uid,
-                        )
                 except Exception as e:
                     if sys.stderr is not None:
                         print(
@@ -957,9 +948,8 @@ class AsyncSandboxClient(Generic[T]):
         namespace: str,
         expected_uid: str | None,
     ) -> None:
-        """Delete a Claim while preserving legacy name-only rollback."""
-        if expected_uid is None:
-            await self._delete_claim(claim_name, namespace)
+        """Delete a Claim only when its exact identity is known."""
+        if not expected_uid:
             return
         await self.k8s_helper.delete_sandbox_claim(
             claim_name, namespace, expected_uid=expected_uid

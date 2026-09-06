@@ -838,9 +838,8 @@ class SandboxClient(Generic[T]):
         namespace: str,
         expected_uid: str | None,
     ) -> None:
-        """Delete a Claim while preserving legacy name-only rollback."""
-        if expected_uid is None:
-            self._delete_claim(claim_name, namespace)
+        """Delete a Claim only when its exact identity is known."""
+        if not expected_uid:
             return
         self.k8s_helper.delete_sandbox_claim(
             claim_name, namespace, expected_uid=expected_uid

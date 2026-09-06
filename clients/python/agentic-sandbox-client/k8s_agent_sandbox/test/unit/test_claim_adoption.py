@@ -148,6 +148,17 @@ class TestClaimModels(unittest.TestCase):
 
 class TestClaimOwnership(unittest.TestCase):
 
+    def test_automatic_ownership_requires_non_empty_claim_uid(self):
+        ownership = ClaimOwnership()
+        key = ("test-namespace", "generated-claim")
+
+        for missing_uid in (None, ""):
+            with self.subTest(claim_uid=missing_uid):
+                ownership.register_automatic(key, missing_uid)
+
+                self.assertNotIn(key, ownership.automatic_cleanup_claims)
+                self.assertNotIn(key, ownership.automatic_cleanup_claim_uids)
+
     def test_failed_generated_claim_without_uid_is_not_deleted(self):
         ownership = ClaimOwnership()
         key = ("test-namespace", "generated-claim")

@@ -202,6 +202,27 @@ phase3() {
       "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.1/extensions.yaml" \
       >/dev/null 2>&1 || warn "agent-sandbox extensions apply returned non-zero"
 
+    # The release manifest doesn't know about the controller-pool taint;
+    # create-gke-standard-fleet.sh's post-create notes mark this patch
+    # REQUIRED, and phase 2 created the clusters with that script. Guarded
+    # anyway: on a rerun against pools without controller-pool nodes, the
+    # nodeSelector would strand the controller Pending forever.
+    if kubectl --context "$ctx" get nodes \
+         -l cloud.google.com/gke-nodepool=controller-pool -o name 2>/dev/null \
+         | grep -q .; then
+      info "[$c] pinning agent-sandbox-controller to controller-pool"
+      kubectl --context "$ctx" -n agent-sandbox-system patch deployment \
+        agent-sandbox-controller --type=strategic -p '{
+          "spec": {"template": {"spec": {
+            "nodeSelector": {"cloud.google.com/gke-nodepool": "controller-pool"},
+            "tolerations": [{"key": "controller-pool", "operator": "Equal", "value": "true", "effect": "NoSchedule"}]
+          }}}' >/dev/null
+      kubectl --context "$ctx" -n agent-sandbox-system rollout status \
+        deployment/agent-sandbox-controller --timeout=120s >/dev/null
+    else
+      info "[$c] no controller-pool nodes — controller stays on the default pool"
+    fi
+
     info "[$c] applying fleet RBAC"
     kubectl --context "$ctx" apply -f "$POC_ROOT/deploy/rbac.yaml" >/dev/null
 

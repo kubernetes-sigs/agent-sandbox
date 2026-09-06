@@ -62,7 +62,10 @@ switch_context() {
       || { echo "get-credentials failed for $c ($loc_flag=$loc_value)." \
                 "Zonal clusters need ZONE, regional need REGION." >&2; exit 1; }
   else
-    kubectl config use-context "kind-$c" >/dev/null 2>&1
+    # Same failure mode the GKE branch above surfaces: with stderr discarded,
+    # `set -e` would die here without a word when the kind cluster is absent.
+    kubectl config use-context "kind-$c" >/dev/null 2>&1 \
+      || { echo "kubectl context kind-$c not found — is the kind cluster up?" >&2; exit 1; }
   fi
 }
 

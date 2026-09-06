@@ -68,8 +68,10 @@ It runs in one of two modes, chosen from the spec rather than from a flag:
 `demo/fleet-spec-xs.yaml` is the second kind: it names three clusters and uses
 `placement_policy: image-affinity`, which decides per pool by hashing the
 image. There is deliberately no per-cluster figure to check against — that is
-what `image-affinity` is for — so the per-cluster split is reported and the
-fleet total is what gets asserted.
+what `image-affinity` is for — so the per-cluster split is reported, and what
+is asserted is the fleet total plus that no named cluster lands empty
+(spread-first guarantees the latter whenever there are at least as many models
+as clusters, and the XS spec has six models on three clusters).
 
 ```bash
 # spec-driven: runs as shipped
@@ -152,9 +154,15 @@ creating them.
 for c in "${CLUSTERS[@]}"; do
   gcloud container clusters get-credentials $c --region=$REGION --project=$PROJECT
 
-  # agent-sandbox itself, including the extension controllers that own
-  # SandboxTemplate and SandboxWarmPool.
-  kubectl apply -f ../k8s/crds/
+  # agent-sandbox itself — the release manifests install the CRDs AND the
+  # controllers. The CRDs alone (../k8s/crds/) admit the objects but leave
+  # nothing reconciling them, so no warm pool ever fills and §3f/§3g below
+  # wait forever.
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.1/manifest.yaml
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.1/extensions.yaml
+  # On clusters from deploy/create-gke-standard-fleet.sh, also apply the
+  # controller-pool patch its post-create output prints — the release
+  # manifest does not know about the pool taint.
 
   kubectl apply -f deploy/rbac.yaml
 
@@ -177,9 +185,12 @@ gcloud artifacts repositories create fleet-images \
     --repository-format=docker --location=$REGION 2>/dev/null || true
 gcloud auth configure-docker $REGION-docker.pkg.dev
 
-export IMAGE=$REGION-docker.pkg.dev/$PROJECT/fleet-images/fleet-member:v0.1.0
-./deploy/build-push.sh
+export FLEET_MEMBER_IMAGE=$(REGION=$REGION REPO=fleet-images ./deploy/build-push.sh)
 ```
+
+`build-push.sh` composes the full reference itself (`IMAGE` is the bare image
+*name* inside it, default `fleet-member`) and prints the pushed ref as its only
+stdout — capture it, don't hand it a full `ref:tag`.
 
 The build context is the **repo root**, not `fleet/` — the Dockerfile copies
 both `clients/python/agentic-sandbox-client` (the SDK) and `fleet/python`.
@@ -189,7 +200,7 @@ both `clients/python/agentic-sandbox-client` (the SDK) and `fleet/python`.
 ```bash
 for c in "${CLUSTERS[@]}"; do
   gcloud container clusters get-credentials $c --region=$REGION --project=$PROJECT
-  CLUSTER_NAME=$c FLEET_BUCKET=$FLEET_BUCKET IMAGE=$IMAGE \
+  CLUSTER_NAME=$c FLEET_BUCKET=$FLEET_BUCKET FLEET_MEMBER_IMAGE=$FLEET_MEMBER_IMAGE \
     ./deploy/render.sh deploy/fleet-member-deployment-wi.yaml | kubectl apply -f -
   kubectl -n multi-cluster-fleet rollout status deployment/fleet-member --timeout=120s
 done
@@ -233,7 +244,8 @@ right:
   zonal cluster by region, and vice versa.
 
 Expected: `assignments.json` in the bucket, members reconcile within 30 s, and
-per-image replica counts across clusters sum to each image's `target_replicas`.
+the per-cluster budgets sum to exactly `max_concurrent`, each model's pool
+sized by its `target_tasks`-proportional share (clamped by `max_pool`).
 
 ### 3h. Failure injection
 
@@ -373,13 +385,14 @@ of the fleet.
 
 - [ ] `pytest -v` in `fleet/python` — 100% pass
 - [ ] `python -m agent_sandbox_fleet.fleet_member --help` — entrypoint works
-- [ ] `IMAGE=... ./deploy/build-push.sh` — image builds from the repo root
+- [ ] `./deploy/build-push.sh` — image builds from the repo root and prints
+      the pushed ref on stdout
 - [ ] `./demo/preflight-cp-plan.py demo/fleet-spec-xs.yaml` — exit 0
 - [ ] the same against a hub-driven spec, which needs `--capacities`, and
       `--omit <cluster>` there shows the short landing rather than an error
 - [ ] 3+ clusters, one member each, all publishing capacity within 60 s
 - [ ] `fleetctl apply` on a 3-image spec spreads pools per the selected policy,
-      and per-image totals sum **exactly** to `target_replicas`
+      and per-cluster totals sum **exactly** to `max_concurrent`
 - [ ] Fail-mode 1 (kill member): assignments shift on the next `apply`
 - [ ] Fail-mode 2 (delete pool): member recreates within 60 s
 - [ ] Fail-mode 3 (corrupt JSON): member logs the error and keeps serving

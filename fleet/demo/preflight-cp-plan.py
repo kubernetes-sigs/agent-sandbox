@@ -336,12 +336,19 @@ def main() -> int:
           "raise max_pool, add clusters, or lower max_concurrent.")
     return 1
   if unplaced:
-    print(f"OK (with a caveat): the fleet total is exactly "
+    # This mode's documented contract (TESTING.md's mode table) asserts both
+    # the fleet total AND that no named cluster is left empty. The spread-first
+    # pre-pass gives every eligible cluster one pool whenever there are at
+    # least as many models as clusters, so an empty named cluster is an
+    # anomaly, not a policy choice.
+    print(f"EMPTY CLUSTER: the fleet total is exactly "
           f"{spec.max_concurrent:,}, but {', '.join(unplaced)} received no "
-          f"pools. Under placement_policy={spec.placement_policy} that can be "
-          "correct — the distribution is chosen per pool, not per cluster — "
-          "but an idle member in a fleet you are paying for is worth a look.")
-    return 0
+          "pools. With at least as many models as clusters, spread-first "
+          "places every eligible cluster — so either this spec has fewer "
+          "models than named clusters, or the cluster was dropped from "
+          "eligibility. Add models, or remove the idle cluster from "
+          "cluster_weights if a smaller fleet is intended.")
+    return 1
   print(f"OK: every named cluster is placed and the fleet total is exactly "
         f"{spec.max_concurrent:,}. The per-cluster split above is "
         f"placement_policy={spec.placement_policy}'s to choose; it is reported, "

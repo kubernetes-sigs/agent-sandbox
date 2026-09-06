@@ -48,7 +48,7 @@ class ClaimOwnership:
 
     def __init__(self) -> None:
         self.automatic_cleanup_claims: set[ClaimKey] = set()
-        self.automatic_cleanup_claim_uids: dict[ClaimKey, str | None] = {}
+        self.automatic_cleanup_claim_uids: dict[ClaimKey, str] = {}
         self.caller_owned_claims: set[ClaimKey] = set()
         self._explicit_operations: dict[ClaimKey, ExplicitClaimOperations] = {}
         self._lookup_operations: dict[ClaimKey, list[ClaimLookupOperation]] = {}
@@ -129,6 +129,8 @@ class ClaimOwnership:
 
     def register_automatic(self, key: ClaimKey, claim_uid: str | None) -> None:
         """Record automatic ownership unless a completed explicit call owns it."""
+        if not claim_uid:
+            return
         if key in self._explicit_operations or key not in self.caller_owned_claims:
             self.automatic_cleanup_claims.add(key)
             self.automatic_cleanup_claim_uids[key] = claim_uid

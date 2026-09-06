@@ -89,7 +89,12 @@ class TestSandboxClient(unittest.TestCase):
         with patch.object(self.client, '_create_claim') as mock_create_claim:
             # The create response's resourceVersion seeds the ready-wait
             # watch so it is served from the apiserver watch cache.
-            mock_create_claim.return_value = {"metadata": {"resourceVersion": "12345"}}
+            mock_create_claim.return_value = {
+                "metadata": {
+                    "resourceVersion": "12345",
+                    "uid": "claim-uid",
+                }
+            }
 
             sandbox = self.client.create_sandbox("test-warmpool", "test-namespace")
 
@@ -866,6 +871,40 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper.get_sandbox_claim.assert_not_called()
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
+
+    @patch("uuid.uuid4")
+    def test_generated_claim_without_uid_is_not_deleted_by_automatic_cleanup(
+        self, mock_uuid
+    ):
+        mock_uuid.return_value.hex = "1234abcd"
+        claim_name = "sandbox-claim-1234abcd"
+        key = (NAMESPACE, claim_name)
+        created_claim = claim_for_request(
+            claim_name=claim_name,
+            namespace=NAMESPACE,
+        )
+        created_claim["metadata"].pop("uid")
+        self.mock_k8s_helper.create_sandbox_claim.return_value = created_claim
+        self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
+        generated_handle = MagicMock(claim_name=claim_name)
+        self.mock_sandbox_class.return_value = generated_handle
+
+        self.client.create_sandbox(WARMPOOL, NAMESPACE)
+        self.client._delete_automatic_cleanup_claims()
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+        self.assertNotIn(key, self.client._automatic_cleanup_claim_uids)
+
+    def test_automatic_cleanup_never_deletes_without_observed_uid(self):
+        key = (NAMESPACE, CLAIM_NAME)
+        generated_handle = MagicMock(claim_name=CLAIM_NAME)
+        self.client._active_connection_sandboxes[key] = generated_handle
+        self.client._automatic_cleanup_claims.add(key)
+
+        self.client._delete_automatic_cleanup_claims()
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
 
     @patch("uuid.uuid4")
     def test_generated_claim_without_uid_is_not_deleted_after_ambiguous_failure(

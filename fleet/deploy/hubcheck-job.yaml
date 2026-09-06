@@ -13,10 +13,16 @@
 # unit suite and by every local rehearsal; the first real test of it is a pod
 # on GKE. That pod is this one.
 #
-#   envsubst < deploy/hubcheck-job.yaml | kubectl --context <member> apply -f -
+#   FLEET_MEMBER_IMAGE=<ref> CLUSTER_NAME=<member> \
+#     ./deploy/render.sh deploy/hubcheck-job.yaml | kubectl --context <member> apply -f -
 #   kubectl --context <member> logs -n multi-cluster-fleet job/fleet-hubcheck -f
 #
-# envsubst variables:
+# render.sh, not bare envsubst: envsubst expands an unset variable to the
+# empty string and emits the manifest anyway, so an unset CLUSTER_NAME
+# renders `--cluster-name=` and the check silently probes the wrong profile
+# -- the exact failure mode this Job exists to make loud. render.sh refuses.
+#
+# Template variables:
 #   ${FLEET_MEMBER_IMAGE}  the fleet member image -- any image that provides
 #                          the `fleet-hubcheck` entrypoint. Use the same ref
 #                          deployment/fleet-member is running, since the point

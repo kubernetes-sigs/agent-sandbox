@@ -64,6 +64,20 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "python"))
 
+# That path exists once the fleet series is merged -- the package ships in
+# part 1 (#1394). On a checkout without it, fail with instructions rather
+# than a bare ImportError. Probe a SUBMODULE: leftover __pycache__ dirs can
+# make the bare package resolve as an empty namespace package, and this
+# check must not be fooled by that.
+try:
+    import agent_sandbox_fleet.inventory  # noqa: F401
+except ImportError:
+    sys.exit(
+        "agent_sandbox_fleet is not importable. This script needs the fleet "
+        "python package (fleet/python, shipped in part 1 of the series): run "
+        "it from a checkout that includes it, or `pip install -e fleet/python`."
+    )
+
 from agent_sandbox_fleet import inventory  # noqa: E402
 from agent_sandbox_fleet.hubauth import load_hub_configuration  # noqa: E402
 

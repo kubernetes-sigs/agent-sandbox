@@ -424,6 +424,39 @@ def test_fleet_client_records_claim_cluster_mapping():
     assert deletes[0].deleted == [(sb.claim_name, "multi-cluster-fleet")]
 
 
+def test_cluster_for_does_not_advance_the_round_robin_cursor():
+    # The bug this guards: interrogating placement after a create used to be
+    # done with resolve(), which advances the shared per-template cursor --
+    # it names the cluster the NEXT claim would get (with two hosting
+    # clusters, always the wrong one) and perturbs the rotation for every
+    # later claim. cluster_for() reads the create-time record instead.
+    gcs = _three_cluster_gcs()
+    built: list[FakeSDKClient] = []
+    fc = _fleet_client(gcs, built)
+    landed = []
+    for _ in range(3):
+        sb = fc.create_sandbox("shared", strategy="round-robin")
+        # Interrogate repeatedly between creates; a cursor-advancing
+        # implementation would make the rotation skip clusters.
+        for _ in range(2):
+            landed.append(fc.cluster_for(sb.claim_name))
+    # Three creates still cover three distinct clusters...
+    assert len(built) == 3
+    # ...and the record names each claim's own cluster, consistently.
+    assert landed[0] == landed[1] and landed[2] == landed[3] and landed[4] == landed[5]
+    assert len({landed[0], landed[2], landed[4]}) == 3
+
+
+def test_cluster_for_returns_none_for_unknown_or_deleted_claims():
+    gcs = _three_cluster_gcs()
+    fc = _fleet_client(gcs, [])
+    assert fc.cluster_for("never-created") is None
+    sb = fc.create_sandbox("shared", strategy="first")
+    assert fc.cluster_for(sb.claim_name) is not None
+    fc.delete_sandbox(sb.claim_name)
+    assert fc.cluster_for(sb.claim_name) is None
+
+
 def test_fleet_client_delete_unknown_claim_requires_cluster():
     gcs = _three_cluster_gcs()
     fc = _fleet_client(gcs, [])

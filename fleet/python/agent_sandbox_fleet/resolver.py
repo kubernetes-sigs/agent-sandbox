@@ -561,10 +561,27 @@ class FleetSandboxClient:
 
     def resolve(self, template: str, *, strategy: str | None = None
                 ) -> ResolvedCluster:
-        """Expose the underlying resolver directly."""
+        """Expose the underlying resolver directly.
+
+        NOTE: under the round-robin strategy this advances the shared
+        per-template cursor — it answers "where would the NEXT claim go",
+        not "where did mine go". For the latter use :meth:`cluster_for`.
+        """
         return self._resolver.resolve(
             template, strategy=strategy or self._resolve_strategy,
         )
+
+    def cluster_for(self, claim_name: str) -> str | None:
+        """Which cluster a claim created through this facade landed on.
+
+        Reads the create-time record; unlike :meth:`resolve` it does not
+        advance the round-robin cursor, so it is safe for reporting (a
+        bench's routing assertion, say) without perturbing placement.
+        Returns None for a claim this facade did not create, or one it has
+        already deleted.
+        """
+        with self._claim_lock:
+            return self._claim_to_cluster.get(claim_name)
 
     def known_clusters(self) -> list[str]:
         """Names of clusters we've already built a client for."""

@@ -220,6 +220,10 @@ def test_no_selector_returns_a_drained_cluster():
     from agent_sandbox_fleet.placement import _REGISTRY, get_placement
     reg = _mixed_registry()
     for name in sorted(_REGISTRY):
+        if name == "pinned":
+            # Planner-side policy: selection is keyed on the model's `cluster`
+            # field, so Pinned.select() raises by design (see placement.Pinned).
+            continue
         chosen = get_placement(name).select("gcr.io/x/img:v1", _mixed_registry())
         assert chosen.name == "live", f"{name} selected {chosen.name}"
     assert [c.name for c in reg.eligible()] == ["live"]

@@ -58,7 +58,7 @@ one per cluster, which reconciles that plan locally.
 
 ## Prerequisites
 
-- `kubectl`, `python` 3.10+, `docker`, and `gcloud`
+- `kubectl`, `python` 3.11+ (the in-repo SDK requires it), `docker`, and `gcloud`
 - A GCS bucket the planner and every member can read/write
 - agent-sandbox installed on every member cluster, with the extension
   controllers enabled (`SandboxTemplate`, `SandboxWarmPool`)
@@ -73,8 +73,15 @@ cd fleet
 export FLEET_BUCKET=agent-sandbox-fleet-$USER
 
 pip install -e ./python                        # provides `fleetctl`
-IMAGE=us-docker.pkg.dev/my-project/fleet/fleet-member:dev ./deploy/build-push.sh
+export FLEET_MEMBER_IMAGE=$(./deploy/build-push.sh)
 ```
+
+`build-push.sh` composes the full image reference itself — registry host and
+project from `gcloud config`, a content-addressed tag from the build inputs —
+and prints the pushed ref as its only stdout, which is why it is captured
+rather than supplied. Do not pass it a full `ref:tag` via `IMAGE`; that
+variable is the bare image *name* inside the composed reference (override
+`REGION`/`REPO`/`IMAGE` individually if the defaults don't fit).
 
 The image build context is the **repo root**, not `fleet/` — the Dockerfile
 copies both the in-repo Python SDK and `fleet/python`.
@@ -86,7 +93,7 @@ mismatch makes two clusters overwrite one capacity object:
 ```bash
 for ctx in cluster-a cluster-b cluster-c; do
   CLUSTER_NAME="$ctx" FLEET_BUCKET="$FLEET_BUCKET" \
-  IMAGE=us-docker.pkg.dev/my-project/fleet/fleet-member:dev \
+  FLEET_MEMBER_IMAGE="$FLEET_MEMBER_IMAGE" \
     ./deploy/render.sh deploy/fleet-member-deployment-wi.yaml \
     | kubectl --context "$ctx" apply -f -
 done
@@ -107,9 +114,12 @@ kubectl --context cluster-a -n multi-cluster-fleet get sandboxwarmpools
 Within about 30 s you should see `SandboxWarmPool` objects on each cluster, and
 `fleetctl status` reporting per-cluster depth and claim-latency P90.
 
-Their **requested** replicas (`spec.replicas`) sum to exactly each image's
-`target_replicas`; the largest-remainder split guarantees that whatever the
-clusters report. **Ready** replicas are a separate question — they trail while
+Their **requested** replicas (`spec.replicas`) land exactly where the plan put
+them: the largest-remainder split divides `max_concurrent` across clusters by
+weight, summing to exactly that budget whatever the clusters report, and each
+model's pool takes its `target_tasks`-proportional share of it (clamped by
+`max_pool`, floored at one replica per placed pool). **Ready** replicas are a
+separate question — they trail while
 pods pull and start, and they stay short if a cluster was assigned more than it
 can actually hold, which is precisely what a cluster publishing no
 `sandbox-capacity` causes. A plan that sums correctly and a fleet that is
@@ -255,7 +265,7 @@ Properties the members publish, all under `agents.x-k8s.io/`:
 **A cluster with no `sandbox-capacity` property does not drop out — it gets
 weight 1.0.** It stays eligible, receives pools, and takes a rounding-error
 share of the fleet. The plan succeeds and no error is raised — the assignment
-still sums to `target_replicas` — but the cluster cannot fill what it was
+still sums to `max_concurrent` — but the cluster cannot fill what it was
 given, so the fleet lands short on *ready* capacity.
 Check the published properties on every profile before a large apply.
 Note that `fleetctl show-registry` always describes the *published* spec and

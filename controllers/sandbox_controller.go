@@ -378,6 +378,18 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if !sandboxDeleted {
+		if adoption := sandbox.Status.RuntimeAdoption; adoption != nil && adoption.Reservation != nil &&
+			meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
+			// Verification expiry must withdraw readiness even when no other
+			// watched resource changes. Historical commit deadlines do not
+			// bound the lifetime of the already committed workload.
+			if verification := sandbox.Status.RuntimeActivationVerification; verification != nil {
+				remaining := max(time.Until(verification.ValidUntil.Time), immediateRequeueDelay)
+				if result.RequeueAfter == 0 || remaining < result.RequeueAfter {
+					result.RequeueAfter = remaining
+				}
+			}
+		}
 		// Update status
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
@@ -586,7 +598,7 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
 	if adoption := sandbox.Status.RuntimeAdoption; adoption != nil && adoption.Reservation != nil &&
-		(adoption.CommitDigest == "" || adoption.TerminationRequestedTime != nil) {
+		!runtimeAdoptionReady(sandbox, pod, time.Now()) {
 		return metav1.Condition{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
 			Reason: "RuntimeAdoptionPending", Message: "The reserved runtime has not completed a current claim activation", ObservedGeneration: sandbox.Generation}
 	}

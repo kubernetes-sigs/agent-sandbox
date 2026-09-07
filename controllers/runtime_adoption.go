@@ -18,13 +18,40 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
+
+func runtimeAdoptionReady(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, now time.Time) bool {
+	status, verification := sandbox.Status.RuntimeAdoption, sandbox.Status.RuntimeActivationVerification
+	if status == nil || status.Reservation == nil || status.Grant == nil || verification == nil || pod == nil {
+		return false
+	}
+	reservation, owner := status.Reservation, metav1.GetControllerOf(sandbox)
+	return reservation.AttemptID != "" && reservation.TargetActivationID != "" && reservation.SandboxUID == sandbox.UID &&
+		reservation.Namespace == sandbox.Namespace && utils.MatchesGroupKind(owner, extensionsv1beta1.GroupVersion.Group, "SandboxClaim") &&
+		owner.UID == reservation.ClaimUID && owner.Name == reservation.ClaimName &&
+		status.TerminationRequestedTime == nil && status.TerminalEvidenceDigest == "" && sandbox.DeletionTimestamp == nil &&
+		status.CommitDigest != "" && status.CommitDigest == verification.CommitDigest &&
+		status.Grant.ContextDigest != "" && status.Grant.ContextDigest == verification.ContextDigest &&
+		status.Grant.ReceiptDigest != "" && status.Grant.GrantDigest != "" &&
+		verification.AttemptID == reservation.AttemptID && verification.ClaimUID == reservation.ClaimUID &&
+		verification.TargetActivationID == reservation.TargetActivationID && verification.ReceiptDigest != "" &&
+		verification.NodeUID != "" && verification.TaskStartTime > 0 && verification.RuntimeIncarnation != "" &&
+		verification.ValidUntil.After(now) && meta.IsStatusConditionTrue(verification.Conditions, "Verified") &&
+		verification.PodUID != "" && verification.PodUID == pod.UID && pod.Namespace == sandbox.Namespace &&
+		metav1.IsControlledBy(pod, sandbox) && pod.DeletionTimestamp == nil && len(pod.Status.ContainerStatuses) == 1 &&
+		verification.ContainerID != "" && verification.ContainerID == strings.TrimPrefix(pod.Status.ContainerStatuses[0].ContainerID, "containerd://")
+}
 
 // SandboxPodMetadataMatches lets the claim controller acknowledge the same
 // transformation the core writer applies, using an API-server Pod readback.

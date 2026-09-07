@@ -569,8 +569,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			r.exp().ExpectDeletion(poolKey, sb.UID)
 			if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
 				r.exp().DeletionObserved(poolKey, sb.UID)
-				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
-				allErrors = errors.Join(allErrors, err)
+				if !k8serrors.IsConflict(err) {
+					logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
+					allErrors = errors.Join(allErrors, err)
+				}
 				// The sandbox still exists; keep counting it as active so the
 				// create path cannot overshoot spec.replicas.
 				healthySandboxes = append(healthySandboxes, sb)
@@ -772,6 +774,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				if k8serrors.IsNotFound(err) {
 					// Not an error for the batch: the desired outcome
 					// (sandbox gone) already holds.
+					return nil
+				}
+				if k8serrors.IsConflict(err) {
+					// Another writer changed this candidate. Its watch event
+					// will trigger a fresh decision; continue the other deletes.
 					return nil
 				}
 				logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name, "namespace", sb.Namespace)
@@ -1028,6 +1035,14 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
 					if isControlledByPool {
 						r.exp().DeletionObserved(poolKey, sb.UID)
+					}
+					if k8serrors.IsConflict(err) {
+						if isControlledByPool {
+							// A concurrent reservation or update keeps occupying
+							// this slot until the next observed pool snapshot.
+							activeSandboxes = append(activeSandboxes, sb)
+						}
+						continue
 					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)

@@ -2253,11 +2253,17 @@ func (r *SandboxClaimReconciler) initializeSandboxLaunchTypeLabel(ctx context.Co
 	if hasRuntimeAdoptionData(sandbox) {
 		return ErrRuntimeAdoptionUnavailable
 	}
+	// Every handler permits an already-labelled cold recovery. Warm or
+	// unlabelled recovery still needs the authoritative handler check; a
+	// workload label cannot authorize legacy adoption of a strict runtime.
+	if launchType == v1beta1.SandboxLaunchTypeCold && sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] == v1beta1.SandboxLaunchTypeCold {
+		return nil
+	}
 	strict, err := strictRuntimeSandbox(ctx, r.authoritativeReader(), sandbox)
 	if err != nil {
 		return err
 	}
-	if strict && (launchType != v1beta1.SandboxLaunchTypeCold || sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] != v1beta1.SandboxLaunchTypeCold) {
+	if strict {
 		return ErrRuntimeAdoptionUnavailable
 	}
 	if sandbox.Labels != nil {

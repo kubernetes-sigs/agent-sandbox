@@ -208,6 +208,13 @@ spec:
         - apiGroups:
           - ""
           resources:
+          - namespaces
+          - nodes
+          verbs:
+          - get
+        - apiGroups:
+          - ""
+          resources:
           - pods
           verbs:
           - get
@@ -225,6 +232,12 @@ spec:
           - patch
           - update
         - apiGroups:
+          - admissionregistration.k8s.io
+          resources:
+          - validatingwebhookconfigurations
+          verbs:
+          - get
+        - apiGroups:
           - agents.x-k8s.io
           resources:
           - sandboxes
@@ -236,6 +249,15 @@ spec:
           - patch
           - update
           - watch
+        - apiGroups:
+          - agents.x-k8s.io
+          resources:
+          - sandboxes/finalizers
+          - sandboxes/status
+          verbs:
+          - get
+          - patch
+          - update
         - apiGroups:
           - coordination.k8s.io
           resources:
@@ -285,6 +307,20 @@ spec:
           - list
           - patch
           - update
+          - watch
+        - apiGroups:
+          - node.k8s.io
+          resources:
+          - runtimeclasses
+          verbs:
+          - get
+        - apiGroups:
+          - runtime.gatekeeper.sh
+          resources:
+          - runtimepolicynodestatuses
+          verbs:
+          - get
+          - list
           - watch
         serviceAccountName: agent-sandbox-controller
       - rules:

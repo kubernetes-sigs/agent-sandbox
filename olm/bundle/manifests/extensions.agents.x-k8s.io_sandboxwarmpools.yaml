@@ -43,6 +43,15 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              runtimeAdoption:
+                properties:
+                  mode:
+                    enum:
+                    - SamePolicyFirstClaim
+                    type: string
+                required:
+                - mode
+                type: object
               sandboxTemplateRef:
                 properties:
                   name:

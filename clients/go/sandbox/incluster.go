@@ -63,7 +63,7 @@ type inClusterStrategy struct {
 // sets the connector's gRPC target. The method exists so inClusterStrategy conforms
 // to the ConnectionStrategy interface.
 func (t *inClusterStrategy) Connect(ctx context.Context) (string, error) {
-	_, span := startSpan(ctx, t.tracer, t.svcName, "sandboxd_in_cluster")
+	_, span := startSpan(ctx, t.tracer, t.svcName, "in_cluster_transport")
 	defer span.End()
 
 	host, via, err := t.resolveHost()

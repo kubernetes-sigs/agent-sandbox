@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -128,6 +129,41 @@ func TestRuntimeAdoptionReadyRequiresCurrentVerification(t *testing.T) {
 			if !tc.ready {
 				require.Equal(t, "RuntimeAdoptionPending", condition.Reason)
 			}
+		})
+	}
+}
+
+func TestRuntimeAdoptionReadyPreservesErrorAndSuspensionReasons(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason, message string
+		err                   error
+		suspended, missingPod bool
+	}{
+		{name: "running without verification", reason: "RuntimeAdoptionPending", message: "The reserved runtime has not completed a current claim activation"},
+		{name: "reconcile error", err: errors.New("retained Pod is missing"), reason: "ReconcilerError", message: "Error seen: retained Pod is missing", missingPod: true},
+		{name: "multiple owned Pods", err: errors.Join(errors.New("temporary PVC error"), &multipleSandboxPodsError{count: 2}),
+			reason: sandboxv1beta1.SandboxReasonMultiplePods, message: "multiple Pods (2) are controlled by this Sandbox; refusing to choose or create a Pod"},
+		{name: "suspending", suspended: true, reason: sandboxv1beta1.SandboxReasonSuspended, message: "Sandbox is suspending"},
+		{name: "suspended", suspended: true, missingPod: true, reason: sandboxv1beta1.SandboxReasonSuspended, message: "Sandbox is suspended"},
+		{name: "suspension error", suspended: true, err: errors.New("Pod deletion denied"), reason: "ReconcilerError", message: "Error seen: Pod deletion denied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox, pod := committedRuntimeAdoptionFixture()
+			sandbox.Status.RuntimeActivationVerification = nil
+			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
+			if tc.suspended {
+				sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+			}
+			if tc.missingPod {
+				pod = nil
+			}
+			conditions := (&SandboxReconciler{}).computeConditions(sandbox, tc.err, nil, pod, tc.err)
+			ready := meta.FindStatusCondition(conditions, string(sandboxv1beta1.SandboxConditionReady))
+			require.NotNil(t, ready)
+			require.Equal(t, metav1.ConditionFalse, ready.Status)
+			require.Equal(t, tc.reason, ready.Reason)
+			require.Equal(t, tc.message, ready.Message)
+			require.Equal(t, sandbox.Generation, ready.ObservedGeneration)
 		})
 	}
 }

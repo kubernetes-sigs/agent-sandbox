@@ -597,11 +597,6 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
-	if adoption := sandbox.Status.RuntimeAdoption; adoption != nil && adoption.Reservation != nil &&
-		!runtimeAdoptionReady(sandbox, pod, time.Now()) {
-		return metav1.Condition{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
-			Reason: "RuntimeAdoptionPending", Message: "The reserved runtime has not completed a current claim activation", ObservedGeneration: sandbox.Generation}
-	}
 	readyCondition := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionReady),
 		ObservedGeneration: sandbox.Generation,
@@ -630,6 +625,12 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			readyCondition.Message = "Sandbox is suspended"
 		}
 		return readyCondition
+	}
+
+	if adoption := sandbox.Status.RuntimeAdoption; adoption != nil && adoption.Reservation != nil &&
+		!runtimeAdoptionReady(sandbox, pod, time.Now()) {
+		return metav1.Condition{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+			Reason: "RuntimeAdoptionPending", Message: "The reserved runtime has not completed a current claim activation", ObservedGeneration: sandbox.Generation}
 	}
 
 	if pod != nil {

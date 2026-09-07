@@ -23,7 +23,8 @@ This policy **rejects** any `Sandbox` resource that attempts to bypass the follo
 | **DoS Protection** | `resources.limits` (CPU & Memory) | **Prevents Noisy Neighbors.** <br> Requires all containers to set resource limits, preventing a single compromised or buggy sandbox from starving the underlying node of resources. |
 | **User Isolation** | `runAsNonRoot: true` | **Defense in Depth.** <br> Enforces that the process cannot run as root. The policy checks both the Pod-level `securityContext` and the individual Container-level `securityContext` to ensure proper inheritance. |
 | **GKE Specific: Scheduling** | `nodeSelector: sandbox.gke.io/runtime: gvisor` | **Guarantees Runtime Target.** <br> Ensures the Kubernetes scheduler only places the Sandbox on node pools that have gVisor installed and configured. |
-| **GKE Specfic: Scheduling** | `tolerations: sandbox.gke.io/runtime=gvisor` | **Permits Runtime Target.** <br> Ensures the Sandbox is authorized to land on the dedicated, tainted gVisor node pool. |
+| **GKE Specific: Scheduling** | `tolerations: sandbox.gke.io/runtime=gvisor` | **Permits Runtime Target.** <br> Ensures the Sandbox is authorized to land on the dedicated, tainted gVisor node pool. |
+
 ## Deployment
 
 This policy requires **Kubernetes v1.30+** (Standard on GKE Autopilot).

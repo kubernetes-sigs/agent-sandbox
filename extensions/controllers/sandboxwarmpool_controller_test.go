@@ -804,6 +804,48 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 	}
 }
 
+func TestReconcilePoolSetsObservedGeneration(t *testing.T) {
+	poolName := "test-pool"
+	poolNamespace := "default"
+	templateName := "test-template"
+	replicas := int32(2)
+
+	template := createTemplate(poolNamespace)
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       poolName,
+			Namespace:  poolNamespace,
+			UID:        "warmpool-uid-123",
+			Generation: 4,
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+		},
+	}
+	readySandbox := func(suffix string) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionTrue,
+		}}
+		return sb
+	}
+
+	r := SandboxWarmPoolReconciler{
+		Client: newFakeClient(scheme, template, readySandbox("-a"), readySandbox("-b")),
+		Scheme: scheme,
+	}
+	_, err := r.reconcilePool(context.Background(), warmPool)
+	require.NoError(t, err)
+
+	require.Equal(t, warmPool.Generation, warmPool.Status.ObservedGeneration,
+		"observedGeneration should track the pool's metadata.generation")
+}
+
 func TestUpdateStatusClearsZeroValues(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
@@ -1367,8 +1409,6 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 		},
 	}
 
-	r := &SandboxWarmPoolReconciler{}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			template := &extensionsv1beta1.SandboxTemplate{
@@ -1391,7 +1431,7 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 				ApplySandboxSecureDefaults(template, actualSpecCopy)
 			}
 
-			result := r.comparePodSpecs(template, actualSpecCopy)
+			result := comparePodSpecs(template, actualSpecCopy)
 			if result != tt.expectedResult {
 				t.Errorf("comparePodSpecs() = %v, want %v", result, tt.expectedResult)
 			}
@@ -2241,8 +2281,6 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 		},
 	}
 
-	r := &SandboxWarmPoolReconciler{}
-
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			template := &extensionsv1beta1.SandboxTemplate{
@@ -2251,7 +2289,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 					SandboxBlueprint:        tt.templateSandboxBlueprint,
 				},
 			}
-			result := r.compareSandboxBlueprint(template, &tt.actualSandboxBlueprint)
+			result := compareSandboxBlueprint(template, &tt.actualSandboxBlueprint)
 			require.Equal(t, tt.expectedResult, result)
 		})
 	}

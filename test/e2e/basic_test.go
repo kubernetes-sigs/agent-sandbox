@@ -99,6 +99,12 @@ func TestSimpleSandbox(t *testing.T) {
 					Message:            "Sandbox is not suspended",
 				},
 				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+					Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
+				},
+				{
 					Type:               "Ready",
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: 1,

@@ -47,14 +47,14 @@
 {{- if hasKey .Values.controller "sandboxWarmPoolMaxBatchSize" }}
 - --sandbox-warm-pool-max-batch-size={{ .Values.controller.sandboxWarmPoolMaxBatchSize }}
 {{- end }}
+{{- if hasKey .Values.controller "sandboxWarmPoolReadinessGracePeriod" }}
+- --sandbox-warm-pool-readiness-grace-period={{ .Values.controller.sandboxWarmPoolReadinessGracePeriod }}
+{{- end }}
+{{- if hasKey .Values.controller "sandboxWarmPoolUnschedulableRecheckInterval" }}
+- --sandbox-warm-pool-unschedulable-recheck-interval={{ .Values.controller.sandboxWarmPoolUnschedulableRecheckInterval }}
+{{- end }}
 {{- if hasKey .Values.controller "enableWarmPoolEviction" }}
 - --enable-warm-pool-eviction={{ .Values.controller.enableWarmPoolEviction }}
-{{- end }}
-{{- if .Values.webhookServiceName }}
-- --webhook-service-name={{ .Values.webhookServiceName }}
-{{- end }}
-{{- if (include "agent-sandbox.namespace" .) }}
-- --webhook-namespace={{ include "agent-sandbox.namespace" . }}
 {{- end }}
 {{- range .Values.controller.extraArgs }}
 - {{ . | quote }}

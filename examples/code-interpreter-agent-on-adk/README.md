@@ -4,9 +4,9 @@ The guide walks you through the process of creating a simple [ADK](https://googl
 
 ## Installation
 
-1. Install the Agent-Sandbox controller and CRDs to a cluster. You can follow the instructions from the [installation section from the Getting Started page](/README.md/#installation).
+1. Install the Agent-Sandbox controller and CRDs to a cluster. You can follow the instructions from the [installation section from the Getting Started page](../../README.md#installation).
 
-2. Install the Agent Sandbox [router](/clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router)
+2. Install the Agent Sandbox [router](../../clients/python/agentic-sandbox-client/README.md#setup-deploying-the-router)
 
 3. Create a Python virtual environment:
    ```sh
@@ -45,7 +45,7 @@ The guide walks you through the process of creating a simple [ADK](https://googl
    
    
    root_agent = Agent(
-       model='gemini-2.5-flash',
+       model='gemini-3.7-flash',
        name='coding_agent',
        description="Writes Python code and executes it in a sandbox.",
        instruction="You are a helpful assistant that can write Python code and execute it in the sandbox. Use the 'execute_python' tool for this purpose.",
@@ -86,9 +86,7 @@ The guide walks you through the process of creating a simple [ADK](https://googl
    func executePython(_ tool.Context, args executePythonArgs) (executePythonResult, error) {
    	ctx := context.Background()
 
-   	// WarmPoolName must be set here too to satisfy Options.validate();
-   	// CreateSandbox's own argument below is what actually gets used.
-   	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+   	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
    	if err != nil {
    		return executePythonResult{Error: err.Error()}, nil
    	}
@@ -116,7 +114,7 @@ The guide walks you through the process of creating a simple [ADK](https://googl
    func main() {
    	ctx := context.Background()
 
-   	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+   	model, err := gemini.NewModel(ctx, "gemini-3.7-flash", &genai.ClientConfig{
    		APIKey: os.Getenv("GOOGLE_API_KEY"),
    	})
    	if err != nil {

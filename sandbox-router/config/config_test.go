@@ -364,6 +364,179 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "",
 		},
+		{
+			name:    "empty path routing prefix is valid (disabled)",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "" },
+			wantErr: "",
+		},
+		{
+			name:    "path routing prefix without leading slash rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "router" },
+			wantErr: "path-routing-prefix must start with",
+		},
+		{
+			name:    "path routing prefix with trailing slash rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router/" },
+			wantErr: "path-routing-prefix must not end with",
+		},
+		{
+			name:    "valid path routing prefix accepted",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router" },
+			wantErr: "",
+		},
+		{
+			name:    "path routing prefix with an embedded space rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/my router" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with a leading tab rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "\t/router" },
+			wantErr: "path-routing-prefix must start with",
+		},
+		{
+			name:    "path routing prefix with an embedded tab rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/rou\tter" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with a trailing newline rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/router\n" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with a control character rejected",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/rou\x00ter" },
+			wantErr: "path-routing-prefix must not contain whitespace or control characters",
+		},
+		{
+			name:    "path routing prefix with hyphens and multiple segments accepted",
+			mut:     func(c *Config) { c.PathRoutingPrefix = "/sandbox-router/browser" },
+			wantErr: "",
+		},
+		{
+			name:    "invalid cookie samesite",
+			mut:     func(c *Config) { c.AuthzCookieSameSite = "bogus" },
+			wantErr: "invalid --authz-cookie-samesite",
+		},
+		{
+			name:    "cookie query param without cookie name",
+			mut:     func(c *Config) { c.AuthzCookieQueryParam = "token" },
+			wantErr: "authz-cookie-query-param requires --authz-cookie-name",
+		},
+		{
+			name: "cookie name without path routing prefix",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+			},
+			wantErr: "authz-cookie-name requires --path-routing-prefix",
+		},
+		{
+			name: "cookie name with allow-all authz mode",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzCookieName = "sid"
+			},
+			wantErr: "authz-cookie-name has no effect with --authz-mode=allow-all",
+		},
+		{
+			name: "cookie name with invalid characters",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "s;id"
+			},
+			wantErr: "authz-cookie-name",
+		},
+		{
+			name: "cookie query param with invalid characters",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "tok en"
+			},
+			wantErr: "authz-cookie-query-param",
+		},
+		{
+			name: "samesite none incompatible with insecure",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieSameSite = CookieSameSiteNone
+				c.AuthzCookieInsecure = true
+			},
+			wantErr: "authz-cookie-samesite=none requires the cookie to be Secure",
+		},
+		{
+			name: "malformed allowed origin",
+			mut: func(c *Config) {
+				c.AuthzCookieAllowedOrigins = []string{"not-a-valid-origin"}
+			},
+			wantErr: "authz-cookie-allowed-origins",
+		},
+		{
+			name: "allowed origin with a path is rejected",
+			mut: func(c *Config) {
+				c.AuthzCookieAllowedOrigins = []string{"https://example.com/some/path"}
+			},
+			wantErr: "authz-cookie-allowed-origins",
+		},
+		{
+			name: "valid browser-session cookie configuration",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "token"
+				c.AuthzCookieAllowedOrigins = []string{"https://atenea.example.com", "https://atenea.example.com:8443"}
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid cross-site cookie configuration with samesite=none",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzTokenReview
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "token"
+				c.AuthzCookieSameSite = CookieSameSiteNone
+			},
+			wantErr: "",
+		},
+		{
+			name: "allowed origins without cookie name has no effect",
+			mut: func(c *Config) {
+				c.AuthzCookieAllowedOrigins = []string{"https://atenea.example.com"}
+			},
+			wantErr: "authz-cookie-allowed-origins has no effect without --authz-cookie-name",
+		},
+		{
+			name: "trust forwarded proto without cookie name has no effect",
+			mut: func(c *Config) {
+				c.AuthzTrustForwardedProto = true
+			},
+			wantErr: "authz-trust-forwarded-proto has no effect without --authz-cookie-name",
+		},
+		{
+			name: "valid browser-session configuration behind a TLS-terminating proxy",
+			mut: func(c *Config) {
+				c.PathRoutingPrefix = "/router"
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzCookieName = "sid"
+				c.AuthzCookieQueryParam = "token"
+				c.AuthzTrustForwardedProto = true
+			},
+			wantErr: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -154,6 +154,16 @@ class TestSandboxConnectorStrategySelection(unittest.TestCase):
             k8s_helper=MagicMock(),
         )
 
+    def test_post_requests_are_not_retried(self):
+        connector = self._make_connector(
+            SandboxDirectConnectionConfig(api_url="http://router")
+        )
+        retry_policy = connector.session.get_adapter("http://").max_retries
+
+        self.assertEqual(
+            set(retry_policy.allowed_methods), {"GET", "PUT", "DELETE"}
+        )
+
     def test_selects_in_cluster_strategy(self):
         config = SandboxInClusterConnectionConfig()
         connector = self._make_connector(config)

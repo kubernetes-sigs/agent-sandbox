@@ -163,6 +163,12 @@ type ScopedTokenOptions struct {
 	// Clock returns the current time; nil defaults to time.Now. Tests
 	// override this to exercise expiry deterministically.
 	Clock func() time.Time
+	// TokenLocations additionally lets Authorize find the token in a
+	// URL query parameter or a cookie, beyond the Authorization header
+	// it always checks first (see authz.TokenFromRequest). The zero
+	// value keeps this authorizer's behavior exactly as it was before
+	// this field existed: Authorization header only.
+	TokenLocations TokenLocations
 }
 
 // ScopedTokenAuthorizer authenticates and authorizes a request in one
@@ -182,6 +188,7 @@ type ScopedTokenOptions struct {
 type ScopedTokenAuthorizer struct {
 	secret []byte
 	clock  func() time.Time
+	locs   TokenLocations
 }
 
 // NewScopedTokenAuthorizer builds an authorizer from o.
@@ -194,12 +201,12 @@ func NewScopedTokenAuthorizer(o ScopedTokenOptions) (*ScopedTokenAuthorizer, err
 	if clock == nil {
 		clock = time.Now
 	}
-	return &ScopedTokenAuthorizer{secret: key, clock: clock}, nil
+	return &ScopedTokenAuthorizer{secret: key, clock: clock, locs: o.TokenLocations}, nil
 }
 
 // Authorize implements the Authorizer interface.
 func (a *ScopedTokenAuthorizer) Authorize(_ context.Context, r *http.Request, sandboxNamespace, sandboxName string) error {
-	token, ok := BearerTokenFromRequest(r)
+	token, _, ok := TokenFromRequest(r, a.locs)
 	if !ok {
 		return ErrUnauthenticated
 	}

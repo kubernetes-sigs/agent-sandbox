@@ -50,7 +50,7 @@ type Client struct {
 // NewClient creates a Client with shared configuration.
 func NewClient(_ context.Context, opts Options) (*Client, error) {
 	opts.setDefaults()
-	if err := opts.validate(); err != nil {
+	if err := opts.validateCommon(); err != nil {
 		return nil, err
 	}
 
@@ -78,9 +78,6 @@ func NewClient(_ context.Context, opts Options) (*Client, error) {
 // CreateSandbox provisions a new sandbox and returns a managed handle.
 // On failure, the orphaned claim is cleaned up.
 func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string) (*Sandbox, error) {
-	if warmPoolName == "" {
-		return nil, fmt.Errorf("sandbox: warm pool name is required")
-	}
 	if namespace == "" {
 		namespace = defaultNamespace
 	}

@@ -72,6 +72,12 @@ type TokenReviewOptions struct {
 	// Empty means "no audience check at the API server" — the default,
 	// matching how K8s itself authenticates kubelet tokens.
 	Audiences []string
+	// TokenLocations additionally lets Authorize find the token in a
+	// URL query parameter or a cookie, beyond the Authorization header
+	// it always checks first (see authz.TokenFromRequest). The zero
+	// value keeps this authorizer's behavior exactly as it was before
+	// this field existed: Authorization header only.
+	TokenLocations TokenLocations
 }
 
 // TokenReviewAuthorizer authenticates requests by submitting their
@@ -95,6 +101,7 @@ type TokenReviewAuthorizer struct {
 	timeout   time.Duration
 	require   bool
 	audiences []string
+	locs      TokenLocations
 }
 
 // tokenDecision is the cached result of a TokenReview call. Stored by
@@ -149,12 +156,13 @@ func NewTokenReviewAuthorizer(o TokenReviewOptions) (*TokenReviewAuthorizer, err
 		timeout:   o.RequestTimeout,
 		require:   o.RequireToken,
 		audiences: append([]string(nil), o.Audiences...),
+		locs:      o.TokenLocations,
 	}, nil
 }
 
 // Authorize implements the Authorizer interface.
 func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error {
-	token, ok := BearerTokenFromRequest(r)
+	token, _, ok := TokenFromRequest(r, a.locs)
 	if !ok {
 		if a.require {
 			a.log.V(1).Info("authz deny: missing Bearer token",

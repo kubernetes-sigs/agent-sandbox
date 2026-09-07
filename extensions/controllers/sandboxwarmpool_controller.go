@@ -61,9 +61,10 @@ const (
 	// of O(sandboxes-in-namespace).
 	sandboxWarmPoolLabelIndex = ".metadata.labels[" + warmPoolSandboxLabel + "]"
 
-	// warmPoolReadinessGracePeriod is how long a pool sandbox may stay
-	// non-Ready before the reconciler considers it stuck and replaces it.
-	warmPoolReadinessGracePeriod = 5 * time.Minute
+	// DefaultWarmPoolReadinessGracePeriod is how long a pool sandbox may stay
+	// non-Ready before the reconciler considers it stuck and replaces it,
+	// unless overridden via SandboxWarmPoolReconciler.ReadinessGracePeriod.
+	DefaultWarmPoolReadinessGracePeriod = 5 * time.Minute
 
 	// expectationsPendingRequeueDelay is the fallback requeue used when create
 	// or delete work is skipped because previously issued writes have not been
@@ -71,9 +72,11 @@ const (
 	// pool much sooner; this only guards against lost events.
 	expectationsPendingRequeueDelay = 30 * time.Second
 
-	// unschedulableRequeueDelay is the rate-limited retry interval for a pool
-	// holding unschedulable sandboxes instead of churning delete/create (#1215).
-	unschedulableRequeueDelay = time.Minute
+	// DefaultUnschedulableRecheckInterval is the rate-limited retry interval
+	// for a pool holding unschedulable sandboxes instead of churning
+	// delete/create (#1215), unless overridden via
+	// SandboxWarmPoolReconciler.UnschedulableRecheckInterval.
+	DefaultUnschedulableRecheckInterval = time.Minute
 
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
@@ -103,6 +106,14 @@ type SandboxWarmPoolReconciler struct {
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
+	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready
+	// before it is considered stuck (delete-and-replace, or held if its pod
+	// is unschedulable). Zero means DefaultWarmPoolReadinessGracePeriod.
+	ReadinessGracePeriod time.Duration
+	// UnschedulableRecheckInterval is the requeue interval while a pool holds
+	// unschedulable sandboxes past the readiness grace period. Zero means
+	// DefaultUnschedulableRecheckInterval.
+	UnschedulableRecheckInterval time.Duration
 	// Recorder emits pool-level Events (e.g. WarmPoolNotProgressing). May be
 	// nil (tests); all uses are nil-guarded.
 	Recorder events.EventRecorder
@@ -362,6 +373,24 @@ func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
 	return time.Now()
 }
 
+// readinessGracePeriod returns the configured readiness grace period, falling
+// back to the default for zero-value construction (tests, bare literals).
+func (r *SandboxWarmPoolReconciler) readinessGracePeriod() time.Duration {
+	if r.ReadinessGracePeriod > 0 {
+		return r.ReadinessGracePeriod
+	}
+	return DefaultWarmPoolReadinessGracePeriod
+}
+
+// unschedulableRecheckInterval returns the configured unschedulable-hold
+// requeue interval, falling back to the default for zero-value construction.
+func (r *SandboxWarmPoolReconciler) unschedulableRecheckInterval() time.Duration {
+	if r.UnschedulableRecheckInterval > 0 {
+		return r.UnschedulableRecheckInterval
+	}
+	return DefaultUnschedulableRecheckInterval
+}
+
 // exp returns the reconciler's expectations tracker.
 //
 // In production the tracker is initialized before any reconcile runs:
@@ -489,7 +518,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(sb.CreationTimestamp.Time)
-			if age <= warmPoolReadinessGracePeriod {
+			if age <= r.readinessGracePeriod() {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -499,7 +528,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// unschedulable-hold/NotProgressing signal unreachable.
 				// Requeue for the earliest grace deadline so the evaluation
 				// is deterministic.
-				if remaining := warmPoolReadinessGracePeriod - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
+				if remaining := r.readinessGracePeriod() - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
 					nextGraceDeadline = remaining
 				}
 				healthySandboxes = append(healthySandboxes, sb)
@@ -568,6 +597,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		}
 	}
 	warmPool.Status.ReadyReplicas = readyReplicas
+
+	// Surface the pool's observed generation so clients can gate on
+	// status.observedGeneration == metadata.generation before trusting the
+	// replica counts (eliminates read-after-write races on scale/spec updates).
+	warmPool.Status.ObservedGeneration = warmPool.Generation
 
 	maxBatchSize := int32(r.MaxBatchSize)
 
@@ -739,8 +773,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	if unschedulableReplicas > 0 {
 		r.setNotProgressing(warmPool, poolKey, true, fmt.Sprintf(
 			"%d/%d sandboxes are unschedulable past the %s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
-			unschedulableReplicas, desiredReplicas, warmPoolReadinessGracePeriod))
-		requeueAfter = minNonZeroDuration(requeueAfter, unschedulableRequeueDelay)
+			unschedulableReplicas, desiredReplicas, r.readinessGracePeriod()))
+		requeueAfter = minNonZeroDuration(requeueAfter, r.unschedulableRecheckInterval())
 	} else {
 		r.setNotProgressing(warmPool, poolKey, false, "")
 	}
@@ -833,10 +867,24 @@ func (r *SandboxWarmPoolReconciler) isSandboxPodUnschedulable(ctx context.Contex
 	return false
 }
 
+// resolveUpdateStrategy returns the effective update strategy for the warm pool,
+// defaulting to OnReplenish when unspecified or unknown.
+func resolveUpdateStrategy(warmPool *extensionsv1beta1.SandboxWarmPool) extensionsv1beta1.SandboxWarmPoolUpdateStrategyType {
+	if warmPool.Spec.UpdateStrategy == nil {
+		return extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	}
+	switch warmPool.Spec.UpdateStrategy.Type {
+	case extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType:
+		return extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType
+	default:
+		return extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	}
+}
+
 // adoptSandbox sets this warmpool as the owner of an orphaned sandbox.
 func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sb *sandboxv1beta1.Sandbox) error {
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
-		return err
+		return fmt.Errorf("set controller reference for warm pool sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
 	}
 	setWarmLaunchTypeLabelIfNeeded(sb)
 	return r.Update(ctx, sb)
@@ -869,20 +917,12 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 	vettedHashes := make(map[string]bool)
 
 	// Determine the update strategy, defaulting to OnReplenish if not specified or unknown.
-	var updateStrategyType extensionsv1beta1.SandboxWarmPoolUpdateStrategyType
-	if warmPool.Spec.UpdateStrategy != nil {
-		updateStrategyType = warmPool.Spec.UpdateStrategy.Type
-	}
-
-	var updateStrategy extensionsv1beta1.SandboxWarmPoolUpdateStrategyType
-	switch updateStrategyType {
-	case extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType:
-		updateStrategy = extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType
-	case extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType, "":
-		updateStrategy = extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
-	default:
-		logger.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", updateStrategyType)
-		updateStrategy = extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType
+	updateStrategy := resolveUpdateStrategy(warmPool)
+	if raw := warmPool.Spec.UpdateStrategy; raw != nil &&
+		raw.Type != "" &&
+		raw.Type != extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType &&
+		raw.Type != extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType {
+		logger.Info("Unknown update strategy, defaulting to OnReplenish", "strategy", raw.Type)
 	}
 
 	for _, sb := range sandboxes {
@@ -1132,7 +1172,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	isOrphan := controllerRef == nil
 	if isOrphan {
 		// Always perform full semantic comparison for orphans.
-		return !r.compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
+		return !compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
 	}
 
 	// If hashes match, it's fresh.
@@ -1158,7 +1198,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 	// Perform a semantic comparison of the sandbox blueprint.
 	// We normalize the pod spec by applying the same secure defaults
 	// used during creation to avoid false positives from controller-injected fields.
-	isStale := !r.compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
+	isStale := !compareSandboxBlueprint(template, &sandbox.Spec.SandboxBlueprint)
 
 	// Save the result for the next sandbox with this same hash.
 	if sandboxHash != "" {
@@ -1170,7 +1210,7 @@ func (r *SandboxWarmPoolReconciler) isSandboxStale(
 
 // comparePodSpecs checks if the pod spec in the sandbox is semantically equal to the template,
 // normalizing for fields that the controller populates by default.
-func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *corev1.PodSpec) bool {
+func comparePodSpecs(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *corev1.PodSpec) bool {
 	// Create what the sandbox SHOULD look like if it were created from the current template.
 	expectedSpec := template.Spec.PodTemplate.Spec.DeepCopy()
 	ApplySandboxSecureDefaults(template, expectedSpec)
@@ -1186,7 +1226,7 @@ func (r *SandboxWarmPoolReconciler) comparePodSpecs(template *extensionsv1beta1.
 // Note: Comparison is index-based (order-sensitive) to stay consistent with computeSandboxBlueprintHash (+listType=atomic).
 // Making this comparison order-independent without also sorting the templates in computeSandboxBlueprintHash
 // would cause reordered warm sandboxes to fail the hash label check on every reconcile.
-func (r *SandboxWarmPoolReconciler) compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, actualVCTs []sandboxv1beta1.PersistentVolumeClaimTemplate) bool {
+func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, actualVCTs []sandboxv1beta1.PersistentVolumeClaimTemplate) bool {
 	if len(template.Spec.SandboxBlueprint.VolumeClaimTemplates) != len(actualVCTs) {
 		return false
 	}
@@ -1203,9 +1243,9 @@ func (r *SandboxWarmPoolReconciler) compareVolumeClaimTemplates(template *extens
 
 // compareSandboxBlueprint checks if the sandbox blueprint in the sandbox is semantically equal to the template,
 // ignoring metadata differences and only comparing the fields that are relevant for staleness detection.
-func (r *SandboxWarmPoolReconciler) compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
-	return r.comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
-		r.compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
+func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
+	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
+		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
 		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
 }
 

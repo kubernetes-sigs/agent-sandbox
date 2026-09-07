@@ -339,7 +339,7 @@ func runWithEnv(ctx context.Context, sb *sandbox.Sandbox, namespace string, payl
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://sandbox-router-svc.default.svc.cluster.local:8080/execute", bytes.NewReader(body))
+		"http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/execute", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -369,10 +369,8 @@ func main() {
 	ctx := context.Background()
 	namespace := "default"
 
-	// 1. Initialize the client. WarmPoolName must be set here too to satisfy
-	// Options.validate(); CreateSandbox's own argument below is what
-	// actually gets used.
-	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: namespace, WarmPoolName: "simple-sandbox-pool"})
+	// 1. Initialize the client.
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: namespace})
 	if err != nil {
 		log.Fatal(err)
 	}

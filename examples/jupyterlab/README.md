@@ -257,7 +257,7 @@ volumeClaimTemplates:
 
 ```bash
 kubectl delete sandbox jupyterlab-sandbox
-kubectl delete pvc jupyterlab-sandbox-workspace
+kubectl delete pvc workspace-jupyterlab-sandbox
 kubectl apply -f jupyterlab.yaml
 ```
 
@@ -329,7 +329,7 @@ kubectl delete secret jupyter-hf-token
 kubectl delete sandbox jupyterlab-sandbox --cascade=orphan
 
 # PVC remains - you can reattach it later
-kubectl get pvc jupyterlab-sandbox-workspace
+kubectl get pvc workspace-jupyterlab-sandbox
 ```
 
 ## Additional Resources

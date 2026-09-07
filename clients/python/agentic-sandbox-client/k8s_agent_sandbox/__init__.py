@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .sandbox_client import SandboxClient
+from .metrics_utils import get_metrics, print_metrics
 from .exceptions import (
     SandboxError,
     SandboxNotFoundError,

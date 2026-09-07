@@ -16,16 +16,15 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"math"
 	"net/http"
 	"net/http/pprof"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -33,23 +32,20 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/felixge/fgprof"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/controllers"
-	extensionsv1alpha1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -80,29 +76,16 @@ func main() {
 	var sandboxWarmPoolMaxBatchSize int
 	var sandboxWarmPoolReplenishDelay time.Duration
 	var sandboxWarmPoolMaxRefillRate float64
+	var sandboxWriteBehindWindow time.Duration
+	var sandboxWarmPoolReadinessGracePeriod time.Duration
+	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
-	var webhookPort int
-	var webhookCertDir string
-	var webhookCertName string
-	var webhookKeyName string
-	var webhookServiceName string
-	var webhookNamespace string
-	var manageWebhookCerts bool
-	var enableWebhook bool
 	var disableClaimEvents bool
 	var disableClaimObservabilityAnnotations bool
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
-	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
-	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "The directory that contains the certificates.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", defaultWebhookCertName, "The filename of the webhook serving certificate within --webhook-cert-dir. Only used when --manage-webhook-certs=false.")
-	flag.StringVar(&webhookKeyName, "webhook-key-name", defaultWebhookKeyName, "The filename of the webhook private key within --webhook-cert-dir. Only used when --manage-webhook-certs=false.")
-	flag.StringVar(&webhookServiceName, "webhook-service-name", "agent-sandbox-webhook-service", "The name of the webhook service.")
-	flag.StringVar(&webhookNamespace, "webhook-namespace", "agent-sandbox-system", "The namespace of the webhook service.")
-	flag.BoolVar(&manageWebhookCerts, "manage-webhook-certs", true, "Manage webhook serving certs and patch CRD conversion caBundles on startup. Set to false when certs and CRD/webhook configuration are managed externally by a certificate provisioner.")
-	flag.BoolVar(&enableWebhook, "enable-webhook", true, "Enable webhook server and webhook registrations.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -152,6 +135,8 @@ func main() {
 			"pacing refill into a smooth stream instead of full-deficit bursts that flood the write path and compete with claim adoption. "+
 			"Composes with --sandbox-warm-pool-replenish-delay: the delay defers the start of refill, the rate shapes its flow. "+
 			"0 (default) leaves refill unpaced (whole deficit per reconcile).")
+	flag.DurationVar(&sandboxWarmPoolReadinessGracePeriod, "sandbox-warm-pool-readiness-grace-period", extensionscontrollers.DefaultWarmPoolReadinessGracePeriod, "How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.")
+	flag.DurationVar(&sandboxWarmPoolUnschedulableRecheckInterval, "sandbox-warm-pool-unschedulable-recheck-interval", extensionscontrollers.DefaultUnschedulableRecheckInterval, "Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
@@ -170,6 +155,8 @@ func main() {
 			"metrics and trace propagation to the Sandbox keep working within the controller process. Costs the on-object "+
 			"debugging breadcrumbs and, after a controller restart, the startup-latency metric for claims first observed "+
 			"by the previous process. Default false (annotations persisted).")
+	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
+		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -182,13 +169,12 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-
-	if strings.TrimSpace(webhookCertName) == "" {
-		setupLog.Error(nil, "--webhook-cert-name cannot be empty")
+	if sandboxWarmPoolReadinessGracePeriod <= 0 {
+		setupLog.Error(nil, "--sandbox-warm-pool-readiness-grace-period must be a positive duration", "value", sandboxWarmPoolReadinessGracePeriod)
 		os.Exit(1)
 	}
-	if strings.TrimSpace(webhookKeyName) == "" {
-		setupLog.Error(nil, "--webhook-key-name cannot be empty")
+	if sandboxWarmPoolUnschedulableRecheckInterval <= 0 {
+		setupLog.Error(nil, "--sandbox-warm-pool-unschedulable-recheck-interval must be a positive duration", "value", sandboxWarmPoolUnschedulableRecheckInterval)
 		os.Exit(1)
 	}
 
@@ -218,6 +204,13 @@ func main() {
 			"value", sandboxWarmPoolMaxRefillRate)
 		os.Exit(1)
 	}
+	// 0 means "write-behind disabled"; a negative window is always a
+	// misconfiguration, so fail fast instead of silently disabling.
+	if sandboxWriteBehindWindow < 0 {
+		setupLog.Error(nil, "sandbox-write-behind-window must be >= 0 (0 disables write-behind coalescing)",
+			"value", sandboxWriteBehindWindow)
+		os.Exit(1)
+	}
 	// A logical maximum (too much will create unnecessary load on the API server)
 	totalWorkers := sandboxConcurrentWorkers + sandboxClaimConcurrentWorkers + sandboxWarmPoolConcurrentWorkers + sandboxTemplateConcurrentWorkers
 	if totalWorkers > 1000 {
@@ -244,15 +237,6 @@ func main() {
 		setupLog.V(1).Info("leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty; attempting auto-detection")
 	}
 
-	if !enableWebhook {
-		setupLog.Info("webhook subsystem disabled (--enable-webhook=false); " +
-			"installed CRDs must use conversion.strategy=None — the stock CRDs in k8s/crds " +
-			"and helm/crds use Webhook conversion and API version conversion will fail without the webhook server")
-		if manageWebhookCerts {
-			setupLog.Info("--manage-webhook-certs has no effect when --enable-webhook=false")
-		}
-	}
-
 	ctx := ctrl.SetupSignalHandler()
 
 	// Initialize Tracing Provider
@@ -272,14 +256,24 @@ func main() {
 		defer cleanup()
 	}
 
+	// Register client-go REST client metrics.
+	// These metrics provide visibility into API server interactions.
+	setupLog.Info("client-go REST client metrics enabled")
+	metrics.RegisterRESTClientMetrics(
+		metrics.MetricRequestLatency,
+		metrics.MetricDNSResolutionLatency,
+		metrics.MetricRequestSize,
+		metrics.MetricResponseSize,
+		metrics.MetricRateLimiterLatency,
+		metrics.MetricRequestRetry,
+	)
+
 	// Importing net/http/pprof registers handlers on the global DefaultServeMux.
 	// Reset it to avoid accidentally exposing pprof via any server that uses the default mux.
 	http.DefaultServeMux = http.NewServeMux()
 
 	scheme := controllers.Scheme
-	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	if extensions {
-		utilruntime.Must(extensionsv1alpha1.AddToScheme(scheme))
 		utilruntime.Must(extensionsv1beta1.AddToScheme(scheme))
 	}
 
@@ -316,7 +310,18 @@ func main() {
 			metricsOpts.ExtraHandlers["/debug/pprof/block"] = pprof.Handler("block")
 			metricsOpts.ExtraHandlers["/debug/pprof/mutex"] = pprof.Handler("mutex")
 			metricsOpts.ExtraHandlers["/debug/pprof/trace"] = http.HandlerFunc(pprof.Trace)
-			metricsOpts.ExtraHandlers["/debug/fgprof"] = fgprof.Handler()
+			// Wrap fgprof handler with mutex to reject concurrent profiling requests,
+			// aligning with pprof CPU profiling behavior.
+			var fgprofMu sync.Mutex
+			fgprofHandler := fgprof.Handler()
+			metricsOpts.ExtraHandlers["/debug/fgprof"] = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !fgprofMu.TryLock() {
+					http.Error(w, "Could not enable fgprof profiling: fgprof profiling already in use", http.StatusInternalServerError)
+					return
+				}
+				defer fgprofMu.Unlock()
+				fgprofHandler.ServeHTTP(w, r)
+			})
 		}
 	}
 
@@ -346,60 +351,6 @@ func main() {
 			"connections", apiConnections)
 	}
 
-	if enableWebhook {
-		if manageWebhookCerts {
-			// Create a temporary client to patch the CRDs and access Secrets
-			tempClient, err := client.New(restConfig, client.Options{Scheme: scheme})
-			if err != nil {
-				setupLog.Error(err, "unable to create temporary client")
-				os.Exit(1)
-			}
-
-			// Generate or load self-signed TLS certificates for the webhook server
-			setupLog.Info("Preparing webhook certificates", "certDir", webhookCertDir)
-			caPEM, err := generateWebhookCerts(ctx, tempClient, webhookCertDir, webhookServiceName, webhookNamespace, clusterDomain)
-			if err != nil {
-				setupLog.Error(err, "unable to prepare webhook certificates")
-				os.Exit(1)
-			}
-
-			setupLog.Info("Patching CRDs with generated CA bundle")
-			if err := patchCRDs(ctx, tempClient, caPEM, webhookServiceName, webhookNamespace); err != nil {
-				setupLog.Error(err, "failed to patch CRDs with CA bundle")
-				os.Exit(1)
-			}
-
-			// Ensure server looks for tls.crt and tls.key generated by generateWebhookCerts
-			if webhookCertName != defaultWebhookCertName || webhookKeyName != defaultWebhookKeyName {
-				setupLog.Info("Warning: --webhook-cert-name and --webhook-key-name are ignored when --manage-webhook-certs=true; using generated tls.crt/tls.key",
-					"certName", webhookCertName, "keyName", webhookKeyName)
-			}
-			webhookCertName = defaultWebhookCertName
-			webhookKeyName = defaultWebhookKeyName
-		} else {
-			setupLog.Info("Webhook cert management and CRD conversion caBundle patching disabled; expecting existing cert files in certDir and CRDs patched externally",
-				"certDir", webhookCertDir,
-				"certName", webhookCertName,
-				"keyName", webhookKeyName,
-				"serviceName", webhookServiceName,
-				"namespace", webhookNamespace,
-			)
-
-			resolvedCertName, resolvedKeyName, err := resolveWebhookCertFiles(webhookCertDir, webhookCertName, webhookKeyName)
-			if err != nil {
-				setupLog.Error(err, "required webhook cert/key file missing",
-					"hint", "with --manage-webhook-certs=false the serving certificate and key (tls.crt/tls.key or a combined cert.pem) must be pre-provisioned in certDir by a certificate provisioner")
-				os.Exit(1)
-			}
-			if resolvedCertName != webhookCertName || resolvedKeyName != webhookKeyName {
-				setupLog.Info("Found single-file webhook certificate and key (combined cert+key PEM)",
-					"path", filepath.Join(webhookCertDir, resolvedCertName))
-			}
-			webhookCertName = resolvedCertName
-			webhookKeyName = resolvedKeyName
-		}
-	}
-
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
 	// managedFields stripping, the Pod spec diet, and (optionally) the
 	// tracking-label scoping; see buildCacheOptions for the rationale.
@@ -419,19 +370,6 @@ func main() {
 		// WrapTransport, so watch streams stay off the write connections.
 		mgrOpts.Cache.HTTPClient = watchHTTPClient
 	}
-	if enableWebhook {
-		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{
-			Port:     webhookPort,
-			CertDir:  webhookCertDir,
-			CertName: webhookCertName,
-			KeyName:  webhookKeyName,
-			TLSOpts: []func(*tls.Config){
-				func(cfg *tls.Config) {
-					cfg.ClientAuth = tls.NoClientCert
-				},
-			},
-		})
-	}
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOpts)
 	if err != nil {
@@ -442,22 +380,25 @@ func main() {
 	// Register the custom Sandbox metric collector globally.
 	asmetrics.RegisterSandboxCollector(mgr.GetClient(), mgr.GetLogger().WithName("sandbox-collector"))
 
+	// RequeueAfter-based write deferral for the Sandbox controller's
+	// recoverable metadata-only writes. Default (0) is fully synchronous:
+	// the controller keeps its stock write path. No background goroutine is
+	// involved; the workqueue's AddAfter provides the coalescing window.
+	if sandboxWriteBehindWindow > 0 {
+		setupLog.Info("Sandbox controller write deferral enabled (--sandbox-write-behind-window)",
+			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
+	}
+
 	if err = (&controllers.SandboxReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Tracer:        instrumenter,
-		ClusterDomain: clusterDomain,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorder("sandbox-controller"),
+		Tracer:            instrumenter,
+		ClusterDomain:     clusterDomain,
+		WriteBehindWindow: sandboxWriteBehindWindow,
 	}).SetupWithManager(mgr, sandboxConcurrentWorkers); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
-	}
-
-	if enableWebhook {
-		if err = ctrl.NewWebhookManagedBy(mgr, &sandboxv1beta1.Sandbox{}).
-			Complete(); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "Sandbox")
-			os.Exit(1)
-		}
 	}
 
 	if extensions {
@@ -520,37 +461,20 @@ func main() {
 		}
 
 		if err = (&extensionscontrollers.SandboxWarmPoolReconciler{
-			Client:                 mgr.GetClient(),
-			Scheme:                 mgr.GetScheme(),
-			MaxBatchSize:           sandboxWarmPoolMaxBatchSize,
-			EnableWarmPoolEviction: enableWarmPoolEviction,
-			Recorder:               mgr.GetEventRecorder("sandboxwarmpool-controller"),
-			ReplenishDelay:         sandboxWarmPoolReplenishDelay,
-			MaxRefillRate:          sandboxWarmPoolMaxRefillRate,
+			Client:                       mgr.GetClient(),
+			Scheme:                       mgr.GetScheme(),
+			MaxBatchSize:                 sandboxWarmPoolMaxBatchSize,
+			EnableWarmPoolEviction:       enableWarmPoolEviction,
+			Recorder:                     mgr.GetEventRecorder("sandboxwarmpool-controller"),
+			ReplenishDelay:               sandboxWarmPoolReplenishDelay,
+			MaxRefillRate:                sandboxWarmPoolMaxRefillRate,
+			ReadinessGracePeriod:         sandboxWarmPoolReadinessGracePeriod,
+			UnschedulableRecheckInterval: sandboxWarmPoolUnschedulableRecheckInterval,
 		}).SetupWithManager(mgr, sandboxWarmPoolConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxWarmPool")
 			os.Exit(1)
 		}
 
-		if enableWebhook {
-			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxClaim{}).
-				Complete(); err != nil {
-				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxClaim")
-				os.Exit(1)
-			}
-
-			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxTemplate{}).
-				Complete(); err != nil {
-				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxTemplate")
-				os.Exit(1)
-			}
-
-			if err = ctrl.NewWebhookManagedBy(mgr, &extensionsv1beta1.SandboxWarmPool{}).
-				Complete(); err != nil {
-				setupLog.Error(err, "unable to create webhook", "webhook", "SandboxWarmPool")
-				os.Exit(1)
-			}
-		}
 	}
 
 	//+kubebuilder:scaffold:builder

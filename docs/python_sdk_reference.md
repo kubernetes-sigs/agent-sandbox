@@ -59,7 +59,8 @@ def create_sandbox(warmpool: str,
                    shutdown_after_seconds: int | None = None,
                    volume_claim_templates: list[dict] | None = None,
                    pod_labels: dict[str, str] | None = None,
-                   pod_annotations: dict[str, str] | None = None) -> T
+                   pod_annotations: dict[str, str] | None = None,
+                   env: dict[str, str] | None = None) -> T
 ```
 
 Provisions new Sandbox claim and returns a Sandbox handle which tracks
@@ -85,6 +86,10 @@ the underlying infrastructure.
   the sandbox through the Downward API.
 - `pod_annotations` - Optional annotations stamped onto the running
   Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
+- `env` - Optional environment variables to inject into the SandboxClaim.
+  Setting this populates ``spec.env`` and forces a cold start
+  from the warm pool template instead of adopting a pre-warmed
+  pod, which may increase startup latency.
   
 
 **Example**:
@@ -255,6 +260,11 @@ class FileEntry(BaseModel)
 
 Represents a file or directory entry in the sandbox.
 
+Runtime-neutral: the SDK decodes both the legacy python-runtime wire
+format (``mod_time`` as a float POSIX timestamp) and the sandboxd wire
+format (``modified_at`` as an RFC 3339 string, plus ``mode``) into this
+one shape. ``modified`` is always a timezone-aware datetime.
+
 <a id="k8s_agent_sandbox.models.FileEntry.name"></a>
 
 ##### name
@@ -273,11 +283,61 @@ Size of the file in bytes.
 
 Type of the entry (file or directory).
 
-<a id="k8s_agent_sandbox.models.FileEntry.mod_time"></a>
+<a id="k8s_agent_sandbox.models.FileEntry.modified"></a>
 
-##### mod\_time
+##### modified
 
-Last modification time of the file. (POSIX timestamp)
+Last modification time (timezone-aware).
+
+<a id="k8s_agent_sandbox.models.FileEntry.mode"></a>
+
+##### mode
+
+Octal permission bits (sandboxd only), e.g. "0644".
+
+<a id="k8s_agent_sandbox.models.FileEntry.from_legacy"></a>
+
+##### from\_legacy
+
+```python
+@classmethod
+def from_legacy(cls, entry: dict) -> "FileEntry"
+```
+
+Build from the legacy python-runtime listing entry.
+
+<a id="k8s_agent_sandbox.models.FileEntry.from_sandboxd"></a>
+
+##### from\_sandboxd
+
+```python
+@classmethod
+def from_sandboxd(cls, entry: dict) -> "FileEntry"
+```
+
+Build from a sandboxd DirectoryListing entry.
+
+<a id="k8s_agent_sandbox.models.SandboxClaimEnvVar"></a>
+
+### SandboxClaimEnvVar Objects
+
+```python
+class SandboxClaimEnvVar(BaseModel)
+```
+
+Represents an environment variable entry in a SandboxClaim spec.
+
+<a id="k8s_agent_sandbox.models.SandboxClaimEnvVar.name"></a>
+
+##### name
+
+Name of the environment variable.
+
+<a id="k8s_agent_sandbox.models.SandboxClaimEnvVar.value"></a>
+
+##### value
+
+Value of the environment variable.
 
 <a id="k8s_agent_sandbox.models.SandboxDirectConnectionConfig"></a>
 
@@ -362,6 +422,38 @@ Port the sandbox container listens on.
 ##### router\_namespace
 
 Namespace where the Router service resides.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig"></a>
+
+### SandboxdPodTunnelConnectionConfig Objects
+
+```python
+class SandboxdPodTunnelConnectionConfig(BaseModel)
+```
+
+Configuration for the sandboxd runtime via a direct pod port-forward.
+
+sandboxd (KEP-539.2) exposes two listeners: the Filesystem & Runtime REST
+API and the gRPC ProcessService. This config port-forwards directly to the
+sandbox pod, reaching both.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.rest_port"></a>
+
+##### rest\_port
+
+sandboxd REST filesystem port on the pod.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.grpc_port"></a>
+
+##### grpc\_port
+
+sandboxd gRPC ProcessService port on the pod.
+
+<a id="k8s_agent_sandbox.models.SandboxdPodTunnelConnectionConfig.port_forward_ready_timeout"></a>
+
+##### port\_forward\_ready\_timeout
+
+Seconds to wait for port-forward readiness.
 
 <a id="k8s_agent_sandbox.models.SandboxInClusterConnectionConfig"></a>
 

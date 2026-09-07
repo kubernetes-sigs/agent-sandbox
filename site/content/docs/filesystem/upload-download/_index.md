@@ -51,9 +51,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// WarmPoolName must be set here too to satisfy Options.validate();
-	// CreateSandbox's own argument below is what actually gets used.
-	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -126,9 +124,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// WarmPoolName must be set here too to satisfy Options.validate();
-	// CreateSandbox's own argument below is what actually gets used.
-	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -210,9 +206,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// WarmPoolName must be set here too to satisfy Options.validate();
-	// CreateSandbox's own argument below is what actually gets used.
-	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -303,9 +297,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// WarmPoolName must be set here too to satisfy Options.validate();
-	// CreateSandbox's own argument below is what actually gets used.
-	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -409,9 +401,7 @@ with open('output.csv', 'w') as f:
 func main() {
 	ctx := context.Background()
 
-	// WarmPoolName must be set here too to satisfy Options.validate();
-	// CreateSandbox's own argument below is what actually gets used.
-	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default", WarmPoolName: "python-sandbox-pool"})
+	client, err := sandbox.NewClient(ctx, sandbox.Options{Namespace: "default"})
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -8,7 +8,7 @@ This guide explains how to manually set up the Sandbox Router and Gateway API on
 
 1.  **Setup Agentic Sandbox and Python SDK Client:**
     a.  **Deploy Kind Cluster and Build Images:**
-        Run the following command from the root of the repository to set up the Kind cluster and build/load all necessary images (including the Sandbox Router). We also export the `IMAGE_TAG` for subsequent steps:
+        Run the following commands from the root of the repository to set up the Kind cluster and build/load all necessary images (including the Sandbox Router). We also export the `IMAGE_TAG` for subsequent steps:
         ```bash
         make build
         make deploy-kind EXTENSIONS=true 
@@ -22,7 +22,7 @@ This guide explains how to manually set up the Sandbox Router and Gateway API on
         # Ensure IMAGE_TAG is set (see step 1.a)
         cd clients/python/agentic-sandbox-client/sandbox-router
         export SANDBOX_ROUTER_IMG=kind.local/sandbox-router:$IMAGE_TAG
-        sed "s|IMAGE_PLACEHOLDER|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml | kubectl apply -f -
+        sed "s|\${ROUTER_IMAGE}|${SANDBOX_ROUTER_IMG}|g" sandbox_router.yaml | kubectl apply -f -
         cd -
         ```
 
@@ -42,7 +42,7 @@ This guide explains how to manually set up the Sandbox Router and Gateway API on
 2.  **Install and Run cloud-provider-kind:**
     This component provides a load balancer implementation for KinD.
 
-    Install the latest version and run `cloud-provider-kind` in the background, enabling the Gateway API controller::
+    Run the following commands from the root of the repository to install and run `cloud-provider-kind` in the background, enabling the Gateway API controller:
     ```bash
     make deploy-cloud-provider-kind
     ```
@@ -52,6 +52,7 @@ This guide explains how to manually set up the Sandbox Router and Gateway API on
 3.  **Deploy KinD Gateway Resources:**
     Apply the Gateway, and HTTPRoute from this directory:
     ```bash
+    cd clients/python/agentic-sandbox-client/gateway-kind
     kubectl apply -f gateway-kind.yaml
     ```
     
@@ -74,6 +75,7 @@ This guide explains how to manually set up the Sandbox Router and Gateway API on
 
 5. **Clean up:** To stop the cloud-provider-kind process, run:
     ```bash
+    # From the root of the repository
     make kill-cloud-provider-kind
     ```
 

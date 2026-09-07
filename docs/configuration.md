@@ -8,6 +8,8 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 * `--sandbox-claim-concurrent-workers` (default: 50): The maximum number of concurrent reconciles for the SandboxClaim controller.
 * `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller.
 * `--sandbox-warm-pool-max-batch-size` (default: 300): The maximum number of sandboxes the SandboxWarmPool controller will create/delete in a single batch.
+* `--sandbox-warm-pool-readiness-grace-period` (default: `5m`): How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.
+* `--sandbox-warm-pool-unschedulable-recheck-interval` (default: `1m`): Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.
 * `--kube-api-qps` (default: -1, no client-side rate limiting): Client-side QPS limit for the Kubernetes API client.
 * `--kube-api-burst` (default: 10): The maximum burst for client-side throttling of the Kubernetes API client.
 
@@ -88,3 +90,42 @@ Then include the patch in your `kustomization.yaml`:
 patches:
   - path: patch-args.yaml
 ```
+
+## SandboxClaim label-domain allowlist
+
+Since v0.5.0, label keys in `SandboxClaim.spec.additionalPodMetadata.labels`
+must carry a domain prefix from an allowlist; claims with any other label
+domain are rejected with `Ready=False, reason=InvalidMetadata`. The default
+allowlist is `sandbox.users.io` (subdomains of an allowed domain also pass).
+
+The extensions controller reads the allowlist **once at startup** from
+`/etc/sandbox-config/allowed-label-domains`, mounted from an optional
+ConfigMap named `agent-sandbox-config` in the controller's namespace. The
+file's contents **replace** the default rather than extending it, so include
+`sandbox.users.io` if existing consumers rely on it. Domains are separated
+by newlines or commas. An empty (or separator-only) file does not disable
+the allowlist — the controller treats it the same as an absent file and
+falls back to the `sandbox.users.io` default.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-sandbox-config
+  namespace: agent-sandbox-system
+data:
+  allowed-label-domains: |
+    example.com
+    sandbox.users.io
+```
+
+After creating or changing the ConfigMap, restart the controller so it
+re-reads the file:
+
+```sh
+kubectl -n agent-sandbox-system rollout restart deploy/agent-sandbox-controller
+```
+
+Annotations in `additionalPodMetadata` are governed separately by a
+restricted-domain blocklist (with `cluster-autoscaler.kubernetes.io/safe-to-evict`
+exempted), not by this allowlist.

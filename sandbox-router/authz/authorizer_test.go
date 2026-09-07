@@ -19,8 +19,6 @@ import (
 	"errors"
 	"net/http"
 	"testing"
-
-	authenticationv1 "k8s.io/api/authentication/v1"
 )
 
 func TestAllowAllAuthorize(t *testing.T) {
@@ -32,57 +30,6 @@ func TestAllowAllAuthorize(t *testing.T) {
 	if err := a.Authorize(context.Background(), nil, "", ""); err != nil {
 		t.Fatalf("AllowAll should not care about nil request: %v", err)
 	}
-}
-
-func TestFromUserInfo(t *testing.T) {
-	u := authenticationv1.UserInfo{
-		Username: "user@example.com",
-		UID:      "uid-1",
-		Groups:   []string{"g1", "g2"},
-		Extra: map[string]authenticationv1.ExtraValue{
-			"k": {"v1", "v2"},
-		},
-	}
-	got := FromUserInfo(u, "bearer-token")
-	want := Identity{
-		Username: "user@example.com",
-		UID:      "uid-1",
-		Groups:   []string{"g1", "g2"},
-		Extra:    map[string][]string{"k": {"v1", "v2"}},
-		Source:   "bearer-token",
-	}
-	if !equalIdentity(got, want) {
-		t.Fatalf("got %+v want %+v", got, want)
-	}
-}
-
-func equalIdentity(a, b Identity) bool {
-	if a.Username != b.Username || a.UID != b.UID || a.Source != b.Source {
-		return false
-	}
-	if len(a.Groups) != len(b.Groups) {
-		return false
-	}
-	for i := range a.Groups {
-		if a.Groups[i] != b.Groups[i] {
-			return false
-		}
-	}
-	if len(a.Extra) != len(b.Extra) {
-		return false
-	}
-	for k, va := range a.Extra {
-		vb, ok := b.Extra[k]
-		if !ok || len(va) != len(vb) {
-			return false
-		}
-		for i := range va {
-			if va[i] != vb[i] {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func TestHTTPStatusFor(t *testing.T) {
@@ -102,27 +49,6 @@ func TestHTTPStatusFor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := HTTPStatusFor(tc.err); got != tc.want {
 				t.Fatalf("got %d want %d", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestIdentityIsAuthenticated(t *testing.T) {
-	cases := []struct {
-		name string
-		id   Identity
-		want bool
-	}{
-		{"empty", Identity{}, false},
-		{"username only", Identity{Username: "u"}, true},
-		{"uid only", Identity{UID: "abc"}, true},
-		{"groups only", Identity{Groups: []string{"g"}}, true},
-		{"source set but nothing else", Identity{Source: "tls"}, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.id.IsAuthenticated(); got != tc.want {
-				t.Fatalf("got %v want %v", got, tc.want)
 			}
 		})
 	}

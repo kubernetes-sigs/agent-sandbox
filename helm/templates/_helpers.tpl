@@ -13,6 +13,13 @@ The namespace to deploy into.
 {{- end }}
 
 {{/*
+The controller Service name.
+*/}}
+{{- define "agent-sandbox.serviceName" -}}
+{{- default "agent-sandbox-controller" .Values.service.name }}
+{{- end }}
+
+{{/*
 Common labels.
 */}}
 {{- define "agent-sandbox.labels" -}}

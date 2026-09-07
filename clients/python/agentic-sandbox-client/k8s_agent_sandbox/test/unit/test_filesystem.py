@@ -100,6 +100,9 @@ class TestAsyncFilesystemSafeUploadPath(unittest.TestCase):
 class TestFilesystemSafePaths(unittest.TestCase):
     def setUp(self):
         self._connector = MagicMock()
+        # These cases assert the legacy python-runtime wire shape
+        # (multipart upload / download path); pin the runtime to legacy.
+        self._connector.is_sandboxd.return_value = False
         tracer = MagicMock()
         self._fs = Filesystem(self._connector, tracer, trace_service_name="test")
 
@@ -142,6 +145,7 @@ class TestFilesystemSafePaths(unittest.TestCase):
 class TestAsyncFilesystemSafePaths(TestFilesystemSafePaths):
     def setUp(self):
         self._connector = AsyncMock()
+        self._connector.is_sandboxd.return_value = False
         tracer = MagicMock()
         self._fs = AsyncFilesystem(self._connector, tracer, trace_service_name="test")
 

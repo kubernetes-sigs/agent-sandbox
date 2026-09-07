@@ -307,6 +307,7 @@ func warmAdoptionFixtures() (*extensionsv1beta1.SandboxClaim, *extensionsv1beta1
 		},
 		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}}}}},
 		Status: sandboxv1beta1.SandboxStatus{
+			PodIPs: []string{testNetworkedPodIP},
 			Conditions: []metav1.Condition{{
 				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready",
 			}},

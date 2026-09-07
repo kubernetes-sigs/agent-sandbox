@@ -32,7 +32,6 @@ from k8s_agent_sandbox.models import (
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
 )
-from k8s_agent_sandbox.constants import POD_NAME_ANNOTATION
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
@@ -54,9 +53,6 @@ class TestSandboxClient(unittest.TestCase):
     def test_create_sandbox_success(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'
         self.mock_k8s_helper.wait_for_claim_ready.return_value = "resolved-id"
-        self.mock_k8s_helper.get_sandbox.return_value = {
-            "metadata": {"annotations": {POD_NAME_ANNOTATION: "custom-pod-name"}}
-        }
 
         mock_sandbox_instance = MagicMock()
         self.mock_sandbox_class.return_value = mock_sandbox_instance
@@ -76,8 +72,8 @@ class TestSandboxClient(unittest.TestCase):
                 lifecycle=None,
                 volume_claim_templates=None,
                 pod_metadata=None,
+                env=None,
             )
-
             # A single claim watch resolves the sandbox name AND readiness;
             # no separate wait on the Sandbox resource. The watch starts at
             # the created claim's resourceVersion.
@@ -225,6 +221,7 @@ class TestSandboxClient(unittest.TestCase):
                 lifecycle=None,
                 volume_claim_templates=None,
                 pod_metadata=None,
+                env=None,
             )
 
     @patch('uuid.uuid4')
@@ -253,6 +250,7 @@ class TestSandboxClient(unittest.TestCase):
                     "labels": {"client-id": "tenant-a"},
                     "annotations": {"note": "owned-by-tenant-a"},
                 },
+                env=None,
             )
 
     def test_create_sandbox_rejects_invalid_pod_label(self):
@@ -285,6 +283,7 @@ class TestSandboxClient(unittest.TestCase):
                 lifecycle=None,
                 volume_claim_templates=vcts,
                 pod_metadata=None,
+                env=None,
             )
 
     def test_create_claim_with_volume_claim_templates(self):
@@ -306,6 +305,7 @@ class TestSandboxClient(unittest.TestCase):
             lifecycle=None,
             volume_claim_templates=vcts,
             pod_metadata=None,
+            env=None,
         )
 
     def test_create_claim_with_labels(self):
@@ -322,6 +322,7 @@ class TestSandboxClient(unittest.TestCase):
             lifecycle=None,
             volume_claim_templates=None,
             pod_metadata=None,
+            env=None,
         )
 
     def test_create_claim_with_pod_metadata(self):
@@ -340,6 +341,7 @@ class TestSandboxClient(unittest.TestCase):
             lifecycle=None,
             volume_claim_templates=None,
             pod_metadata={"labels": {"client-id": "tenant-a"}},
+            env=None,
         )
 
     def test_create_claim(self):
@@ -355,6 +357,7 @@ class TestSandboxClient(unittest.TestCase):
             lifecycle=None,
             volume_claim_templates=None,
             pod_metadata=None,
+            env=None,
         )
 
     def test_validate_labels_rejects_invalid_value(self):
@@ -428,6 +431,32 @@ class TestSandboxClient(unittest.TestCase):
             self.assertIn("shutdownTime", lifecycle)
 
     @patch('uuid.uuid4')
+    def test_create_sandbox_with_env(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+
+        mock_sandbox_instance = MagicMock()
+        self.mock_sandbox_class.return_value = mock_sandbox_instance
+
+        env = {"FOO": "bar", "DEBUG": "true"}
+
+        with patch.object(self.client, '_create_claim') as mock_create_claim, \
+             patch.object(self.client, '_wait_for_sandbox_ready'):
+
+            self.client.create_sandbox("test-warmpool", "test-namespace", env=env)
+
+            mock_create_claim.assert_called_once_with(
+                "sandbox-claim-1234abcd",
+                "test-warmpool",
+                "test-namespace",
+                labels=None,
+                lifecycle=None,
+                volume_claim_templates=None,
+                pod_metadata=None,
+                env=env,
+            )
+
+    @patch('uuid.uuid4')
     def test_create_sandbox_without_shutdown_after_seconds(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
@@ -468,6 +497,7 @@ class TestSandboxClient(unittest.TestCase):
             lifecycle=lifecycle,
             volume_claim_templates=None,
             pod_metadata=None,
+            env=None,
         )
 
     def test_create_claim_without_lifecycle(self):
@@ -483,6 +513,24 @@ class TestSandboxClient(unittest.TestCase):
             lifecycle=None,
             volume_claim_templates=None,
             pod_metadata=None,
+            env=None,
+        )
+
+    def test_create_claim_with_env(self):
+        self.client.tracing_manager = MagicMock()
+        self.client.tracing_manager.get_trace_context_json.return_value = None
+
+        env = {"FOO": "bar"}
+        self.client._create_claim("test-claim", "test-warmpool", "test-namespace", env=env)
+
+        self.mock_k8s_helper.create_sandbox_claim.assert_called_once_with(
+            "test-claim", "test-warmpool", "test-namespace",
+            annotations={},
+            labels=None,
+            lifecycle=None,
+            volume_claim_templates=None,
+            pod_metadata=None,
+            env=env,
         )
 
     def test_shutdown_after_seconds_validation_zero(self):

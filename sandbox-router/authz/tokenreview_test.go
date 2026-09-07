@@ -227,6 +227,34 @@ func TestTokenReview_PassesAudiences(t *testing.T) {
 	}
 }
 
+// A TokenReview credential presented via a query parameter or cookie
+// must authenticate exactly like one presented via the Authorization
+// header, once TokenLocations opts into it — mirrors
+// TestScopedToken_AuthorizesFromQueryAndCookie.
+func TestTokenReview_AuthenticatesFromQueryAndCookie(t *testing.T) {
+	cs, _ := withReactor(t, func(a clienttesting.Action) (bool, runtime.Object, error) {
+		tr := a.(clienttesting.CreateAction).GetObject().(*authenticationv1.TokenReview).DeepCopy()
+		tr.Status.Authenticated = true
+		return true, tr, nil
+	})
+	auth, _ := NewTokenReviewAuthorizer(TokenReviewOptions{
+		Client:         cs,
+		Log:            logr.Discard(),
+		TokenLocations: TokenLocations{QueryParam: "token", CookieName: "sid"},
+	})
+
+	req, _ := http.NewRequest("GET", "/?token=q1", nil)
+	if err := auth.Authorize(context.Background(), req, "ns", "s"); err != nil {
+		t.Fatalf("query: expected allow, got %v", err)
+	}
+
+	req, _ = http.NewRequest("GET", "/", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "c1"})
+	if err := auth.Authorize(context.Background(), req, "ns", "s"); err != nil {
+		t.Fatalf("cookie: expected allow, got %v", err)
+	}
+}
+
 func TestHashTokenStable(t *testing.T) {
 	a := hashToken("abc")
 	b := hashToken("abc")

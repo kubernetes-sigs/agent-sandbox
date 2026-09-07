@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import URL
 from starlette.websockets import WebSocketDisconnect
 
 os.environ["ALLOW_UNAUTHENTICATED_ROUTER"] = "true"
@@ -493,6 +494,64 @@ class TestProxyRouting:
             assert "test-box.prod.svc.cluster.local:9999/some/path" in str(
                 request_obj.url
             )
+
+    def test_target_url_preserves_raw_escaped_path(self):
+        """Escaped dot segments must survive the router hop."""
+        target_url, _ = sandbox_router._resolve_target(
+            {
+                "X-Sandbox-ID": "test-box",
+                "X-Sandbox-Namespace": "prod",
+                "X-Sandbox-Port": "9999",
+            },
+            URL("http://router/list/."),
+            "http",
+            {"raw_path": b"/list/%2E", "query_string": b"marker=%2E"},
+        )
+
+        assert target_url == (
+            "http://test-box.prod.svc.cluster.local:9999/list/%2E?marker=%2E"
+        )
+
+    def test_target_url_preserves_raw_escaped_dotdot_path(self):
+        """Escaped dotdot segments must not be normalized by the router."""
+        target_url, _ = sandbox_router._resolve_target(
+            {
+                "X-Sandbox-ID": "test-box",
+                "X-Sandbox-Namespace": "prod",
+                "X-Sandbox-Port": "9999",
+            },
+            URL("http://router/list/.."),
+            "http",
+            {"raw_path": b"/list/%2E%2E", "query_string": b""},
+        )
+
+        assert target_url == "http://test-box.prod.svc.cluster.local:9999/list/%2E%2E"
+
+    def test_target_url_falls_back_when_raw_path_is_not_ascii(self):
+        """Non-ASCII raw path bytes should not crash target URL construction."""
+        target_url, _ = sandbox_router._resolve_target(
+            {"X-Sandbox-ID": "test-box"},
+            URL("http://router/files/%C3%A9?ok=true"),
+            "http",
+            {"raw_path": b"/files/\xff", "query_string": b"ok=true"},
+        )
+
+        assert target_url == (
+            "http://test-box.default.svc.cluster.local:8888/files/%C3%A9?ok=true"
+        )
+
+    def test_target_url_falls_back_when_raw_query_is_not_ascii(self):
+        """Non-ASCII raw query bytes should not crash target URL construction."""
+        target_url, _ = sandbox_router._resolve_target(
+            {"X-Sandbox-ID": "test-box"},
+            URL("http://router/files/%2E?q=%C3%A9"),
+            "http",
+            {"raw_path": b"/files/%2E", "query_string": b"q=\xff"},
+        )
+
+        assert target_url == (
+            "http://test-box.default.svc.cluster.local:8888/files/%2E?q=%C3%A9"
+        )
 
     def test_target_url_pod_ip_construction(self, client):
         """Verify the router builds the correct URL when X-Sandbox-Pod-IP is provided."""

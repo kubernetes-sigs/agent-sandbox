@@ -2,17 +2,20 @@
 	{{ $name := trim (.Get "name") " " }}
 	{{ $include := trim (.Get "include") " "}}
 	{{ $codelang := .Get "codelang" }}
+	{{ $options := .Get "options" | default "" }}
+	{{ $ctatext := .Get "ctatext" }}
+	{{ $ctaurl := .Get "ctaurl" }}
 	{{ if not (.Parent.Scratch.Get "tabs") }}
 	{{ .Parent.Scratch.Set "tabs" slice }}
 	{{ end }}
 	{{ with .Inner }}
 	{{ if $codelang }}
-	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "content" (highlight . $codelang "") ) }}
+	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "content" (highlight . $codelang $options) "ctatext" $ctatext "ctaurl" $ctaurl) }}
 	{{ else }}
-	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "content" . ) }}
+	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "content" . "ctatext" $ctatext "ctaurl" $ctaurl) }}
 	{{ end }}
 	{{ else }}
-	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "include" $include "codelang" $codelang) }}
+	{{ $.Parent.Scratch.Add "tabs" (dict "name" $name "include" $include "codelang" $codelang "ctatext" $ctatext "ctaurl" $ctaurl) }}
 	{{ end }}
 {{ else }}
 	{{- errorf "[%s] %q: tab shortcode missing its parent" site.Language.Lang .Page.Path -}}

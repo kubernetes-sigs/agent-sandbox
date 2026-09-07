@@ -27,10 +27,18 @@
 
 Add an optional `claimDefaults` field to `SandboxWarmPoolSpec` that lets pool
 operators declare default lifecycle settings for claims. When a `SandboxClaim`
-with `Lifecycle: nil` targets a pool that has `claimDefaults.lifecycle`
-configured, the controller copies the pool's lifecycle into the claim — both
-on warm adoption and cold fallback (pool exhaustion). Claims that set their
-own `Lifecycle` are never modified.
+with `Lifecycle: nil` targets a pool that has `claimDefaults` configured, the
+controller copies the pool's lifecycle into the claim — both on warm adoption
+and cold fallback (pool exhaustion). Claims that set their own `Lifecycle` are
+never modified.
+
+`claimDefaults` supports two complementary cleanup mechanisms:
+- `lifecycle.ttlSecondsAfterFinished` — deletes claims after the sandbox
+  reaches a terminal state (batch/job workloads with `RestartPolicy: Never`).
+- `maxLifetimeSeconds` — a duration-based hard deadline computed into
+  `ShutdownTime` at adoption time. This is the primary cleanup mechanism for
+  long-running workloads where `RestartPolicy: Always` (the default) prevents
+  the sandbox from ever reaching a terminal state, making TTL ineffective.
 
 ## Motivation
 
@@ -49,6 +57,15 @@ claim, executes code, and discards it. Without a lifecycle:
 - **Zombie VMs accumulate.** A completed Kata claim holds real hypervisor
   processes, CPU, and memory until explicitly deleted. If the SDK client
   crashes without calling `Close()`, the claim and its VM live forever.
+- **TTL is ineffective for long-running workloads.** The existing
+  `TTLSecondsAfterFinished` mechanism requires the sandbox to reach a terminal
+  state (`Finished: True`). With `RestartPolicy: Always` (the Kubernetes
+  default), the container restarts indefinitely — the sandbox never reaches
+  a terminal state, and TTL never fires. This was validated empirically:
+  `ShutdownPolicy: Delete + TTLSecondsAfterFinished: 10` on a kata-qemu pool
+  resulted in 11+ VMs stuck per node because every container restart resets
+  the TTL clock. Only `ShutdownTime` (an absolute wall-clock deadline)
+  reliably terminates claims regardless of restart policy.
 - **Pool starvation under sustained load.** On a 30-replica kata-qemu pool
   with 3-minute sustained burst, nil-lifecycle claims cause ready replicas to
   drop from 27/30 to 0/30 after ~90 claims. All 30 vCPUs are consumed by
@@ -182,18 +199,21 @@ the same workaround.
 
 1. Let pool operators declare default `Lifecycle` settings for claims targeting
    their pool, without changing the global `SandboxClaim` default.
-2. Apply defaults at claim creation time (warm adoption or cold fallback),
+2. Provide a duration-based cleanup mechanism (`maxLifetimeSeconds`) that works
+   regardless of pod restart policy — addressing the TTL ineffectiveness gap
+   for long-running workloads with `RestartPolicy: Always`.
+3. Apply defaults at claim creation time (warm adoption or cold fallback),
    never retroactively.
-3. Preserve explicit claim-level `Lifecycle` settings — no silent override.
-4. Ensure the field survives v1alpha1 ↔ v1beta1 conversion round-trips.
+4. Preserve explicit claim-level `Lifecycle` settings — no silent override.
+5. Ensure the field survives v1alpha1 ↔ v1beta1 conversion round-trips.
 
 ### Non-Goals
 
 - Changing the global default `ShutdownPolicy` from `Retain` to `Delete`.
 - Adding a mutating admission webhook (may be considered in the future).
-- Providing defaults for fields other than `Lifecycle` (e.g., resource limits,
-  network policy). The `ClaimDefaults` struct is extensible, but only
-  `Lifecycle` is proposed in this KEP.
+- Providing defaults for fields beyond lifecycle management (e.g., resource
+  limits, network policy). The `ClaimDefaults` struct is extensible, but only
+  `Lifecycle` and `MaxLifetimeSeconds` are proposed in this KEP.
 
 ## Proposal
 
@@ -203,8 +223,9 @@ the same workaround.
 
 As a platform admin, I create warm pools backed by Kata VMs for multi-tenant
 agent workloads. I want claims from these pools to auto-delete after the
-workload finishes, so that VMs are reclaimed and the pool can refill. I should
-not have to modify every SDK client or agent framework that creates claims.
+workload finishes or after a hard time limit, so that VMs are reclaimed and the
+pool can refill. I should not have to modify every SDK client or agent framework
+that creates claims.
 
 ```yaml
 apiVersion: extensions.agents.x-k8s.io/v1beta1
@@ -216,14 +237,19 @@ spec:
   sandboxTemplateRef:
     name: kata-sandbox
   claimDefaults:
+    maxLifetimeSeconds: 3600
     lifecycle:
       shutdownPolicy: Delete
       ttlSecondsAfterFinished: 10
 ```
 
 Any `SandboxClaim` targeting `kata-agent-pool` with `Lifecycle: nil` will
-inherit `Delete + TTL=10s`. A claim that explicitly sets `Retain` keeps its
-setting.
+inherit `Delete + TTL=10s`, and `ShutdownTime` will be computed as `now +
+3600s` at adoption time — giving each claim a unique 1-hour hard deadline.
+`ttlSecondsAfterFinished` handles batch workloads that finish before the
+deadline; `maxLifetimeSeconds` catches long-running workloads where
+`RestartPolicy: Always` prevents the sandbox from ever reaching a terminal
+state. A claim that explicitly sets its own `Lifecycle` keeps its setting.
 
 **Story 2: Developer using the default pool for debugging**
 
@@ -245,6 +271,7 @@ clients that forget, not an override for clients that choose.
 | Operator adds `claimDefaults` to a pool with existing `Lifecycle: nil` claims whose workloads have finished | Defaults are applied **only at claim creation** (warm adoption or cold fallback). Existing claims are already bound and never re-enter the creation path. No retroactive deletion. |
 | `claimDefaults` lost during v1alpha1 round-trip | State-preservation annotation on the v1alpha1 object stores the serialized `ClaimDefaults`, restored on conversion back to v1beta1. Covered by round-trip test. |
 | Confusion about which lifecycle applies | The claim's `Spec.Lifecycle` is always the source of truth. `claimDefaults` is copied into it at creation — after adoption, `kubectl get sandboxclaim -o yaml` shows the effective lifecycle directly. No indirection. |
+| `TTLSecondsAfterFinished` ineffective with `RestartPolicy: Always` | TTL requires the sandbox to reach a terminal state (`Finished: True`). With `RestartPolicy: Always` (the default), the container restarts indefinitely and TTL never fires. `maxLifetimeSeconds` addresses this by computing a per-claim `ShutdownTime` at adoption time — a wall-clock deadline that fires regardless of pod state. Pools serving long-running workloads should set `maxLifetimeSeconds`; pools serving batch workloads (`RestartPolicy: Never`) can rely on TTL alone. |
 | Transient `Finished` during suspension could start TTL | When a sandbox is suspended ([KEP-694][694]), the controller deletes the pod. During pod termination, containers that exit non-zero briefly produce a `PodFailed` phase, which `computeFinishedCondition` reflects as `Finished: True` on the sandbox. This condition is **transient** — once the pod is fully removed, the sandbox controller drops `Finished` from the conditions array, and the claim controller mirrors the removal. With `TTL=0`, the claim could theoretically be expired and deleted during the 1-2 second race window before the transient condition is cleaned up. `TTL=10` eliminates this: the 10-second grace period far exceeds the pod termination window, so the transient `Finished` is always cleaned up before expiry fires. The 10-second delay has zero practical impact on resource leak prevention — the problem being solved is VMs running for hours/days, not seconds. |
 
 ## Design Details
@@ -272,6 +299,17 @@ type ClaimDefaults struct {
     // If the claim sets its own Lifecycle, this field is ignored.
     // +optional
     Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+
+    // maxLifetimeSeconds specifies the maximum duration (in seconds) a claimed
+    // sandbox may run. At adoption time, the controller computes
+    // ShutdownTime = now + maxLifetimeSeconds and sets it on the claim's
+    // lifecycle. Each claim gets a unique deadline.
+    // This is the primary cleanup mechanism for long-running workloads where
+    // RestartPolicy: Always prevents the sandbox from reaching a terminal
+    // state, making TTLSecondsAfterFinished ineffective.
+    // +optional
+    // +kubebuilder:validation:Minimum=1
+    MaxLifetimeSeconds *int64 `json:"maxLifetimeSeconds,omitempty"`
 }
 ```
 
@@ -284,22 +322,35 @@ the same kubebuilder validation markers (`ShutdownPolicy` enum,
 field (absolute timestamp). An absolute deadline in `claimDefaults` would be
 shared by all adopted claims — claims adopted after that time would expire
 immediately. To prevent this, `ClaimDefaults` includes a CEL validation rule
-that rejects `ShutdownTime`:
+that rejects `ShutdownTime` in `lifecycle` — the correct way to express a
+time-based limit is `maxLifetimeSeconds`, which computes a per-claim
+`ShutdownTime` at adoption time:
 
 ```go
 // ClaimDefaults defines default values for SandboxClaims targeting a pool.
-// +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.shutdownTime)",message="shutdownTime is not allowed in claimDefaults; use ttlSecondsAfterFinished instead"
+// +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.shutdownTime)",message="shutdownTime is not allowed in claimDefaults.lifecycle; use maxLifetimeSeconds instead"
 // +kubebuilder:validation:XValidation:rule="!has(self.lifecycle) || !has(self.lifecycle.ttlSecondsAfterFinished) || self.lifecycle.ttlSecondsAfterFinished >= 1",message="ttlSecondsAfterFinished in claimDefaults must be at least 1 to avoid premature expiry during transient Finished states"
 type ClaimDefaults struct {
     // lifecycle specifies the default lifecycle for claims with nil Lifecycle.
     // If the claim sets its own Lifecycle, this field is ignored.
     // +optional
     Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
+
+    // maxLifetimeSeconds specifies the maximum duration (in seconds) a claimed
+    // sandbox may run. At adoption time, the controller computes
+    // ShutdownTime = now + maxLifetimeSeconds and sets it on the claim's
+    // lifecycle. Each claim gets a unique deadline.
+    // +optional
+    // +kubebuilder:validation:Minimum=1
+    MaxLifetimeSeconds *int64 `json:"maxLifetimeSeconds,omitempty"`
 }
 ```
 
-Only `ShutdownPolicy` and `TTLSecondsAfterFinished` are meaningful as pool-
-level defaults.
+`maxLifetimeSeconds` and `lifecycle.ttlSecondsAfterFinished` are
+complementary — TTL handles batch workloads that finish cleanly (whichever
+comes first wins), while `maxLifetimeSeconds` catches long-running workloads
+where `RestartPolicy: Always` prevents the sandbox from reaching a terminal
+state.
 
 ### Controller Implementation
 
@@ -342,15 +393,37 @@ if err := r.Update(ctx, claim); err != nil {
 
 ```go
 // resolvePoolLifecycle returns the pool's default lifecycle if the claim
-// has no lifecycle of its own. Returns nil if either side is unset.
+// has no lifecycle of its own. Returns nil if no defaults apply.
+// When maxLifetimeSeconds is set, ShutdownTime is computed as now + duration,
+// giving each claim a unique wall-clock deadline.
 func resolvePoolLifecycle(pool *extensionsv1beta1.SandboxWarmPool, claim *extensionsv1beta1.SandboxClaim) *extensionsv1beta1.Lifecycle {
     if claim.Spec.Lifecycle != nil {
         return nil
     }
-    if pool.Spec.ClaimDefaults != nil && pool.Spec.ClaimDefaults.Lifecycle != nil {
-        return pool.Spec.ClaimDefaults.Lifecycle.DeepCopy()
+    cd := pool.Spec.ClaimDefaults
+    if cd == nil {
+        return nil
     }
-    return nil
+
+    var lc *extensionsv1beta1.Lifecycle
+    if cd.Lifecycle != nil {
+        lc = cd.Lifecycle.DeepCopy()
+    }
+
+    if cd.MaxLifetimeSeconds != nil {
+        if lc == nil {
+            lc = &extensionsv1beta1.Lifecycle{}
+        }
+        deadline := metav1.NewTime(time.Now().Add(
+            time.Duration(*cd.MaxLifetimeSeconds) * time.Second,
+        ))
+        lc.ShutdownTime = &deadline
+        if lc.ShutdownPolicy == "" {
+            lc.ShutdownPolicy = extensionsv1beta1.ShutdownPolicyDelete
+        }
+    }
+
+    return lc
 }
 ```
 
@@ -481,6 +554,10 @@ v1beta1-originated pool updated through the v1alpha1 API preserves
 | `cold fallback + nil lifecycle + claimDefaults` | No ready candidate in pool, claim falls through to `createSandbox`. Pool has `Delete+TTL=10` defaults. | Claim created with `Delete+TTL=10` lifecycle. Same defaults as warm path. |
 | `cold fallback + explicit Retain + claimDefaults` | No ready candidate, pool has `Delete+TTL=10` defaults, claim has explicit `Retain` | Claim lifecycle unchanged. Pool defaults ignored. |
 | `cold fallback + nil lifecycle + no claimDefaults` | No ready candidate, pool has no `claimDefaults` | Claim created with `Lifecycle: nil`. Behavior identical to today. |
+| `warm + nil lifecycle + maxLifetimeSeconds` | Pool has `maxLifetimeSeconds: 3600`, claim has `Lifecycle: nil` | Claim adopted with `ShutdownPolicy: Delete`, `ShutdownTime` ≈ now+3600s. No TTL set. |
+| `warm + nil lifecycle + maxLifetimeSeconds + TTL` | Pool has `maxLifetimeSeconds: 3600` and `lifecycle: Delete+TTL=10`, claim has `Lifecycle: nil` | Claim adopted with `Delete`, `TTL=10`, `ShutdownTime` ≈ now+3600s. Both mechanisms active — whichever fires first wins. |
+| `warm + explicit lifecycle + maxLifetimeSeconds` | Pool has `maxLifetimeSeconds: 3600`, claim has explicit `Retain` | Claim lifecycle unchanged. Pool defaults (including `maxLifetimeSeconds`) ignored. |
+| `cold fallback + nil lifecycle + maxLifetimeSeconds` | No ready candidate, pool has `maxLifetimeSeconds: 3600` | Claim created with `Delete`, `ShutdownTime` ≈ now+3600s. Same as warm path. |
 
 **Conversion tests** (`extensions/api/v1alpha1/sandboxwarmpool_conversion_test.go`):
 

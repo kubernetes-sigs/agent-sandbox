@@ -136,6 +136,26 @@ class InstallNodeDownloadRetryTest(unittest.TestCase):
         self.sleep.assert_called_once_with(node._DOWNLOAD_RETRY_DELAY_SECONDS)
         self.assertIsNotNone(bin_dir)
 
+    def test_retries_http_429(self):
+        with mock.patch(
+            "node.urllib.request.urlretrieve",
+            side_effect=[
+                urllib.error.HTTPError(
+                    "https://nodejs.org/dist/x", 429, "Too Many Requests", {}, io.BytesIO()
+                ),
+                None,
+            ],
+        ) as urlretrieve, mock.patch(
+            "node._verify_sha256"
+        ), mock.patch(
+            "node.tarfile.open"
+        ):
+            bin_dir = node.install_node("/fake/install/dir")
+
+        self.assertEqual(urlretrieve.call_count, 2)
+        self.sleep.assert_called_once_with(node._DOWNLOAD_RETRY_DELAY_SECONDS)
+        self.assertIsNotNone(bin_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

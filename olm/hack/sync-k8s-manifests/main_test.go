@@ -62,10 +62,16 @@ func TestRewriteRouterNamespaceResourceList(t *testing.T) {
 	if !strings.HasPrefix(text, "resources:\n") {
 		t.Fatalf("kustomization.yaml should be a resources list, got:\n%s", text)
 	}
-	if !strings.Contains(text, "- deployment.yaml\n") || !strings.Contains(text, "- service.yaml\n") {
+	if !strings.Contains(text, "- deployment.yaml\n") ||
+		!strings.Contains(text, "- service.yaml\n") ||
+		!strings.Contains(text, "- networkpolicy.yaml\n") {
 		t.Fatalf("kustomization.yaml missing included resources:\n%s", text)
 	}
-	if strings.Contains(text, "networkpolicy.yaml") || strings.Contains(text, "rbac-tokenreview.yaml") {
+	// rbac-tokenreview.yaml is copied for reference but stays out of the
+	// generated resource list: it grants system:auth-delegator, which is
+	// only needed when --authz-mode=tokenreview. networkpolicy.yaml is
+	// included — the OLM default ships a working policy.
+	if strings.Contains(text, "rbac-tokenreview.yaml") {
 		t.Fatalf("kustomization.yaml included excluded resources:\n%s", text)
 	}
 	if strings.Contains(text, "images:") {

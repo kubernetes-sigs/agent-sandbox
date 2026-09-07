@@ -10,8 +10,9 @@ on:
     - cron: "0 * * * *" # hourly
 
 # Serialize runs instead of letting them overlap: two concurrent runs could
-# both search-then-create before either issue is search-indexed, filing a
-# duplicate. Let an in-flight run finish rather than cancel it.
+# both list-then-create before either one's new issue shows up in the
+# other's listing, filing a duplicate. Let an in-flight run finish rather
+# than cancel it.
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false

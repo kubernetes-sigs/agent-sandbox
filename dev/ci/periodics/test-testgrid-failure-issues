@@ -26,6 +26,10 @@ existing tracking issue open.
 Presubmit tabs (name prefix "presubmit-"/"pull-") are skipped: their
 failures are already surfaced as required checks on the PR in question, so
 filing a standing issue for them would just be noise.
+
+A tab already tracked by dev/tools/flake-report's infra-failure detection
+(job died before any test ran) is skipped too, so the same breakage doesn't
+end up with two open issues under two different labels.
 """
 
 import json
@@ -41,6 +45,14 @@ TOKEN_PATH = "/etc/github-token/token"
 MARKER_TEMPLATE = "<!-- testgrid-failure:{dashboard}/{tab} -->"
 LABEL = "kind/failing-test"
 SKIP_TAB_PREFIXES = ("presubmit-", "pull-")
+
+# dev/tools/flake-report already files a kind/flake issue, marked this way,
+# when a tab's recent runs are dying before any test runs (its "infra
+# failure" bucket). That looks like FAILING here too, so before filing our
+# own issue we check for one of theirs on the same tab and defer to it
+# instead of tracking the same breakage twice.
+FLAKE_REPORT_LABEL = "kind/flake"
+FLAKE_REPORT_INFRA_MARKER_TEMPLATE = "<!-- flake-report:infra-tab={tab} -->"
 MAX_FAILING_TESTS_LISTED = 5
 MAX_FAILURE_MESSAGE_LENGTH = 200
 HTTP_TIMEOUT_SECONDS = 30
@@ -86,8 +98,8 @@ def fetch_summary(dashboard):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def find_open_tracking_issue(repo, token, marker):
-    # Listing open LABEL-labeled issues directly (rather than querying
+def find_issue_with_marker(repo, token, label, marker):
+    # Listing open label-labeled issues directly (rather than querying
     # GitHub's search API) keeps this deterministic: search indexing lag or
     # tokenization of the marker's "/" and ":" characters could otherwise
     # make a currently open tracking issue invisible to a search query,
@@ -98,7 +110,7 @@ def find_open_tracking_issue(repo, token, marker):
     while True:
         url = (
             f"{API_ROOT}/repos/{repo}/issues"
-            f"?labels={urllib.parse.quote(LABEL, safe='')}&state=open"
+            f"?labels={urllib.parse.quote(label, safe='')}&state=open"
             f"&per_page=100&page={page}"
         )
         items = _request("GET", url, token)
@@ -108,6 +120,15 @@ def find_open_tracking_issue(repo, token, marker):
         if len(items) < 100:
             return None
         page += 1
+
+
+def find_open_tracking_issue(repo, token, marker):
+    return find_issue_with_marker(repo, token, LABEL, marker)
+
+
+def find_flake_report_infra_issue(repo, token, tab):
+    marker = FLAKE_REPORT_INFRA_MARKER_TEMPLATE.format(tab=tab)
+    return find_issue_with_marker(repo, token, FLAKE_REPORT_LABEL, marker)
 
 
 def issue_body(dashboard, tab, tab_data, marker):
@@ -183,6 +204,9 @@ def handle_tab(repo, token, dashboard, tab, tab_data, dry_run):
     marker = MARKER_TEMPLATE.format(dashboard=dashboard, tab=tab)
     issue = find_open_tracking_issue(repo, token, marker)
     if status == "FAILING" and issue is None:
+        if find_flake_report_infra_issue(repo, token, tab) is not None:
+            print(f"skipping {dashboard}/{tab}: already tracked by flake-report")
+            return
         file_issue(repo, token, dashboard, tab, tab_data, dry_run)
     elif status == "PASSING" and issue is not None:
         close_issue(repo, token, issue, dashboard, tab, dry_run)

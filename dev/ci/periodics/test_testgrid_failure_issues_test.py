@@ -180,6 +180,24 @@ class HandleTabTest(unittest.TestCase):
             tgfi.MARKER_TEMPLATE.format(dashboard=DASHBOARD, tab=TAB), new_issue["body"]
         )
 
+    def test_skips_filing_when_flake_report_already_tracks_infra_failure(self):
+        # dev/tools/flake-report runs nightly and files its own kind/flake
+        # issue when a tab's runs are dying before any test runs. A tab in
+        # that state also reads as FAILING here, so we must defer to the
+        # existing issue instead of opening a second one for it.
+        self.github.issues.append({
+            "number": 42,
+            "state": "open",
+            "title": f"[FLAKE] {TAB}: infrastructure failures before tests ran",
+            "body": tgfi.FLAKE_REPORT_INFRA_MARKER_TEMPLATE.format(tab=TAB),
+            "comments": [],
+        })
+        self._handle(FAILING)
+        self.assertEqual(
+            len(self.github.issues), 1,
+            "flake-report's existing issue must not be duplicated",
+        )
+
     def test_finds_existing_issue_past_first_page(self):
         # 150 other open issues push this tab's existing tracking issue onto
         # the lookup's second page (per_page=100). The lookup must keep

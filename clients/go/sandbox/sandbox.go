@@ -355,6 +355,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 			s.claimName = ""
 			s.sandboxName = ""
 			s.podName = ""
+			s.serviceFQDN = ""
 			s.annotations = nil
 			s.mu.Unlock()
 			retErr := fmt.Errorf("%w: %w", ErrSandboxDeleted, err)
@@ -363,6 +364,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		}
 		s.sandboxName = ""
 		s.podName = ""
+		s.serviceFQDN = ""
 		s.annotations = nil
 		s.mu.Unlock()
 		recordError(span, err)
@@ -375,6 +377,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		if k8serrors.IsNotFound(err) {
 			s.sandboxName = ""
 			s.podName = ""
+			s.serviceFQDN = ""
 			s.annotations = nil
 		}
 		// Non-NotFound: sandboxName preserved so the next Open() can re-verify

@@ -59,6 +59,9 @@ type inClusterStrategy struct {
 	connector *connector
 }
 
+// Connect uses resolveHost to get the URL to connect to. When using sandboxd it also
+// sets the connector's gRPC target. The method exists so inClusterStrategy conforms
+// to the ConnectionStrategy interface.
 func (t *inClusterStrategy) Connect(ctx context.Context) (string, error) {
 	_, span := startSpan(ctx, t.tracer, t.svcName, "sandboxd_in_cluster")
 	defer span.End()

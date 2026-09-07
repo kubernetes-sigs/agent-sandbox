@@ -24,28 +24,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// inClusterStrategy addresses the sandbox runtime on the pod's IP, taking
+// inClusterStrategy addresses the sandbox runtime on the pod network, taking
 // the apiserver (and, for the legacy runtime, the sandbox-router) off the data
-// path.
+// path. Connectivity picks exactly one address, with no fallback between
+// them: useServiceDNS dials the headless Service by name
+// (Status.ServiceFQDN), otherwise it dials Status.PodIP.
 //
 // A caller outside the cluster cannot use it. For the legacy runtime it also gives
 // up the router's own validation of the routing headers, which are not sent on this
 // path because nothing would consume them.
-//
-// Pod IP staleness is not handled here, and recovery differs from the
-// port-forward's. podTunnelStrategy runs a monitor that detects tunnel death
-// and calls connector.SetLastError, which clears the base URL so operations
-// fail fast with ErrNotReady and a plain Open() reconnects. A direct dial has
-// no equivalent signal: nothing clears the base URL, so after the sandbox pod
-// is rescheduled the connector still reports IsConnected, requests keep
-// failing against the dead IP with ErrRetriesExhausted rather than
-// ErrNotReady, and Open() returns ErrAlreadyOpen instead of reconnecting.
-// Recovery is therefore Disconnect() followed by Open(): Connect re-reads
-// getPodIP on every call, so the fresh address is picked up then.
-//
-// An IP the cluster has since reassigned to an unrelated pod would not be
-// detected at all — the SDK has no identity check on this path today, the
-// same as for the port-forward.
 type inClusterStrategy struct {
 	// httpPort carries the runtime's HTTP API: sandboxd's Filesystem &
 	// Runtime REST port, or the legacy runtime's ServerPort.
@@ -57,10 +44,15 @@ type inClusterStrategy struct {
 	tracer   trace.Tracer
 	svcName  string
 
-	// getPodIP returns the resolved sandbox pod IP; set after construction
-	// (the pod is only known once the sandbox is ready). Mirrors
-	// podTunnelStrategy.getPodName.
-	getPodIP func() string
+	// useServiceDNS dials the headless Service's DNS name rather than the
+	// pod IP. The two are exclusive; neither falls back to the other.
+	useServiceDNS bool
+
+	// getServiceFQDN and getPodIP return the resolved Sandbox addresses; set
+	// after construction (they are only known once the sandbox is ready).
+	// Mirrors podTunnelStrategy.getPodName.
+	getServiceFQDN func() string
+	getPodIP       func() string
 
 	// connector is set after construction so Connect can publish the gRPC
 	// dial target.
@@ -71,26 +63,43 @@ func (t *inClusterStrategy) Connect(ctx context.Context) (string, error) {
 	_, span := startSpan(ctx, t.tracer, t.svcName, "sandboxd_in_cluster")
 	defer span.End()
 
+	host, via, err := t.resolveHost()
+	if err != nil {
+		recordError(span, err)
+		return "", err
+	}
+
+	baseURL := "http://" + net.JoinHostPort(host, strconv.Itoa(t.httpPort))
+	if t.grpcPort != 0 && t.connector != nil {
+		t.connector.SetGRPCTarget(net.JoinHostPort(host, strconv.Itoa(t.grpcPort)))
+	}
+	t.log.V(1).Info("in-cluster transport resolved",
+		"host", host, "via", via, "httpPort", t.httpPort, "grpcPort", t.grpcPort)
+	return baseURL, nil
+}
+
+// resolveHost returns the address this strategy dials either the service FQDN
+// or the pod IP, and a label for logging.
+func (t *inClusterStrategy) resolveHost() (host, via string, err error) {
+	if t.useServiceDNS {
+		fqdn := ""
+		if t.getServiceFQDN != nil {
+			fqdn = t.getServiceFQDN()
+		}
+		if fqdn == "" {
+			return "", "", fmt.Errorf("sandbox: %w: cannot address it by DNS; set spec.service: true on the template, or use %q connectivity to dial the pod IP", ErrNoSandboxService, ConnectivityInClusterPodIP)
+		}
+		return fqdn, "service", nil
+	}
+
 	podIP := ""
 	if t.getPodIP != nil {
 		podIP = t.getPodIP()
 	}
 	if podIP == "" {
-		err := fmt.Errorf("sandbox: sandbox pod IP not resolved yet; cannot connect directly")
-		recordError(span, err)
-		return "", err
+		return "", "", fmt.Errorf("sandbox: sandbox pod IP not resolved yet; cannot connect directly")
 	}
-
-	// JoinHostPort brackets IPv6 literals, which both the URL and the gRPC
-	// dial target require. The IP is already normalized by selectPodIP when
-	// the sandbox status is read.
-	baseURL := "http://" + net.JoinHostPort(podIP, strconv.Itoa(t.httpPort))
-	if t.grpcPort != 0 && t.connector != nil {
-		t.connector.SetGRPCTarget(net.JoinHostPort(podIP, strconv.Itoa(t.grpcPort)))
-	}
-	t.log.V(1).Info("in-cluster transport resolved",
-		"podIP", podIP, "httpPort", t.httpPort, "grpcPort", t.grpcPort)
-	return baseURL, nil
+	return podIP, "pod-ip", nil
 }
 
 // Close is a no-op: the strategy owns no connections or goroutines. The HTTP

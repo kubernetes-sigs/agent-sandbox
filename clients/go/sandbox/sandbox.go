@@ -42,6 +42,7 @@ type Sandbox struct {
 	sandboxName string
 	podName     string
 	podIP       string
+	serviceFQDN string
 	annotations map[string]string
 
 	lifecycleSem chan struct{}
@@ -86,14 +87,15 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	switch {
 	case opts.APIURL != "":
 		strategy = &DirectStrategy{URL: opts.APIURL}
-	case opts.Connectivity == ConnectivityInCluster:
+	case opts.Connectivity.isInCluster():
 		// Caller is on the pod network and has opted to dial
 		// the runtime on the pod IP.
 		ics := &inClusterStrategy{
-			httpPort: opts.ServerPort,
-			log:      opts.Logger,
-			tracer:   tracer,
-			svcName:  svcName,
+			httpPort:      opts.ServerPort,
+			useServiceDNS: opts.Connectivity == ConnectivityInClusterService,
+			log:           opts.Logger,
+			tracer:        tracer,
+			svcName:       svcName,
 		}
 		if opts.Runtime == RuntimeSandboxd {
 			ics.httpPort = opts.SandboxdRESTPort
@@ -144,7 +146,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Strategy:            strategy,
 		Namespace:           opts.Namespace,
 		ServerPort:          opts.ServerPort,
-		RouterHeaders:       opts.Runtime != RuntimeSandboxd && opts.Connectivity != ConnectivityInCluster,
+		RouterHeaders:       opts.Runtime != RuntimeSandboxd && !opts.Connectivity.isInCluster(),
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,
@@ -214,6 +216,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		pts.getPodName = s.PodName
 	}
 	if ics, ok := strategy.(*inClusterStrategy); ok {
+		ics.getServiceFQDN = s.ServiceFQDN
 		ics.getPodIP = s.PodIP
 	}
 
@@ -409,6 +412,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	s.sandboxName = ""
 	s.podName = ""
 	s.podIP = ""
+	s.serviceFQDN = ""
 	s.annotations = nil
 	if cleanupErr == nil {
 		s.claimName = ""
@@ -496,6 +500,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	s.sandboxName = ""
 	s.podName = ""
 	s.podIP = ""
+	s.serviceFQDN = ""
 	s.annotations = nil
 	if err != nil && s.claimName != "" {
 		s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
@@ -633,6 +638,15 @@ func (s *Sandbox) PodIP() string {
 	return s.podIP
 }
 
+// ServiceFQDN returns the in-cluster DNS name of the Sandbox's headless
+// Service, or "" when it has none (spec.service unset or false). Not part of
+// the Info interface, which is frozen for backward compatibility.
+func (s *Sandbox) ServiceFQDN() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.serviceFQDN
+}
+
 func (s *Sandbox) Annotations() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -676,5 +690,6 @@ func (s *Sandbox) setState(state *sandboxState) {
 	s.sandboxName = state.SandboxName
 	s.podName = state.PodName
 	s.podIP = state.PodIP
+	s.serviceFQDN = state.ServiceFQDN
 	s.annotations = state.Annotations
 }

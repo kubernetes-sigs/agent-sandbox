@@ -16,10 +16,13 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 // inClusterTestOpts returns options selecting the in-cluster sandboxd
@@ -30,7 +33,7 @@ func inClusterTestOpts() Options {
 		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		Runtime:             RuntimeSandboxd,
-		Connectivity:        ConnectivityInCluster,
+		Connectivity:        ConnectivityInClusterPodIP,
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
 	}
@@ -45,7 +48,7 @@ func legacyInClusterTestOpts() Options {
 		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
 		Runtime:             RuntimeLegacyPython,
-		Connectivity:        ConnectivityInCluster,
+		Connectivity:        ConnectivityInClusterPodIP,
 		SandboxReadyTimeout: 5 * time.Second,
 		Quiet:               true,
 	}
@@ -63,18 +66,30 @@ func newInClusterStrategy(getPodIP func() string) (*inClusterStrategy, *connecto
 // newInClusterStrategyPorts is the same with explicit ports; grpcPort 0 models
 // a runtime with no gRPC service (the legacy runtime).
 func newInClusterStrategyPorts(getPodIP func() string, httpPort, grpcPort int) (*inClusterStrategy, *connector) {
+	s, conn := newInClusterStrategyFull(nil, getPodIP, false)
+	s.httpPort, s.grpcPort = httpPort, grpcPort
+	return s, conn
+}
+
+// newInClusterStrategyFull builds a strategy with both address sources and
+// the useServiceDNS flag under test.
+func newInClusterStrategyFull(getServiceFQDN, getPodIP func() string, useServiceDNS bool) (*inClusterStrategy, *connector) {
 	tracer, svcName := newTracer(Options{TraceServiceName: "sandbox-client-test"})
 	conn := newConnector(connectorConfig{Log: logr.Discard(), Tracer: tracer, TraceServiceName: svcName})
 	return &inClusterStrategy{
-		httpPort:  httpPort,
-		grpcPort:  grpcPort,
-		log:       logr.Discard(),
-		tracer:    tracer,
-		svcName:   svcName,
-		getPodIP:  getPodIP,
-		connector: conn,
+		httpPort:       8080,
+		grpcPort:       9090,
+		useServiceDNS:  useServiceDNS,
+		log:            logr.Discard(),
+		tracer:         tracer,
+		svcName:        svcName,
+		getServiceFQDN: getServiceFQDN,
+		getPodIP:       getPodIP,
+		connector:      conn,
 	}, conn
 }
+
+func constFn(v string) func() string { return func() string { return v } }
 
 // grpcTarget reads the connector's published gRPC dial address under its lock.
 func grpcTarget(c *connector) string {
@@ -341,7 +356,7 @@ func TestValidation_Connectivity(t *testing.T) {
 	}{
 		{
 			name: "in-cluster with sandboxd",
-			opts: Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInCluster},
+			opts: Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInClusterPodIP},
 		},
 		{
 			name: "port-forward with sandboxd",
@@ -353,26 +368,44 @@ func TestValidation_Connectivity(t *testing.T) {
 		},
 		{
 			name: "in-cluster with legacy runtime",
-			opts: Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityInCluster},
+			opts: Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityInClusterPodIP},
 		},
 		{
 			name:    "in-cluster with legacy runtime and GatewayName",
-			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityInCluster, GatewayName: "gw"},
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityInClusterPodIP, GatewayName: "gw"},
 			wantErr: true,
 		},
 		{
 			name:    "in-cluster with legacy runtime and APIURL",
-			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityInCluster, APIURL: "http://localhost:9999"},
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityInClusterPodIP, APIURL: "http://localhost:9999"},
 			wantErr: true,
 		},
 		{
 			name:    "in-cluster with APIURL",
-			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInCluster, APIURL: "http://localhost:9999"},
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInClusterPodIP, APIURL: "http://localhost:9999"},
 			wantErr: true,
 		},
 		{
 			name:    "in-cluster with GatewayName",
-			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInCluster, GatewayName: "gw"},
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInClusterPodIP, GatewayName: "gw"},
+			wantErr: true,
+		},
+		{
+			name: "in-cluster-service with sandboxd",
+			opts: Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInClusterService},
+		},
+		{
+			name: "in-cluster-service with legacy runtime",
+			opts: Options{WarmPoolName: "pool", Runtime: RuntimeLegacyPython, Connectivity: ConnectivityInClusterService},
+		},
+		{
+			name:    "in-cluster-service with APIURL",
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInClusterService, APIURL: "http://localhost:9999"},
+			wantErr: true,
+		},
+		{
+			name:    "in-cluster-service with GatewayName",
+			opts:    Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, Connectivity: ConnectivityInClusterService, GatewayName: "gw"},
 			wantErr: true,
 		},
 		{
@@ -397,7 +430,7 @@ func TestValidation_Connectivity(t *testing.T) {
 }
 
 // APIURL is the documented sandboxd escape hatch and must keep working; only
-// ConnectivityInCluster conflicts with it.
+// ConnectivityInClusterPodIP conflicts with it.
 func TestValidation_APIURLStillAllowedWithSandboxdDefault(t *testing.T) {
 	opts := Options{WarmPoolName: "pool", Runtime: RuntimeSandboxd, APIURL: "http://localhost:9999", Quiet: true}
 	opts.setDefaults()
@@ -406,5 +439,167 @@ func TestValidation_APIURLStillAllowedWithSandboxdDefault(t *testing.T) {
 	}
 	if err := validateAllOptions(&opts); err != nil {
 		t.Errorf("expected APIURL to remain valid with the default connectivity, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Service DNS addressing
+// ---------------------------------------------------------------------------
+
+const testFQDN = "sb.default.svc.cluster.local"
+
+func TestInClusterStrategy_ResolveHost(t *testing.T) {
+	cases := []struct {
+		name          string
+		fqdn          string
+		podIP         string
+		useServiceDNS bool
+		wantHost      string
+		wantVia       string
+		wantErr       error
+	}{
+		{
+			name: "service mode dials the Service DNS name",
+			fqdn: testFQDN, podIP: "10.244.0.42", useServiceDNS: true,
+			wantHost: testFQDN, wantVia: "service",
+		},
+		{
+			// The modes are exclusive: an available Service is ignored.
+			name: "pod-IP mode dials the pod IP even when a Service exists",
+			fqdn: testFQDN, podIP: "10.244.0.42",
+			wantHost: "10.244.0.42", wantVia: "pod-ip",
+		},
+		{
+			name:  "pod-IP mode needs no Service",
+			podIP: "10.244.0.42",
+			// A Sandbox with spec.service unset reports no ServiceFQDN.
+			wantHost: "10.244.0.42", wantVia: "pod-ip",
+		},
+		{
+			name:  "service mode refuses to fall back to the pod IP",
+			podIP: "10.244.0.42", useServiceDNS: true,
+			wantErr: ErrNoSandboxService,
+		},
+		{
+			// Not ErrNoSandboxService: in pod-IP mode the Service is
+			// irrelevant, the pod IP simply is not populated yet.
+			name: "pod-IP mode errors before the pod IP is resolved",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newInClusterStrategyFull(constFn(tc.fqdn), constFn(tc.podIP), tc.useServiceDNS)
+
+			host, via, err := s.resolveHost()
+			if tc.wantHost == "" {
+				if err == nil {
+					t.Fatalf("expected an error, got host=%s", host)
+				}
+				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+					t.Errorf("expected error wrapping %v, got %v", tc.wantErr, err)
+				}
+				if tc.wantErr == nil && errors.Is(err, ErrNoSandboxService) {
+					t.Errorf("expected a plain resolution error, got ErrNoSandboxService: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveHost() error: %v", err)
+			}
+			if host != tc.wantHost {
+				t.Errorf("expected host=%s, got %s", tc.wantHost, host)
+			}
+			if via != tc.wantVia {
+				t.Errorf("expected via=%s, got %s", tc.wantVia, via)
+			}
+		})
+	}
+}
+
+// A hostname needs no bracketing, but the port join must still be correct.
+func TestInClusterStrategy_Connect_ServiceDNSTargets(t *testing.T) {
+	s, conn := newInClusterStrategyFull(constFn(testFQDN), constFn("10.244.0.42"), true)
+
+	gotURL, err := s.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect() error: %v", err)
+	}
+	if want := "http://" + testFQDN + ":8080"; gotURL != want {
+		t.Errorf("expected baseURL=%s, got %s", want, gotURL)
+	}
+	if got, want := grpcTarget(conn), testFQDN+":9090"; got != want {
+		t.Errorf("expected grpcTarget=%s, got %s", want, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mode selection through Open()
+// ---------------------------------------------------------------------------
+
+// readySandboxWithService is readySandbox plus a populated Status.ServiceFQDN,
+// as the controller sets when spec.service is true.
+func readySandboxWithService(name string) *sandboxv1beta1.Sandbox {
+	sb := readySandbox(name)
+	sb.Status.ServiceFQDN = testFQDN
+	return sb
+}
+
+func TestModeSelection_InClusterService_UsesServiceDNS(t *testing.T) {
+	opts := inClusterTestOpts()
+	opts.Connectivity = ConnectivityInClusterService
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandboxWithService("sb"))
+
+	if err := c.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer c.Close(context.Background())
+
+	if got, want := c.connector.BaseURL(), "http://"+testFQDN+":8080"; got != want {
+		t.Errorf("expected baseURL=%s, got %s", want, got)
+	}
+	if got := c.ServiceFQDN(); got != testFQDN {
+		t.Errorf("expected ServiceFQDN=%s, got %s", testFQDN, got)
+	}
+}
+
+// The strict mode must fail closed rather than silently using the pod IP.
+func TestModeSelection_InClusterService_RefusesWithoutService(t *testing.T) {
+	opts := inClusterTestOpts()
+	opts.Connectivity = ConnectivityInClusterService
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("sb")) // no ServiceFQDN
+
+	err := c.Open(context.Background())
+	if err == nil {
+		defer c.Close(context.Background())
+		t.Fatalf("expected Open to fail without a Service, got baseURL=%s", c.connector.BaseURL())
+	}
+	if !errors.Is(err, ErrNoSandboxService) {
+		t.Errorf("expected error wrapping ErrNoSandboxService, got %v", err)
+	}
+	if c.connector.BaseURL() != "" {
+		t.Errorf("expected no baseURL after a refused Open, got %s", c.connector.BaseURL())
+	}
+}
+
+// Pod-IP mode ignores an available Service rather than quietly upgrading to
+// it, so the address a caller gets is the one the mode names.
+func TestModeSelection_InClusterPodIP_IgnoresServiceDNS(t *testing.T) {
+	opts := inClusterTestOpts()
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandboxWithService("sb"))
+
+	if err := c.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer c.Close(context.Background())
+
+	if got, want := c.connector.BaseURL(), "http://10.244.0.42:8080"; got != want {
+		t.Errorf("expected baseURL=%s, got %s", want, got)
+	}
+	// The Service is still reported, it is just not what we dial.
+	if got := c.ServiceFQDN(); got != testFQDN {
+		t.Errorf("expected ServiceFQDN=%s, got %s", testFQDN, got)
 	}
 }

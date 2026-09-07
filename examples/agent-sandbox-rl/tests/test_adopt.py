@@ -419,3 +419,50 @@ def test_max_live_sandboxes_also_gates_non_adopt_acquire(make_cluster):
   f.acquire(Task(id="t1", image=IMG_A))
   with pytest.raises(FleetOvercommitError):
     f.acquire(Task(id="t2", image=IMG_A))
+
+
+def test_teardown_during_inflight_acquire_terminates_the_claim(make_cluster):
+  # The remote create runs outside the fleet lock, so the breaker thread can
+  # tear the fleet down in that window. The handle must not be appended after
+  # the sweep (it would outlive teardown), the sandbox must be terminated, and
+  # the reservation must not leak into the next cycle.
+  c = make_cluster("solo")
+  f = _adopt_fleet(ClusterRegistry([c]), max_live_sandboxes=5)
+  _seed(c, f.config, IMG_A)
+  f.load_tasks([IMG_A])
+  f.plan()
+  created = []
+
+  def create_then_teardown(**kw):
+    s = c._make_sandbox(**kw)
+    created.append(s)
+    f.teardown()          # the breaker fires while this create is in flight
+    return s
+
+  c.sandbox_client.create_sandbox.side_effect = create_then_teardown
+  with pytest.raises(FleetError, match="torn down"):
+    f.acquire(Task(id="t1", image=IMG_A))
+  assert f.handles() == []
+  assert created[0].terminate.called
+  assert f._claims_reserved == 0
+
+
+def test_a_failed_remote_release_keeps_the_slot_occupied(make_cluster):
+  # Freeing the slot before the remote delete succeeds lets acquire() exceed
+  # max_live_sandboxes over a sandbox that never died. The handle also has to
+  # go back, so the caller can retry the release.
+  c = make_cluster("solo")
+  f = _adopt_fleet(ClusterRegistry([c]), max_live_sandboxes=1)
+  _seed(c, f.config, IMG_A)
+  f.load_tasks([IMG_A])
+  f.plan()
+  h = f.acquire(Task(id="t1", image=IMG_A))
+  h.sandbox.terminate.side_effect = RuntimeError("apiserver said no")
+  with pytest.raises(RuntimeError):
+    f.release(h)
+  assert h in f.handles(), "the un-released handle must stay retryable"
+  with pytest.raises(FleetOvercommitError):
+    f.acquire(Task(id="t2", image=IMG_A))
+  h.sandbox.terminate.side_effect = None
+  f.release(h)
+  f.acquire(Task(id="t3", image=IMG_A))

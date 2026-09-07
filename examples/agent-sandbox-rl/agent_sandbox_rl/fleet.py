@@ -962,6 +962,10 @@ class SandboxFleet:
     if self.config.install_teardown_hooks:
       self._install_teardown_hooks()          # (#4) clean up even on kill/crash
     self._torndown = False
+    with self._lock:
+      # A fresh cycle starts with a clean slate; a slot leaked by a crashed
+      # prior cycle must not pre-charge this one's max_live_sandboxes.
+      self._claims_reserved = 0
     self.preflight()
     self.plan()
     if prepull:
@@ -1080,9 +1084,27 @@ class SandboxFleet:
         task=task, cluster_name=cluster.name, claim_name=sandbox.claim_name,
         sandbox_id=sandbox.sandbox_id, pod_name=pod, hostname=sandbox.sandbox_id,
         pod_ip=pod_ip, sandbox=sandbox, _cluster=cluster)
-    cluster.reserve_claim()
+    # The remote create ran outside the lock, and the breaker thread can tear
+    # the fleet down in that window. _teardown flips _torndown under this same
+    # lock before it sweeps, so exactly one of two things is true here: the
+    # append lands before the sweep's snapshot (and the sweep releases it), or
+    # _torndown is already visible (and this claim must not outlive the
+    # teardown it missed).
     with self._lock:
-      self._handles.append(handle)
+      torn = self._torndown
+      if not torn:
+        self._handles.append(handle)
+    if torn:
+      try:
+        sandbox.terminate()
+      except Exception:  # noqa: BLE001
+        logger.warning("failed to terminate sandbox created during teardown",
+                       exc_info=True)
+      self._obs.claim(cluster.name, "error")
+      raise FleetError(
+          "fleet was torn down while this claim was in flight; the claim has "
+          "been terminated. Call setup() before acquiring again.")
+    cluster.reserve_claim()
     self._obs.claim(cluster.name, "ok")
     return handle
 
@@ -1105,11 +1127,21 @@ class SandboxFleet:
       if handle not in self._handles:
         return
       self._handles.remove(handle)
-      self._claims_reserved = max(0, self._claims_reserved - 1)
       c = self.registry.get(handle.cluster_name)
+    try:
+      with self._obs.phase("release", cluster=handle.cluster_name):
+        handle.release()
+    except Exception:
+      # The remote delete failed, so the sandbox is still live: the slot must
+      # stay occupied (freeing it would let acquire() exceed the cap over a
+      # sandbox that never died) and the handle must go back so the caller can
+      # retry the release.
+      with self._lock:
+        self._handles.append(handle)
+      raise
     c.release_claim()
-    with self._obs.phase("release", cluster=handle.cluster_name):
-      handle.release()
+    with self._lock:
+      self._claims_reserved = max(0, self._claims_reserved - 1)
 
   def release_all(self) -> None:
     for h in list(self._handles):
@@ -1129,7 +1161,12 @@ class SandboxFleet:
     with self._teardown_lock:
       if self._torndown:
         return
-      self._torndown = True
+      # Under _lock as well: acquire()'s check-then-append is atomic under
+      # _lock, so flipping the flag inside it guarantees an in-flight acquire
+      # either appended before this point (the sweep below sees the handle) or
+      # will see the flag and terminate its own claim.
+      with self._lock:
+        self._torndown = True
     self.release_all()
     for c in self.registry:
       sel = c.resources.managed_selector()

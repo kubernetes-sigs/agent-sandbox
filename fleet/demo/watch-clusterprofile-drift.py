@@ -71,7 +71,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "python"))
 # check must not be fooled by that.
 try:
     import agent_sandbox_fleet.inventory  # noqa: F401
-except ImportError:
+except ModuleNotFoundError as _e:
+    # Narrow on purpose: only the fleet package itself counts as "missing".
+    # A transitive miss (pydantic, kubernetes) means the package IS here but
+    # its dependencies are not, and reporting that as a missing package sends
+    # the operator to the wrong fix -- re-raise those, and any other
+    # ImportError (an init failure is a bug, not an install problem).
+    if _e.name not in ("agent_sandbox_fleet", "agent_sandbox_fleet.inventory"):
+        raise
     sys.exit(
         "agent_sandbox_fleet is not importable. This script needs the fleet "
         "python package (fleet/python, shipped in part 1 of the series): run "

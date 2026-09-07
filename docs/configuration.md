@@ -2,6 +2,10 @@
 
 The `agent-sandbox-controller` supports several command-line flags to tune performance and scalability under high load or in large clusters.
 
+The optional [same-policy runtime adoption integration](runtime-adoption.md)
+documents its protected admission service, Helm settings, and runtime
+qualification requirements. It is disabled by default.
+
 ## Concurrency Settings
 
 * `--sandbox-concurrent-workers` (default: 100): The maximum number of concurrent reconciles for the Sandbox controller.

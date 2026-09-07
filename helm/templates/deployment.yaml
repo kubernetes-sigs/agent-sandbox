@@ -42,6 +42,11 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        {{- if .Values.runtimeAdoption.enabled }}
+        - name: adoption
+          containerPort: 9443
+          protocol: TCP
+        {{- end }}
 
         livenessProbe:
           httpGet:
@@ -67,6 +72,11 @@ spec:
         - name: config-volume
           mountPath: /etc/sandbox-config
           readOnly: true
+        {{- if .Values.runtimeAdoption.enabled }}
+        - name: runtime-adoption-tls
+          mountPath: /etc/runtime-adoption/tls
+          readOnly: true
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -84,4 +94,8 @@ spec:
         configMap:
           name: agent-sandbox-config
           optional: true
-
+      {{- if .Values.runtimeAdoption.enabled }}
+      - name: runtime-adoption-tls
+        secret:
+          secretName: {{ required "runtimeAdoption.tlsSecretName is required" .Values.runtimeAdoption.tlsSecretName }}
+      {{- end }}

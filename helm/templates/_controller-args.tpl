@@ -1,4 +1,14 @@
 {{- define "agent-sandbox.controllerArgs" -}}
+{{- if .Values.runtimeAdoption.enabled }}
+{{- if not .Values.controller.extensions }}
+{{- fail "runtimeAdoption.enabled requires controller.extensions=true" }}
+{{- end }}
+- --runtime-adoption-admission=true
+- --runtime-adoption-webhook-configuration={{ .Values.runtimeAdoption.webhookConfigurationName }}
+- --runtime-adoption-controller-namespace={{ include "agent-sandbox.namespace" . }}
+- --runtime-adoption-runtime-namespace={{ .Values.runtimeAdoption.runtimeControllerNamespace }}
+- --runtime-adoption-agent-namespace={{ .Values.runtimeAdoption.agentNamespace }}
+{{- end }}
 {{- if hasKey .Values.controller "leaderElect" }}
 - --leader-elect={{ .Values.controller.leaderElect }}
 {{- end }}

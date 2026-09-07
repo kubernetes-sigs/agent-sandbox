@@ -1,0 +1,355 @@
+[
+  {
+    "name": "minimal",
+    "claim": {
+      "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+      "kind": "SandboxClaim",
+      "metadata": {
+        "name": "claim-a",
+        "namespace": "agents",
+        "uid": "claim-uid-0001",
+        "generation": 2
+      },
+      "spec": {
+        "warmPoolRef": {
+          "name": "pool-a"
+        }
+      }
+    },
+    "namespace": {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "agents",
+        "uid": "namespace-uid-0001"
+      }
+    },
+    "sandbox": {
+      "apiVersion": "agents.x-k8s.io/v1beta1",
+      "kind": "Sandbox",
+      "metadata": {
+        "name": "sandbox-a",
+        "namespace": "agents",
+        "uid": "sandbox-uid-0001"
+      }
+    },
+    "pod": {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "sandbox-a",
+        "namespace": "agents",
+        "uid": "pod-uid-0001"
+      }
+    },
+    "claimIntentProjection": {
+      "claimUID": "claim-uid-0001",
+      "claimGeneration": 2,
+      "spec": {
+        "additionalPodMetadata": {},
+        "warmPoolRef": {
+          "name": "pool-a"
+        }
+      },
+      "createdBy": "",
+      "traceContext": ""
+    },
+    "claimIntentDigest": "sha256:423149d8b74c982f3000565d14367e971b9360a483155a3e0b334fb02992f12d",
+    "metadataProjection": {
+      "namespace": {
+        "name": "agents",
+        "uid": "namespace-uid-0001",
+        "labels": null
+      },
+      "sandbox": {
+        "name": "sandbox-a",
+        "uid": "sandbox-uid-0001",
+        "labels": null,
+        "annotations": null,
+        "ownerReferences": null
+      },
+      "pod": {
+        "name": "sandbox-a",
+        "uid": "pod-uid-0001",
+        "labels": null,
+        "annotations": null,
+        "ownerReferences": null
+      }
+    },
+    "metadataDigest": "sha256:13ca00752b874854d36105c6062db4d41a9ff9cf58a5520cee5827e5e39ac4a7"
+  },
+  {
+    "name": "populated",
+    "claim": {
+      "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+      "kind": "SandboxClaim",
+      "metadata": {
+        "name": "claim-a",
+        "namespace": "agents",
+        "uid": "claim-uid-0001",
+        "generation": 2,
+        "labels": {
+          "agents.x-k8s.io/created-by": "python-sdk"
+        },
+        "annotations": {
+          "opentelemetry.io/trace-context": "00-01234567890123456789012345678901-0123456789012345-01",
+          "agents.x-k8s.io/sandbox-name": "ignored-controller-output"
+        }
+      },
+      "spec": {
+        "warmPoolRef": {
+          "name": "pool-a"
+        },
+        "additionalPodMetadata": {
+          "labels": {
+            "team": "agents",
+            "app": "worker"
+          },
+          "annotations": {
+            "description": "retained execution"
+          }
+        },
+        "lifecycle": {
+          "shutdownTime": "2026-09-06T12:05:00Z",
+          "ttlSecondsAfterFinished": 0,
+          "shutdownPolicy": "Retain"
+        }
+      }
+    },
+    "namespace": {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "agents",
+        "uid": "namespace-uid-0001",
+        "labels": {
+          "team": "agents",
+          "region": "west"
+        }
+      }
+    },
+    "sandbox": {
+      "apiVersion": "agents.x-k8s.io/v1beta1",
+      "kind": "Sandbox",
+      "metadata": {
+        "name": "sandbox-a",
+        "namespace": "agents",
+        "uid": "sandbox-uid-0001",
+        "labels": {
+          "app": "worker"
+        },
+        "annotations": {
+          "agents.x-k8s.io/sandbox-pod-name": "sandbox-a"
+        },
+        "ownerReferences": [
+          {
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxClaim",
+            "name": "claim-a",
+            "uid": "claim-uid-0001",
+            "controller": true,
+            "blockOwnerDeletion": true
+          }
+        ]
+      }
+    },
+    "pod": {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "sandbox-a",
+        "namespace": "agents",
+        "uid": "pod-uid-0001",
+        "labels": {
+          "team": "agents",
+          "app": "worker"
+        },
+        "annotations": {
+          "description": "retained execution"
+        },
+        "ownerReferences": [
+          {
+            "apiVersion": "agents.x-k8s.io/v1beta1",
+            "kind": "Sandbox",
+            "name": "sandbox-a",
+            "uid": "sandbox-uid-0001",
+            "controller": true,
+            "blockOwnerDeletion": true
+          }
+        ]
+      }
+    },
+    "claimIntentProjection": {
+      "claimUID": "claim-uid-0001",
+      "claimGeneration": 2,
+      "spec": {
+        "additionalPodMetadata": {
+          "annotations": {
+            "description": "retained execution"
+          },
+          "labels": {
+            "app": "worker",
+            "team": "agents"
+          }
+        },
+        "lifecycle": {
+          "shutdownPolicy": "Retain",
+          "shutdownTime": "2026-09-06T12:05:00Z",
+          "ttlSecondsAfterFinished": 0
+        },
+        "warmPoolRef": {
+          "name": "pool-a"
+        }
+      },
+      "createdBy": "python-sdk",
+      "traceContext": "00-01234567890123456789012345678901-0123456789012345-01"
+    },
+    "claimIntentDigest": "sha256:5d3f7800fca56c375d2d9f0f0fb6666357813737df587d12c276b70d80d58342",
+    "metadataProjection": {
+      "namespace": {
+        "name": "agents",
+        "uid": "namespace-uid-0001",
+        "labels": {
+          "region": "west",
+          "team": "agents"
+        }
+      },
+      "sandbox": {
+        "name": "sandbox-a",
+        "uid": "sandbox-uid-0001",
+        "labels": {
+          "app": "worker"
+        },
+        "annotations": {
+          "agents.x-k8s.io/sandbox-pod-name": "sandbox-a"
+        },
+        "ownerReferences": [
+          {
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxClaim",
+            "name": "claim-a",
+            "uid": "claim-uid-0001",
+            "controller": true,
+            "blockOwnerDeletion": true
+          }
+        ]
+      },
+      "pod": {
+        "name": "sandbox-a",
+        "uid": "pod-uid-0001",
+        "labels": {
+          "app": "worker",
+          "team": "agents"
+        },
+        "annotations": {
+          "description": "retained execution"
+        },
+        "ownerReferences": [
+          {
+            "apiVersion": "agents.x-k8s.io/v1beta1",
+            "kind": "Sandbox",
+            "name": "sandbox-a",
+            "uid": "sandbox-uid-0001",
+            "controller": true,
+            "blockOwnerDeletion": true
+          }
+        ]
+      }
+    },
+    "metadataDigest": "sha256:56cb86c652ce401491934c4d97fd08366d22e0182896de68934d2bcedc1af69a"
+  },
+  {
+    "name": "explicit-empty",
+    "claim": {
+      "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+      "kind": "SandboxClaim",
+      "metadata": {
+        "name": "claim-a",
+        "namespace": "agents",
+        "uid": "claim-uid-0001",
+        "generation": 2
+      },
+      "spec": {
+        "warmPoolRef": {
+          "name": "pool-a"
+        },
+        "additionalPodMetadata": {
+          "labels": {},
+          "annotations": {}
+        },
+        "env": [],
+        "volumeClaimTemplates": []
+      }
+    },
+    "namespace": {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "agents",
+        "uid": "namespace-uid-0001",
+        "labels": {},
+        "annotations": {},
+        "ownerReferences": []
+      }
+    },
+    "sandbox": {
+      "apiVersion": "agents.x-k8s.io/v1beta1",
+      "kind": "Sandbox",
+      "metadata": {
+        "name": "sandbox-a",
+        "namespace": "agents",
+        "uid": "sandbox-uid-0001",
+        "labels": {},
+        "annotations": {},
+        "ownerReferences": []
+      }
+    },
+    "pod": {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "sandbox-a",
+        "namespace": "agents",
+        "uid": "pod-uid-0001",
+        "labels": {},
+        "annotations": {},
+        "ownerReferences": []
+      }
+    },
+    "claimIntentProjection": {
+      "claimUID": "claim-uid-0001",
+      "claimGeneration": 2,
+      "spec": {
+        "additionalPodMetadata": {},
+        "warmPoolRef": {
+          "name": "pool-a"
+        }
+      },
+      "createdBy": "",
+      "traceContext": ""
+    },
+    "claimIntentDigest": "sha256:423149d8b74c982f3000565d14367e971b9360a483155a3e0b334fb02992f12d",
+    "metadataProjection": {
+      "namespace": {
+        "name": "agents",
+        "uid": "namespace-uid-0001",
+        "labels": {}
+      },
+      "sandbox": {
+        "name": "sandbox-a",
+        "uid": "sandbox-uid-0001",
+        "labels": {},
+        "annotations": {},
+        "ownerReferences": []
+      },
+      "pod": {
+        "name": "sandbox-a",
+        "uid": "pod-uid-0001",
+        "labels": {},
+        "annotations": {},
+        "ownerReferences": []
+      }
+    },
+    "metadataDigest": "sha256:6285bef4f737356b9c5e0bf2e7ab9e85ad798f38adddde8abbda77ab3da52cbd"
+  }
+]

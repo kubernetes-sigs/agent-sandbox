@@ -225,6 +225,8 @@ func init() {
 // SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
+	// APIReader bypasses transformed informer Pods for adoption metadata readback.
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	Recorder      events.EventRecorder
 	Tracer        asmetrics.Instrumenter
@@ -583,6 +585,11 @@ func (r *SandboxReconciler) computeSuspendedCondition(sandbox *sandboxv1beta1.Sa
 }
 
 func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod) metav1.Condition {
+	if adoption := sandbox.Status.RuntimeAdoption; adoption != nil && adoption.Reservation != nil &&
+		(adoption.CommitDigest == "" || adoption.TerminationRequestedTime != nil) {
+		return metav1.Condition{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+			Reason: "RuntimeAdoptionPending", Message: "The reserved runtime has not completed a current claim activation", ObservedGeneration: sandbox.Generation}
+	}
 	readyCondition := metav1.Condition{
 		Type:               string(sandboxv1beta1.SandboxConditionReady),
 		ObservedGeneration: sandbox.Generation,
@@ -722,6 +729,12 @@ func podIPsFromStatus(podIPs []corev1.PodIP) []string {
 func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandboxv1beta1.SandboxStatus, sandbox *sandboxv1beta1.Sandbox) error {
 	logger := log.FromContext(ctx)
 
+	// These fields have independent trusted writers. Keeping them equal on
+	// both patch bases omits them from the core controller's merge patch,
+	// including when its informer view predates a reservation or verification.
+	sandbox.Status.RuntimeAdoption = oldStatus.RuntimeAdoption.DeepCopy()
+	sandbox.Status.RuntimeActivationVerification = oldStatus.RuntimeActivationVerification.DeepCopy()
+
 	if apiequality.Semantic.DeepEqual(oldStatus, &sandbox.Status) {
 		return nil
 	}
@@ -744,9 +757,10 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	// Two deliberate trade-offs now that the optimistic lock is gone:
 	//   1. A JSON merge patch replaces the whole status.conditions array whenever
 	//      any condition differs from base. That is safe only while this
-	//      controller is the SOLE writer of Sandbox status -- true today, since
-	//      reconciles are workqueue-serialized per object. If a second status
-	//      writer is ever added, switch to MergeFromWithOptimisticLock or SSA.
+	//      controller is the sole writer of the top-level conditions array.
+	//      Runtime adoption and verification writers own separate status fields,
+	//      which this patch excludes above. A second conditions writer would
+	//      require MergeFromWithOptimisticLock or field-owned SSA.
 	//   2. The old Update's 409 doubled as a stale-informer-cache guard: a
 	//      reconcile computed from a stale read used to fail and re-run with
 	//      fresh data. The patch instead writes through. Status is derived from
@@ -1176,6 +1190,9 @@ func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1beta1.Sandbox) 
 }
 
 func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string, wd *writeDeferral) (*corev1.Pod, error) {
+	if adoption := sandbox.Status.RuntimeAdoption; adoption != nil && adoption.Reservation != nil {
+		return r.reconcileRuntimeAdoptionPod(ctx, sandbox)
+	}
 	logger := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
@@ -1703,6 +1720,11 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (bool, error) {
 	logger := log.FromContext(ctx)
 	var allErrors error
+	// The claim controller requests owner-aware termination and retains both
+	// finalizers until the node proves that the original root is destroyed.
+	if adoption := sandbox.Status.RuntimeAdoption; adoption != nil && adoption.Reservation != nil && adoption.TerminalEvidenceDigest == "" {
+		return false, nil
+	}
 
 	// Delete pod only if owned by this sandbox
 	podName := resolvePodName(sandbox)
@@ -1762,9 +1784,13 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Drop live-resource status while retaining terminal conditions.
-		conditions := sandbox.Status.Conditions
-		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
+		// Clear only derived resource status. Reservations, consumed eligibility,
+		// and runtime verification must survive expiry and restart recovery.
+		sandbox.Status.ServiceFQDN = ""
+		sandbox.Status.Service = ""
+		sandbox.Status.LabelSelector = ""
+		sandbox.Status.PodIPs = nil
+		sandbox.Status.NodeName = ""
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -1832,6 +1858,9 @@ func podSandboxNameHashIndexer(obj client.Object) []string {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, podSandboxNameHashIndex,
 		podSandboxNameHashIndexer); err != nil {
 		return fmt.Errorf("failed to index pods by sandbox label: %w", err)

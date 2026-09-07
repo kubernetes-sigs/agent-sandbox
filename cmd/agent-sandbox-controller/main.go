@@ -46,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -84,6 +85,11 @@ func main() {
 	var printVersion bool
 	var disableClaimEvents bool
 	var disableClaimObservabilityAnnotations bool
+	var runtimeAdoptionAdmission bool
+	var runtimeAdoptionWebhookName string
+	var runtimeAdoptionControllerNamespace string
+	var runtimeAdoptionRuntimeNamespace string
+	var runtimeAdoptionAgentNamespace string
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
@@ -94,6 +100,11 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "", "The namespace in which the leader election resource will be created.")
 	flag.BoolVar(&extensions, "extensions", false, "Enable extensions controllers.")
+	flag.BoolVar(&runtimeAdoptionAdmission, "runtime-adoption-admission", false, "Serve protected same-policy adoption admission. Pools must also opt in and nodes must advertise a qualified runtime capability.")
+	flag.StringVar(&runtimeAdoptionWebhookName, "runtime-adoption-webhook-configuration", "agent-sandbox-runtime-adoption", "Name of the installed fail-closed adoption admission registration.")
+	flag.StringVar(&runtimeAdoptionControllerNamespace, "runtime-adoption-controller-namespace", "agent-sandbox-system", "Namespace of the trusted agent-sandbox-controller service account.")
+	flag.StringVar(&runtimeAdoptionRuntimeNamespace, "runtime-adoption-runtime-namespace", "gatekeeper-runtime-system", "Namespace of the trusted gatekeeper-runtime-controller service account.")
+	flag.StringVar(&runtimeAdoptionAgentNamespace, "runtime-adoption-agent-namespace", "gatekeeper-runtime-agent-system", "Namespace of the bound gatekeeper-runtime-agent service account.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false, "Enable OpenTelemetry tracing via OTLP.")
 	flag.BoolVar(&enablePprof, "enable-pprof", false,
 		"Enable CPU profiling endpoint (/debug/pprof/profile) on the metrics server.")
@@ -162,6 +173,10 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	if runtimeAdoptionAdmission && !extensions {
+		setupLog.Error(fmt.Errorf("runtime adoption admission requires --extensions"), "invalid runtime adoption configuration")
+		os.Exit(1)
+	}
 
 	if printVersion {
 		fmt.Println(version.Print("agent-sandbox-controller"))
@@ -352,6 +367,9 @@ func main() {
 	}
 
 	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
+	if runtimeAdoptionAdmission {
+		mgrOpts.WebhookServer = webhook.NewServer(webhook.Options{Port: 9443, CertDir: "/etc/runtime-adoption/tls"})
+	}
 	// managedFields stripping, the Pod spec diet, and (optionally) the
 	// tracking-label scoping; see buildCacheOptions for the rationale.
 	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)
@@ -436,6 +454,17 @@ func main() {
 			setupLog.Info("SandboxClaim observability annotation persistence disabled (--disable-claim-observability-annotations)")
 		}
 
+		if runtimeAdoptionAdmission {
+			if err := extensionscontrollers.RegisterRuntimeAdoptionAdmission(mgr, extensionscontrollers.RuntimeAdoptionAdmissionOptions{
+				ControllerUsername:        "system:serviceaccount:" + runtimeAdoptionControllerNamespace + ":agent-sandbox-controller",
+				RuntimeControllerUsername: "system:serviceaccount:" + runtimeAdoptionRuntimeNamespace + ":gatekeeper-runtime-controller",
+				AgentNamespace:            runtimeAdoptionAgentNamespace, AllowedLabelDomains: allowedDomains,
+			}); err != nil {
+				setupLog.Error(err, "unable to register protected runtime adoption admission")
+				os.Exit(1)
+			}
+		}
+
 		if err = (&extensionscontrollers.SandboxClaimReconciler{
 			Client:                          mgr.GetClient(),
 			APIReader:                       mgr.GetAPIReader(),
@@ -444,6 +473,8 @@ func main() {
 			Recorder:                        claimRecorder,
 			Tracer:                          instrumenter,
 			AllowedLabelDomains:             allowedDomains,
+			RuntimeAdoptionEnabled:          runtimeAdoptionAdmission,
+			RuntimeAdoptionWebhookName:      runtimeAdoptionWebhookName,
 			DisableObservabilityAnnotations: disableClaimObservabilityAnnotations,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")

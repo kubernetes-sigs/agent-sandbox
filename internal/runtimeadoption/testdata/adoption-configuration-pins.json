@@ -1,0 +1,1 @@
+[{"group":"","kind":"ConfigMap","namespace":"agents","name":"agent-settings","uid":"configmap-uid-0001","resourceVersion":"opaque-version-a"},{"group":"","kind":"Secret","namespace":"agents","name":"agent-credentials","uid":"secret-uid-0001","resourceVersion":"opaque-version-b"}]

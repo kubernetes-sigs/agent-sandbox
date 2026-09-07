@@ -103,6 +103,7 @@ const (
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
 type SandboxWarmPoolReconciler struct {
 	client.Client
+	APIReader              client.Reader
 	Scheme                 *runtime.Scheme
 	MaxBatchSize           int
 	EnableWarmPoolEviction bool
@@ -496,6 +497,23 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		logger.Error(err, "Failed to list sandboxes")
 		return 0, err
 	}
+	// Reservation membership survives the label and owner transition. Keep
+	// unresolved executions in capacity accounting until commit or destruction.
+	if warmPool.UID != "" {
+		var reserved sandboxv1beta1.SandboxList
+		if err := r.List(ctx, &reserved, client.InNamespace(warmPool.Namespace), client.MatchingFields{RuntimeAdoptionPoolUIDIndex: string(warmPool.UID)}); err != nil {
+			return 0, err
+		}
+		seen := make(map[types.UID]bool, len(sandboxList.Items))
+		for i := range sandboxList.Items {
+			seen[sandboxList.Items[i].UID] = true
+		}
+		for _, sandbox := range reserved.Items {
+			if !seen[sandbox.UID] {
+				sandboxList.Items = append(sandboxList.Items, sandbox)
+			}
+		}
+	}
 
 	// Fetch template and compute hash once to avoid repeated expensive operations,
 	// only currentSandboxBlueprintHash is used for staleness checks,
@@ -549,7 +567,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
 			r.exp().ExpectDeletion(poolKey, sb.UID)
-			if err := r.Delete(ctx, &sb); err != nil {
+			if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
 				r.exp().DeletionObserved(poolKey, sb.UID)
 				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
@@ -739,7 +757,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
 				sb := &activeSandboxes[idx]
 				r.exp().ExpectDeletion(poolKey, sb.UID)
-				err := r.Delete(ctx, sb)
+				err := r.Delete(ctx, sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion})
 				if err == nil {
 					return nil
 				}
@@ -883,6 +901,20 @@ func resolveUpdateStrategy(warmPool *extensionsv1beta1.SandboxWarmPool) extensio
 
 // adoptSandbox sets this warmpool as the owner of an orphaned sandbox.
 func (r *SandboxWarmPoolReconciler) adoptSandbox(ctx context.Context, warmPool *extensionsv1beta1.SandboxWarmPool, sb *sandboxv1beta1.Sandbox) error {
+	if warmPool.Spec.RuntimeAdoption != nil || runtimeAdoptionProtected(sb) {
+		return ErrRuntimeAdoptionUnavailable
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	strict, err := strictRuntimeSandbox(ctx, reader, sb)
+	if err != nil {
+		return err
+	}
+	if strict {
+		return ErrRuntimeAdoptionUnavailable
+	}
 	if err := controllerutil.SetControllerReference(warmPool, sb, r.Scheme); err != nil {
 		return fmt.Errorf("set controller reference for warm pool sandbox %s/%s: %w", sb.Namespace, sb.Name, err)
 	}
@@ -930,6 +962,37 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		isOrphan := controllerRef == nil
 		isControlledByPool := controllerRef != nil && controllerRef.UID == warmPool.UID
 
+		// A reservation survives owner/label changes and uncertain runtime
+		// outcomes. Pool GC and orphan recovery cannot reclaim this execution.
+		if runtimeAdoptionProtected(&sb) {
+			status := sb.Status.RuntimeAdoption
+			if status != nil && status.Reservation != nil && status.Reservation.PoolUID == warmPool.UID {
+				if status.CommitDigest == "" && status.TerminalEvidenceDigest == "" {
+					terminatingReplicas++
+				}
+			} else if isControlledByPool {
+				terminatingReplicas++
+			}
+			continue
+		}
+		if isOrphan {
+			if warmPool.Spec.RuntimeAdoption != nil {
+				continue
+			}
+			reader := r.APIReader
+			if reader == nil {
+				reader = r.Client
+			}
+			strict, err := strictRuntimeSandbox(ctx, reader, &sb)
+			if err != nil {
+				allErrors = errors.Join(allErrors, err)
+				continue
+			}
+			if strict {
+				continue
+			}
+		}
+
 		if !sb.DeletionTimestamp.IsZero() {
 			// Terminating pool members are no longer active, but they still
 			// occupy capacity until fully gone: count them so create gating
@@ -962,7 +1025,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				if isControlledByPool {
 					r.exp().ExpectDeletion(poolKey, sb.UID)
 				}
-				if err := r.Delete(ctx, &sb); err != nil {
+				if err := r.Delete(ctx, &sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion}); err != nil {
 					if isControlledByPool {
 						r.exp().DeletionObserved(poolKey, sb.UID)
 					}
@@ -1309,6 +1372,9 @@ func (h *warmPoolSandboxEventHandler) Delete(ctx context.Context, evt event.Dele
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers int) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if r.MaxBatchSize <= 0 {
 		r.MaxBatchSize = sandboxCreateDeleteMaxBatchSize
 	}
@@ -1317,6 +1383,9 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1beta1.Sandbox{},
 		sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer); err != nil {
 		return fmt.Errorf("failed to index sandboxes by warm pool label: %w", err)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1beta1.Sandbox{}, RuntimeAdoptionPoolUIDIndex, runtimeAdoptionPoolUIDIndexer); err != nil {
+		return fmt.Errorf("failed to index reserved sandboxes by pool UID: %w", err)
 	}
 
 	// Index warm pools by the template reference name
@@ -1336,6 +1405,7 @@ func (r *SandboxWarmPoolReconciler) SetupWithManager(mgr ctrl.Manager, concurren
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1beta1.SandboxWarmPool{}).
 		Watches(&sandboxv1beta1.Sandbox{}, sandboxHandler).
+		Watches(&sandboxv1beta1.Sandbox{}, handler.EnqueueRequestsFromMapFunc(r.mapReservedSandboxToPool)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Watches(
 			&extensionsv1beta1.SandboxTemplate{},

@@ -64,6 +64,18 @@ resources: {}
   #   cpu: 10m
   #   memory: 64Mi
 
+# Serving admission does not qualify the runtime capability. It stays disabled
+# until the installed GKR node/runtime profile passes adoption conformance.
+runtimeAdoption:
+  enabled: false
+  webhookConfigurationName: agent-sandbox-runtime-adoption
+  # Pre-created TLS Secret with tls.crt and tls.key for the webhook Service DNS.
+  tlsSecretName: ""
+  # Base64 PEM CA bundle used by the API server to verify the serving certificate.
+  caBundle: ""
+  runtimeControllerNamespace: gatekeeper-runtime-system
+  agentNamespace: gatekeeper-runtime-agent-system
+
 nodeSelector: {}
 
 tolerations: []

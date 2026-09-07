@@ -111,6 +111,222 @@ _Appears in:_
 | `metadata` _[PodMetadata](#podmetadata)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
 
 
+#### RuntimeActivationVerification
+
+
+
+RuntimeActivationVerification is owned exclusively by the GKR readiness controller.
+A claim must match the complete current verification and its validity deadline;
+a Ready condition or receipt for the same Pod under another attempt is insufficient.
+
+
+
+_Appears in:_
+- [SandboxStatus](#sandboxstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `attemptID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | attemptID identifies the committed adoption being verified. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `claimUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | claimUID identifies the current claimant. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `podUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | podUID identifies the retained Pod verified by the runtime controller. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `nodeUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | nodeUID identifies the Node whose current key verified the receipt. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `containerID` _string_ | containerID identifies the retained application container. |  | MaxLength: 256 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `taskStartTime` _integer_ | taskStartTime distinguishes the retained task from PID reuse or restart. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `runtimeIncarnation` _string_ | runtimeIncarnation identifies the native runtime instance that verified execution. |  | MaxLength: 128 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `targetActivationID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | targetActivationID identifies the current successor binding. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `receiptDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | receiptDigest identifies the current verified target receipt. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `contextDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | contextDigest binds the receipt to this exact adoption context. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `commitDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | commitDigest identifies the confirmed runtime release observation. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `policyEpoch` _integer_ | policyEpoch is the exact prepared policy epoch, not an API resource version. |  | Minimum: 0 <br />Required: \{\} <br /> |
+| `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | validUntil bounds the current observational evidence, not the historical commit. |  | Required: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions report the current verification result. |  | MaxItems: 16 <br />Optional: \{\} <br /> |
+
+
+#### RuntimeAdoptionConsumption
+
+
+
+RuntimeAdoptionConsumption permanently retires a sandbox's first-claim eligibility.
+It is distinct from the node's consumption of release authorization. A failed
+attempt that may have held execution also consumes eligibility.
+
+
+
+_Appears in:_
+- [RuntimeAdoptionStatus](#runtimeadoptionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `attemptID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | attemptID identifies the attempt that retired the sandbox from the pool. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `claimUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | claimUID identifies that attempt's claim even after the claim is deleted. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `consumedTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | consumedTime records when first-claim eligibility was retired. |  | Required: \{\} <br /> |
+
+
+#### RuntimeAdoptionDigest
+
+_Underlying type:_ _string_
+
+RuntimeAdoptionDigest identifies a domain-separated canonical SHA-256 payload.
+
+_Validation:_
+- MaxLength: 71
+- MinLength: 71
+- Pattern: `^sha256:[0-9a-f]{64}$`
+
+_Appears in:_
+- [RuntimeActivationVerification](#runtimeactivationverification)
+- [RuntimeAdoptionGrant](#runtimeadoptiongrant)
+- [RuntimeAdoptionInitialization](#runtimeadoptioninitialization)
+- [RuntimeAdoptionReservation](#runtimeadoptionreservation)
+- [RuntimeAdoptionStatus](#runtimeadoptionstatus)
+- [SandboxClaimRuntimeAdoptionStatus](#sandboxclaimruntimeadoptionstatus)
+
+
+
+#### RuntimeAdoptionGrant
+
+
+
+RuntimeAdoptionGrant records the API-side authorization for one held transfer receipt.
+The node must independently verify it and durably consume its signed grant once.
+
+
+
+_Appears in:_
+- [RuntimeAdoptionStatus](#runtimeadoptionstatus)
+- [SandboxClaimRuntimeAdoptionStatus](#sandboxclaimruntimeadoptionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `contextDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | contextDigest identifies the immutable prepared adoption context. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `receiptDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | receiptDigest identifies the held target receipt authorized for release. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `expiresAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | expiresAt must not exceed the reservation, preparation, or receipt deadline. |  | Required: \{\} <br /> |
+| `grantDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | grantDigest identifies the node-signed start grant after it has been observed. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Optional: \{\} <br /> |
+
+
+#### RuntimeAdoptionID
+
+_Underlying type:_ _string_
+
+RuntimeAdoptionID identifies an initialization, activation, or durable adoption attempt.
+IDs must be generated by a trusted controller; their syntax does not establish authority.
+
+_Validation:_
+- MaxLength: 128
+- MinLength: 16
+- Pattern: `^[A-Za-z0-9._-]+$`
+
+_Appears in:_
+- [RuntimeActivationVerification](#runtimeactivationverification)
+- [RuntimeAdoptionConsumption](#runtimeadoptionconsumption)
+- [RuntimeAdoptionInitialization](#runtimeadoptioninitialization)
+- [RuntimeAdoptionReservation](#runtimeadoptionreservation)
+
+
+
+#### RuntimeAdoptionInitialization
+
+
+
+RuntimeAdoptionInitialization references authenticated strict pool initialization.
+Only the signed envelope and matching live runtime state establish eligibility;
+the summary fields are not independent authorization.
+
+
+
+_Appears in:_
+- [RuntimeAdoptionStatus](#runtimeadoptionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `initializationID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | initializationID identifies the original initialization observation. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `sourceActivationID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | sourceActivationID identifies the strict cold activation used to initialize the pool member. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `poolUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | poolUID identifies the pool that created the unused sandbox. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `templateUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | templateUID identifies the template used for initialization. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `blueprintDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | blueprintDigest binds the versioned immutable workload projection. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `receiptDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | receiptDigest identifies the original strict cold activation receipt. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `envelope` _integer array_ | envelope contains the canonical signed initialization envelope, encoded as base64<br />in JSON. Opaque bytes preserve the signed encoding through API-server storage. |  | MaxLength: 262144 <br />MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### RuntimeAdoptionObjectReference
+
+
+
+RuntimeAdoptionObjectReference keeps a UID-bound locator through deletion and recovery.
+
+
+
+_Appears in:_
+- [SandboxClaimRuntimeAdoptionStatus](#sandboxclaimruntimeadoptionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name locates the referenced object. |  | MaxLength: 253 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | uid distinguishes the original object from a replacement with the same name. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+
+
+#### RuntimeAdoptionReservation
+
+
+
+RuntimeAdoptionReservation binds one live claim to one initialized sandbox.
+Both the claim and sandbox must contain this exact reservation before a runtime
+may act. Names locate objects; UIDs, authenticated writers, and live readback
+establish their identities. Resource versions are optimistic-write fences and
+are deliberately absent from this immutable protocol context.
+
+
+
+_Appears in:_
+- [RuntimeAdoptionStatus](#runtimeadoptionstatus)
+- [SandboxClaimRuntimeAdoptionStatus](#sandboxclaimruntimeadoptionstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `wireVersion` _string_ | wireVersion identifies the canonical reservation encoding. |  | Enum: [runtime.gatekeeper.sh/same-policy-adoption/v1alpha1] <br />Required: \{\} <br /> |
+| `attemptID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | attemptID identifies this attempt across retries and controller restarts. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `initializationID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | initializationID identifies the verified first-claim-only pool initialization. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `sourceActivationID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | sourceActivationID is the expected predecessor that currently owns the execution. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `targetActivationID` _[RuntimeAdoptionID](#runtimeadoptionid)_ | targetActivationID is the only permitted successor for this attempt. |  | MaxLength: 128 <br />MinLength: 16 <br />Pattern: `^[A-Za-z0-9._-]+$` <br />Required: \{\} <br /> |
+| `namespace` _string_ | namespace is shared by the claim, sandbox, pool, and template. |  | MaxLength: 63 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `namespaceUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | namespaceUID prevents a recreated namespace from reusing this reservation. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `claimName` _string_ | claimName locates the claiming SandboxClaim. |  | MaxLength: 253 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `claimUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | claimUID is the identity of the claiming SandboxClaim. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `claimGeneration` _integer_ | claimGeneration records the claim spec accepted for the attempt. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `claimIntentDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | claimIntentDigest also covers metadata inputs that do not increment generation. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Required: \{\} <br /> |
+| `sandboxUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | sandboxUID is the identity of the exclusively reserved Sandbox. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `poolUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | poolUID is the identity of the original SandboxWarmPool. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `templateUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#uid-types-pkg)_ | templateUID is the identity of the initialized SandboxTemplate. |  | MaxLength: 128 <br />MinLength: 1 <br />Type: string <br />Required: \{\} <br /> |
+| `expiresAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | expiresAt bounds new authorization; expiry never returns uncertain execution to the pool. |  | Required: \{\} <br /> |
+
+
+#### RuntimeAdoptionStatus
+
+
+
+RuntimeAdoptionStatus is owned by the trusted claim controller.
+Protected fields require authenticated writers and admission checks; their
+presence alone does not enable warm execution or authorize any runtime action.
+
+
+
+_Appears in:_
+- [SandboxStatus](#sandboxstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `initialization` _[RuntimeAdoptionInitialization](#runtimeadoptioninitialization)_ | initialization retains the first-use origin for the lifetime of the sandbox. |  | Optional: \{\} <br /> |
+| `reservation` _[RuntimeAdoptionReservation](#runtimeadoptionreservation)_ | reservation is exclusive and survives cancellation until the node proves a terminal result. |  | Optional: \{\} <br /> |
+| `holdEvidenceDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | holdEvidenceDigest records the authenticated hold before ownership or metadata changes. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Optional: \{\} <br /> |
+| `targetMetadataDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | targetMetadataDigest identifies the final API-server-observed target metadata. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Optional: \{\} <br /> |
+| `grant` _[RuntimeAdoptionGrant](#runtimeadoptiongrant)_ | grant records the accepted API-side release authorization. |  | Optional: \{\} <br /> |
+| `commitDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | commitDigest identifies the immutable, confirmed runtime release result. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Optional: \{\} <br /> |
+| `terminationRequestedTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | terminationRequestedTime requests owner-aware cleanup without erasing the attempt.<br />Once set, no new release authorization may be issued for this reservation. |  | Optional: \{\} <br /> |
+| `consumed` _[RuntimeAdoptionConsumption](#runtimeadoptionconsumption)_ | consumed permanently prevents this sandbox from serving another first claim. |  | Optional: \{\} <br /> |
+| `terminalEvidenceDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | terminalEvidenceDigest identifies the retained node observation used for finalization. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions record observed adoption progress without replacing the durable identity. |  | MaxItems: 16 <br />Optional: \{\} <br /> |
+
+
 #### Sandbox
 
 
@@ -209,6 +425,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `runtimeAdoption` _[RuntimeAdoptionStatus](#runtimeadoptionstatus)_ | runtimeAdoption retains controller-owned pool origin and exclusive claim reservation.<br />Core Sandbox reconciliation must preserve it, including after expiry. |  | Optional: \{\} <br /> |
+| `runtimeActivationVerification` _[RuntimeActivationVerification](#runtimeactivationverification)_ | runtimeActivationVerification reports current claim-bound GKR evidence.<br />Only the GKR readiness controller may write this field. |  | Optional: \{\} <br /> |
 | `serviceFQDN` _string_ | serviceFQDN that is valid for default cluster settings<br />The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag. |  | Optional: \{\} <br /> |
 | `service` _string_ | service is the name of the headless Service created for this Sandbox. It is empty<br />when no Service exists for the Sandbox (for example when spec.service is false, or<br />unset with no pre-existing Service). See serviceFQDN for the fully qualified<br />in-cluster DNS name of this Service. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions defines the status conditions array |  | Optional: \{\} <br /> |
@@ -362,6 +580,31 @@ SandboxClaim is the Schema for the sandbox Claim API.
 | `status` _[SandboxClaimStatus](#sandboxclaimstatus)_ | status defines the observed state of Sandbox |  | Optional: \{\} <br /> |
 
 
+#### SandboxClaimRuntimeAdoptionStatus
+
+
+
+SandboxClaimRuntimeAdoptionStatus binds a claim to its reserved sandbox and runtime attempt.
+This field requires a trusted controller writer and is not workload-supplied authorization.
+
+
+
+_Appears in:_
+- [SandboxClaimStatus](#sandboxclaimstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `sandboxName` _string_ | sandboxName locates the sandbox whose UID is bound by reservation. |  | MaxLength: 253 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `podRef` _[RuntimeAdoptionObjectReference](#runtimeadoptionobjectreference)_ | podRef records the retained Pod verified before the reservation was made. |  | Required: \{\} <br /> |
+| `nodeRef` _[RuntimeAdoptionObjectReference](#runtimeadoptionobjectreference)_ | nodeRef retains the node evidence locator even after Pod deletion. |  | Required: \{\} <br /> |
+| `reservation` _[RuntimeAdoptionReservation](#runtimeadoptionreservation)_ | reservation must exactly match the reserved sandbox's protected status. |  | Required: \{\} <br /> |
+| `grant` _[RuntimeAdoptionGrant](#runtimeadoptiongrant)_ | grant records a UID/resourceVersion-guarded API-side release authorization. |  | Optional: \{\} <br /> |
+| `commitDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | commitDigest identifies the immutable runtime release accepted for this assignment. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Optional: \{\} <br /> |
+| `terminationRequestedTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | terminationRequestedTime requests runtime cleanup while retaining the attempt. |  | Optional: \{\} <br /> |
+| `terminalEvidenceDigest` _[RuntimeAdoptionDigest](#runtimeadoptiondigest)_ | terminalEvidenceDigest identifies the retained node result used for finalization. |  | MaxLength: 71 <br />MinLength: 71 <br />Pattern: `^sha256:[0-9a-f]\{64\}$` <br />Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions report progress for this attempt without clearing its identity. |  | MaxItems: 16 <br />Optional: \{\} <br /> |
+
+
 #### SandboxClaimSpec
 
 
@@ -395,6 +638,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `runtimeAdoption` _[SandboxClaimRuntimeAdoptionStatus](#sandboxclaimruntimeadoptionstatus)_ | runtimeAdoption records the claim controller's single durable warm-adoption attempt.<br />A stored attempt cannot be replaced while its runtime outcome is uncertain. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions represent the latest available observations of a Sandbox's current state. |  | Optional: \{\} <br /> |
 | `sandbox` _[SandboxStatus](#sandboxstatus)_ | sandbox defines the state of Sandbox |  | Optional: \{\} <br /> |
 
@@ -512,6 +756,39 @@ _Appears in:_
 | `name` _string_ | name of the SandboxWarmPool |  | Required: \{\} <br /> |
 
 
+#### SandboxWarmPoolRuntimeAdoption
+
+
+
+SandboxWarmPoolRuntimeAdoption selects the opt-in runtime transfer contract.
+
+
+
+_Appears in:_
+- [SandboxWarmPoolSpec](#sandboxwarmpoolspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mode` _[SandboxWarmPoolRuntimeAdoptionMode](#sandboxwarmpoolruntimeadoptionmode)_ | mode requires identical immutable policy revisions and unused pool initialization.<br />Unsupported modes or runtime capabilities must never fall back to ungated warm adoption. |  | Enum: [SamePolicyFirstClaim] <br />Required: \{\} <br /> |
+
+
+#### SandboxWarmPoolRuntimeAdoptionMode
+
+_Underlying type:_ _string_
+
+SandboxWarmPoolRuntimeAdoptionMode identifies an authenticated warm transfer protocol.
+
+_Validation:_
+- Enum: [SamePolicyFirstClaim]
+
+_Appears in:_
+- [SandboxWarmPoolRuntimeAdoption](#sandboxwarmpoolruntimeadoption)
+
+| Field | Description |
+| --- | --- |
+| `SamePolicyFirstClaim` | SandboxWarmPoolRuntimeAdoptionSamePolicyFirstClaim permits only the first claim of<br />a verified unused pool activation under its exact existing policy revision set.<br /> |
+
+
 #### SandboxWarmPoolSpec
 
 
@@ -525,6 +802,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `runtimeAdoption` _[SandboxWarmPoolRuntimeAdoption](#sandboxwarmpoolruntimeadoption)_ | runtimeAdoption opts this pool into an authenticated runtime transfer protocol.<br />Omission preserves ordinary warm-pool behavior. A configured protocol remains<br />unavailable unless the complete controller and runtime handshake is supported. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox<br />Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant. |  | Required: \{\} <br /> |
 | `updateStrategy` _[SandboxWarmPoolUpdateStrategy](#sandboxwarmpoolupdatestrategy)_ | updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is<br />considered stale when the effective SandboxBlueprint derived from the referenced<br />SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits<br />(annotations or labels) do not make a sandbox stale and never trigger replacement.<br />It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox<br />is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer<br />manages or replaces it.<br />Defaults to OnReplenish. |  | Optional: \{\} <br /> |

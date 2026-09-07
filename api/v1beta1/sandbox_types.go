@@ -337,6 +337,16 @@ type Lifecycle struct {
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
+	// runtimeAdoption retains controller-owned pool origin and exclusive claim reservation.
+	// Core Sandbox reconciliation must preserve it, including after expiry.
+	// +optional
+	RuntimeAdoption *RuntimeAdoptionStatus `json:"runtimeAdoption,omitempty"`
+
+	// runtimeActivationVerification reports current claim-bound GKR evidence.
+	// Only the GKR readiness controller may write this field.
+	// +optional
+	RuntimeActivationVerification *RuntimeActivationVerification `json:"runtimeActivationVerification,omitempty"`
+
 	// serviceFQDN that is valid for default cluster settings
 	// The domain defaults to cluster.local but is configurable via the controller's --cluster-domain flag.
 	// +optional

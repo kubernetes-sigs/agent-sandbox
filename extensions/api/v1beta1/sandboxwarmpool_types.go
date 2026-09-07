@@ -38,6 +38,12 @@ type SandboxTemplateRef struct {
 
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpec struct {
+	// runtimeAdoption opts this pool into an authenticated runtime transfer protocol.
+	// Omission preserves ordinary warm-pool behavior. A configured protocol remains
+	// unavailable unless the complete controller and runtime handshake is supported.
+	// +optional
+	RuntimeAdoption *SandboxWarmPoolRuntimeAdoption `json:"runtimeAdoption,omitempty"`
+
 	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
 	// +optional
@@ -61,6 +67,24 @@ type SandboxWarmPoolSpec struct {
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
 }
+
+// SandboxWarmPoolRuntimeAdoption selects the opt-in runtime transfer contract.
+type SandboxWarmPoolRuntimeAdoption struct {
+	// mode requires identical immutable policy revisions and unused pool initialization.
+	// Unsupported modes or runtime capabilities must never fall back to ungated warm adoption.
+	// +required
+	Mode SandboxWarmPoolRuntimeAdoptionMode `json:"mode"`
+}
+
+// SandboxWarmPoolRuntimeAdoptionMode identifies an authenticated warm transfer protocol.
+// +kubebuilder:validation:Enum=SamePolicyFirstClaim
+type SandboxWarmPoolRuntimeAdoptionMode string
+
+const (
+	// SandboxWarmPoolRuntimeAdoptionSamePolicyFirstClaim permits only the first claim of
+	// a verified unused pool activation under its exact existing policy revision set.
+	SandboxWarmPoolRuntimeAdoptionSamePolicyFirstClaim SandboxWarmPoolRuntimeAdoptionMode = "SamePolicyFirstClaim"
+)
 
 // SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates
 // all possible update strategies for the SandboxWarmPool controller.

@@ -241,6 +241,207 @@ spec:
                   - type
                   type: object
                 type: array
+              runtimeAdoption:
+                properties:
+                  commitDigest:
+                    maxLength: 71
+                    minLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  conditions:
+                    items:
+                      properties:
+                        lastTransitionTime:
+                          format: date-time
+                          type: string
+                        message:
+                          maxLength: 32768
+                          type: string
+                        observedGeneration:
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        reason:
+                          maxLength: 1024
+                          minLength: 1
+                          pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                          type: string
+                        status:
+                          enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                          type: string
+                        type:
+                          maxLength: 316
+                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                          type: string
+                      required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                      type: object
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - type
+                    x-kubernetes-list-type: map
+                  grant:
+                    properties:
+                      contextDigest:
+                        maxLength: 71
+                        minLength: 71
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                      expiresAt:
+                        format: date-time
+                        type: string
+                      grantDigest:
+                        maxLength: 71
+                        minLength: 71
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                      receiptDigest:
+                        maxLength: 71
+                        minLength: 71
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                    required:
+                    - contextDigest
+                    - expiresAt
+                    - receiptDigest
+                    type: object
+                  nodeRef:
+                    properties:
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      uid:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                  podRef:
+                    properties:
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      uid:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                  reservation:
+                    properties:
+                      attemptID:
+                        maxLength: 128
+                        minLength: 16
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      claimGeneration:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      claimIntentDigest:
+                        maxLength: 71
+                        minLength: 71
+                        pattern: ^sha256:[0-9a-f]{64}$
+                        type: string
+                      claimName:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      claimUID:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      expiresAt:
+                        format: date-time
+                        type: string
+                      initializationID:
+                        maxLength: 128
+                        minLength: 16
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      namespaceUID:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      poolUID:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      sandboxUID:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      sourceActivationID:
+                        maxLength: 128
+                        minLength: 16
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      targetActivationID:
+                        maxLength: 128
+                        minLength: 16
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      templateUID:
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                      wireVersion:
+                        enum:
+                        - runtime.gatekeeper.sh/same-policy-adoption/v1alpha1
+                        type: string
+                    required:
+                    - attemptID
+                    - claimGeneration
+                    - claimIntentDigest
+                    - claimName
+                    - claimUID
+                    - expiresAt
+                    - initializationID
+                    - namespace
+                    - namespaceUID
+                    - poolUID
+                    - sandboxUID
+                    - sourceActivationID
+                    - targetActivationID
+                    - templateUID
+                    - wireVersion
+                    type: object
+                  sandboxName:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  terminalEvidenceDigest:
+                    maxLength: 71
+                    minLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  terminationRequestedTime:
+                    format: date-time
+                    type: string
+                required:
+                - nodeRef
+                - podRef
+                - reservation
+                - sandboxName
+                type: object
               sandbox:
                 properties:
                   name:

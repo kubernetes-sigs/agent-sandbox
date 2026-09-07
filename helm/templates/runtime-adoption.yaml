@@ -1,0 +1,54 @@
+{{- if .Values.runtimeAdoption.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-sandbox-runtime-adoption
+  namespace: {{ include "agent-sandbox.namespace" . }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "agent-sandbox.selectorLabels" . | nindent 4 }}
+  ports:
+  - name: https
+    port: 443
+    targetPort: adoption
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ .Values.runtimeAdoption.webhookConfigurationName }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+webhooks:
+- name: runtime-adoption.agents.x-k8s.io
+  admissionReviewVersions: [v1]
+  sideEffects: None
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  timeoutSeconds: 10
+  clientConfig:
+    service:
+      name: agent-sandbox-runtime-adoption
+      namespace: {{ include "agent-sandbox.namespace" . }}
+      path: /validate-runtime-adoption
+      port: 443
+    caBundle: {{ required "runtimeAdoption.caBundle is required" .Values.runtimeAdoption.caBundle | quote }}
+  rules:
+  - apiGroups: [agents.x-k8s.io]
+    apiVersions: [v1beta1]
+    operations: [CREATE, UPDATE, DELETE, CONNECT]
+    resources: [sandboxes, sandboxes/status]
+  - apiGroups: [extensions.agents.x-k8s.io]
+    apiVersions: [v1beta1]
+    operations: [CREATE, UPDATE, DELETE, CONNECT]
+    resources: [sandboxclaims, sandboxclaims/status]
+  - apiGroups: [""]
+    apiVersions: [v1]
+    operations: [CREATE, UPDATE, DELETE, CONNECT]
+    resources: [pods, pods/status, pods/ephemeralcontainers, pods/resize, pods/eviction, pods/exec, pods/attach, pods/portforward]
+  - apiGroups: [runtime.gatekeeper.sh]
+    apiVersions: [v1alpha1]
+    operations: [CREATE, UPDATE, DELETE, CONNECT]
+    resources: [runtimepolicynodestatuses, runtimepolicynodestatuses/status]
+{{- end }}

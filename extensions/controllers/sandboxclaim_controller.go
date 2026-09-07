@@ -76,6 +76,9 @@ var ErrInvalidMetadata = errors.New("invalid additionalPodMetadata")
 // ErrSandboxNotOwned indicates the Sandbox exists but is not controlled by this claim.
 var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 
+// ErrRuntimeAdoptionUnavailable keeps legacy adoption from bypassing the runtime handshake.
+var ErrRuntimeAdoptionUnavailable = errors.New("authenticated runtime adoption is not available")
+
 // ErrWarmPoolNotFound is a sentinel error indicating a SandboxWarmPool was not found.
 var ErrWarmPoolNotFound = errors.New("SandboxWarmPool not found")
 
@@ -196,6 +199,10 @@ type SandboxClaimReconciler struct {
 	// startup-latency metric for claims first observed by the previous
 	// process. Wired to --disable-claim-observability-annotations.
 	DisableObservabilityAnnotations bool
+	// RuntimeAdoptionEnabled is platform admission availability, not pool opt-in.
+	// A pool must also select the typed mode and its node must be qualified.
+	RuntimeAdoptionEnabled     bool
+	RuntimeAdoptionWebhookName string
 }
 
 //+kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
@@ -243,6 +250,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	ctx, end := r.Tracer.StartSpan(ctx, claim, "ReconcileSandboxClaim", initialAttrs)
 	defer end()
+	if err := r.recoverEmptyRuntimePreparation(ctx, claim); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if claim.Status.RuntimeAdoption != nil {
+		return r.reconcileRuntimeAdoptionClaim(ctx, claim)
+	}
 
 	if !claim.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
@@ -410,6 +423,10 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Suppress user configuration and validation errors to avoid crash loops
+	if errors.Is(reconcileErr, errRuntimeAdoptionPending) {
+		return ctrl.Result{RequeueAfter: runtimeAdoptionRetryInterval}, metricsErr
+	}
+
 	if shouldSuppressError(reconcileErr) {
 		logger.V(1).Info("Sandboxclaim suppressed error(s) encountered", "error", reconcileErr, "request", req.NamespacedName)
 		// Still surface metricsErr so the annotation guard is retried; the
@@ -690,6 +707,19 @@ func (r *SandboxClaimReconciler) updateStatus(ctx context.Context, oldStatus *ex
 func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) metav1.Condition {
 	if err != nil {
 		reason := "ReconcilerError"
+		if errors.Is(err, errRuntimeAdoptionPending) {
+			return metav1.Condition{Type: string(v1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+				Reason: "RuntimeAdoptionPending", Message: "Waiting for authenticated claim activation", ObservedGeneration: claim.Generation}
+		}
+		if errors.Is(err, ErrRuntimeAdoptionUnavailable) {
+			return metav1.Condition{
+				Type:               string(v1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             "RuntimeAdoptionUnavailable",
+				Message:            "The authenticated runtime adoption handshake is not available",
+				ObservedGeneration: claim.Generation,
+			}
+		}
 		if errors.Is(err, ErrTemplateNotFound) {
 			reason = "TemplateNotFound"
 			msg := strings.TrimSuffix(err.Error(), ": "+ErrTemplateNotFound.Error())
@@ -806,6 +836,9 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 			ObservedGeneration: claim.Generation,
 		}
 	}
+	if (claim.Status.RuntimeAdoption != nil || hasRuntimeAdoptionData(sandbox)) && !runtimeAdoptionVerified(claim, sandbox, time.Now()) {
+		return r.computeReadyCondition(claim, sandbox, ErrRuntimeAdoptionUnavailable, isClaimExpired)
+	}
 
 	// Check if Core Controller marked it as Expired
 	if hasSandboxExpiredCondition(sandbox.Status.Conditions) {
@@ -838,7 +871,7 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) {
 	// Cache-lag retry is a benign look-again: if status already records a
 	// sandbox Name, leave it and the conditions untouched instead of wiping them.
-	if sandbox == nil && errors.Is(err, errSandboxAlreadyExists) && claim.Status.SandboxStatus.Name != "" {
+	if sandbox == nil && errors.Is(err, errSandboxAlreadyExists) && claim.Status.SandboxStatus.Name != "" && claim.Status.RuntimeAdoption == nil {
 		return
 	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
@@ -1042,6 +1075,13 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			}
 			continue
 		}
+		strict, err := strictRuntimeSandbox(ctx, r.authoritativeReader(), adopted)
+		if err != nil {
+			return nil, queue.SandboxKey{}, pendingNetworkCandidates, err
+		}
+		if strict {
+			continue
+		}
 
 		// Enforce blueprint version consistency only under the Recreate strategy (issue #764).
 		recreate, expectedHash, expectedTemplate, err := resolveRecreate()
@@ -1109,6 +1149,17 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (*v1beta1.Sandbox, int, error) {
 	logger := log.FromContext(ctx)
 	namespacedWarmPoolNameForQueue := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
+
+	pool, err := r.getWarmPool(ctx, claim)
+	if err != nil {
+		if errors.Is(err, ErrWarmPoolNotFound) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	if pool.Spec.RuntimeAdoption != nil || claim.Status.RuntimeAdoption != nil {
+		return nil, 0, ErrRuntimeAdoptionUnavailable
+	}
 
 	// Keep trying until we successfully adopt a sandbox, or run out of candidates
 	for range 3 {
@@ -1208,6 +1259,24 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 }
 
 func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, adopted *v1beta1.Sandbox) error {
+	if claim.Status.RuntimeAdoption != nil || hasRuntimeAdoptionData(adopted) {
+		return ErrRuntimeAdoptionUnavailable
+	}
+	strict, err := strictRuntimeSandbox(ctx, r.authoritativeReader(), adopted)
+	if err != nil {
+		return err
+	}
+	if strict {
+		return ErrRuntimeAdoptionUnavailable
+	}
+	pool, err := r.getWarmPool(ctx, claim)
+	if err != nil {
+		return err
+	}
+	if pool.Spec.RuntimeAdoption != nil {
+		return ErrRuntimeAdoptionUnavailable
+	}
+
 	// Take a snapshot of the sandbox BEFORE we mutate it to generate a clean JSON Patch.
 	originalAdopted := adopted.DeepCopy()
 
@@ -1380,6 +1449,9 @@ func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, cl
 		if fresh.UID != claim.UID {
 			return false, fmt.Errorf("%w: claim %s was deleted and recreated during adoption", errAdoptionConflict, claim.Name)
 		}
+		if fresh.Status.RuntimeAdoption != nil {
+			return false, ErrRuntimeAdoptionUnavailable
+		}
 		if assigned := fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation]; assigned != "" && assigned != sandboxName {
 			// A different sandbox is already recorded on the authoritative
 			// object; do not overwrite it. The annotation-recovery path of the
@@ -1409,6 +1481,16 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 		fresh := &v1beta1.Sandbox{}
 		if err := reader.Get(ctx, key, fresh); err != nil {
 			return err
+		}
+		if claim.Status.RuntimeAdoption != nil || hasRuntimeAdoptionData(fresh) {
+			return ErrRuntimeAdoptionUnavailable
+		}
+		strict, err := strictRuntimeSandbox(ctx, reader, fresh)
+		if err != nil {
+			return err
+		}
+		if strict {
+			return ErrRuntimeAdoptionUnavailable
 		}
 		if metav1.IsControlledBy(fresh, claim) {
 			// Already complete on the server; nothing left to write.
@@ -1472,12 +1554,18 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 // the label as the assigned reference) on a fresh claim base, guarded to the
 // exact reference being cleaned.
 func (r *SandboxClaimReconciler) removeAssignedSandboxReference(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) error {
+	if claim.Status.RuntimeAdoption != nil {
+		return ErrRuntimeAdoptionUnavailable
+	}
 	// A deleted or recreated claim leaves nothing to clean and must not be
 	// copied back over this pass's object.
 	errClaimGone := errors.New("claim gone")
 	err := r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
 		if fresh.UID != claim.UID {
 			return false, errClaimGone
+		}
+		if fresh.Status.RuntimeAdoption != nil {
+			return false, ErrRuntimeAdoptionUnavailable
 		}
 		annotationMatches := fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] == sandboxName
 		labelMatches := fresh.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] == sandboxName
@@ -1820,6 +1908,16 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 				logger.Error(collisionErr, "Sandbox controller mismatch", "claim", claim.Name, "sandbox", liveSandbox.Name)
 				return nil, collisionErr
 			}
+			if hasRuntimeAdoptionData(liveSandbox) || claim.Status.RuntimeAdoption != nil {
+				return nil, ErrRuntimeAdoptionUnavailable
+			}
+			strict, err := strictRuntimeSandbox(ctx, r.authoritativeReader(), liveSandbox)
+			if err != nil {
+				return nil, err
+			}
+			if strict && liveSandbox.Labels[v1beta1.SandboxLaunchTypeLabel] != v1beta1.SandboxLaunchTypeCold {
+				return nil, ErrRuntimeAdoptionUnavailable
+			}
 			logger.V(4).Info("Recovered just-created sandbox via authoritative read after AlreadyExists", "claim", claim.Name, "sandbox", liveSandbox.Name)
 			return liveSandbox, nil
 		}
@@ -1947,6 +2045,14 @@ func warmCandidateRetryAfter(claim *extensionsv1beta1.SandboxClaim, now time.Tim
 func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, _ *extensionsv1beta1.SandboxTemplate) (*v1beta1.Sandbox, error) {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Executing getOrCreateSandbox", "claim", claim.Name)
+
+	if claim.Status.RuntimeAdoption != nil {
+		return nil, errRuntimeAdoptionPending
+	}
+	pool, poolErr := r.getWarmPool(ctx, claim)
+	if poolErr == nil && pool.Spec.RuntimeAdoption != nil {
+		return r.getOrCreateRuntimeAdoptionSandbox(ctx, claim, pool)
+	}
 
 	// Check if a previously adopted sandbox is recorded in claim status
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
@@ -2144,6 +2250,16 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 }
 
 func (r *SandboxClaimReconciler) initializeSandboxLaunchTypeLabel(ctx context.Context, sandbox *v1beta1.Sandbox, launchType string) error {
+	if hasRuntimeAdoptionData(sandbox) {
+		return ErrRuntimeAdoptionUnavailable
+	}
+	strict, err := strictRuntimeSandbox(ctx, r.authoritativeReader(), sandbox)
+	if err != nil {
+		return err
+	}
+	if strict && (launchType != v1beta1.SandboxLaunchTypeCold || sandbox.Labels[v1beta1.SandboxLaunchTypeLabel] != v1beta1.SandboxLaunchTypeCold) {
+		return ErrRuntimeAdoptionUnavailable
+	}
 	if sandbox.Labels != nil {
 		if _, ok := sandbox.Labels[v1beta1.SandboxLaunchTypeLabel]; ok {
 			return nil
@@ -2390,6 +2506,10 @@ func sandboxTemplateCreatePredicate() predicate.Funcs {
 // adoption-hardening direction in #1229) will not fire until this predicate is
 // widened to admit the relevant metadata change.
 func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
+	if !equality.Semantic.DeepEqual(oldSb.Status.RuntimeAdoption, newSb.Status.RuntimeAdoption) ||
+		!equality.Semantic.DeepEqual(oldSb.Status.RuntimeActivationVerification, newSb.Status.RuntimeActivationVerification) {
+		return true
+	}
 	if oldSb.DeletionTimestamp.IsZero() != newSb.DeletionTimestamp.IsZero() {
 		return true
 	}
@@ -2448,6 +2568,7 @@ func (r *SandboxClaimReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWo
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&extensionsv1beta1.SandboxClaim{}, builder.WithPredicates(r.getTimingPredicate())).
 		Owns(&v1beta1.Sandbox{}, builder.WithPredicates(sandboxOwnsPredicate)).
+		Watches(&v1beta1.Sandbox{}, handler.EnqueueRequestsFromMapFunc(r.mapReservedSandboxToClaim)).
 		Watches(&v1beta1.Sandbox{}, &sandboxEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(&extensionsv1beta1.SandboxWarmPool{}, &warmPoolEventHandler{sandboxQueue: r.WarmSandboxQueue}).
 		Watches(
@@ -2771,6 +2892,9 @@ func verifySandboxCandidate(candidate *v1beta1.Sandbox, claim *extensionsv1beta1
 // MUST NOT be checked here; failures in isAdoptable trigger permanent queue
 // eviction and premature claim unassignments. Transient checks belong in getCandidate.
 func isAdoptable(candidate *v1beta1.Sandbox) error {
+	if hasRuntimeAdoptionData(candidate) {
+		return ErrRuntimeAdoptionUnavailable
+	}
 	if !candidate.DeletionTimestamp.IsZero() {
 		return fmt.Errorf("sandbox is deleted")
 	}
@@ -2793,6 +2917,27 @@ func isAdoptable(candidate *v1beta1.Sandbox) error {
 		return fmt.Errorf("sandbox %s/%s is not managed by warm pool. Controller: %v", candidate.Namespace, candidate.Name, controllerRef)
 	}
 	return nil
+}
+
+func hasRuntimeAdoptionData(candidate *v1beta1.Sandbox) bool {
+	return candidate.Status.RuntimeAdoption != nil || candidate.Status.RuntimeActivationVerification != nil
+}
+
+// runtimeAdoptionProtected distinguishes untouched pool initialization from a
+// reservation or outcome whose execution belongs to the adoption protocol.
+func runtimeAdoptionProtected(candidate *v1beta1.Sandbox) bool {
+	return runtimeAdoptionHasFinalizer(candidate) || runtimeAdoptionStateProtected(candidate)
+}
+
+func runtimeAdoptionStateProtected(candidate *v1beta1.Sandbox) bool {
+	if candidate.Status.RuntimeActivationVerification != nil {
+		return true
+	}
+	adoption := candidate.Status.RuntimeAdoption
+	return adoption != nil && (adoption.Reservation != nil || adoption.Consumed != nil ||
+		adoption.Grant != nil || adoption.TargetMetadataDigest != "" || adoption.HoldEvidenceDigest != "" ||
+		adoption.CommitDigest != "" || adoption.TerminationRequestedTime != nil ||
+		adoption.TerminalEvidenceDigest != "" || len(adoption.Conditions) != 0)
 }
 
 func (h *sandboxEventHandler) Delete(ctx context.Context, e event.DeleteEvent, _ workqueue.TypedRateLimitingInterface[reconcile.Request]) {

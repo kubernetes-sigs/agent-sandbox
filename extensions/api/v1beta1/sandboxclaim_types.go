@@ -140,6 +140,11 @@ type SandboxClaimSpec struct {
 
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatus struct {
+	// runtimeAdoption records the claim controller's single durable warm-adoption attempt.
+	// A stored attempt cannot be replaced while its runtime outcome is uncertain.
+	// +optional
+	RuntimeAdoption *SandboxClaimRuntimeAdoptionStatus `json:"runtimeAdoption,omitempty"`
+
 	// conditions represent the latest available observations of a Sandbox's current state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -147,6 +152,51 @@ type SandboxClaimStatus struct {
 	// sandbox defines the state of Sandbox
 	// +optional
 	SandboxStatus SandboxStatus `json:"sandbox,omitempty"`
+}
+
+// SandboxClaimRuntimeAdoptionStatus binds a claim to its reserved sandbox and runtime attempt.
+// This field requires a trusted controller writer and is not workload-supplied authorization.
+type SandboxClaimRuntimeAdoptionStatus struct {
+	// sandboxName locates the sandbox whose UID is bound by reservation.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SandboxName string `json:"sandboxName"`
+
+	// podRef records the retained Pod verified before the reservation was made.
+	// +required
+	PodRef sandboxv1beta1.RuntimeAdoptionObjectReference `json:"podRef"`
+
+	// nodeRef retains the node evidence locator even after Pod deletion.
+	// +required
+	NodeRef sandboxv1beta1.RuntimeAdoptionObjectReference `json:"nodeRef"`
+
+	// reservation must exactly match the reserved sandbox's protected status.
+	// +required
+	Reservation sandboxv1beta1.RuntimeAdoptionReservation `json:"reservation"`
+
+	// grant records a UID/resourceVersion-guarded API-side release authorization.
+	// +optional
+	Grant *sandboxv1beta1.RuntimeAdoptionGrant `json:"grant,omitempty"`
+
+	// commitDigest identifies the immutable runtime release accepted for this assignment.
+	// +optional
+	CommitDigest sandboxv1beta1.RuntimeAdoptionDigest `json:"commitDigest,omitempty"`
+
+	// terminationRequestedTime requests runtime cleanup while retaining the attempt.
+	// +optional
+	TerminationRequestedTime *metav1.Time `json:"terminationRequestedTime,omitempty"`
+
+	// terminalEvidenceDigest identifies the retained node result used for finalization.
+	// +optional
+	TerminalEvidenceDigest sandboxv1beta1.RuntimeAdoptionDigest `json:"terminalEvidenceDigest,omitempty"`
+
+	// conditions report progress for this attempt without clearing its identity.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=16
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 type SandboxStatus struct {

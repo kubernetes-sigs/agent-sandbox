@@ -1,0 +1,419 @@
+[
+  {
+    "name": "implicit-managed",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ]
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ]
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsPolicy": "None",
+      "automountServiceAccountToken": false,
+      "dnsConfig": {
+        "nameservers": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ]
+      }
+    }
+  },
+  {
+    "name": "explicit-managed",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ]
+          },
+          "metadata": {}
+        },
+        "networkPolicyManagement": "Managed"
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ]
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsPolicy": "None",
+      "automountServiceAccountToken": false,
+      "dnsConfig": {
+        "nameservers": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ]
+      }
+    }
+  },
+  {
+    "name": "empty-network-policy",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ]
+          },
+          "metadata": {}
+        },
+        "networkPolicy": {}
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ]
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "automountServiceAccountToken": false
+    }
+  },
+  {
+    "name": "unmanaged",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ]
+          },
+          "metadata": {}
+        },
+        "networkPolicyManagement": "Unmanaged"
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ]
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "automountServiceAccountToken": false
+    }
+  },
+  {
+    "name": "explicit-dns-policy",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ],
+            "dnsPolicy": "ClusterFirst"
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsPolicy": "ClusterFirst"
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsPolicy": "ClusterFirst",
+      "automountServiceAccountToken": false
+    }
+  },
+  {
+    "name": "explicit-dns-config-empty-policy",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ],
+            "dnsConfig": {
+              "nameservers": [
+                "192.0.2.53"
+              ],
+              "searches": [
+                "example.invalid"
+              ],
+              "options": [
+                {
+                  "name": "ndots",
+                  "value": "1"
+                }
+              ]
+            }
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsConfig": {
+        "nameservers": [
+          "192.0.2.53"
+        ],
+        "searches": [
+          "example.invalid"
+        ],
+        "options": [
+          {
+            "name": "ndots",
+            "value": "1"
+          }
+        ]
+      }
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsPolicy": "None",
+      "automountServiceAccountToken": false,
+      "dnsConfig": {
+        "nameservers": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ]
+      }
+    }
+  },
+  {
+    "name": "automount-true",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ],
+            "automountServiceAccountToken": true
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "automountServiceAccountToken": true
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsPolicy": "None",
+      "automountServiceAccountToken": true,
+      "dnsConfig": {
+        "nameservers": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ]
+      }
+    }
+  },
+  {
+    "name": "automount-false",
+    "template": {
+      "metadata": {
+        "name": "template",
+        "namespace": "agents",
+        "uid": "template-uid"
+      },
+      "spec": {
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "agent",
+                "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                "resources": {}
+              }
+            ],
+            "automountServiceAccountToken": false
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "podSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "automountServiceAccountToken": false
+    },
+    "expectedPodSpec": {
+      "containers": [
+        {
+          "name": "agent",
+          "image": "example.invalid/agent@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "resources": {}
+        }
+      ],
+      "dnsPolicy": "None",
+      "automountServiceAccountToken": false,
+      "dnsConfig": {
+        "nameservers": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ]
+      }
+    }
+  }
+]

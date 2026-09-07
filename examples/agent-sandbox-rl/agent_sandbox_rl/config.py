@@ -232,7 +232,9 @@ class FleetConfig(BaseModel):
     try:
       sample = self.pool_name_format.format(template=sample_template,
                                             image_hash=sample_hash)
-    except (KeyError, IndexError) as e:
+    except (KeyError, IndexError, ValueError) as e:
+      # ValueError too: an unmatched brace ("pool-{template") raises it from
+      # str.format, and it should get this actionable message, not escape raw.
       raise ValueError(
           "pool_name_format may only reference {template} and {image_hash} "
           f"(use {{{{ }}}} for a literal brace); got {self.pool_name_format!r}") from e
@@ -275,4 +277,4 @@ class FleetConfig(BaseModel):
     the SDK that names a pool goes through here."""
     h = self.image_hash(image)
     return self.pool_name_format.format(
-        template=f"{self.template_name_prefix}{h}", image_hash=h)
+        template=self.template_name(image), image_hash=h)

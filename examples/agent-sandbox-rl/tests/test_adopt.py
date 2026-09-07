@@ -28,6 +28,7 @@ from agent_sandbox_rl import (
     ClusterRegistry,
     FleetConfig,
     FleetError,
+    FleetOvercommitError,
     PoolNotFoundError,
     SandboxFleet,
     Task,
@@ -99,6 +100,23 @@ def test_pool_name_format_unknown_placeholder_is_rejected():
     FleetConfig(pool_name_format="{cluster}-{template}")
 
 
+def test_pool_name_format_unmatched_brace_gets_the_actionable_message():
+  # str.format raises ValueError (not KeyError) for "pool-{template", and it
+  # must land in the same guidance as the other malformed formats.
+  with pytest.raises(ValueError, match="literal brace"):
+    FleetConfig(pool_name_format="pool-{template")
+
+
+def test_pool_name_derives_from_template_name():
+  # pool_name() must go through template_name(), not re-derive the prefix+hash
+  # scheme, so a subclass overriding one cannot diverge from the other.
+  class Custom(FleetConfig):
+    def template_name(self, image):
+      return "custom-name"
+  cfg = Custom(pool_name_format="{template}-pool")
+  assert cfg.pool_name(IMG_A) == "custom-name-pool"
+
+
 def test_pool_name_format_must_render_a_valid_object_name():
   with pytest.raises(ValueError, match="DNS-1123"):
     FleetConfig(pool_name_format="Pool_{template}")
@@ -156,6 +174,30 @@ def test_discover_pools_skips_a_pool_whose_template_is_gone():
 def test_discover_pools_reads_the_first_container_when_unnamed():
   # A template written by something else need not use our container name.
   r = _resources_with([_pool("p", "t", 1)], [_tmpl("t", IMG_A, container="main")])
+  assert r.discover_pools()[IMG_A].pool == "p"
+
+
+def test_discover_pools_skips_multi_container_without_runtime_name(caplog):
+  # A PodSpec has no primary-container order: with several containers and none
+  # named RUNTIME_CONTAINER, containers[0] is as likely the istio sidecar as
+  # the task image, and adopting on a sidecar's image routes tasks to a pool
+  # running the wrong thing. Skip, loudly.
+  tmpl = {"metadata": {"name": "t"},
+          "spec": {"podTemplate": {"spec": {"containers": [
+              {"name": "istio-proxy", "image": "sidecar:v1"},
+              {"name": "main", "image": IMG_A}]}}}}
+  r = _resources_with([_pool("p", "t", 1)], [tmpl])
+  with caplog.at_level(logging.WARNING, logger="agent_sandbox_rl.resources"):
+    assert r.discover_pools() == {}
+  assert "cannot tell the task image" in caplog.text
+
+
+def test_discover_pools_multi_container_with_runtime_name_still_works():
+  tmpl = {"metadata": {"name": "t"},
+          "spec": {"podTemplate": {"spec": {"containers": [
+              {"name": "istio-proxy", "image": "sidecar:v1"},
+              {"name": constants.RUNTIME_CONTAINER, "image": IMG_A}]}}}}
+  r = _resources_with([_pool("p", "t", 1)], [tmpl])
   assert r.discover_pools()[IMG_A].pool == "p"
 
 
@@ -332,3 +374,48 @@ def test_adopt_end_to_end_run(make_cluster):
   assert claimed == {_fleet_style(f.config, IMG_A), _fleet_style(f.config, IMG_B)}
   c.resources.create_warmpool.assert_not_called()
   c.resources.delete_warmpool.assert_not_called()
+
+
+# --- 4. max_live_sandboxes is enforced synchronously ---------------------- #
+# The async breaker counts pods carrying this run's label. Adopted pods carry
+# the provisioner's labels instead, so in adopt mode that count is
+# structurally ~0 and neither ceiling could ever fire — the hard cap has to be
+# a reservation taken before the claim is created.
+
+def test_adopt_acquire_enforces_max_live_sandboxes(make_cluster):
+  c = make_cluster("solo")
+  f = _adopt_fleet(ClusterRegistry([c]), max_live_sandboxes=2)
+  _seed(c, f.config, IMG_A)
+  f.load_tasks([IMG_A])
+  f.plan()
+  h1 = f.acquire(Task(id="t1", image=IMG_A))
+  f.acquire(Task(id="t2", image=IMG_A))
+  with pytest.raises(FleetOvercommitError, match="max_live_sandboxes=2"):
+    f.acquire(Task(id="t3", image=IMG_A))
+  # releasing a handle frees its slot
+  f.release(h1)
+  f.acquire(Task(id="t4", image=IMG_A))
+
+
+def test_a_failed_acquire_releases_its_reservation(make_cluster):
+  c = make_cluster("solo")
+  f = _adopt_fleet(ClusterRegistry([c]), max_live_sandboxes=1)
+  _seed(c, f.config, IMG_A)
+  f.load_tasks([IMG_A])
+  f.plan()
+  c.sandbox_client.create_sandbox.side_effect = RuntimeError("apiserver said no")
+  with pytest.raises(RuntimeError):
+    f.acquire(Task(id="t1", image=IMG_A))
+  # the failed attempt must not consume the only slot
+  c.sandbox_client.create_sandbox.side_effect = c._make_sandbox
+  f.acquire(Task(id="t2", image=IMG_A))
+
+
+def test_max_live_sandboxes_also_gates_non_adopt_acquire(make_cluster):
+  # Same reservation, all modes: the cap is now synchronous everywhere, with
+  # the async breaker kept as the runaway-pod detector.
+  c = make_cluster("solo")
+  f = SandboxFleet(FleetConfig(max_live_sandboxes=1), registry=ClusterRegistry([c]))
+  f.acquire(Task(id="t1", image=IMG_A))
+  with pytest.raises(FleetOvercommitError):
+    f.acquire(Task(id="t2", image=IMG_A))

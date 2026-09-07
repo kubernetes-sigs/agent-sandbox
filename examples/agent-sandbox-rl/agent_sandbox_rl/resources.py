@@ -492,7 +492,20 @@ class Resources:
       if not name or not containers:
         continue
       chosen = next((c for c in containers
-                     if c.get("name") == constants.RUNTIME_CONTAINER), containers[0])
+                     if c.get("name") == constants.RUNTIME_CONTAINER), None)
+      if chosen is None:
+        if len(containers) != 1:
+          # A PodSpec has no primary-container order. With several containers
+          # and none named RUNTIME_CONTAINER, containers[0] is as likely a
+          # sidecar as the task image, and adopting on a sidecar's image
+          # routes tasks to a pool running the wrong thing. Skip it — an
+          # unmatchable template is better than a wrongly-matched one.
+          logger.warning(
+              "template %s has %d containers and none named %r; cannot tell "
+              "the task image from a sidecar — skipping it for adoption",
+              name, len(containers), constants.RUNTIME_CONTAINER)
+          continue
+        chosen = containers[0]
       image = chosen.get("image")
       if image:
         out[name] = image

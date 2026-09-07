@@ -42,7 +42,9 @@ KEEPALIVE_COMMAND = ["sleep", "infinity"]
 # template. Also the container `discover_pools` reads back to work out which
 # image an existing pool serves; a template written by something else (the fleet
 # layer, a platform team) may name it differently, in which case the first
-# container is used.
+# container is used — but only when it is the ONLY container. A multi-container
+# template with no container by this name gives no way to tell the task image
+# from a sidecar, and is skipped for adoption rather than guessed at.
 RUNTIME_CONTAINER = "agent-runtime"
 
 # Default label applied to every resource this package creates (for listing +

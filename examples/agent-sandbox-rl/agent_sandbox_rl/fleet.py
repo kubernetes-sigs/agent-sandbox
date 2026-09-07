@@ -148,6 +148,12 @@ class SandboxFleet:
     self.tasks: list[Task] = []
     self.plan_: FleetPlan | None = None
     self._handles: list[SandboxHandle] = []
+    # Claims live or in flight on this fleet, counted SYNCHRONOUSLY (reserved
+    # in acquire() before the remote create, released on failure/release). The
+    # async pod-count breaker cannot enforce max_live_sandboxes in adopt mode
+    # — adopted pods carry the provisioner's labels, not this run's — so this
+    # counter is what makes the hard cap real there.
+    self._claims_reserved = 0
     self._warmed: dict[str, int] = {}        # image -> replicas currently warmed
     self._ondemand: set[tuple[str, str]] = set()   # (cluster, image) pools made via acquire()
     # (cluster, name) of pools/templates adopted under `adopt_existing`. Someone
@@ -219,8 +225,11 @@ class SandboxFleet:
       # misleading: an adopted plan's `total_replicas` is the provisioner's depth
       # (large), while `live_owned_count` sees only pods carrying THIS run's
       # label — of which adoption creates none. Ceiling × 1.5 against a count
-      # that is structurally ~0 is a breaker that cannot fire. Only an explicit
-      # `max_live_sandboxes` still applies.
+      # that is structurally ~0 is a breaker that cannot fire — and for the
+      # same reason the hard ceiling cannot fire HERE either. In adopt mode
+      # `max_live_sandboxes` is enforced synchronously by the claim
+      # reservation in acquire(); this thread stays useful only as a runaway
+      # detector for pods that DO carry the run label.
       expected = 0
     ceilings = []
     if factor and factor > 0 and expected > 0:
@@ -967,7 +976,31 @@ class SandboxFleet:
     On any failure between claim creation and bookkeeping, the partially-created
     sandbox is terminated and the on-demand replica bump is rolled back, so a
     failed acquire leaks neither a remote sandbox nor capacity counters.
+
+    ``max_live_sandboxes`` is enforced HERE, synchronously, before anything
+    remote happens. The async pod-count breaker keys off this run's pod label,
+    which adopted pods do not carry, so in ``adopt_existing`` mode this
+    reservation is the only thing standing between the harness and an
+    unbounded claim count.
     """
+    with self._lock:
+      hard = self.config.max_live_sandboxes
+      if hard and self._claims_reserved >= hard:
+        raise FleetOvercommitError(
+            f"max_live_sandboxes={hard} reached: {self._claims_reserved} claims "
+            "live or in flight on this fleet. Release handles before acquiring "
+            "more, or raise the limit.")
+      self._claims_reserved += 1
+    try:
+      return self._acquire_reserved(task)
+    except Exception:
+      with self._lock:
+        self._claims_reserved = max(0, self._claims_reserved - 1)
+      raise
+
+  def _acquire_reserved(self, task: Task) -> SandboxHandle:
+    # Body of acquire(); the caller holds one slot in _claims_reserved and
+    # releases it if this raises.
     entry = self.plan_.for_image(task.image) if self.plan_ else None
     on_demand = entry is None
     if not on_demand:
@@ -1072,6 +1105,7 @@ class SandboxFleet:
       if handle not in self._handles:
         return
       self._handles.remove(handle)
+      self._claims_reserved = max(0, self._claims_reserved - 1)
       c = self.registry.get(handle.cluster_name)
     c.release_claim()
     with self._obs.phase("release", cluster=handle.cluster_name):

@@ -47,7 +47,6 @@ from .claim_adoption import (
 from .claim_ownership import (
     ClaimLookupOperation,
     ClaimOwnership,
-    ExplicitClaimOperations,
 )
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
@@ -199,8 +198,6 @@ class SandboxClient(Generic[T]):
         key = (namespace, claim_name)
         cleanup_generated_claim = generated_claim_name
         claim_uid = None
-        explicit_ownership_committed = not generated_claim_name
-        explicit_operation: ExplicitClaimOperations | None = None
         adopted_sandbox_id = None
         claim_validator = None
         validate_expected_claim = None
@@ -219,7 +216,7 @@ class SandboxClient(Generic[T]):
         with self._lock:
             expected_handle = self._active_connection_sandboxes.get(key)
             if not generated_claim_name:
-                explicit_operation = self._claim_ownership.begin_explicit(key)
+                self._claim_ownership.mark_caller_owned(key)
         sandbox: T | None = None
         try:
             try:
@@ -252,8 +249,6 @@ class SandboxClient(Generic[T]):
             except ApiException as error:
                 if generated_claim_name and error.status == 409:
                     cleanup_generated_claim = False
-                if not generated_claim_name and error.status == 409:
-                    explicit_ownership_committed = False
                 if not (adopt_existing and error.status == 409):
                     raise
                 existing_claim = self.k8s_helper.get_sandbox_claim(
@@ -267,7 +262,6 @@ class SandboxClient(Generic[T]):
                 assert validate_expected_claim is not None
                 claim_identity = validate_expected_claim(existing_claim)
                 claim_uid = claim_identity.uid
-                explicit_ownership_committed = True
                 claim_rv = claim_identity.resource_version
                 claim_validator = partial(
                     validate_expected_claim,
@@ -306,7 +300,6 @@ class SandboxClient(Generic[T]):
                 sandbox,
                 generated_claim_name,
                 expected_handle,
-                explicit_operation,
                 claim_uid,
             )
         except Exception:
@@ -317,12 +310,6 @@ class SandboxClient(Generic[T]):
                 cleanup_generated_claim,
             )
             raise
-        finally:
-            if not generated_claim_name:
-                assert explicit_operation is not None
-                self._finish_explicit_claim_operation(
-                    key, explicit_operation, explicit_ownership_committed
-                )
 
     def _register_created_handle(
         self,
@@ -330,43 +317,44 @@ class SandboxClient(Generic[T]):
         sandbox: T,
         generated_claim_name: bool,
         expected_handle: T | None,
-        explicit_operation: ExplicitClaimOperations | None,
         claim_uid: str | None,
     ) -> T:
-        """Register one handle without leaking or reversing explicit ownership."""
+        """Register one handle and close superseded handles outside the lock."""
+        stale_handles: list[T] = []
+        result: T | None = None
+        concurrent_change = False
         with self._lock:
-            if (
-                explicit_operation is not None
-                and not self._claim_ownership.explicit_is_valid(
-                    key, explicit_operation
-                )
-            ):
-                raise self._concurrent_claim_change(key)
             current_handle = self._active_connection_sandboxes.get(key)
             if current_handle is not expected_handle:
                 if expected_handle is not None:
-                    self._detach_handle_best_effort(
-                        key, expected_handle, retire=True
-                    )
+                    stale_handles.append(expected_handle)
                 if self._handle_matches_claim(
                     key, current_handle, sandbox, claim_uid
                 ):
-                    self._detach_handle_best_effort(key, sandbox, retire=True)
-                    return current_handle
-                self._detach_handle_best_effort(key, sandbox, retire=True)
-                raise self._concurrent_claim_change(key)
-            if self._handle_matches_claim(key, current_handle, sandbox, claim_uid):
-                self._detach_handle_best_effort(key, sandbox, retire=True)
-                return current_handle
-            if current_handle is not None:
-                self._detach_handle_best_effort(
-                    key, current_handle, retire=True
-                )
-            self._active_connection_sandboxes[key] = sandbox
-            self._active_claim_uids[key] = claim_uid
-            if generated_claim_name:
-                self._claim_ownership.register_automatic(key, claim_uid)
-            return sandbox
+                    stale_handles.append(sandbox)
+                    result = current_handle
+                else:
+                    concurrent_change = True
+            elif self._handle_matches_claim(
+                key, current_handle, sandbox, claim_uid
+            ):
+                stale_handles.append(sandbox)
+                result = current_handle
+            else:
+                if current_handle is not None:
+                    stale_handles.append(current_handle)
+                self._active_connection_sandboxes[key] = sandbox
+                self._active_claim_uids[key] = claim_uid
+                if generated_claim_name:
+                    self._claim_ownership.register_automatic(key, claim_uid)
+                result = sandbox
+
+        for stale_handle in stale_handles:
+            self._close_handle_best_effort(stale_handle, retire=True)
+        if concurrent_change:
+            raise self._concurrent_claim_change(key)
+        assert result is not None
+        return result
 
     def _handle_matches_claim(
         self, key: Tuple[str, str], current: T | None, candidate: T, uid: str | None
@@ -388,34 +376,6 @@ class SandboxClient(Generic[T]):
             and self._active_claim_uids.get(key) == uid
         )
 
-    def _finish_explicit_claim_operation(
-        self,
-        key: Tuple[str, str],
-        operation: ExplicitClaimOperations,
-        committed: bool,
-    ) -> None:
-        """Commit or restore ownership after an explicitly named operation."""
-        with self._lock:
-            should_delete, expected_uid = self._claim_ownership.finish_explicit(
-                key,
-                operation,
-                committed=committed,
-                has_registered_handle=key in self._active_connection_sandboxes,
-            )
-            if should_delete:
-                namespace, claim_name = key
-                try:
-                    self._delete_claim_with_optional_uid(
-                        claim_name, namespace, expected_uid
-                    )
-                except Exception as error:
-                    self._claim_ownership.register_automatic(key, expected_uid)
-                    logging.error(
-                        f"Failed to delete deferred SandboxClaim: {error}"
-                    )
-                else:
-                    self._claim_ownership.discard(key)
-
     def _delete_failed_generated_claim_if_owned(
         self, key: Tuple[str, str], expected_uid: str | None
     ) -> None:
@@ -428,11 +388,15 @@ class SandboxClient(Generic[T]):
             )
             if not should_delete:
                 return
-            namespace, claim_name = key
-            self._delete_claim_with_optional_uid(
-                claim_name, namespace, expected_uid
+        namespace, claim_name = key
+        self._delete_claim_with_optional_uid(
+            claim_name, namespace, expected_uid
+        )
+        assert expected_uid
+        with self._lock:
+            self._claim_ownership.discard_automatic_if_uid(
+                key, expected_uid
             )
-            self._claim_ownership.discard(key)
 
     def _rollback_failed_creation(
         self,
@@ -443,6 +407,10 @@ class SandboxClient(Generic[T]):
     ) -> None:
         """Best-effort rollback that cannot replace the original failure."""
         if sandbox is not None:
+            with self._lock:
+                if self._active_connection_sandboxes.get(key) is sandbox:
+                    self._active_connection_sandboxes.pop(key, None)
+                    self._active_claim_uids.pop(key, None)
             try:
                 self._retire_stale_handle(sandbox)
             except Exception as error:
@@ -548,34 +516,41 @@ class SandboxClient(Generic[T]):
         """Detach only the handle observed by the failed lookup."""
         if expected_handle is None:
             return
+        should_delete = False
+        expected_uid = None
         with self._lock:
             current_handle = self._active_connection_sandboxes.get(key)
             if current_handle is not expected_handle:
                 return
-            automatic_cleanup = self._claim_ownership.should_retire_handle(key)
-            expected_uid = self._claim_ownership.automatic_cleanup_uid(key)
-            self._detach_handle_best_effort(
-                key, expected_handle, retire=automatic_cleanup
+            automatic_cleanup = self._claim_ownership.should_retire_handle(
+                key
             )
-            if not self._claim_ownership.can_delete_automatic_claim(key):
-                return
+            self._active_connection_sandboxes.pop(key, None)
+            self._active_claim_uids.pop(key, None)
+            should_delete, expected_uid = (
+                self._claim_ownership.take_automatic_cleanup(key)
+            )
+
+        self._close_handle_best_effort(
+            expected_handle, retire=automatic_cleanup
+        )
+        if should_delete:
             namespace, claim_name = key
             try:
                 self._delete_claim_with_optional_uid(
                     claim_name, namespace, expected_uid
                 )
             except Exception as error:
+                with self._lock:
+                    self._claim_ownership.register_automatic(
+                        key, expected_uid
+                    )
                 logging.error(f"Failed to delete stale SandboxClaim: {error}")
-            else:
-                self._claim_ownership.discard(key)
 
-    def _detach_handle_best_effort(
-        self, key: Tuple[str, str], sandbox: T, *, retire: bool
+    def _close_handle_best_effort(
+        self, sandbox: T, *, retire: bool
     ) -> None:
-        """Detach a handle while preserving the failure that caused it."""
-        if self._active_connection_sandboxes.get(key) is sandbox:
-            self._active_connection_sandboxes.pop(key, None)
-            self._active_claim_uids.pop(key, None)
+        """Close a detached handle while preserving the preceding outcome."""
         try:
             if retire:
                 self._retire_stale_handle(sandbox)
@@ -603,6 +578,9 @@ class SandboxClient(Generic[T]):
         claim_uid: str,
     ) -> T:
         """Install a resolved handle without overwriting a concurrent replacement."""
+        stale_handles: list[T] = []
+        result: T | None = None
+        concurrent_change = False
         with self._lock:
             if not self._claim_ownership.lookup_is_valid(
                 key, lookup_operation
@@ -611,36 +589,41 @@ class SandboxClient(Generic[T]):
             current_handle = self._active_connection_sandboxes.get(key)
             if current_handle is not expected_handle:
                 if expected_handle is not None:
-                    self._detach_handle_best_effort(
-                        key, expected_handle, retire=True
-                    )
+                    stale_handles.append(expected_handle)
                 if self._resolved_handle_matches_claim(
                     key, current_handle, sandbox_id, claim_uid
                 ):
                     self._claim_ownership.register_automatic(key, claim_uid)
-                    return current_handle
-                raise self._concurrent_claim_change(key)
-            if self._resolved_handle_matches_claim(
+                    result = current_handle
+                else:
+                    concurrent_change = True
+            elif self._resolved_handle_matches_claim(
                 key, current_handle, sandbox_id, claim_uid
             ):
                 self._claim_ownership.register_automatic(key, claim_uid)
-                return current_handle
-            if current_handle is not None:
-                self._detach_handle_best_effort(
-                    key, current_handle, retire=True
+                result = current_handle
+            else:
+                if current_handle is not None:
+                    stale_handles.append(current_handle)
+                new_handle = self.sandbox_class(
+                    claim_name=claim_name,
+                    sandbox_id=sandbox_id,
+                    namespace=namespace,
+                    connection_config=self.connection_config,
+                    tracer_config=self.tracer_config,
+                    k8s_helper=self.k8s_helper,
                 )
-            new_handle = self.sandbox_class(
-                claim_name=claim_name,
-                sandbox_id=sandbox_id,
-                namespace=namespace,
-                connection_config=self.connection_config,
-                tracer_config=self.tracer_config,
-                k8s_helper=self.k8s_helper,
-            )
-            self._active_connection_sandboxes[key] = new_handle
-            self._active_claim_uids[key] = claim_uid
-            self._claim_ownership.register_automatic(key, claim_uid)
-            return new_handle
+                self._active_connection_sandboxes[key] = new_handle
+                self._active_claim_uids[key] = claim_uid
+                self._claim_ownership.register_automatic(key, claim_uid)
+                result = new_handle
+
+        for stale_handle in stale_handles:
+            self._close_handle_best_effort(stale_handle, retire=True)
+        if concurrent_change:
+            raise self._concurrent_claim_change(key)
+        assert result is not None
+        return result
 
     def _resolved_handle_matches_claim(
         self, key: Tuple[str, str], handle: T | None, sandbox_id: str, uid: str
@@ -702,19 +685,38 @@ class SandboxClient(Generic[T]):
             >>> client.delete_sandbox(sandbox.claim_name)
         """
         key = (namespace, claim_name)
+        with self._lock:
+            sandbox = self._active_connection_sandboxes.pop(key, None)
+            active_uid = self._active_claim_uids.pop(key, None)
+            automatic_owned = key in self._automatic_cleanup_claims
+            automatic_uid = self._claim_ownership.automatic_cleanup_uid(key)
+            caller_owned = key in self._caller_owned_claims
+            self._claim_ownership.discard(key)
         try:
-            with self._lock:
-                sandbox = self._active_connection_sandboxes.get(key)
-                if sandbox:
-                    sandbox.terminate()
-                    if self._active_connection_sandboxes.get(key) is sandbox:
-                        self._active_connection_sandboxes.pop(key, None)
-                        self._active_claim_uids.pop(key, None)
+            if sandbox:
+                self._retire_stale_handle(sandbox)
+                if active_uid:
+                    self._delete_claim_with_optional_uid(
+                        claim_name, namespace, active_uid
+                    )
                 else:
                     self._delete_claim(claim_name, namespace)
-                    self._active_claim_uids.pop(key, None)
-                self._claim_ownership.discard(key)
+            else:
+                self._delete_claim(claim_name, namespace)
         except Exception as e:
+            with self._lock:
+                if (
+                    sandbox is not None
+                    and key not in self._active_connection_sandboxes
+                ):
+                    self._active_connection_sandboxes[key] = sandbox
+                    self._active_claim_uids[key] = active_uid
+                if caller_owned:
+                    self._claim_ownership.mark_caller_owned(key)
+                elif automatic_owned:
+                    self._claim_ownership.register_automatic(
+                        key, automatic_uid
+                    )
             logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
             
     def delete_all(self):
@@ -753,17 +755,25 @@ class SandboxClient(Generic[T]):
     def _delete_automatic_cleanup_claim(self, key: Tuple[str, str]) -> None:
         """Delete a claim only while this client still owns its cleanup."""
         with self._lock:
-            if not self._claim_ownership.can_delete_automatic_claim(key):
+            should_delete, expected_uid = (
+                self._claim_ownership.take_automatic_cleanup(key)
+            )
+            if not should_delete:
                 return
             namespace, claim_name = key
-            sandbox = self._active_connection_sandboxes.get(key)
-            expected_uid = self._claim_ownership.automatic_cleanup_uid(key)
-            if sandbox is not None:
-                self._detach_handle_best_effort(key, sandbox, retire=True)
+            sandbox = self._active_connection_sandboxes.pop(key, None)
+            self._active_claim_uids.pop(key, None)
+
+        if sandbox is not None:
+            self._close_handle_best_effort(sandbox, retire=True)
+        try:
             self._delete_claim_with_optional_uid(
                 claim_name, namespace, expected_uid
             )
-            self._claim_ownership.discard(key)
+        except Exception:
+            with self._lock:
+                self._claim_ownership.register_automatic(key, expected_uid)
+            raise
 
     @trace_span("create_claim")
     def _create_claim(

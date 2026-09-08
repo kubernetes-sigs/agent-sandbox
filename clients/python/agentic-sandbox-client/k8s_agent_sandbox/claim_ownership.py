@@ -11,22 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ownership bookkeeping for deterministic SandboxClaim operations."""
+"""Ownership bookkeeping for SandboxClaim handles."""
 
 from pydantic import BaseModel
 
 
 ClaimKey = tuple[str, str]
-
-
-class ExplicitClaimOperations(BaseModel):
-    active: int
-    caller_owned_before: bool
-    automatic_cleanup_before: bool
-    committed: bool = False
-    generated_cleanup_pending: bool = False
-    generated_cleanup_uid: str | None = None
-    invalidated: bool = False
 
 
 class ClaimLookupOperation(BaseModel):
@@ -41,16 +31,19 @@ class ClaimLookupOperation(BaseModel):
 
 
 class ClaimOwnership:
-    """Track automatic and caller-owned Claims across overlapping operations.
+    """Track automatic and caller-owned Claims.
 
     Every method must be called while the owning client's registry lock is held.
+
+    An explicitly supplied Claim name is caller-owned from the start of the
+    operation, whether creation succeeds or fails. Only generated or reattached
+    Claims with an observed UID are eligible for automatic cleanup.
     """
 
     def __init__(self) -> None:
         self.automatic_cleanup_claims: set[ClaimKey] = set()
         self.automatic_cleanup_claim_uids: dict[ClaimKey, str] = {}
         self.caller_owned_claims: set[ClaimKey] = set()
-        self._explicit_operations: dict[ClaimKey, ExplicitClaimOperations] = {}
         self._lookup_operations: dict[ClaimKey, list[ClaimLookupOperation]] = {}
 
     def begin_lookup(self, key: ClaimKey) -> ClaimLookupOperation:
@@ -77,63 +70,20 @@ class ClaimOwnership:
         if not operations:
             self._lookup_operations.pop(key)
 
-    def begin_explicit(self, key: ClaimKey) -> ExplicitClaimOperations:
-        """Protect a Claim while an explicitly named operation is in flight."""
-        state = self._explicit_operations.get(key)
-        if state is None:
-            state = ExplicitClaimOperations(
-                active=0,
-                caller_owned_before=key in self.caller_owned_claims,
-                automatic_cleanup_before=key in self.automatic_cleanup_claims,
-            )
-            self._explicit_operations[key] = state
-            self.caller_owned_claims.add(key)
-            self.automatic_cleanup_claims.discard(key)
-        state.active += 1
-        return state
-
-    def finish_explicit(
-        self,
-        key: ClaimKey,
-        operation: ExplicitClaimOperations,
-        *,
-        committed: bool,
-        has_registered_handle: bool,
-    ) -> tuple[bool, str | None]:
-        """Finish an explicit operation and report deferred deletion work."""
-        state = self._explicit_operations.get(key)
-        if state is not operation and operation.invalidated:
-            return False, None
-        if state is not operation:
-            raise RuntimeError("Explicit Claim ownership operation changed unexpectedly.")
-        state.committed = state.committed or committed
-        state.active -= 1
-        if state.active:
-            return False, None
-
-        self._explicit_operations.pop(key)
-        if state.committed:
-            self.caller_owned_claims.add(key)
-            self.automatic_cleanup_claims.discard(key)
-            self.automatic_cleanup_claim_uids.pop(key, None)
-        else:
-            self._restore_previous_ownership(key, state)
-
-        should_delete = (
-            state.generated_cleanup_pending
-            and state.generated_cleanup_uid is not None
-            and key not in self.caller_owned_claims
-            and not has_registered_handle
-        )
-        return should_delete, state.generated_cleanup_uid
+    def mark_caller_owned(self, key: ClaimKey) -> None:
+        """Make an explicitly named Claim ineligible for automatic cleanup."""
+        self.caller_owned_claims.add(key)
+        self.automatic_cleanup_claims.discard(key)
+        self.automatic_cleanup_claim_uids.pop(key, None)
 
     def register_automatic(self, key: ClaimKey, claim_uid: str | None) -> None:
-        """Record automatic ownership unless a completed explicit call owns it."""
+        """Record automatic ownership unless an explicit call owns the name."""
         if not claim_uid:
             return
-        if key in self._explicit_operations or key not in self.caller_owned_claims:
-            self.automatic_cleanup_claims.add(key)
-            self.automatic_cleanup_claim_uids[key] = claim_uid
+        if key in self.caller_owned_claims:
+            return
+        self.automatic_cleanup_claims.add(key)
+        self.automatic_cleanup_claim_uids[key] = claim_uid
 
     def failed_generated_needs_delete(
         self,
@@ -142,22 +92,12 @@ class ClaimOwnership:
         has_registered_handle: bool,
         claim_uid: str | None,
     ) -> bool:
-        """Return whether a failed generated Claim can be deleted immediately."""
-        if has_registered_handle or claim_uid is None:
-            return False
-        state = self._explicit_operations.get(key)
-        if state is not None:
-            if not state.caller_owned_before:
-                state.generated_cleanup_pending = True
-                state.generated_cleanup_uid = claim_uid
-            return False
-        return key not in self.caller_owned_claims
-
-    def explicit_is_valid(
-        self, key: ClaimKey, operation: ExplicitClaimOperations
-    ) -> bool:
-        """Return whether deliberate deletion has not superseded an operation."""
-        return self._explicit_operations.get(key) is operation and not operation.invalidated
+        """Return whether a failed generated Claim can be deleted safely."""
+        return (
+            not has_registered_handle
+            and bool(claim_uid)
+            and key not in self.caller_owned_claims
+        )
 
     def automatic_cleanup_uid(self, key: ClaimKey) -> str | None:
         """Return the UID that constrains automatic deletion for a Claim."""
@@ -165,50 +105,40 @@ class ClaimOwnership:
 
     def should_retire_handle(self, key: ClaimKey) -> bool:
         """Return whether a detached handle could delete an automatic Claim."""
-        state = self._explicit_operations.get(key)
-        if state is not None:
-            return not state.caller_owned_before and (
-                state.automatic_cleanup_before
-                or key in self.automatic_cleanup_claims
-            )
         return (
             key in self.automatic_cleanup_claims
             and key not in self.caller_owned_claims
         )
 
     def can_delete_automatic_claim(self, key: ClaimKey) -> bool:
-        """Return whether no explicit operation protects an automatic Claim."""
+        """Return whether this client still owns automatic cleanup."""
         return (
             key in self.automatic_cleanup_claims
             and key not in self.caller_owned_claims
-            and key not in self._explicit_operations
         )
+
+    def take_automatic_cleanup(
+        self, key: ClaimKey
+    ) -> tuple[bool, str | None]:
+        """Reserve one automatic cleanup attempt and return its observed UID."""
+        if not self.can_delete_automatic_claim(key):
+            return False, None
+        self.automatic_cleanup_claims.discard(key)
+        return True, self.automatic_cleanup_claim_uids.pop(key, None)
+
+    def discard_automatic_if_uid(
+        self, key: ClaimKey, expected_uid: str
+    ) -> None:
+        """Forget automatic ownership only for the deleted Claim identity."""
+        if self.automatic_cleanup_claim_uids.get(key) != expected_uid:
+            return
+        self.automatic_cleanup_claims.discard(key)
+        self.automatic_cleanup_claim_uids.pop(key, None)
 
     def discard(self, key: ClaimKey) -> None:
         """Forget completed ownership after deliberate deletion."""
         self.automatic_cleanup_claims.discard(key)
         self.automatic_cleanup_claim_uids.pop(key, None)
         self.caller_owned_claims.discard(key)
-        state = self._explicit_operations.pop(key, None)
-        if state is not None:
-            state.invalidated = True
-            state.generated_cleanup_pending = False
-            state.generated_cleanup_uid = None
         for operation in self._lookup_operations.get(key, []):
             operation.invalidated = True
-
-    def _restore_previous_ownership(
-        self, key: ClaimKey, state: ExplicitClaimOperations
-    ) -> None:
-        if state.caller_owned_before:
-            self.caller_owned_claims.add(key)
-        else:
-            self.caller_owned_claims.discard(key)
-
-        if state.automatic_cleanup_before:
-            self.automatic_cleanup_claims.add(key)
-        elif state.caller_owned_before:
-            self.automatic_cleanup_claims.discard(key)
-            self.automatic_cleanup_claim_uids.pop(key, None)
-        # If neither owner existed before, preserve an automatic registration
-        # made by a generated operation while this explicit operation ran.

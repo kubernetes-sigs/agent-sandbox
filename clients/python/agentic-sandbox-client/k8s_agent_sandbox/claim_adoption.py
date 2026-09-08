@@ -26,15 +26,6 @@ from .claim_status import get_claim_sandbox_name
 from .utils import construct_sandbox_claim_env_spec
 
 
-_SUPPORTED_SPEC_FIELDS = frozenset(
-    {
-        "warmPoolRef",
-        "lifecycle",
-        "volumeClaimTemplates",
-        "additionalPodMetadata",
-        "env",
-    }
-)
 _DNS1123_SUBDOMAIN_RE = re.compile(
     r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 )
@@ -145,9 +136,9 @@ def validate_claim_for_adoption(
 ) -> ValidatedClaimIdentity:
     """Validates that an existing Claim is the exact requested allocation.
 
-    Additional labels are tolerated because controllers and admission may add
-    labels. Spec fields fail closed: attaching to behavior the caller did not
-    request would make a deterministic name unsafe as an idempotency key.
+    Additional labels and spec fields are tolerated because controllers and
+    admission may add or default them. Fields controlled by this client must
+    still match the request exactly.
 
     Returns the existing object's identity for a watch that cannot miss a
     readiness transition or silently switch to a recreated object.
@@ -178,13 +169,6 @@ def validate_claim_for_adoption(
     spec = claim.get("spec")
     if not isinstance(spec, dict):
         _reject(claim_name, "spec")
-    unsupported_fields = sorted(set(spec) - _SUPPORTED_SPEC_FIELDS)
-    if unsupported_fields:
-        raise ValueError(
-            f"SandboxClaim '{claim_name}' has unsupported spec fields: "
-            f"{', '.join(unsupported_fields)}; "
-            "refusing to use it."
-        )
     if spec.get("warmPoolRef") != {"name": warmpool}:
         _reject(claim_name, "spec.warmPoolRef")
 

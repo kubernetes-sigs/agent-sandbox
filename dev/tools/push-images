@@ -220,6 +220,11 @@ def main(args):
             if root == sandboxd_dir:
                 context_dir = "."
 
+            # The geminicli-toolbox image also imports the shared Go module,
+            # so it too builds from the repo root.
+            if service_name == "geminicli-toolbox":
+                context_dir = "."
+
             if args.controller_only and service_name != "agent-sandbox-controller":
                 continue
 

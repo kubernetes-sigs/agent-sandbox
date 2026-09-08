@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"sync"
 	"time"
@@ -125,16 +126,17 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 
 	conn := newConnector(connectorConfig{
-		Strategy:          strategy,
-		Namespace:         opts.Namespace,
-		ServerPort:        opts.ServerPort,
-		RouterHeaders:     opts.Runtime != RuntimeSandboxd,
-		RequestTimeout:    opts.RequestTimeout,
-		PerAttemptTimeout: opts.PerAttemptTimeout,
-		HTTPTransport:     opts.HTTPTransport,
-		Log:               opts.Logger,
-		Tracer:            tracer,
-		TraceServiceName:  svcName,
+		Strategy:            strategy,
+		Namespace:           opts.Namespace,
+		ServerPort:          opts.ServerPort,
+		RouterHeaders:       opts.Runtime != RuntimeSandboxd,
+		RequestTimeout:      opts.RequestTimeout,
+		PerAttemptTimeout:   opts.PerAttemptTimeout,
+		HTTPTransport:       opts.HTTPTransport,
+		DisablePodIPRouting: opts.DisablePodIPRouting,
+		Log:                 opts.Logger,
+		Tracer:              tracer,
+		TraceServiceName:    svcName,
 	})
 
 	// Wire strategy connector references for death notifications (and, for
@@ -269,7 +271,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 	}
 
 	// Create claim.
-	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.tracer, s.traceServiceName)
+	claimName, err := s.k8s.createClaim(openCtx, s.opts.Namespace, s.opts.WarmPoolName, s.opts.Env, s.tracer, s.traceServiceName)
 	if err != nil {
 		return err
 	}
@@ -557,6 +559,15 @@ func (s *Sandbox) Run(ctx context.Context, command string, opts ...CallOption) (
 func (s *Sandbox) Write(ctx context.Context, path string, content []byte, opts ...CallOption) error {
 	return s.files.Write(ctx, path, content, opts...)
 }
+
+// WriteReader streams content from an io.Reader without buffering the entire
+// payload. Streaming uploads use a single request attempt because a generic
+// reader cannot be replayed safely. Passing WithMaxAttempts with a value
+// greater than 1 returns an error; it is not silently reduced to one attempt.
+func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
+	return s.files.WriteReader(ctx, path, content, opts...)
+}
+
 func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
 	return s.files.Read(ctx, path, opts...)
 }

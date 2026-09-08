@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -299,6 +300,69 @@ func TestNewScopedTokenAuthorizer_RequiresSecret(t *testing.T) {
 	}
 	if _, err := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: []byte("short")}); err == nil {
 		t.Fatalf("expected error for secret shorter than %d bytes", MinScopedTokenSecretLen)
+	}
+}
+
+// A scoped token presented via a query parameter or a cookie must
+// authorize exactly like one presented via the Authorization header —
+// this is what lets ScopedTokenAuthorizer work behind
+// --path-routing-prefix, where the caller is a browser that cannot set
+// a header at all.
+func TestScopedToken_AuthorizesFromQueryAndCookie(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box-a", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth, err := NewScopedTokenAuthorizer(ScopedTokenOptions{
+		Secret:         secret,
+		TokenLocations: TokenLocations{QueryParam: "token", CookieName: "sid"},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	t.Run("query", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "/?token="+tok, nil)
+		if err := auth.Authorize(context.Background(), req, "ns", "box-a"); err != nil {
+			t.Fatalf("expected allow, got %v", err)
+		}
+	})
+	t.Run("cookie", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: tok})
+		if err := auth.Authorize(context.Background(), req, "ns", "box-a"); err != nil {
+			t.Fatalf("expected allow, got %v", err)
+		}
+	})
+	// Still scoped: a token for box-a, however it arrives, is forbidden
+	// against box-b.
+	t.Run("cookie against other sandbox", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: tok})
+		err := auth.Authorize(context.Background(), req, "ns", "box-b")
+		if !errors.Is(err, ErrForbidden) {
+			t.Fatalf("expected ErrForbidden, got %v", err)
+		}
+	})
+}
+
+// With TokenLocations left at its zero value, a token in the query
+// string or a cookie must be ignored exactly as before this field
+// existed — a deployment that hasn't opted in is unaffected.
+func TestScopedToken_IgnoresQueryAndCookieByDefault(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box-a", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
+
+	req, _ := http.NewRequest("GET", "/?token="+tok, nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: tok})
+	err = auth.Authorize(context.Background(), req, "ns", "box-a")
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated with locations disabled, got %v", err)
 	}
 }
 

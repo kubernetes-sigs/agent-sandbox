@@ -25,6 +25,8 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/client-go/rest"
+
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 const (
@@ -84,7 +86,7 @@ type Options struct {
 	// Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
 	Namespace string
 
-	// GatewayName enables production mode. The client watches this Gateway resource
+	// GatewayName enables Gateway mode. The client watches this Gateway resource
 	// for an external IP, then routes through the sandbox-router.
 	// Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
 	GatewayName string
@@ -97,12 +99,16 @@ type Options struct {
 	// from the Gateway's address. Default: "http".
 	GatewayScheme string
 
-	// APIURL enables advanced mode. The client connects directly to this URL,
+	// APIURL enables Direct URL mode. The client connects directly to this URL,
 	// bypassing gateway discovery. Takes precedence over GatewayName.
 	APIURL string
 
 	// ServerPort is the port the sandbox runtime listens on. Default: 8888.
 	ServerPort int
+
+	// Env is the list of environment variables to inject into the SandboxClaim.
+	// Setting Env forces a cold start from the warm pool template.
+	Env []extv1beta1.EnvVar
 
 	// SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
 	SandboxReadyTimeout time.Duration
@@ -134,8 +140,9 @@ type Options struct {
 	// fixed 8 MB internal limit. Default: 256 MB.
 	MaxDownloadSize int64
 
-	// MaxUploadSize is the maximum content size for Write(). Content
-	// exceeding this limit is rejected before any network I/O. Default: 256 MB.
+	// MaxUploadSize is the maximum content size for Write() and WriteReader().
+	// Write rejects oversized content before network I/O; WriteReader enforces
+	// the limit while streaming. Default: 256 MB.
 	MaxUploadSize int64
 
 	// Logger for structured logging. Defaults to stderr at INFO level.
@@ -170,6 +177,14 @@ type Options struct {
 	// TracerProvider sets the OpenTelemetry TracerProvider for span creation.
 	// If nil, falls back to otel.GetTracerProvider (noop by default).
 	TracerProvider trace.TracerProvider
+
+	// DisablePodIPRouting suppresses the X-Sandbox-Pod-IP header even when a
+	// pod IP is available. Use in environments with strict network policies,
+	// service meshes, or secure overlays where direct pod-to-pod IP routing is
+	// restricted but service-based DNS routing works correctly.
+	// Note: this only affects router-based transports that send X-Sandbox-* headers.
+	// Default: false (header is sent when router headers are enabled and a pod IP is present).
+	DisablePodIPRouting bool
 }
 
 func (o *Options) setDefaults() {

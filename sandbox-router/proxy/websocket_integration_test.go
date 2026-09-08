@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,7 +29,10 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/gorilla/websocket"
+	"k8s.io/apimachinery/pkg/types"
 
+	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
@@ -218,6 +222,98 @@ func TestIntegration_NonUpgradeStillRespectsProxyTimeout(t *testing.T) {
 	}
 }
 
+// TestIntegration_WebSocketRoundTripsViaPathRouting is the regression test
+// for the whole point of --path-routing-prefix: a caller that cannot set
+// X-Sandbox-* headers at all — a browser opening a WebSocket, which has no
+// API for custom headers on the handshake — must still be able to reach a
+// WebSocket-dependent backend (a web IDE's terminal, a dev server's HMR
+// socket) purely through the URL path. No X-Sandbox-* header is set on this
+// request; if the router fell back to header parsing it would 400 on a
+// missing X-Sandbox-Id, so a 101 here proves the path alone carried routing.
+func TestIntegration_WebSocketRoundTripsViaPathRouting(t *testing.T) {
+	backend := startEchoBackend(t)
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"path-routed-uid": {PodIP: bu.Hostname(), SandboxName: "ws-sandbox", Namespace: "test"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{
+		Config: &cfg,
+		Cache:  lookup,
+		Logger: logr.Discard(),
+	}))
+	defer router.Close()
+
+	wsURL := strings.Replace(router.URL, "http://", "ws://", 1) +
+		fmt.Sprintf("/router/test/ws-sandbox/%s/", bu.Port())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// No X-Sandbox-* headers anywhere in this dial — the path is the only
+	// routing information present.
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	if err != nil {
+		status := -1
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("ws dial: %v (status=%d)", err, status)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("path-routed")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, got, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "path-routed" {
+		t.Fatalf("echo: got %q want %q", got, "path-routed")
+	}
+}
+
+// TestIntegration_PathRoutingFallsThroughToHeaders makes sure enabling
+// --path-routing-prefix does not disable header-based routing for requests
+// whose path does not match the prefix — the two mechanisms are additive,
+// not exclusive.
+func TestIntegration_PathRoutingFallsThroughToHeaders(t *testing.T) {
+	backend := startEchoBackend(t)
+	defer backend.Close()
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.AllowLoopbackPodIP = true // httptest binds to 127.0.0.1
+	router := httptest.NewServer(NewHandler(Options{
+		Config: &cfg,
+		Logger: logr.Discard(),
+	}))
+	defer router.Close()
+
+	// Header-routed dial against a path that does NOT start with the
+	// configured prefix — must still work exactly as it does with path
+	// routing disabled.
+	conn := dialThroughRouter(t, router.URL, backend.URL)
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("still-header-routed")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, got, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "still-header-routed" {
+		t.Fatalf("echo: got %q want %q", got, "still-header-routed")
+	}
+}
+
 // TestIntegration_WebSocketStripsOriginOnUpgrade locks in the
 // vscode-server compatibility fix. The router rewrites Host to the
 // upstream sandbox's address, so a client-supplied Origin that
@@ -361,5 +457,192 @@ func TestIntegration_XForwardedHeadersSet(t *testing.T) {
 	}
 	if fwdFor == "" {
 		t.Errorf("X-Forwarded-For: empty; expected the client address")
+	}
+}
+
+// TestIntegration_WebSocketAuthenticatedByCookie proves the payoff of
+// the whole browser-session design: a scoped token presented as a
+// cookie — the only credential channel a WebSocket handshake can carry
+// automatically, since it has no API for a header and, in any real
+// browser flow, never carries the bootstrap query parameter — still
+// authenticates and reaches the backend. It also proves the cookie is
+// never forwarded upstream (see stripCookieFromHeader), same as
+// Authorization already isn't.
+func TestIntegration_WebSocketAuthenticatedByCookie(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		gotCookie = "<unset>"
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotCookie = r.Header.Get("Cookie")
+		mu.Unlock()
+		conn, err := echoUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("backend upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		mt, payload, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		_ = conn.WriteMessage(mt, payload)
+	}))
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := authz.MintScopedToken(secret, "test", "ws-sandbox", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+		Secret:         secret,
+		TokenLocations: authz.TokenLocations{QueryParam: "token", CookieName: "sid"},
+	})
+	if err != nil {
+		t.Fatalf("new authorizer: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.AuthzMode = config.AuthzScopedToken
+	cfg.AuthzCookieName = "sid"
+	cfg.AuthzCookieQueryParam = "token"
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"cookie-ws-uid": {PodIP: bu.Hostname(), SandboxName: "ws-sandbox", Namespace: "test"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{
+		Config:     &cfg,
+		Cache:      lookup,
+		Authorizer: auth,
+		Logger:     logr.Discard(),
+	}))
+	defer router.Close()
+
+	wsURL := strings.Replace(router.URL, "http://", "ws://", 1) +
+		fmt.Sprintf("/router/test/ws-sandbox/%s/", bu.Port())
+	hdrs := http.Header{}
+	hdrs.Set("Cookie", "sid="+tok)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, hdrs)
+	if err != nil {
+		status := -1
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("ws dial: %v (status=%d)", err, status)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("cookie-authed")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, got, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "cookie-authed" {
+		t.Fatalf("echo: got %q want %q", got, "cookie-authed")
+	}
+
+	mu.Lock()
+	cookieSeen := gotCookie
+	mu.Unlock()
+	if cookieSeen != "" {
+		t.Fatalf("backend saw Cookie=%q, want empty (the session cookie must never be forwarded upstream)", cookieSeen)
+	}
+}
+
+// TestIntegration_WebSocketRejectedForDisallowedOrigin is the key
+// security test for the browser-session cookie feature: a cookie is an
+// ambient credential a third-party page's WebSocket can ride on (a
+// handshake is not subject to the Same-Origin Policy the way a fetch
+// is), so a cross-site Origin not on the allowlist must be rejected
+// before the handshake ever reaches the backend — otherwise a valid
+// scoped token sitting in the browser's cookie jar for this sandbox
+// would let any page on the internet open a terminal inside it.
+func TestIntegration_WebSocketRejectedForDisallowedOrigin(t *testing.T) {
+	var (
+		mu         sync.Mutex
+		backendHit bool
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		backendHit = true
+		mu.Unlock()
+		conn, err := echoUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}))
+	defer backend.Close()
+	bu, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend: %v", err)
+	}
+
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := authz.MintScopedToken(secret, "test", "ws-sandbox", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+		Secret:         secret,
+		TokenLocations: authz.TokenLocations{QueryParam: "token", CookieName: "sid"},
+	})
+	if err != nil {
+		t.Fatalf("new authorizer: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.PathRoutingPrefix = "/router"
+	cfg.AuthzMode = config.AuthzScopedToken
+	cfg.AuthzCookieName = "sid"
+	cfg.AuthzCookieQueryParam = "token"
+	cfg.AuthzCookieAllowedOrigins = []string{"https://atenea.example.com"}
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"cswsh-uid": {PodIP: bu.Hostname(), SandboxName: "ws-sandbox", Namespace: "test"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{
+		Config:     &cfg,
+		Cache:      lookup,
+		Authorizer: auth,
+		Logger:     logr.Discard(),
+	}))
+	defer router.Close()
+
+	wsURL := strings.Replace(router.URL, "http://", "ws://", 1) +
+		fmt.Sprintf("/router/test/ws-sandbox/%s/", bu.Port())
+	hdrs := http.Header{}
+	hdrs.Set("Cookie", "sid="+tok)
+	hdrs.Set("Origin", "https://evil.example.com")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, resp, err := websocket.DefaultDialer.DialContext(ctx, wsURL, hdrs)
+	if err == nil {
+		t.Fatal("expected the handshake to be rejected, but it succeeded")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		status := -1
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("status: got %d want 403", status)
+	}
+
+	mu.Lock()
+	hit := backendHit
+	mu.Unlock()
+	if hit {
+		t.Fatal("backend must never see a request whose Origin failed the cookie allowlist check")
 	}
 }

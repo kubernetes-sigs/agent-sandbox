@@ -28,6 +28,7 @@ from .tools import (
     download_file,
     list_files,
     file_exists,
+    get_sandbox_status,
 )
 
 from .resources import (
@@ -66,6 +67,7 @@ def create_mcp_server(settings: Settings | None = None):
     mcp.add_tool(download_file)
     mcp.add_tool(list_files)
     mcp.add_tool(file_exists)
+    mcp.add_tool(get_sandbox_status)
 
     return mcp
 

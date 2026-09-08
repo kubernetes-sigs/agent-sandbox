@@ -51,11 +51,9 @@ helm upgrade agent-sandbox ./helm/ \
 > kubectl apply -f helm/crds/
 > ```
 
-### v1alpha1 → v1beta1 storage migration
+### Upgrading from v1alpha1
 
-Upgrades to chart versions that move CRDs from `v1alpha1` to `v1beta1` require a manual storage migration using the `dev/tools/migrate.sh` script.
-
-See [`docs/api-migration-guide.md`](../docs/api-migration-guide.md) for full details, sequence of steps, and operational guidelines.
+Support for the `v1alpha1` API has been removed. If you are upgrading from an older release that uses `v1alpha1`, you must upgrade to a `v0.5.x` release and run the storage migration first. Note that this upgrade inverts the general order above: you must apply the `v1beta1` CRDs **before** running `helm upgrade` to prevent conversion errors during webhook service teardown. See the [Helm Upgrade Ordering section in `docs/api-migration-guide.md`](../docs/api-migration-guide.md#helm-upgrade-ordering) for the full sequence.
 
 ## Uninstallation
 
@@ -112,7 +110,6 @@ The following table lists the configurable parameters and their defaults.
 | `containerSecurityContext` | Container `securityContext` for the controller; only rendered when set | `null` |
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
 | `podLabels` | Extra labels added to the controller pod template alongside the chart's selector labels (selector labels take precedence on conflict) | `{}` |
-| `webhookServiceName` | Name of the conversion webhook Service | `agent-sandbox-webhook-service` |
 | `service.name` | Name of the controller Service that exposes the metrics endpoint | `agent-sandbox-controller` |
 | `metrics.serviceMonitor.enabled` | Create a Prometheus Operator `ServiceMonitor` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
 | `metrics.serviceMonitor.additionalLabels` | Extra labels on the `ServiceMonitor` (often required to match the Prometheus `serviceMonitorSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |

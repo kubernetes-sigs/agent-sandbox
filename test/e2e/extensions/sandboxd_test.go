@@ -36,8 +36,10 @@ import (
 
 // sandboxdManifest runs sandboxd as the sole container. It binds 0.0.0.0
 // (the daemon default), so the kubelet httpGet readiness probe reaches
-// /v1/health and the test reaches both ports via port-forward. Real
-// deployments run it as a sidecar next to the workload; behavior is identical.
+// /v1/health and the test reaches both ports via port-forward. The API
+// behaves the same in any deployment topology; note that exec'd commands
+// always run in the container hosting sandboxd, regardless of what other
+// containers share the pod.
 const sandboxdManifest = `
 apiVersion: agents.x-k8s.io/v1beta1
 kind: Sandbox

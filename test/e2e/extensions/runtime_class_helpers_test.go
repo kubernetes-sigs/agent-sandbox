@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -133,7 +134,8 @@ func benchPoolSizes(cpuCapacity int64) ([]int, error) {
 		half := max(int(cpuCapacity/2), 1)
 		full := int(cpuCapacity)
 		double := full * 2
-		return []int{half, full, double}, nil
+		sizes := slices.Compact([]int{half, full, double})
+		return sizes, nil
 	}
 	return nil, fmt.Errorf("cluster reported 0 worker CPU capacity — cannot derive pool sizes")
 }

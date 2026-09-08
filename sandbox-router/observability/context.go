@@ -31,11 +31,20 @@ import (
 // packages and risks divergent default values), or type-asserting the
 // ResponseWriter to a custom setter interface (fragile under wrapping).
 type Labels struct {
-	// SandboxNamespace is the parsed and validated namespace from
-	// X-Sandbox-Namespace. The default sentinel "-" is used when no
-	// proxy handler has populated it (e.g. for /healthz, /metrics, or
-	// requests rejected at header-parse time).
+	// SandboxNamespace is the resolved namespace of the request's routing
+	// Target — from X-Sandbox-Namespace, or, when path-based routing is
+	// enabled, the corresponding path segment (see ParsePathRoute). The
+	// default sentinel "-" is used when no proxy handler has populated it
+	// (e.g. for /healthz, /metrics, or requests rejected at parse time).
 	SandboxNamespace string
+	// SandboxID is the resolved sandbox ID of the same Target, from
+	// whichever input actually produced it. Deliberately NOT read
+	// straight from the X-Sandbox-Id header by consumers (tracing,
+	// access logging): a path-routed request never sets that header at
+	// all, and doing so would silently show an empty sandbox identity
+	// for every browser-facing request. Empty when unset, same as
+	// SandboxNamespace before the "-" sentinel is applied.
+	SandboxID string
 }
 
 type labelsKey struct{}
@@ -49,6 +58,31 @@ func WithLabels(ctx context.Context, l *Labels) context.Context {
 func LabelsFromContext(ctx context.Context) *Labels {
 	l, _ := ctx.Value(labelsKey{}).(*Labels)
 	return l
+}
+
+// LabelsForRequest returns the *Labels already attached to ctx by an outer
+// middleware, alongside ctx unchanged — or, if none is attached yet,
+// allocates a fresh *Labels and returns the context it should be attached
+// to for inner handlers.
+//
+// Every middleware that wants to observe the routing identity the proxy
+// handler resolves (tracing, access logging, metrics) should call this
+// once, rather than unconditionally allocating its own Labels: context
+// values only propagate inward, so if two nested middleware layers each
+// call WithLabels independently, only the innermost allocation is ever
+// visible to the proxy handler that actually mutates it — the outer
+// layer's own pointer is never touched and stays permanently empty. In the
+// real middleware chain (TracingMiddleware, the outermost layer,
+// allocating first) this makes every layer share one Labels instance;
+// called standalone in a test with no outer layer present, it falls back
+// to allocating its own, so each middleware still works correctly in
+// isolation.
+func LabelsForRequest(ctx context.Context) (context.Context, *Labels) {
+	if l := LabelsFromContext(ctx); l != nil {
+		return ctx, l
+	}
+	l := &Labels{}
+	return WithLabels(ctx, l), l
 }
 
 // SandboxNamespaceFromContext returns the SandboxNamespace set on the Labels

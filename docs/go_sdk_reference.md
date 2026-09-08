@@ -37,6 +37,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(f \*Files\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Files.List>)
   - [func \(f \*Files\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Files.Read>)
   - [func \(f \*Files\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Files.Write>)
+  - [func \(f \*Files\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Files.WriteReader>)
 - [type HTTPError](<#HTTPError>)
   - [func \(e \*HTTPError\) Error\(\) string](<#HTTPError.Error>)
 - [type Handle](<#Handle>)
@@ -65,6 +66,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Sandbox.Write>)
+  - [func \(s \*Sandbox\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Sandbox.WriteReader>)
 
 
 ### Constants
@@ -74,8 +76,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 ```go
 const (
 
-    // PodNameAnnotation is the annotation key on a Sandbox resource that
-    // identifies the name of the underlying pod.
+    // PodNameAnnotation is the deprecated annotation key on a Sandbox resource that identifies the name of the underlying pod.
+    // Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
     PodNameAnnotation = "agents.x-k8s.io/pod-name"
 )
 ```
@@ -421,6 +423,17 @@ With the legacy runtime the path must be a plain filename without directory sepa
 
 The entire content is buffered in memory to support retries on transient failures. Content exceeding MaxUploadSize \(default 256 MB\) is rejected before any network I/O.
 
+<a name="Files.WriteReader"></a>
+#### func \(\*Files\) [WriteReader](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error
+```
+
+WriteReader uploads content read from content without buffering the entire payload in memory. Streaming uploads use a single request attempt because a generic io.Reader cannot be replayed safely after a partial request. Passing WithMaxAttempts with a value greater than 1 returns an error; it is not silently reduced to a single attempt.
+
+With the legacy runtime, path must be a plain filename. The sandboxd runtime accepts relative paths and creates parent directories automatically. For an unknown\-length reader, MaxUploadSize is enforced while the request is being streamed; the server may therefore receive a prefix before an oversized upload is rejected. Legacy streaming uploads use HTTP chunked transfer encoding, so compatible runtimes and proxies must accept streaming request bodies without a Content\-Length header.
+
 <a name="HTTPError"></a>
 ### type [HTTPError](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -549,7 +562,7 @@ type Options struct {
     // Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
     Namespace string
 
-    // GatewayName enables production mode. The client watches this Gateway resource
+    // GatewayName enables Gateway mode. The client watches this Gateway resource
     // for an external IP, then routes through the sandbox-router.
     // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
     GatewayName string
@@ -562,12 +575,16 @@ type Options struct {
     // from the Gateway's address. Default: "http".
     GatewayScheme string
 
-    // APIURL enables advanced mode. The client connects directly to this URL,
+    // APIURL enables Direct URL mode. The client connects directly to this URL,
     // bypassing gateway discovery. Takes precedence over GatewayName.
     APIURL string
 
     // ServerPort is the port the sandbox runtime listens on. Default: 8888.
     ServerPort int
+
+    // Env is the list of environment variables to inject into the SandboxClaim.
+    // Setting Env forces a cold start from the warm pool template.
+    Env []extv1beta1.EnvVar
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration
@@ -599,8 +616,9 @@ type Options struct {
     // fixed 8 MB internal limit. Default: 256 MB.
     MaxDownloadSize int64
 
-    // MaxUploadSize is the maximum content size for Write(). Content
-    // exceeding this limit is rejected before any network I/O. Default: 256 MB.
+    // MaxUploadSize is the maximum content size for Write() and WriteReader().
+    // Write rejects oversized content before network I/O; WriteReader enforces
+    // the limit while streaming. Default: 256 MB.
     MaxUploadSize int64
 
     // Logger for structured logging. Defaults to stderr at INFO level.
@@ -635,6 +653,14 @@ type Options struct {
     // TracerProvider sets the OpenTelemetry TracerProvider for span creation.
     // If nil, falls back to otel.GetTracerProvider (noop by default).
     TracerProvider trace.TracerProvider
+
+    // DisablePodIPRouting suppresses the X-Sandbox-Pod-IP header even when a
+    // pod IP is available. Use in environments with strict network policies,
+    // service meshes, or secure overlays where direct pod-to-pod IP routing is
+    // restricted but service-based DNS routing works correctly.
+    // Note: this only affects router-based transports that send X-Sandbox-* headers.
+    // Default: false (header is sent when router headers are enabled and a pod IP is present).
+    DisablePodIPRouting bool
 }
 ```
 
@@ -835,5 +861,14 @@ func (s *Sandbox) Write(ctx context.Context, path string, content []byte, opts .
 ```
 
 
+
+<a name="Sandbox.WriteReader"></a>
+#### func \(\*Sandbox\) [WriteReader](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error
+```
+
+WriteReader streams content from an io.Reader without buffering the entire payload. Streaming uploads use a single request attempt because a generic reader cannot be replayed safely. Passing WithMaxAttempts with a value greater than 1 returns an error; it is not silently reduced to one attempt.
 
 Generated by [gomarkdoc](<https://github.com/princjef/gomarkdoc>)

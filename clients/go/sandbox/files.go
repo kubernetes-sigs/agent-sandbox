@@ -152,21 +152,128 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 		return err
 	}
 
+	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, maxAttempts, span); err != nil {
+		return err
+	}
+	f.log.V(1).Info("write completed", "path", path, "size", len(content))
+	return nil
+}
+
+// WriteReader uploads content read from content without buffering the entire
+// payload in memory. Streaming uploads use a single request attempt because a
+// generic io.Reader cannot be replayed safely after a partial request. Passing
+// WithMaxAttempts with a value greater than 1 returns an error; it is not
+// silently reduced to a single attempt.
+//
+// With the legacy runtime, path must be a plain filename. The sandboxd runtime
+// accepts relative paths and creates parent directories automatically. For an
+// unknown-length reader, MaxUploadSize is enforced while the request is being
+// streamed; the server may therefore receive a prefix before an oversized
+// upload is rejected. Legacy streaming uploads use HTTP chunked transfer
+// encoding, so compatible runtimes and proxies must accept streaming request
+// bodies without a Content-Length header.
+func (f *Files) WriteReader(ctx context.Context, path string, content io.Reader, opts ...CallOption) error {
+	defer f.trackOp()()
+	ctx, callCancel, maxAttempts := applyCallOpts(ctx, opts)
+	defer callCancel()
+	ctx, span := startSpan(withLifecycleSpan(ctx, f.lifecycleCtx()), f.tracer, f.svcName, "write", AttrFilePath.String(path))
+	defer span.End()
+
+	if content == nil {
+		err := fmt.Errorf("%s: write(%q): content reader must not be nil", f.errPrefix(), path)
+		recordError(span, err)
+		return err
+	}
+	if maxAttempts > 1 {
+		err := fmt.Errorf("%s: write(%q): streaming uploads do not support retries", f.errPrefix(), path)
+		recordError(span, err)
+		return err
+	}
+	// A zero value means "use the operation default" to the connector. A
+	// generic reader cannot be replayed safely, so streaming uploads always
+	// normalize the default to one attempt.
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
+
+	var method, endpoint, contentType string
+	var body io.Reader
+	var err error
+	if f.runtime == RuntimeSandboxd {
+		if err := f.validateSandboxdWritePath(path); err != nil {
+			recordError(span, err)
+			return err
+		}
+		method, endpoint, contentType = http.MethodPut, filesEndpoint(path), "application/octet-stream"
+		body = &uploadLimitReader{reader: content, remaining: f.maxUpload, maxUpload: f.maxUpload}
+	} else {
+		if err := f.validateLegacyWritePath(path); err != nil {
+			recordError(span, err)
+			return err
+		}
+		method, endpoint = http.MethodPost, "upload"
+		body, contentType, err = f.legacyStreamingWriteReq(path, content)
+		if err != nil {
+			recordError(span, err)
+			return err
+		}
+	}
+
+	if err := f.sendWriteRequest(ctx, path, method, endpoint, body, contentType, maxAttempts, span); err != nil {
+		return err
+	}
+	f.log.V(1).Info("streaming write completed", "path", path)
+	return nil
+}
+
+func (f *Files) sendWriteRequest(
+	ctx context.Context,
+	path, method, endpoint string,
+	body io.Reader,
+	contentType string,
+	maxAttempts int,
+	span trace.Span,
+) error {
 	resp, err := f.connector.SendRequest(ctx, method, endpoint, body, contentType, maxAttempts)
 	if err != nil {
 		recordError(span, err)
 		return fmt.Errorf("%s: write(%q) failed: %w", f.errPrefix(), path, err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		retErr := fmt.Errorf("%s: write(%q): %w", f.errPrefix(), path, f.httpErrorFromResponse(resp, "write"))
 		recordError(span, retErr)
 		return retErr
 	}
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
-	f.log.V(1).Info("write completed", "path", path, "size", len(content))
 	return nil
+}
+
+type uploadLimitReader struct {
+	reader    io.Reader
+	remaining int64
+	maxUpload int64
+}
+
+func (r *uploadLimitReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.remaining > 0 {
+		if int64(len(p)) > r.remaining {
+			p = p[:r.remaining]
+		}
+		n, err := r.reader.Read(p)
+		r.remaining -= int64(n)
+		return n, err
+	}
+
+	var extra [1]byte
+	n, err := r.reader.Read(extra[:])
+	if n > 0 {
+		return 0, fmt.Errorf("content size exceeds MaxUploadSize %d", r.maxUpload)
+	}
+	return 0, err
 }
 
 // sandboxdWriteReq builds the sandboxd PUT request: an idempotent write of the
@@ -175,23 +282,30 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 // are rejected client-side as defense in depth (sandboxd also enforces this
 // server-side via SanitizePath).
 func (f *Files) sandboxdWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
-	if path == "" || path == "." || path == ".." || strings.HasSuffix(path, "/") {
-		return "", "", "", nil, fmt.Errorf("%s: write: %q is not a valid file path", f.errPrefix(), path)
-	}
-	if slices.Contains(strings.Split(path, "/"), "..") {
-		return "", "", "", nil, fmt.Errorf("%s: write: %q must not contain %q path segments (escapes the sandbox root)", f.errPrefix(), path, "..")
+	if err := f.validateSandboxdWritePath(path); err != nil {
+		return "", "", "", nil, err
 	}
 	return http.MethodPut, filesEndpoint(path), "application/octet-stream", bytes.NewReader(content), nil
+}
+
+func (f *Files) validateSandboxdWritePath(path string) error {
+	if path == "" || path == "." || path == ".." || strings.HasSuffix(path, "/") {
+		return fmt.Errorf("%s: write: %q is not a valid file path", f.errPrefix(), path)
+	}
+	if slices.Contains(strings.Split(path, "/"), "..") {
+		return fmt.Errorf("%s: write: %q must not contain %q path segments (escapes the sandbox root)", f.errPrefix(), path, "..")
+	}
+	return nil
 }
 
 // legacyWriteReq builds the python-runtime multipart upload request. The path
 // must be a plain filename (no directory separators); the whole body is
 // buffered so the request can be retried.
 func (f *Files) legacyWriteReq(path string, content []byte) (method, endpoint, contentType string, body *bytes.Reader, err error) {
-	base := pathpkg.Base(path)
-	if base == "." || base == ".." || base == "/" || base != path {
-		return "", "", "", nil, fmt.Errorf("%s: write: %q is not a plain filename (resolved to %q); pass only the filename, not a path with directories", f.errPrefix(), path, base)
+	if err := f.validateLegacyWritePath(path); err != nil {
+		return "", "", "", nil, err
 	}
+	base := pathpkg.Base(path)
 	var buf bytes.Buffer
 	buf.Grow(len(content) + 512)
 	writer := multipart.NewWriter(&buf)
@@ -206,6 +320,30 @@ func (f *Files) legacyWriteReq(path string, content []byte) (method, endpoint, c
 		return "", "", "", nil, fmt.Errorf("%s: failed to close multipart writer: %w", f.errPrefix(), err)
 	}
 	return http.MethodPost, "upload", writer.FormDataContentType(), bytes.NewReader(buf.Bytes()), nil
+}
+
+func (f *Files) legacyStreamingWriteReq(path string, content io.Reader) (body io.Reader, contentType string, err error) {
+	var framing bytes.Buffer
+	writer := multipart.NewWriter(&framing)
+	if _, err := writer.CreateFormFile("file", path); err != nil {
+		return nil, "", fmt.Errorf("%s: failed to create form file: %w", f.errPrefix(), err)
+	}
+	prefix := bytes.Clone(framing.Bytes())
+	framing.Reset()
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("%s: failed to close multipart writer: %w", f.errPrefix(), err)
+	}
+	suffix := bytes.Clone(framing.Bytes())
+	limited := &uploadLimitReader{reader: content, remaining: f.maxUpload, maxUpload: f.maxUpload}
+	return io.MultiReader(bytes.NewReader(prefix), limited, bytes.NewReader(suffix)), writer.FormDataContentType(), nil
+}
+
+func (f *Files) validateLegacyWritePath(path string) error {
+	base := pathpkg.Base(path)
+	if base == "." || base == ".." || base == "/" || base != path {
+		return fmt.Errorf("%s: write: %q is not a plain filename (resolved to %q); pass only the filename, not a path with directories", f.errPrefix(), path, base)
+	}
+	return nil
 }
 
 // Read downloads a file from the sandbox.

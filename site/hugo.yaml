@@ -159,6 +159,10 @@ module:
     target: assets/additional/go-client
     files: ["README.md"]
   - disableWatch: true
+    source: ../clients/integrations/nemo-gym
+    target: assets/additional/integrations-nemo-gym
+    files: ["README.md"]
+  - disableWatch: true
     source: ../docs
     target: assets/additional/docs
     files: ["testing.md", "api.md", "api-migration-guide.md", "python_sdk_reference.md", "go_sdk_reference.md"]

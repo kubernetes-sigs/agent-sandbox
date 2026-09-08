@@ -86,19 +86,7 @@ if [ -z "${SANDBOX_NAME:-}" ]; then
   exit 1
 fi
 
-# The agents.x-k8s.io/pod-name annotation is only set when the claim adopts
-# a warm-pool sandbox. For cold-started sandboxes the pod name matches the
-# Sandbox name itself, so fall back to that if the annotation never appears.
-echo "Resolving backing pod (annotation if warm-adopted, else Sandbox name)..."
-for i in $(seq 1 30); do
-  POD="$(kubectl get sandbox "${SANDBOX_NAME}" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}' 2>/dev/null || true)"
-  [ -n "${POD}" ] && break
-  sleep 1
-done
-if [ -z "${POD:-}" ]; then
-  POD="${SANDBOX_NAME}"
-  echo "Pod-name annotation absent; using Sandbox name as pod name (cold-start path)."
-fi
+POD="${SANDBOX_NAME}"
 echo "Claimed pod: ${POD}"
 
 echo "Waiting for claimed pod to be ready..."

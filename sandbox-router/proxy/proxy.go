@@ -112,17 +112,56 @@ func NewHandler(o Options) *Handler {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	target, perr := ParseSandboxHeaders(r.Header, ParseOptions{
-		AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP,
-	})
+	upstreamPath, upstreamRawPath := r.URL.Path, ""
+	var pathRouted bool
+	target, perr := h.resolveTarget(r, &upstreamPath, &upstreamRawPath, &pathRouted)
 	if perr != nil {
 		WriteJSONError(w, perr)
 		return
 	}
 
-	// Make the parsed namespace visible to the observability middleware.
+	// Make the resolved identity visible to the observability middleware.
+	// Tracing and access logging read it back from Labels rather than the
+	// request headers directly, because a path-routed request (see
+	// resolveTarget) never sets X-Sandbox-* at all — reading headers
+	// there would silently show an empty sandbox identity for every
+	// browser-facing request.
 	if labels := observability.LabelsFromContext(r.Context()); labels != nil {
 		labels.SandboxNamespace = target.Namespace
+		labels.SandboxID = target.ID
+	}
+
+	// Detect Upgrade once, ahead of authorization: the browser-session
+	// bootstrap below and the Rewrite callback further down both need
+	// it, and computing it in one place keeps them from disagreeing if
+	// the predicate ever changes.
+	upgrade := isUpgradeRequest(r)
+
+	// Cross-Site WebSocket Hijacking guard. A cookie is an ambient
+	// credential — unlike a header or a query parameter, the browser
+	// attaches it to a request an attacker's page initiated, and a
+	// WebSocket handshake in particular is not subject to the
+	// Same-Origin Policy the way a fetch is. This runs BEFORE Authorize
+	// (a forged cross-site request should never reach the authorizer,
+	// let alone cost a TokenReview API call) and before the Rewrite
+	// callback below strips Origin for upgrades. Header- and
+	// query-sourced credentials are exempt: a third-party page cannot
+	// forge either one.
+	credSrc := h.credentialSource(r)
+	if credSrc == authz.TokenSourceCookie {
+		origin := r.Header.Get("Origin")
+		if !isAllowedOrigin(origin, requestOrigin(r, h.cfg.AuthzTrustForwardedProto), h.cfg.AuthzCookieAllowedOrigins) {
+			observability.LoggerFromContext(r.Context(), h.log).Info("authorization denied: origin not allowed for cookie-authenticated request",
+				"sandbox", target.ID,
+				"namespace", target.Namespace,
+				"origin", origin,
+			)
+			if h.metrics != nil {
+				h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
+			}
+			WriteJSONError(w, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
+			return
+		}
 	}
 
 	// Authorization. Implementations are expected to pull whatever
@@ -149,16 +188,41 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "allow").Inc()
 	}
 
+	// Browser-session bootstrap: this request just proved (via the
+	// Authorize call above) that it holds a valid credential presented
+	// through the query parameter. Set it as a cookie scoped to this
+	// sandbox and redirect, so every later request — including a
+	// WebSocket handshake, which cannot carry a header and, in any real
+	// browser flow, never carries this query parameter either — relies
+	// on the cookie a browser attaches automatically.
+	if h.maybeBootstrapCookie(w, r, target, credSrc, upgrade, pathRouted) {
+		return
+	}
+
 	target0 := target // capture for closures
+	outboundRawQuery := r.URL.RawQuery
+	if h.cfg.AuthzCookieQueryParam != "" {
+		// Never forward the bootstrap credential to the sandbox itself.
+		// In practice this only fires for the non-GET/HEAD and upgrade
+		// edge cases maybeBootstrapCookie declines to redirect — the
+		// normal flow already returned above.
+		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
+	}
 	// Resolve once per request so the ErrorHandler can see which path
 	// produced the IP (cache vs DNS vs override) and invalidate the cache
 	// entry on dial-class failures. The Rewrite callback re-uses the URL.
-	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, r.URL.Path, r.URL.RawQuery, h.cache)
-	// Detect Upgrade once and reuse: the Rewrite callback uses it to
-	// decide whether to strip Origin, the timeout block below uses it
-	// to skip the per-request deadline. Same predicate, same source of
-	// truth — easier to keep them in sync.
-	upgrade := isUpgradeRequest(r)
+	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, outboundRawQuery, h.cache)
+	if upstreamRawPath != "" {
+		// Only ever set for a path-routed request (see resolveTarget).
+		// Target.Resolve only assigns URL.Path, so without this a path-
+		// routed request carrying an encoded separator in its upstream
+		// portion (e.g. a filename containing "/", sent as "%2F") would
+		// reach the sandbox already decoded, silently renaming the
+		// resource it addresses. net/url only honors RawPath when it is
+		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
+		// resolveTarget/ParsePathRoute guarantee that pairing holds.
+		upstreamURL.RawPath = upstreamRawPath
+	}
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = upstreamURL
@@ -173,6 +237,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Bearer-protected service. Matches the Python router, which
 			// strips Authorization right next to Host.
 			pr.Out.Header.Del("Authorization")
+			// Likewise, never forward our own session cookie — it is as
+			// much a credential as the Authorization header above. Any
+			// other cookie the client sent (e.g. one of code-server's
+			// own) passes through untouched.
+			//
+			// Values(), not Get(): a client is free to send "Cookie" as
+			// more than one header line (rare from a real browser, which
+			// always combines its cookies into one, but not disallowed),
+			// and Get only ever returns the first. Joining every value
+			// with "; " before stripping and writing back a single
+			// header means the credential is found and removed
+			// regardless of which line it arrived on, and nothing else
+			// the client sent is silently dropped along with it.
+			if h.cfg.AuthzCookieName != "" {
+				if vs := pr.Out.Header.Values("Cookie"); len(vs) > 0 {
+					if stripped := stripCookieFromHeader(strings.Join(vs, "; "), h.cfg.AuthzCookieName); stripped == "" {
+						pr.Out.Header.Del("Cookie")
+					} else {
+						pr.Out.Header.Set("Cookie", stripped)
+					}
+				}
+			}
 			// SetXForwarded uses Set() for Host + Proto (overwrites,
 			// safe) but APPENDS to any existing X-Forwarded-For — so a
 			// client-supplied "X-Forwarded-For: 1.2.3.4" would land
@@ -276,6 +362,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 	}
 	rp.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// resolveTarget parses the routing Target for r, preferring the path-based
+// form when --path-routing-prefix is configured and r.URL.EscapedPath()
+// matches it, and falling through to X-Sandbox-* headers otherwise —
+// byte-identical to the header parsing this replaced when the prefix is
+// unset (the default), so header-only deployments are unaffected.
+//
+// On a path match, *upstreamPath and *upstreamRawPath are rewritten to the
+// portion of the path the upstream sandbox should actually see
+// (prefix/namespace/id/port stripped) in, respectively, decoded and
+// originally-escaped form — both are needed together to preserve an
+// encoded separator (e.g. "%2F") through to the outbound request, see
+// ParsePathRoute. Both are left untouched for header-routed requests,
+// which carry no routing prefix to strip; *upstreamRawPath in particular
+// stays "" there, exactly matching pre-path-routing behavior of never
+// setting Resolve's outbound URL.RawPath at all.
+//
+// *pathRouted reports which branch actually resolved the target — the
+// browser-session bootstrap (maybeBootstrapCookie) must only fire for a
+// path-routed request, since the cookie it would set is scoped to a
+// Path shaped like the routing prefix and can never match a
+// header-routed request's URL.
+func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *string, pathRouted *bool) (Target, *Error) {
+	if h.cfg.PathRoutingPrefix != "" {
+		if route, matched, perr := ParsePathRoute(h.cfg.PathRoutingPrefix, r.URL.EscapedPath()); matched {
+			if perr != nil {
+				return Target{}, perr
+			}
+			*upstreamPath = route.UpstreamPath
+			*upstreamRawPath = route.UpstreamRawPath
+			*pathRouted = true
+			return route.Target, nil
+		}
+	}
+	return ParseSandboxHeaders(r.Header, ParseOptions{AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP})
 }
 
 // isUpgradeRequest reports whether r is asking the server to switch

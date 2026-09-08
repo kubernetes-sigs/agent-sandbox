@@ -58,15 +58,13 @@ import (
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-
 const (
 	immediateRequeueDelay = time.Millisecond
 	// warmCandidateGracePeriod gives a newly created claim two seconds for a
 	// warm candidate to receive a Pod IP. This covers short IPAM delays without
 	// allowing an unavailable warm pool to postpone cold creation indefinitely.
 	warmCandidateGracePeriod   = 2 * time.Second
-	warmCandidateRetryInterval = 500 * time.Millisecond
+	warmCandidateRetryInterval = 100 * time.Millisecond
 )
 
 // ErrTemplateNotFound is a sentinel error indicating a SandboxTemplate was not found.
@@ -313,8 +311,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Pending warm candidates are expected transient state, not a claim failure.
 	// Return before status calculation so the grace period does not publish a
 	// misleading SandboxMissing or ReconcilerError condition.
-	var pendingWarmCandidates *warmCandidatesPendingError
-	if errors.As(reconcileErr, &pendingWarmCandidates) {
+	if pendingWarmCandidates, ok := errors.AsType[*warmCandidatesPendingError](reconcileErr); ok {
 		logger.V(4).Info("Waiting for warm pool candidates to report Pod IPs",
 			"claim", claim.Name,
 			"warmPool", claim.Spec.WarmPoolRef.Name,
@@ -851,12 +848,14 @@ func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.Sa
 	if sandbox != nil {
 		claim.Status.SandboxStatus.Name = sandbox.Name
 		claim.Status.SandboxStatus.PodIPs = sandbox.Status.PodIPs
+		claim.Status.SandboxStatus.ServiceFQDN = sandbox.Status.ServiceFQDN
 	} else if err == nil || errors.Is(err, ErrSandboxNotOwned) {
 		// Only clear bound sandbox identity when there is no error (sandbox legitimately deleted or unbound)
 		// or when ownership verification fails. Never clear on transient lookup or patch errors, as wiping
 		// status.sandbox.name forces a fallback to cold-start on the next reconcile retry.
 		claim.Status.SandboxStatus.Name = ""
 		claim.Status.SandboxStatus.PodIPs = nil
+		claim.Status.SandboxStatus.ServiceFQDN = ""
 	}
 }
 
@@ -1128,12 +1127,9 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 		// Wrap the API logic in a closure
 		success, err := func() (bool, error) {
-			poolName := "none"
-			if wpName := getWarmPoolName(adopted); wpName != "" {
-				poolName = wpName
-			}
+			poolName := getWarmPoolName(adopted)
 
-			logger.Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
+			logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
 			// Update claim to record adoption (optimistic lock)
 			if claim.Annotations == nil {
@@ -1242,12 +1238,6 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	if adopted.Annotations == nil {
 		adopted.Annotations = make(map[string]string)
 	}
-
-	// Ensure the adopted sandbox records its pod name before it can be observed Ready.
-	if podName := adopted.Annotations[v1beta1.SandboxPodNameAnnotation]; podName != adopted.Name {
-		adopted.Annotations[v1beta1.SandboxPodNameAnnotation] = adopted.Name
-	}
-
 	if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
 		adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 	}
@@ -1570,7 +1560,7 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(claimMeta *v1beta
 				}
 			}
 			if !allowed {
-				return fmt.Errorf("label domain %q is not in the allowlist", domain)
+				return fmt.Errorf("label domain %q is not in the allowlist (configure the allowed-label-domains key of the agent-sandbox-config ConfigMap in the controller namespace; default: sandbox.users.io)", domain)
 			}
 		} else {
 			// For annotations, we use the blocklist
@@ -1820,7 +1810,18 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 
 	if err := r.Create(ctx, sandbox); err != nil {
 		if k8errors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("%w: %w", errSandboxAlreadyExists, err)
+			liveSandbox := &v1beta1.Sandbox{}
+			if readErr := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(sandbox), liveSandbox); readErr != nil {
+				logger.V(1).Info("Authoritative read after AlreadyExists failed; falling back to bounded requeue", "claim", claim.Name, "sandbox", sandbox.Name, "error", readErr)
+				return nil, fmt.Errorf("%w: %w (authoritative read failed: %w)", errSandboxAlreadyExists, err, readErr)
+			}
+			if !metav1.IsControlledBy(liveSandbox, claim) {
+				collisionErr := fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", liveSandbox.Name, claim.Name)
+				logger.Error(collisionErr, "Sandbox controller mismatch", "claim", claim.Name, "sandbox", liveSandbox.Name)
+				return nil, collisionErr
+			}
+			logger.V(4).Info("Recovered just-created sandbox via authoritative read after AlreadyExists", "claim", claim.Name, "sandbox", liveSandbox.Name)
+			return liveSandbox, nil
 		}
 		err = fmt.Errorf("sandbox create error: %w", err)
 		logger.Error(err, "Error creating sandbox for claim", "claimName", claim.Name)
@@ -2368,11 +2369,12 @@ func sandboxTemplateCreatePredicate() predicate.Funcs {
 
 // sandboxStatusRelevantChange reports whether a Sandbox update changed a field
 // the SandboxClaim reconciler actually consumes: the Ready condition, the
-// Finished condition, PodIPs (mirrored into claim.Status.SandboxStatus), or the
-// DeletionTimestamp (the claim must react when its adopted Sandbox starts
-// terminating). Only these two conditions are compared — by type, not the whole
-// slice — so churn on conditions the claim does not read (e.g. Suspended) does
-// not trigger a needless claim reconcile.
+// Finished condition, PodIPs and ServiceFQDN (mirrored into
+// claim.Status.SandboxStatus), or the DeletionTimestamp (the claim must react
+// when its adopted Sandbox starts terminating). Of the condition slice, only
+// the Ready and Finished condition types are compared — each looked up by
+// type, not the slice as a whole — so churn on condition types the claim does
+// not read (e.g. Suspended) does not trigger a needless claim reconcile.
 //
 // Each condition is compared in full (Status, Reason, Message, ...), NOT just
 // its Status. This matters for expiry: expiry has no condition type of its own —
@@ -2392,6 +2394,13 @@ func sandboxStatusRelevantChange(oldSb, newSb *v1beta1.Sandbox) bool {
 		return true
 	}
 	if !equality.Semantic.DeepEqual(oldSb.Status.PodIPs, newSb.Status.PodIPs) {
+		return true
+	}
+	// ServiceFQDN is mirrored into claim.Status.SandboxStatus like PodIPs.
+	// Admit its changes so the claim converges whenever the Sandbox controller
+	// sets or clears the field (it is cleared when the Service is deleted, so
+	// it can change more than once over a sandbox's life).
+	if oldSb.Status.ServiceFQDN != newSb.Status.ServiceFQDN {
 		return true
 	}
 	for _, condType := range []string{

@@ -33,6 +33,9 @@ from .models import (
 )
 
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+# POST endpoints include command execution, so replaying them can duplicate
+# side effects after the server handled a request but returned a 5xx response.
+RETRYABLE_METHODS = {"GET", "PUT", "DELETE"}
 MAX_RETRIES = 5
 BACKOFF_FACTOR = 0.5
 
@@ -219,7 +222,11 @@ class AsyncSandboxConnector:
                 response = await self.client.request(
                     method, url, headers=headers, follow_redirects=False, **kwargs
                 )
-                if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
+                if (
+                    method.upper() in RETRYABLE_METHODS
+                    and response.status_code in RETRYABLE_STATUS_CODES
+                    and attempt < MAX_RETRIES
+                ):
                     delay = BACKOFF_FACTOR * (2 ** attempt)
                     logger.warning(
                         f"Retryable status {response.status_code} from {url}, "

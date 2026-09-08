@@ -13,9 +13,10 @@
 # limitations under the License.
 
 # SandboxTemplate running the sandboxd portable runtime daemon (KEP-539.2)
-# as a sidecar next to an (unmodified) workload container. The two share the
-# /workspace volume; a co-located workload reaches sandboxd over pod-local
-# networking.
+# as the pod's runtime container (topology A). Commands sent over
+# ProcessService execute in THIS container's filesystem, so any tools they
+# need must be in this image; see deploy/README.md for the topology choice
+# (including topology B: injecting sandboxd into an existing tool-rich image).
 #
 # SDK access: sandboxd binds 0.0.0.0 by default, so it is reachable on the
 # pod network like any other in-pod service (via a Service or the
@@ -66,11 +67,11 @@ spec:
           volumeMounts:
             - name: workspace
               mountPath: /workspace
-      # In practice sandboxd runs as a sidecar next to your workload container,
-      # sharing the /workspace volume; the workload reaches it on the pod
-      # network (e.g. via a Service) or an SDK connects from outside. The
-      # workload container is omitted here to keep the example focused on
-      # deploying sandboxd itself.
+      # A co-located workload container may be added as a CLIENT of the
+      # sandboxd API (reaching it over pod-local networking) — but note that
+      # a shared volume shares files, not binaries: exec'd commands still run
+      # in the sandboxd container above and cannot see a neighboring
+      # container's tools. See deploy/README.md.
       volumes:
         - name: workspace
           emptyDir: {}

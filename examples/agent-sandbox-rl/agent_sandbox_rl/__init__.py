@@ -47,6 +47,8 @@ from .exceptions import (
     FleetOvercommitError,
     NoClusterAvailableError,
     PreflightError,
+    SnapshotError,
+    SnapshotsUnavailable,
 )
 from .async_fleet import AsyncSandboxFleet
 from .fleet import FleetPlan, PlanEntry, SandboxFleet
@@ -156,6 +158,8 @@ __all__ = [
     # exceptions
     "FleetError",
     "PreflightError",
+    "SnapshotError",
+    "SnapshotsUnavailable",
     "CapacityError",
     "NoClusterAvailableError",
     "FleetOvercommitError",

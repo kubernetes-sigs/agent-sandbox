@@ -89,6 +89,11 @@ class ClusterConfig(BaseModel):
   image_pull_secret: str | None = None
   weight: float = 1.0                        # for CapacityWeighted placement
   max_replicas: int | None = None           # optional hard capacity hint
+  # GKE Pod Snapshots: build the SDK's PodSnapshot-capable client for this
+  # cluster so its handles gain snapshot()/suspend()/resume()/restore().
+  # Needs a GKE cluster with Pod Snapshots enabled, a gVisor runtime class,
+  # and a PodSnapshotStorageConfig + PodSnapshotPolicy (README → Snapshots).
+  snapshots: bool = False
 
   @field_validator("weight")
   @classmethod

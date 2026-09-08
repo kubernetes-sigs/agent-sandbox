@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import shlex
 import time
 from dataclasses import dataclass, field
@@ -23,10 +24,14 @@ from typing import TYPE_CHECKING, Optional
 
 from kubernetes.stream import stream
 
+from . import snapshots as _snap
+from .exceptions import SnapshotsUnavailable
 from .sources import Task
 
 if TYPE_CHECKING:
   from .cluster import Cluster
+
+logger = logging.getLogger("agent_sandbox_rl.handles")
 
 
 def exec_in_pod(core_api, pod: str, namespace: str, command) -> str:
@@ -171,6 +176,13 @@ class SandboxHandle:
     pod_ip: Pod IP if known.
     sandbox: The underlying SDK ``Sandbox`` (``.commands`` / ``.files`` — needs
       the Sandbox Router; ``exec()`` below is the router-free path).
+
+  On a cluster with ``ClusterConfig(snapshots=True)`` (GKE Pod Snapshots) the
+  handle also offers ``snapshot()`` / ``suspend()`` / ``resume()`` /
+  ``restore()`` / ``list_snapshots()``; a resume or restore brings up a **new
+  pod**, so those calls end with ``refresh()`` (new ``pod_name`` / ``pod_ip``,
+  exec session dropped). ``hostname`` / ``sandbox_id`` / ``claim_name`` are
+  stable across it.
   """
 
   task: Task
@@ -223,6 +235,112 @@ class SandboxHandle:
     """In-cluster endpoint (``<hostname>.<namespace>:<port>``) for callers that
     reach the sandbox over the network rather than via exec."""
     return f"{self.hostname}.{self._cluster.namespace}:{port}"
+
+  # --- GKE Pod Snapshots (opt-in: ClusterConfig(snapshots=True)) ----------- #
+  def _snapshot_sandbox(self):
+    if not _snap.capable(self.sandbox):
+      raise SnapshotsUnavailable(
+          f"sandbox {self.sandbox_id!r} has no snapshot support — " + _snap.HINT)
+    return self.sandbox
+
+  def _snapshot_engine(self):
+    engine = getattr(self._snapshot_sandbox(), "snapshots", None)
+    if engine is None:
+      raise SnapshotsUnavailable(
+          f"sandbox {self.sandbox_id!r} has no snapshot engine (closed?) — "
+          + _snap.HINT)
+    return engine
+
+  def refresh(self) -> None:
+    """Re-read pod identity after a pod restart (resume / restore).
+
+    A resumed or restored sandbox is a **new pod**: new ``pod_name`` and
+    ``pod_ip``; ``hostname`` / ``sandbox_id`` / ``claim_name`` do not change.
+    Any persistent exec session was bound to the old pod, so it is dropped
+    (``exec()`` falls back to one-shot; call ``open_session()`` again to
+    re-attach). Safe to call at any time.
+    """
+    self.close_session()
+    sb = self.sandbox
+    if sb is None:
+      return
+    try:
+      self.pod_name = sb.get_pod_name() or self.pod_name
+    except Exception:  # noqa: BLE001 — keep the last known name
+      logger.warning("refresh: could not re-read pod name for %s", self.sandbox_id,
+                     exc_info=True)
+    try:
+      self.pod_ip = sb.get_pod_ip()
+    except Exception:  # noqa: BLE001
+      self.pod_ip = None
+
+  def snapshot(self, name: str | None = None, *, timeout: int = 180) -> str:
+    """Snapshot the running sandbox (memory + filesystem); returns the uid.
+
+    ``name`` seeds the ``PodSnapshotManualTrigger`` name (default: the sandbox
+    id). Blocks up to ``timeout`` seconds for the trigger to be processed. The
+    sandbox keeps running (``postCheckpoint: resume`` in the policy).
+    """
+    r = _snap.check(self._snapshot_engine().create(
+        name or f"snap-{self.sandbox_id}", podsnapshot_timeout=timeout), "snapshot")
+    return r.snapshot_uid
+
+  def list_snapshots(self) -> list:
+    """This sandbox's snapshots, newest first (SDK ``SnapshotDetail`` objects)."""
+    return list(_snap.check(self._snapshot_engine().list(), "list snapshots").snapshots)
+
+  def delete_snapshot(self, snapshot_uid: str, *, timeout: int = 180) -> None:
+    _snap.check(self._snapshot_engine().delete(snapshot_uid, timeout=timeout),
+                "delete snapshot")
+
+  def delete_snapshots(self, *, timeout: int = 180) -> None:
+    """Delete every snapshot of this sandbox (they outlive the claim otherwise)."""
+    _snap.check(self._snapshot_engine().delete_all(timeout=timeout), "delete snapshots")
+
+  def suspend(self, *, snapshot: bool = True, timeout: int = 180) -> Optional[str]:
+    """Suspend the sandbox: the pod is deleted, the claim (and identity) kept.
+
+    With ``snapshot`` (default) the live state is captured first so ``resume()``
+    brings back memory + filesystem; returns that snapshot's uid. Without it,
+    resume is a cold boot of the template. Quiesce the sandbox before calling
+    (an in-flight command is frozen inside the snapshot). Blocks up to
+    ``timeout`` seconds for the pod to terminate. The persistent exec session
+    (if any) is closed first, even when the suspend then fails — ``exec()``
+    falls back to one-shot.
+    """
+    sb = self._snapshot_sandbox()
+    self.close_session()          # the stream is bound to the pod being deleted
+    r = _snap.check(sb.suspend(snapshot_before_suspend=snapshot, wait_timeout=timeout),
+                    "suspend")
+    sr = getattr(r, "snapshot_response", None)
+    return getattr(sr, "snapshot_uid", None) if sr is not None else None
+
+  def resume(self, *, timeout: int = 180) -> bool:
+    """Resume a suspended sandbox, restoring its **latest** snapshot if any.
+
+    Returns whether it came back from a snapshot (False = cold boot, or it was
+    not suspended). Waits up to ``timeout`` seconds for the new pod to be Ready,
+    then ``refresh()``es this handle.
+    """
+    r = _snap.check(self._snapshot_sandbox().resume(wait_timeout=timeout), "resume")
+    self.refresh()
+    return bool(getattr(r, "restored_from_snapshot", False))
+
+  def restore(self, snapshot_uid: str, *, timeout: int = 180) -> None:
+    """Restore a **suspended** sandbox from one specific snapshot.
+
+    Pins the snapshot via the claim's pod annotation, resumes, and verifies the
+    pod's ``PodRestored`` condition names it (the SDK does the verification;
+    a mismatch is a `SnapshotError`). Ends with ``refresh()``.
+    """
+    _snap.check(self._snapshot_sandbox().restore(
+        snapshot_uid, sandbox_ready_timeout=timeout), "restore")
+    self.refresh()
+
+  @property
+  def is_suspended(self) -> bool:
+    """Whether the Sandbox's ``spec.operatingMode`` is ``Suspended``."""
+    return bool(self._snapshot_sandbox().is_suspended())
 
   def release(self) -> None:
     """Release this sandbox (delete its claim).

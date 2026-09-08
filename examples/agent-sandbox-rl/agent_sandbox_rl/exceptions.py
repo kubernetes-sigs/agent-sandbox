@@ -35,3 +35,16 @@ class FleetOvercommitError(FleetError):
   """The in-SDK circuit breaker tripped: live sandboxes exceeded the safe ceiling
   (``overcommit_factor`` × expected, or ``max_live_sandboxes``), signalling a
   runaway/over-creation. The fleet is torn down before this is raised."""
+
+
+class SnapshotError(FleetError):
+  """A snapshot / suspend / resume / restore operation failed: the SDK's GKE
+  Pod Snapshot extension reported ``success=False`` (its ``error_reason`` is
+  the message)."""
+
+
+class SnapshotsUnavailable(FleetError):
+  """Snapshot operations were requested where they cannot work: the cluster
+  was not configured with ``ClusterConfig(snapshots=True)``, the installed SDK
+  lacks ``gke_extensions.snapshots``, or the cluster does not serve the
+  PodSnapshot CRDs."""

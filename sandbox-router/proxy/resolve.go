@@ -29,10 +29,11 @@ import (
 // proxy package doesn't pull the informer wiring into its dependency
 // graph just to make a map read.
 type Lookup interface {
-	Get(uid types.UID) (cache.Entry, bool)
-	// GetByName looks up an entry by sandbox namespace + name — the only
-	// cache path for callers that send X-Sandbox-Id without a UID.
-	GetByName(namespace, name string) (cache.Entry, bool)
+	// Resolve returns the canonical cache entry for a sandbox identity.
+	// The implementation resolves UID and name indexes atomically so a
+	// replacement event cannot authorize one incarnation and route to
+	// another.
+	Resolve(namespace, name string, requestedUID types.UID) (cache.Entry, cache.ResolutionSource, bool)
 	// Invalidate evicts an entry; called by the proxy's ErrorHandler on
 	// dial-class failures so the next request doesn't retry the stale IP.
 	Invalidate(uid types.UID) bool
@@ -53,9 +54,10 @@ const (
 	// SourceCache — UID was present and matched a cache entry; we dialed
 	// the live Pod IP. The KEP-NNNN fast/secure path.
 	SourceCache Source = "cache"
-	// SourceCacheName — no UID (or UID missed), but the namespace/name
-	// index matched; we dialed the live Pod IP. Keeps warm-pool
-	// sandboxes (no per-sandbox Service) routable (issue #883).
+	// SourceCacheName — the canonical namespace/name index selected the
+	// entry. This includes stale requested UIDs, because the current name
+	// owner wins. Keeps adopted warm-pool sandboxes routable without a
+	// per-sandbox Service (issue #883).
 	SourceCacheName Source = "cache-name"
 	// SourceDNS — no override, and both cache lookups missed (or the
 	// cache wasn't configured); fell back to the in-cluster DNS form
@@ -69,39 +71,46 @@ const (
 //
 //  1. t.PodIP (set from X-Sandbox-Pod-IP) — explicit caller override,
 //     used by SDKs that already know the Pod IP from creating the Sandbox.
-//  2. cache lookup by t.UID — KEP-NNNN's secure fast path. Only attempted
-//     when both cache is non-nil AND t.UID is present.
-//  3. cache lookup by namespace/name (t.Namespace + t.ID) — routes SDK
-//     traffic that carries no UID header, notably warm-pool sandboxes
-//     whose DNS form can never resolve (issue #883).
-//  4. DNS form — always works without informer cache or UID, matches
+//  2. one canonical cache lookup over t.UID and namespace/name. The
+//     current name owner wins over a stale requested UID; an exact UID
+//     can still select an unclaimed warm-pool member before adoption.
+//  3. DNS form — always works without informer cache or a cache match,
+//     matching
 //     the Python router's behavior.
 //
 // scheme defaults to "http" when empty. The returned Source records
-// which branch fired so the caller can attribute logs and metrics.
-func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Lookup) (*url.URL, Source) {
+// which branch fired, and the returned UID is the cache-selected
+// Sandbox UID. It is empty for Pod-IP and DNS resolution.
+func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Lookup) (*url.URL, Source, types.UID) {
 	if scheme == "" {
 		scheme = "http"
 	}
 
 	var host string
 	src := SourceDNS
+	var resolvedUID types.UID
 	switch {
 	case t.PodIP != "":
 		host = t.PodIP
 		src = SourcePodIP
-	case lookup != nil && t.UID != "":
-		if e, ok := lookup.Get(types.UID(t.UID)); ok {
-			host = e.PodIP
-			src = SourceCache
-		}
-	}
-	if host == "" && lookup != nil {
-		// X-Sandbox-Id is the Sandbox CR name (== Pod name), so with the
-		// namespace it addresses the same entry the UID would have.
-		if e, ok := lookup.GetByName(t.Namespace, t.ID); ok {
-			host = e.PodIP
-			src = SourceCacheName
+	case lookup != nil:
+		if e, resolutionSource, ok := lookup.Resolve(t.Namespace, t.ID, types.UID(t.UID)); ok {
+			if e.PodIP == "" || e.SandboxUID == "" || e.Namespace != t.Namespace || e.SandboxName != t.ID {
+				break
+			}
+			validResolution := true
+			switch resolutionSource {
+			case cache.ResolutionByUID:
+				src = SourceCache
+			case cache.ResolutionByName:
+				src = SourceCacheName
+			default:
+				validResolution = false
+			}
+			if validResolution {
+				host = e.PodIP
+				resolvedUID = e.SandboxUID
+			}
 		}
 	}
 	if host == "" {
@@ -121,5 +130,5 @@ func (t Target) Resolve(scheme, clusterDomain, path, rawQuery string, lookup Loo
 		Host:     net.JoinHostPort(host, strconv.Itoa(t.Port)),
 		Path:     path,
 		RawQuery: rawQuery,
-	}, src
+	}, src, resolvedUID
 }

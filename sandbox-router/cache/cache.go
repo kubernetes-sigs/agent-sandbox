@@ -76,6 +76,11 @@ const (
 // (e.g. ready timestamp, ownership labels for authz) can be added without
 // breaking call sites.
 type Entry struct {
+	// SandboxUID is the canonical UID of the Sandbox that owns the Pod.
+	// Authorization consumes this value from the cache rather than
+	// trusting the caller's routing header.
+	SandboxUID types.UID
+
 	// PodIP is the IPv4/IPv6 address of the sandbox Pod. The ext_proc
 	// handler combines this with the inbound X-Sandbox-Port to build the
 	// upstream target.
@@ -89,6 +94,20 @@ type Entry struct {
 	// Namespace is the K8s namespace of the Sandbox / Pod.
 	Namespace string
 }
+
+// ResolutionSource identifies the cache index that selected an entry.
+type ResolutionSource uint8
+
+const (
+	// ResolutionByUID means the requested UID selected the entry. This
+	// includes unclaimed warm-pool members, which intentionally have no
+	// name-index entry until adoption.
+	ResolutionByUID ResolutionSource = iota + 1
+	// ResolutionByName means the canonical namespace/name index selected
+	// the entry. When a requested UID differs, the name index wins so a
+	// stale incarnation can never override the current Sandbox owner.
+	ResolutionByName
+)
 
 // Cache is a thread-safe Sandbox-UID → Entry map kept up to date by a
 // background Pod informer. Lookups are O(1) and lock-free for the common
@@ -161,7 +180,7 @@ func New(o Options) (*Cache, error) {
 
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.onAddOrUpdate,
-		UpdateFunc: func(_, newObj any) { c.onAddOrUpdate(newObj) },
+		UpdateFunc: c.onUpdate,
 		DeleteFunc: c.onDelete,
 	}); err != nil {
 		return nil, err
@@ -186,6 +205,11 @@ func (c *Cache) WaitForSync(ctx context.Context) bool {
 	return cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced)
 }
 
+// HasSynced lets readiness probes require the informer's initial LIST.
+func (c *Cache) HasSynced() bool {
+	return c.informer.HasSynced()
+}
+
 // Get looks up the cached entry for the given Sandbox UID. Returns
 // (Entry, true) when known, (Entry{}, false) on cache miss. Lock-free in
 // the common case via sync.RWMutex.
@@ -208,6 +232,36 @@ func (c *Cache) GetByName(namespace, name string) (Entry, bool) {
 	}
 	e, ok := c.entries[uid]
 	return e, ok
+}
+
+// Resolve returns one canonical entry for a sandbox request under a
+// single read lock. The current namespace/name owner wins whenever the
+// name is indexed, including while an older UID entry still exists after
+// replacement. When the name is not indexed, an exact UID may select an
+// unclaimed warm-pool member after its namespace and name are verified.
+func (c *Cache) Resolve(namespace, name string, requestedUID types.UID) (Entry, ResolutionSource, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if currentUID, ok := c.byName[nameKey(namespace, name)]; ok {
+		e, exists := c.entries[currentUID]
+		if !exists || e.Namespace != namespace || e.SandboxName != name {
+			return Entry{}, 0, false
+		}
+		if requestedUID != "" && requestedUID == currentUID {
+			return e, ResolutionByUID, true
+		}
+		return e, ResolutionByName, true
+	}
+
+	if requestedUID == "" {
+		return Entry{}, 0, false
+	}
+	e, ok := c.entries[requestedUID]
+	if !ok || e.Namespace != namespace || e.SandboxName != name {
+		return Entry{}, 0, false
+	}
+	return e, ResolutionByUID, true
 }
 
 // Len returns the current number of cached entries. Primarily for tests
@@ -256,6 +310,27 @@ func (c *Cache) onAddOrUpdate(obj any) {
 	}, !unclaimed)
 }
 
+func (c *Cache) onUpdate(oldObj, newObj any) {
+	newPod, ok := newObj.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	c.onAddOrUpdate(newPod)
+
+	oldPod, ok := oldObj.(*corev1.Pod)
+	if !ok {
+		return
+	}
+	oldUID, oldOwned := sandboxUIDOf(oldPod)
+	newUID, newOwned := sandboxUIDOf(newPod)
+	if oldOwned && (!newOwned || oldUID != newUID) {
+		// Publish the new owner first, then remove the old UID. The guarded
+		// name-index delete keeps the new owner canonical in either event
+		// order while preventing the old UID entry from leaking.
+		c.remove(oldUID)
+	}
+}
+
 func (c *Cache) onDelete(obj any) {
 	// DeletedFinalStateUnknown wraps the last-known state when the
 	// informer missed the delete event. Unwrap it.
@@ -276,6 +351,7 @@ func (c *Cache) onDelete(obj any) {
 // pass false so they stay UID-only.
 func (c *Cache) upsert(uid types.UID, e Entry, indexName bool) {
 	c.mu.Lock()
+	e.SandboxUID = uid
 	prev, existed := c.entries[uid]
 	c.entries[uid] = e
 	// Drop a stale name key only when it still points at this UID, so a

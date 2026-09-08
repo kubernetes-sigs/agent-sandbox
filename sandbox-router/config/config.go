@@ -77,10 +77,9 @@ const (
 	AuthzTokenReview AuthzMode = "tokenreview"
 	// AuthzScopedToken authorizes each request against a signed,
 	// per-sandbox token instead of a cluster-verifiable K8s
-	// credential: the token is bound to one (namespace, name) pair at
-	// mint time (see authz.MintScopedToken) and the router rejects it
-	// with 403 against any other sandbox. Use this when the caller
-	// should never need to hold a K8s Bearer token at all.
+	// credential. V1 binds namespace plus name. V2 binds the canonical
+	// authorization target, including Sandbox UID, port, method, and
+	// upstream path.
 	AuthzScopedToken AuthzMode = "scoped-token"
 )
 
@@ -233,14 +232,19 @@ type Config struct {
 	// match. Empty disables the audience check.
 	AuthzTokenReviewAudiences []string
 
-	// AuthzScopedTokenSecretFile is the path to a file holding the
-	// shared HMAC-SHA256 secret used to verify scoped tokens (see
-	// authz.ScopedTokenAuthorizer). Required when AuthzMode is
-	// scoped-token. The router never generates this secret — whoever
-	// mints tokens (typically the Sandbox controller) and the router
-	// must share it out-of-band, e.g. the same K8s Secret mounted into
-	// both.
+	// AuthzScopedTokenSecretFile is the path to the shared HMAC-SHA256
+	// secret used to verify legacy v1 tokens. It is required when
+	// AuthzMode is scoped-token unless v2 verification keys are set.
 	AuthzScopedTokenSecretFile string
+	// AuthzScopedTokenVerificationKeysFile is a JSON key set containing
+	// the Ed25519 public keys accepted for scoped-token v2. Setting it
+	// enables v2 and requires the Pod cache so callers can route by the
+	// Sandbox UID carried in every v2 claim.
+	AuthzScopedTokenVerificationKeysFile string
+	// AuthzScopedTokenV1AcceptUntil is the exclusive RFC3339 cutoff for
+	// legacy v1 HMAC verification during a v2 rollout. It is required
+	// when both the v1 secret and v2 verification keys are configured.
+	AuthzScopedTokenV1AcceptUntil string
 
 	// AuthzCookieName, when non-empty, additionally lets the configured
 	// Authorizer accept a credential carried in a cookie of this name —
@@ -419,8 +423,27 @@ func (c *Config) Validate() error {
 	if c.AuthzTokenReviewCacheSize <= 0 {
 		return fmt.Errorf("--authz-tokenreview-cache-size must be positive, got %d", c.AuthzTokenReviewCacheSize)
 	}
-	if c.AuthzMode == AuthzScopedToken && c.AuthzScopedTokenSecretFile == "" {
-		return errors.New("--authz-scoped-token-secret-file is required when --authz-mode=scoped-token")
+	if c.AuthzMode == AuthzScopedToken && c.AuthzScopedTokenSecretFile == "" && c.AuthzScopedTokenVerificationKeysFile == "" {
+		return errors.New("--authz-mode=scoped-token requires --authz-scoped-token-secret-file or --authz-scoped-token-verification-keys-file")
+	}
+	if c.AuthzScopedTokenVerificationKeysFile != "" {
+		if c.AuthzMode != AuthzScopedToken {
+			return errors.New("--authz-scoped-token-verification-keys-file requires --authz-mode=scoped-token")
+		}
+		if !c.CacheEnabled {
+			return errors.New("--authz-scoped-token-verification-keys-file requires --cache-enabled so v2 requests carry a routable Sandbox UID")
+		}
+		if c.AuthzScopedTokenSecretFile != "" && c.AuthzScopedTokenV1AcceptUntil == "" {
+			return errors.New("--authz-scoped-token-v1-accept-until is required when v1 and v2 scoped-token verification are both enabled")
+		}
+	}
+	if c.AuthzScopedTokenV1AcceptUntil != "" {
+		if c.AuthzMode != AuthzScopedToken || c.AuthzScopedTokenSecretFile == "" {
+			return errors.New("--authz-scoped-token-v1-accept-until requires --authz-mode=scoped-token and --authz-scoped-token-secret-file")
+		}
+		if _, err := time.Parse(time.RFC3339, c.AuthzScopedTokenV1AcceptUntil); err != nil {
+			return fmt.Errorf("--authz-scoped-token-v1-accept-until must be RFC3339: %w", err)
+		}
 	}
 
 	switch c.AuthzCookieSameSite {

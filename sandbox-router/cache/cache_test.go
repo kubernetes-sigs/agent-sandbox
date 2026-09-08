@@ -100,11 +100,17 @@ func newCache(t *testing.T, objs ...runtime.Object) (*Cache, *fake.Clientset, co
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	if c.HasSynced() {
+		t.Fatal("cache must not be ready before the initial LIST")
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	c.Start(ctx)
 	if ok := c.WaitForSync(ctx); !ok {
 		cancel()
 		t.Fatalf("WaitForSync failed")
+	}
+	if !c.HasSynced() {
+		t.Fatal("cache must be ready after WaitForSync succeeds")
 	}
 	return c, client, cancel
 }
@@ -356,6 +362,12 @@ func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
 	if _, ok := c.GetByName(testPodNS, testPodName); ok {
 		t.Fatalf("unclaimed warm-pool pod must not be name-routable")
 	}
+	if _, _, ok := c.Resolve(testPodNS, testPodName, ""); ok {
+		t.Fatalf("unclaimed warm-pool pod must not resolve without its UID")
+	}
+	if e, source, ok := c.Resolve(testPodNS, testPodName, testUID); !ok || source != ResolutionByUID || e.SandboxUID != testUID {
+		t.Fatalf("unclaimed warm-pool pod must resolve by exact UID: entry=%+v source=%v ok=%v", e, source, ok)
+	}
 
 	// Adoption: the label is removed → the update indexes the entry.
 	adopted := pod.DeepCopy()
@@ -365,6 +377,9 @@ func TestCache_UnclaimedWarmPoolPodNotInNameIndex(t *testing.T) {
 	}
 	if !waitFor(t, func() bool { _, ok := c.GetByName(testPodNS, testPodName); return ok }) {
 		t.Fatalf("adopted pod was not added to the name index")
+	}
+	if e, source, ok := c.Resolve(testPodNS, testPodName, ""); !ok || source != ResolutionByName || e.SandboxUID != testUID {
+		t.Fatalf("adopted pod must resolve by canonical name: entry=%+v source=%v ok=%v", e, source, ok)
 	}
 }
 
@@ -438,6 +453,9 @@ func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
 	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
 	// New Pod claims the name first (add before delete)...
 	c.upsert(testUID2, Entry{PodIP: testPodIP2, SandboxName: testPodName, Namespace: testPodNS}, true)
+	if e, source, ok := c.Resolve(testPodNS, testPodName, testUID); !ok || source != ResolutionByName || e.SandboxUID != testUID2 {
+		t.Fatalf("new add must supersede stale requested UID before old delete: entry=%+v source=%v ok=%v", e, source, ok)
+	}
 	// ...then the old Pod's delete arrives late.
 	c.remove(testUID)
 
@@ -457,6 +475,42 @@ func TestCache_PodRecreationNewUIDSameName(t *testing.T) {
 	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: testPodName, Namespace: testPodNS}, true)
 	if e, ok := c.GetByName(testPodNS, testPodName); !ok || e.PodIP != testPodIP {
 		t.Fatalf("delete-then-add must repopulate the name index: %+v ok=%v", e, ok)
+	}
+	if e, source, ok := c.Resolve(testPodNS, testPodName, testUID2); !ok || source != ResolutionByName || e.SandboxUID != testUID {
+		t.Fatalf("delete-then-add must reject the stale requested UID: entry=%+v source=%v ok=%v", e, source, ok)
+	}
+}
+
+func TestCache_UpdateOwnerUIDRemovesOldEntryAfterPublishingNew(t *testing.T) {
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+	oldPod := makePod(testPodName, testPodNS, testUID, testPodIP, true)
+	newPod := makePod(testPodName, testPodNS, testUID2, testPodIP2, true)
+	c.onAddOrUpdate(oldPod)
+	c.onUpdate(oldPod, newPod)
+
+	if _, ok := c.Get(testUID); ok {
+		t.Fatal("owner-UID update must remove the old entry")
+	}
+	entry, source, ok := c.Resolve(testPodNS, testPodName, testUID)
+	if !ok || source != ResolutionByName || entry.SandboxUID != testUID2 {
+		t.Fatalf("owner-UID update must publish the new canonical entry: entry=%+v source=%v ok=%v", entry, source, ok)
+	}
+}
+
+func TestCache_ResolveRejectsUIDForDifferentSandboxName(t *testing.T) {
+	c := &Cache{
+		log:     logr.Discard(),
+		entries: make(map[types.UID]Entry),
+		byName:  make(map[string]types.UID),
+	}
+	c.upsert(testUID, Entry{PodIP: testPodIP, SandboxName: "other", Namespace: testPodNS}, false)
+
+	if _, _, ok := c.Resolve(testPodNS, testPodName, testUID); ok {
+		t.Fatal("UID entry for a different sandbox name must not resolve")
 	}
 }
 

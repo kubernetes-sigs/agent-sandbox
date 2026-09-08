@@ -149,9 +149,9 @@ Run `sandbox-router --help` for the full list. The most relevant:
 
 ## Pod-IP cache (KEP-NNNN fast path)
 
-When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map plus a namespace/name secondary index over the same entries. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes — not the size of the cluster.
+When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map plus a namespace/name secondary index over the same entries. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes rather than the size of the cluster.
 
-For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → cache lookup by `X-Sandbox-UID` → cache lookup by `X-Sandbox-Namespace`/`X-Sandbox-ID` (the name index) → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. The name-index step matters most for warm-pool sandboxes: they have no per-sandbox Service, so for traffic that carries only the ID header the DNS form can never resolve and the name index is the only working path. Cache misses fall through to DNS — the router never refuses to route a request just because the cache is cold or out of sync.
+For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → canonical cache lookup over `X-Sandbox-UID` and `X-Sandbox-Namespace`/`X-Sandbox-ID` → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. The name-index step matters most for warm-pool sandboxes: they have no per-sandbox Service, so for traffic that carries only the ID header the DNS form can never resolve and the name index is the only working path. Compatibility modes fall through to DNS on a cache miss. Scoped-token v2 rejects the request because a miss cannot produce the canonical Sandbox UID bound by its claims.
 
 **Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails because the host is unreachable (timeout, no route — the Pod was rescheduled and the cache hasn't caught up), the cache entry is evicted immediately — by UID when the UID path resolved it, by namespace/name when the name index did — so the next request for the same sandbox falls through to DNS instead of retrying the same stale IP. A connection *refusal* does not evict: it proves a live host (typically a caller-selected port the Pod isn't listening on), and evicting on it would strand warm-pool traffic on the DNS path until the next resync. Name-keyed evictions are additionally conditional on the entry still holding the IP that failed, so a recreated Pod cached mid-dial is never evicted by a late failure against its predecessor's IP. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
 
@@ -165,17 +165,17 @@ For every inbound request, the proxy resolves the upstream in this order: explic
 
 ## Authorization
 
-The router runs every request through an `authz.Authorizer` after header parsing and before resolving the upstream. The default is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded. Two other built-in authorizers — TokenReview and scoped-token, both described below — are selectable via `--authz-mode`.
+The router resolves the canonical cache target after header parsing, then runs the request through an `authz.Authorizer` before proxying. The default is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded. Two other built-in authorizers, TokenReview and scoped-token, are selectable via `--authz-mode`.
 
 The `Authorizer` interface is intentionally simple:
 
 ```go
 type Authorizer interface {
-    Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error
+    Authorize(ctx context.Context, r *http.Request, target AuthorizationTarget) error
 }
 ```
 
-Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (Bearer token via `authz.BearerTokenFromRequest`, TLS client cert, custom header) directly off the request.
+`AuthorizationTarget` carries the namespace, Sandbox name, Sandbox UID, execution port, normalized HTTP method, and the upstream path after path-routing prefixes have been removed. Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (TLS client cert, Bearer token via `authz.BearerTokenFromRequest`, custom header) directly off the request.
 
 The `sandbox_router_authz_decisions_total{decision="allow|deny",sandbox_namespace="…"}` counter records every verdict so deployments can see whether `AllowAll` is actually allowing the traffic shape they expect.
 
@@ -199,7 +199,13 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 ### Scoped-token authorizer
 
-Set `--authz-mode=scoped-token` to enable the built-in authorizer that closes exactly the gap called out above, but without requiring the caller to hold a cluster-verifiable K8s credential at all. A scoped token is a small HMAC-SHA256-signed value binding `(namespace, name, exp)` — minted with `authz.MintScopedToken`, wire format `v1.<payload>.<signature>` — and the authorizer both verifies the signature/expiry *and* checks that the token's `(namespace, name)` matches the sandbox actually being addressed. The leading `v1` version lets a future format coexist with outstanding tokens during a rollout, and the signature is domain-separated (MAC'd over a fixed context string) so it can't be cross-verified by any other component sharing the Secret. A token minted for `box-a` gets 403 against `box-b`; there is no TokenReview round-trip and no K8s API access implied by possessing the token. Requests carrying `X-Sandbox-Pod-IP` or `X-Sandbox-UID` are rejected outright in this mode: both override how the proxy picks the dial target *after* authorization (a raw IP, or a UID→IP cache lookup), which would let a token scoped to one sandbox reach a different pod while `X-Sandbox-ID` still names the authorized one. Rejecting them leaves resolution by `(namespace, name)` — exactly the identity the token authorizes — as the only routing path, so the dial target always matches what was authorized. Today that resolution is DNS, so scoped-token mode needs the sandbox reachable by its `(namespace, name)` DNS name (e.g. a headless `Service`), rather than the UID cache fast-path. A `(namespace, name)`-keyed cache name index (added in #1239) resolves the same identity and composes here without weakening the guarantee — it would lift the headless-`Service` requirement for warm-pool sandboxes; whichever of the two lands second should keep this sentence and #1239's wording in sync.
+Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
+
+Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
+
+The router reads the verification key file once during startup. It does not reload projected file updates. Use a versioned ConfigMap name in the Pod template so each reader-first key-set change rolls the Deployment, and wait for every router replica to accept the overlapping set before issuers use a new `kid`. The [`deploy/examples/scoped-token-v2`](deploy/examples/scoped-token-v2/) example carries the upstream patch and rotation sequence. Helm values, content-hash annotations, and Argo rollout controls belong to the downstream deployment.
+
+V2 requires `--cache-enabled` and rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. Before authorization, the router resolves the UID and namespace/name indexes together and places the cache-selected Sandbox UID in the canonical target. The current name owner wins over a stale requested UID, so a token from a replaced Sandbox cannot follow the name to its replacement. An unclaimed warm-pool member remains reachable only through its exact UID until adoption adds the name index. When v1 and v2 verification are both configured, legacy namespace/name routing remains available to v1 only during the configured overlap window. V1-only deployments retain their existing behavior.
 
 This is the primitive an agent-facing example needs to reproduce the credential-boundary story of `examples/containarium-ssh-sandbox` (agent holds one narrow, single-purpose credential, never a cluster token) using only pieces native to this project — no third-party SSH gateway, no vendor runtime image. `MintScopedToken` is exported so a Sandbox controller (or a test/example harness standing in for one) can mint a token at Sandbox-creation time and hand it to the agent; the router itself never mints, only verifies.
 
@@ -208,9 +214,19 @@ Flags:
 | Flag | Default | Notes |
 |---|---|---|
 | `--authz-mode` | `allow-all` | `allow-all`, `tokenreview`, or `scoped-token`. |
-| `--authz-scoped-token-secret-file` | `""` | Path to a file holding the shared HMAC-SHA256 secret. Required when `--authz-mode=scoped-token`; must match whatever minted the tokens (e.g. the same K8s Secret mounted into the controller and the router). At least 32 bytes after whitespace trimming (`authz.MinScopedTokenSecretLen`) — every observed token is an offline brute-force oracle for this secret, so short values are refused at startup. Minter and verifier both trim surrounding whitespace, so a trailing newline in the mounted file is harmless. |
+| `--authz-scoped-token-secret-file` | `""` | Path to the legacy v1 HMAC-SHA256 secret. Required unless v2 verification keys are configured. At least 32 bytes after whitespace trimming. |
+| `--authz-scoped-token-verification-keys-file` | `""` | Path to a JSON Ed25519 public-key set for v2. Requires `--cache-enabled`. |
+| `--authz-scoped-token-v1-accept-until` | `""` | Exclusive RFC3339 cutoff for v1 verification. Required when v1 and v2 readers overlap. |
 
-**Follow-up, not in this change.** Nothing here mints tokens automatically at Sandbox creation or rotates the shared secret without a restart — both are natural next steps once a controller-side minting story is agreed, tracked alongside the per-sandbox-authorization follow-up on TokenReview above.
+The v2 key file contains unpadded base64url public keys:
+
+```json
+{"keys":[{"kid":"2026-08","publicKey":"<base64url-ed25519-public-key>"}]}
+```
+
+A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+
+The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
 
 ### Browser-session credentials
 

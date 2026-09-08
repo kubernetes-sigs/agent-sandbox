@@ -16,11 +16,14 @@ package proxy
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +38,7 @@ import (
 )
 
 // recordingAuthz lets a test pin the verdict for every call and inspect
-// the (ns, sandbox) arguments after the fact.
+// the canonical authorization target after the fact.
 type recordingAuthz struct {
 	mu       sync.Mutex
 	err      error
@@ -43,14 +46,22 @@ type recordingAuthz struct {
 }
 
 type recordedAuthzReq struct {
-	ns      string
-	sandbox string
-	hasTLS  bool
-	bearer  string
+	target authz.AuthorizationTarget
+	hasTLS bool
+	bearer string
 }
 
-func (a *recordingAuthz) Authorize(_ context.Context, r *http.Request, ns, name string) error {
-	rec := recordedAuthzReq{ns: ns, sandbox: name}
+func mustAtoi(t *testing.T, value string) int {
+	t.Helper()
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		t.Fatalf("parse integer %q: %v", value, err)
+	}
+	return parsed
+}
+
+func (a *recordingAuthz) Authorize(_ context.Context, r *http.Request, target authz.AuthorizationTarget) error {
+	rec := recordedAuthzReq{target: target}
 	if r != nil && r.TLS != nil {
 		rec.hasTLS = true
 	}
@@ -157,8 +168,8 @@ func TestAuthzDenialMapsToStatus(t *testing.T) {
 				t.Fatalf("expected exactly one Authorize call, got %d", len(calls))
 			}
 			req0 := calls[0]
-			if req0.ns != "team" || req0.sandbox != "abc" {
-				t.Fatalf("Authorize got (ns=%q, sandbox=%q), want (team, abc)", req0.ns, req0.sandbox)
+			if req0.target.Namespace != "team" || req0.target.SandboxName != "abc" {
+				t.Fatalf("Authorize got (ns=%q, sandbox=%q), want (team, abc)", req0.target.Namespace, req0.target.SandboxName)
 			}
 			if req0.bearer != "test-token" {
 				t.Fatalf("Authorize should see bearer token, got %q", req0.bearer)
@@ -218,7 +229,7 @@ func TestAuthzRunsForPathRoutedRequests(t *testing.T) {
 			}))
 			defer router.Close()
 
-			resp, err := http.Get(router.URL + "/router/team-a/sandbox-7/" + backendURL.Port() + "/x")
+			resp, err := http.Get(router.URL + "/router/team-a/sandbox-7/" + backendURL.Port() + "/x%2Fy")
 			if err != nil {
 				t.Fatalf("get: %v", err)
 			}
@@ -231,8 +242,11 @@ func TestAuthzRunsForPathRoutedRequests(t *testing.T) {
 			if len(calls) != 1 {
 				t.Fatalf("expected exactly one Authorize call, got %d", len(calls))
 			}
-			if calls[0].ns != "team-a" || calls[0].sandbox != "sandbox-7" {
-				t.Fatalf("Authorize got (ns=%q, sandbox=%q) from the path, want (team-a, sandbox-7)", calls[0].ns, calls[0].sandbox)
+			if calls[0].target.Namespace != "team-a" || calls[0].target.SandboxName != "sandbox-7" {
+				t.Fatalf("Authorize got (ns=%q, sandbox=%q) from the path, want (team-a, sandbox-7)", calls[0].target.Namespace, calls[0].target.SandboxName)
+			}
+			if calls[0].target.Port != mustAtoi(t, backendURL.Port()) || calls[0].target.Method != http.MethodGet || calls[0].target.Path != "/x%2Fy" {
+				t.Fatalf("Authorize got target %+v, want routed port, GET, and /x%%2Fy", calls[0].target)
 			}
 		})
 	}
@@ -254,8 +268,10 @@ func TestAuthzPassesNamespaceAndID(t *testing.T) {
 	req, _ := http.NewRequest("GET", router.URL+"/x", nil)
 	req.Header.Set(HeaderSandboxID, "sandbox-7")
 	req.Header.Set(HeaderSandboxNamespace, "team-a")
+	req.Header.Set(HeaderSandboxUID, "uid-7")
 	req.Header.Set(HeaderSandboxPodIP, "127.0.0.1")
-	req.Header.Set(HeaderSandboxPort, pickFreePortStr(t))
+	port := pickFreePortStr(t)
+	req.Header.Set(HeaderSandboxPort, port)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
@@ -266,7 +282,200 @@ func TestAuthzPassesNamespaceAndID(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected one Authorize call, got %d", len(calls))
 	}
-	if calls[0].ns != "team-a" || calls[0].sandbox != "sandbox-7" {
-		t.Fatalf("Authorize got (%q,%q) want (team-a, sandbox-7)", calls[0].ns, calls[0].sandbox)
+	if calls[0].target.Namespace != "team-a" || calls[0].target.SandboxName != "sandbox-7" {
+		t.Fatalf("Authorize got (%q,%q) want (team-a, sandbox-7)", calls[0].target.Namespace, calls[0].target.SandboxName)
+	}
+	if calls[0].target.SandboxUID != "" || calls[0].target.Port != mustAtoi(t, port) || calls[0].target.Method != http.MethodGet || calls[0].target.Path != "/x" {
+		t.Fatalf("Authorize got target %+v, want no cache-resolved UID, routed port, GET, and /x", calls[0].target)
+	}
+}
+
+func TestScopedTokenV2BindsTheForwardedHeaderRoutedPath(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate Ed25519 key: %v", err)
+	}
+
+	tests := []struct {
+		name            string
+		requestPath     string
+		requestRawPath  string
+		tokenPath       string
+		wantRequestPath string
+	}{
+		{
+			name:            "literal percent",
+			requestPath:     "/x%zz",
+			requestRawPath:  "/x%25zz",
+			tokenPath:       "/x%25zz",
+			wantRequestPath: "/x%25zz",
+		},
+		{
+			name:            "encoded slash follows header routing semantics",
+			requestPath:     "/x/y",
+			requestRawPath:  "/x%2Fy",
+			tokenPath:       "/x/y",
+			wantRequestPath: "/x/y",
+		},
+		{
+			name:            "lowercase escapes become canonical",
+			requestPath:     "/café",
+			requestRawPath:  "/caf%c3%a9",
+			tokenPath:       "/caf%C3%A9",
+			wantRequestPath: "/caf%C3%A9",
+		},
+		{
+			name:            "malformed raw escape becomes a literal percent",
+			requestPath:     "/x%ZZ",
+			requestRawPath:  "/x%ZZ",
+			tokenPath:       "/x%25ZZ",
+			wantRequestPath: "/x%25ZZ",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := make(chan string, 1)
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.RequestURI
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer backend.Close()
+			backendURL, err := url.Parse(backend.URL)
+			if err != nil {
+				t.Fatalf("parse backend URL: %v", err)
+			}
+			port := mustAtoi(t, backendURL.Port())
+
+			token, err := authz.MintScopedTokenV2(privateKey, "current", authz.AuthorizationTarget{
+				Namespace:   "team-a",
+				SandboxName: "sandbox-7",
+				SandboxUID:  "uid-7",
+				Port:        port,
+				Method:      http.MethodGet,
+				Path:        test.tokenPath,
+			}, time.Minute)
+			if err != nil {
+				t.Fatalf("mint v2 token: %v", err)
+			}
+			authorizer, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+				VerificationKeys: map[string]ed25519.PublicKey{"current": publicKey},
+			})
+			if err != nil {
+				t.Fatalf("new scoped-token authorizer: %v", err)
+			}
+
+			cfg := config.Defaults()
+			cfg.AllowLoopbackPodIP = true
+			cfg.ProxyTimeout = 2 * time.Second
+			cfg.UpstreamMaxRetries = 0
+			lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+				"uid-7": {
+					PodIP:       backendURL.Hostname(),
+					Namespace:   "team-a",
+					SandboxName: "sandbox-7",
+				},
+			}}
+			handler := NewHandler(Options{
+				Config:     &cfg,
+				Cache:      lookup,
+				Authorizer: authorizer,
+				Logger:     logr.Discard(),
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "http://router.invalid/", nil)
+			req.URL.Path = test.requestPath
+			req.URL.RawPath = test.requestRawPath
+			req.Header.Set(HeaderSandboxID, "sandbox-7")
+			req.Header.Set(HeaderSandboxNamespace, "team-a")
+			req.Header.Set(HeaderSandboxUID, "uid-7")
+			req.Header.Set(HeaderSandboxPort, backendURL.Port())
+			req.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			resp := response.Result()
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("status: got %d want %d", resp.StatusCode, http.StatusNoContent)
+			}
+			if got := <-requests; got != test.wantRequestPath {
+				t.Fatalf("upstream request path: got %q want %q", got, test.wantRequestPath)
+			}
+		})
+	}
+}
+
+func TestScopedTokenV2RejectsNoncanonicalMethodBeforeForwarding(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate Ed25519 key: %v", err)
+	}
+	backendCalled := make(chan struct{}, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendCalled <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+
+	token, err := authz.MintScopedTokenV2(privateKey, "current", authz.AuthorizationTarget{
+		Namespace:   "team-a",
+		SandboxName: "sandbox-7",
+		SandboxUID:  "uid-7",
+		Port:        mustAtoi(t, backendURL.Port()),
+		Method:      http.MethodPost,
+		Path:        "/exec",
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("mint v2 token: %v", err)
+	}
+	authorizer, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+		VerificationKeys: map[string]ed25519.PublicKey{"current": publicKey},
+	})
+	if err != nil {
+		t.Fatalf("new scoped-token authorizer: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.ProxyTimeout = 2 * time.Second
+	cfg.UpstreamMaxRetries = 0
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"uid-7": {
+			PodIP:       backendURL.Hostname(),
+			Namespace:   "team-a",
+			SandboxName: "sandbox-7",
+		},
+	}}
+	router := httptest.NewServer(NewHandler(Options{
+		Config:     &cfg,
+		Cache:      lookup,
+		Authorizer: authorizer,
+		Logger:     logr.Discard(),
+	}))
+	defer router.Close()
+
+	req, err := http.NewRequest("post", router.URL+"/exec", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set(HeaderSandboxID, "sandbox-7")
+	req.Header.Set(HeaderSandboxNamespace, "team-a")
+	req.Header.Set(HeaderSandboxUID, "uid-7")
+	req.Header.Set(HeaderSandboxPort, backendURL.Port())
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status: got %d want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	select {
+	case <-backendCalled:
+		t.Fatal("noncanonical method reached upstream")
+	default:
 	}
 }

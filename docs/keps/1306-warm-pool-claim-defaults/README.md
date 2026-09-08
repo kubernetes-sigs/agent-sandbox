@@ -36,7 +36,8 @@ never modified.
 - `lifecycle.ttlSecondsAfterFinished` — deletes claims after the sandbox
   reaches a terminal state (batch/job workloads with `RestartPolicy: Never`).
 - `maxLifetimeSeconds` — a duration-based hard deadline computed into
-  `ShutdownTime` at adoption time. This is the primary cleanup mechanism for
+  `ShutdownTime` at warm adoption or cold creation time. This is the primary
+  cleanup mechanism for
   long-running workloads where `RestartPolicy: Always` (the default) prevents
   the sandbox from ever reaching a terminal state, making TTL ineffective.
 
@@ -302,7 +303,7 @@ type ClaimDefaults struct {
     Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 
     // maxLifetimeSeconds specifies the maximum duration (in seconds) a claimed
-    // sandbox may run. At adoption time, the controller computes
+    // sandbox may run. At claim creation (warm adoption or cold fallback), the controller computes
     // ShutdownTime = now + maxLifetimeSeconds and sets it on the claim's
     // lifecycle. Each claim gets a unique deadline.
     // This is the primary cleanup mechanism for long-running workloads where
@@ -310,7 +311,7 @@ type ClaimDefaults struct {
     // state, making TTLSecondsAfterFinished ineffective.
     // +optional
     // +kubebuilder:validation:Minimum=1
-    MaxLifetimeSeconds *int64 `json:"maxLifetimeSeconds,omitempty"`
+    MaxLifetimeSeconds *int32 `json:"maxLifetimeSeconds,omitempty"`
 }
 ```
 
@@ -338,12 +339,12 @@ type ClaimDefaults struct {
     Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 
     // maxLifetimeSeconds specifies the maximum duration (in seconds) a claimed
-    // sandbox may run. At adoption time, the controller computes
+    // sandbox may run. At claim creation (warm adoption or cold fallback), the controller computes
     // ShutdownTime = now + maxLifetimeSeconds and sets it on the claim's
     // lifecycle. Each claim gets a unique deadline.
     // +optional
     // +kubebuilder:validation:Minimum=1
-    MaxLifetimeSeconds *int64 `json:"maxLifetimeSeconds,omitempty"`
+    MaxLifetimeSeconds *int32 `json:"maxLifetimeSeconds,omitempty"`
 }
 ```
 

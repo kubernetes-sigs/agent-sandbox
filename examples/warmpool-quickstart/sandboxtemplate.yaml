@@ -13,6 +13,7 @@ spec:
         runAsGroup: 3000
         fsGroup: 2000
         runAsNonRoot: true
+      restartPolicy: "OnFailure"
       containers:
       - name: my-container
         image: busybox

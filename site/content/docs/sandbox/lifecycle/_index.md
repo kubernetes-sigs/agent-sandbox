@@ -49,6 +49,7 @@ spec:
   shutdownTime: "${SHUTDOWN_TIME}"
   podTemplate:
     spec:
+      restartPolicy: Never
       containers:
       - name: workspace
         image: alpine:latest
@@ -205,4 +206,52 @@ func main() {
 }
   {{< /blocks/tab >}}
 {{< /blocks/tabs >}}
+
+## Restart Policy and Cleanup Interaction
+
+The `restartPolicy` on a sandbox's pod template determines whether the container restarts after it exits. This directly affects which cleanup mechanisms work:
+
+| `restartPolicy` | Container behavior on exit | TTL fires? | `shutdownTime` fires? | Risk if no lifecycle set |
+|---|---|---|---|---|
+| `Never` | Container stays terminated | **Yes** — pod reaches `Failed` or `Succeeded` | Yes | Low — TTL handles cleanup |
+| `OnFailure` | Restarts on non-zero exit only | Only on clean exit (exit 0) | Yes | Medium — crashes don't trigger TTL |
+| `Always` (Kubernetes default) | Restarts on any exit | **Never** — container restarts indefinitely | Yes | **High — no cleanup without `shutdownTime`** |
+
+### Why this matters
+
+When `restartPolicy` is omitted, Kubernetes defaults to `Always`. If a pool operator relies on
+`TTLSecondsAfterFinished` for cleanup, the sandbox never reaches a terminal state because the
+container is restarted each time it exits. The TTL never fires, and the sandbox runs indefinitely.
+
+This creates two failure modes:
+
+1. **Zombie sandboxes.** A batch workload finishes, the container exits, but `Always` restarts it. The sandbox sits idle consuming resources until manually deleted.
+
+2. **Unbounded CrashLoopBackOff.** A container that OOMs or panics on startup enters `CrashLoopBackOff` indefinitely. The pod is never terminal, TTL never fires, and the sandbox consumes resources in a crash loop with no escape.
+
+### Recommendations
+
+Always set `restartPolicy` explicitly in your `SandboxTemplate`:
+
+- **`Never`** for ephemeral, one-shot workloads (single script execution, Playwright scrapes, CI test runs). TTL cleanup works reliably because the pod reaches a terminal state on exit.
+
+- **`OnFailure`** for interactive or long-running workloads (MCP servers, Jupyter kernels, coding agents). The container restarts on crashes but stays terminated on clean exit. Pair with `shutdownTime` or `maxLifetimeSeconds` for a hard cleanup deadline.
+
+- **`Always`** only when you explicitly need indefinite restarts (rare). Always pair with `shutdownTime` or `maxLifetimeSeconds` — TTL-based cleanup will not work.
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: batch-template
+spec:
+  podTemplate:
+    spec:
+      # Never: container stays terminated on exit, TTL cleanup works reliably.
+      restartPolicy: "Never"
+      containers:
+      - name: workspace
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c", "python run_task.py"]
+```
 

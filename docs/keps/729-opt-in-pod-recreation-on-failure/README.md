@@ -61,18 +61,18 @@ Auto-recreation must remain opt-in so platforms that rely on terminal `Finished`
 ```text
 reconcilePod sees existing Pod
   → if phase=Failed AND podFailurePolicy=Recreate AND owned by Sandbox
-      → Delete Pod, clear agents.x-k8s.io/pod-name annotation, bump in-memory backoff, return nil
+      → Delete Pod (bump in-memory backoff only on successful delete; skip bump on NotFound), clear agents.x-k8s.io/pod-name annotation, return nil
   → next reconcile: Pod missing → if recreate backoff not elapsed, skip Create and RequeueAfter
   → once backoff elapses: existing create path builds a new Pod
   → PVCs from volumeClaimTemplates remain Sandbox-owned and are remounted
-  → when the replacement Pod reaches Running, reset in-memory backoff
+  → when the replacement Pod has been Running for 10 minutes, reset in-memory backoff
 ```
 
 Expiry handling already short-circuits before child reconcile, so expired Sandboxes do not recreate Failed Pods. Suspend continues to delete the Pod for suspension and does not create while `operatingMode=Suspended`.
 
 With Recreate, `Finished` must not stick on the Failed Pod being replaced: `reconcilePod` runs before `computeFinishedCondition`, and returning a nil Pod after delete clears Finished for that reconcile.
 
-**Crash-loop backoff (Deployment pattern):** `Recreate` combined with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly. Without delay, Owns(Pod) watch events would drive an immediate Delete→Create hot loop (workqueue rate limiting does not apply to watch `Add`s). This KEP uses the Deployment-style approach: track retry state in controller memory and gate Create with exponential backoff (5s base, doubling up to 5m), waking via `RequeueAfter`. State is lost on process restart / leader failover (at most one un-backed-off recreate burst). Persisting `failureCount` / `lastFailureTime` on `SandboxStatus` (Job pattern) is deferred.
+**Crash-loop backoff (Deployment pattern):** `Recreate` combined with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly. Without delay, Owns(Pod) watch events would drive an immediate Delete→Create hot loop (workqueue rate limiting does not apply to watch `Add`s). This KEP uses the Deployment-style approach: track retry state in controller memory and gate Create with exponential backoff (5s base, doubling up to 5m), waking via `RequeueAfter`. Backoff is not reset on the first Running observation: a container that crashes shortly after start would otherwise recreate at the 5s base forever. Reset (and Failed-delete decay) require the Pod to have been started for 10 minutes, matching kubelet CrashLoopBackOff decay. A Failed delete that returns `NotFound` does not bump (stale cache / already gone). State is lost on process restart / leader failover (at most one un-backed-off recreate burst). Persisting `failureCount` / `lastFailureTime` on `SandboxStatus` (Job pattern) is deferred.
 
 #### API Changes
 
@@ -104,8 +104,8 @@ Enum (not bool) matches project API conventions and `ShutdownPolicy`. A plain en
 - Only delete when ownership is `resourceOwnedBySandbox` and `DeletionTimestamp` is zero.
 - Refuse delete for foreign-owned pods (same logging pattern as suspend).
 - Log the recreate delete at `Info` (major lifecycle event).
-- Apply Deployment-style in-memory recreate backoff: bump on Failed delete, gate Create, `RequeueAfter` for the remaining delay, reset when the Pod is Running.
-- Unit-test Ignore vs Recreate, ownership refusal, Succeeded+Recreate (no recreate), Suspended (suspend path only), and recreate backoff gate/reset.
+- Apply Deployment-style in-memory recreate backoff: bump on successful Failed delete (skip bump when Delete returns NotFound), gate Create, `RequeueAfter` for the remaining delay. Reset only after the replacement Pod has been Running for 10 minutes (or when a Failed pod's StartTime shows it ran that long), so a crash loop that passes through Running still doubles 5s→5m.
+- Unit-test Ignore vs Recreate, ownership refusal, Succeeded+Recreate (no recreate), Suspended (suspend path only), recreate backoff gate/reset, skip-bump on Delete NotFound, and no reset on brief Running.
 - Optional e2e: Fail once, recreate, remount PVC with surviving data.
 
 ## Scalability

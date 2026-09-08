@@ -254,7 +254,8 @@ type SandboxSpec struct {
 	// Combined with restartPolicy Never and a container that always exits non-zero,
 	// Recreate can recreate the Pod repeatedly; the controller applies Deployment-style
 	// in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash
-	// loop cannot hot-loop the API server. Backoff state is not persisted in status.
+	// loop cannot hot-loop the API server. Backoff resets after the replacement Pod has
+	// been Running for 10 minutes. Backoff state is not persisted in status.
 	// +kubebuilder:default=Ignore
 	// +optional
 	PodFailurePolicy PodFailurePolicy `json:"podFailurePolicy,omitempty"`

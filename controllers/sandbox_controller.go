@@ -74,6 +74,10 @@ const (
 	// Deployment-pattern in-memory backoff for podFailurePolicy=Recreate.
 	recreateBackoffBase = 5 * time.Second
 	recreateBackoffMax  = 5 * time.Minute
+	// recreateBackoffResetAfter is how long a replacement Pod must have been
+	// started before backoff is cleared. Matches kubelet CrashLoopBackOff
+	// decay (2 × max backoff).
+	recreateBackoffResetAfter = 2 * recreateBackoffMax
 )
 
 // PodCacheTransform is a client-go informer transform for the manager's Pod
@@ -1338,12 +1342,22 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 						"pod.Name": pod.Name,
 					})
 				}
-				if err := r.Delete(ctx, pod); err != nil && !k8serrors.IsNotFound(err) {
-					return nil, 0, fmt.Errorf("failed to delete Failed pod for recreate: %w", err)
+				if err := r.Delete(ctx, pod); err != nil {
+					if !k8serrors.IsNotFound(err) {
+						return nil, 0, fmt.Errorf("failed to delete Failed pod for recreate: %w", err)
+					}
+					// Stale-cache / already-gone: do not bump. A prior successful
+					// delete already counted this failure.
+				} else {
+					// Only bump when this pass initiates the delete so a
+					// terminating Pod or NotFound no-op does not double-count.
+					// A pod that ran for recreateBackoffResetAfter is treated as a
+					// new incident (kubelet CrashLoopBackOff decay).
+					if podLivedAtLeast(pod, r.recreateBackoff.clock()) {
+						r.recreateBackoff.reset(sandboxKey)
+					}
+					r.recreateBackoff.bump(sandboxKey)
 				}
-				// Only bump when we initiate the delete so a terminating Pod
-				// does not stretch the delay on every reconcile.
-				r.recreateBackoff.bump(sandboxKey)
 			} else {
 				logger.V(4).Info("Failed Pod is already being deleted for recreate",
 					"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
@@ -1355,8 +1369,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil, r.recreateBackoff.delay(sandboxKey), nil
 		}
 
+		var resetRequeue time.Duration
 		if ownership == resourceOwnedBySandbox && pod.Status.Phase == corev1.PodRunning {
-			r.recreateBackoff.reset(sandboxKey)
+			resetRequeue = r.recreateBackoff.maybeResetAfterStableRun(sandboxKey, pod)
 		}
 
 		if err := ensurePodNameAnnotation(pod.Name); err != nil {
@@ -1365,7 +1380,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		// TODO - Do we enforce (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
-		return pod, 0, nil
+		return pod, resetRequeue, nil
 	}
 
 	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
@@ -1921,6 +1936,35 @@ func (b *recreateBackoff) delay(key types.NamespacedName) time.Duration {
 	return wait
 }
 
+// has reports whether backoff state exists for key, including after the
+// delay has elapsed (failures still counted until reset).
+func (b *recreateBackoff) has(key types.NamespacedName) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.entries == nil {
+		return false
+	}
+	_, ok := b.entries[key]
+	return ok
+}
+
+// maybeResetAfterStableRun clears backoff once the pod has been started for
+// recreateBackoffResetAfter. If the window has not elapsed, it returns the
+// remaining wait so Reconcile can RequeueAfter rather than resetting on the
+// first Running observation (which would defeat exponential backoff for
+// crash loops that pass through Running).
+func (b *recreateBackoff) maybeResetAfterStableRun(key types.NamespacedName, pod *corev1.Pod) time.Duration {
+	if !b.has(key) {
+		return 0
+	}
+	now := b.clock()
+	if podLivedAtLeast(pod, now) {
+		b.reset(key)
+		return 0
+	}
+	return remainingPodLiveWait(pod, now)
+}
+
 // bump records a Failed-pod recreate delete and schedules the next create
 // after 5s * 2^(failures-1), capped at 5m (Job-style intervals).
 func (b *recreateBackoff) bump(key types.NamespacedName) {
@@ -1946,7 +1990,8 @@ func (b *recreateBackoff) bump(key types.NamespacedName) {
 	b.entries[key] = e
 }
 
-// reset clears backoff after the Sandbox has a healthy (Running) Pod again.
+// reset clears backoff after the Sandbox has a healthy Pod that has been
+// Running long enough, or when a Failed pod itself ran that long.
 func (b *recreateBackoff) reset(key types.NamespacedName) {
 	b.clear(key)
 }
@@ -1959,4 +2004,27 @@ func (b *recreateBackoff) clear(key types.NamespacedName) {
 		return
 	}
 	delete(b.entries, key)
+}
+
+// podLivedAtLeast reports whether kubelet-set Status.StartTime is at least
+// recreateBackoffResetAfter ago. Pods that never started (nil StartTime)
+// have not lived long enough.
+func podLivedAtLeast(pod *corev1.Pod, now time.Time) bool {
+	if pod == nil || pod.Status.StartTime == nil {
+		return false
+	}
+	return now.Sub(pod.Status.StartTime.Time) >= recreateBackoffResetAfter
+}
+
+// remainingPodLiveWait is how long until podLivedAtLeast becomes true, or 0
+// if StartTime is unknown so a deadline cannot be computed.
+func remainingPodLiveWait(pod *corev1.Pod, now time.Time) time.Duration {
+	if pod == nil || pod.Status.StartTime == nil {
+		return 0
+	}
+	elapsed := now.Sub(pod.Status.StartTime.Time)
+	if elapsed >= recreateBackoffResetAfter {
+		return 0
+	}
+	return recreateBackoffResetAfter - elapsed
 }

@@ -23,3 +23,14 @@ spec:
             secretKeyRef:
               name: gemini-api-key
               key: key
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: sandbox-python-computeruse-warmpool
+spec:
+  # 0: claims cold-start from the template; a pre-warmed spare would be
+  # adopted by test_agent_without_api_key and defeat its timeout assertion
+  replicas: 0
+  sandboxTemplateRef:
+    name: sandbox-python-computeruse-template

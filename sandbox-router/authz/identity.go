@@ -15,7 +15,6 @@
 package authz
 
 import (
-	"crypto/tls"
 	"net/http"
 	"strings"
 )
@@ -28,42 +27,6 @@ const AuthorizationHeader = "Authorization"
 // BearerSchemePrefix is the case-insensitive prefix that introduces a
 // Bearer token in the Authorization header.
 const BearerSchemePrefix = "Bearer "
-
-// IdentityFromTLS extracts an Identity from the peer's verified TLS
-// client certificate. Returns the zero Identity (Source=="") when no
-// verified cert is available — typically because mTLS is off or
-// optional and the client didn't present one.
-//
-// Name precedence: first SPIFFE URI SAN → first DNS SAN → Subject CN.
-// This ordering favors SPIFFE in service-mesh deployments, falls back
-// to DNS SANs which are how K8s ServiceAccount certs are typically
-// shaped, and uses the CN only when nothing else is available.
-func IdentityFromTLS(state *tls.ConnectionState) Identity {
-	if state == nil || len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) == 0 {
-		return Identity{}
-	}
-	leaf := state.VerifiedChains[0][0]
-	id := Identity{Source: "tls"}
-
-	for _, u := range leaf.URIs {
-		if strings.EqualFold(u.Scheme, "spiffe") {
-			id.Username = u.String()
-			break
-		}
-	}
-	if id.Username == "" && len(leaf.DNSNames) > 0 {
-		id.Username = leaf.DNSNames[0]
-	}
-	if id.Username == "" && leaf.Subject.CommonName != "" {
-		id.Username = leaf.Subject.CommonName
-	}
-	// O groups become group claims, which mirrors how K8s shapes
-	// client-cert identities (group = O, user = CN).
-	if len(leaf.Subject.Organization) > 0 {
-		id.Groups = append(id.Groups, leaf.Subject.Organization...)
-	}
-	return id
-}
 
 // BearerTokenFromRequest extracts a Bearer token from the Authorization
 // header. Returns ("", false) when the header is missing or does not

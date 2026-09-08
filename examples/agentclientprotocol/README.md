@@ -32,7 +32,8 @@ Together they cover the core ACP flows:
 ### Interactive session against `gemini --acp`
 
 ```bash
-go run ./examples/agentclientprotocol
+cd examples/agentclientprotocol
+go run .
 ```
 
 This launches `gemini --acp` as a subprocess, creates a session in the current directory, and drops you into a prompt loop:
@@ -58,7 +59,8 @@ Done — proof.txt now contains "hello".
 ### One-shot prompt
 
 ```bash
-go run ./examples/agentclientprotocol -yolo -prompt "Summarize the README in this directory"
+cd examples/agentclientprotocol
+go run . -yolo -prompt "Summarize the README in this directory"
 ```
 
 `-prompt` sends a single prompt and exits when the turn completes; `-yolo` auto-approves all tool permission requests.
@@ -67,12 +69,13 @@ go run ./examples/agentclientprotocol -yolo -prompt "Summarize the README in thi
 
 | Flag | Description |
 |---|---|
-| `-cmd` | Agent command to spawn (default `gemini --acp`) |
+| `-cmd` | Agent command to spawn (default `gemini --acp`). Use shell quoting to pass the whole command as one flag value; the program then splits that value on whitespace, so individual arguments cannot themselves contain spaces (quotes inside the value are not interpreted). |
 | `-cwd` | Working directory for the session (default: current directory) |
 | `-prompt` | Send one prompt and exit instead of running interactively |
 | `-session-id` | Resume an existing session instead of creating a new one |
 | `-yolo` | Auto-approve all tool call permission requests |
 | `-auth-method` | Auth method ID to use if the agent requires authentication |
+| `-setup-timeout` | Timeout for the initialize/authenticate/session setup calls (default `60s`); prompt turns have no timeout |
 | `-debug` | Show agent stderr, thoughts, and raw notification traffic |
 
 ### Running against an Agent inside a Sandbox
@@ -80,5 +83,6 @@ go run ./examples/agentclientprotocol -yolo -prompt "Summarize the README in thi
 You can connect to an agent running inside a Kubernetes Sandbox pod by giving `-cmd` a command whose stdio is wired to the remote agent:
 
 ```bash
-go run ./examples/agentclientprotocol -cmd "kubectl exec -i sandbox-claim-pod -c agent -- gemini --acp"
+cd examples/agentclientprotocol
+go run . -cmd "kubectl exec -i sandbox-claim-pod -c agent -- gemini --acp"
 ```

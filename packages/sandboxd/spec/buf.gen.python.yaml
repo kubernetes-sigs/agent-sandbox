@@ -23,9 +23,9 @@ version: v2
 managed:
   enabled: true
 plugins:
-  - remote: buf.build/protocolbuffers/python
+  - remote: buf.build/protocolbuffers/python:v36.1
     out: ../../../clients/python/agentic-sandbox-client/k8s_agent_sandbox/_proto
-  - remote: buf.build/protocolbuffers/pyi
+  - remote: buf.build/protocolbuffers/pyi:v36.1
     out: ../../../clients/python/agentic-sandbox-client/k8s_agent_sandbox/_proto
-  - remote: buf.build/grpc/python
+  - remote: buf.build/grpc/python:v1.83.1
     out: ../../../clients/python/agentic-sandbox-client/k8s_agent_sandbox/_proto

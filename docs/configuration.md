@@ -90,3 +90,42 @@ Then include the patch in your `kustomization.yaml`:
 patches:
   - path: patch-args.yaml
 ```
+
+## SandboxClaim label-domain allowlist
+
+Since v0.5.0, label keys in `SandboxClaim.spec.additionalPodMetadata.labels`
+must carry a domain prefix from an allowlist; claims with any other label
+domain are rejected with `Ready=False, reason=InvalidMetadata`. The default
+allowlist is `sandbox.users.io` (subdomains of an allowed domain also pass).
+
+The extensions controller reads the allowlist **once at startup** from
+`/etc/sandbox-config/allowed-label-domains`, mounted from an optional
+ConfigMap named `agent-sandbox-config` in the controller's namespace. The
+file's contents **replace** the default rather than extending it, so include
+`sandbox.users.io` if existing consumers rely on it. Domains are separated
+by newlines or commas. An empty (or separator-only) file does not disable
+the allowlist — the controller treats it the same as an absent file and
+falls back to the `sandbox.users.io` default.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-sandbox-config
+  namespace: agent-sandbox-system
+data:
+  allowed-label-domains: |
+    example.com
+    sandbox.users.io
+```
+
+After creating or changing the ConfigMap, restart the controller so it
+re-reads the file:
+
+```sh
+kubectl -n agent-sandbox-system rollout restart deploy/agent-sandbox-controller
+```
+
+Annotations in `additionalPodMetadata` are governed separately by a
+restricted-domain blocklist (with `cluster-autoscaler.kubernetes.io/safe-to-evict`
+exempted), not by this allowlist.

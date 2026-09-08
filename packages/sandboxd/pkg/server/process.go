@@ -275,8 +275,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 	exitCode := int32(0)
 	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
 			exitCode = int32(exitErr.ExitCode())
 		} else {
 			exitCode = -1
@@ -312,8 +311,7 @@ func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteReque
 	runErr := cmd.Run()
 	exitCode := int32(0)
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			exitCode = int32(exitErr.ExitCode())
 		} else {
 			return nil, mapCommandError(runErr, codes.Internal, "failed to execute command")

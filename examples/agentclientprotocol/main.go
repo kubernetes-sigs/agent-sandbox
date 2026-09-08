@@ -124,20 +124,18 @@ func run(ctx context.Context) error {
 
 	// One-shot mode: send a single prompt and exit.
 	if opt.Prompt != "" {
-		return sendPrompt(ctx, client, cons, sessionID, opt.Prompt)
+		err := sendPrompt(ctx, client, cons, sessionID, opt.Prompt)
+		cons.flush() // don't lose streamed output when the process exits
+		return err
 	}
 
 	// Interactive prompt loop.
 	fmt.Println(`Type a prompt and press Enter ("exit" or Ctrl-D to quit).`)
 	for {
-		fmt.Print("\n> ")
-		line, err := cons.stdin.ReadString('\n')
-		if err == io.EOF {
+		line, ok := cons.ask("\n> ")
+		if !ok {
 			fmt.Println()
 			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("reading input: %w", err)
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -228,12 +226,17 @@ func setupSession(ctx context.Context, client *acp.Client, opt options, cwd stri
 	return newResp.SessionID, nil
 }
 
-// withAuthRetry invokes fn, and if it fails on an agent that advertises
-// authentication methods, authenticates and retries once. Agents reject
-// session/new and session/load until authenticate succeeds.
+// withAuthRetry invokes fn, and if it fails with an auth-required error on
+// an agent that advertises authentication methods, authenticates and
+// retries once. Agents reject session/new and session/load with
+// acp.AuthRequired until authenticate succeeds; any other error is
+// returned as-is.
 func withAuthRetry(ctx context.Context, client *acp.Client, initResp *acp.InitializeResponse, authMethod string, fn func() error) error {
 	err := fn()
 	if err == nil || len(initResp.AuthMethods) == 0 {
+		return err
+	}
+	if !acp.IsAuthRequiredError(err) {
 		return err
 	}
 	method := authMethod
@@ -261,11 +264,18 @@ func sendPrompt(ctx context.Context, client *acp.Client, cons *console, sessionI
 	return nil
 }
 
-// console renders session updates and answers agent requests (permission
-// prompts, file system access). It owns stdin/stdout for the interactive
-// loop.
+// console shows output and asks questions using a model / view split: the
+// model is an ordered list of items appended by any goroutine, and a single
+// view goroutine (run) — the only writer to stdout and reader of stdin —
+// handles the items in order, keeping track of how far it has gotten.
+//
+// Producers never block on the user: while the view is waiting for the
+// answer to a question, later items simply accumulate in the model. A
+// question therefore holds back everything appended after it, so it is
+// never pushed off the screen. (A TUI could replace the view — for example
+// painting new items above the active question — without touching the
+// model or its producers.)
 type console struct {
-	stdin *bufio.Reader
 	// workDir is the session working directory (symlinks resolved); agent
 	// file system requests are confined to it.
 	workDir string
@@ -274,36 +284,149 @@ type console struct {
 	// request instead of asking the user.
 	autoApprove bool
 
-	mu             sync.Mutex
-	midAgentOutput bool              // true while streamed agent text lacks a trailing newline
-	toolTitles     map[string]string // toolCallId → title, for labeling status updates
+	// mu guards items; itemsChanged signals the view that items has grown.
+	mu           sync.Mutex
+	itemsChanged *sync.Cond
+	// items is the model: output to print and questions to ask, in order.
+	items []*item
+
+	// toolTitles maps toolCallId → title, for labeling status updates. It
+	// is only accessed from handleNotification, which acp.Client invokes on
+	// its single read-loop goroutine.
+	toolTitles map[string]string
 }
 
+// item is one entry in the console model: output to show and, optionally, a
+// question whose answer should be read from the user.
+type item struct {
+	// text is printed verbatim.
+	text string
+	// needsLineStart means text must begin at the start of a line; a
+	// newline is inserted first if streamed agent text left the cursor
+	// mid-line.
+	needsLineStart bool
+
+	// question means one line of user input is read after printing text.
+	question bool
+
+	// handled, if non-nil, is closed by the view once the item has been
+	// printed and any question answered; answer and eof are valid after
+	// that. Producers that need the result (or need to sequence their next
+	// step after the print) set it.
+	handled chan struct{}
+	answer  string
+	eof     bool
+}
+
+// newConsole creates the console and starts its view goroutine.
 func newConsole(workDir string, debug, autoApprove bool) *console {
-	return &console{
-		stdin:       bufio.NewReader(os.Stdin),
+	c := &console{
 		workDir:     workDir,
 		debug:       debug,
 		autoApprove: autoApprove,
 		toolTitles:  make(map[string]string),
 	}
+	c.itemsChanged = sync.NewCond(&c.mu)
+	go c.run()
+	return c
 }
 
-// breakAgentOutput ensures we are at the start of a line before printing
-// non-chunk output (tool status, prompts). Callers must hold c.mu.
-func (c *console) breakAgentOutput() {
-	if c.midAgentOutput {
-		fmt.Println()
-		c.midAgentOutput = false
-	}
-}
-
-// endTurn prints the turn's stop reason once the prompt call returns.
-func (c *console) endTurn(stopReason string) {
+// append adds an item to the model and wakes the view.
+func (c *console) append(it *item) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.breakAgentOutput()
-	fmt.Printf("[turn ended: %s]\n", stopReason)
+	c.items = append(c.items, it)
+	c.itemsChanged.Broadcast()
+}
+
+// render appends output to the model.
+func (c *console) render(text string, needsLineStart bool) {
+	c.append(&item{text: text, needsLineStart: needsLineStart})
+}
+
+// ask appends a question to the model and blocks until the view has read
+// the user's reply, returned without its trailing newline. ok is false if
+// standard input has ended.
+func (c *console) ask(prompt string) (line string, ok bool) {
+	it := &item{text: prompt, needsLineStart: true, question: true, handled: make(chan struct{})}
+	c.append(it)
+	<-it.handled
+	return it.answer, !it.eof
+}
+
+// endTurn renders the turn's stop reason. There is no need to wait for it
+// to print: items are handled in append order, so it is shown before any
+// question the caller asks next.
+func (c *console) endTurn(stopReason string) {
+	c.render(fmt.Sprintf("[turn ended: %s]\n", stopReason), true)
+}
+
+// flush blocks until the view has handled every item appended so far; call
+// it before exiting so pending output is not lost.
+func (c *console) flush() {
+	it := &item{handled: make(chan struct{})}
+	c.append(it)
+	<-it.handled
+}
+
+// run is the view goroutine; see the console type comment.
+func (c *console) run() {
+	stdin := bufio.NewReader(os.Stdin)
+	stdinClosed := false
+	midLine := false // streamed text left the cursor mid-line
+	handledCount := 0
+
+	for {
+		c.mu.Lock()
+		for handledCount >= len(c.items) {
+			c.itemsChanged.Wait()
+		}
+		it := c.items[handledCount]
+		handledCount++
+		// Once the view has caught up, drop the handled prefix so the
+		// model does not grow without bound. clear releases the handled
+		// item pointers still referenced by the backing array.
+		if handledCount == len(c.items) {
+			clear(c.items)
+			c.items = c.items[:0]
+			handledCount = 0
+		}
+		c.mu.Unlock()
+
+		if it.needsLineStart && midLine {
+			fmt.Println()
+			midLine = false
+		}
+		if it.text != "" {
+			fmt.Print(it.text)
+			midLine = !strings.HasSuffix(it.text, "\n")
+		}
+
+		if it.question {
+			if stdinClosed {
+				it.eof = true
+			} else {
+				line, err := stdin.ReadString('\n')
+				if err != nil {
+					stdinClosed = true
+				}
+				line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+				if line == "" && err != nil {
+					it.eof = true
+				} else {
+					it.answer = line
+				}
+			}
+			// Interactively, the user's Enter moved to a fresh line; with
+			// piped input the cursor is still after the prompt, and
+			// continuing from there matches ordinary echoed input.
+			midLine = false
+		}
+
+		if it.handled != nil {
+			close(it.handled)
+		}
+	}
 }
 
 // textContent decodes a session update's content as a single text block,
@@ -330,50 +453,43 @@ func (c *console) handleNotification(method string, params json.RawMessage) {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	update := notif.Update
 	switch update.SessionUpdateKind {
 	case acp.UpdateAgentMessageChunk:
 		if text := textContent(update.Content); text != "" {
-			fmt.Print(text)
-			c.midAgentOutput = !strings.HasSuffix(text, "\n")
+			c.render(text, false)
 		}
 	case acp.UpdateAgentThoughtChunk:
 		if !c.debug {
 			return
 		}
 		if text := textContent(update.Content); text != "" {
-			c.breakAgentOutput()
-			fmt.Printf("[thought] %s\n", strings.TrimSpace(text))
+			c.render(fmt.Sprintf("[thought] %s\n", strings.TrimSpace(text)), true)
 		}
 	case acp.UpdateUserMessageChunk:
 		// Replay of a prompt, e.g. while loading an existing session.
 		if text := textContent(update.Content); text != "" {
-			c.breakAgentOutput()
-			fmt.Printf("[user] %s\n", strings.TrimSpace(text))
+			c.render(fmt.Sprintf("[user] %s\n", strings.TrimSpace(text)), true)
 		}
 	case acp.UpdateToolCall:
-		c.breakAgentOutput()
 		c.toolTitles[update.ToolCallID] = update.Title
-		fmt.Printf("[tool: %s] %s (%s)\n", update.ToolKind, update.Title, update.Status)
+		c.render(fmt.Sprintf("[tool: %s] %s (%s)\n", update.ToolKind, update.Title, update.Status), true)
 	case acp.UpdateToolCallUpdate:
 		if update.Status == "" {
 			return
 		}
-		c.breakAgentOutput()
 		title := c.toolTitles[update.ToolCallID]
 		if title == "" {
 			title = update.ToolCallID
 		}
-		fmt.Printf("[tool] %s → %s\n", title, update.Status)
+		c.render(fmt.Sprintf("[tool] %s → %s\n", title, update.Status), true)
 	case acp.UpdatePlan:
-		c.breakAgentOutput()
-		fmt.Println("[plan]")
+		var plan strings.Builder
+		plan.WriteString("[plan]\n")
 		for _, entry := range update.Entries {
-			fmt.Printf("  - [%s] %s\n", entry.Status, entry.Content)
+			fmt.Fprintf(&plan, "  - [%s] %s\n", entry.Status, entry.Content)
 		}
+		c.render(plan.String(), true)
 	default:
 		if c.debug {
 			fmt.Fprintf(os.Stderr, "[debug] session update %s\n", update.SessionUpdateKind)
@@ -472,24 +588,25 @@ func (c *console) resolvePath(path string) (string, error) {
 }
 
 // requestPermission asks the user (or auto-approves with -yolo) which
-// permission option to select for a tool call. Concurrent requests are
-// serialized by c.mu, so at most one prompt reads stdin at a time.
+// permission option to select for a tool call. The console goroutine asks
+// questions one at a time and defers other output while one is pending, so
+// concurrent requests cannot interleave and the question is never pushed
+// off the screen.
 func (c *console) requestPermission(req acp.RequestPermissionParams) acp.RequestPermissionResult {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.breakAgentOutput()
-
 	title := req.ToolCall.Title
 	if title == "" {
 		title = req.ToolCall.ToolCallID
 	}
-	fmt.Printf("\n[permission] Agent wants to run: %s\n", title)
+
+	var header strings.Builder
+	fmt.Fprintf(&header, "\n[permission] Agent wants to run: %s\n", title)
 	if c.debug && len(req.ToolCall.RawInput) > 0 {
-		fmt.Printf("  input: %s\n", string(req.ToolCall.RawInput))
+		fmt.Fprintf(&header, "  input: %s\n", string(req.ToolCall.RawInput))
 	}
 
 	if len(req.Options) == 0 {
-		fmt.Println("  (agent offered no permission options; cancelling)")
+		header.WriteString("  (agent offered no permission options; cancelling)\n")
+		c.render(header.String(), true)
 		return acp.RequestPermissionResult{
 			Outcome: acp.PermissionOutcome{Outcome: acp.PermissionCancelled},
 		}
@@ -498,19 +615,21 @@ func (c *console) requestPermission(req acp.RequestPermissionParams) acp.Request
 	if c.autoApprove {
 		for _, opt := range req.Options {
 			if strings.HasPrefix(opt.Kind, "allow") {
-				fmt.Printf("  auto-approving (-yolo): %s\n", opt.Name)
+				fmt.Fprintf(&header, "  auto-approving (-yolo): %s\n", opt.Name)
+				c.render(header.String(), true)
 				return selected(opt)
 			}
 		}
 	}
 
 	for i, opt := range req.Options {
-		fmt.Printf("  %d) %s [%s]\n", i+1, opt.Name, opt.Kind)
+		fmt.Fprintf(&header, "  %d) %s [%s]\n", i+1, opt.Name, opt.Kind)
 	}
+
+	prompt := header.String() + fmt.Sprintf("Choose 1-%d (Enter = 1): ", len(req.Options))
 	for {
-		fmt.Printf("Choose 1-%d (Enter = 1): ", len(req.Options))
-		line, err := c.stdin.ReadString('\n')
-		if err != nil {
+		line, ok := c.ask(prompt)
+		if !ok {
 			return acp.RequestPermissionResult{
 				Outcome: acp.PermissionOutcome{Outcome: acp.PermissionCancelled},
 			}
@@ -522,7 +641,7 @@ func (c *console) requestPermission(req acp.RequestPermissionParams) acp.Request
 		if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(req.Options) {
 			return selected(req.Options[n-1])
 		}
-		fmt.Println("Invalid choice.")
+		prompt = fmt.Sprintf("Invalid choice.\nChoose 1-%d (Enter = 1): ", len(req.Options))
 	}
 }
 

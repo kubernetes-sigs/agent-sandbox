@@ -23,11 +23,11 @@ import (
 // Interface provides access to all the informers in this group version.
 type Interface interface {
 	// SandboxClaims returns a SandboxClaimInformer.
-	SandboxClaims() SandboxClaimInformer
+	SandboxClaims() TypedSandboxClaimInformer
 	// SandboxTemplates returns a SandboxTemplateInformer.
-	SandboxTemplates() SandboxTemplateInformer
+	SandboxTemplates() TypedSandboxTemplateInformer
 	// SandboxWarmPools returns a SandboxWarmPoolInformer.
-	SandboxWarmPools() SandboxWarmPoolInformer
+	SandboxWarmPools() TypedSandboxWarmPoolInformer
 }
 
 type version struct {
@@ -41,17 +41,17 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
-// SandboxClaims returns a SandboxClaimInformer.
-func (v *version) SandboxClaims() SandboxClaimInformer {
+// SandboxClaims returns a TypedSandboxClaimInformer.
+func (v *version) SandboxClaims() TypedSandboxClaimInformer {
 	return &sandboxClaimInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
-// SandboxTemplates returns a SandboxTemplateInformer.
-func (v *version) SandboxTemplates() SandboxTemplateInformer {
+// SandboxTemplates returns a TypedSandboxTemplateInformer.
+func (v *version) SandboxTemplates() TypedSandboxTemplateInformer {
 	return &sandboxTemplateInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
-// SandboxWarmPools returns a SandboxWarmPoolInformer.
-func (v *version) SandboxWarmPools() SandboxWarmPoolInformer {
+// SandboxWarmPools returns a TypedSandboxWarmPoolInformer.
+func (v *version) SandboxWarmPools() TypedSandboxWarmPoolInformer {
 	return &sandboxWarmPoolInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

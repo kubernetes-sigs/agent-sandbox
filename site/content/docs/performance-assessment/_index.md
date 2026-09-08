@@ -27,7 +27,7 @@ The `agent-sandbox-controller` exposes several flags that directly affect throug
 | `--sandbox-warm-pool-replenish-delay` | `0` | Defer warm pool replenishment after claims adopt members so burst adoptions get API server priority |
 | `--disable-claim-events` | `false` | Suppresses Kubernetes Event emission from the SandboxClaim controller to cut API and etcd write traffic |
 | `--disable-claim-observability-annotations` | `false` | Skips persisting first-observed timestamp and trace annotations to etcd while preserving in-memory metrics |
-| `--cache-label-selectors` | `false` | Scopes Pod and Service informer caches to sandbox tracking labels, avoiding caching unrelated cluster resources. Caveat: externally pre-provisioned Pods and Services relying on adoption must also carry `agents.x-k8s.io/sandbox-name-hash` to be visible to the controller. |
+| `--cache-label-selectors` | `false` | Scopes Pod and Service informer caches to sandbox tracking labels, avoiding caching unrelated cluster resources. Caveat: externally pre-provisioned Pods and Services relying on adoption must carry `agents.x-k8s.io/sandbox-name-hash` set to the owning sandbox's name hash to be visible to the controller. |
 | `--sandbox-write-behind-window` | `0` | Coalescing window for recoverable metadata-only writes on Sandboxes |
 
 ### Choosing worker counts

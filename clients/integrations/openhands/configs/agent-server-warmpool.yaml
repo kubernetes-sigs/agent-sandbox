@@ -1,0 +1,13 @@
+# Warm pool of ready agent-server pods. Depth = expected concurrent
+# conversations; a claim binds one instantly instead of cold-starting a
+# container (DockerWorkspace) per conversation.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: agent-server-pool
+  namespace: default
+spec:
+  replicas: 8
+  sandboxTemplateRef:
+    # Must exactly match the SandboxTemplate's metadata.name.
+    name: openhands-agent-server

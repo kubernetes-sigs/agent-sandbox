@@ -32,11 +32,39 @@ import (
 )
 
 // SandboxWarmPoolInformer provides access to a shared informer and lister for
-// SandboxWarmPools.
+// SandboxWarmPools. Prefer using the type-safe variant (see [TypedSandboxWarmPoolInformer]).
 type SandboxWarmPoolInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() apiv1beta1.SandboxWarmPoolLister
 }
+
+// TypedSandboxWarmPoolInformer provides access to a shared informer and lister for
+// SandboxWarmPools, including the type-safe TypedInformer variant.
+// It is a superset of SandboxWarmPoolInformer.
+type TypedSandboxWarmPoolInformer interface {
+	Informer() cache.SharedIndexInformer
+	TypedInformer() SandboxWarmPoolIndexInformer
+	Lister() apiv1beta1.SandboxWarmPoolLister
+}
+
+// SandboxWarmPoolIndexInformer is a wrapper around the underlying [cache.SharedIndexInformer]
+// with type-safe variants of several methods.
+type SandboxWarmPoolIndexInformer cache.TypedSharedIndexInformer[*extensionsapiv1beta1.SandboxWarmPool]
+
+// SandboxWarmPoolHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerFuncs] for SandboxWarmPool.
+type SandboxWarmPoolHandlerFuncs = cache.TypedResourceEventHandlerFuncs[*extensionsapiv1beta1.SandboxWarmPool]
+
+// SandboxWarmPoolDetailedHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerDetailedFuncs] for SandboxWarmPool.
+type SandboxWarmPoolDetailedHandlerFuncs = cache.TypedResourceEventHandlerDetailedFuncs[*extensionsapiv1beta1.SandboxWarmPool]
+
+// SandboxWarmPoolFilteringHandler is a specialization of [cache.TypedFilteringResourceEventHandler] for SandboxWarmPool.
+type SandboxWarmPoolFilteringHandler = cache.TypedFilteringResourceEventHandler[*extensionsapiv1beta1.SandboxWarmPool]
+
+// SandboxWarmPoolIndexers is a specialization of [cache.TypedIndexers] for SandboxWarmPool.
+type SandboxWarmPoolIndexers = cache.TypedIndexers[*extensionsapiv1beta1.SandboxWarmPool]
+
+// DeletedSandboxWarmPool is a specialization of [cache.DeletedObject] for SandboxWarmPool.
+type DeletedSandboxWarmPool = cache.DeletedObject[*extensionsapiv1beta1.SandboxWarmPool]
 
 type sandboxWarmPoolInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
@@ -47,25 +75,49 @@ type sandboxWarmPoolInformer struct {
 // NewSandboxWarmPoolInformer constructs a new informer for SandboxWarmPool type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedSandboxWarmPoolInformer]).
 func NewSandboxWarmPoolInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
 	return NewSandboxWarmPoolInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
+}
+
+// NewTypedSandboxWarmPoolInformer constructs a new informer for SandboxWarmPool type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedSandboxWarmPoolInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers SandboxWarmPoolIndexers) SandboxWarmPoolIndexInformer {
+	return NewTypedSandboxWarmPoolInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers)})
 }
 
 // NewFilteredSandboxWarmPoolInformer constructs a new informer for SandboxWarmPool type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedFilteredSandboxWarmPoolInformer]).
 func NewFilteredSandboxWarmPoolInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return NewSandboxWarmPoolInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+	return NewTypedSandboxWarmPoolInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewTypedFilteredSandboxWarmPoolInformer constructs a new informer for SandboxWarmPool type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedFilteredSandboxWarmPoolInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers SandboxWarmPoolIndexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) SandboxWarmPoolIndexInformer {
+	return NewTypedSandboxWarmPoolInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers), TweakListOptions: tweakListOptions})
 }
 
 // NewSandboxWarmPoolInformerWithOptions constructs a new informer for SandboxWarmPool type with additional options.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedSandboxWarmPoolInformerWithOptions]).
 func NewSandboxWarmPoolInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	return NewTypedSandboxWarmPoolInformerWithOptions(client, namespace, options)
+}
+
+// NewTypedSandboxWarmPoolInformerWithOptions constructs a new informer for SandboxWarmPool type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedSandboxWarmPoolInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) SandboxWarmPoolIndexInformer {
 	gvr := schema.GroupVersionResource{Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Resource: "sandboxwarmpools"}
 	identifier := options.InformerName.WithResource(gvr)
 	tweakListOptions := options.TweakListOptions
-	return cache.NewSharedIndexInformerWithOptions(
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxWarmPool](cache.NewSharedIndexInformerWithOptions(
 		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
@@ -98,17 +150,57 @@ func NewSandboxWarmPoolInformerWithOptions(client versioned.Interface, namespace
 			Indexers:     options.Indexers,
 			Identifier:   identifier,
 		},
-	)
+	))
 }
 
 func (f *sandboxWarmPoolInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewSandboxWarmPoolInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
+	return NewTypedSandboxWarmPoolInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *sandboxWarmPoolInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&extensionsapiv1beta1.SandboxWarmPool{}, f.defaultInformer)
+	return f.TypedInformer()
+}
+
+func (f *sandboxWarmPoolInformer) TypedInformer() SandboxWarmPoolIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxWarmPool](f.factory.InformerFor(&extensionsapiv1beta1.SandboxWarmPool{}, f.defaultInformer))
 }
 
 func (f *sandboxWarmPoolInformer) Lister() apiv1beta1.SandboxWarmPoolLister {
 	return apiv1beta1.NewSandboxWarmPoolLister(f.Informer().GetIndexer())
+}
+
+// ToTypedSandboxWarmPoolInformer converts an untyped informer into a TypedSandboxWarmPoolInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *SandboxWarmPool. If that is not the case, calling type-safe methods of the returned
+// TypedSandboxWarmPoolInformer leads to runtime panics. A safer alternative is to pass
+// around a TypedSandboxWarmPoolInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToTypedSandboxWarmPoolInformer(informer SandboxWarmPoolInformer) TypedSandboxWarmPoolInformer {
+	if informer, ok := informer.(TypedSandboxWarmPoolInformer); ok {
+		return informer
+	}
+	return &sandboxWarmPoolTypedInformerAdapter{informer}
+}
+
+type sandboxWarmPoolTypedInformerAdapter struct {
+	SandboxWarmPoolInformer
+}
+
+func (a *sandboxWarmPoolTypedInformerAdapter) TypedInformer() SandboxWarmPoolIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxWarmPool](a.Informer())
+}
+
+// ToSandboxWarmPoolIndexInformer converts an untyped informer into a SandboxWarmPoolIndexInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *SandboxWarmPool. If that is not the case, calling type-safe methods of the returned
+// SandboxWarmPoolIndexInformer leads to runtime panics. A safer alternative is to pass
+// around a SandboxWarmPoolIndexInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToSandboxWarmPoolIndexInformer(informer cache.SharedIndexInformer) SandboxWarmPoolIndexInformer {
+	if informer, ok := informer.(SandboxWarmPoolIndexInformer); ok {
+		return informer
+	}
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxWarmPool](informer)
 }

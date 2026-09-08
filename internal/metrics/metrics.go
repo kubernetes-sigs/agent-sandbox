@@ -47,21 +47,20 @@ const (
 
 	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
-
-	// CreationLatencyRecordedAnnotation marks a SandboxClaim whose startup/creation latency
-	// has already been recorded, preventing double-recording (e.g. after a suspend/resume).
-	CreationLatencyRecordedAnnotation = "agents.x-k8s.io/creation-latency-recorded"
 )
 
 var (
-	// ClaimStartupLatency measures the time from SandboxClaim creation to SandboxClaim Ready state.
+	// ClaimStartupLatency measures the time from the webhook first observing the SandboxClaim to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox.
+	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox, or "__unknown__"
+	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_startup_latency_ms",
-			Help: "End-to-end latency from SandboxClaim creation to Sandbox Ready state in milliseconds.",
+			Help: "End-to-end latency from a mutating admission webhook first observing the SandboxClaim (the " +
+				"agents.x-k8s.io/webhook-first-observed-at annotation) to the claim reaching Ready in milliseconds. " +
+				"Note: Only recorded for claims carrying that annotation.",
 			// Buckets for latency from 100ms to 4 minutes
 			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
@@ -71,11 +70,12 @@ var (
 	// ClaimControllerStartupLatency measures the time from controller first observed timestamp to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox.
+	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox, or "__unknown__"
+	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_claim_controller_startup_latency_ms",
-			Help: "Latency from controller first observed SandboxClaim to Sandbox Ready state in milliseconds.",
+			Help: "Latency from the controller first observing the SandboxClaim to the claim reaching Ready in milliseconds.",
 			// Buckets for latency from 100ms to 4 minutes
 			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
@@ -85,45 +85,55 @@ var (
 	// ClientClaimStartupLatency measures the time from client request to SandboxClaim Ready state.
 	// Labels:
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef.
+	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox, or "__unknown__"
+	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClientClaimStartupLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_client_claim_startup_latency_ms",
-			Help: "End-to-end latency from client request to SandboxClaim Ready state in milliseconds. " +
-				"Note: This metric may be affected by clock skew between the client and controller.",
+			Help: "End-to-end latency from the client-recorded request time (the " +
+				"agents.x-k8s.io/client-first-requested-at annotation) to the claim reaching Ready in milliseconds. " +
+				"Note: Only recorded for claims carrying that annotation, and may be affected by clock skew " +
+				"between the client and controller.",
 			// Buckets for latency from 100ms to 4 minutes
 			Buckets: []float64{100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000},
 		},
 		[]string{"launch_type", "sandbox_template"},
 	)
 
-	// SandboxCreationLatency measures the time from Sandbox creation to Pod Ready state.
+	// SandboxCreationLatency measures the time from Sandbox creation to the Sandbox Ready condition.
 	// Labels:
 	// - namespace: the namespace of the sandbox
-	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef.
+	// - launch_type: "warm", "cold"
+	// - sandbox_template: the SandboxTemplateRef, or "__unknown__" when the Sandbox carries no template
+	//   annotation. This metric is only recorded for a resolved Sandbox, so the no-Sandbox case cannot occur.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_creation_latency_ms",
-			Help: "Latency from Sandbox creation to Pod Ready state in milliseconds. For warm launches, this measures controller synchronization overhead since the Pod is pre-provisioned.",
+			Help: "Latency from Sandbox creation to the Sandbox Ready condition in milliseconds. " +
+				"Note: For warm launches the Sandbox is created by the SandboxWarmPool, so this measures the " +
+				"pool's provisioning time; a claim may adopt the Sandbox before or after it becomes Ready.",
 			// Buckets for latency from 50ms to 10 minutes
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},
 	)
 
-	// SandboxClaimCreationTotal calculates the total number of SandboxClaims created.
+	// SandboxClaimCreationTotal counts the Sandboxes created or adopted for a SandboxClaim.
 	// Labels:
 	// - namespace: the namespace of the claim
-	// - sandbox_template: the SandboxTemplateRef
-	// - launch_type: "warm", "cold", "unknown"
-	// - warmpool_name: the requested warm pool reference name (from SandboxClaim spec.warmPoolRef.name).
-	// - pod_condition: "ready", "not_ready".
+	// - sandbox_template: the SandboxTemplateRef, or "__unknown__" when the created or adopted
+	//   Sandbox carries no template annotation.
+	// - launch_type: "warm", "cold"
+	// - warmpool_name: for warm launches, the SandboxWarmPool owning the adopted Sandbox; always
+	//   set, because verifySandboxCandidate rejects a candidate with no pool owner before adoption.
+	//   For cold launches, the requested warm pool reference name (from
+	//   SandboxClaim spec.warmPoolRef.name).
+	// - pod_condition: "ready" when the Sandbox has Ready=True at creation/adoption time; otherwise "not_ready".
 	// - created_by: the component that created the claim (e.g. "go-client", "python-client", "controller", "unknown").
 	SandboxClaimCreationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "agent_sandbox_claim_creation_total",
-			Help: "Total number of SandboxClaims created, labeled by namespace, sandbox template, launch type, warmpool name, pod condition, and created_by.",
+			Help: "Total number of Sandboxes created or adopted for a SandboxClaim.",
 		},
 		[]string{"namespace", "sandbox_template", "launch_type", "warmpool_name", "pod_condition", "created_by"},
 	)
@@ -134,7 +144,9 @@ var (
 	// - ready_condition: "true" | "false"
 	// - expired: "true" | "false"
 	// - launch_type: "warm" | "cold"
-	// - sandbox_template: sandboxTemplateRef.
+	// - sandbox_template: sandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
+	//   Note this sentinel differs from the "__unknown__" the SandboxClaim metrics use, so the two
+	//   families do not join on sandbox_template for templateless Sandboxes.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	// - created_by: the component that created the sandbox (e.g. "go-client", "python-client", "controller", "unknown").
 	AgentSandboxesDesc = prometheus.NewDesc(
@@ -164,7 +176,7 @@ var (
 	)
 )
 
-// Init registers custom metrics with the global controller-runtime registry.
+// init registers custom metrics with the global controller-runtime registry.
 func init() {
 	metrics.Registry.MustRegister(ClaimStartupLatency)
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
@@ -213,7 +225,7 @@ func NormalizeCreatedBy(createdBy string) string {
 	}
 }
 
-// RecordSandboxClaimCreation increments the total count of created sandbox claims.
+// RecordSandboxClaimCreation increments the total count of Sandboxes created or adopted for a SandboxClaim.
 // The createdBy value is automatically normalized.
 func RecordSandboxClaimCreation(namespace, templateName, launchType, warmPoolName, podCondition, createdBy string) {
 	SandboxClaimCreationTotal.WithLabelValues(namespace, templateName, launchType, warmPoolName, podCondition, NormalizeCreatedBy(createdBy)).Inc()

@@ -159,6 +159,21 @@ class TestSandbox(unittest.TestCase):
         self.mock_k8s_helper.get_sandbox.return_value = None
         self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
 
+    def test_get_pod_name_empty_annotation_falls_back(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "metadata": {
+                "annotations": {
+                    'agents.x-k8s.io/pod-name': ""
+                }
+            }
+        }
+        self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
+
+        # The fallback value is cached and not re-queried from Kubernetes.
+        self.mock_k8s_helper.get_sandbox.reset_mock()
+        self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
+        self.mock_k8s_helper.get_sandbox.assert_not_called()
+
     def test_status_not_found(self):
         self.mock_k8s_helper.get_sandbox.return_value = None
         status, message = self.sandbox.status()

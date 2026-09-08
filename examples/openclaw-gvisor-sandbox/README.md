@@ -285,7 +285,7 @@ PVCs are named `<vctName>-<sandboxName>` and owned by the `Sandbox` CR. So:
 - **Delete the `Sandbox`** (or the `SandboxClaim` with `shutdownPolicy: Delete`)
   → PVC is garbage-collected, data is gone.
 
-Do not put `volumeClaimTemplates` on the `SandboxClaim`. A claim containing its own VCTs will bypass the pre-warmed pool entirely and trigger a cold start of a fresh sandbox, defeating the purpose of the warm pool.
+Do not put `volumeClaimTemplates` on the `SandboxClaim`. This template leaves `volumeClaimTemplatesPolicy` at its default (`Disallowed`), so a claim carrying its own VCTs is rejected outright; even on templates that allow them, such a claim bypasses the pre-warmed pool and cold-starts a fresh sandbox, defeating the purpose of the warm pool.
 
 ## Known limitations
 

@@ -285,6 +285,14 @@ kops edit cluster --name "${CLUSTER_NAME}" \
   --set cluster.spec.kubelet.eventQPS=5 \
   --set cluster.spec.kubelet.eventBurst=50
 
+# kubeControllerManager.nodeCIDRMaskSize: each node's pod CIDR is carved
+# out of the cluster pod CIDR (10.4.0.0/14 on kOps GCE), and the mask
+# bounds the cluster along two axes:
+#   pods per node  <= 2^(32-mask) - 2   (/24 -> 254, /23 -> 510)
+#   nodes          <= 2^(mask-14)       (/24 -> 1024, /23 -> 512, /22 -> 256)
+# /23 balances the two axes: up to 510 pods/node AND up to 512 nodes.
+kops edit cluster --name "${CLUSTER_NAME}" \
+  --set "cluster.spec.kubeControllerManager.nodeCIDRMaskSize=${STRESS_NODE_CIDR_MASK_SIZE:-23}"
 
 if [[ "${CNI}" == "cilium" ]]; then
   # cilium.enablePrometheusMetrics: serve cilium-agent metrics on :9090 so the
@@ -301,8 +309,33 @@ kops update cluster --name "${CLUSTER_NAME}" --yes
 echo "Exporting kubeconfig..."
 kops export kubeconfig --name "${CLUSTER_NAME}" --admin
 
-echo "Waiting for cluster to be ready..."
-kops validate cluster --wait 15m
+capture_control_plane_serial_port() {
+  echo "kOps cluster validation failed. Capturing control plane serial port output for diagnosis..."
+  local out_dir="${ARTIFACTS:-.}"
+  mkdir -p "${out_dir}"
+  local cp_instance
+  cp_instance=$(gcloud compute instance-groups managed list-instances "a-control-plane-${ZONE}-${CLUSTER_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" --format="value(instance.basename())" 2>/dev/null | head -n1 || true)
+  if [[ -z "${cp_instance}" ]]; then
+    cp_instance=$(gcloud compute instances list --project="${PROJECT_ID}" --filter="name ~ 'control-plane.*${CLUSTER_NAME}' AND zone:${ZONE}" --format="value(name)" 2>/dev/null | head -n1 || true)
+  fi
+  if [[ -n "${cp_instance}" ]]; then
+    echo "Saving serial port output from ${cp_instance} to ${out_dir}/control-plane-serial-port.log..."
+    gcloud compute instances get-serial-port-output "${cp_instance}" --zone="${ZONE}" --project="${PROJECT_ID}" > "${out_dir}/control-plane-serial-port.log" 2>&1 || true
+  else
+    echo "WARNING: Could not find control-plane instance for cluster ${CLUSTER_NAME} in zone ${ZONE}; serial port output was not captured." >&2
+  fi
+}
+
+validate_cluster() {
+  local wait_time="${1:-${STRESS_VALIDATE_WAIT:-15m}}"
+  echo "Waiting for cluster to be ready (timeout: ${wait_time})..."
+  if ! kops validate cluster --wait "${wait_time}"; then
+    capture_control_plane_serial_port
+    exit 1
+  fi
+}
+
+validate_cluster "${STRESS_VALIDATE_WAIT:-15m}"
 
 if [[ "${CNI}" == "cilium" ]]; then
   # Raise Cilium's endpoint-create API rate limit. The agent rate-limits
@@ -330,7 +363,7 @@ if [[ "${CNI}" == "cilium" ]]; then
   # out). Delete the agent pods so the DaemonSet brings them back with the
   # new config, then re-validate the cluster to wait for them to be Ready.
   kubectl --namespace kube-system delete pods --selector=k8s-app=cilium
-  kops validate cluster --wait 5m
+  validate_cluster "${STRESS_CILIUM_VALIDATE_WAIT:-5m}"
 fi
 
 # node-exporter: node-level CPU (incl. iowait), memory and disk stats for

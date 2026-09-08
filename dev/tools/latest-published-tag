@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+# Copyright 2025 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Print the latest stable published tag of the agent-sandbox controller image.
+
+Queries the tag list of registry.k8s.io/agent-sandbox/agent-sandbox-controller
+and prints the newest stable vX.Y.Z tag, so `make deploy-kind SKIP_BUILD=true`
+never needs a hardcoded tag bumped per release. Pre-release tags (vX.Y.ZrcN,
+vX.Y.Z-rc.N) and signature/attestation tags are ignored. Pin a specific
+release instead by passing IMAGE_TAG to make, e.g. IMAGE_TAG=v0.5.5.
+"""
+
+import json
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+_TAGS_URL = "https://registry.k8s.io/v2/agent-sandbox/agent-sandbox-controller/tags/list"
+_STABLE_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+_NEXT_LINK_RE = re.compile(r'\s*<([^>]+)>\s*;\s*rel\s*=\s*"?next"?', re.IGNORECASE)
+
+
+def pick_latest_stable(tags):
+    """Return the newest stable vX.Y.Z tag from *tags*, or None if there is none."""
+    stable = [t for t in tags if _STABLE_RE.match(t)]
+    return max(stable, key=lambda t: tuple(int(x) for x in t.lstrip("v").split(".")),
+               default=None)
+
+
+def _next_link(headers):
+    """Return the next-page URL advertised in a Link header, or None if there is none.
+
+    The registry may paginate the tags list (OCI Distribution Spec): each page
+    carries a ``Link: <url>; rel="next"`` header pointing at the next page.
+    """
+    for part in (headers.get("Link") or "").split(","):
+        match = _NEXT_LINK_RE.match(part)
+        if match:
+            return urllib.parse.urljoin(_TAGS_URL, match.group(1))
+    return None
+
+
+def fetch_all_tags():
+    """Fetch tags from every page of the registry tags/list endpoint."""
+    tags = []
+    url = _TAGS_URL
+    while url:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            tags.extend(json.load(resp).get("tags") or [])
+            url = _next_link(resp.headers)
+    return tags
+
+
+def main():
+    try:
+        tags = fetch_all_tags()
+    except Exception as e:  # network or parse failures
+        print(f"error: failed to list tags from {_TAGS_URL}: {e}", file=sys.stderr)
+        sys.exit(1)
+    tag = pick_latest_stable(tags)
+    if not tag:
+        print("error: no stable vX.Y.Z tag found on registry.k8s.io", file=sys.stderr)
+        sys.exit(1)
+    print(tag)
+
+
+if __name__ == "__main__":
+    main()
+

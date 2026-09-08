@@ -44,6 +44,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	//+kubebuilder:scaffold:imports
 )
@@ -254,6 +255,18 @@ func main() {
 		}
 		defer cleanup()
 	}
+
+	// Register client-go REST client metrics.
+	// These metrics provide visibility into API server interactions.
+	setupLog.Info("client-go REST client metrics enabled")
+	metrics.RegisterRESTClientMetrics(
+		metrics.MetricRequestLatency,
+		metrics.MetricDNSResolutionLatency,
+		metrics.MetricRequestSize,
+		metrics.MetricResponseSize,
+		metrics.MetricRateLimiterLatency,
+		metrics.MetricRequestRetry,
+	)
 
 	// Importing net/http/pprof registers handlers on the global DefaultServeMux.
 	// Reset it to avoid accidentally exposing pprof via any server that uses the default mux.

@@ -1,11 +1,23 @@
 # A Gateway to create an endpoint for external HTTP traffic.
+#
+# The Gateway and HTTPRoute resources below are cloud-agnostic — only
+# spec.gatewayClassName varies per environment. Pick the class that matches
+# your cluster's Gateway API controller:
+#
+#   Istio (any cluster):          istio
+#   GKE (managed L7 LB):          gke-l7-global-external-managed
+#   KinD (local dev):             cloud-provider-kind
+#   Envoy Gateway:                eg
+#
+# The default below uses Istio, which works on clusters where Istio is installed.
+# (managed or self-hosted). See README.md for installation instructions.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: external-http-gateway
   namespace: default
 spec:
-  gatewayClassName: gke-l7-global-external-managed # Specific to GKE; creates all necessary GatewayClass resources; choose a different gateway class to use other Gateway implementations
+  gatewayClassName: istio # See comment above for alternatives
   listeners:
   - name: http
     protocol: HTTP
@@ -15,6 +27,7 @@ spec:
         from: Same
 ---
 # The HTTPRoute to connect the Gateway to the router service.
+# This resource is identical across all Gateway API implementations.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -31,21 +44,3 @@ spec:
     backendRefs:
     - name: sandbox-router-svc # Route all traffic to the router service
       port: 8080
----
-# HealthCheckPolicy tells the GKE Gateway to use the router app "/healthz" endpoint for its health
-# checks instead of the default "/".
-apiVersion: networking.gke.io/v1 # Specific to GKE
-kind: HealthCheckPolicy
-metadata:
-  name: router-health-check-policy
-  namespace: default
-spec:
-  targetRef:
-    group: ""
-    kind: Service
-    name: sandbox-router-svc # This must match the name of the router's service
-  default:
-    config:
-      type: HTTP
-      httpHealthCheck:
-        requestPath: /healthz # Tell the health checker to use this path

@@ -29,9 +29,8 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SANDBOX_RUNTIME_CLASS` | *(required)* | RuntimeClass name: `default` (cluster default / runc), `gvisor`, `kata`, etc. Tests skip when unset. |
-| `SANDBOX_POOL_SIZES` | total worker CPUs | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to the cluster's total worker CPU count when unset. |
+| `SANDBOX_POOL_SIZES` | `{cpus/2, cpus, cpus×2}` | Comma-separated pool sizes for burst recovery and warm claim benchmarks. Defaults to half, full, and double the cluster's total worker CPU capacity. |
 | `SANDBOX_BATCH_CAP` | `10` | Maximum number of claims fired per batch in burst recovery. Lower values reduce controller serialization; higher values stress the reconcile loop. |
-| `SANDBOX_SETTLE_SEC` | `2` | Seconds to wait after pool fill before starting burst claims. Lets the controller work queue drain so fill-residue doesn't inflate batch 1 latencies. Set to `0` to measure raw post-fill behavior. |
 | `SANDBOX_LONGEVITY` | *(unset)* | Go duration (e.g. `2h`, `30m`) to run burst recovery in longevity mode: continuous batches with adaptive sizing until the deadline. |
 | `SANDBOX_DEBUG` | *(unset)* | Set to any non-empty value to dump scoped controller logs after each pool iteration even on success. |
 | `SANDBOX_REPORT_DIR` | `artifacts` | Base directory for CSV output and controller logs. A subdirectory is auto-created per run. |
@@ -83,7 +82,7 @@ SANDBOX_RUNTIME_CLASS=gvisor \
 ### Kata
 
 Kata VMs consume ~250m CPU + 350Mi RAM each (pod overhead from the RuntimeClass).
-The test auto-detects cluster CPU capacity and skips pool sizes that exceed it.
+The test auto-detects cluster CPU capacity and skips pool sizes exceeding 300%.
 
 ```shell
 SANDBOX_RUNTIME_CLASS=kata \
@@ -142,37 +141,44 @@ delay = coldStartSec × batchSize / poolSize   (floor 50ms)
 This is static (computed once) to avoid fighting with adaptive batch sizing.
 For runc this yields ~50ms, for kata ~500ms.
 
-In regular (non-longevity) mode, the delay defaults to 100ms. The test stops
-when `ReadyReplicas ≤ 1` **and** at least `poolSize` claims have been issued
-(ensuring at least one full pass through the pool), or after `2 × poolSize`
-total claims — whichever comes first.
+In regular (non-longevity) mode, the delay defaults to 100ms. The test
+always fires `2×poolSize` claims to capture the warm-to-cold transition
+point. Pool depletion (`ReadyReplicas ≤ 1`) is logged but does not stop
+the test — claims past depletion exercise the cold fallback path and
+appear as `is_warm=false` in the CSV.
 
-## Pool Reuse and Fill Measurement
+## Pool Lifecycle and Fill Measurement
 
-`TestRuntimeClassBurstRecovery` creates a single namespace, template, and pool
-that are reused across all pool sizes. The flow:
+`TestRuntimeClassBurstRecovery` creates a fresh pool for each pool size to
+avoid stale controller state (expectations tracker, observedGeneration) from
+degrading fill times across iterations. The flow:
 
-1. **Calibration**: pool is created at 4 replicas (capped by CPU for VM
-   runtimes). A single claim measures **warm baseline** — the irreducible
-   create-claim-watch latency.
-2. **Scale to 0**: pool is drained, calibration claim deleted.
-3. **Per pool size**: scale pool to target replicas, measure **fill time**
-   (time for `ReadyReplicas` to reach target), run burst claims, scale back
-   to 0. Between iterations, the test polls until all pods in the namespace
-   (including Terminating) are fully gone — this ensures the next pool size
-   starts with all CPU capacity available, which is critical for kata where
-   pod termination can take 5-10 seconds per VM.
+1. **Calibration**: a temporary pool at 4 replicas (capped by CPU for VM
+   runtimes) measures **warm baseline** — the irreducible create-claim-watch
+   latency. The calibration pool and claim are deleted before burst iterations.
+2. **Per pool size**: a new pool is created at target replicas, **fill time**
+   is measured (time for `ReadyReplicas` to reach target), burst claims run,
+   then the pool and all claims are deleted. In longevity mode, `pool_fill_sec`
+   measures time until `minReady` (roughly `2×batchSize`) rather than full
+   target replicas — the pool continues filling in the background while claims
+   fire, so this metric is not comparable to full-fill times in regular mode.
+   Between iterations, the test requires all pods in the namespace (including
+   Terminating) to be fully gone before proceeding — this ensures the next
+   pool size starts with all CPU capacity available, which is critical for kata
+   where pod termination can take 5-10 seconds per VM. Cleanup failures
+   (claim deletion, pod drain) fail the test to prevent invalid measurements.
 
 VM runtimes skip pool sizes that exceed **300%** of worker CPU capacity.
 Overprovisioning works well for kata — scheduler queues VMs while the
-pool maintains a larger buffer of pre-warmed slots. Empirically, warm
+pool maintains a larger buffer of pre-warmed slots. Empirically, green
 ratio and throughput both improve past 100% CPU (e.g., pool-28 on a
-3×8 vCPU cluster yields 89% warm at 3.3 claims/s vs 65% at 2.3 for
+3×8 vCPU cluster yields 89% green at 3.3 claims/s vs 65% at 2.3 for
 pool-16).
 
 Fill time accounts for the controller's `slowStartBatch` exponential ramp
 (1, 2, 4, 8… concurrent creates) and is used to derive claim timeouts for
-that specific pool size. The warm/cold threshold is fixed at **1 second**.
+that specific pool size. The green threshold is fixed at **1 second** — claims
+above this are classified as grey (warm but slow) or cold (fallback).
 
 ## Reading Results
 
@@ -207,50 +213,61 @@ Header metadata:
 
 ```text
 # cluster_id,my-cluster-abcde
+# kubernetes_version,v1.32.1
+# sandbox_version,0.5.3
+# provider,gce
 # worker_count,3
 # total_cpu_capacity,24
+# total_ram_capacity_bytes,100663296000
+# preexisting_pods,12
+# allocated_cpu_millis,3500
+# allocated_ram_bytes,4294967296
 # instance_type,n2-standard-8
 # runtime_class,kata
 # pool_size,8
-# workload_sec,0
+# workload_sec,30
+# cold_baseline_sec,8.500
 # warm_baseline_sec,0.350
-# warm_cold_threshold_sec,1.000
+# green_threshold_sec,1.000
 # pool_fill_sec,12.500
 # batch_size,4
 # max_claims,16
-# settle_sec,2
 # inter_batch_delay_ms,100
 ```
 
 Footer summary:
 
 ```text
-# total_batches,6
-# total_claims,48
-# under_1s_claims,48
-# over_1s_claims,0
-# green_claims,21
-# grey_zone_claims,27
-# worst_start_sec,0.752
-# over_cold_claims,2
-# time_to_all_ready_sec,3.214
-# total_duration_sec,4.795
-# throughput_claims_per_sec,10.0
+# total_batches,4
+# total_claims,16
+# green_claims,8
+# grey_claims,4
+# cold_claims,4
+# worst_start_sec,9.215
+# total_duration_sec,18.450
+# time_to_all_ready_sec,15.720
+# throughput_claims_per_sec,0.9
+# pods_on_node,worker-1,6
+# pods_on_node,worker-2,5
+# pods_on_node,worker-3,5
 ```
 
 ### Quality zones
 
-Claims are classified into quality zones based on latency:
+Claims are classified into three zones using the controller's `is_warm` signal
+and a 1-second latency threshold:
 
-| Zone | Range | Meaning |
-|------|-------|---------|
-| **Green** | ≤ 500ms | Invisible to the caller — warm pool delivered its promise |
-| **Grey** | 500ms … 1s | Contention-degraded but still faster than cold start |
-| **Cold** | > 1s | Warm pool failed to mask the cold start |
-| **Over-cold** | > pool fill time | Worse than the measured pool fill time |
+| Zone | Criteria | Meaning |
+|------|----------|---------|
+| **Green** | `is_warm=true` and ≤ 1s | Sub-second from warm pool — target SLA met |
+| **Grey** | `is_warm=true` and > 1s | Warm-served but slow — scheduling or adoption lag |
+| **Cold** | `is_warm=false` | Pool failed to serve the claim — cold fallback path |
 
-The grey zone is dominated by API server round-trip (~170ms) and controller
-adoption overhead (~100-250ms) — it is runtime-independent.
+`is_warm` is ground truth from the controller: `true` when the sandbox pod
+existed before the claim was created (pre-warmed), `false` when the controller
+created a new sandbox on demand. This avoids runtime-specific latency
+thresholds — cold start varies from ~2s (runc) to ~8s (kata), but `is_warm`
+is unambiguous regardless of runtime.
 
 ## Report Directory Structure
 
@@ -298,8 +315,8 @@ Key differences from regular burst mode:
 - **Minimum pool size**: longevity mode skips pool sizes below 20 — smaller
   pools deplete too fast for meaningful adaptive tuning.
 - **Summary CSV**: a `burst_summary_<runtime>_pool<N>.csv` is written every
-  10 batches with aggregated p50/p95 latencies, throughput, warm ratio, and
-  batch size direction for live monitoring.
+  10 batches with aggregated p50/p95 latencies, throughput, green/grey/cold
+  counts, and batch size direction for live monitoring.
 
 ## Controller Log Capture
 
@@ -323,26 +340,87 @@ the full (unscoped) controller log as a fallback.
 
 ## Roadmap
 
-- **Split functional vs stress tests**: Separate `runtime_class_test.go` into
-  functional tests (CI-suitable gating) and stress/benchmarks (hardware-dependent,
-  CSV-producing). Enables a dedicated CI job for runtime-aware e2e validation
-  without benchmark noise.
+### Functional E2E Coverage
+
+- **Volume and initContainer injection**: Validate initContainer + emptyDir
+  execution patterns and file-proxy (virtiofsd/gofer) mount initialization
+  across sandboxed runtimes. The kata image volume gap
+  ([kata-containers#13749](https://github.com/kata-containers/kata-containers/issues/13749))
+  was found via openshell, not direct-driver tests — these paths need explicit
+  coverage.
+- **Warm pool adoption integrity**: Verify that controller state transitions
+  (Pending → Ready → Claimed) and metadata mutations apply cleanly without
+  triggering guest container restarts or corrupting runtime state.
+- **Network proxy reachability**: Confirm end-to-end ingress routing through
+  the sandbox-router into Kata virtual TAP interfaces and gVisor networking
+  stacks.
+- **Virtiofs storage I/O validation**: Verify file-based tool calls (writes,
+  reads, workspace updates) function correctly over virtiofs rather than
+  overlayfs. Perform rapid multi-file agent workspace I/O inside mounted
+  volumes and check file consistency across the guest-host boundary — stale
+  reads, partial writes, and metadata desync are common virtiofs failure
+  modes under concurrent access. Requires bare metal for accurate I/O
+  throughput profiling.
+
+### Infrastructure & Test Harness
+
 - **RuntimeClass auto-detection**: Query installed RuntimeClasses from the cluster
   to drive multi-runtime test sweeps without manual `SANDBOX_RUNTIME_CLASS` env
   var. Not all nodes support all runtimes (e.g., `kata-nvidia-gpu` requires
   specific node capabilities).
-- **CPU-relative benchmark pool sizes**: Default `SANDBOX_POOL_SIZES` to
-  `{cpuCapacity/2, cpuCapacity, cpuCapacity*2}` — half (comfortable headroom),
-  full (capacity cliff), and double (forced cold starts to measure the penalty).
 - **Multi-size lifecycle subtests**: Run `TestRuntimeClassLifecycle` at small (2)
   and half-CPU pool sizes to validate the fill → claim → refill cycle under
   moderate scheduling pressure in CI.
-- **Probe-based settle detection**: Replace the fixed `SANDBOX_SETTLE_SEC` delay
-  with a single probe claim after pool fill. If the probe latency falls within
-  the green threshold (500ms), the controller work queue is empirically drained and burst
-  can start immediately. If not, back off and retry. Eliminates both the risk of
-  starting too early (inflated baselines) and waiting too long (wasted time on
-  fast clusters).
+
+### Cluster Health Observability
+
+The CSV header now captures static cluster state (total RAM, preexisting pods,
+allocated CPU/RAM, provider, versions) and the footer includes per-node pod
+counts to surface scheduling skew. The remaining items add *dynamic*
+node-level context — what the cluster was doing *during* the run. A 9s cold
+start at 30% node CPU means something very different from one at 95%.
+
+- **Node resource snapshots**: Sample `kubectl top nodes` (or metrics-server
+  API) at the start and end of each pool iteration, and periodically during
+  longevity runs. Write per-node CPU% and memory usage to a separate
+  `node_health_<runtime>_pool<N>.csv`. Key aggregates: average and peak
+  CPU%, average and peak memory%.
+- **Node condition monitoring**: Poll node conditions (MemoryPressure,
+  DiskPressure, PIDPressure) during the test. Flag iterations where any
+  worker entered a pressure condition — these results are unreliable for
+  benchmarking and should be marked in the CSV.
+- **Runtime daemon health**: For kata, check hypervisor memory overhead
+  (~256MB/VM) and file descriptor counts on runtime proxy daemons
+  (`kata-shim-v2`, `virtiofsd`). For gVisor, check `runsc` sentry memory.
+  High FD counts or OOM kills on the daemon side cause cold starts that look
+  like controller slowness in the CSV.
+
+### Time-to-Ready Breakdown
+
+The current milestone tracker measures coarse phases (create-ack, adoption,
+schedule, runtime, propagate) but does not decompose the runtime phase into
+its constituent steps. For openshell-style workloads the full stack is:
+
+1. **Hypervisor / VM boot** — firmware load → kernel → kata-agent ready.
+   Varies significantly between bare-metal KVM (~1.5s) and nested virt
+   (~4-8s). Requires bare metal for accurate cold-start SLA measurement.
+   The test should detect nested virt and annotate results.
+2. **Virtiofs volume mount** — time for virtiofsd to establish the shared
+   filesystem between host and guest. Blocks container start if workspace
+   volumes are mounted. Requires bare metal for accurate I/O profiling —
+   double-virtualized storage layers inflate latency.
+3. **Supervisor and L7 proxy startup** — sandbox-router, sidecar proxies,
+   and any injected init containers that must be ready before the agent
+   can accept tool calls.
+4. **Agent process execution readiness** — time from container start to
+   the agent process accepting its first request (health check passing).
+
+Exposing these sub-phases in the CSV (as optional columns when the runtime
+supports it) would make it possible to pinpoint whether a regression is in
+the hypervisor layer, the storage layer, or the application stack.
+
+### Controller & Runtime Observability
+
 - **Per-pool metrics capture**: Scrape the controller's Prometheus endpoint
   (`/metrics` on port 8080) before and after each pool iteration. Save the
   delta as `metrics_<runtime>_pool<N>.prom` in the results directory. Key
@@ -368,6 +446,34 @@ the full (unscoped) controller log as a fallback.
   start is invisible without tracing. Alternatively, scrape the per-sandbox
   shim-monitor.sock metrics endpoint while VMs are still running to capture
   boot timing without Jaeger infrastructure.
+
+### Scale & Stress Coverage (Nightly/Non-Blocking)
+
+- **Replenishment latency under burst claims**: Ensure pool controllers
+  gracefully queue concurrent claim bursts and absorb microVM cold-start
+  boot latency (1-3s) without claim timeouts. Currently covered by
+  `TestRuntimeClassBurstRecovery` but only as a manual benchmark — needs
+  a nightly CI job with pass/fail thresholds on green ratio and p95 latency.
+- **Host density and resource overhead**: Stress-test node density limits
+  to monitor hypervisor memory overhead (~256MB/VM) and file descriptor
+  limits on runtime proxy daemons. Identify the point where adding more
+  pool replicas degrades rather than improves claim latency.
+- **Long-term stability and drift (7-day soak)**: Run continuous
+  claim-and-release loops over an extended duration to detect resource
+  leaks and zombie processes under sustained warm pool churn. Assert zero
+  memory growth in sandbox-router, complete finalization of hypervisor
+  processes (qemu/cloud-hypervisor), and no orphaned virtiofsd daemons on
+  host nodes. The existing longevity mode (`SANDBOX_LONGEVITY`) caps at a
+  few hours — a week-long soak needs periodic node-side auditing (process
+  counts, FD counts, RSS snapshots) written to a time-series CSV.
+- **Gateway and node saturation thresholds**: Progressively scale active
+  Kata sandboxes on a single node until CPU/memory saturation or gateway
+  throughput limits are hit. Identifies maximum sandbox density under
+  dual-layer overhead (hypervisor + sandbox-router) and establishes
+  baseline density guidance for platform sizing. Record the inflection
+  point where claim latency degrades and the failure mode (OOM kill,
+  throttling, gateway timeout). Requires bare metal for accurate density
+  limits — nested virt overhead skews the saturation point.
 
 ## Design Decisions
 

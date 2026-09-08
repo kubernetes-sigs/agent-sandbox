@@ -58,8 +58,6 @@ import (
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-
 const (
 	immediateRequeueDelay = time.Millisecond
 	// warmCandidateGracePeriod gives a newly created claim two seconds for a
@@ -313,8 +311,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Pending warm candidates are expected transient state, not a claim failure.
 	// Return before status calculation so the grace period does not publish a
 	// misleading SandboxMissing or ReconcilerError condition.
-	var pendingWarmCandidates *warmCandidatesPendingError
-	if errors.As(reconcileErr, &pendingWarmCandidates) {
+	if pendingWarmCandidates, ok := errors.AsType[*warmCandidatesPendingError](reconcileErr); ok {
 		logger.V(4).Info("Waiting for warm pool candidates to report Pod IPs",
 			"claim", claim.Name,
 			"warmPool", claim.Spec.WarmPoolRef.Name,
@@ -1563,7 +1560,7 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(claimMeta *v1beta
 				}
 			}
 			if !allowed {
-				return fmt.Errorf("label domain %q is not in the allowlist", domain)
+				return fmt.Errorf("label domain %q is not in the allowlist (configure the allowed-label-domains key of the agent-sandbox-config ConfigMap in the controller namespace; default: sandbox.users.io)", domain)
 			}
 		} else {
 			// For annotations, we use the blocklist

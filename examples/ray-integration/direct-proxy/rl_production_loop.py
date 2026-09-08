@@ -55,7 +55,6 @@ class SecureEnvironmentActor:
         # that the SandboxWarmPool has already booted. This reduces provisioning time from 
         # ~60 seconds down to <200 milliseconds.
         self.sandbox = self.client.create_sandbox(
-            template="ray-native-template",
             warmpool="ray-native-pool"
         )
         

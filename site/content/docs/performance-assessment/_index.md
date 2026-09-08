@@ -16,7 +16,7 @@ The `agent-sandbox-controller` exposes several flags that directly affect throug
 |------|---------|-------------|
 | `--sandbox-concurrent-workers` | `100` | Max concurrent reconciles for the Sandbox controller |
 | `--sandbox-claim-concurrent-workers` | `50` | Max concurrent reconciles for the SandboxClaim controller |
-| `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller. Keep at 1 (or small) to prevent reconciler workers from racing on the pool expectations tracker. |
+| `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller. Reconciles are serialized per pool key by the workqueue, so workers provide concurrency across distinct pools. Size to the number of active warm pools in the cluster. |
 | `--sandbox-template-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxTemplate controller |
 | `--sandbox-warm-pool-max-batch-size` | `300` | Max sandboxes the SandboxWarmPool controller creates or deletes in a single batch |
 | `--kube-api-qps` | `-1` (no client-side throttling) | Disables client-side rate limiting to the Kubernetes API server. Server-side throttling (API Priority and Fairness) still applies. When setting a positive value, use at least the sum of all `--*-concurrent-workers` flags to avoid starving reconcile loops. |
@@ -27,7 +27,7 @@ The `agent-sandbox-controller` exposes several flags that directly affect throug
 | `--sandbox-warm-pool-replenish-delay` | `0` | Defer warm pool replenishment after claims adopt members so burst adoptions get API server priority |
 | `--disable-claim-events` | `false` | Suppresses Kubernetes Event emission from the SandboxClaim controller to cut API and etcd write traffic |
 | `--disable-claim-observability-annotations` | `false` | Skips persisting first-observed timestamp and trace annotations to etcd while preserving in-memory metrics |
-| `--cache-label-selectors` | `false` | Scopes Pod and Service informer caches to sandbox tracking labels, avoiding caching unrelated cluster resources |
+| `--cache-label-selectors` | `false` | Scopes Pod and Service informer caches to sandbox tracking labels, avoiding caching unrelated cluster resources. Caveat: externally pre-provisioned Pods and Services relying on adoption must also carry `agents.x-k8s.io/sandbox-name-hash` to be visible to the controller. |
 | `--sandbox-write-behind-window` | `0` | Coalescing window for recoverable metadata-only writes on Sandboxes |
 
 ### Choosing worker counts

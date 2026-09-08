@@ -6,13 +6,13 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 
 * `--sandbox-concurrent-workers` (default: 100): The maximum number of concurrent reconciles for the Sandbox controller.
 * `--sandbox-claim-concurrent-workers` (default: 50): The maximum number of concurrent reconciles for the SandboxClaim controller.
-* `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller. Keep this at 1 (or small) to prevent multiple reconciler workers from racing each other on the same pool's expectations tracker.
+* `--sandbox-warm-pool-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxWarmPool controller. Reconciles for a given pool key are serialized by the workqueue, so workers provide concurrency across distinct warm pools rather than within a single pool. Size this to the number of active warm pools in the cluster and available API capacity (e.g. 1 is sufficient if managing a single warm pool).
 * `--sandbox-template-concurrent-workers` (default: 1): The maximum number of concurrent reconciles for the SandboxTemplate controller.
 * `--sandbox-warm-pool-max-batch-size` (default: 300): The maximum number of sandboxes the SandboxWarmPool controller will create/delete in a single batch. Creates advance one observed batch per watch round-trip (the expectations gate waits for a batch's add events before issuing the next), so a large pool fills in about `ceil(replicas/batchSize)` round-trips; raising this trades round-trips for burst size and is safe at any value under the gate.
 * `--sandbox-warm-pool-readiness-grace-period` (default: `5m`): How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.
 * `--sandbox-warm-pool-unschedulable-recheck-interval` (default: `1m`): Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.
 * `--kube-api-qps` (default: -1, no client-side rate limiting): Client-side QPS limit for the Kubernetes API client.
-* `--kube-api-burst` (default: 10): The maximum burst for client-side throttling of the Kubernetes API client. When running high worker concurrency or experiencing client-side throttling, raise this (e.g. 100–200).
+* `--kube-api-burst` (default: 10): The maximum burst for client-side throttling of the Kubernetes API client. Only applies when `--kube-api-qps` is set to a positive value (client-side rate limiting enabled). When running high worker concurrency with a positive `--kube-api-qps`, raise this (e.g. 100–200) to match or exceed worker concurrency to avoid client-side throttling.
 
 ## API Transport and Connection Settings
 
@@ -127,7 +127,7 @@ When running high sustained claim rates (e.g., 10–20+ claims/second) or managi
    At high throughput, routine event generation and annotation updates write heavily to etcd:
    * **Fix**: Enable `--disable-claim-events=true` and `--disable-claim-observability-annotations=true` to eliminate ~40 write QPS at 20 claims/s.
    * **Fix**: Enable `--cache-label-selectors=true` to avoid caching non-sandbox pods and services across the cluster.
-   * **Fix**: Ensure `--kube-api-burst=200` to prevent client-side rate limiting from throttling worker reconciles.
+   * **Fix**: If using client-side rate limiting (`--kube-api-qps`), ensure `--kube-api-burst` (e.g. `200`) is sized to match or exceed worker concurrency to prevent client-side throttling. By default, `--kube-api-qps=-1` (client-side rate limiting is disabled).
 
 ### High-Throughput Deployment Example
 
@@ -137,11 +137,22 @@ kind: Deployment
 metadata:
   name: agent-sandbox-controller
   namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
 spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
   template:
+    metadata:
+      labels:
+        app: agent-sandbox-controller
     spec:
+      serviceAccountName: agent-sandbox-controller
       containers:
       - name: agent-sandbox-controller
+        image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # replace with published image or deploy with ko
         args:
         - --leader-elect=true
         - --extensions=true
@@ -155,8 +166,7 @@ spec:
         - --disable-claim-events=true
         - --disable-claim-observability-annotations=true
         - --cache-label-selectors=true
-        - --kube-api-burst=200
-        # Worker concurrency
+        # Worker concurrency (size warm-pool workers to the number of distinct pools)
         - --sandbox-claim-concurrent-workers=100
         - --sandbox-concurrent-workers=150
         - --sandbox-warm-pool-concurrent-workers=1

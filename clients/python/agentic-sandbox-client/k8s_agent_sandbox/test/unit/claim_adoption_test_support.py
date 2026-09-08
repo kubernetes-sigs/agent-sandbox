@@ -150,11 +150,6 @@ def mismatched_claims():
     claim["metadata"]["deletionTimestamp"] = "2026-08-31T23:59:00Z"
     yield claim, "metadata.deletionTimestamp"
 
-    claim = matching_claim()
-    claim["spec"]["futureBehavior"] = {"enabled": True}
-    yield claim, "unsupported spec fields"
-
-
 def terminal_claims():
     """Yields adopted Claims with every terminal readiness condition."""
     reasons = (

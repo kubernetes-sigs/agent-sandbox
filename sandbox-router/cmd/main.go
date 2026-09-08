@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -220,15 +221,40 @@ func run(cfg *config.Config, log logr.Logger) error {
 		authorizer = tr
 	}
 	if cfg.AuthzMode == config.AuthzScopedToken {
-		secret, err := os.ReadFile(cfg.AuthzScopedTokenSecretFile)
-		if err != nil {
-			return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
+		var secret []byte
+		if cfg.AuthzScopedTokenSecretFile != "" {
+			var err error
+			secret, err = os.ReadFile(cfg.AuthzScopedTokenSecretFile)
+			if err != nil {
+				return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
+			}
+		}
+		var verificationKeys map[string]ed25519.PublicKey
+		if cfg.AuthzScopedTokenVerificationKeysFile != "" {
+			keyData, err := os.ReadFile(cfg.AuthzScopedTokenVerificationKeysFile)
+			if err != nil {
+				return fmt.Errorf("read --authz-scoped-token-verification-keys-file: %w", err)
+			}
+			verificationKeys, err = authz.ParseScopedTokenVerificationKeys(keyData)
+			if err != nil {
+				return fmt.Errorf("parse --authz-scoped-token-verification-keys-file: %w", err)
+			}
+		}
+		var v1AcceptUntil time.Time
+		if cfg.AuthzScopedTokenV1AcceptUntil != "" {
+			var err error
+			v1AcceptUntil, err = time.Parse(time.RFC3339, cfg.AuthzScopedTokenV1AcceptUntil)
+			if err != nil {
+				return fmt.Errorf("parse --authz-scoped-token-v1-accept-until: %w", err)
+			}
 		}
 		st, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
 			// NewScopedTokenAuthorizer trims whitespace itself, so a
 			// mounted Secret with a trailing newline just works.
-			Secret:         secret,
-			TokenLocations: tokenLocations,
+			Secret:           secret,
+			VerificationKeys: verificationKeys,
+			V1AcceptUntil:    v1AcceptUntil,
+			TokenLocations:   tokenLocations,
 		})
 		if err != nil {
 			return fmt.Errorf("build scoped-token authorizer: %w", err)

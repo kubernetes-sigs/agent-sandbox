@@ -74,6 +74,34 @@ type stubLookup struct {
 	invalidatedByName []string
 }
 
+func (s *stubLookup) Resolve(namespace, name string, requestedUID types.UID) (cache.Entry, cache.ResolutionSource, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for uid, e := range s.entries {
+		if e.Namespace == namespace && e.SandboxName == name {
+			e.SandboxUID = uid
+			if requestedUID != "" && requestedUID == uid {
+				return e, cache.ResolutionByUID, true
+			}
+			return e, cache.ResolutionByName, true
+		}
+	}
+	if requestedUID != "" {
+		if e, ok := s.entries[requestedUID]; ok {
+			if e.Namespace == "" && e.SandboxName == "" {
+				e.Namespace = namespace
+				e.SandboxName = name
+			}
+			if e.Namespace != namespace || e.SandboxName != name {
+				return cache.Entry{}, 0, false
+			}
+			e.SandboxUID = requestedUID
+			return e, cache.ResolutionByUID, true
+		}
+	}
+	return cache.Entry{}, 0, false
+}
+
 func (s *stubLookup) Get(uid types.UID) (cache.Entry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

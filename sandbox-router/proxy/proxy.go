@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"time"
 
@@ -170,7 +171,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// errors in package authz. The default AllowAll authorizer wired in
 	// by NewHandler always permits, preserving the Python router's
 	// no-auth contract.
-	if err := h.authz.Authorize(r.Context(), r, target.Namespace, target.ID); err != nil {
+	target0 := target // capture for closures
+	upstreamURL, src, resolvedUID := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
+	if upstreamRawPath != "" {
+		// Only ever set for a path-routed request (see resolveTarget).
+		// Target.Resolve only assigns URL.Path, so without this a path-
+		// routed request carrying an encoded separator in its upstream
+		// portion (e.g. a filename containing "/", sent as "%2F") would
+		// reach the sandbox already decoded, silently renaming the
+		// resource it addresses. net/url only honors RawPath when it is
+		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
+		// resolveTarget/ParsePathRoute guarantee that pairing holds.
+		upstreamURL.RawPath = upstreamRawPath
+	}
+	upstreamPathURL := url.URL{Path: upstreamPath, RawPath: upstreamRawPath}
+	authorizationTarget, err := authz.NormalizeAuthorizationTarget(authz.AuthorizationTarget{
+		Namespace:   target.Namespace,
+		SandboxName: target.ID,
+		SandboxUID:  string(resolvedUID),
+		Port:        target.Port,
+		Method:      r.Method,
+		Path:        upstreamPathURL.EscapedPath(),
+	})
+	if err != nil {
+		WriteJSONError(w, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		return
+	}
+	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
 		status := authz.HTTPStatusFor(err)
 		observability.LoggerFromContext(r.Context(), h.log).Info("authorization denied",
 			"sandbox", target.ID,
@@ -199,7 +226,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target0 := target // capture for closures
 	outboundRawQuery := r.URL.RawQuery
 	if h.cfg.AuthzCookieQueryParam != "" {
 		// Never forward the bootstrap credential to the sandbox itself.
@@ -208,21 +234,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// normal flow already returned above.
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
-	// Resolve once per request so the ErrorHandler can see which path
-	// produced the IP (cache vs DNS vs override) and invalidate the cache
-	// entry on dial-class failures. The Rewrite callback re-uses the URL.
-	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, outboundRawQuery, h.cache)
-	if upstreamRawPath != "" {
-		// Only ever set for a path-routed request (see resolveTarget).
-		// Target.Resolve only assigns URL.Path, so without this a path-
-		// routed request carrying an encoded separator in its upstream
-		// portion (e.g. a filename containing "/", sent as "%2F") would
-		// reach the sandbox already decoded, silently renaming the
-		// resource it addresses. net/url only honors RawPath when it is
-		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
-		// resolveTarget/ParsePathRoute guarantee that pairing holds.
-		upstreamURL.RawPath = upstreamRawPath
-	}
+	upstreamURL.RawQuery = outboundRawQuery
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = upstreamURL

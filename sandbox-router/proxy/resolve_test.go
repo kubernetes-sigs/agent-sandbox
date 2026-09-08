@@ -31,6 +31,32 @@ type fakeLookup struct {
 	invalidatedByName []string
 }
 
+func (f *fakeLookup) Resolve(namespace, name string, requestedUID types.UID) (cache.Entry, cache.ResolutionSource, bool) {
+	for uid, e := range f.entries {
+		if e.Namespace == namespace && e.SandboxName == name {
+			e.SandboxUID = uid
+			if requestedUID != "" && requestedUID == uid {
+				return e, cache.ResolutionByUID, true
+			}
+			return e, cache.ResolutionByName, true
+		}
+	}
+	if requestedUID != "" {
+		if e, ok := f.entries[requestedUID]; ok {
+			if e.Namespace == "" && e.SandboxName == "" {
+				e.Namespace = namespace
+				e.SandboxName = name
+			}
+			if e.Namespace != namespace || e.SandboxName != name {
+				return cache.Entry{}, 0, false
+			}
+			e.SandboxUID = requestedUID
+			return e, cache.ResolutionByUID, true
+		}
+	}
+	return cache.Entry{}, 0, false
+}
+
 func (f *fakeLookup) Get(uid types.UID) (cache.Entry, bool) {
 	e, ok := f.entries[uid]
 	return e, ok
@@ -73,6 +99,7 @@ func TestResolve(t *testing.T) {
 		lookup     Lookup
 		wantURL    string
 		wantSource Source
+		wantUID    types.UID
 	}{
 		{
 			name:       "pod ip override beats everything",
@@ -87,6 +114,7 @@ func TestResolve(t *testing.T) {
 			lookup:     &fakeLookup{entries: map[types.UID]cache.Entry{"u1": {PodIP: "10.0.0.42"}}},
 			wantURL:    "http://10.0.0.42:9999",
 			wantSource: SourceCache,
+			wantUID:    "u1",
 		},
 		{
 			name:       "cache miss falls back to DNS",
@@ -107,16 +135,18 @@ func TestResolve(t *testing.T) {
 			}},
 			wantURL:    "http://10.0.0.42:9999",
 			wantSource: SourceCacheName,
+			wantUID:    "u1",
 		},
 		{
-			name:   "UID hit takes precedence over name index",
+			name:   "canonical name owner takes precedence over mismatched UID",
 			target: Target{ID: "id", UID: "u1", Namespace: "ns", Port: 9999},
 			lookup: &fakeLookup{entries: map[types.UID]cache.Entry{
 				"u1": {PodIP: "10.0.0.42", SandboxName: "other", Namespace: "ns"},
 				"u2": {PodIP: "10.0.0.66", SandboxName: "id", Namespace: "ns"},
 			}},
-			wantURL:    "http://10.0.0.42:9999",
-			wantSource: SourceCache,
+			wantURL:    "http://10.0.0.66:9999",
+			wantSource: SourceCacheName,
+			wantUID:    "u2",
 		},
 		{
 			name:   "UID miss, name index hit",
@@ -126,6 +156,7 @@ func TestResolve(t *testing.T) {
 			}},
 			wantURL:    "http://10.0.0.42:9999",
 			wantSource: SourceCacheName,
+			wantUID:    "u1",
 		},
 		{
 			name:   "no UID, name index miss falls back to DNS",
@@ -152,12 +183,15 @@ func TestResolve(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotURL, gotSrc := tc.target.Resolve("", cd, "", "", tc.lookup)
+			gotURL, gotSrc, gotUID := tc.target.Resolve("", cd, "", "", tc.lookup)
 			if gotURL.String() != tc.wantURL {
 				t.Fatalf("url: got %q want %q", gotURL.String(), tc.wantURL)
 			}
 			if gotSrc != tc.wantSource {
 				t.Fatalf("source: got %q want %q", gotSrc, tc.wantSource)
+			}
+			if gotUID != tc.wantUID {
+				t.Fatalf("uid: got %q want %q", gotUID, tc.wantUID)
 			}
 		})
 	}
@@ -165,7 +199,7 @@ func TestResolve(t *testing.T) {
 
 func TestResolvePreservesPathAndQuery(t *testing.T) {
 	tgt := Target{ID: "id", Namespace: "ns", Port: 8888}
-	got, _ := tgt.Resolve("https", "cluster.local", "/api/v1/things", "a=1&b=2", nil)
+	got, _, _ := tgt.Resolve("https", "cluster.local", "/api/v1/things", "a=1&b=2", nil)
 	want := "https://id.ns.svc.cluster.local:8888/api/v1/things?a=1&b=2"
 	if got.String() != want {
 		t.Fatalf("got %q want %q", got.String(), want)
@@ -180,21 +214,27 @@ func TestResolveBracketsIPv6PodIP(t *testing.T) {
 		"v6": {PodIP: "2001:db8::42"},
 	}}
 	tgt := Target{ID: "id", UID: "v6", Namespace: "ns", Port: 8888}
-	got, src := tgt.Resolve("http", "cluster.local", "/api", "", lookup)
+	got, src, resolvedUID := tgt.Resolve("http", "cluster.local", "/api", "", lookup)
 	if got.String() != "http://[2001:db8::42]:8888/api" {
 		t.Fatalf("ipv6 cache hit: got %q want http://[2001:db8::42]:8888/api", got.String())
 	}
 	if src != SourceCache {
 		t.Fatalf("source: got %q want cache", src)
 	}
+	if resolvedUID != "v6" {
+		t.Fatalf("uid: got %q want v6", resolvedUID)
+	}
 
 	// Same expectation for an explicit X-Sandbox-Pod-IP override.
 	tgt = Target{ID: "id", Namespace: "ns", Port: 8888, PodIP: "fe80::1"}
-	got, src = tgt.Resolve("http", "cluster.local", "/", "", nil)
+	got, src, resolvedUID = tgt.Resolve("http", "cluster.local", "/", "", nil)
 	if got.String() != "http://[fe80::1]:8888/" {
 		t.Fatalf("ipv6 override: got %q want http://[fe80::1]:8888/", got.String())
 	}
 	if src != SourcePodIP {
 		t.Fatalf("source: got %q want pod-ip", src)
+	}
+	if resolvedUID != "" {
+		t.Fatalf("pod-IP override must not report a canonical UID, got %q", resolvedUID)
 	}
 }

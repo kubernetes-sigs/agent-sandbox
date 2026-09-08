@@ -21,8 +21,8 @@ import (
 	"os/exec"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //nolint:revive // Ginkgo and Gomega require dot-imports.
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	"sigs.k8s.io/agent-sandbox/olm/test/utils"
 )

@@ -355,6 +355,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 			s.claimName = ""
 			s.sandboxName = ""
 			s.podName = ""
+			s.podIP = ""
 			s.serviceFQDN = ""
 			s.annotations = nil
 			s.mu.Unlock()
@@ -364,6 +365,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		}
 		s.sandboxName = ""
 		s.podName = ""
+		s.podIP = ""
 		s.serviceFQDN = ""
 		s.annotations = nil
 		s.mu.Unlock()
@@ -377,6 +379,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		if k8serrors.IsNotFound(err) {
 			s.sandboxName = ""
 			s.podName = ""
+			s.podIP = ""
 			s.serviceFQDN = ""
 			s.annotations = nil
 		}

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openhands-k8s-agent-sandbox"
+description = "OpenHands agent-SDK workspace backed by Kubernetes agent-sandbox warm pools."
+readme = "README.md"
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version"]
+# openhands-sdk publishes requires-python >=3.12; we inherit that floor.
+requires-python = ">=3.12"
+dependencies = [
+    # RemoteWorkspace (the base class) and the agent-server HTTP contract.
+    # The SDK versions its agent-server image per release, so keep the band
+    # narrow enough that client and server speak the same protocol.
+    "openhands-sdk>=1.44,<2",
+    # SandboxClient.create_sandbox(warmpool=...) claim path. The client is only
+    # imported when the caller does not inject one (tests inject fakes). The
+    # claim API (create_sandbox / get_pod_ip / terminate) is stable across the
+    # 0.5 → 1.x line.
+    "k8s-agent-sandbox>=0.5.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/integrations/openhands"
+Repository = "https://github.com/kubernetes-sigs/agent-sandbox"
+Documentation = "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/integrations/openhands"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["openhands_k8s_agent_sandbox*"]
+exclude = ["tests*"]
+
+[tool.setuptools.exclude-package-data]
+# setuptools_scm automatically bundles tracked files as package data.
+# We need to explicitly exclude test directories and files from being bundled.
+"*" = ["test/*", "tests/*", "*/test/*", "*/tests/*", "test_*.py", "*_test.py"]
+
+[tool.setuptools_scm]
+root = "../../.."
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]

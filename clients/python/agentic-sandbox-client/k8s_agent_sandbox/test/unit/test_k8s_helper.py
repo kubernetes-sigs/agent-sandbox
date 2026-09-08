@@ -425,6 +425,24 @@ class TestK8sHelperDeleteSandboxClaim(unittest.TestCase):
             helper.delete_sandbox_claim("claim", "default")
         self.assertEqual(ctx.exception.status, 403)
 
+    def test_delete_defaults_to_no_request_timeout(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.delete_sandbox_claim("claim", "default")
+
+        self.assertIsNone(mock_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"])
+
+    def test_delete_forwards_request_timeout(self, mock_config, mock_api_cls, mock_core_cls):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+
+        helper = K8sHelper()
+        helper.delete_sandbox_claim("claim", "default", _request_timeout=30)
+
+        self.assertEqual(mock_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
+
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")

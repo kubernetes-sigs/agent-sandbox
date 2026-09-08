@@ -1,0 +1,50 @@
+# SandboxTemplate for pre-warmed OpenHands agent-server pods.
+#
+# The readinessProbe on /health:8000 is load-bearing: SandboxClient waits for
+# the claim's Ready condition, so Ready MUST mean "agent-server is serving" —
+# that is what lets AgentSandboxWorkspace use a short (10 s) health budget.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: openhands-agent-server
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor          # recommended: model-driven code runs here
+      containers:
+      - name: agent-server
+        # Pin to the openhands-sdk release you install client-side; the SDK and
+        # the agent-server image are versioned together.
+        image: ghcr.io/openhands/agent-server:1.44.1-python
+        args: ["--host", "0.0.0.0", "--port", "8000"]
+        ports:
+        - containerPort: 8000
+        # Pool-level session key: pre-warmed servers cannot take a per-claim
+        # key, so every pod in the pool shares this one. Pass the same value as
+        # AgentSandboxWorkspace(api_key=...). Delete this block only on a
+        # private, trusted network.
+        env:
+        - name: OH_SESSION_API_KEYS_0
+          valueFrom:
+            secretKeyRef:
+              name: openhands-session-key
+              key: key
+        readinessProbe:
+          httpGet:
+            path: "/health"
+            port: 8000
+          initialDelaySeconds: 0
+          periodSeconds: 1
+        livenessProbe:
+          httpGet:
+            path: "/health"
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+            ephemeral-storage: "2Gi"
+      restartPolicy: "OnFailure"

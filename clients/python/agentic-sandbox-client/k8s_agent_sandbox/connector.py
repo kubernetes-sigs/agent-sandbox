@@ -455,9 +455,6 @@ class SandboxConnector:
         else:
             raise ValueError("Unknown connection configuration type")
 
-    def get_conn_strategy(self):
-        return self.strategy
-
     def is_sandboxd(self) -> bool:
         """Return True when this connector speaks the sandboxd runtime API."""
         return isinstance(self.connection_config, SandboxdPodTunnelConnectionConfig)

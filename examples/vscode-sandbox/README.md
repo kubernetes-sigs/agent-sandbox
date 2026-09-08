@@ -196,9 +196,14 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
     ```
 
 2.  **Deploy the Gateway (Production Only):**
-    If you need external access via a Public IP (GKE), apply the Gateway configuration.
+    If you need external access via a public IP, apply the Gateway configuration.
+    This requires the Gateway API CRDs and a Gateway API controller
+    (e.g. Istio, GKE built-in, Envoy Gateway) — see the
+    [sandbox-router README](../../clients/python/agentic-sandbox-client/sandbox-router/README.md) for prerequisites.
+    Edit `spec.gatewayClassName` in the YAML to match your environment — see the
+    comments in `gateway.yaml` for options.
     ```bash
-    # Deploys Gateway, HTTPRoute, and HealthCheckPolicy
+    # (GKE-only) Deploys Gateway, HTTPRoute, and HealthCheckPolicy
     kubectl apply -f ../../sandbox-router/deploy/examples/gateway-gke.yaml
     ```
 
@@ -206,7 +211,7 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
 
 1. Get the Gateway IP:
 ```bash
-export GATEWAY_IP=$(kubectl get gateway external-http-gateway -n default -o jsonpath='{.status.addresses[0].value}')
+export GATEWAY_IP=$(kubectl get gateway external-http-gateway -n agent-sandbox-system -o jsonpath='{.status.addresses[0].value}')
 echo "Gateway IP: $GATEWAY_IP"
 ```
 
@@ -235,7 +240,7 @@ For local development, port-forward to the **Router Service** (do not port-forwa
 1. Start the Tunnel: 
 ```bash 
 # Forward local 8080 to the Router Service
-kubectl port-forward svc/sandbox-router-svc 8080:8080 -n default
+kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system
 ```
 
 - **Access via Curl:** You need to send the correct headers to route traffic to your specific sandbox. Via curl, set:

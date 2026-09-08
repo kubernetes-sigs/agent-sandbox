@@ -27,7 +27,6 @@ from k8s_agent_sandbox.claim_adoption import (
 from k8s_agent_sandbox.claim_ownership import (
     ClaimLookupOperation,
     ClaimOwnership,
-    ExplicitClaimOperations,
 )
 from k8s_agent_sandbox.test.unit.claim_adoption_test_support import (
     CLAIM_NAME,
@@ -93,28 +92,27 @@ class TestClaimStatus(unittest.TestCase):
 
 class TestClaimValidation(unittest.TestCase):
 
-    def test_unsupported_spec_fields_are_named_in_error(self):
+    def test_server_defaulted_spec_fields_are_ignored(self):
         claim = matching_claim()
         claim["spec"]["futureBehavior"] = {"enabled": True}
         claim["spec"]["otherBehavior"] = True
 
-        with self.assertRaisesRegex(
-            ValueError, "futureBehavior, otherBehavior"
-        ):
-            validate_claim_for_adoption(
-                claim,
-                claim_name=CLAIM_NAME,
-                namespace=NAMESPACE,
-                warmpool=WARMPOOL,
-                labels=REQUESTED_LABELS,
-                lifecycle=None,
-                volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
-                pod_metadata={
-                    "labels": POD_LABELS,
-                    "annotations": POD_ANNOTATIONS,
-                },
-                env=None,
-            )
+        identity = validate_claim_for_adoption(
+            claim,
+            claim_name=CLAIM_NAME,
+            namespace=NAMESPACE,
+            warmpool=WARMPOOL,
+            labels=REQUESTED_LABELS,
+            lifecycle=None,
+            volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+            pod_metadata={
+                "labels": POD_LABELS,
+                "annotations": POD_ANNOTATIONS,
+            },
+            env=None,
+        )
+
+        self.assertEqual(identity.uid, "claim-uid")
 
 
 class TestClaimModels(unittest.TestCase):
@@ -128,15 +126,9 @@ class TestClaimModels(unittest.TestCase):
         with self.assertRaises(ValidationError):
             identity.uid = "replacement-uid"
 
-    def test_ownership_state_uses_pydantic_models(self):
-        state = ExplicitClaimOperations(
-            active=1,
-            caller_owned_before=False,
-            automatic_cleanup_before=False,
-        )
+    def test_lookup_state_uses_a_pydantic_model(self):
         lookup = ClaimLookupOperation()
 
-        self.assertIsInstance(state, BaseModel)
         self.assertIsInstance(lookup, BaseModel)
 
     def test_lookup_operations_keep_identity_equality(self):
@@ -171,42 +163,30 @@ class TestClaimOwnership(unittest.TestCase):
 
         self.assertFalse(should_delete)
 
-    def test_deferred_generated_claim_without_uid_is_not_deleted(self):
+    def test_caller_owned_name_rejects_automatic_ownership(self):
         ownership = ClaimOwnership()
         key = ("test-namespace", "generated-claim")
-        operation = ownership.begin_explicit(key)
 
-        ownership.failed_generated_needs_delete(
+        ownership.mark_caller_owned(key)
+        ownership.register_automatic(key, "generated-uid")
+        should_delete = ownership.failed_generated_needs_delete(
             key,
             has_registered_handle=False,
-            claim_uid=None,
-        )
-        should_delete, expected_uid = ownership.finish_explicit(
-            key,
-            operation,
-            committed=False,
-            has_registered_handle=False,
+            claim_uid="generated-uid",
         )
 
         self.assertFalse(should_delete)
-        self.assertIsNone(expected_uid)
+        self.assertIn(key, ownership.caller_owned_claims)
+        self.assertNotIn(key, ownership.automatic_cleanup_claims)
 
-    def test_invalidated_operation_cannot_erase_new_epoch_ownership(self):
+    def test_discard_allows_a_new_automatic_ownership_epoch(self):
         ownership = ClaimOwnership()
         key = ("test-namespace", "test-claim")
-        old_operation = ownership.begin_explicit(key)
 
+        ownership.mark_caller_owned(key)
         ownership.discard(key)
         ownership.register_automatic(key, "replacement-uid")
-        should_delete, expected_uid = ownership.finish_explicit(
-            key,
-            old_operation,
-            committed=False,
-            has_registered_handle=True,
-        )
 
-        self.assertFalse(should_delete)
-        self.assertIsNone(expected_uid)
         self.assertIn(key, ownership.automatic_cleanup_claims)
         self.assertEqual(
             ownership.automatic_cleanup_uid(key), "replacement-uid"

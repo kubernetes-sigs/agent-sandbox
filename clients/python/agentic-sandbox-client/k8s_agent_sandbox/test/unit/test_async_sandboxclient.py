@@ -670,6 +670,41 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             "ready-sandbox",
         )
 
+    async def test_create_sandbox_accepts_server_defaulted_spec_fields(self):
+        existing_claim = matching_claim()
+        existing_claim["spec"]["futureBehavior"] = {"enabled": True}
+        existing_claim["status"] = {
+            "conditions": [
+                {
+                    "type": "Ready",
+                    "status": "True",
+                    "observedGeneration": 1,
+                }
+            ],
+            "sandbox": {"name": "ready-sandbox"},
+        }
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            side_effect=ApiException(status=409)
+        )
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(
+            return_value=existing_claim
+        )
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock()
+
+        sandbox = await self.client.create_sandbox(
+            WARMPOOL,
+            NAMESPACE,
+            labels=REQUESTED_LABELS,
+            claim_name=CLAIM_NAME,
+            adopt_existing=True,
+            volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+            pod_labels=POD_LABELS,
+            pod_annotations=POD_ANNOTATIONS,
+        )
+
+        self.assertEqual(sandbox, self.mock_sandbox_class.return_value)
+        self.mock_k8s_helper.wait_for_claim_ready.assert_not_awaited()
+
     async def test_create_sandbox_ignores_stale_ready_adopted_snapshot(self):
         existing_claim = matching_claim()
         existing_claim["status"] = {
@@ -1185,44 +1220,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertIs(context.exception, conflict)
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
-    async def test_deferred_generated_cleanup_cannot_mask_explicit_failure(
-        self,
-    ):
-        key = (NAMESPACE, CLAIM_NAME)
-        conflict = ApiException(status=409)
-
-        async def fail_with_deferred_cleanup(*_args, **_kwargs):
-            async with self.client._lock:
-                self.client._claim_ownership.failed_generated_needs_delete(
-                    key,
-                    has_registered_handle=False,
-                    claim_uid="generated-uid",
-                )
-            raise conflict
-
-        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
-            side_effect=fail_with_deferred_cleanup
-        )
-        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock(
-            side_effect=RuntimeError("deferred cleanup failed")
-        )
-
-        with self.assertRaises(ApiException) as context:
-            await self.client.create_sandbox(
-                WARMPOOL,
-                NAMESPACE,
-                claim_name=CLAIM_NAME,
-            )
-
-        self.assertIs(context.exception, conflict)
-        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
-            CLAIM_NAME,
-            NAMESPACE,
-            expected_uid="generated-uid",
-        )
-        self.assertIn(key, self.client._automatic_cleanup_claims)
-
-    async def test_rejected_explicit_claim_keeps_generated_cleanup_ownership(self):
+    async def test_rejected_explicit_claim_name_remains_caller_owned(self):
         key = (NAMESPACE, CLAIM_NAME)
         generated_handle = MagicMock(is_active=True, sandbox_id="generated")
         generated_handle.close_connection = AsyncMock()
@@ -1241,11 +1239,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIs(context.exception, conflict)
-        self.assertIn(key, self.client._automatic_cleanup_claims)
-        self.assertNotIn(key, self.client._caller_owned_claims)
+        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+        self.assertIn(key, self.client._caller_owned_claims)
 
     @patch("uuid.uuid4")
-    async def test_restored_generated_cleanup_uses_original_claim_uid(
+    async def test_explicit_attempt_stops_cleanup_of_previously_generated_name(
         self, mock_uuid
     ):
         mock_uuid.return_value.hex = "1234abcd"
@@ -1286,14 +1284,13 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
         await self.client._delete_automatic_cleanup_claims()
 
-        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
-            claim_name,
-            NAMESPACE,
-            expected_uid="original-uid",
-        )
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
         generated_handle.terminate.assert_not_awaited()
-        generated_handle.close_connection.assert_awaited_once_with()
-        self.assertNotIn(key, self.client._active_connection_sandboxes)
+        generated_handle.close_connection.assert_not_awaited()
+        self.assertIs(
+            self.client._active_connection_sandboxes[key], generated_handle
+        )
+        self.assertIn(key, self.client._caller_owned_claims)
 
     async def test_automatic_cleanup_skips_caller_protected_generated_registration(
         self,
@@ -1305,7 +1302,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.client._active_connection_sandboxes[key] = generated_handle
         self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
         async with self.client._lock:
-            self.client._claim_ownership.begin_explicit(key)
+            self.client._claim_ownership.mark_caller_owned(key)
             self.client._claim_ownership.register_automatic(key, "generated-uid")
 
         await self.client._delete_automatic_cleanup_claims()
@@ -1315,25 +1312,31 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
         self.assertIs(self.client._active_connection_sandboxes[key], generated_handle)
 
-    async def test_delete_during_explicit_operation_invalidates_ownership_restore(
-        self,
-    ):
+    async def test_deliberate_delete_clears_caller_ownership(self):
         key = (NAMESPACE, CLAIM_NAME)
-        generated_handle = MagicMock(is_active=True, sandbox_id="generated")
+        generated_handle = MagicMock(
+            is_active=True,
+            sandbox_id="generated",
+            claim_name=CLAIM_NAME,
+        )
         generated_handle.terminate = AsyncMock()
+        generated_handle.close_connection = AsyncMock()
         self.client._active_connection_sandboxes[key] = generated_handle
+        self.client._active_claim_uids[key] = "generated-uid"
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
         self.client._claim_ownership.register_automatic(key, "generated-uid")
         async with self.client._lock:
-            operation = self.client._claim_ownership.begin_explicit(key)
+            self.client._claim_ownership.mark_caller_owned(key)
 
         await self.client.delete_sandbox(CLAIM_NAME, NAMESPACE)
-        await self.client._finish_explicit_claim_operation(
-            key, operation, committed=False
-        )
 
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
         self.assertNotIn(key, self.client._caller_owned_claims)
-        generated_handle.terminate.assert_awaited_once_with()
+        generated_handle.terminate.assert_not_awaited()
+        generated_handle.close_connection.assert_awaited_once_with()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="generated-uid"
+        )
 
     @patch("uuid.uuid4")
     async def test_late_generated_claim_keeps_explicit_ownership(self, mock_uuid):
@@ -1841,8 +1844,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.client._active_connection_sandboxes[key], adopted_handle)
         self.assertNotIn(key, self.client._automatic_cleanup_claims)
 
-    async def test_automatic_cleanup_serializes_explicit_ownership_transfer(self):
-        key = (NAMESPACE, CLAIM_NAME)
+    async def test_slow_automatic_cleanup_does_not_block_another_claim(self):
+        cleanup_key = (NAMESPACE, "generated-claim")
         termination_started = asyncio.Event()
         release_termination = asyncio.Event()
         explicit_create_called = asyncio.Event()
@@ -1861,8 +1864,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             side_effect=block_termination
         )
         adopted_handle = MagicMock()
-        self.client._active_connection_sandboxes[key] = generated_handle
-        self.client._claim_ownership.register_automatic(key, "generated-uid")
+        self.client._active_connection_sandboxes[cleanup_key] = generated_handle
+        self.client._claim_ownership.register_automatic(
+            cleanup_key, "generated-uid"
+        )
         self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
             side_effect=create_claim
@@ -1888,16 +1893,68 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             )
         )
         try:
-            with self.assertRaises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    explicit_create_called.wait(), timeout=0.2
-                )
+            await asyncio.wait_for(explicit_create_called.wait(), timeout=0.5)
         finally:
             release_termination.set()
             await asyncio.gather(cleanup_task, create_task)
 
-        self.assertIs(self.client._active_connection_sandboxes[key], adopted_handle)
-        self.assertNotIn(key, self.client._automatic_cleanup_claims)
+        self.assertIs(
+            self.client._active_connection_sandboxes[(NAMESPACE, CLAIM_NAME)],
+            adopted_handle,
+        )
+        self.assertNotIn(cleanup_key, self.client._automatic_cleanup_claims)
+
+    async def test_slow_delete_does_not_block_create_for_another_claim(self):
+        deleted_claim_name = "generated-claim"
+        deleted_key = (NAMESPACE, deleted_claim_name)
+        termination_started = asyncio.Event()
+        release_termination = asyncio.Event()
+        explicit_create_called = asyncio.Event()
+        generated_handle = MagicMock()
+
+        async def block_termination():
+            termination_started.set()
+            await release_termination.wait()
+
+        async def create_claim(*_args, **_kwargs):
+            explicit_create_called.set()
+            return matching_claim()
+
+        generated_handle.claim_name = deleted_claim_name
+        generated_handle.terminate = AsyncMock()
+        generated_handle.close_connection = AsyncMock(
+            side_effect=block_termination
+        )
+        self.client._active_connection_sandboxes[deleted_key] = generated_handle
+        self.client._active_claim_uids[deleted_key] = "generated-uid"
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            side_effect=create_claim
+        )
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(
+            return_value="created-sandbox"
+        )
+
+        delete_task = asyncio.create_task(
+            self.client.delete_sandbox(deleted_claim_name, NAMESPACE)
+        )
+        await asyncio.wait_for(termination_started.wait(), timeout=5)
+        create_task = asyncio.create_task(
+            self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                labels=REQUESTED_LABELS,
+                claim_name=CLAIM_NAME,
+                volume_claim_templates=VOLUME_CLAIM_TEMPLATES,
+                pod_labels=POD_LABELS,
+                pod_annotations=POD_ANNOTATIONS,
+            )
+        )
+        try:
+            await asyncio.wait_for(explicit_create_called.wait(), timeout=0.5)
+        finally:
+            release_termination.set()
+            await asyncio.gather(delete_task, create_task)
 
     async def test_list_active_sandboxes(self):
         mock_active = MagicMock()
@@ -1933,7 +1990,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             CLAIM_NAME, NAMESPACE, expected_uid="old-uid"
         )
 
-    async def test_close_retires_automatic_handle_during_explicit_operation(self):
+    async def test_close_preserves_caller_owned_claim(self):
         key = (NAMESPACE, CLAIM_NAME)
         retained_handle = AsyncSandbox.__new__(AsyncSandbox)
         retained_handle.claim_name = CLAIM_NAME
@@ -1946,27 +2003,16 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.client._active_claim_uids[key] = "old-uid"
         self.client._claim_ownership.register_automatic(key, "old-uid")
         async with self.client._lock:
-            operation = self.client._claim_ownership.begin_explicit(key)
+            self.client._claim_ownership.mark_caller_owned(key)
 
         await self.client.close()
-        async with self.client._lock:
-            self.client._claim_ownership.finish_explicit(
-                key,
-                operation,
-                committed=False,
-                has_registered_handle=False,
-            )
         await self.client._delete_automatic_cleanup_claims()
-        await retained_handle.terminate()
 
-        self.assertIsNone(retained_handle.claim_name)
-        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
-            CLAIM_NAME, NAMESPACE, expected_uid="old-uid"
-        )
+        self.assertEqual(retained_handle.claim_name, CLAIM_NAME)
+        self.assertIn(key, self.client._caller_owned_claims)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
-    async def test_failed_lookup_retires_automatic_handle_during_explicit_operation(
-        self,
-    ):
+    async def test_failed_lookup_preserves_caller_owned_claim(self):
         key = (NAMESPACE, CLAIM_NAME)
         retained_handle = AsyncSandbox.__new__(AsyncSandbox)
         retained_handle.claim_name = CLAIM_NAME
@@ -1978,23 +2024,14 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.client._active_claim_uids[key] = "old-uid"
         self.client._claim_ownership.register_automatic(key, "old-uid")
         async with self.client._lock:
-            operation = self.client._claim_ownership.begin_explicit(key)
+            self.client._claim_ownership.mark_caller_owned(key)
 
         await self.client._detach_failed_lookup(key, retained_handle)
-        async with self.client._lock:
-            self.client._claim_ownership.finish_explicit(
-                key,
-                operation,
-                committed=False,
-                has_registered_handle=False,
-            )
         await self.client._delete_automatic_cleanup_claims()
-        await retained_handle.terminate()
 
-        self.assertIsNone(retained_handle.claim_name)
-        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
-            CLAIM_NAME, NAMESPACE, expected_uid="old-uid"
-        )
+        self.assertEqual(retained_handle.claim_name, CLAIM_NAME)
+        self.assertIn(key, self.client._caller_owned_claims)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
     async def test_failed_lookup_cannot_delete_claim_adopted_concurrently(self):
         key = (NAMESPACE, CLAIM_NAME)
@@ -2008,24 +2045,12 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.client._active_claim_uids[key] = "old-uid"
         self.client._claim_ownership.register_automatic(key, "old-uid")
         async with self.client._lock:
-            operation = self.client._claim_ownership.begin_explicit(key)
+            self.client._claim_ownership.mark_caller_owned(key)
 
         await self.client._detach_failed_lookup(key, retained_handle)
-
-        async with self.client._lock:
-            self.assertTrue(
-                self.client._claim_ownership.explicit_is_valid(key, operation)
-            )
-            self.client._claim_ownership.finish_explicit(
-                key,
-                operation,
-                committed=True,
-                has_registered_handle=False,
-            )
         await self.client._delete_automatic_cleanup_claims()
-        await retained_handle.terminate()
 
-        self.assertIsNone(retained_handle.claim_name)
+        self.assertEqual(retained_handle.claim_name, CLAIM_NAME)
         self.assertIn(key, self.client._caller_owned_claims)
         self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
@@ -2037,17 +2062,42 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, ["sb-1", "sb-2"])
 
     async def test_delete_sandbox_in_registry(self):
-        mock_sandbox = MagicMock()
+        key = ("test-ns", "test-claim")
+        mock_sandbox = MagicMock(claim_name="test-claim")
         mock_sandbox.terminate = AsyncMock()
-        self.client._active_connection_sandboxes[("test-ns", "test-claim")] = mock_sandbox
-        self.client._automatic_cleanup_claims.add(("test-ns", "test-claim"))
+        mock_sandbox.close_connection = AsyncMock()
+        self.client._active_connection_sandboxes[key] = mock_sandbox
+        self.client._active_claim_uids[key] = "claim-uid"
+        self.client._automatic_cleanup_claims.add(key)
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
 
         await self.client.delete_sandbox("test-claim", "test-ns")
-        mock_sandbox.terminate.assert_called_once()
+        mock_sandbox.terminate.assert_not_awaited()
+        mock_sandbox.close_connection.assert_awaited_once_with()
         self.assertNotIn(
-            ("test-ns", "test-claim"),
+            key,
             self.client._automatic_cleanup_claims,
         )
+        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
+            "test-claim", "test-ns", expected_uid="claim-uid"
+        )
+
+    async def test_delete_failure_preserves_registry_for_retry(self):
+        key = ("test-ns", "test-claim")
+        mock_sandbox = MagicMock(claim_name="test-claim")
+        mock_sandbox.terminate = AsyncMock()
+        mock_sandbox.close_connection = AsyncMock(
+            side_effect=RuntimeError("delete failed")
+        )
+        self.client._active_connection_sandboxes[key] = mock_sandbox
+        self.client._active_claim_uids[key] = "claim-uid"
+        self.client._claim_ownership.register_automatic(key, "claim-uid")
+
+        await self.client.delete_sandbox("test-claim", "test-ns")
+
+        self.assertIs(self.client._active_connection_sandboxes[key], mock_sandbox)
+        self.assertEqual(self.client._active_claim_uids[key], "claim-uid")
+        self.assertIn(key, self.client._automatic_cleanup_claims)
 
     async def test_delete_all(self):
         mock1 = MagicMock()

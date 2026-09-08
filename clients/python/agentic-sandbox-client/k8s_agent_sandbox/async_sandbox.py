@@ -93,7 +93,7 @@ class AsyncSandbox:
         metadata = sandbox_object.get("metadata") or {}
         annotations = metadata.get("annotations") or {}
         pod_name = annotations.get(POD_NAME_ANNOTATION)
-        self._pod_name = pod_name if pod_name is not None else self.sandbox_id
+        self._pod_name = pod_name if pod_name else self.sandbox_id
         return self._pod_name
 
     async def get_sandbox_name_hash(self) -> str | None:

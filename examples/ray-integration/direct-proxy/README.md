@@ -109,7 +109,7 @@ Deploy the GKE `SandboxTemplate` and `SandboxWarmPool` resources. Ensure your te
 kubectl apply -f manifest.yaml
 ```
 
-Verify the warm pool pods are hot and ready: `kubectl get pods -l pool-name=ray-native-pool`
+Verify the warm pool pods are hot and ready: `kubectl get pods -l agents.x-k8s.io/warm-pool-sandbox`
 
 ### Step 6: Create the RL Training Source ConfigMap
 Expose your verified `rl_production_loop.py` policy trainer code to the cluster so the Ray nodes can mount it:
@@ -140,7 +140,7 @@ kubectl logs -f -l job-name=secure-rl-production-job
 ## Expected Successful Output
 
 ```bash
-Deploying Distributed RL Policy Trainer on GKE...
+Deploying Scaled RL Policy Trainer on GKE...
 Orchestrating 3 workers and 6 secure sandboxes E2E!
 (RLPolicyTrainer pid=xxx) --- Training Episode: Syncing policy weights to 3 workers ---
 

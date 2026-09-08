@@ -697,8 +697,7 @@ func TestRetry_AllExhausted(t *testing.T) {
 	if !errors.Is(err, ErrRetriesExhausted) {
 		t.Errorf("expected ErrRetriesExhausted in error chain, got: %v", err)
 	}
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*HTTPError](err); !ok {
 		t.Errorf("expected HTTPError in error chain, got: %v", err)
 	} else if httpErr.StatusCode != http.StatusBadGateway {
 		t.Errorf("expected status 502 in HTTPError, got %d", httpErr.StatusCode)
@@ -1280,8 +1279,7 @@ func TestRetry_AllExhausted_WrapsErrRetriesExhausted(t *testing.T) {
 	if !errors.Is(err, ErrRetriesExhausted) {
 		t.Errorf("expected ErrRetriesExhausted, got: %v", err)
 	}
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*HTTPError](err); !ok {
 		t.Errorf("expected HTTPError in error chain, got: %v", err)
 	} else if httpErr.StatusCode != http.StatusBadGateway {
 		t.Errorf("expected status 502 in HTTPError, got %d", httpErr.StatusCode)

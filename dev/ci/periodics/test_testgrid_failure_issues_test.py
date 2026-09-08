@@ -40,10 +40,11 @@ _loader.exec_module(tgfi)
 class FakeGitHub:
     """In-memory stand-in for the GitHub REST calls the script makes.
 
-    The list-issues call is paginated the same way the real endpoint is
-    (bounded by per_page, more pages while a page comes back full), so
-    tests can exercise find_open_tracking_issue's pagination loop directly
-    instead of trusting it by inspection.
+    The list-issues call is paginated and label-filtered the same way the
+    real endpoint is (bounded by per_page, more pages while a page comes
+    back full, and only issues carrying the requested label included), so
+    tests can exercise find_open_tracking_issue's pagination and label
+    matching directly instead of trusting them by inspection.
     """
 
     def __init__(self):
@@ -56,9 +57,16 @@ class FakeGitHub:
             # "page=100" tail of "per_page=100" and misread the page number.
             page = int(re.search(r"[?&]page=(\d+)", url).group(1))
             per_page = int(re.search(r"per_page=(\d+)", url).group(1))
-            open_issues = [i for i in self.issues if i["state"] == "open"]
+            label = tgfi.urllib.parse.unquote(
+                re.search(r"[?&]labels=([^&]+)", url).group(1)
+            )
+            matching = [
+                i
+                for i in self.issues
+                if i["state"] == "open" and label in i.get("labels", [])
+            ]
             start = (page - 1) * per_page
-            return open_issues[start : start + per_page]
+            return matching[start : start + per_page]
         if method == "POST" and url.endswith("/issues"):
             issue = {
                 "number": self._next_number,
@@ -170,6 +178,7 @@ class HandleTabTest(unittest.TestCase):
             "state": "open",
             "title": "unrelated",
             "body": "mentions testgrid-failure but not the real marker",
+            "labels": [tgfi.LABEL],
             "comments": [],
         })
         self._handle(FAILING)
@@ -190,6 +199,7 @@ class HandleTabTest(unittest.TestCase):
             "state": "open",
             "title": f"[FLAKE] {TAB}: infrastructure failures before tests ran",
             "body": tgfi.FLAKE_REPORT_INFRA_MARKER_TEMPLATE.format(tab=TAB),
+            "labels": [tgfi.FLAKE_REPORT_LABEL],
             "comments": [],
         })
         self._handle(FAILING)
@@ -197,6 +207,26 @@ class HandleTabTest(unittest.TestCase):
             len(self.github.issues), 1,
             "flake-report's existing issue must not be duplicated",
         )
+
+    def test_marker_match_under_wrong_label_does_not_defer_to_flake_report(self):
+        # Same marker text flake-report would use, but filed under a
+        # different label -- find_flake_report_infra_issue filters by
+        # FLAKE_REPORT_LABEL, so a same-marker issue under some other label
+        # must not be mistaken for it, and filing must proceed normally.
+        self.github.issues.append({
+            "number": 42,
+            "state": "open",
+            "title": "coincidentally contains the infra marker",
+            "body": tgfi.FLAKE_REPORT_INFRA_MARKER_TEMPLATE.format(tab=TAB),
+            "labels": ["some-other-label"],
+            "comments": [],
+        })
+        self._handle(FAILING)
+        self.assertEqual(
+            len(self.github.issues), 2,
+            "a marker match under the wrong label must not suppress filing",
+        )
+        self.assertEqual(self.github.issues[1]["labels"], [tgfi.LABEL])
 
     def test_finds_existing_issue_past_first_page(self):
         # 150 other open issues push this tab's existing tracking issue onto
@@ -210,6 +240,7 @@ class HandleTabTest(unittest.TestCase):
                 "state": "open",
                 "title": "other tab",
                 "body": f"<!-- testgrid-failure:{DASHBOARD}/other-tab-{i} -->",
+                "labels": [tgfi.LABEL],
                 "comments": [],
             })
         real_marker = tgfi.MARKER_TEMPLATE.format(dashboard=DASHBOARD, tab=TAB)
@@ -218,6 +249,7 @@ class HandleTabTest(unittest.TestCase):
             "state": "open",
             "title": f"[TestGrid] {TAB} is failing",
             "body": real_marker,
+            "labels": [tgfi.LABEL],
             "comments": [],
         })
 

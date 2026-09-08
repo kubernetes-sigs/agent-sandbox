@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sts-trust-verifier
+  namespace: irsa-sim-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sts-trust-verifier
+  template:
+    metadata:
+      labels:
+        app: sts-trust-verifier
+    spec:
+      # Needs its own projected ServiceAccount token to authenticate to the
+      # cluster's /openid/v1/jwks discovery endpoint (see verify_and_proxy.py)
+      # -- this is unrelated to, and must not be confused with, the
+      # WebIdentityToken it verifies on incoming requests.
+      automountServiceAccountToken: true
+      securityContext:
+        fsGroup: 1000
+      containers:
+      - name: verifier
+        image: python:3.12-slim
+        command:
+          - sh
+          - -c
+          - |
+            pip install --user --quiet --no-cache-dir "pyjwt[crypto]>=2.8,<3" "requests>=2.31,<3" && \
+            exec python3 /verifier/verify_and_proxy.py
+        env:
+        # The image's /usr/local/lib site-packages isn't writable by non-root
+        # UID 1000, so install with --user; HOME=/tmp gives pip (and Python's
+        # automatic user-site lookup) a writable home. /tmp is world-writable
+        # (sticky 1777) in this base image already, so no extra volume mount
+        # is needed for it.
+        - name: HOME
+          value: "/tmp"
+        # Discover this on your cluster with:
+        #   kubectl get --raw /.well-known/openid-configuration | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'
+        # Set explicitly (not derived from any incoming token) so a caller
+        # can never redirect this proxy's trust to an issuer of their choosing.
+        - name: EXPECTED_ISSUER
+          value: "https://kubernetes.default.svc.cluster.local"
+        - name: EXPECTED_AUDIENCE
+          value: "sts.amazonaws.com"
+        - name: LOCALSTACK_URL
+          # https, not http: LocalStack auto-detects TLS and serves HTTPS on
+          # this same port with no extra config.
+          value: "https://localstack.irsa-sim-ns.svc.cluster.local:4566"
+        - name: LOCALSTACK_CA_FILE
+          # localstack-tls.yaml issues LocalStack a certificate matching its
+          # real Service DNS name; this hop is genuinely certificate-verified
+          # against it, not verify=False.
+          value: "/localstack-tls/ca.crt"
+        ports:
+        - containerPort: 4566
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: verifier-script
+          mountPath: /verifier
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+        - name: localstack-ca
+          mountPath: /localstack-tls
+          readOnly: true
+        readinessProbe:
+          tcpSocket:
+            port: 4566
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: verifier-script
+        configMap:
+          name: sts-trust-verifier-script
+      - name: tls
+        # Issued by trust-verifier-tls.yaml's Certificate; apply that before
+        # this Deployment or the pod will fail to start (missing Secret).
+        secret:
+          secretName: sts-trust-verifier-tls
+      - name: localstack-ca
+        # Only the public ca.crt is needed here (to verify LocalStack's
+        # cert), unlike the "tls" volume above which needs tls.crt/tls.key
+        # for this pod's own server-side TLS termination.
+        secret:
+          secretName: localstack-tls
+          items:
+            - key: ca.crt
+              path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sts-trust-verifier
+  namespace: irsa-sim-ns
+spec:
+  selector:
+    app: sts-trust-verifier
+  ports:
+  - port: 4566
+    targetPort: 4566

@@ -12,13 +12,44 @@ spec:
         image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/python-runtime-sandbox:latest-main
         env:
         - name: AWS_ENDPOINT_URL_STS
-          value: "http://localstack.irsa-sim-ns.svc.cluster.local:4566"
+          # Routed through sts-trust-verifier, not straight to LocalStack: the
+          # verifier checks the WebIdentityToken's signature/issuer/audience
+          # before forwarding to LocalStack's STS mock (see
+          # trust-verifier-configmap.yaml and the README's "Trust boundary
+          # verification" section). https, not http: this carries the real
+          # WebIdentityToken and the resulting AWS credentials, so it's
+          # TLS-encrypted end to end -- see AWS_CA_BUNDLE below for how this
+          # pod actually verifies the verifier's certificate, rather than
+          # just encrypting to an unverified endpoint.
+          value: "https://sts-trust-verifier.irsa-sim-ns.svc.cluster.local:4566"
         - name: AWS_REGION
           value: "us-east-1"
+        - name: AWS_CA_BUNDLE
+          # botocore reads this for every client it constructs, including the
+          # one the WebIdentityRoleCredentialFetcher builds internally for
+          # AssumeRoleWithWebIdentity -- there's no separate "verify=" knob
+          # exposed for that internal client, so this is the supported way to
+          # make it trust sts-trust-verifier's cert-manager-issued
+          # certificate instead of either failing closed or (worse) someone
+          # reaching for verify=False on a hop that actually carries
+          # credentials.
+          value: "/irsa-sim-tls/ca.crt"
         volumeMounts:
         - name: check-script
           mountPath: /irsa-sim
+        - name: verifier-ca
+          mountPath: /irsa-sim-tls
+          readOnly: true
       volumes:
       - name: check-script
         configMap:
           name: irsa-sim-check-script
+      - name: verifier-ca
+        # Same Secret sts-trust-verifier.yaml mounts tls.crt/tls.key from
+        # (trust-verifier-tls.yaml); this pod only needs the public ca.crt
+        # (identical to tls.crt for a self-signed cert-manager Certificate).
+        secret:
+          secretName: sts-trust-verifier-tls
+          items:
+            - key: ca.crt
+              path: ca.crt

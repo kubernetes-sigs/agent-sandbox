@@ -83,7 +83,7 @@ post_token() {
     local token="$2"
     kubectl -n "${NS}" exec irsa-sim-sandbox -- python3 -c "
 $(ssl_helper)
-import urllib.parse, urllib.request
+import urllib.parse, urllib.request, urllib.error
 body = urllib.parse.urlencode({
     'Action': 'AssumeRoleWithWebIdentity',
     'Version': '2011-06-15',
@@ -96,6 +96,13 @@ try:
     print(urllib.request.urlopen(req, context=_ssl_ctx).read().decode())
 except urllib.error.HTTPError as e:
     print(e.read().decode())
+except urllib.error.URLError as e:
+    # A connection refused/reset during the kube-proxy dataplane-convergence
+    # window (see assert_rejected below) raises this, not HTTPError. Printing
+    # instead of letting it propagate keeps this a plain non-zero-exit-free
+    # script output, so 'set -e' doesn't kill the whole test on a transient
+    # connection error that assert_rejected's retry loop is meant to absorb.
+    print(f'URLError: {e.reason}')
 "
 }
 

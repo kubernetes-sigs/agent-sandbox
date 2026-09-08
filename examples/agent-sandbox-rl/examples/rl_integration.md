@@ -246,6 +246,46 @@ fleet = AsyncSandboxFleet(cfg); fleet.load_tasks(src)
 results = await fleet.run(async_rollout, strategy="sliding", concurrency=64)
 ```
 
+## OpenHands (agent SDK)
+
+OpenHands conversations run against a *workspace*; the
+[`openhands-k8s-agent-sandbox`](../../../clients/integrations/openhands)
+integration binds one to an agent-sandbox pod. `adapters.openhands` puts those
+workspaces on **fleet-managed** pods (same ownership inversion as R2E-Gym: the
+fleet acquires/releases, the workspace only binds). Two forms, matching who
+drives the loop:
+
+```python
+# fleet.run drives (it acquires + releases around process_fn):
+from agent_sandbox_rl.adapters.openhands import make_handle_workspace
+
+def rollout(task, handle):
+    workspace = make_handle_workspace(handle, api_key=POOL_KEY)
+    try:
+        conversation = Conversation(agent=agent, workspace=workspace)
+        try:
+            conversation.send_message(prompt); conversation.run()
+            return {"id": task.id, "status": str(conversation.state.execution_status)}
+        finally:
+            conversation.close()
+    finally:
+        workspace.cleanup()   # no-op on the pod; the fleet releases
+
+results = fleet.run(rollout, strategy="naive", concurrency=64)
+
+# you drive (the workspace acquires from the fleet; close() releases):
+from agent_sandbox_rl.adapters.openhands import make_fleet_workspace
+with make_fleet_workspace(fleet, task, api_key=POOL_KEY) as workspace:
+    ...
+```
+
+The pool's template must *run* the agent-server (`TemplateSpec.keepalive_command`
+replaces the image entrypoint) with a `/health` readinessProbe merged via
+`extra_pod_spec` — `examples/run_openhands_fleet.py` is the complete runnable
+version (with a no-LLM smoke mode). Fleet-owned kwargs (`warmpool`, `ttl_s`,
+`sandbox_client`) raise; needs `pip install openhands-k8s-agent-sandbox`
+(Python >= 3.12 — the `openhands-sdk` floor).
+
 ## Multi-cluster
 
 Give several `ClusterConfig`s (different `context`/`kubeconfig`) and a

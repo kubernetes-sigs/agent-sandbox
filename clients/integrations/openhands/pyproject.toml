@@ -17,14 +17,20 @@ dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = [
     # RemoteWorkspace (the base class) and the agent-server HTTP contract.
-    # The SDK versions its agent-server image per release, so keep the band
-    # narrow enough that client and server speak the same protocol.
-    "openhands-sdk>=1.44,<2",
+    # The SDK versions its agent-server image per release; the floor is the
+    # release the example template pins, and the workspace's advisory
+    # version-skew check (get_server_info vs installed SDK) flags drift at
+    # attach time. An exact pin would block every SDK patch release.
+    "openhands-sdk>=1.44.1,<2",
     # SandboxClient.create_sandbox(warmpool=...) claim path. The client is only
     # imported when the caller does not inject one (tests inject fakes). The
     # claim API (create_sandbox / get_pod_ip / terminate) is stable across the
     # 0.5 → 1.x line.
     "k8s-agent-sandbox>=0.5.1",
+    # RemoteWorkspace's HTTP transport (already pulled in by openhands-sdk);
+    # imported directly so the advisory version check can narrow its error
+    # handling to transport/HTTP failures.
+    "httpx",
 ]
 
 [project.urls]

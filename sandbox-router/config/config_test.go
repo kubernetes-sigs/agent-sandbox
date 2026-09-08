@@ -365,6 +365,53 @@ func TestValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "scoped-token v2 requires cache",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+			},
+			wantErr: "requires --cache-enabled",
+		},
+		{
+			name: "valid scoped-token v2 configuration",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+				c.CacheEnabled = true
+			},
+			wantErr: "",
+		},
+		{
+			name: "scoped-token v1 and v2 overlap requires cutoff",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+				c.CacheEnabled = true
+			},
+			wantErr: "authz-scoped-token-v1-accept-until is required",
+		},
+		{
+			name: "valid scoped-token v1 and v2 overlap",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzScopedTokenVerificationKeysFile = "/etc/scoped-token/keys.json"
+				c.AuthzScopedTokenV1AcceptUntil = "2026-09-01T00:00:00Z"
+				c.CacheEnabled = true
+			},
+			wantErr: "",
+		},
+		{
+			name: "scoped-token v1 cutoff must be RFC3339",
+			mut: func(c *Config) {
+				c.AuthzMode = AuthzScopedToken
+				c.AuthzScopedTokenSecretFile = "/etc/scoped-token/secret"
+				c.AuthzScopedTokenV1AcceptUntil = "tomorrow"
+			},
+			wantErr: "must be RFC3339",
+		},
+		{
 			name:    "empty path routing prefix is valid (disabled)",
 			mut:     func(c *Config) { c.PathRoutingPrefix = "" },
 			wantErr: "",

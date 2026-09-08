@@ -23,3 +23,13 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
+
+func testAuthorizationTarget(namespace, sandboxName string) AuthorizationTarget {
+	return AuthorizationTarget{
+		Namespace:   namespace,
+		SandboxName: sandboxName,
+		Port:        8888,
+		Method:      "GET",
+		Path:        "/",
+	}
+}

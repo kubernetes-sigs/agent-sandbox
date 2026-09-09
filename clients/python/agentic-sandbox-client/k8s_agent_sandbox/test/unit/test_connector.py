@@ -480,6 +480,29 @@ class TestSandboxConnectorRetryExhaustion(unittest.TestCase):
         self.assertFalse(connector._pod_ip_resolved)
         close_spy.assert_not_called()
 
+    def test_in_cluster_5xx_reresolves_pod_ip(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        api = self._serve_503()
+        port = int(api.rsplit(":", 1)[1])
+        ips = iter(["127.0.0.1", "10.0.0.99"])
+        connector = SandboxConnector(
+            sandbox_id="sb",
+            namespace="ns",
+            connection_config=SandboxInClusterConnectionConfig(server_port=port),
+            k8s_helper=MagicMock(),
+            get_pod_ip=lambda: next(ips),
+        )
+
+        with patch("time.sleep"):
+            with self.assertRaises(SandboxRequestError) as ctx:
+                connector.send_request("GET", "run")
+
+        # In-cluster caches the Pod IP in the strategy's base URL; a 5xx must
+        # invalidate it so the next connect() resolves the replacement Pod.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertFalse(connector.strategy._resolved)
+        self.assertEqual(connector.connect(), f"http://10.0.0.99:{port}")
+
 
 if __name__ == "__main__":
     unittest.main()

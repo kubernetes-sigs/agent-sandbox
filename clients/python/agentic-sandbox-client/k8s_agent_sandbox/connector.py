@@ -84,6 +84,11 @@ class ConnectionStrategy(ABC):
         """Returns True if X-Sandbox-* router headers should be injected into requests."""
         pass
 
+    def invalidate_pod_ip(self):
+        """Drops any Pod IP cached by the strategy so the next connect() re-resolves it,
+        without tearing down the connection. No-op unless the strategy caches a Pod IP."""
+        pass
+
 class DirectConnectionStrategy(ConnectionStrategy):
     def __init__(self, config: SandboxDirectConnectionConfig):
         self.config = config
@@ -397,6 +402,10 @@ class InClusterConnectionStrategy(ConnectionStrategy):
         self._resolved = False
         self._cached_pod_ip_url = None
 
+    def invalidate_pod_ip(self):
+        self._resolved = False
+        self._cached_pod_ip_url = None
+
     def should_inject_router_headers(self) -> bool:
         return False
 
@@ -630,6 +639,10 @@ class SandboxConnector:
             elif status_code >= 500:
                 self._pod_ip_resolved = False
                 self._pod_ip = None
+                # In-cluster routing caches the Pod IP in the strategy's base
+                # URL, not the header above; invalidate it too so connect()
+                # re-resolves instead of reusing the stale Pod.
+                self.strategy.invalidate_pod_ip()
             raise SandboxRequestError(
                 f"Failed to communicate with the sandbox at {url}.",
                 status_code=status_code,

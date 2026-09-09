@@ -54,7 +54,7 @@ def running_in_ci():
 
 
 def git(args, repo_root, check=True):
-    """Runs a git command, returning stdout. Raises CalledProcessError if check."""
+    """Runs a git command, returning CompletedProcess. Raises CalledProcessError if check."""
     return subprocess.run(
         ["git"] + args,
         cwd=repo_root,
@@ -87,7 +87,9 @@ def resolve_merge_base(repo_root, ref):
     """
     pull_base_sha = os.environ.get("PULL_BASE_SHA")
     if pull_base_sha:
-        return pull_base_sha
+        result = git(["merge-base", "HEAD", pull_base_sha], repo_root, check=False)
+        if result.returncode == 0:
+            return result.stdout.strip()
 
     remote_ref = f"origin/{ref}"
 
@@ -181,13 +183,16 @@ def verify(repo_root):
         return 0
 
     # The version must exceed the base branch tip, not just the merge base;
-    # otherwise a bump that landed concurrently is duplicated.
-    tip = git(["rev-parse", f"origin/{ref}"], repo_root, check=False)
-    if tip.returncode != 0:
-        # No remote-tracking ref (local runs, or a base branch that only exists
-        # locally); a local branch of the same name is the next best tip.
-        tip = git(["rev-parse", ref], repo_root, check=False)
-    version_revision = tip.stdout.strip() if tip.returncode == 0 else merge_base
+    # otherwise a bump that landed concurrently is duplicated. PULL_BASE_SHA is
+    # that tip under Prow, where neither origin/<ref> nor a local <ref> exists.
+    pull_base_sha = os.environ.get("PULL_BASE_SHA")
+    if pull_base_sha:
+        version_revision = pull_base_sha
+    else:
+        tip = git(["rev-parse", f"origin/{ref}"], repo_root, check=False)
+        if tip.returncode != 0:
+            tip = git(["rev-parse", ref], repo_root, check=False)
+        version_revision = tip.stdout.strip() if tip.returncode == 0 else merge_base
     base_version = chart_version_at(repo_root, version_revision)
     if base_version is None:
         print(f"{CHART_PATH} is new in this change; no version bump required.")

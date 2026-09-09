@@ -84,13 +84,18 @@ class ChartVersionTestCase(unittest.TestCase):
         self.git("checkout", "-q", "-b", "feature")
 
     def git(self, *args):
-        subprocess.run(
+        """Runs a git command in the scratch repo, discarding its output."""
+        self.git_output(*args)
+
+    def git_output(self, *args):
+        """Runs a git command in the scratch repo, returning its stdout."""
+        return subprocess.run(
             ["git"] + list(args),
             cwd=self.repo,
             check=True,
             capture_output=True,
             text=True,
-        )
+        ).stdout.strip()
 
     def write(self, relative_path, contents):
         path = self.repo / relative_path
@@ -186,6 +191,52 @@ class TestVerifyChartVersion(ChartVersionTestCase):
 
     def test_skips_outside_ci_when_no_comparison_base_exists(self):
         with mock.patch.dict(os.environ, {"GITHUB_BASE_REF": "no-such-branch"}):
+            self.assertEqual(0, self.verify())
+
+    def test_passes_when_a_quoted_version_is_bumped(self):
+        self.change_generated_content()
+        self.write_chart('"0.1.1"')
+        self.assertEqual(0, self.verify())
+
+    def test_fails_when_a_quoted_version_is_not_bumped(self):
+        self.change_generated_content()
+        self.write_chart("'0.1.0'")
+        self.assertEqual(1, self.verify())
+
+
+class TestPullBaseSha(ChartVersionTestCase):
+    """Simulates Prow: local main is deleted so PULL_BASE_SHA is the only handle on it."""
+
+    def land_on_main(self, version, generated):
+        """Commit on main after feature forked; returns the new tip."""
+        self.git("checkout", "-q", "main")
+        self.write("helm/templates/rbac.generated.yaml", generated)
+        self.write_chart(version)
+        self.git("add", "-A")
+        self.git("commit", "-m", "concurrent change on main")
+        tip = self.git_output("rev-parse", "HEAD")
+        self.git("checkout", "-q", "feature")
+        self.git("branch", "-D", "main")
+        return tip
+
+    def test_content_diff_is_anchored_on_the_merge_base(self):
+        # Diffing straight against PULL_BASE_SHA would blame this branch for main's change.
+        tip = self.land_on_main("0.1.1", "kind: ClusterRole\n# landed on main\n")
+        with mock.patch.dict(os.environ, {"PULL_BASE_SHA": tip}):
+            self.assertEqual(0, self.verify())
+
+    def test_fails_when_the_version_matches_a_concurrent_bump(self):
+        tip = self.land_on_main("0.1.1", "kind: ClusterRole\n# landed on main\n")
+        self.change_generated_content()
+        self.write_chart("0.1.1")
+        with mock.patch.dict(os.environ, {"PULL_BASE_SHA": tip}):
+            self.assertEqual(1, self.verify())
+
+    def test_passes_when_the_version_exceeds_a_concurrent_bump(self):
+        tip = self.land_on_main("0.1.1", "kind: ClusterRole\n# landed on main\n")
+        self.change_generated_content()
+        self.write_chart("0.1.2")
+        with mock.patch.dict(os.environ, {"PULL_BASE_SHA": tip}):
             self.assertEqual(0, self.verify())
 
 

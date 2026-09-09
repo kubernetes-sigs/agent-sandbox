@@ -585,7 +585,10 @@ class SandboxConnector:
             if self.strategy.should_inject_router_headers():
                 headers["X-Sandbox-ID"] = self.id
                 headers["X-Sandbox-Namespace"] = self.namespace
-                headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
+                # sandboxd uses rest_port/grpc_port and does not inject router
+                # headers; every other config has server_port.
+                if not isinstance(self.connection_config, SandboxdPodTunnelConnectionConfig):
+                    headers["X-Sandbox-Port"] = str(self.connection_config.server_port)
                 timeout_header = _router_timeout_header_value(kwargs.get("timeout"))
                 if timeout_header is not None:
                     headers["X-Sandbox-Timeout"] = timeout_header

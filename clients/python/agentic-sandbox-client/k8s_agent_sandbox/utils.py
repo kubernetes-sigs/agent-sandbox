@@ -121,7 +121,7 @@ def select_pod_ip(ips: Sequence[object] | None) -> str | None:
             parsed = ipaddress.ip_address(cleaned)
             if parsed.version == 4:
                 return str(parsed)
-            if parsed.version == 6 and parsed.ipv4_mapped:
+            if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped:
                 return str(parsed.ipv4_mapped)
 
             if first_valid is None:

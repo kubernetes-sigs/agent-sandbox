@@ -1326,7 +1326,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
 class SandboxClaimDeleteHandler(BaseHTTPRequestHandler):
     """Stub K8s apiserver; only handles the DELETE call atexit cleanup makes."""
 
-    received_deletes = []
+    received_deletes: list[str] = []
 
     def do_DELETE(self):
         self.__class__.received_deletes.append(self.path)
@@ -1346,6 +1346,10 @@ class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
     kubernetes_asyncio's aiohttp transport dispatches a per-request netrc lookup via a background thread, which fails
     once Python's own thread-pool teardown has begun. No in-process test can reproduce that condition because the 
     interpreter never actually exits mid-suite, so this spawns a real subprocess and lets it exit for real."""
+
+    port: int
+    server: HTTPServer
+    server_thread: Thread
 
     @classmethod
     def setUpClass(cls):

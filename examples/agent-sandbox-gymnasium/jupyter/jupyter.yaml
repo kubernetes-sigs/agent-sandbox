@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyter-l4-gpu
+  namespace: gymnasium
+  labels:
+    app: jupyter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jupyter
+  template:
+    metadata:
+      labels:
+        app: jupyter
+    spec:
+      serviceAccountName: jupyter-sandbox-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      containers:
+      - name: jupyter
+        image: tensorflow/tensorflow:2.21.0-gpu-jupyter
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: HOME
+          value: /home/tfuser
+        - name: JUPYTER_RUNTIME_DIR
+          value: /tmp/jupyter/runtime
+        - name: JUPYTER_DATA_DIR
+          value: /home/tfuser/.local/share/jupyter
+        ports:
+        - containerPort: 8888
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: "16Gi"
+          requests:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: "16Gi"
+            ephemeral-storage: "20Gi"
+        volumeMounts:
+        - name: notebook-volume
+          mountPath: /tf/rl_training.ipynb
+          subPath: rl_training.ipynb
+          readOnly: true
+        # Writable locations required by Jupyter/Python
+        - name: tmp
+          mountPath: /tmp
+        - name: user-home
+          mountPath: /home/tfuser
+        # Prevents auto-save crashes on a read-only root
+        - name: jupyter-checkpoints
+          mountPath: /tf/.ipynb_checkpoints
+      volumes:
+      - name: notebook-volume
+        configMap:
+          name: rl-notebook-config
+      - name: tmp
+        emptyDir: {}
+      - name: user-home
+        emptyDir: {}
+      - name: jupyter-checkpoints
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jupyter-service
+  namespace: gymnasium
+spec:
+  type: ClusterIP
+  selector:
+    app: jupyter
+  ports:
+  - port: 80
+    targetPort: 8888

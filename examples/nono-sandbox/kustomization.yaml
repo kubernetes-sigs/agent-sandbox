@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - audit-storage.yaml
+  - demo-llm-secret.yaml
+  - loki.yaml
+  - nono-profiles-configmap.yaml
+  - sandbox.yaml
+  - sandboxtemplate.yaml
+
+# Kata's installer owns the cluster-scoped RuntimeClass, including its
+# scheduling and pod-overhead settings. This opt-in Kustomize variant only
+# selects it for the two nono workload forms.
+patches:
+  - target:
+      group: agents.x-k8s.io
+      version: v1beta1
+      kind: Sandbox
+      name: nono-agent
+    patch: |-
+      - op: add
+        path: /spec/podTemplate/spec/runtimeClassName
+        value: kata-qemu
+  - target:
+      group: extensions.agents.x-k8s.io
+      version: v1beta1
+      kind: SandboxTemplate
+      name: nono-agent-template
+    patch: |-
+      - op: add
+        path: /spec/podTemplate/spec/runtimeClassName
+        value: kata-qemu

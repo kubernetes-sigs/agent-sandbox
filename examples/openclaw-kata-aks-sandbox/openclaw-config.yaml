@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-config
+data:
+  openclaw.json: |
+    {
+      "gateway": {
+        "controlUi": {
+          "allowedOrigins": [
+              "http://localhost:18789",
+              "http://127.0.0.1:18789"
+            ]
+        }
+      }
+    }

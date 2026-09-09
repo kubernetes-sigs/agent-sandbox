@@ -1,0 +1,12 @@
+# The runnable demo keeps audit state on a PVC that is independent of the
+# Sandbox lifecycle. The agent profile does not grant this mount, so only the
+# trusted nono supervisor can write the audit trail.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nono-demo-audit
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

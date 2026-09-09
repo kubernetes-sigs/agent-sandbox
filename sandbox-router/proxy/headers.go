@@ -148,7 +148,7 @@ func validDNSLabel(s string) bool {
 	if s == "" || len(s) > 63 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c >= '0' && c <= '9':

@@ -20,7 +20,6 @@ file I/O) via the Sandbox resource handle.
 import uuid
 import atexit
 import sys
-import time
 import logging
 from typing import List, Dict, Tuple, TypeVar, Generic, Type
 
@@ -100,10 +99,11 @@ class SandboxClient(Generic[T]):
         *,
         shutdown_after_seconds: int | None = None,
         volume_claim_templates: list[dict] | None = None,
-        pod_labels: dict[str, str] | None = None, 
-        pod_annotations: dict[str, str] | None = None
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> T:
-        """Provisions new Sandbox claim and returns a Sandbox handle which tracks 
+        """Provisions new Sandbox claim and returns a Sandbox handle which tracks
            the underlying infrastructure.
 
         Args:
@@ -125,6 +125,10 @@ class SandboxClient(Generic[T]):
                 the sandbox through the Downward API.
             pod_annotations: Optional annotations stamped onto the running
                 Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
+            env: Optional environment variables to inject into the SandboxClaim.
+                Setting this populates ``spec.env`` and forces a cold start
+                from the warm pool template instead of adopting a pre-warmed
+                pod, which may increase startup latency.
 
         Example:
 
@@ -145,7 +149,7 @@ class SandboxClient(Generic[T]):
         claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
 
         try:
-            self._create_claim(
+            created_claim = self._create_claim(
                 claim_name,
                 warmpool,
                 namespace,
@@ -153,18 +157,21 @@ class SandboxClient(Generic[T]):
                 lifecycle=lifecycle,
                 volume_claim_templates=volume_claim_templates,
                 pod_metadata=pod_metadata,
+                env=env,
             )
-            # Resolve the sandbox id from the sandbox claim object.
-            # In case of warmpool, sandbox id is not the same as claim name.
-            start_time = time.monotonic()
-            sandbox_id = self.k8s_helper.resolve_sandbox_name(
-                claim_name, namespace, sandbox_ready_timeout
+            # Wait for the claim to be bound and Ready in a single watch.
+            # The claim status carries the sandbox name (which differs from
+            # the claim name with warm pools) and the forwarded Ready
+            # condition in the same status update, so no second watch on the
+            # Sandbox resource is needed. The watch starts from the create
+            # response's resourceVersion so the apiserver serves it from the
+            # watch cache instead of a quorum etcd read per wait.
+            claim_rv = None
+            if isinstance(created_claim, dict):
+                claim_rv = (created_claim.get("metadata") or {}).get("resourceVersion")
+            sandbox_id = self._wait_for_claim_ready(
+                claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv
             )
-            elapsed_time = time.monotonic() - start_time
-            remaining_timeout = max(0, int(sandbox_ready_timeout - elapsed_time))
-            if remaining_timeout <= 0:
-                raise TimeoutError("Sandbox resolution exceeded the ready timeout.")
-            self._wait_for_sandbox_ready(sandbox_id, namespace, remaining_timeout)
 
             sandbox = self.sandbox_class(
                 claim_name=claim_name,
@@ -325,6 +332,7 @@ class SandboxClient(Generic[T]):
         lifecycle: dict | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_metadata: dict | None = None,
+        env: dict[str, str] | None = None,
     ):
         """Creates the SandboxClaim custom resource in the Kubernetes cluster."""
         span = trace.get_current_span()
@@ -340,7 +348,7 @@ class SandboxClient(Generic[T]):
             if trace_context_str:
                 annotations["opentelemetry.io/trace-context"] = trace_context_str
 
-        self.k8s_helper.create_sandbox_claim(
+        return self.k8s_helper.create_sandbox_claim(
             claim_name,
             warmpool_name,
             namespace,
@@ -349,7 +357,13 @@ class SandboxClient(Generic[T]):
             lifecycle=lifecycle,
             volume_claim_templates=volume_claim_templates,
             pod_metadata=pod_metadata,
+            env=env,
         )
+
+    @trace_span("wait_for_claim_ready")
+    def _wait_for_claim_ready(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
+        """Waits for the SandboxClaim to be bound and Ready, returning the sandbox name."""
+        return self.k8s_helper.wait_for_claim_ready(claim_name, namespace, timeout, resource_version=resource_version)
 
     @trace_span("wait_for_sandbox_ready")
     def _wait_for_sandbox_ready(

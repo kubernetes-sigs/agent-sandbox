@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localstack
+  namespace: irsa-sim-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localstack
+  template:
+    metadata:
+      labels:
+        app: localstack
+    spec:
+      # Plain emptyDir volumes are created world-writable (0777) by kubelet
+      # regardless of security context, so UID 1000 can already write to both
+      # mounts below without this -- fsGroup is set anyway for explicitness
+      # and so ownership isn't left to an implementation detail of emptyDir.
+      securityContext:
+        fsGroup: 1000
+      containers:
+      - name: localstack
+        image: localstack/localstack:3.8
+        ports:
+        - containerPort: 4566
+        env:
+        - name: SERVICES
+          value: "sts"
+        # The image runs as root by default and writes to /tmp/localstack and
+        # /var/lib/localstack/cache at startup; without the emptyDir mounts
+        # below, running as non-root fails with repeated PermissionErrors on
+        # those paths (verified: the container still becomes Ready, but logs
+        # are full of write failures and its on-disk cache never persists).
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: localstack-var
+          mountPath: /var/lib/localstack
+        readinessProbe:
+          httpGet:
+            path: /_localstack/health
+            port: 4566
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: localstack-var
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack
+  namespace: irsa-sim-ns
+spec:
+  selector:
+    app: localstack
+  ports:
+  - port: 4566
+    targetPort: 4566

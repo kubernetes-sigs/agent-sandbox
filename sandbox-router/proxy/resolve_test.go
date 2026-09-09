@@ -24,14 +24,25 @@ import (
 
 // fakeLookup is a minimal Lookup implementation for tests. It records
 // Invalidate calls so the proxy ErrorHandler tests can assert on them.
+// GetByName scans entries so tests only have to populate one map.
 type fakeLookup struct {
-	entries     map[types.UID]cache.Entry
-	invalidated []types.UID
+	entries           map[types.UID]cache.Entry
+	invalidated       []types.UID
+	invalidatedByName []string
 }
 
 func (f *fakeLookup) Get(uid types.UID) (cache.Entry, bool) {
 	e, ok := f.entries[uid]
 	return e, ok
+}
+
+func (f *fakeLookup) GetByName(namespace, name string) (cache.Entry, bool) {
+	for _, e := range f.entries {
+		if e.Namespace == namespace && e.SandboxName == name {
+			return e, true
+		}
+	}
+	return cache.Entry{}, false
 }
 
 func (f *fakeLookup) Invalidate(uid types.UID) bool {
@@ -41,6 +52,17 @@ func (f *fakeLookup) Invalidate(uid types.UID) bool {
 	}
 	f.invalidated = append(f.invalidated, uid)
 	return ok
+}
+
+func (f *fakeLookup) InvalidateByName(namespace, name, podIP string) bool {
+	f.invalidatedByName = append(f.invalidatedByName, namespace+"/"+name+"="+podIP)
+	for uid, e := range f.entries {
+		if e.Namespace == namespace && e.SandboxName == name && e.PodIP == podIP {
+			delete(f.entries, uid)
+			return true
+		}
+	}
+	return false
 }
 
 func TestResolve(t *testing.T) {
@@ -74,9 +96,43 @@ func TestResolve(t *testing.T) {
 			wantSource: SourceDNS,
 		},
 		{
-			name:       "no UID supplied, lookup non-nil",
-			target:     Target{ID: "id", Namespace: "ns", Port: 9999},
-			lookup:     &fakeLookup{entries: map[types.UID]cache.Entry{"u1": {PodIP: "10.0.0.42"}}},
+			// Regression for issue #883: SDKs send only X-Sandbox-Id +
+			// X-Sandbox-Namespace, and warm-pool sandboxes have no
+			// per-sandbox Service, so DNS fallback here means NXDOMAIN.
+			// The name index must route these to the live Pod IP.
+			name:   "no UID, name index hit",
+			target: Target{ID: "id", Namespace: "ns", Port: 9999},
+			lookup: &fakeLookup{entries: map[types.UID]cache.Entry{
+				"u1": {PodIP: "10.0.0.42", SandboxName: "id", Namespace: "ns"},
+			}},
+			wantURL:    "http://10.0.0.42:9999",
+			wantSource: SourceCacheName,
+		},
+		{
+			name:   "UID hit takes precedence over name index",
+			target: Target{ID: "id", UID: "u1", Namespace: "ns", Port: 9999},
+			lookup: &fakeLookup{entries: map[types.UID]cache.Entry{
+				"u1": {PodIP: "10.0.0.42", SandboxName: "other", Namespace: "ns"},
+				"u2": {PodIP: "10.0.0.66", SandboxName: "id", Namespace: "ns"},
+			}},
+			wantURL:    "http://10.0.0.42:9999",
+			wantSource: SourceCache,
+		},
+		{
+			name:   "UID miss, name index hit",
+			target: Target{ID: "id", UID: "gone", Namespace: "ns", Port: 9999},
+			lookup: &fakeLookup{entries: map[types.UID]cache.Entry{
+				"u1": {PodIP: "10.0.0.42", SandboxName: "id", Namespace: "ns"},
+			}},
+			wantURL:    "http://10.0.0.42:9999",
+			wantSource: SourceCacheName,
+		},
+		{
+			name:   "no UID, name index miss falls back to DNS",
+			target: Target{ID: "id", Namespace: "ns", Port: 9999},
+			lookup: &fakeLookup{entries: map[types.UID]cache.Entry{
+				"u1": {PodIP: "10.0.0.42", SandboxName: "id", Namespace: "other-ns"},
+			}},
 			wantURL:    "http://id.ns.svc.cluster.local:9999",
 			wantSource: SourceDNS,
 		},

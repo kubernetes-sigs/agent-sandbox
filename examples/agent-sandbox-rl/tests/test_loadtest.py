@@ -84,6 +84,23 @@ def test_resolve_strategies():
     loadtest.resolve_strategies("bogus")
 
 
+def test_resolve_strategies_accepts_reuse_but_not_in_all():
+  # `reuse` is a recognized execution mode in an explicit list...
+  assert loadtest.resolve_strategies("naive, reuse") == ["naive", "reuse"]
+  # ...but "all" stays the four warm-pool strategies (reuse is opt-in).
+  assert "reuse" not in loadtest.resolve_strategies("all")
+
+
+def test_parser_exposes_reuse_flags():
+  a = loadtest.build_parser().parse_args(
+      ["--images", "1", "--image-template", "img{i}", "--strategies", "reuse",
+       "--max-reuses", "8", "--check-env"])
+  assert a.max_reuses == 8 and a.check_env is True and a.use_session is True
+  a2 = loadtest.build_parser().parse_args(
+      ["--images", "1", "--image-template", "img{i}", "--no-session"])
+  assert a2.use_session is False
+
+
 def _fake_result(strategy, wall, ok=10, total=10):
   return {
       "strategy": strategy, "wall_s": wall, "ok": ok, "total": total,

@@ -80,8 +80,8 @@ Advanced ingress/egress isolation, lifecycle state retention, and security contr
 
 Audit trails, custom telemetry, reliability, and automated regression testing.
 
-*   **Alpha to Beta API Versioning** `⏳ In Progress`
-    *   Evolve the existing API schemas from alpha status toward robust beta APIs with deprecation safety.
+*   **Alpha to Beta API Versioning** `✅ Done`
+    *   `v1beta1` is the exclusive served API version across all CRDs. Legacy `v1alpha1` types, conversion webhooks, and migration harnesses have been removed.
 *   **Security Fixes** `⏳ In Progress`
     *   Maintain active patching cycles for third-party dependencies and container base image security.
 *   **CI for PodSnapshot & AgentSandbox Regression Prevention** `⏳ In Progress`
@@ -118,7 +118,7 @@ Lowering the barrier to entry, beautiful guides, interactive tools, and UI dashb
     *   Document production-ready reference designs for multi-user cloud environments.
 
 
-## Completed (Since v0.0.1)
+## Completed
 *   **Golang SDK Support** `✅ Completed`
     *   Deliver high-level Go client libraries to programmatically manage sandboxes and route connections. [[#227](https://github.com/kubernetes-sigs/agent-sandbox/issues/227)]
 *   **PyPI Distribution (`k8s-agent-sandbox`)** `✅ Completed`

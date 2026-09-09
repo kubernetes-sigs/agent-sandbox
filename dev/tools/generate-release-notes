@@ -146,7 +146,7 @@ def get_pr_descriptions(prs_data):
     return pr_descriptions
 
 
-def generate_release_notes(commits, breaking_changes, pr_descriptions, contributors, tag, installation_notes, model="gemini-2.5-flash"):
+def generate_release_notes(commits, breaking_changes, pr_descriptions, contributors, tag, installation_notes, model="gemini-3.7-flash"):
     """Generates curated release notes using Gemini via the Vertex AI API platform."""
     # Try importing the modern SDK
     try:
@@ -157,7 +157,7 @@ def generate_release_notes(commits, breaking_changes, pr_descriptions, contribut
         return None
 
     project_id = os.getenv("GCP_PROJECT", "").strip()
-    location = os.getenv("GCP_LOCATION", "us-central1").strip()
+    location = os.getenv("GCP_LOCATION", "global").strip()
 
     if not project_id:
         print("⚠️ GCP_PROJECT environment variable not set. Skipping Gemini release notes.")
@@ -273,7 +273,7 @@ def main():
         "--output", default="release_notes_preview.md", help="File to save notes to."
     )
     parser.add_argument(
-        "--model", default=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), help="The Gemini model to use."
+        "--model", default=os.getenv("GEMINI_MODEL", "gemini-3.7-flash"), help="The Gemini model to use."
     )
     args = parser.parse_args()
 
@@ -293,12 +293,19 @@ def main():
     installation_notes = f"""
 ### Installation
 
-#### Core & Extensions
+#### Standard Install (Core + Extensions)
+Recommended for most users and GitOps engines (Argo CD, Config Sync, kustomize):
 ```bash
-# To install only the core components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/sandbox-with-extensions.yaml
+```
 
-# To install the extensions components:
+#### Selective Install
+Install components separately:
+```bash
+# Core only:
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/sandbox.yaml
+
+# Extensions (opt-in):
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/extensions.yaml
 ```
 

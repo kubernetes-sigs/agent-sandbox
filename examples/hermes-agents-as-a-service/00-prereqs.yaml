@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hermes-demo
+---
+# Shared platform credentials baked into every sandbox pod. Warm pools
+# require this shape: pod env is stamped when the SPARE is created, BEFORE
+# any user exists — so per-user secrets cannot live in pod env. The
+# dashboard-session-secret is the HMAC key for dashboard login cookies;
+# keeping it stable across suspend/resume is what keeps users logged in
+# through a wake.
+#
+# The hermes-platform-secrets Secret is deliberately NOT committed here:
+# these credentials reach every tenant sandbox, so usable values in a
+# manifest would be shared by every install of this example. Generate
+# fresh values per install (README step 1; run-test-kind.sh does the same
+# with throwaway values):
+#
+#   kubectl -n hermes-demo create secret generic hermes-platform-secrets \
+#     --from-literal=dashboard-username=platform \
+#     --from-literal=dashboard-password="$(openssl rand -hex 16)" \
+#     --from-literal=dashboard-session-secret="$(openssl rand -hex 32)" \
+#     --from-literal=api-server-key="$(openssl rand -hex 24)"  # >= 16 chars
+---
+# LLM provider keys, injected into every sandbox via envFrom. May start
+# empty — all the infrastructure in this example works without one; only
+# actual chat needs a real key. Add e.g. GEMINI_API_KEY, then
+# suspend/resume a sandbox to pick it up.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hermes-provider-keys
+  namespace: hermes-demo
+type: Opaque
+# stringData:
+#   GEMINI_API_KEY: "your-key-here"

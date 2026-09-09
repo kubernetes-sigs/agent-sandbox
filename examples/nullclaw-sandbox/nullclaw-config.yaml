@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nullclaw-config
+data:
+  config.json: |
+    {
+      "agents": {
+        "defaults": {
+          "model": {
+            "primary": "openrouter/anthropic/claude-sonnet-4"
+          }
+        }
+      },
+      "models": {
+        "providers": {
+          "openrouter": {
+            "api_key": "<OPENROUTER_API_KEY>"
+          }
+        }
+      },
+      "gateway": {
+        "port": 3000,
+        "host": "::",
+        "allow_public_bind": true
+      }
+    }

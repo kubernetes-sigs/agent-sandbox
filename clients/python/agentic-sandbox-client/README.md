@@ -5,19 +5,19 @@ sandboxes managed by the Agent Sandbox controller. It's designed to be used as a
 ensuring that sandbox resources are properly created and cleaned up.
 
 It supports a **scalable, cloud-native architecture** using Kubernetes Gateways and a specialized
-Router, while maintaining a convenient **Developer Mode** for local testing.
+Router, while maintaining a convenient **Tunnel Mode** for local testing.
 
 ## Architecture
 
-The client operates in four modes:
+The client operates in four connectivity modes:
 
-1.  **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
-    -> Router Service -> Sandbox Pod. This supports high-scale deployments.
-2.  **Development (Tunnel Mode):** Traffic flows from Localhost -> `kubectl port-forward` -> Router
-    Service -> Sandbox Pod. This requires no public IP and works on Kind/Minikube.
+1.  **Gateway Mode:** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
+    -> Router Service -> Sandbox Pod. This supports external ingress via Gateway API.
+2.  **Tunnel Mode:** Traffic flows from Localhost -> `kubectl port-forward` -> Router
+    Service -> Sandbox Pod. This requires no public IP and works on Kind/Minikube for local development.
 3.  **In-Cluster Mode:** The client connects **directly to the sandbox pod** (via pod IP or cluster
     DNS), bypassing the router. Intended for workloads running inside the cluster.
-4.  **Advanced / Internal Mode:** The client connects directly to a provided `api_url`, bypassing
+4.  **Direct URL Mode:** The client connects directly to a provided `api_url`, bypassing
     discovery. This is useful when connecting through a custom domain or a manually specified router URL.
 
 ## Prerequisites
@@ -28,17 +28,16 @@ The client operates in four modes:
 
 ## Setup: Deploying the Router
 
-Before using the client, you must deploy the `sandbox-router`. This is a one-time setup.
+Before using the client in Gateway Mode or Tunnel Mode, deploy the `sandbox-router` into your cluster.
 
-1.  **Build and Push the Router Image:**
+1.  **Deploy the Router:**
 
-    For both Gateway Mode and Tunnel Mode, follow the instructions in [sandbox-router](sandbox-router/README.md)
-    to build, push, and apply the router image and resources.
+    Follow the instructions in [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) to deploy the router using the manifests in [sandbox-router/deploy](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy). *(Note: If you installed a specific client release tag, replace `main` in these URLs with the corresponding tag.)*
 
 2.  **Create a Sandbox Warmpool:**
 
     Ensure a `SandboxWarmPool` exists in your target namespace. The test_client.py
-    uses the [python-runtime-sandbox](../../../examples/python-runtime-sandbox/) image.
+    uses the [python-runtime-sandbox](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/python-runtime-sandbox) image.
 
     ```bash
     kubectl apply -f python-sandbox-warmpool.yaml
@@ -108,7 +107,7 @@ Before using the client, you must deploy the `sandbox-router`. This is a one-tim
 
 ## Usage Examples
 
-### 1. Production Mode (GKE Gateway)
+### 1. Gateway Mode (GKE Gateway)
 
 Use this when running against a real cluster with a public Gateway IP. The client automatically
 discovers the Gateway.
@@ -131,7 +130,7 @@ finally:
     sandbox.terminate()
 ```
 
-### 2. Developer Mode (Local Tunnel)
+### 2. Tunnel Mode (Local Port-Forward)
 
 Use this for local development or CI. The client automatically opens a secure tunnel to the
 Router Service using `kubectl`.
@@ -152,32 +151,34 @@ finally:
     sandbox.terminate()
 ```
 
+You can pass per-claim environment variables when creating a sandbox:
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    env={"FOO": "bar"},
+)
+```
+
+Setting `env` populates `SandboxClaim.spec.env`, which forces a cold start
+from the warm pool template instead of adopting a pre-warmed pod. This may
+increase startup latency.
+
 ### 3. In-Cluster Mode (Direct Pod Connection)
 
 Use this when the client runs **inside the cluster** (for example, another pod in the same cluster).
 The client connects **directly to the sandbox runtime pod**, bypassing the sandbox router.
 
-The **default** is **cluster DNS** (`use_pod_ip=False`). Omit the argument or pass `use_pod_ip=False`
-to use it; set `use_pod_ip=True` only when you want the pod IP path.
-
-**Option A: Direct Pod IP** — `SandboxInClusterConnectionConfig(use_pod_ip=True)`
-
-- Uses the pod IP from the Sandbox status for **low-latency**, direct connections without relying on
-  cluster DNS resolution.
-
-**Option B: Cluster DNS** — `SandboxInClusterConnectionConfig(use_pod_ip=False)`
-
-- Uses a stable DNS-style endpoint (typically `http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`).
-  Prefer this when you want **stable DNS-based routing** across pod lifecycle events.
+The client first uses the pod IP reported in the Sandbox status. If the pod IP is not available
+(for example, before status is populated or when running against an older controller), it falls
+back to the stable cluster DNS endpoint:
+`http://{sandbox_id}.{namespace}.svc.cluster.local:{server_port}`.
 
 ```python
 from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.models import SandboxInClusterConnectionConfig
 
-# Choose one connection_config (default = cluster DNS):
-#   SandboxInClusterConnectionConfig()  # same as use_pod_ip=False
-# Option A — direct pod IP (low latency):
-#   SandboxInClusterConnectionConfig(use_pod_ip=True)
 connection_config = SandboxInClusterConnectionConfig()
 
 client = SandboxClient(connection_config=connection_config)
@@ -189,7 +190,7 @@ finally:
     sandbox.terminate()
 ```
 
-### 4. Advanced / Internal Mode
+### 4. Direct URL Mode
 
 Use `SandboxDirectConnectionConfig` to bypass discovery entirely. Useful for:
 
@@ -349,17 +350,47 @@ sandbox = client.create_sandbox(
 
 The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
+### 9. Startup Latency: How the SDK Waits for Readiness
+
+`create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
+API on an interval, so there is no poll-interval latency added on top of the
+controller's own claim-to-Ready time.
+
+The wait is a **single watch on the SandboxClaim**. The claim controller
+publishes the bound sandbox name (`status.sandbox.name`), the pod IPs
+(`status.sandbox.podIPs`) and the forwarded `Ready` condition in one status
+update when it adopts a warm-pool sandbox, so the first watch event that
+carries the sandbox name normally also carries `Ready=True` and
+`create_sandbox()` returns immediately. On a cold start (no warm sandbox
+available, or `env`/`volume_claim_templates` set, which force cold starts)
+the same watch simply keeps streaming claim updates until the forwarded
+`Ready` condition flips to `True`.
+
+Latency guidance:
+
+- **Do not poll** `Sandbox`/`SandboxClaim` objects with `get_*` calls in a
+  loop to detect readiness; a poll interval of `T` adds an average of `T/2`
+  (uniformly distributed 0..`T`) on top of the controller latency. Use
+  `create_sandbox()` / the claim `Ready` condition watch.
+- `sandbox_ready_timeout` (default 180s) bounds the whole wait; the watch
+  returns as soon as the claim is Ready, the timeout only caps the worst case.
+- The Kubernetes client reuses a single authenticated connection pool for
+  the watch, so no extra TLS handshakes occur on the ready path.
+- With the local-tunnel connection mode, the first request additionally pays
+  for the `kubectl port-forward` startup; the SDK probes the local port every
+  50ms while it comes up. Gateway/in-cluster modes do not have this step.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).
 
-### Run in Dev Mode:
+### Run in Tunnel Mode:
 
 ```bash
 python test_client.py --namespace default
 ```
 
-### Run in Production Mode:
+### Run in Gateway Mode:
 
 ```bash
 python test_client.py --gateway-name external-http-gateway

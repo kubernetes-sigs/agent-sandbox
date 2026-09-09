@@ -1,0 +1,241 @@
+# Sandbox capacity cliff test.
+#
+# Finds the maximum number of Sandbox objects (each with a backing Pod) a
+# cluster can sustain before performance falls off a cliff. Unlike the other
+# recipes in this directory, the primary signal is NOT latency — it is
+# convergence: the test ratchets the total Sandbox count upward in steps and
+# the cliff is the first step at which the cluster can no longer drive every
+# Sandbox to Ready=True within the (generous) convergence timeout.
+#
+# Per-step capacity metrics (etcd DB size, controller memory, workqueue depth,
+# stored object counts, controller restarts) are snapshotted at each plateau so
+# the degradation curve can be reconstructed afterwards. Latency measurements
+# are collected as nice-to-know data only and never gate the test.
+#
+# The extensions (SandboxClaim/SandboxTemplate/SandboxWarmPool) are
+# intentionally not exercised: only Sandbox and its child Pod are in scope.
+
+# The number of namespaces to create and spread the test load across.
+{{$namespaces := DefaultParam .CL2_NAMESPACES 1}}
+# The maximum rate (Queries Per Second) for cluster loader to create objects.
+{{$qps := DefaultParam .CL2_QPS 100}}
+# The number of Sandboxes added per namespace at each step.
+{{$stepSize := DefaultParam .CL2_STEP_SIZE 1000}}
+# The total number of ramp steps. The final target is
+# STEP_SIZE * TOTAL_STEPS * NAMESPACES sandboxes. Deliberately overshoot the
+# expected ceiling: the step that fails to converge IS the result.
+{{$totalSteps := DefaultParam .CL2_TOTAL_STEPS 20}}
+# How long to hold each plateau before snapshotting metrics. The hold exposes
+# steady-state load (resyncs, watch churn) that a pure creation burst hides.
+{{$holdDuration := DefaultParam .CL2_HOLD_DURATION "2m"}}
+# How long to wait for a step's sandboxes to all become Ready. This is the
+# effective definition of "does not fit": slow is fine, not converging is not.
+# Size it to step size / conservative expected throughput with a wide margin.
+{{$convergenceTimeout := DefaultParam .CL2_CONVERGENCE_TIMEOUT "30m"}}
+# The prefix used for naming the test namespaces.
+{{$namespacePrefix := DefaultParam .CL2_NAMESPACE_PREFIX "sandbox-capacity"}}
+# Set to "true" to pin sandbox pods to kwok fake nodes (nodeSelector type=kwok
+# plus the standard kwok taint toleration). Use this to measure the
+# control-plane ceiling without paying for real nodes.
+{{$kwokNodes := DefaultParam .CL2_KWOK_NODES "false"}}
+# Container image for the sandbox pods. Must be pullable from the test
+# cluster's nodes — private GKE nodes without Cloud NAT cannot reach
+# registry.k8s.io; use a gcr.io/pkg.dev-hosted image there instead.
+{{$sandboxImage := DefaultParam .CL2_SANDBOX_IMAGE "registry.k8s.io/pause:3.10"}}
+# Set to "true" to apply one NetworkPolicy per namespace selecting all sandbox
+# pods, mirroring the SandboxTemplate extension's "Secure by Default" policy.
+# Use to measure the dataplane cost of policy enforcement at scale — the
+# production configuration — vs. the unpoliced best case.
+{{$networkPolicy := DefaultParam .CL2_NETWORK_POLICY "false"}}
+
+name: sandbox-capacity-cliff-test
+
+namespace:
+  number: {{$namespaces}}
+  prefix: {{$namespacePrefix}}
+
+tuningSets:
+- name: RampCreate
+  qpsLoad:
+    qps: {{$qps}}
+
+steps:
+{{if eq $networkPolicy "true"}}
+# Applied before any sandboxes exist so every endpoint is created under policy
+# enforcement, exactly as in a SandboxTemplate-managed production namespace.
+- name: Apply Sandbox NetworkPolicy
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 1
+    tuningSet: RampCreate
+    objectBundle:
+    - basename: capacity-netpol
+      objectTemplatePath: templates/cluster-loader-capacity-networkpolicy.yaml
+      templateFillMap:
+        Group: sandbox-capacity-cliff
+{{end}}
+
+# Latency is nice-to-know only: the threshold is set far beyond any plausible
+# value so this measurement never fails the run.
+- name: Start Pod Startup Latency Measurement (informational only)
+  measurements:
+  - Identifier: SandboxPodStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: start
+      labelSelector: "group=sandbox-capacity-cliff"
+      threshold: 1h
+
+# --- START RAMP LOOP ---
+{{range $i := Loop $totalSteps}}
+{{$step := AddInt $i 1}}
+{{$targetPerNamespace := MultiplyInt $step $stepSize}}
+{{$targetTotal := MultiplyInt $targetPerNamespace $namespaces}}
+
+# The metrics window opens BEFORE the ramp so that rate()-based queries (%v
+# resolves to time-since-start at gather) cover the busy ramp/convergence
+# phase, not just the idle hold.
+- name: Step {{$step}} - Begin step metrics window
+  measurements:
+  - Identifier: CapacityMetricsStep{{$step}}
+    Method: GenericPrometheusQuery
+    Params:
+      action: start
+      metricName: Sandbox Capacity Step {{$step}} ({{$targetTotal}} sandboxes)
+      metricVersion: v1
+      unit: count
+      # Recorded as data, not pass/fail: no thresholds on purpose.
+      queries:
+      - name: ControllerResidentMemoryBytes
+        query: max(max_over_time(process_resident_memory_bytes{namespace="agent-sandbox-system"}[%v]))
+      # Uptime dropping between steps means the controller restarted (e.g.
+      # OOMKilled) — sourced from the controller's own /metrics so it works
+      # without kube-state-metrics.
+      - name: ControllerUptimeSeconds
+        query: min(time() - process_start_time_seconds{namespace="agent-sandbox-system"})
+      - name: SandboxWorkqueueDepthMax
+        query: max(max_over_time(workqueue_depth{name="sandbox"}[%v]))
+      - name: SandboxWorkqueueSecondsP99
+        query: histogram_quantile(0.99, sum(rate(workqueue_queue_duration_seconds_bucket{name="sandbox"}[%v])) by (le))
+      # Reconcile service time and throughput — the discriminators for why the
+      # workqueue backs up. Service time growing with cluster size while
+      # throughput falls means each reconcile got slower; then the rest_client
+      # rows say whether the time went into API round-trips (latency), 409s
+      # (conflict retries), or 429s (APF throttling), and CPU/GC whether it
+      # went into the process itself.
+      - name: ReconcileTimeP50
+        query: histogram_quantile(0.50, sum(rate(controller_runtime_reconcile_time_seconds_bucket{controller="sandbox"}[%v])) by (le))
+      - name: ReconcileTimeP99
+        query: histogram_quantile(0.99, sum(rate(controller_runtime_reconcile_time_seconds_bucket{controller="sandbox"}[%v])) by (le))
+      - name: ReconcilesPerSecond
+        query: sum(rate(controller_runtime_reconcile_total{controller="sandbox"}[%v]))
+      - name: WorkqueueRetriesPerSecond
+        query: sum(rate(workqueue_retries_total{name="sandbox"}[%v]))
+      - name: RestClientPutP99Seconds
+        query: histogram_quantile(0.99, sum(rate(rest_client_request_duration_seconds_bucket{namespace="agent-sandbox-system",verb="PUT"}[%v])) by (le))
+      - name: RestClientGetP99Seconds
+        query: histogram_quantile(0.99, sum(rate(rest_client_request_duration_seconds_bucket{namespace="agent-sandbox-system",verb="GET"}[%v])) by (le))
+      - name: RestClient409PerSecond
+        query: sum(rate(rest_client_requests_total{namespace="agent-sandbox-system",code="409"}[%v]))
+      - name: RestClient429PerSecond
+        query: sum(rate(rest_client_requests_total{namespace="agent-sandbox-system",code="429"}[%v]))
+      - name: ControllerCPUCores
+        query: sum(rate(process_cpu_seconds_total{namespace="agent-sandbox-system"}[%v]))
+      - name: GoGCMaxPauseSeconds
+        query: max(go_gc_duration_seconds{namespace="agent-sandbox-system",quantile="1"})
+      # StoredSandboxObjects/StoredPodObjects need a scrapable apiserver (the
+      # runner configures this automatically for kind; managed control planes
+      # generally expose nothing). EtcdDBSizeBytes additionally needs scrapable
+      # etcd (kOps/self-managed only — kind's etcd binds metrics to localhost).
+      # They record nothing rather than failing when unavailable.
+      - name: StoredSandboxObjects
+        query: max(apiserver_storage_objects{resource=~"sandboxes.*"})
+      - name: StoredPodObjects
+        query: max(apiserver_storage_objects{resource="pods"})
+      # On Cilium-based dataplanes (e.g. GKE Dataplane V2): identity count
+      # growing per-sandbox instead of staying ~flat means unique pod labels
+      # are exploding identity cardinality — the dataplane cliff signature.
+      - name: StoredCiliumIdentities
+        query: max(apiserver_storage_objects{resource="ciliumidentities.cilium.io"})
+      - name: EtcdDBSizeBytes
+        query: max(etcd_mvcc_db_total_size_in_bytes)
+
+- name: Step {{$step}} - Ramp to {{$targetTotal}} Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: {{$targetPerNamespace}}
+    tuningSet: RampCreate
+    objectBundle:
+    - basename: capacity-sandbox
+      objectTemplatePath: templates/cluster-loader-capacity-sandbox.yaml
+      templateFillMap:
+        Group: sandbox-capacity-cliff
+        KwokNodes: "{{$kwokNodes}}"
+        Image: {{$sandboxImage}}
+
+# Convergence is the pass/fail criterion. If this times out, the previous
+# step's count is the cluster's upper bound and the metrics snapshots tell
+# you which component gave out first.
+- name: Step {{$step}} - Wait for {{$targetTotal}} Sandboxes Ready
+  measurements:
+  - Identifier: WaitForSandboxesStep{{$step}}
+    Method: WaitForGenericK8sObjects
+    Params:
+      action: start
+      objectGroup: agents.x-k8s.io
+      objectVersion: v1beta1
+      objectResource: sandboxes
+      namespaceRange: {min: 1, max: {{$namespaces}}}
+      successfulConditions: ["Ready=True"]
+      failedConditions: []
+      minDesiredObjectCount: {{$targetTotal}}
+      maxFailedObjectCount: 0
+      timeout: {{$convergenceTimeout}}
+      # Deliberately slow: polling LISTs are themselves apiserver load at
+      # high object counts and must not distort the measurement.
+      refreshInterval: 10s
+
+- name: Step {{$step}} - Hold plateau for {{$holdDuration}}
+  measurements:
+  - Identifier: HoldStep{{$step}}
+    Method: Sleep
+    Params:
+      duration: {{$holdDuration}}
+
+- name: Step {{$step}} - Snapshot capacity metrics
+  measurements:
+  - Identifier: CapacityMetricsStep{{$step}}
+    Method: GenericPrometheusQuery
+    Params:
+      action: gather
+      enableViolations: false
+{{end}}
+# --- END RAMP LOOP ---
+
+- name: Pause 1m to allow Prometheus to scrape final metrics
+  measurements:
+  - Identifier: WaitAfterTest
+    Method: Sleep
+    Params:
+      duration: 1m
+
+- name: Gather Pod Startup Latency (informational only)
+  measurements:
+  - Identifier: SandboxPodStartupLatency
+    Method: PodStartupLatency
+    Params:
+      action: gather
+      labelSelector: "group=sandbox-capacity-cliff"
+
+- name: Delete Sandboxes
+  phases:
+  - namespaceRange: {min: 1, max: {{$namespaces}}}
+    replicasPerNamespace: 0
+    tuningSet: RampCreate
+    objectBundle:
+    - basename: capacity-sandbox
+      objectTemplatePath: templates/cluster-loader-capacity-sandbox.yaml
+      templateFillMap:
+        Group: sandbox-capacity-cliff
+        KwokNodes: "{{$kwokNodes}}"
+        Image: {{$sandboxImage}}

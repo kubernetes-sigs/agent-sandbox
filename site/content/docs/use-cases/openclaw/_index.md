@@ -16,10 +16,10 @@ This is the **always-lived** pattern: the sandbox runs indefinitely as a persist
 
 - **Stable identity** — Each sandbox has a stable hostname and network identity, so the agent is always reachable at the same address.
 - **Persistent storage** — Sandboxes can mount persistent volumes so the agent's data survives pod restarts.
-- **Web UI and CLI access** — Agents like OpenClaw expose a web interface and support CLI operations, accessible via port-forwarding.
+- **Web UI and CLI access** — Agents like OpenClaw expose a web interface and support CLI operations, accessible via Kubernetes Services (NodePort, LoadBalancer, or IAP tunnel).
 - **Token-based authentication** — Secure access to agent interfaces through gateway authentication.
-- **Lifecycle management** — The agent-sandbox controller handles pod creation, restarts, and scheduled deletion without manual intervention.
+- **Lifecycle management** — The agent-sandbox controller handles pod creation, warm pools, and claims without manual intervention.
 
 ## Getting Started
 
-See the [OpenClaw Sandbox example](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/openclaw-sandbox/) for a complete walkthrough covering image loading, token generation, sandbox deployment, web UI access, and CLI operations.
+See the [OpenClaw Sandbox example](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/openclaw-gvisor-sandbox/) for a complete walkthrough covering image loading, token generation, warm pool and claim deployment, web UI access, and persistence verification.

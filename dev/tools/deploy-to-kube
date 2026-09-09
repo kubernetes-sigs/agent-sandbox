@@ -17,9 +17,69 @@ import argparse
 import io
 import os
 import subprocess
-import yaml
+import sys
 
 from shared import utils
+
+try:
+    import yaml
+except ImportError:
+    # Auto-provision a venv with required dependencies so developers don't
+    # need to manually pip-install before running deploy-to-kube.
+    script_file = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_file)
+    repo_root = utils.get_repo_root()
+    venv_dir = os.path.join(repo_root, "bin", "dev-tools-venv")
+    venv_python = os.path.join(venv_dir, "bin", "python")
+    venv_pip = os.path.join(venv_dir, "bin", "pip")
+    req_file = os.path.join(script_dir, "requirements.txt")
+
+    def _install_deps():
+        """Install requirements and retry the import; returns True on success."""
+        print("Installing dev-tools venv dependencies...")
+        try:
+            subprocess.check_call([venv_pip, "install", "--quiet", "-r", req_file])
+            import yaml  # noqa: F401 — verify yaml is now importable; local scope only
+            return True
+        except (OSError, subprocess.CalledProcessError, ImportError):
+            return False
+
+    # Backstop against exec-loop: if we already re-exec'd into the venv once
+    # and deps are still missing, try installing before giving up.
+    if os.environ.get("_DEPLOY_TO_KUBE_REEXEC") == "1":
+        if not _install_deps():
+            print(f"Error: dependency bootstrap looped; delete {venv_dir} and re-run.", file=sys.stderr)
+            sys.exit(1)
+    elif os.path.abspath(sys.executable) == venv_python:
+        if not _install_deps():
+            print("Error: Failed to install dependencies in venv.", file=sys.stderr)
+            sys.exit(1)
+    elif not os.path.isfile(venv_python):
+        print("Setting up dev-tools venv (missing dependencies)...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+            subprocess.check_call([venv_pip, "install", "--quiet", "-r", req_file])
+        except (OSError, subprocess.CalledProcessError):
+            print("Error: Failed to set up dev-tools venv.", file=sys.stderr)
+            sys.exit(1)
+        os.environ["_DEPLOY_TO_KUBE_REEXEC"] = "1"
+        try:
+            os.execv(venv_python, [venv_python, script_file] + sys.argv[1:])
+        except OSError:
+            print(f"Error: Failed to execute newly created venv — delete {venv_dir} and re-run.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        os.environ["_DEPLOY_TO_KUBE_REEXEC"] = "1"
+        try:
+            os.execv(venv_python, [venv_python, script_file] + sys.argv[1:])
+        except OSError:
+            print(f"Error: Stale dev-tools venv — delete {venv_dir} and re-run.", file=sys.stderr)
+            sys.exit(1)
+
+    # _install_deps() above imports yaml only to verify pip succeeded; the name
+    # is bound to the function's local scope, not module scope. Re-import here
+    # so the rest of the script can use it.
+    import yaml  # noqa: F401
 
 
 def find_and_replace_images(doc, image_prefix, image_tag):
@@ -136,6 +196,11 @@ def gather_manifests(manifests_path):
     for root, dirs, files in os.walk(manifests_path):
         for filename in files:
             if not (filename.endswith(".yaml") or filename.endswith(".yml")):
+                continue
+            if filename in ("kustomization.yaml", "kustomization.yml"):
+                # kustomization files describe how to assemble the manifests
+                # (see the all-in-one sandbox-with-extensions.yaml); they are not applyable
+                # resources, so skip them here as the release tool does.
                 continue
             path = os.path.join(root, filename)
             with open(path, "r") as f:

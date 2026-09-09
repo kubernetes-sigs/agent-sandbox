@@ -25,7 +25,13 @@ from k8s_agent_sandbox.constants import (
     SANDBOX_PLURAL_NAME,
 )
 from k8s_agent_sandbox.exceptions import SnapshotNotFoundError
+from k8s_agent_sandbox.metrics import (
+    sandbox_client_resume_latency_ms,
+    sandbox_client_restore_latency_ms,
+    sandbox_client_suspend_latency_ms,
+)
 from k8s_agent_sandbox.sandbox import Sandbox
+from k8s_agent_sandbox.utils import record_latency
 
 from .snapshot_engine import SnapshotEngine, SnapshotResponse
 from .utils import (
@@ -183,9 +189,8 @@ class SandboxWithSnapshotSupport(Sandbox):
                 return list_result.snapshots[0].snapshot_uid
         return None
 
-    def suspend(
-        self, snapshot_before_suspend: bool = True, wait_timeout: int = 180
-    ) -> SuspendResponse:
+    @record_latency(sandbox_client_suspend_latency_ms)
+    def suspend(self, snapshot_before_suspend: bool = True, wait_timeout: int = 180) -> SuspendResponse:
         """
         Suspends the sandbox.
 
@@ -198,6 +203,7 @@ class SandboxWithSnapshotSupport(Sandbox):
         """
         if self.is_suspended():
             logger.info(f"Sandbox '{self.sandbox_id}' is already suspended.")
+            self._skip_latency_metric = True
             return SuspendResponse(
                 success=True,
                 snapshot_response=None,
@@ -394,6 +400,7 @@ class SandboxWithSnapshotSupport(Sandbox):
             error_code=ERROR_CODE,
         )
 
+    @record_latency(sandbox_client_resume_latency_ms)
     def resume(self, wait_timeout: int = 180) -> ResumeResponse:
         """
         Resumes the sandbox from the latest available snapshot.
@@ -405,9 +412,8 @@ class SandboxWithSnapshotSupport(Sandbox):
             ResumeResponse: An object containing the success status, restoration details, and any error information.
         """
         if not self.is_suspended():
-            logger.info(
-                f"Sandbox '{self.sandbox_id}' is already running (not suspended)."
-            )
+            logger.info(f"Sandbox '{self.sandbox_id}' is already running (not suspended).")
+            self._skip_latency_metric = True
             return ResumeResponse(
                 success=True,
                 restored_from_snapshot=False,
@@ -486,14 +492,14 @@ class SandboxWithSnapshotSupport(Sandbox):
                 f"Snapshot '{snapshot_uid}' does not exist for this sandbox."
             )
 
-    def restore(
-        self, snapshot_uid: str, sandbox_ready_timeout: int = 180
-    ) -> RestorationResponse:
+    @record_latency(sandbox_client_restore_latency_ms)
+    def restore(self, snapshot_uid: str, sandbox_ready_timeout: int = 180) -> RestorationResponse:
         """Restores this sandbox from a specific snapshot."""
         try:
             self._verify_snapshot_exists(snapshot_uid)
 
             if not self.is_suspended():
+                self._skip_latency_metric = True
                 return RestorationResponse(
                     success=False,
                     restored_from_snapshot=False,

@@ -32,11 +32,39 @@ import (
 )
 
 // SandboxClaimInformer provides access to a shared informer and lister for
-// SandboxClaims.
+// SandboxClaims. Prefer using the type-safe variant (see [TypedSandboxClaimInformer]).
 type SandboxClaimInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() apiv1beta1.SandboxClaimLister
 }
+
+// TypedSandboxClaimInformer provides access to a shared informer and lister for
+// SandboxClaims, including the type-safe TypedInformer variant.
+// It is a superset of SandboxClaimInformer.
+type TypedSandboxClaimInformer interface {
+	Informer() cache.SharedIndexInformer
+	TypedInformer() SandboxClaimIndexInformer
+	Lister() apiv1beta1.SandboxClaimLister
+}
+
+// SandboxClaimIndexInformer is a wrapper around the underlying [cache.SharedIndexInformer]
+// with type-safe variants of several methods.
+type SandboxClaimIndexInformer cache.TypedSharedIndexInformer[*extensionsapiv1beta1.SandboxClaim]
+
+// SandboxClaimHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerFuncs] for SandboxClaim.
+type SandboxClaimHandlerFuncs = cache.TypedResourceEventHandlerFuncs[*extensionsapiv1beta1.SandboxClaim]
+
+// SandboxClaimDetailedHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerDetailedFuncs] for SandboxClaim.
+type SandboxClaimDetailedHandlerFuncs = cache.TypedResourceEventHandlerDetailedFuncs[*extensionsapiv1beta1.SandboxClaim]
+
+// SandboxClaimFilteringHandler is a specialization of [cache.TypedFilteringResourceEventHandler] for SandboxClaim.
+type SandboxClaimFilteringHandler = cache.TypedFilteringResourceEventHandler[*extensionsapiv1beta1.SandboxClaim]
+
+// SandboxClaimIndexers is a specialization of [cache.TypedIndexers] for SandboxClaim.
+type SandboxClaimIndexers = cache.TypedIndexers[*extensionsapiv1beta1.SandboxClaim]
+
+// DeletedSandboxClaim is a specialization of [cache.DeletedObject] for SandboxClaim.
+type DeletedSandboxClaim = cache.DeletedObject[*extensionsapiv1beta1.SandboxClaim]
 
 type sandboxClaimInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
@@ -47,25 +75,49 @@ type sandboxClaimInformer struct {
 // NewSandboxClaimInformer constructs a new informer for SandboxClaim type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedSandboxClaimInformer]).
 func NewSandboxClaimInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
 	return NewSandboxClaimInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
+}
+
+// NewTypedSandboxClaimInformer constructs a new informer for SandboxClaim type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedSandboxClaimInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers SandboxClaimIndexers) SandboxClaimIndexInformer {
+	return NewTypedSandboxClaimInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers)})
 }
 
 // NewFilteredSandboxClaimInformer constructs a new informer for SandboxClaim type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedFilteredSandboxClaimInformer]).
 func NewFilteredSandboxClaimInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return NewSandboxClaimInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+	return NewTypedSandboxClaimInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewTypedFilteredSandboxClaimInformer constructs a new informer for SandboxClaim type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedFilteredSandboxClaimInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers SandboxClaimIndexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) SandboxClaimIndexInformer {
+	return NewTypedSandboxClaimInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers), TweakListOptions: tweakListOptions})
 }
 
 // NewSandboxClaimInformerWithOptions constructs a new informer for SandboxClaim type with additional options.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedSandboxClaimInformerWithOptions]).
 func NewSandboxClaimInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	return NewTypedSandboxClaimInformerWithOptions(client, namespace, options)
+}
+
+// NewTypedSandboxClaimInformerWithOptions constructs a new informer for SandboxClaim type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedSandboxClaimInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) SandboxClaimIndexInformer {
 	gvr := schema.GroupVersionResource{Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Resource: "sandboxclaims"}
 	identifier := options.InformerName.WithResource(gvr)
 	tweakListOptions := options.TweakListOptions
-	return cache.NewSharedIndexInformerWithOptions(
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxClaim](cache.NewSharedIndexInformerWithOptions(
 		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
@@ -98,17 +150,57 @@ func NewSandboxClaimInformerWithOptions(client versioned.Interface, namespace st
 			Indexers:     options.Indexers,
 			Identifier:   identifier,
 		},
-	)
+	))
 }
 
 func (f *sandboxClaimInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewSandboxClaimInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
+	return NewTypedSandboxClaimInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *sandboxClaimInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&extensionsapiv1beta1.SandboxClaim{}, f.defaultInformer)
+	return f.TypedInformer()
+}
+
+func (f *sandboxClaimInformer) TypedInformer() SandboxClaimIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxClaim](f.factory.InformerFor(&extensionsapiv1beta1.SandboxClaim{}, f.defaultInformer))
 }
 
 func (f *sandboxClaimInformer) Lister() apiv1beta1.SandboxClaimLister {
 	return apiv1beta1.NewSandboxClaimLister(f.Informer().GetIndexer())
+}
+
+// ToTypedSandboxClaimInformer converts an untyped informer into a TypedSandboxClaimInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *SandboxClaim. If that is not the case, calling type-safe methods of the returned
+// TypedSandboxClaimInformer leads to runtime panics. A safer alternative is to pass
+// around a TypedSandboxClaimInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToTypedSandboxClaimInformer(informer SandboxClaimInformer) TypedSandboxClaimInformer {
+	if informer, ok := informer.(TypedSandboxClaimInformer); ok {
+		return informer
+	}
+	return &sandboxClaimTypedInformerAdapter{informer}
+}
+
+type sandboxClaimTypedInformerAdapter struct {
+	SandboxClaimInformer
+}
+
+func (a *sandboxClaimTypedInformerAdapter) TypedInformer() SandboxClaimIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxClaim](a.Informer())
+}
+
+// ToSandboxClaimIndexInformer converts an untyped informer into a SandboxClaimIndexInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *SandboxClaim. If that is not the case, calling type-safe methods of the returned
+// SandboxClaimIndexInformer leads to runtime panics. A safer alternative is to pass
+// around a SandboxClaimIndexInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToSandboxClaimIndexInformer(informer cache.SharedIndexInformer) SandboxClaimIndexInformer {
+	if informer, ok := informer.(SandboxClaimIndexInformer); ok {
+		return informer
+	}
+	return cache.NewTypedSharedIndexInformer[*extensionsapiv1beta1.SandboxClaim](informer)
 }

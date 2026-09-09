@@ -1,49 +1,20 @@
 # AI Code Review Guidelines
 
-**Project Context:**
-`agent-sandbox` is a Kubernetes controller that provides the `Sandbox` CRD: a stateful, singleton, pod-backed workload with a stable identity, intended for AI agent runtimes, dev environments, notebooks, and similar use cases. It is a SIG Apps subproject (`sigs.k8s.io/agent-sandbox`) and follows Kubernetes / `controller-runtime` conventions.
-
-- API group `agents.x-k8s.io/v1beta1`: `Sandbox` (core).
-- API group `extensions.agents.x-k8s.io/v1beta1`: `SandboxClaim`, `SandboxTemplate`, `SandboxWarmPool` (opt-in extensions).
-- Go module: `sigs.k8s.io/agent-sandbox` (Go 1.26.x, see `go.mod`).
-
-**Project Toolchain & Versions:**
-The Go toolchain version targeted by this repository is the value of the `go` directive in `go.mod` at the head of the PR's base branch. Defer to that value as the authoritative target. Do **not** suggest lowering the targeted Go version, dropping support for newer language features that compile cleanly under it, or adding compatibility shims for older toolchains the repo has already moved past. If a PR introduces a `go` bump, evaluate the bump on its own merits (motivation, blast radius) — not by pattern-matching to "older is safer". Treat the version set in `go.mod` as a deliberate maintainer decision unless the PR is itself changing it.
-
-**Lint Policy:**
-This repository's binding style and correctness gate is whatever lint config exists at the head of the PR's base branch (e.g. `.golangci.yml`, `.golangci.yaml`, `.golangci-kal.yml`, or absence of one). If the repo has not opted into a particular linter or stylistic rule, do **not** introduce that rule via review comments. Bias toward stylistic suggestions only when:
-- the rule is enforced by the repo's existing lint config, **or**
-- the change introduces a clear bug (not a clear style preference), **or**
-- the file already follows a local convention and the new code visibly diverges from it.
-
-If the repo's lint gate (`make lint-go` and `make lint-api`, which wrap `./dev/tools/lint-*`) and `go test` all pass and no lint config flags the line, treat residual style as author preference rather than a review-blocking concern.
+**Project Context & Architecture:**
+Refer to [AGENTS.md](../AGENTS.md) for full project background, module layout, toolchain versions, and core conventions.
 
 **Scope of Review:**
-Focus on substantive findings tied to the lines the PR actually changes — logic bugs, security issues, controller-runtime misuse, API/contract breaks, missing tests for the new behavior. In particular:
-- Do **not** flag style issues in pre-existing code that the PR happens to move or re-format mechanically.
+Focus strictly on substantive findings tied to lines the PR actually modifies — logic bugs, concurrency issues, security vulnerabilities, controller-runtime misuse, API contract breaks, and missing tests for new behavior.
+- Do NOT flag style issues in pre-existing code that the PR touches mechanically.
+- When in doubt between flagging a marginal nit and staying silent: **stay silent**. Do not introduce review fatigue.
 
-When in doubt between flagging a marginal nit and staying silent: stay silent. Each comment costs the contributor attention, and a noisy review erodes the signal of the substantive findings.
+**Toolchain & Lint Policy:**
+- Defer to the `go` directive in `go.mod` at the base branch head as the authoritative target. Do not suggest lowering the Go version or adding compatibility shims for older toolchains.
+- The binding style and correctness gate is the repo's lint configuration (`make lint-go`, `make lint-api`). If existing linters and tests pass without flagging a line, treat residual style as author preference.
 
-**Specific Conventions & Gotchas:**
-Pay special attention to these project-specific rules:
-*   **Label Values**: Do NOT put full resource names in label values (to avoid exceeding size limits).
-*   **Preview Features**: Do NOT use annotations for alpha/preview features. Advise using new API fields instead.
-*   **Mutating Spec**: The `spec` of the primary Custom Resource (CR) being reconciled is user-owned and should not be modified and saved back to the API server by the reconciler. This avoids mutating user intent. Controllers may, however, create and update the `spec` of **secondary or target** objects (for example, the HPA controller updating a Deployment's `spec.replicas`).
-*   **Status Properties**: Prefer `conditions` instead of a `phase` enum for tracking state.
-*   **Zero vs. Unset**: Suggest using pointers for fields where distinguishing between zero and unset is important.
-*   **Booleans**: Advise against booleans for fields that might evolve to have more states in the future.
-*   **Breaking Changes**: Whenever reviewing or proposing changes that alter existing default runtime behaviors, flag them as breaking changes that require deprecation cycles and migration paths.
-*   **Controller CLI Flags vs. Declarative CRs**: Do NOT use global controller command-line flags to configure tenant workload semantics or operational behaviors; all workload behavior must be configured declaratively via Custom Resources. When global CLI flags exist for platform-level baseline governance, ensure declarative Custom Resource configuration always takes precedence.
-*   **API Schema Minimization**: Do NOT expand CRD schemas with new fields unless strictly necessary. Avoid toggle proliferation (introducing multiple overlapping configuration mechanisms for a single behavior) and establish clear, declarative precedence hierarchies.
-*   **Error Wrapping**: Always wrap errors with context (`fmt.Errorf("...: %w", err)`). Surface meaningful conditions on the resource status rather than swallowing errors.
-*   **Structured Logging & Verbosity**: Use `logr.Logger` from controller-runtime (`log.FromContext(ctx)`) with structured key/value pairs (never `fmt.Sprintf`). In Reconcile loops, reserve `logger.Info` / `V(0)` for major state changes (e.g., resource created, claim adopted) and require `V(4)` for routine steady-state checks or cache lookups.
-*   **Metrics Cardinality**: Never introduce high or unbounded cardinality Prometheus labels (e.g., pod names, UIDs, timestamps, raw errors). When deriving label values from dynamic input or errors, apply metrics normalization (an allowlist switch or categorizer) to map strings into a small, fixed enum.
-*   **Call-Site Audit**: When modifying helper predicates or error returns, audit all call sites across reconcilers to prevent downstream side effects (e.g., premature queue evictions or cache drops).
-*   **Docs Site Mounts**: Root files like `README.md`, `CONTRIBUTING.md`, and client READMEs are mounted directly to the public Hugo website (`https://agent-sandbox.sigs.k8s.io`). Treat edits to these files as formal public documentation.
-*   **Python SDK (`clients/python`)**: Enforce Python 3.10+ idioms, Pydantic models for data structures, and maintain architectural parity between sync modules and their async siblings (e.g., `sandbox_client.py` vs `async_sandbox_client.py`), avoiding unintended drift. Note the three distinct names: directory `agentic-sandbox-client`, package `k8s_agent_sandbox`, PyPI wheel `k8s-agent-sandbox`.
-
-**CLA Reminder:**
-When you provide code suggestions in a review, add a reminder at the end of your comment that the contributor should **not** click the "Commit suggestion" button in the GitHub UI. Explain that doing so adds the AI bot as a co-author, which breaks the Kubernetes CLA check as bots cannot sign it. Advise them to apply the suggestion locally instead.
+**CLA Safety Reminder:**
+When offering code suggestions, always remind contributors **not** to click "Commit suggestion" in the GitHub UI (which adds the AI bot as co-author and breaks the CNCF/Kubernetes CLA check), and to apply the change locally instead.
 
 **Tone:**
-Constructive, empathetic, and professional. Always explain the reasoning behind your suggestions.
+Succinct, constructive, and direct. Explain technical rationale clearly without conversational filler.
+

@@ -19,7 +19,7 @@ spec:
       runtimeClassName: gvisor
       containers:
       - name: my-container1
-        image: python:3.10-slim
+        image: python:3.11-slim
         command: ["python3", "-c"]
         args:
           - |

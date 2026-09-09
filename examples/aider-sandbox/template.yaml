@@ -1,0 +1,67 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: aider-browser-template
+  namespace: default
+spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+    - ports: [{protocol: TCP, port: 8501}]
+    egress:
+    - ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - ports: [{protocol: TCP, port: 443}]
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace-volume
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+  podTemplate:
+    spec:
+      # Ensures the volume files are group-owned by GID 1000
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      - name: git-clone
+        image: alpine/git
+        workingDir: /workspace
+        env:
+        # Define the repository URL you want to automatically download here
+        - name: REPO_URL
+          value: "REPO_URL"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Only clone if the directory is empty to avoid crashing on restarts
+          if [ ! -d /workspace/.git ]; then
+            echo "Cloning $REPO_URL..."
+            git clone "$REPO_URL" .
+          else
+            echo "/workspace is already populated. Skipping clone."
+          fi
+          chown -R 1000:1000 /workspace
+        volumeMounts:
+        - name: workspace-volume
+          mountPath: /workspace
+
+      containers:
+      - name: aider
+        image: aider-sandbox:v1
+        imagePullPolicy: Never
+        workingDir: /workspace
+        ports:
+        - containerPort: 8501
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-secrets
+              key: openai-api-key
+              optional: true
+        volumeMounts:
+        - name: workspace-volume
+          mountPath: /workspace

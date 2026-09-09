@@ -1,0 +1,23 @@
+# "User signup": one claim per user. This is the entire per-user resource —
+# the platform pattern keeps it deliberately minimal:
+#
+#   - warmPoolRef ONLY. No spec.env and no spec.volumeClaimTemplates: either
+#     would force a cold start past the warm pool (and this template's
+#     Disallowed policies reject them outright — see 40-claim-rejected.yaml).
+#   - No spec.lifecycle: every claim-expiry path deletes the Sandbox, which
+#     garbage-collects the user's PVC — their entire memory. Cost saving
+#     comes exclusively from Sandbox.spec.operatingMode instead.
+#   - additionalPodMetadata is the one warm-compatible per-claim
+#     customization. Label keys must use the sandbox.users.io domain under
+#     default controller flags.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: hermes-alice
+  namespace: hermes-demo
+spec:
+  warmPoolRef:
+    name: hermes-pool
+  additionalPodMetadata:
+    labels:
+      sandbox.users.io/hermes-user: alice

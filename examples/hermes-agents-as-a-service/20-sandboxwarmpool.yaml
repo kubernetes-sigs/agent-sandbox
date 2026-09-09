@@ -1,0 +1,12 @@
+# Pre-warmed spares: image pulled, PVC provisioned, Hermes booted, probe
+# green — everything a signup would otherwise wait for is pre-paid, so
+# claiming an agent takes ~2s instead of a full cold provision.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: hermes-pool
+  namespace: hermes-demo
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: hermes-agent

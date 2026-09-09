@@ -211,7 +211,7 @@ func isValidGatewayHostname(s string) bool {
 	if len(s) == 0 || len(s) > 253 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':

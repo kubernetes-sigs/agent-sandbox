@@ -1,0 +1,9 @@
+# A plain kind cluster (default containerd/runc runtime). nono enforces via the
+# node's own kernel Landlock, so no special runtime class is required for the demo.
+# For the opt-in Kata posture, use a Kata-enabled cluster and Kustomize variant
+# documented in README.md. For gVisor, see the notes in sandbox.yaml and the
+# openclaw-gvisor-sandbox example's kind-config.yaml.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

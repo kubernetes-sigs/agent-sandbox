@@ -1,0 +1,43 @@
+# Mirrors the "Secure by Default" NetworkPolicy the SandboxTemplate extension
+# controller creates per template (buildDefaultNetworkPolicySpec in
+# extensions/controllers/sandboxtemplate_controller.go), with the test's shared
+# `group` label standing in for the shared sandbox-template-ref-hash label —
+# same cardinality: ONE policy selecting ALL sandbox pods via a shared label.
+#
+# Ingress admits only the sandbox-router (which does not exist in this test, so
+# ingress is effectively default-deny — faithful to production enforcement
+# work). Egress allows public internet while blocking private/link-local
+# ranges, including the metadata server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{.Name}}
+spec:
+  podSelector:
+    matchLabels:
+      group: {{.Group}}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: agent-sandbox-system
+      podSelector:
+        matchLabels:
+          app: sandbox-router
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+    - ipBlock:
+        cidr: ::/0
+        except:
+        - fc00::/7
+        - fe80::/10

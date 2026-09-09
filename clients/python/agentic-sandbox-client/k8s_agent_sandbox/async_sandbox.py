@@ -21,7 +21,7 @@ from .constants import POD_NAME_ANNOTATION
 from .files.async_filesystem import AsyncFilesystem
 from .models import SandboxConnectionConfig, SandboxTracerConfig
 from .trace_manager import create_tracer_manager
-from .utils import select_pod_ip
+from .utils import select_pod_ip, extract_sandbox_name_hash
 
 
 class AsyncSandbox:
@@ -82,6 +82,7 @@ class AsyncSandbox:
 
         self._is_closed = False
         self._pod_name: str | None = None
+        self._sandbox_name_hash: str | None = None
 
     async def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
@@ -94,8 +95,22 @@ class AsyncSandbox:
         metadata = sandbox_object.get("metadata") or {}
         annotations = metadata.get("annotations") or {}
         pod_name = annotations.get(POD_NAME_ANNOTATION)
-        self._pod_name = pod_name if pod_name is not None else self.sandbox_id
+        self._pod_name = pod_name if pod_name else self.sandbox_id
         return self._pod_name
+
+    async def get_sandbox_name_hash(self) -> str | None:
+        """Fetches the Sandbox object from Kubernetes and retrieves its name hash from selector.
+        Caches the result to avoid repeated API calls.
+        """
+        if self._sandbox_name_hash is not None:
+            return self._sandbox_name_hash
+
+        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        sandbox_name_hash = extract_sandbox_name_hash(sandbox_object)
+        if sandbox_name_hash:
+            self._sandbox_name_hash = sandbox_name_hash
+
+        return sandbox_name_hash
 
     async def get_pod_ip(self) -> str | None:
         """Selects a pod IP from the Sandbox status (prefers IPv4, normalizes canonical form).
@@ -106,8 +121,31 @@ class AsyncSandbox:
         Returns None if no valid IP can be selected.
         """
         sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
-        pod_ips = sandbox_object.get("status", {}).get("podIPs", [])
+        status_data = sandbox_object.get("status") or {}
+        pod_ips = status_data.get("podIPs", [])
         return select_pod_ip(pod_ips)
+
+    async def status(self) -> tuple[str, str]:
+        """
+        Retrieves the current status of the Sandbox by inspecting its Kubernetes conditions.
+
+        Returns a tuple of (status, message).
+        status can be 'SandboxReady', 'SandboxNotFound', or 'SandboxNotReady'.
+        message contains the Kubernetes condition message if available.
+        """
+        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace)
+        if not sandbox_object:
+            return "SandboxNotFound", "Sandbox object not found in Kubernetes."
+
+        status_data = sandbox_object.get("status") or {}
+        for cond in status_data.get("conditions") or []:
+            if cond.get("type") == "Ready":
+                message = cond.get("message", "")
+                if cond.get("status") == "True":
+                    return "SandboxReady", message
+                return "SandboxNotReady", message
+
+        return "SandboxNotReady", "Unknown message"
 
     @property
     def commands(self) -> AsyncCommandExecutor | None:
@@ -119,10 +157,19 @@ class AsyncSandbox:
 
     @property
     def is_active(self) -> bool:
+        """
+        Returns True if the connection hasn't been explicitly closed
+        and engines are still initialized.
+        """
         return not self._is_closed and self._commands is not None and self._files is not None
 
-    async def _close_connection(self) -> None:
-        """Closes the client-side connection and disables execution engines."""
+    async def close_connection(self) -> None:
+        """
+        Closes the client-side connection and disables execution engines locally,
+        but leaves the remote Kubernetes Sandbox infrastructure running.
+
+        Use this to free up local resources (like port-forwards or HTTP sessions).
+        """
         if self._is_closed:
             return
 
@@ -141,6 +188,21 @@ class AsyncSandbox:
         logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
 
     async def terminate(self) -> None:
-        """Permanent deletion of all server side infrastructure and client side connection."""
-        await self._close_connection()
+        """
+        Permanent deletion of all server side infrastructure and client side connection.
+
+        This method is idempotent. After a successful delete, ``claim_name`` is
+        cleared so later calls are a local no-op and do not issue another DELETE.
+        If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
+        404 as success rather than raising.
+        """
+        await self.close_connection()
+
+        if not self.claim_name:
+            # Already deleted (or never successfully created a claim).
+            return
+
         await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # Clear only after success so a failed delete can be retried.
+        self.claim_name = None

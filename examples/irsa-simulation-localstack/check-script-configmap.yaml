@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: irsa-sim-check-script
+  namespace: irsa-sim-ns
+data:
+  check_irsa.py: |
+    """Validates the IRSA credential-loading code path against a
+    LocalStack-mocked STS. Does NOT validate the real AWS OIDC trust
+    boundary (issuer/JWKS signature checks) -- LocalStack accepts any web
+    identity token without verifying it. This only proves the pod correctly
+    discovers AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE (injected by
+    amazon-eks-pod-identity-webhook) and can exchange the projected token
+    for credentials via the standard boto3 credential chain -- no
+    application code changes needed.
+    """
+    import os
+    import sys
+
+    import boto3
+
+    # Assert the webhook actually did its job before trusting any credentials
+    # boto3 hands back -- otherwise a stray static/env credential elsewhere in
+    # the pod could make this smoke test pass even if webhook injection is
+    # broken, defeating the point of the check.
+    role_arn = os.environ.get("AWS_ROLE_ARN")
+    token_file = os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE")
+    if not role_arn or not token_file:
+        sys.exit("AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE not set -- webhook did not inject IRSA env vars")
+    with open(token_file) as f:
+        if not f.read().strip():
+            sys.exit(f"{token_file} is empty -- projected ServiceAccount token was not mounted")
+
+    # Read explicitly and pass to the client below rather than relying on
+    # boto3 picking up AWS_ENDPOINT_URL_STS implicitly -- older botocore
+    # versions don't honor that env var at all and would silently call real
+    # AWS STS instead of LocalStack (see README's boto3 version note).
+    sts_endpoint = os.environ.get("AWS_ENDPOINT_URL_STS")
+    if not sts_endpoint:
+        sys.exit("AWS_ENDPOINT_URL_STS not set -- refusing to guess whether this would hit real AWS")
+
+    session = boto3.Session(region_name="us-east-1")
+    resolved_creds = session.get_credentials()
+    if resolved_creds is None:
+        sys.exit("session.get_credentials() returned None -- no credential provider in the chain found anything usable")
+    if resolved_creds.method != "assume-role-with-web-identity":
+        sys.exit(f"boto3 used credential provider {resolved_creds.method!r}, not IRSA -- check is not testing what it claims to")
+
+    creds = resolved_creds.get_frozen_credentials()
+    print(f"Credential provider: {resolved_creds.method}")
+    print(f"AccessKeyId: {creds.access_key}")
+    print(f"SecretKey present: {bool(creds.secret_key)}")
+    print(f"SessionToken present: {bool(creds.token)}")
+
+    sts = session.client("sts", endpoint_url=sts_endpoint)
+    identity = sts.get_caller_identity()
+    print(f"Assumed identity ARN: {identity['Arn']}")

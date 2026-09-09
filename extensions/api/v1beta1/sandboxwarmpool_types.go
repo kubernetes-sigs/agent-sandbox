@@ -50,7 +50,14 @@ type SandboxWarmPoolSpec struct {
 	// +required
 	TemplateRef SandboxTemplateRef `json:"sandboxTemplateRef,omitempty"`
 
-	// updateStrategy - strategy for updating the SandboxWarmPool pods based on sandboxTemplateRef name change or underlying template changes
+	// updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is
+	// considered stale when the effective SandboxBlueprint derived from the referenced
+	// SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits
+	// (annotations or labels) do not make a sandbox stale and never trigger replacement.
+	// It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox
+	// is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer
+	// manages or replaces it.
+	// Defaults to OnReplenish.
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
 }
@@ -61,10 +68,15 @@ type SandboxWarmPoolSpec struct {
 type SandboxWarmPoolUpdateStrategyType string
 
 const (
-	// RecreateSandboxWarmPoolUpdateStrategyType indicates that stale pods are deleted immediately to ensure the pool only contains fresh pods.
-	// Note: This applies to PodTemplate spec changes only. Changes to annotations or labels in the template do not trigger recreate.
+	// RecreateSandboxWarmPoolUpdateStrategyType deletes stale unclaimed sandboxes immediately
+	// so the pool only holds fresh sandboxes matching the current template. Already-claimed
+	// sandboxes are never touched.
+	// Note: This applies to changes in the template's SandboxBlueprint only. Changes to annotations, labels, or template-level policies do not trigger recreate.
 	RecreateSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "Recreate"
-	// OnReplenishSandboxWarmPoolUpdateStrategyType indicates that stale pods are only replaced when they are manually deleted or when these stale pods are adopted by sandboxclaims and hence replaced by fresh pods.
+	// OnReplenishSandboxWarmPoolUpdateStrategyType leaves stale unclaimed sandboxes in place.
+	// A stale sandbox is only replaced with a fresh one when it is manually deleted, or when it
+	// is claimed by a SandboxClaim (which removes it from the pool and triggers replenishment).
+	// Already-claimed sandboxes are never touched.
 	OnReplenishSandboxWarmPoolUpdateStrategyType SandboxWarmPoolUpdateStrategyType = "OnReplenish"
 )
 
@@ -90,6 +102,15 @@ type SandboxWarmPoolStatus struct {
 	// selector is the label selector used to find the pods in the pool.
 	// +optional
 	Selector string `json:"selector,omitempty"`
+
+	// observedGeneration is the most recent generation observed by the controller.
+	// It corresponds to the SandboxWarmPool's metadata.generation, which is bumped
+	// on spec mutations such as replicas changes. Note that SandboxTemplate content
+	// changes do not bump the pool's generation, so this does not track template
+	// rollout progress.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +genclient
@@ -101,7 +122,6 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".spec.replicas"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
-// +kubebuilder:conversion:strategy=Webhook
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.
 type SandboxWarmPool struct {
 	metav1.TypeMeta `json:",inline"`

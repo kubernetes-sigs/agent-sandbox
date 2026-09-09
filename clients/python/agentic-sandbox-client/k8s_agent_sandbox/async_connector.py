@@ -29,11 +29,15 @@ from .models import (
     SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 
 logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+# POST endpoints include command execution, so replaying them can duplicate
+# side effects after the server handled a request but returned a 5xx response.
+RETRYABLE_METHODS = {"GET", "PUT", "DELETE"}
 MAX_RETRIES = 5
 BACKOFF_FACTOR = 0.5
 
@@ -77,6 +81,12 @@ class AsyncSandboxConnector:
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "or SandboxInClusterConnectionConfig instead. "
                 "For local development, use the synchronous SandboxClient."
+            )
+        if isinstance(connection_config, SandboxdPodTunnelConnectionConfig):
+            raise NotImplementedError(
+                "The async client does not support the sandboxd runtime "
+                "(SandboxdPodTunnelConnectionConfig). Use the synchronous "
+                "SandboxClient for sandboxd."
             )
 
         self.id = sandbox_id
@@ -218,10 +228,11 @@ class AsyncSandboxConnector:
                     method, url, headers=headers, follow_redirects=False, **kwargs
                 )
                 if (
-                    response.status_code in RETRYABLE_STATUS_CODES
+                    method.upper() in RETRYABLE_METHODS
+                    and response.status_code in RETRYABLE_STATUS_CODES
                     and attempt < MAX_RETRIES
                 ):
-                    delay = BACKOFF_FACTOR * (2**attempt)
+                    delay = BACKOFF_FACTOR * (2 ** attempt)
                     logger.warning(
                         f"Retryable status {response.status_code} from {url}, "
                         f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
@@ -239,12 +250,14 @@ class AsyncSandboxConnector:
                 return response
             except httpx.HTTPStatusError as e:
                 logger.error(f"Request to sandbox failed: {e}")
-                # Clear cached URLs that may have gone stale.
-                if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
-                    self._base_url = None
-                self._pod_ip_resolved = False
-                self._cached_pod_ip_url = None
-                self._pod_ip = None
+                # 5xx: often a stale Pod IP after a pod swap, clear the cached
+                # routing state so the next request re-resolves.
+                if e.response.status_code >= 500:
+                    if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
+                        self._base_url = None
+                    self._pod_ip_resolved = False
+                    self._cached_pod_ip_url = None
+                    self._pod_ip = None
                 raise SandboxRequestError(
                     f"Failed to communicate with the sandbox at {url}.",
                     status_code=e.response.status_code,

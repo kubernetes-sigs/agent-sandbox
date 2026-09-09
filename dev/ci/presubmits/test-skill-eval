@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Prow presubmit job to run deterministic skill evaluations across all skills in .agents/skills/.
+"""
+
+import glob
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+
+
+def get_skill_name(path_str):
+    parts = Path(path_str).parts
+    if "skills" in parts:
+        idx = parts.index("skills")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return "unknown"
+
+
+def get_repo_root():
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+def main():
+    repo_root = get_repo_root()
+    os.chdir(repo_root)
+
+    print("\n=======================================================")
+    print("Prow Presubmit: Running Deterministic Skill Evaluations")
+    print("=======================================================\n")
+
+    # Find all eval_runner.py scripts across .agents/skills/
+    eval_runners = sorted(glob.glob(".agents/skills/**/evals/eval_runner.py", recursive=True))
+
+    if not eval_runners:
+        print("No skill eval runners found in .agents/skills/.")
+        sys.exit(0)
+
+    failed = False
+    for runner in eval_runners:
+        skill_name = get_skill_name(runner)
+        print(f"--- Running deterministic eval for skill: {skill_name} ---")
+        res = subprocess.run([sys.executable, runner], cwd=repo_root)
+        if res.returncode != 0:
+            print(f"❌ Skill eval failed for: {skill_name}")
+            failed = True
+        else:
+            print(f"✅ Skill eval passed for: {skill_name}\n")
+
+    # If running in Prow CI, copy workspace artifacts to ARTIFACTS dir for Spyglass
+    artifact_dir = os.getenv("ARTIFACTS")
+    if artifact_dir:
+        dest = os.path.join(artifact_dir, "skill-evals")
+        os.makedirs(dest, exist_ok=True)
+        for workspace in glob.glob(".agents/skills/**/evals/workspace", recursive=True):
+            skill_name = get_skill_name(workspace)
+            target_dir = os.path.join(dest, skill_name)
+            shutil.copytree(workspace, target_dir, dirs_exist_ok=True)
+        print(f"Artifacts copied to Prow ARTIFACTS dir: {dest}")
+
+    if failed:
+        print("\n[PRESUBMIT FAIL] One or more skill evaluations failed!")
+        sys.exit(1)
+
+    print("\n[PRESUBMIT SUCCESS] All deterministic skill evaluations passed!")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

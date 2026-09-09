@@ -32,15 +32,26 @@ SANDBOX_VERSION = "v1beta1"
 SANDBOXES_PLURAL = "sandboxes"
 
 # Annotations / labels.
-POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name"
 SANDBOX_NAME_HASH_LABEL = "agents.x-k8s.io/sandbox-name-hash"
 
 # A warm sandbox pod must stay alive to be claimed and exec'd into. Task images
 # have their own entrypoint, so we override it to idle.
 KEEPALIVE_COMMAND = ["sleep", "infinity"]
 
+# Name of the container holding the task image in a SandboxTemplate's pod
+# template. Also the container `discover_pools` reads back to work out which
+# image an existing pool serves; a template written by something else (the fleet
+# layer, a platform team) may name it differently, in which case the first
+# container is used — but only when it is the ONLY container. A multi-container
+# template with no container by this name gives no way to tell the task image
+# from a sidecar, and is skipped for adoption rather than guessed at.
+RUNTIME_CONTAINER = "agent-runtime"
+
 # Default label applied to every resource this package creates (for listing +
 # scoped cleanup).
 MANAGED_BY_LABEL = "app"
 MANAGED_BY_VALUE = "agent-sandbox-rl"
 DEFAULT_LABELS = {MANAGED_BY_LABEL: MANAGED_BY_VALUE}
+# Per-run label stamped on every resource a fleet creates, so an orphaned run's
+# resources can always be swept by the reaper (`reap(run_id=…)`).
+RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"

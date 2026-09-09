@@ -1,0 +1,98 @@
+<!--
+ Copyright 2026 The Kubernetes Authors.
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{% extends "base.html" %}
+
+{% block title %}Node Resources - Sandbox Stress Test Report{% endblock %}
+
+{% block header_title %}Node CPU & I/O Wait{% endblock %}
+
+{% block content %}
+{% if node_cpu_summary %}
+<div class="grid">
+    <div class="card chart-card">
+        <div class="card-title">Node CPU Utilization Over Time</div>
+        <div class="chart-container">
+            <canvas id="nodeCpuChart"></canvas>
+        </div>
+        <div class="card-desc" style="margin-top: 12px;">
+            Busy is all non-idle, non-iowait CPU time; iowait is CPU time stalled waiting on disk.
+            High control-plane busy% slows etcd, the apiserver, KCM and the scheduler together —
+            client-observed etcd latency inflates without etcd's disk being the cause. High iowait
+            with spare CPU points at the disk instead. Workers are averaged across all worker nodes.
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Node CPU by Phase</div>
+    <div class="table-container">
+        <table id="node-cpu-table"></table>
+    </div>
+</div>
+
+<script>
+    const nodeCpuSummary = {{ node_cpu_summary | tojson }};
+    renderTable('#node-cpu-table', [
+        {key: 'phase_name', label: 'Phase', render: v => `<strong>${escapeHtml(v)}</strong>`},
+        {key: 'role', label: 'Role', render: v => `<code>${escapeHtml(v)}</code>`},
+        {key: 'nodes', label: 'Nodes'},
+        {key: 'busy_avg_pct', label: 'Busy (avg)', render: v =>
+            badge(v > 90 ? 'danger' : v > 75 ? 'warning' : 'success', v.toFixed(1) + '%')},
+        {key: 'busy_max_pct', label: 'Busy (max node)', render: v =>
+            badge(v > 90 ? 'danger' : v > 75 ? 'warning' : 'success', v.toFixed(1) + '%')},
+        {key: 'iowait_avg_pct', label: 'I/O wait (avg)', render: v =>
+            badge(v > 25 ? 'danger' : v > 10 ? 'warning' : 'success', v.toFixed(1) + '%')},
+        {key: 'iowait_max_pct', label: 'I/O wait (max node)', render: v =>
+            badge(v > 25 ? 'danger' : v > 10 ? 'warning' : 'success', v.toFixed(1) + '%')}
+    ], nodeCpuSummary);
+
+    const chartData = {{ chart_data | tojson }};
+    const phases = {{ phases | tojson }};
+
+    const timestamps = chartData.map(d => d.ts);
+    const formattedLabels = timeLabels(timestamps);
+    const pointTimes = timestamps.map(ts => new Date(ts).getTime());
+
+    const series = [
+        ['cp_busy', 'control-plane busy %'],
+        ['worker_busy', 'workers busy % (avg)'],
+        ['cp_iowait', 'control-plane iowait %'],
+        ['worker_iowait', 'workers iowait % (avg)'],
+    ];
+    const datasets = series.map(([key, label], idx) =>
+        lineDataset(label, chartData.map(d => d[key] ?? null), idx));
+
+    new Chart(document.getElementById('nodeCpuChart').getContext('2d'), {
+        type: 'line',
+        data: { labels: formattedLabels, datasets: datasets },
+        options: lineChartOptions('% of node CPU'),
+        plugins: [phaseBands(phases, pointTimes, formattedLabels)]
+    });
+</script>
+{% else %}
+<div class="card">
+    <div class="card-title">No node-level metrics in this run</div>
+    <div class="card-desc">
+        Node CPU and iowait are captured from a <code>node-exporter</code> DaemonSet
+        (deployed by the kOps stress scenario; see
+        <code>test/benchmarks/scenarios/benchmarks-kops-gcp/node-exporter.yaml</code>).
+        This run has no <code>source: node</code> samples — an older run, or a scenario
+        that does not deploy node-exporter.
+    </div>
+</div>
+{% endif %}
+{% endblock %}

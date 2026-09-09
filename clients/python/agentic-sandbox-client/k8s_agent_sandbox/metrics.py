@@ -14,9 +14,34 @@
 
 from prometheus_client import Histogram
 
+_LATENCY_BUCKETS_MS = (100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000)
+
 sandbox_client_discovery_latency_ms = Histogram(
     'sandbox_client_discovery_latency_ms',
     'Latency of establishing connection to the sandbox in milliseconds',
     ['mode', 'status'],
-    buckets=(100, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 5000, 10000, 30000, 60000, 120000, 240000)
+    buckets=_LATENCY_BUCKETS_MS
 )
+
+sandbox_client_suspend_latency_ms = Histogram(
+    'sandbox_client_suspend_latency_ms',
+    'Latency of suspending the sandbox in milliseconds',
+    ['status'],
+    buckets=_LATENCY_BUCKETS_MS
+)
+
+sandbox_client_resume_latency_ms = Histogram(
+    'sandbox_client_resume_latency_ms',
+    'Latency of resuming the sandbox in milliseconds',
+    ['status'],
+    buckets=_LATENCY_BUCKETS_MS
+)
+
+sandbox_client_restore_latency_ms = Histogram(
+    'sandbox_client_restore_latency_ms',
+    'Latency of restoring the sandbox from a snapshot in milliseconds',
+    ['status'],
+    buckets=_LATENCY_BUCKETS_MS
+)
+
+

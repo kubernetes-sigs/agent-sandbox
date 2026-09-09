@@ -23,9 +23,14 @@ from __future__ import annotations
 import hashlib
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import constants
+
+# A DNS-1123 subdomain: what the apiserver accepts as an object name. Applied to
+# the *generated* template/pool names, not to the prefix/format on its own.
+_DNS1123 = re.compile(
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
 
 PLACEMENTS = ("round-robin", "least-loaded", "capacity-weighted", "image-affinity")
 
@@ -119,8 +124,49 @@ class FleetConfig(BaseModel):
   warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
+  # Stage the warm fill in waves of <= this many sandbox creates in flight,
+  # waiting for each wave to reach Ready before the next. Bounds the controller's
+  # concurrent create burst (Σ pools×replicas). On controllers <= v0.5.3 this
+  # mitigates (but does NOT prevent) the SandboxWarmPool over-creation race
+  # (issue 1215; fixed in v0.5.4 by PR 1266) — those controllers still need
+  # --sandbox-warm-pool-concurrent-workers <= 10. 0 = warm all at once (old behavior).
+  warm_create_budget: int = 1000
+  # --- runaway safeguards (see plans/sdk-runaway-safeguards.md) ------------- #
+  # Circuit breaker (#1, fail-safe): abort + teardown if live sandboxes this run
+  # owns exceed the safe ceiling — min(expected × overcommit_factor,
+  # max_live_sandboxes). Keys off *intent*, so it catches accidental over-creation
+  # (runaway/orphan/#1215) not a large-but-intended run. 0/None on factor disables.
+  overcommit_factor: float = 1.5
+  max_live_sandboxes: int | None = None      # optional absolute hard ceiling
+  breaker_poll_s: float = 5.0
+  # Trip only after the ceiling is breached for this many *consecutive* polls, so a
+  # transient spike (a claim briefly double-warms before scale-down; Terminating-pod
+  # GC lag) can't tear down a healthy run on a single sample. One healthy poll resets
+  # the counter. Sustained breach = breaker_trip_polls × breaker_poll_s.
+  breaker_trip_polls: int = 3
+  # Guaranteed teardown (#4): install atexit + SIGINT/SIGTERM handlers that tear
+  # the fleet down on any exit path (orphan defense; pairs with the run-id label +
+  # reaper). Set False if the host owns signal handling.
+  install_teardown_hooks: bool = True
   template: TemplateSpec = Field(default_factory=TemplateSpec)
   template_name_prefix: str = "r2e-img-"
+  # How a pool name is derived from its template. `{template}` is the full
+  # SandboxTemplate name, `{image_hash}` the bare 12-char image digest.
+  #
+  # This is configurable because the pool name is an INTERFACE, not an internal
+  # detail: whoever provisioned a warm pool chose its name, and a harness that
+  # hardcodes a different one does not find pools that are standing right in
+  # front of it. The multi-cluster fleet layer, for instance, names its pools
+  # `{template}-pool` — set that here to line up with a fleet-provisioned
+  # cluster. See `adopt_existing` for the stronger guarantee (match by image and
+  # refuse to provision), which does not depend on getting this string right.
+  pool_name_format: str = "pool-{template}"
+  # Use warm pools that already exist instead of creating any. See the field-by-
+  # field contract in `SandboxFleet._plan_adopt`; in short, planning matches each
+  # task image against the pools already in the namespace (by the image in their
+  # template, so any naming scheme works) and raises `PoolNotFoundError` for an
+  # image nothing serves, rather than quietly building a size-1 pool for it.
+  adopt_existing: bool = False
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))
   observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
   # Disk-aware window sizing (all optional; when avg_image_gb is None it's a no-op
@@ -171,12 +217,41 @@ class FleetConfig(BaseModel):
     # ending in '-' before a dot), which fail with a 422 only at create time.
     # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in.
     sample = f"{v}{'0' * 12}"
-    dns1123 = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
-    if len(sample) > 253 or not re.match(dns1123, sample):
+    if len(sample) > 253 or not _DNS1123.match(sample):
       raise ValueError(
           "template_name_prefix must yield a DNS-1123 subdomain when combined "
           f"with the 12-char image hash; got a name like {sample!r}")
     return v
+
+  @model_validator(mode="after")
+  def _valid_pool_name_format(self) -> "FleetConfig":
+    # Validated here rather than as a field_validator because the rendered name
+    # depends on template_name_prefix too.
+    sample_hash = "0" * 12
+    sample_template = f"{self.template_name_prefix}{sample_hash}"
+    try:
+      sample = self.pool_name_format.format(template=sample_template,
+                                            image_hash=sample_hash)
+    except (KeyError, IndexError, ValueError) as e:
+      # ValueError too: an unmatched brace ("pool-{template") raises it from
+      # str.format, and it should get this actionable message, not escape raw.
+      raise ValueError(
+          "pool_name_format may only reference {template} and {image_hash} "
+          f"(use {{{{ }}}} for a literal brace); got {self.pool_name_format!r}") from e
+    if sample_hash not in sample:
+      # Not pedantry: a format with no per-image part maps EVERY image onto one
+      # pool name, so the second image silently upserts the first one's pool and
+      # its tasks claim sandboxes running the wrong image. There is no later
+      # error — the run just produces garbage.
+      raise ValueError(
+          "pool_name_format must include {template} or {image_hash}, otherwise "
+          "every image resolves to the same pool name and they collide; got "
+          f"{self.pool_name_format!r}")
+    if len(sample) > 253 or not _DNS1123.match(sample):
+      raise ValueError(
+          "pool_name_format must yield a DNS-1123 subdomain; "
+          f"{self.pool_name_format!r} renders as {sample!r}")
+    return self
 
   @field_validator("placement")
   @classmethod
@@ -185,8 +260,21 @@ class FleetConfig(BaseModel):
       raise ValueError(f"unknown placement '{v}'; choose from {sorted(PLACEMENTS)}")
     return v
 
+  def image_hash(self, image: str) -> str:
+    """The 12-char digest that makes template/pool names stable per image."""
+    return hashlib.md5(image.encode(), usedforsecurity=False).hexdigest()[:12]
+
   def template_name(self, image: str) -> str:
     """Stable, DNS-compliant SandboxTemplate name for an image (same scheme as
     the rl-sandbox-scripts example: ``<prefix><md5[:12]>``)."""
-    h = hashlib.md5(image.encode(), usedforsecurity=False).hexdigest()[:12]
-    return f"{self.template_name_prefix}{h}"
+    return f"{self.template_name_prefix}{self.image_hash(image)}"
+
+  def pool_name(self, image: str) -> str:
+    """Stable SandboxWarmPool name for an image, per ``pool_name_format``.
+
+    Subclass `FleetConfig` and override this for a scheme the format string can't
+    express (a per-image lookup table, a cluster-qualified name); everything in
+    the SDK that names a pool goes through here."""
+    h = self.image_hash(image)
+    return self.pool_name_format.format(
+        template=self.template_name(image), image_hash=h)

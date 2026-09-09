@@ -1,0 +1,57 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SandboxTemplate + SandboxWarmPool pair for Firecracker sandboxes.
+# The warmpool keeps two warm kata-fc pods ready for instant claim.
+#
+# Replace ${IMAGE} with the location of the firecracker-sandbox container image
+# (for example via: envsubst < sandbox-template-firecracker.yaml | kubectl apply -f -).
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: firecracker-runtime-template
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: firecracker
+    spec:
+      runtimeClassName: kata-fc
+      containers:
+      - name: python-runtime
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8888
+          name: http
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+      nodeSelector:
+        kata-firecracker: "true"
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: firecracker-runtime-warmpool
+  namespace: default
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: firecracker-runtime-template

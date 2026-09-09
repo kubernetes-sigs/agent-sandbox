@@ -172,6 +172,31 @@ spec:
         - --sandbox-warm-pool-concurrent-workers=1
 ```
 
+## TLS Settings
+
+The controller's metrics server can optionally serve over HTTPS with configurable TLS parameters. This is primarily useful for downstream distributions that enforce a cluster-wide TLS security profile.
+
+* `--metrics-secure-serving` (default: `false`): Serve metrics over HTTPS instead of HTTP. When enabled without `--metrics-cert-dir`, a self-signed certificate is generated automatically.
+* `--metrics-cert-dir` (default: `""`): Directory containing `tls.crt` and `tls.key` for the metrics server. Only used when `--metrics-secure-serving` is enabled. The controller exits at startup if either file is missing.
+* `--tls-min-version` (default: Go default, currently TLS 1.2): Minimum TLS version for the metrics server. Accepted values: `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13`.
+* `--tls-cipher-suites` (default: Go defaults): Comma-separated list of cipher suites using Go cipher-suite names (e.g. `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`). TLS 1.3 cipher suites are not configurable in Go and are ignored when `--tls-min-version=VersionTLS13`.
+
+**Example: HTTPS metrics with explicit TLS profile**
+
+```yaml
+      containers:
+      - name: agent-sandbox-controller
+        args:
+        - --leader-elect=true
+        - --metrics-secure-serving
+        - --metrics-bind-address=:8443
+        - --metrics-cert-dir=/etc/metrics-certs
+        - --tls-min-version=VersionTLS12
+        - --tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+```
+
+A downstream operator can inject the cluster TLS profile by translating it into these flags and patching the controller Deployment.
+
 ## SandboxClaim label-domain allowlist
 
 Since v0.5.0, label keys in `SandboxClaim.spec.additionalPodMetadata.labels`

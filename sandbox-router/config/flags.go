@@ -38,6 +38,9 @@ const (
 	EnvOTLPEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	EnvOTLPTracesEndpoint  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	EnvOTLPMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+
+	EnvTLSMinVersion   = "TLS_MIN_VERSION"
+	EnvTLSCipherSuites = "TLS_CIPHER_SUITES"
 )
 
 // LookupEnvFunc matches the signature of os.LookupEnv. Tests inject a fake.
@@ -73,6 +76,15 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"when --mtls-mode is optional or required.")
 	stringEnumVar(fs, (*string)(&c.MTLSMode), "mtls-mode", string(c.MTLSMode),
 		"Client-cert verification policy: off, optional, or required.")
+	fs.StringVar(&c.TLSMinVersion, "tls-min-version", c.TLSMinVersion,
+		"Minimum TLS version for the HTTPS proxy listener. "+
+			"Accepted values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13. "+
+			"Default: VersionTLS12 (applied when empty). "+
+			"Honors "+EnvTLSMinVersion+".")
+	stringSliceVar(fs, &c.TLSCipherSuites, "tls-cipher-suites",
+		"Comma-separated cipher suites for the HTTPS proxy listener, using Go "+
+			"cipher-suite names (e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). "+
+			"Default: Go defaults. Honors "+EnvTLSCipherSuites+".")
 
 	fs.StringVar(&c.ClusterDomain, "cluster-domain", c.ClusterDomain,
 		"Kubernetes cluster DNS suffix used to build sandbox FQDNs. "+
@@ -312,6 +324,20 @@ func applyEnvDefaults(c *Config, lookup LookupEnvFunc) {
 	}
 	if v, ok := lookup(EnvKubeconfig); ok && v != "" {
 		c.Kubeconfig = v
+	}
+	if v, ok := lookup(EnvTLSMinVersion); ok && v != "" {
+		c.TLSMinVersion = v
+	}
+	if v, ok := lookup(EnvTLSCipherSuites); ok && v != "" {
+		parts := strings.Split(v, ",")
+		var out []string
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		c.TLSCipherSuites = out
 	}
 }
 

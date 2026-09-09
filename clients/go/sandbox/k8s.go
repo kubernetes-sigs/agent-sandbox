@@ -139,7 +139,7 @@ func stampClientRequestTime(annotations map[string]string, now time.Time) map[st
 }
 
 // createClaim creates a SandboxClaim and returns its generated name.
-func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, tracer trace.Tracer, svcName string) (string, error) {
+func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, env []extv1beta1.EnvVar, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
 	defer span.End()
 
@@ -164,6 +164,7 @@ func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName str
 			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
 				Name: warmPoolName,
 			},
+			Env: env,
 		},
 	}
 
@@ -442,7 +443,7 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 		state.Annotations = make(map[string]string, len(sb.Annotations))
 		maps.Copy(state.Annotations, sb.Annotations)
 	}
-	if name, ok := sb.Annotations[PodNameAnnotation]; ok {
+	if name, ok := sb.Annotations[PodNameAnnotation]; ok && name != "" {
 		state.PodName = name
 	} else {
 		state.PodName = sb.Name

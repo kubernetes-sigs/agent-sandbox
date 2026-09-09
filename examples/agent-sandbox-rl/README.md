@@ -50,6 +50,12 @@ kubectl get crd | grep agents.x-k8s.io        # expect the 4 CRDs
 kubectl get pods -n agent-sandbox-system       # controller Running
 ```
 
+Run this if the namespace doesn't already exist:
+
+```bash
+kubectl create namespace agent-sandbox-rl
+```
+
 `fleet.preflight()` checks all of this for you and raises `PreflightError` with a
 precise message if something is missing.
 
@@ -89,6 +95,11 @@ The **R2E-Gym adapter** (`adapters.r2egym`) needs R2E-Gym, which isn't on PyPI �
 install it from its checkout (`pip install -e path/to/R2E-Gym`); the adapter
 raises a clear error if it's missing. (No `r2egym` extra for that reason.)
 
+The **OpenHands adapter** (`adapters.openhands`) likewise imports lazily and
+needs the [`openhands-k8s-agent-sandbox`](../../clients/integrations/openhands)
+integration (`pip install openhands-k8s-agent-sandbox`), which pulls the
+OpenHands agent SDK — note the SDK requires **Python >= 3.12**.
+
 ### 4. Verify
 
 ```bash
@@ -98,7 +109,7 @@ pytest examples/agent-sandbox-rl
 # import + reach your cluster
 python -c "import agent_sandbox_rl as a; print('agent-sandbox-rl', a.__version__)"
 python -c "from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig; \
-SandboxFleet(FleetConfig(clusters=[ClusterConfig(name='c', namespace='default')])).preflight()"
+SandboxFleet(FleetConfig(clusters=[ClusterConfig(name='c', namespace='agent-sandbox-rl')])).preflight()"
 ```
 
 A clean `preflight()` (no `PreflightError`) means you're ready for the Quickstart.
@@ -111,7 +122,7 @@ A clean `preflight()` (no `PreflightError`) means you're ready for the Quickstar
 from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig, SweBenchSource, swebench_probe
 
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="rl", namespace="rl-tunix-swebench")],
+    clusters=[ClusterConfig(name="rl", namespace="agent-sandbox-rl")],
     max_concurrent=8, max_warmpool_size=32, placement="image-affinity"))
 fleet.load_tasks(SweBenchSource(limit=8))
 
@@ -148,7 +159,7 @@ results = await fleet.run(async_or_sync_process_fn, strategy="naive", concurrenc
 
 ```bash
 cd examples
-WARMPOOL_STRATEGY=sliding TASKS_LIMIT=4 MAX_CONCURRENT=4 NAMESPACE=rl-tunix-swebench \
+WARMPOOL_STRATEGY=sliding TASKS_LIMIT=4 MAX_CONCURRENT=4 NAMESPACE=agent-sandbox-rl \
 NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool NODE_SELECTOR_VAL=e2-pool \
 python run_swebench_fleet.py
 ```
@@ -166,7 +177,7 @@ python run_swebench_fleet.py
 | **Placement** | Which cluster serves an image: `round-robin`, `least-loaded`, `capacity-weighted`, `image-affinity`. |
 | **Strategy** | *When* pools exist: `none`, `naive`, `sliding`, `pipelined`. |
 | **Recycling** | *Reuse* one sandbox across same-image tasks (reset between): `run(recycle=True)` — orthogonal to strategy — backed by `reuse_git_restore_sandbox` + `GitRestoreReset` (claims scale ÷ tasks-per-image). |
-| **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`). |
+| **Adapters** | Framework glue: `adapters.swebench` (dataset → tasks), `adapters.r2egym` (`make_fleet_repo_env` binds a warm pod into R2E-Gym/tunix `RepoEnv`), `adapters.openhands` (`make_fleet_workspace`/`make_handle_workspace` put OpenHands agent-SDK workspaces on fleet pods). |
 
 ## Warm-pool strategies
 
@@ -250,7 +261,7 @@ behavior is unchanged):
 
 ```python
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="rl", namespace="rl")],
+    clusters=[ClusterConfig(name="rl", namespace="agent-sandbox-rl")],
     max_concurrent=50, max_warmpool_size=16,
     warm_per_task=True,                          # 1 warm replica per task
     template=TemplateSpec(colocate_replicas=True)))  # pack a pool's replicas on one node
@@ -408,6 +419,44 @@ across pools freely, use a single config with no `node_selector` and a node
 affinity in `TemplateSpec.extra_pod_spec` — simpler, but you lose control of the
 split across pools with different pod caps.)
 
+### Adopting warm pools someone else provisioned
+
+If the pools are already standing — put there by the multi-cluster fleet layer, a
+platform team, or an earlier run — set `adopt_existing=True` and this package will
+use them instead of building its own:
+
+```python
+fleet = SandboxFleet(FleetConfig(clusters=[...], adopt_existing=True))
+fleet.load_tasks(source)
+fleet.setup()          # discovers, verifies, creates nothing
+```
+
+Matching is **by image**, not by name: every SandboxWarmPool in the namespace is
+resolved through its `sandboxTemplateRef` to the image its template runs, so a
+pool named by any scheme is found. (This matters — the fleet layer names pools
+`<template>-pool` while this package names them `pool-<template>`, so a harness
+that only knew its own scheme found none of them.)
+
+In adopt mode nothing in the namespace is written: no template is created or
+relabelled, no pool is created, scaled or deleted, and teardown leaves both in
+place while still releasing the claims this run made. A task image that **no**
+pool serves raises `PoolNotFoundError` at `plan()`, naming the images and the
+pool count found per cluster, rather than quietly provisioning a size-1 pool per
+image — a working-but-far-slower run alongside warm pods it never touched.
+
+Two consequences worth knowing: adopted replicas don't count towards
+`active_replicas` or the circuit breaker's intent ceiling (they aren't this run's
+to over-create, and their pods carry the provisioner's labels, not its run-id —
+only an explicit `max_live_sandboxes` still applies), and `set_pool_replicas` /
+`unwarm_image` become no-ops, so `recycle(scale_on_hold=True)` and the sliding
+window won't resize a pool they don't own.
+
+If you'd rather keep creating pools but line their **names** up with an existing
+convention, set `pool_name_format` on its own — `"{template}-pool"` for the fleet
+layer's scheme, `"warm-{image_hash}"` for a bare digest. Override
+`FleetConfig.pool_name(image)` in a subclass for anything the format string can't
+express; every pool name in the SDK goes through it.
+
 ## Configuration reference
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
@@ -416,7 +465,10 @@ split across pools with different pod caps.)
 the warm fill in waves of ≤ N sandbox creates in flight to bound the controller's
 create burst; on controllers ≤ v0.5.3 also pair with a low
 `--sandbox-warm-pool-concurrent-workers` to dodge #1215; `0` = warm all at once), `template`
-(`TemplateSpec`), `template_name_prefix` (`r2e-img-`), `labels`. Disk-aware sizing (optional):
+(`TemplateSpec`), `template_name_prefix` (`r2e-img-`), `pool_name_format`
+(`pool-{template}`; `{image_hash}` also available), `adopt_existing` (False — use
+pools that already exist and fail loudly on a miss, see
+[above](#adopting-warm-pools-someone-else-provisioned)), `labels`. Disk-aware sizing (optional):
 `avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
 (None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
 images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct images
@@ -489,7 +541,7 @@ Three layers, mirroring the `k8s-agent-sandbox` SDK so traces/metrics interopera
    ```text
    ── Run report (strategy=naive) ──
      environment:
-       default: context=(ambient)  namespace=rl-tunix-swebench  k8s_version=v1.35...
+       default: context=(ambient)  namespace=agent-sandbox-rl  k8s_version=v1.35...
                 nodes=11  node_pools=[e2-pool,...]  region=us-central2
      preflight              1.35s  (n=1, max=1.35s)
      wait_pool_ready        8.44s  (n=2, max=4.22s)
@@ -598,9 +650,8 @@ PYTHONPATH=. python tests/run_full_swebench_benchmark.py \
 The fleet can fan out hundreds–thousands of concurrent claims, but throughput is
 ultimately bounded by the **Agent Sandbox controller's** reconcile concurrency, not
 this package. The controller ships with conservative defaults: the **Sandbox**
-controller reconciles at **1 worker** and **SandboxClaim** at **50** — so a
-1000-wide `max_concurrent` run still has its sandbox state transitions serialized
-one at a time. For large eval/RL batches, raise the controller's worker flags (on
+controller reconciles at **100 workers** and **SandboxClaim** at **50** — so a
+1000-wide `max_concurrent` run can still queue behind reconcile concurrency. For large eval/RL batches, raise the controller's worker flags (on
 the controller Deployment's container args, namespace `agent-sandbox-system`):
 
 | flag | default | recommended (high scale) | why |

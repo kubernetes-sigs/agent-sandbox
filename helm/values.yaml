@@ -8,6 +8,11 @@ image:
   tag: ""  # required, eg. v0.3.10
   pullPolicy: IfNotPresent
 
+# imagePullSecrets adds image pull secrets to the controller PodSpec (spec.template.spec.imagePullSecrets).
+# Example:
+# imagePullSecrets:
+#   - name: my-registry-creds
+imagePullSecrets: []
 replicaCount: 1
 
 # podAnnotations are added to the controller pod template.
@@ -85,8 +90,9 @@ podSecurityContext: null
 #     type: RuntimeDefault
 containerSecurityContext: null
 
-# Name of the webhook service.
-webhookServiceName: agent-sandbox-webhook-service
+service:
+  # name sets the name of the controller Service that exposes the metrics endpoint.
+  name: agent-sandbox-controller
 
 metrics:
   # serviceMonitor creates a Prometheus Operator ServiceMonitor that scrapes the
@@ -101,3 +107,16 @@ metrics:
     interval: 30s
     # scrapeTimeout is omitted unless set (Prometheus defaults apply).
     scrapeTimeout: ""
+  # prometheusRule creates a Prometheus Operator PrometheusRule with a small
+  # starter alert set for the controller metrics endpoint. Requires the
+  # prometheus-operator CRDs (monitoring.coreos.com/v1) to be installed.
+  prometheusRule:
+    enabled: false
+    # additionalLabels are added to the PrometheusRule. Most Prometheus instances
+    # only select PrometheusRules matching their ruleSelector, e.g.:
+    #   release: kube-prometheus-stack
+    additionalLabels: {}
+    # additionalGroups appends additional Prometheus rule groups after the
+    # chart's starter group. Each list item must be a full Prometheus rule
+    # group object.
+    additionalGroups: []

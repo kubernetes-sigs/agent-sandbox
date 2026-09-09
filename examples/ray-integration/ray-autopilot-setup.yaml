@@ -8,7 +8,7 @@ spec:
       runtimeClassName: gvisor
       containers:
       - name: runtime
-        image: # REPLACE_WITH_YOUR_IMAGE
+        image: REPLACE_WITH_YOUR_IMAGE  # e.g. us-central1-docker.pkg.dev/<project>/<repo>/python-runtime-sandbox:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8888

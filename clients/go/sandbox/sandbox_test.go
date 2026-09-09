@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -151,7 +152,7 @@ func readySandbox(name string) *sandboxv1beta1.Sandbox {
 			Name:      name,
 			Namespace: "default",
 			Annotations: map[string]string{
-				PodNameAnnotation: name + "-pod",
+				"test-annotation": "test-value",
 			},
 		},
 		Status: sandboxv1beta1.SandboxStatus{
@@ -201,11 +202,6 @@ func setupWatchWithReactor(agentsCS *fakeagents.Clientset, extensionsCS *fakeext
 		}
 		matched := sb.DeepCopy()
 		matched.Name = name
-		if matched.Annotations != nil {
-			if _, has := matched.Annotations[PodNameAnnotation]; has {
-				matched.Annotations[PodNameAnnotation] = name + "-pod"
-			}
-		}
 		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*matched}}, nil
 	})
 }
@@ -251,6 +247,47 @@ func TestNew_DefaultsApplied(t *testing.T) {
 	}
 }
 
+func TestExtractState_PodNameAnnotationFallback(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        string
+	}{
+		{
+			name:        "empty annotation falls back to sandbox name",
+			annotations: map[string]string{PodNameAnnotation: ""},
+			want:        "test-sandbox",
+		},
+		{
+			name:        "absent annotation falls back to sandbox name",
+			annotations: nil,
+			want:        "test-sandbox",
+		},
+		{
+			name:        "set annotation is honored",
+			annotations: map[string]string{PodNameAnnotation: "custom-pod"},
+			want:        "custom-pod",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-sandbox",
+					Annotations: tt.annotations,
+				},
+			}
+
+			state := extractState(sb)
+
+			if state.PodName != tt.want {
+				t.Errorf("expected PodName=%q, got %q", tt.want, state.PodName)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle tests
 // ---------------------------------------------------------------------------
@@ -272,7 +309,7 @@ func TestOpen_CreatesClaimAndBecomesReady(t *testing.T) {
 	if !c.IsReady() {
 		t.Error("expected IsReady()=true after Open")
 	}
-	expectedPod := c.ClaimName() + "-pod"
+	expectedPod := c.SandboxName()
 	if c.PodName() != expectedPod {
 		t.Errorf("expected PodName=%s, got %s", expectedPod, c.PodName())
 	}
@@ -399,34 +436,6 @@ func TestClose_ToleratesAlreadyClosed(t *testing.T) {
 
 	if err := c.Close(context.Background()); err != nil {
 		t.Fatalf("Close() on unopened client returned error: %v", err)
-	}
-}
-
-func TestOpen_PodNameFallsBackToSandboxName(t *testing.T) {
-	opts := defaultTestOpts()
-	c, agentsCS, extensionsCS := newTestSandbox(opts)
-
-	sb := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sb-no-annotation",
-			Namespace: "default",
-		},
-		Status: sandboxv1beta1.SandboxStatus{
-			Conditions: []metav1.Condition{
-				{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
-			},
-		},
-	}
-	setupWatchWithReactor(agentsCS, extensionsCS, sb)
-
-	ctx := context.Background()
-	if err := c.Open(ctx); err != nil {
-		t.Fatalf("Open() returned error: %v", err)
-	}
-	defer c.Close(context.Background())
-
-	if c.PodName() != c.SandboxName() {
-		t.Errorf("expected PodName to fall back to sandbox name %s, got %s", c.SandboxName(), c.PodName())
 	}
 }
 
@@ -1396,6 +1405,42 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 	}
 }
 
+func TestOpen_CreateClaimSendsEnv(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.Env = []extv1beta1.EnvVar{
+		{Name: "FOO", Value: "bar"},
+		{Name: "DEBUG", Value: "true"},
+	}
+	c, agentsCS, extensionsCS := newTestSandbox(opts)
+
+	var capturedEnv []extv1beta1.EnvVar
+	fakeWatcher := watch.NewFake()
+
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ca := action.(ktesting.CreateAction)
+		claim, ok := ca.GetObject().(*extv1beta1.SandboxClaim)
+		if ok {
+			if claim.Name == "" && claim.GenerateName != "" {
+				claim.Name = claim.GenerateName + "test12345"
+			}
+			capturedEnv = claim.Spec.Env
+			go fakeWatcher.Add(readySandbox(claim.Name))
+		}
+		return false, nil, nil
+	})
+
+	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(fakeWatcher, nil))
+
+	if err := c.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer c.Close(context.Background())
+
+	if !reflect.DeepEqual(capturedEnv, opts.Env) {
+		t.Errorf("expected env %+v, got %+v", opts.Env, capturedEnv)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Rollback failure path
 // ---------------------------------------------------------------------------
@@ -1707,9 +1752,8 @@ func TestAnnotations_ReturnsAnnotations(t *testing.T) {
 	if ann == nil {
 		t.Fatal("expected non-nil annotations")
 	}
-	expectedPod := c.ClaimName() + "-pod"
-	if ann[PodNameAnnotation] != expectedPod {
-		t.Errorf("expected pod annotation %s, got %s", expectedPod, ann[PodNameAnnotation])
+	if ann["test-annotation"] != "test-value" {
+		t.Errorf("expected test-annotation test-value, got %s", ann["test-annotation"])
 	}
 }
 
@@ -2382,8 +2426,7 @@ func TestSetState_ClearsStaleAnnotations(t *testing.T) {
 		SandboxName: "sb1",
 		PodName:     "pod1",
 		Annotations: map[string]string{
-			PodNameAnnotation: "pod1",
-			"custom":          "value",
+			"custom": "value",
 		},
 	})
 	if c.Annotations() == nil {

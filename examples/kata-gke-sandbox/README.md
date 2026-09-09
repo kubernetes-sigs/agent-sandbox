@@ -111,16 +111,16 @@ kubectl exec -it $POD_NAME -- uname -r
 | Error                                           | Cause                                                                                  | Solution                                                                                       |
 | :---------------------------------------------- | :------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------- |
 | **Pod Stuck in ContainerCreating or CrashLoopBackOff** | The node does not support Nested Virtualization.                                         | Check machine type. Ensure you are using **N2 (Intel)**. Do not use E2 or AMD.                 |
-| **404 Not Found during kubectl apply**          | The GitHub raw URLs in the main branch changed.                                        | Use the pinned 3.2.0 URLs provided in Step 2.                                                  |
-| **no handler found error in Pod events**        | The RuntimeClass is missing or the node hasn't finished installing Kata.                 | Verify Step 3 was applied. Check kube-system pods are running.                               |
+| **404 Not Found during kubectl apply**          | The GitHub raw URLs in the main branch changed.                                        | Use the pinned 3.2.0 URLs used by setup.sh (KATA_VERSION).                                                  |
+| **no handler found error in Pod events**        | The RuntimeClass is missing or the node hasn't finished installing Kata.                 | Verify setup.sh completed its RuntimeClass registration step. Check kube-system pods are running.                               |
 
-### Further Troubleshooting
+## Further Troubleshooting
 
 For issues not covered in the table, the following resources may be helpful:
 
 *   **Agent Sandbox Controller:** Check the controller's logs for errors related to the sandbox resource:
     ```shell
-    kubectl logs statefulset/agent-sandbox-controller -n agent-sandbox-system
+    kubectl logs deployment/agent-sandbox-controller -n agent-sandbox-system
     ```
 *   **General Pod Issues:** For problems with the pod itself (e.g., `ImagePullBackOff`, `CrashLoopBackOff`), use `kubectl describe pod <pod-name>`. See the official [Kubernetes guide to debugging pods](https://kubernetes.io/docs/tasks/debug/debug-pod-replication-controller/).
 *   **Kata Containers:** For issues related to the Kata runtime itself, refer to the [Kata Containers troubleshooting guide](https://github.com/kata-containers/kata-containers/blob/main/docs/troubleshooting.md).

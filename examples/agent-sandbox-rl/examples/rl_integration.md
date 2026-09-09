@@ -22,7 +22,7 @@ the instant-claim levers so no rollout queues behind another:
 from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig, TemplateSpec
 
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    clusters=[ClusterConfig(name="c1", namespace="agent-sandbox-rl")],
     max_concurrent=64,
     max_warmpool_size=16,                 # >= rollouts per problem (G)
     warm_per_task=True,                   # one warm replica per rollout
@@ -53,7 +53,7 @@ from agent_sandbox_rl.sources import to_tasks
 # SHALLOW warm: recycle holds ~1 sandbox per problem, so 1 replica/pool is enough.
 # Do NOT deep-warm (warm_per_task) for recycling — that stresses the warm-pool controller.
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    clusters=[ClusterConfig(name="c1", namespace="agent-sandbox-rl")],
     max_concurrent=500,                                    # concurrent problems held
     template=TemplateSpec(resources=ResourceSpec(cpu="250m", memory="512Mi"))))
 
@@ -110,7 +110,7 @@ the SDK is fail-safe by default:
 from agent_sandbox_rl import SandboxFleet, FleetConfig, ClusterConfig, SweBenchSource
 
 fleet = SandboxFleet(FleetConfig(
-    clusters=[ClusterConfig(name="c1", namespace="rl")],
+    clusters=[ClusterConfig(name="c1", namespace="agent-sandbox-rl")],
     max_concurrent=16, max_warmpool_size=32, placement="image-affinity"))
 fleet.load_tasks(SweBenchSource(limit=500))
 fleet.setup()                         # preflight + plan + warm pools
@@ -246,6 +246,46 @@ fleet = AsyncSandboxFleet(cfg); fleet.load_tasks(src)
 results = await fleet.run(async_rollout, strategy="sliding", concurrency=64)
 ```
 
+## OpenHands (agent SDK)
+
+OpenHands conversations run against a *workspace*; the
+[`openhands-k8s-agent-sandbox`](../../../clients/integrations/openhands)
+integration binds one to an agent-sandbox pod. `adapters.openhands` puts those
+workspaces on **fleet-managed** pods (same ownership inversion as R2E-Gym: the
+fleet acquires/releases, the workspace only binds). Two forms, matching who
+drives the loop:
+
+```python
+# fleet.run drives (it acquires + releases around process_fn):
+from agent_sandbox_rl.adapters.openhands import make_handle_workspace
+
+def rollout(task, handle):
+    workspace = make_handle_workspace(handle, api_key=POOL_KEY)
+    try:
+        conversation = Conversation(agent=agent, workspace=workspace)
+        try:
+            conversation.send_message(prompt); conversation.run()
+            return {"id": task.id, "status": str(conversation.state.execution_status)}
+        finally:
+            conversation.close()
+    finally:
+        workspace.cleanup()   # no-op on the pod; the fleet releases
+
+results = fleet.run(rollout, strategy="naive", concurrency=64)
+
+# you drive (the workspace acquires from the fleet; close() releases):
+from agent_sandbox_rl.adapters.openhands import make_fleet_workspace
+with make_fleet_workspace(fleet, task, api_key=POOL_KEY) as workspace:
+    ...
+```
+
+The pool's template must *run* the agent-server (`TemplateSpec.keepalive_command`
+replaces the image entrypoint) with a `/health` readinessProbe merged via
+`extra_pod_spec` — `examples/run_openhands_fleet.py` is the complete runnable
+version (with a no-LLM smoke mode). Fleet-owned kwargs (`warmpool`, `ttl_s`,
+`sandbox_client`) raise; needs `pip install openhands-k8s-agent-sandbox`
+(Python >= 3.12 — the `openhands-sdk` floor).
+
 ## Multi-cluster
 
 Give several `ClusterConfig`s (different `context`/`kubeconfig`) and a
@@ -254,8 +294,8 @@ Give several `ClusterConfig`s (different `context`/`kubeconfig`) and a
 
 ```python
 FleetConfig(clusters=[
-    ClusterConfig(name="us-central2", context="ctx-a", namespace="rl"),
-    ClusterConfig(name="us-east1",   context="ctx-b", namespace="rl", weight=2.0),
+    ClusterConfig(name="us-central2", context="ctx-a", namespace="agent-sandbox-rl"),
+    ClusterConfig(name="us-east1",   context="ctx-b", namespace="agent-sandbox-rl", weight=2.0),
 ], placement="image-affinity", max_concurrent=128)
 ```
 

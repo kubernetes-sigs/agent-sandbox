@@ -19,6 +19,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
@@ -197,6 +198,174 @@ func TestRegistryCall_DoesNotMutateRegisteredTemplate(t *testing.T) {
 	}
 	if template.Command != "should-not-be-used" {
 		t.Errorf("registered template was mutated: Command = %q, want unchanged %q", template.Command, "should-not-be-used")
+	}
+}
+
+// --- Registry.ToolTimeout ---
+
+func TestRegistryCall_SucceedsWithTimeoutConfigured(t *testing.T) {
+	r := NewRegistry()
+	r.Add(&RunCommand{})
+	r.ToolTimeout = time.Minute
+	sandbox := &fakeSandbox{
+		responses: []fakeResponse{{result: &ExecCommandResult{Stdout: "hi\n", ExitCode: 0}}},
+	}
+
+	msg, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
+	})
+	if err != nil {
+		t.Fatalf("Call() returned error: %v", err)
+	}
+	if msg.Content == nil || !strings.Contains(*msg.Content, "hi") {
+		t.Errorf("Content = %v, want it to contain %q", msg.Content, "hi")
+	}
+}
+
+func TestRegistryCall_TimeoutCancelsBlockingTool(t *testing.T) {
+	r := NewRegistry()
+	r.Add(&RunCommand{})
+	// A short but non-trivial real timeout: this test genuinely waits for
+	// this timer to fire. Large enough to avoid flaking under CI scheduling
+	// jitter, small enough to keep the test fast.
+	r.ToolTimeout = 20 * time.Millisecond
+	sandbox := &fakeSandbox{
+		responses: []fakeResponse{{block: true}},
+	}
+
+	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"sleep 99999"}`},
+	})
+	if err == nil {
+		t.Fatal("Call() returned nil error for a tool that never returns on its own")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	wantSubstrings := []string{`"run_command"`, "timed out", r.ToolTimeout.String()}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestRegistryCall_ParentCancellationIsNotReportedAsTimeout(t *testing.T) {
+	r := NewRegistry()
+	r.Add(&RunCommand{})
+	// Configured long enough that it would never fire on its own; the test
+	// proves parent cancellation wins the race deterministically, not by
+	// chance.
+	r.ToolTimeout = time.Hour
+	sandbox := &fakeSandbox{
+		responses: []fakeResponse{{block: true}},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Parent is already done before Call ever runs.
+
+	_, err := r.Call(ctx, sandbox, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"sleep 99999"}`},
+	})
+	if err == nil {
+		t.Fatal("Call() returned nil error for a cancelled parent context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, incorrectly wraps context.DeadlineExceeded for parent cancellation", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("err = %q, incorrectly describes parent cancellation as a timeout", err.Error())
+	}
+}
+
+func TestRegistryCall_ParentDeadlineIsNotReportedAsToolTimeout(t *testing.T) {
+	r := NewRegistry()
+	r.Add(&RunCommand{})
+	// Configured long enough that, if this fired on its own, it would prove
+	// exactly the bug this test guards against: the registry must never
+	// blame its own configured timeout for a deadline the parent already
+	// owned, even though both report context.DeadlineExceeded from Err().
+	r.ToolTimeout = time.Hour
+	sandbox := &fakeSandbox{
+		responses: []fakeResponse{{block: true}},
+	}
+
+	// Parent deadline already in the past: context.WithTimeoutCause
+	// synchronously inherits the parent's already-set cause when
+	// constructing runCtx (see context.propagateCancel), so this never
+	// waits on a timer.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+	defer cancel()
+
+	_, err := r.Call(ctx, sandbox, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"sleep 99999"}`},
+	})
+	if err == nil {
+		t.Fatal("Call() returned nil error for an already-expired parent deadline")
+	}
+	// The parent's own deadline genuinely did expire, so this must still
+	// wrap DeadlineExceeded -- just not attribute it to our ToolTimeout.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("err = %q, incorrectly describes the parent's own expired deadline as our configured tool timeout", err.Error())
+	}
+	if strings.Contains(err.Error(), r.ToolTimeout.String()) {
+		t.Errorf("err = %q, incorrectly claims the configured ToolTimeout (%s) fired", err.Error(), r.ToolTimeout)
+	}
+}
+
+func TestRegistryCall_ZeroTimeoutDisablesWrapping(t *testing.T) {
+	r := NewRegistry()
+	r.Add(&RunCommand{})
+	// r.ToolTimeout left at its zero value: timeout disabled.
+	sandbox := &fakeSandbox{
+		responses: []fakeResponse{{result: &ExecCommandResult{ExitCode: 0}}},
+	}
+
+	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
+	})
+	if err != nil {
+		t.Fatalf("Call() returned error: %v", err)
+	}
+	if len(sandbox.ctxs) != 1 {
+		t.Fatalf("ExecCommand called %d times, want 1", len(sandbox.ctxs))
+	}
+	if _, ok := sandbox.ctxs[0].Deadline(); ok {
+		t.Error("ExecCommand received a context with a deadline despite ToolTimeout being disabled")
+	}
+}
+
+func TestRegistryCall_ConfiguredTimeoutSetsDeadline(t *testing.T) {
+	r := NewRegistry()
+	r.Add(&RunCommand{})
+	r.ToolTimeout = time.Minute
+	sandbox := &fakeSandbox{
+		responses: []fakeResponse{{result: &ExecCommandResult{ExitCode: 0}}},
+	}
+
+	_, err := r.Call(context.Background(), sandbox, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.FunctionCall{Name: "run_command", Arguments: `{"command":"echo hi"}`},
+	})
+	if err != nil {
+		t.Fatalf("Call() returned error: %v", err)
+	}
+	if len(sandbox.ctxs) != 1 {
+		t.Fatalf("ExecCommand called %d times, want 1", len(sandbox.ctxs))
+	}
+	if _, ok := sandbox.ctxs[0].Deadline(); !ok {
+		t.Error("ExecCommand did not receive a context with a deadline despite ToolTimeout being configured")
 	}
 }
 

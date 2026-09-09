@@ -41,6 +41,7 @@ class TestCommandExecutor(unittest.TestCase):
         mock_trace.get_current_span.return_value = mock_span
 
         mock_connector = MagicMock()
+        mock_connector.is_sandboxd.return_value = False  # legacy HTTP execute path
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "stdout": "hello",

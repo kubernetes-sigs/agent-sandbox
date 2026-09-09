@@ -34,8 +34,8 @@ func TestAnnotationsByteExact(t *testing.T) {
 	}{
 		{
 			name: "single key",
-			kv:   map[string]string{"agents.x-k8s.io/pod-name": "my-pod-abc12"},
-			want: `{"metadata":{"annotations":{"agents.x-k8s.io/pod-name":"my-pod-abc12"}}}`,
+			kv:   map[string]string{"example.com/annotation": "my-pod-abc12"},
+			want: `{"metadata":{"annotations":{"example.com/annotation":"my-pod-abc12"}}}`,
 		},
 		{
 			name: "two keys emitted in sorted order regardless of insertion order",
@@ -121,9 +121,9 @@ func TestEquivalenceWithMergeFrom(t *testing.T) {
 
 	t.Run("annotations", func(t *testing.T) {
 		add := map[string]string{
-			"agents.x-k8s.io/pod-name": "pod-1",
-			"trace/context":            "00-ff-01",
-			"escape/check":             "a<b>&\"c\"\n",
+			"example.com/annotation": "pod-1",
+			"trace/context":          "00-ff-01",
+			"escape/check":           "a<b>&\"c\"\n",
 		}
 		modified := base.DeepCopy()
 		legacy := client.MergeFrom(base.DeepCopy())

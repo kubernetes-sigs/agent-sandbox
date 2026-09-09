@@ -10,20 +10,20 @@ It supports three connectivity modes: **Gateway** (Kubernetes Gateway API), **Po
 
 ## Architecture
 
-The client operates in three modes:
+The client operates in three connectivity modes:
 
-1. **Production (Gateway Mode):** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
+1. **Gateway Mode:** Traffic flows from the Client -> Cloud Load Balancer (Gateway)
    -> Router Service -> Sandbox Pod. The client watches the Gateway resource for an external IP.
-2. **Development (Port-Forward Mode):** Traffic flows from the Client -> SPDY tunnel -> Router
-   Service -> Sandbox Pod. Uses `client-go/tools/portforward` natively, no `kubectl` required.
-3. **Advanced / Internal Mode:** The client connects directly to a provided `APIURL`, bypassing
+2. **Port-Forward Mode:** Traffic flows from the Client -> SPDY tunnel -> Router
+   Service -> Sandbox Pod. Uses `client-go/tools/portforward` natively, no `kubectl` required (ideal for local development and CI).
+3. **Direct URL Mode:** The client connects directly to a provided `APIURL`, bypassing
    discovery. Useful for in-cluster agents or custom domains.
 
 ## Prerequisites
 
 - A running Kubernetes cluster with a valid kubeconfig (or in-cluster config). This is required even in Direct URL mode because the client creates Kubernetes clientsets for SandboxClaim lifecycle management.
 - The [**Agent Sandbox Controller**](https://github.com/kubernetes-sigs/agent-sandbox?tab=readme-ov-file#installation) installed.
-- The **Sandbox Router** deployed in the target namespace (`sandbox-router-svc`).
+- The **Sandbox Router** deployed in the target namespace (see [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/README.md) and its [deployment manifests](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router/deploy)). *(Note: If you are using a specific tagged release, replace `main` in these URLs with your version tag.)*
 - A `SandboxWarmPool` created in the target namespace.
 - Go 1.26+.
 
@@ -50,7 +50,7 @@ go get sigs.k8s.io/agent-sandbox/clients/go/sandbox@latest
 
 ## Usage Examples
 
-### 1. Production Mode (Gateway)
+### 1. Gateway Mode
 
 Use this when running against a cluster with a public Gateway IP. The client automatically
 discovers the Gateway address.
@@ -71,7 +71,7 @@ if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
 
-### 2. Developer Mode (Port-Forward)
+### 2. Port-Forward Mode
 
 Use this for local development or CI. If you omit `GatewayName` and `APIURL`, the client
 automatically establishes an SPDY port-forward tunnel to the Router Service.
@@ -89,7 +89,7 @@ if err != nil { log.Fatal(err) }
 fmt.Println(result.Stdout)
 ```
 
-### 3. Advanced / Internal Mode
+### 3. Direct URL Mode
 
 Use `APIURL` to bypass discovery entirely. Useful for:
 
@@ -127,6 +127,18 @@ client, err := sandbox.NewClient(ctx, sandbox.Options{
 // Write a file (must be a plain filename, no directory separators).
 // Paths like "dir/script.py" are rejected with an error.
 err := sb.Write(ctx, "script.py", []byte("print('hello')"))
+
+// Stream a large file without buffering it in memory. Streaming uploads use
+// one request attempt because an io.Reader cannot generally be replayed.
+// Legacy runtime uploads use HTTP chunked transfer encoding, so the runtime
+// and any proxy in front of it must accept requests without Content-Length.
+// (The example requires imports for os and log.)
+file, err := os.Open("model.bin")
+if err != nil { log.Fatal(err) }
+defer file.Close()
+if err := sb.WriteReader(ctx, "model.bin", file); err != nil {
+    log.Fatal(err)
+}
 
 // Read a file
 data, err := sb.Read(ctx, "script.py")
@@ -176,6 +188,9 @@ All options are documented on the `Options` struct in
 [options.go](sandbox/options.go). Key fields:
 
 - `WarmPoolName`: passed per-sandbox to `CreateSandbox`.
+- `Env`: environment variables to inject into the `SandboxClaim`. Setting this
+  forces a cold start from the warm pool template instead of adopting a
+  pre-warmed pod, which may increase startup latency.
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
@@ -191,6 +206,10 @@ result, err := client.Run(ctx, "make build", sandbox.WithTimeout(10*time.Minute)
 
 File operations (`Read`, `Write`, `List`, `Exists`) are automatically retried (up to
 6 attempts) on 500/502/503/504 responses and connection errors with exponential backoff.
+`WriteReader` streams from an `io.Reader` with a single request attempt because a
+reader cannot generally be replayed safely after a partial upload. Passing
+`WithMaxAttempts(n)` with `n > 1` returns an error rather than silently reducing
+the operation to a single attempt.
 
 **Important:** `Run()` defaults to a single attempt (no retries) because command
 execution is not idempotent. Use `WithMaxAttempts` to opt in to retries for
@@ -237,7 +256,7 @@ if err := client.Open(ctx); err != nil { ... }
 | `CleanupTimeout` | 30 s | Claim deletion during rollback / Close |
 | `RequestTimeout` | 180 s | Total timeout per SDK method call (Run, Read, …) |
 | `PerAttemptTimeout` | 60 s | Time to receive response headers per attempt |
-| `MaxUploadSize` | 256 MB | Maximum content size for `Write()` |
+| `MaxUploadSize` | 256 MB | Maximum content size for `Write()` and `WriteReader()` |
 | `MaxDownloadSize` | 256 MB | Maximum response body size for `Read()` |
 
 ## Port-Forward Recovery

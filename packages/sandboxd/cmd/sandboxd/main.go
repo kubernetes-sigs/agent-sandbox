@@ -18,10 +18,11 @@
 //	gRPC  :9090  ProcessService    — streaming process execution
 //	HTTP  :8080  FilesystemService — stateless file operations & probes
 //
-// Both listeners always bind to 127.0.0.1; they are reachable outside the
-// pod solely through explicit proxying (sandbox-router). SDKs discover the
-// endpoints via the SANDBOXD_GRPC_ADDR / SANDBOXD_REST_ADDR environment
-// variables on the workload container.
+// Both listeners bind to --listen-host (default 0.0.0.0), so the daemon is
+// reachable on the pod network — via a Service or the sandbox-router — like
+// any other in-pod service. Containment comes from pod isolation and
+// NetworkPolicy, not loopback binding; pass --listen-host=127.0.0.1 to
+// restrict to loopback for local development.
 package main
 
 import (
@@ -60,14 +61,17 @@ const (
 	// file PUT/GET streams, which this API exists to serve.
 	readHeaderTimeout = 10 * time.Second
 
-	// loopbackHost is the only interface sandboxd ever binds: the runtime
-	// API must not be reachable from outside the pod without explicit
-	// proxying (sandbox-router).
-	loopbackHost = "127.0.0.1"
+	// defaultListenHost is the interface sandboxd binds by default. It is
+	// 0.0.0.0 so the daemon is reachable on the pod network — via a Service
+	// or the sandbox-router — like any other in-pod service. Containment is
+	// provided by pod isolation and NetworkPolicy, not by loopback binding.
+	// Set --listen-host=127.0.0.1 to restrict to loopback (e.g. local dev).
+	defaultListenHost = "0.0.0.0"
 )
 
 // config holds the daemon's flag-configurable settings.
 type config struct {
+	listenHost        string
 	grpcPort          int
 	restPort          int
 	rootDir           string
@@ -82,10 +86,12 @@ func main() {
 	var cfg config
 	zapOpts := zap.Options{Development: false}
 
+	flag.StringVar(&cfg.listenHost, "listen-host", defaultListenHost,
+		"Host interface to bind the gRPC and REST listeners on. Defaults to 0.0.0.0 so the daemon is reachable on the pod network; set to 127.0.0.1 to restrict to loopback.")
 	flag.IntVar(&cfg.grpcPort, "grpc-port", 9090,
-		"Port for the gRPC ProcessService. Binds to 127.0.0.1.")
+		"Port for the gRPC ProcessService.")
 	flag.IntVar(&cfg.restPort, "rest-port", 8080,
-		"Port for the Filesystem & Runtime REST API. Binds to 127.0.0.1.")
+		"Port for the Filesystem & Runtime REST API.")
 	flag.StringVar(&cfg.rootDir, "root-dir", "/workspace",
 		"Sandbox root directory that file operations and working directories are confined to. Created if missing.")
 	flag.StringVar(&cfg.metadataEnvPrefix, "metadata-env-prefix", "SANDBOX_",
@@ -153,8 +159,8 @@ func run(cfg *config, log logr.Logger) error {
 		return fmt.Errorf("build server: %w", err)
 	}
 
-	grpcAddr := net.JoinHostPort(loopbackHost, strconv.Itoa(cfg.grpcPort))
-	restAddr := net.JoinHostPort(loopbackHost, strconv.Itoa(cfg.restPort))
+	grpcAddr := net.JoinHostPort(cfg.listenHost, strconv.Itoa(cfg.grpcPort))
+	restAddr := net.JoinHostPort(cfg.listenHost, strconv.Itoa(cfg.restPort))
 
 	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {

@@ -16,8 +16,42 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+import functools
 import ipaddress
+import time
+from typing import Any
 
+from .constants import SANDBOX_NAME_HASH_LABEL
+from .models import SandboxClaimEnvVar
+
+
+def record_latency(metric):
+    """Decorator to measure and record execution latency to a Prometheus metric.
+
+    Does not record metrics if self._skip_latency_metric is set to True during execution.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            self._skip_latency_metric = False
+            start_time = time.perf_counter()
+            response = None
+            try:
+                response = func(self, *args, **kwargs)
+                return response
+            except Exception as e:
+                if not getattr(self, "_skip_latency_metric", False):
+                    status = "failure"
+                    duration = (time.perf_counter() - start_time) * 1000.0
+                    metric.labels(status=status).observe(duration)
+                raise
+            finally:
+                if response is not None and not getattr(self, "_skip_latency_metric", False):
+                    duration = (time.perf_counter() - start_time) * 1000.0
+                    status = "success" if getattr(response, "success", False) else "failure"
+                    metric.labels(status=status).observe(duration)
+        return wrapper
+    return decorator
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
     """Construct a SandboxClaim lifecycle spec dict from a TTL in seconds.
@@ -146,3 +180,25 @@ def is_valid_gateway_hostname(s: str) -> bool:
             return False
     last = s[-1]
     return last != '-' and last != '.'
+
+
+def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
+    status = sandbox_object.get("status") or {}
+    selector = status.get("selector") or ""
+    for requirement in selector.split(","):
+        key, sep, value = requirement.partition("=")
+        if sep and key.strip() == SANDBOX_NAME_HASH_LABEL:
+            return value.strip() or None
+
+    return None
+
+
+def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[SandboxClaimEnvVar]:
+    """Construct SandboxClaim env spec entries from a mapping of names to values."""
+    if not env:
+        return []
+
+    return [
+        SandboxClaimEnvVar(name=name, value=value)
+        for name, value in env.items()
+    ]

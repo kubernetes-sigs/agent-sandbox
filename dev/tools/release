@@ -125,6 +125,7 @@ def check_install_manifest_drift(
     """
     globbed = {os.path.relpath(f, k8s_dir) for f in all_yaml_files}
     globbed.discard("extensions.controller.yaml")
+    globbed.discard("networkpolicy.yaml")
     listed = _kustomization_resource_paths(kustomization_path)
 
     missing = globbed - listed

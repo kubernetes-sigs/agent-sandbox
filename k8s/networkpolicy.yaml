@@ -1,0 +1,54 @@
+# NetworkPolicy for the agent-sandbox-controller.
+#
+# The controller runs a metrics server (8080) and health probes (8081), and
+# needs egress to the API server and DNS. Everything else is denied.
+#
+# Metrics ingress is open to all namespaces — downstream distributions can
+# restrict to their monitoring namespace. Health probe ingress is open because
+# kubelet probes come from the node, not from a pod.
+#
+# The API server typically runs on host-network control plane nodes, not as
+# regular pods, so a namespaceSelector cannot target it. The port-only rule
+# allows egress on the standard API ports to any destination. Tighten with
+# an ipBlock for your API server ClusterIP if desired.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-controller
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  # Metrics scrape — open to all namespaces by default.
+  - ports:
+    - protocol: TCP
+      port: 8080
+    # Uncomment when --metrics-secure-serving is enabled:
+    # - protocol: TCP
+    #   port: 8443
+  # Kubelet health/readiness probes.
+  - ports:
+    - protocol: TCP
+      port: 8081
+  egress:
+  # DNS resolution.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Kubernetes API server — required for reconciliation and leader election.
+  - ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443

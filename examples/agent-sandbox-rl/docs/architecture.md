@@ -62,6 +62,12 @@ injection (no SDK fork).
   `CoreV1Api`, `_stop_kubernetes_sandbox` to a no-op so the fleet owns the pod,
   and exec/file-copy to forward the handle's namespace). Lazy/guarded so the core
   imports without R2E-Gym; serves tunix deepswe transitively.
+  **`adapters/openhands.py`** — `make_fleet_workspace`/`make_handle_workspace`
+  (+ `FleetWorkspaceClient`/`BoundHandleClient`): bind OpenHands agent-SDK
+  workspaces (`openhands-k8s-agent-sandbox`) to fleet pods through the
+  workspace's `sandbox_client` injection seam — acquire-on-create vs
+  bind-already-acquired (for `fleet.run`), terminate → fleet release / no-op.
+  Same lazy/guarded import posture as the R2E-Gym adapter.
 - **`placement.py`** — `RoundRobin`, `LeastLoaded`, `CapacityWeighted`,
   `ImageAffinity` (capacity-aware) + `get_placement`.
 - **`handles.py`** — `SandboxHandle` (`hostname`, `pod_name`, `pod_ip`,

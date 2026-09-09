@@ -19,8 +19,13 @@ import, no network. The health check is stubbed per test (its real
 implementation is exercised separately against a fake urlopen).
 """
 
+import logging
+from importlib.metadata import PackageNotFoundError
+
+import httpx
 import pytest
 
+from openhands_k8s_agent_sandbox import workspace as workspace_module
 from openhands_k8s_agent_sandbox.workspace import AgentSandboxWorkspace
 
 
@@ -66,6 +71,8 @@ def no_health(monkeypatch):
 
 def make_workspace(client=None, **kwargs):
     kwargs.setdefault("warmpool", "agent-server-pool")
+    # Offline tests: the advisory version check would issue a real HTTP call.
+    kwargs.setdefault("check_server_version", False)
     return AgentSandboxWorkspace(sandbox_client=client or FakeClient(), **kwargs)
 
 
@@ -76,6 +83,19 @@ def test_provision_sets_host_from_pod_ip(no_health):
     client = FakeClient(FakeSandbox(pod_ip="10.9.8.7"))
     ws = make_workspace(client)
     assert ws.host == "http://10.9.8.7:8000"
+
+
+def test_explicit_host_is_replaced_by_claimed_endpoint(no_health, caplog):
+    # A caller-supplied host must never win over the claimed pod: commands
+    # (and the pool session key) would go to an unrelated server while the
+    # claim sits idle.
+    client = FakeClient(FakeSandbox(pod_ip="10.9.8.7"))
+    with caplog.at_level(logging.WARNING):
+        ws = make_workspace(client, host="http://elsewhere:9999")
+    assert ws.host == "http://10.9.8.7:8000"
+    assert any(
+        "host=" in r.message and "ignored" in r.message for r in caplog.records
+    )
     assert ws.working_dir == "/workspace"
 
 
@@ -246,6 +266,77 @@ def test_router_and_endpoint_template_are_exclusive():
     assert client.create_calls == []  # rejected before any claim
 
 
+# -------------------------------------------------------- version skew check
+
+
+def test_version_skew_warns(no_health, monkeypatch, caplog):
+    monkeypatch.setattr(
+        AgentSandboxWorkspace, "get_server_info",
+        lambda self: {"version": "0.0.1-other"},
+    )
+    with caplog.at_level(logging.WARNING):
+        make_workspace(check_server_version=True)
+    assert any("protocol skew" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("unreachable"), ValueError("body is not JSON")],
+    ids=["transport", "not-json"],
+)
+def test_version_check_expected_failures_are_silent(
+    no_health, monkeypatch, caplog, error
+):
+    def boom(self):
+        raise error
+
+    monkeypatch.setattr(AgentSandboxWorkspace, "get_server_info", boom)
+    with caplog.at_level(logging.WARNING):
+        make_workspace(check_server_version=True)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_check_missing_sdk_dist_is_silent(no_health, monkeypatch, caplog):
+    monkeypatch.setattr(
+        AgentSandboxWorkspace, "get_server_info", lambda self: {"version": "1.0"}
+    )
+
+    def missing(_name):
+        raise PackageNotFoundError("openhands-sdk")
+
+    monkeypatch.setattr(workspace_module, "_dist_version", missing)
+    with caplog.at_level(logging.WARNING):
+        make_workspace(check_server_version=True)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_version_check_unexpected_payload_warns(no_health, monkeypatch, caplog):
+    # A non-dict payload must not raise (AttributeError on .get) nor vanish.
+    monkeypatch.setattr(
+        AgentSandboxWorkspace, "get_server_info", lambda self: ["1.0"]
+    )
+    with caplog.at_level(logging.WARNING):
+        ws = make_workspace(check_server_version=True)
+    assert ws.host.startswith("http://")  # attach still succeeded
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "expected a JSON object" in warnings[0].message
+
+
+def test_version_check_bug_is_loud_but_not_fatal(no_health, monkeypatch, caplog):
+    def bug(self):
+        raise TypeError("bug in the check")
+
+    monkeypatch.setattr(AgentSandboxWorkspace, "get_server_info", bug)
+    with caplog.at_level(logging.WARNING):
+        ws = make_workspace(check_server_version=True)
+    assert ws.host.startswith("http://")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "failed unexpectedly" in warnings[0].message
+    assert warnings[0].exc_info is not None  # traceback attached, not hidden
+
+
 # ----------------------------------------------------------------- teardown
 
 
@@ -262,6 +353,28 @@ def test_context_manager_cleans_up(no_health):
     with make_workspace(FakeClient(sandbox)) as ws:
         assert ws.host.startswith("http://")
     assert sandbox.terminated == 1
+
+
+def test_cleanup_logs_release_for_owning_sandbox(no_health, caplog):
+    ws = make_workspace(FakeClient(FakeSandbox(claim_name="claim-own")))
+    with caplog.at_level(logging.INFO):
+        ws.cleanup()
+    messages = [r.message for r in caplog.records]
+    assert "Released sandbox claim claim-own" in messages
+
+
+def test_cleanup_logs_detach_for_non_releasing_view(no_health, caplog):
+    # Injected views (e.g. a fleet handle bound for fleet.run) whose
+    # terminate() is a no-op on the pod must not claim a release.
+    sandbox = FakeSandbox(claim_name="claim-bound")
+    sandbox.releases_on_terminate = False
+    ws = make_workspace(FakeClient(sandbox))
+    with caplog.at_level(logging.INFO):
+        ws.cleanup()
+    messages = [r.message for r in caplog.records]
+    assert sandbox.terminated == 1
+    assert not any("Released sandbox claim" in m for m in messages)
+    assert any("Detached from sandbox claim-bound" in m for m in messages)
 
 
 def test_injected_client_not_closed(no_health):
@@ -283,3 +396,26 @@ def test_terminate_error_is_swallowed(no_health):
     ws = make_workspace(FakeClient(sandbox))
     ws.cleanup()  # must not raise; ttl_s is the backstop
     assert sandbox.terminated == 1
+
+
+def test_cleanup_retries_after_failed_terminate(no_health):
+    # First attempt fails -> the claim reference is kept and the next
+    # cleanup() retries; only success clears it (else a no-ttl claim leaks).
+    sandbox = FakeSandbox()
+    attempts = []
+
+    def flaky():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("apiserver hiccup")
+        sandbox.terminated += 1
+
+    sandbox.terminate = flaky
+    ws = make_workspace(FakeClient(sandbox))
+    ws.cleanup()
+    assert ws._sandbox is not None  # kept for retry
+    ws.cleanup()
+    assert sandbox.terminated == 1
+    assert ws._sandbox is None
+    ws.cleanup()  # idempotent after success
+    assert len(attempts) == 2

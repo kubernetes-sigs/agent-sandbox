@@ -436,6 +436,10 @@ class SandboxConnector:
             backoff_factor=0.5,
             status_forcelist=[500, 502, 503, 504],
             allowed_methods=RETRYABLE_METHODS,
+            # Return the final 5xx response instead of raising RetryError (which
+            # carries no response): send_request's raise_for_status then sees the
+            # status, so a stale-Pod-IP 5xx keeps the tunnel instead of closing.
+            raise_on_status=False,
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))

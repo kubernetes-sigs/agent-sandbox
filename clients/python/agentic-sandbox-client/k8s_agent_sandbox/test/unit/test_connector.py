@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import unittest
-from unittest.mock import MagicMock
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -432,6 +434,51 @@ class TestSandboxConnectorErrorHandling(unittest.TestCase):
         self.assertIsNone(connector._pod_ip)
         self.assertFalse(connector._pod_ip_resolved)
         connector.session.close.assert_called()
+
+
+class TestSandboxConnectorRetryExhaustion(unittest.TestCase):
+    """A 5xx that exhausts urllib3's status retries must still reach the 5xx
+    branch rather than surface as a responseless RetryError."""
+
+    def _serve_503(self):
+        class _H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b"unavailable")
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _H)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_exhausted_retry_5xx_preserves_status_and_keeps_tunnel(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = SandboxConnector(
+            sandbox_id="sb",
+            namespace="ns",
+            connection_config=SandboxDirectConnectionConfig(api_url=self._serve_503()),
+            k8s_helper=MagicMock(),
+        )
+        connector._pod_ip = "10.0.0.5"
+        connector._pod_ip_resolved = True
+        close_spy = MagicMock(wraps=connector.session.close)
+        connector.session.close = close_spy
+
+        # Patch sleep so urllib3's real backoff between the 5 retries is instant.
+        with patch("time.sleep"):
+            with self.assertRaises(SandboxRequestError) as ctx:
+                connector.send_request("GET", "run")
+
+        # raise_on_status=False lets the final 503 reach raise_for_status, so
+        # the 5xx branch fires: status preserved, Pod IP dropped, tunnel kept.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIsNone(connector._pod_ip)
+        self.assertFalse(connector._pod_ip_resolved)
+        close_spy.assert_not_called()
 
 
 if __name__ == "__main__":

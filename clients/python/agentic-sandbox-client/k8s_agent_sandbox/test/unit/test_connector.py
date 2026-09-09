@@ -404,6 +404,22 @@ class TestSandboxConnectorErrorHandling(unittest.TestCase):
         self.assertTrue(connector._pod_ip_resolved)
         connector.session.close.assert_not_called()
 
+    def test_server_error_clears_pod_ip_but_keeps_tunnel(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = self._make_connector()
+        connector.session.request.return_value = self._error_response(503)
+
+        with self.assertRaises(SandboxRequestError) as ctx:
+            connector.send_request("GET", "run")
+
+        # A 5xx often means the cached Pod IP went stale after a pod
+        # replacement: drop it so the next request re-resolves, but the
+        # tunnel carried a full response and must stay open.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIsNone(connector._pod_ip)
+        self.assertFalse(connector._pod_ip_resolved)
+        connector.session.close.assert_not_called()
+
     def test_transport_failure_resets_connection(self):
         from k8s_agent_sandbox.connector import SandboxRequestError
         connector = self._make_connector()

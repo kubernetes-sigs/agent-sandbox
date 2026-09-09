@@ -615,14 +615,17 @@ class SandboxConnector:
             resp = getattr(e, "response", None)
             status_code = resp.status_code if resp is not None else None
 
-            # If we got an HTTP response (4xx or 5xx), the sandbox/router
-            # answered and the connection is still usable. Only a transport
-            # failure (no response) should reset the Pod IP and close the tunnel.
+            # No response: transport may be dead, reset the Pod IP and close.
+            # 5xx: often a stale Pod IP after a pod swap, drop it but keep the tunnel.
+            # 4xx: sandbox answered a client error, routing is fine, keep all.
             if status_code is None:
                 logging.error(f"Request to sandbox failed: {e}")
                 self._pod_ip_resolved = False
                 self._pod_ip = None
                 self.close()
+            elif status_code >= 500:
+                self._pod_ip_resolved = False
+                self._pod_ip = None
             raise SandboxRequestError(
                 f"Failed to communicate with the sandbox at {url}.",
                 status_code=status_code,

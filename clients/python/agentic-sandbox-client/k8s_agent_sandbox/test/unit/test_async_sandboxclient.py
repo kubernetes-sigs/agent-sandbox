@@ -1155,26 +1155,30 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         connector.client.request = AsyncMock(return_value=mock_response)
 
         try:
-            # First request should fail with 503
-            with self.assertRaises(SandboxRequestError):
+            with patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                # First request should fail with 503
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "test")
+
+                # Verify cache was cleared (pod_ip_resolved reset)
+                self.assertFalse(connector._pod_ip_resolved,
+                               "A 5xx should clear pod_ip_resolved flag")
+                self.assertIsNone(connector._cached_pod_ip_url,
+                                "A 5xx should clear cached pod IP URL")
+
+                # Second request should re-resolve pod IP (call count increases)
+                initial_count = call_count[0]
+                mock_response.status_code = 200
+                mock_response.raise_for_status.side_effect = None
+                connector.client.request = AsyncMock(return_value=mock_response)
+
                 await connector.send_request("GET", "test")
 
-            # Verify cache was cleared (pod_ip_resolved reset)
-            self.assertFalse(connector._pod_ip_resolved,
-                           "A 5xx should clear pod_ip_resolved flag")
-            self.assertIsNone(connector._cached_pod_ip_url,
-                            "A 5xx should clear cached pod IP URL")
-
-            # Second request should re-resolve pod IP (call count increases)
-            initial_count = call_count[0]
-            mock_response.status_code = 200
-            mock_response.raise_for_status.side_effect = None
-            connector.client.request = AsyncMock(return_value=mock_response)
-
-            await connector.send_request("GET", "test")
-
-            self.assertEqual(call_count[0], initial_count + 1,
-                           "After cache invalidation, pod IP should be re-resolved")
+                self.assertEqual(call_count[0], initial_count + 1,
+                               "After cache invalidation, pod IP should be re-resolved")
         finally:
             await connector.close()
 

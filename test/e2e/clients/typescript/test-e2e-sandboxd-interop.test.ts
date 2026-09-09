@@ -184,7 +184,9 @@ async function openPodPortForward(
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       if (!addr || typeof addr === "string") {
-        reject(new Error("failed to bind local port-forward listener"));
+        server.close(() => {
+          reject(new Error("failed to bind local port-forward listener"));
+        });
         return;
       }
       resolve({

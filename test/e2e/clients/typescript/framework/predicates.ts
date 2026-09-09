@@ -21,7 +21,9 @@ limitations under the License.
  */
 export function readyConditionIsTrue(): (obj: Record<string, any>) => boolean {
   return (obj: Record<string, any>): boolean => {
-    const conditions = obj?.status?.conditions ?? [];
+    const conditions = Array.isArray(obj?.status?.conditions)
+      ? obj.status.conditions
+      : [];
     return conditions.some(
       (c: Record<string, any>) => c?.type === "Ready" && c?.status === "True",
     );

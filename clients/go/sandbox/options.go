@@ -72,12 +72,26 @@ const (
 	// its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
 	// and, for RuntimeLegacyPython, the sandbox-router, off the data path.
 	//
-	// Requires the Sandbox to have a Service, set spec.service: true on
-	// the template.
+	// Prefer this over ConnectivityInClusterPodIP when sandboxes cross a trust
+	// boundary. The Service's selector only ever matches its own Sandbox's
+	// pod, so a pod IP that Kubernetes has since reassigned to another
+	// tenant would be caught when the TTL expires. A deleted Sandbox takes
+	// its Service with it: connections then fail rather than landing on a stranger.
+	// (DNS caching still leaves a TTL-bounded window)
+	//
+	// Requires the Sandbox to have a Service — set spec.service: true on
+	// the template. Open fails when Status.ServiceFQDN is empty rather than
+	// falling back to the pod IP, so the safety property cannot be lost
+	// silently.
 	ConnectivityInClusterService Connectivity = "in-cluster-service"
 
 	// ConnectivityInClusterPodIP dials Status.PodIP. It needs no Service, so
 	// it works against any Sandbox without template changes.
+	//
+	// It carries the pod IP's reuse hazard: nothing detects that the sandbox
+	// pod was rescheduled, so requests can continue to a stale address that
+	// Kubernetes may have since reassigned to an unrelated pod. Use
+	// ConnectivityInClusterService where that matters.
 	ConnectivityInClusterPodIP Connectivity = "in-cluster-pod-ip"
 )
 
@@ -104,9 +118,9 @@ type Options struct {
 
 	// Connectivity selects the transport. Default: ConnectivityPortForward.
 	//
-	// The in-cluster values work with either Runtime, conflict with both
-	// GatewayName and APIURL, and require that this process runs inside the
-	// cluster.
+	// The in-cluster values conflict with both GatewayName and APIURL, and
+	// require that this process runs inside the same cluster as the sandbox
+	// pods.
 	Connectivity Connectivity
 
 	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime

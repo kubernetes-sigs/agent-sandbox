@@ -220,7 +220,7 @@ The `restartPolicy` on a sandbox's pod template determines whether the container
 ### Why this matters
 
 When `restartPolicy` is omitted, Kubernetes defaults to `Always`. If a pool operator relies on
-`TTLSecondsAfterFinished` for cleanup, the sandbox never reaches a terminal state because the
+`ttlSecondsAfterFinished` for cleanup, the sandbox never reaches a terminal state because the
 container is restarted each time it exits. The TTL never fires, and the sandbox runs indefinitely.
 
 This creates two failure modes:

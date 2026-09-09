@@ -114,6 +114,7 @@ copy-k8s-config: ## Copy ../k8s into config/ (CRDs, RBAC .generated.yaml → rol
 	cp $(K8S_ROOT)/rbac.generated.yaml $(CONFIG_DIR)/rbac/role.yaml
 	cp $(K8S_ROOT)/extensions-rbac.generated.yaml $(CONFIG_DIR)/rbac/extensions_role.yaml
 	cp $(K8S_ROOT)/extensions.yaml $(CONFIG_DIR)/rbac/extensions_role_binding.yaml
+	cp $(K8S_ROOT)/networkpolicy.yaml $(CONFIG_DIR)/manager/networkpolicy.yaml
 	mkdir -p $(CONFIG_DIR)/sandbox-router
 	rm -rf $(CONFIG_DIR)/sandbox-router/*
 	cp $(REPO_ROOT)/sandbox-router/deploy/*.yaml $(CONFIG_DIR)/sandbox-router/

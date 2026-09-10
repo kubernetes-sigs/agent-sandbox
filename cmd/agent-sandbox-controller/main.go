@@ -212,10 +212,13 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// Resolve the controller namespace early: needed to fetch the ConfigMap.
-	controllerNamespace := leaderElectionNamespace
+	// Prefer POD_NAMESPACE (injected via downward API) so the ConfigMap lookup
+	// targets the namespace where the controller actually runs, even when
+	// --leader-election-namespace points elsewhere.
+	controllerNamespace := os.Getenv("POD_NAMESPACE")
 	if controllerNamespace == "" {
-		if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-			controllerNamespace = ns
+		if leaderElectionNamespace != "" {
+			controllerNamespace = leaderElectionNamespace
 		} else {
 			controllerNamespace = "agent-sandbox-system"
 		}
@@ -228,13 +231,16 @@ func main() {
 			setupLog.Error(err, "failed to read controller ConfigMap")
 			os.Exit(1)
 		}
-		if overrides, err := internalconfig.ApplyConfigMapData(configMapData, flag.CommandLine); err != nil {
+		overrides, skipped, err := internalconfig.ApplyConfigMapData(configMapData, flag.CommandLine)
+		if err != nil {
 			setupLog.Error(err, "failed to parse controller config from ConfigMap")
 			os.Exit(1)
-		} else if len(overrides) > 0 {
-			for _, o := range overrides {
-				setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)
-			}
+		}
+		for _, o := range overrides {
+			setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)
+		}
+		for _, key := range skipped {
+			setupLog.Info("ConfigMap key ignored (not a tunable flag)", "key", key)
 		}
 	}
 

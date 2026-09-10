@@ -146,9 +146,10 @@ spec:
 
     ## Configuration
 
-    The operator ships an `agent-sandbox-config` ConfigMap in the controller
-    namespace with tunable knobs. Edit the ConfigMap and restart the controller
-    Deployment to apply changes.
+    To tune the controller, create an `agent-sandbox-config` ConfigMap in the
+    controller namespace with the keys below. The ConfigMap is optional; the
+    controller starts with compiled defaults when it is absent. Restart the
+    controller Deployment after changes.
 
     | Key | Default | Description |
     |-----|---------|-------------|
@@ -163,7 +164,7 @@ spec:
     | `pprof-block-profile-rate` | 1000000 | Block profile sampling rate (ns) |
     | `pprof-mutex-profile-fraction` | 10 | Mutex contention sampling fraction |
 
-    ConfigMap values take precedence over CLI flags. CLI flags override
+    CLI flags take precedence over ConfigMap values. ConfigMap values override
     compiled defaults.
   displayName: Agent Sandbox Operator
   icon:

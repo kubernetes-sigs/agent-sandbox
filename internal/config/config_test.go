@@ -23,12 +23,15 @@ func TestApplyConfigMapData_NilData(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.Int("sandbox-concurrent-workers", 100, "")
 
-	applied, err := ApplyConfigMapData(nil, fs)
+	applied, skipped, err := ApplyConfigMapData(nil, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(applied) != 0 {
 		t.Errorf("expected no overrides, got %v", applied)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("expected no skipped keys, got %v", skipped)
 	}
 }
 
@@ -40,7 +43,7 @@ func TestApplyConfigMapData_OverridesDefault(t *testing.T) {
 	fs.IntVar(&workers, "sandbox-concurrent-workers", 100, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, _, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,7 +63,7 @@ func TestApplyConfigMapData_CLIWinsOverConfigMap(t *testing.T) {
 	fs.IntVar(&workers, "sandbox-concurrent-workers", 100, "")
 	_ = fs.Parse([]string{"-sandbox-concurrent-workers=150"})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, _, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,7 +75,7 @@ func TestApplyConfigMapData_CLIWinsOverConfigMap(t *testing.T) {
 	}
 }
 
-func TestApplyConfigMapData_NonTunableFlagIgnored(t *testing.T) {
+func TestApplyConfigMapData_NonTunableFlagSkipped(t *testing.T) {
 	data := map[string]string{"leader-elect": "false"}
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
@@ -80,12 +83,15 @@ func TestApplyConfigMapData_NonTunableFlagIgnored(t *testing.T) {
 	fs.BoolVar(&leaderElect, "leader-elect", true, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, skipped, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(applied) != 0 {
 		t.Errorf("expected no overrides for non-tunable flag, got %v", applied)
+	}
+	if len(skipped) != 1 || skipped[0] != "leader-elect" {
+		t.Errorf("expected leader-elect in skipped, got %v", skipped)
 	}
 	if leaderElect != true {
 		t.Errorf("leaderElect = %v, want true (non-tunable flag should not be overridden)", leaderElect)
@@ -100,7 +106,7 @@ func TestApplyConfigMapData_BoolFlag(t *testing.T) {
 	fs.BoolVar(&eviction, "enable-warm-pool-eviction", true, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, _, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -120,7 +126,7 @@ func TestApplyConfigMapData_InvalidValue(t *testing.T) {
 	fs.IntVar(&workers, "sandbox-concurrent-workers", 100, "")
 	_ = fs.Parse([]string{})
 
-	_, err := ApplyConfigMapData(data, fs)
+	_, _, err := ApplyConfigMapData(data, fs)
 	if err == nil {
 		t.Fatal("expected error for invalid value")
 	}
@@ -129,7 +135,7 @@ func TestApplyConfigMapData_InvalidValue(t *testing.T) {
 	}
 }
 
-func TestApplyConfigMapData_UnknownKeysIgnored(t *testing.T) {
+func TestApplyConfigMapData_UnknownKeysSkipped(t *testing.T) {
 	data := map[string]string{
 		"unknown-key":                "value",
 		"sandbox-concurrent-workers": "200",
@@ -140,12 +146,15 @@ func TestApplyConfigMapData_UnknownKeysIgnored(t *testing.T) {
 	fs.IntVar(&workers, "sandbox-concurrent-workers", 100, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, skipped, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(applied) != 1 {
-		t.Errorf("expected 1 override (unknown keys ignored), got %v", applied)
+		t.Errorf("expected 1 override (unknown keys skipped), got %v", applied)
+	}
+	if len(skipped) != 1 || skipped[0] != "unknown-key" {
+		t.Errorf("expected unknown-key in skipped, got %v", skipped)
 	}
 	if workers != 200 {
 		t.Errorf("workers = %d, want 200", workers)
@@ -160,7 +169,7 @@ func TestApplyConfigMapData_WhitespaceHandling(t *testing.T) {
 	fs.IntVar(&workers, "sandbox-concurrent-workers", 100, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, _, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,7 +189,7 @@ func TestApplyConfigMapData_FloatFlag(t *testing.T) {
 	fs.Float64Var(&qps, "kube-api-qps", -1.0, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, _, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -207,7 +216,7 @@ func TestApplyConfigMapData_MultipleOverrides(t *testing.T) {
 	fs.BoolVar(&eviction, "enable-warm-pool-eviction", true, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, _, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -230,7 +239,7 @@ func TestApplyConfigMapData_EmptyData(t *testing.T) {
 	fs.Int("sandbox-concurrent-workers", 100, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(map[string]string{}, fs)
+	applied, _, err := ApplyConfigMapData(map[string]string{}, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,44 +259,78 @@ func TestApplyConfigMapData_UnderscorePrefixSkipped(t *testing.T) {
 	fs.IntVar(&workers, "sandbox-concurrent-workers", 100, "")
 	_ = fs.Parse([]string{})
 
-	applied, err := ApplyConfigMapData(data, fs)
+	applied, skipped, err := ApplyConfigMapData(data, fs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(applied) != 1 {
 		t.Errorf("expected 1 override (_readme skipped), got %v", applied)
 	}
+	if len(skipped) != 0 {
+		t.Errorf("expected no skipped keys (_readme is documentation-only, not reported), got %v", skipped)
+	}
 	if workers != 200 {
 		t.Errorf("workers = %d, want 200", workers)
 	}
 }
 
-func TestApplyConfigMapData_ZapFlagsNonTunable(t *testing.T) {
+func TestApplyConfigMapData_NotInAllowlist(t *testing.T) {
 	for _, name := range []string{
 		"zap-devel",
-		"zap-encoder",
 		"zap-log-level",
-		"zap-stacktrace-level",
-		"zap-time-encoding",
+		"leader-elect",
+		"extensions",
+		"kubeconfig",
+		"tls-min-version",
+		"metrics-secure-serving",
 	} {
 		t.Run(name, func(t *testing.T) {
-			data := map[string]string{name: "debug"}
+			data := map[string]string{name: "some-value"}
 
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			var value string
-			fs.StringVar(&value, name, "info", "")
+			fs.StringVar(&value, name, "default", "")
 			_ = fs.Parse([]string{})
 
-			applied, err := ApplyConfigMapData(data, fs)
+			applied, skipped, err := ApplyConfigMapData(data, fs)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(applied) != 0 {
 				t.Errorf("expected no overrides for %s, got %v", name, applied)
 			}
-			if value != "info" {
-				t.Errorf("%s = %q, want info (zap flags are non-tunable)", name, value)
+			if len(skipped) != 1 || skipped[0] != name {
+				t.Errorf("expected %s in skipped, got %v", name, skipped)
+			}
+			if value != "default" {
+				t.Errorf("%s = %q, want default (not in allowlist)", name, value)
 			}
 		})
+	}
+}
+
+func TestApplyConfigMapData_KnownNonFlagKeyNotSkipped(t *testing.T) {
+	data := map[string]string{
+		"allowed-label-domains":      "example.com",
+		"sandbox-concurrent-workers": "200",
+	}
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	var workers int
+	fs.IntVar(&workers, "sandbox-concurrent-workers", 100, "")
+	_ = fs.Parse([]string{})
+
+	applied, skipped, err := ApplyConfigMapData(data, fs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(applied) != 1 {
+		t.Errorf("expected 1 override, got %v", applied)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("expected no skipped keys (allowed-label-domains is a known non-flag key), got %v", skipped)
+	}
+	if workers != 200 {
+		t.Errorf("workers = %d, want 200", workers)
 	}
 }

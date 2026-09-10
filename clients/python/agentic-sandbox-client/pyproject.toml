@@ -66,7 +66,7 @@ test = [
     "pytest-asyncio",
     "httpx",
     "kubernetes_asyncio<34.0.0",
-    "mypy",
+    "mypy~=1.14",
 ]
 tracing = [
     "opentelemetry-api>=1.39,<1.42",

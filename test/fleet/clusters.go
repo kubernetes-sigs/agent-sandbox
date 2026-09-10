@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"fmt"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"log"
 	"path/filepath"
 	"strings"
@@ -94,7 +95,9 @@ func connectClusters(ctx context.Context, cfg config) ([]*cluster, error) {
 			"apiVersion": "v1", "kind": "Namespace",
 			"metadata": map[string]any{"name": cfg.Namespace},
 		}}
-		if _, err := nsClient.Create(ctx, ns, metav1.CreateOptions{}); err != nil {
+		// Tolerate AlreadyExists: a create whose response was lost (WAN
+		// timeout) succeeds server-side, and the retry must not abort the run.
+		if _, err := nsClient.Create(ctx, ns, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("cluster %s: creating namespace: %w", name, err)
 		}
 		log.Printf("cluster %d (%s): connected, namespace %s created", i, name, cfg.Namespace)

@@ -1,0 +1,51 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# down: delete every fleet-* cluster (in parallel) and remove exported
+# kubeconfigs. Idempotent: already-deleted clusters are skipped.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+FLEET_DIR="${FLEET_DIR:-${HOME}/.fleet-kops}"
+export PATH="${FLEET_DIR}/bin:${PATH}"
+
+PROJECT_NUMBER=$(gcloud projects describe "$(gcloud config get-value project)" --format="value(projectNumber)")
+export KOPS_STATE_STORE="gs://kops-state-${PROJECT_NUMBER}"
+
+clusters=$(kops get clusters -o json 2>/dev/null | python3 -c 'import json,sys
+try:
+    for c in json.load(sys.stdin): print(c["metadata"]["name"])
+except Exception: pass' | grep "^fleet-" || true)
+
+if [[ -z "${clusters}" ]]; then
+  echo "No fleet-* clusters in ${KOPS_STATE_STORE}."
+else
+  pids=()
+  for name in ${clusters}; do
+    echo "Deleting ${name}..."
+    kops delete cluster --name "${name}" --yes > "${FLEET_DIR}/logs/down-${name}.log" 2>&1 &
+    pids+=($!)
+  done
+  fail=0
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || fail=1
+  done
+  [[ $fail == 0 ]] || { echo "some deletions FAILED - see ${FLEET_DIR}/logs/down-*.log"; exit 1; }
+fi
+
+rm -f "${FLEET_DIR}"/kubeconfigs/*.kubeconfig
+echo "Fleet down."

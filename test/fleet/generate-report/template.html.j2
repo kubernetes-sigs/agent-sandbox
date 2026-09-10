@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet launch report</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --surface-2: #f1f0ee;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --grid: #e3e2df;
+    --series-created: #2a78d6;
+    --series-ready: #008300;
+    --good: #008300;
+    --serious: #e34948;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --surface-2: #242423;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --grid: #38383573;
+      --series-created: #3987e5;
+      --series-ready: #008300;
+      --good: #008300;
+      --serious: #e66767;
+    }
+  }
+  .viz-root {
+    font: 14px/1.45 system-ui, sans-serif;
+    background: var(--surface-1);
+    color: var(--text-primary);
+    margin: 0; padding: 24px; min-height: 100vh; box-sizing: border-box;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--text-secondary); margin-bottom: 20px; }
+  .tiles { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+  .tile {
+    background: var(--surface-2); border-radius: 8px; padding: 14px 18px; min-width: 150px;
+  }
+  .tile .v { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; }
+  .tile .k { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+  .tile.met .v { color: var(--good); }
+  .tile.notmet .v { color: var(--serious); }
+  .warn {
+    background: color-mix(in srgb, var(--serious) 12%, var(--surface-1));
+    border: 1px solid var(--serious); border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 20px;
+  }
+  .chart-block { margin-bottom: 28px; }
+  .chart-title { font-weight: 600; margin-bottom: 2px; }
+  .chart-note { color: var(--text-secondary); font-size: 12px; margin-bottom: 8px; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  svg text { fill: var(--text-secondary); font-size: 11px; }
+  svg .axis { stroke: var(--grid); stroke-width: 1; }
+  .facets { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .facet { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
+  .facet .t { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
+  .tooltip {
+    position: fixed; pointer-events: none; background: var(--surface-2);
+    border: 1px solid var(--grid); border-radius: 6px; padding: 6px 10px;
+    font-size: 12px; display: none; z-index: 10; box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+  }
+</style>
+</head>
+<body class="viz-root">
+<h1>Fleet launch report</h1>
+<div class="sub">{{ summary.clusters }} clusters &middot; {{ "{:,}".format(summary.requested) }} requested &middot; artifacts: {{ input_dir }}</div>
+
+{% if verdict_mismatch %}
+<div class="warn"><strong>Verdict mismatch:</strong> summary.json reports fixed-60s
+{{ "{:,}".format(summary.fixedWindow60s) }}, but recomputing from the raw ready rows gives
+{{ "{:,}".format(best60) }}. The raw rows are the source of truth; investigate before citing either number.</div>
+{% endif %}
+
+<div class="tiles">
+  <div class="tile {{ 'met' if fixed60 >= summary.targetPerMinute else 'notmet' }}">
+    <div class="v">{{ "{:,}".format(fixed60) }}</div>
+    <div class="k">fixed 60s window (firstReady+10s) &middot; target {{ "{:,}".format(summary.targetPerMinute) }}</div>
+  </div>
+  <div class="tile">
+    <div class="v">{{ "{:,}".format(best60) }}</div>
+    <div class="k">sliding best 60s (reference)</div>
+  </div>
+  <div class="tile">
+    <div class="v">{{ "{:,}".format(summary.ready) }} / {{ "{:,}".format(summary.requested) }}</div>
+    <div class="k">sandboxes Ready</div>
+  </div>
+  <div class="tile {{ 'notmet' if summary.createErrors else '' }}">
+    <div class="v">{{ "{:,}".format(summary.createErrors) }}</div>
+    <div class="k">create errors</div>
+  </div>
+  <div class="tile">
+    <div class="v">{{ "%.0f"|format(summary.wallSeconds) }}s</div>
+    <div class="k">wall time</div>
+  </div>
+</div>
+
+<div class="chart-block">
+  <div class="chart-title">Sandboxes over time</div>
+  <div class="chart-note">cumulative totals across the fleet; the gap between the lines is work in flight</div>
+  <div class="legend">
+    <span><span class="swatch" style="background:var(--series-created)"></span>created</span>
+    <span><span class="swatch" style="background:var(--series-ready)"></span>ready</span>
+  </div>
+  <div id="cumchart"></div>
+</div>
+
+<div class="chart-block">
+  <div class="chart-title">Fleet rates</div>
+  <div class="chart-note">sandboxes per second, aggregate across all clusters; ready uses server-side condition stamps</div>
+  <div class="legend">
+    <span><span class="swatch" style="background:var(--series-created)"></span>created</span>
+    <span><span class="swatch" style="background:var(--series-ready)"></span>ready</span>
+  </div>
+  <div id="aggchart"></div>
+</div>
+
+<div class="chart-block">
+  <div class="chart-title">Ready rate per cluster</div>
+  <div class="chart-note">sandboxes per second per cluster (server clock)</div>
+  <div class="facets" id="facets"></div>
+</div>
+
+<div class="chart-block">
+  <div class="chart-title">Per-cluster summary</div>
+  <table>
+    <thead><tr>
+      <th>cluster</th><th>created</th><th>ready</th>
+      <th>create ack p50 (ms)</th><th>p99 (ms)</th>
+      <th>first ready (s)</th><th>last ready (s)</th>
+    </tr></thead>
+    <tbody>
+    {% for row in cluster_stats %}
+      <tr>
+        <td>{{ row[0] }}</td><td>{{ "{:,}".format(row[1]) }}</td><td>{{ "{:,}".format(row[2]) }}</td>
+        <td>{{ row[3] }}</td><td>{{ row[4] }}</td>
+        <td>{{ row[5] }}</td><td>{{ row[6] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="tooltip" id="tt"></div>
+
+<script>
+const CREATED = {{ created_series }};
+const READY = {{ ready_series }};
+const PER_CLUSTER = {{ per_cluster }};
+
+const css = name => getComputedStyle(document.body).getPropertyValue(name).trim();
+
+// lineChart renders series as SVG polylines with a crosshair tooltip.
+// All series share one x (seconds since first create) and one y (rate/s).
+function lineChart(el, seriesList, width, height, showAxis, unit) {
+  unit = unit === undefined ? '/s' : unit;
+  const PAD = { l: 44, r: 10, t: 8, b: showAxis ? 22 : 8 };
+  const xs = seriesList.flatMap(s => s.data.map(d => d[0]));
+  const ys = seriesList.flatMap(s => s.data.map(d => d[1]));
+  const xMax = Math.max(1, ...xs), yMax = Math.max(1, ...ys);
+  const X = t => PAD.l + (t / xMax) * (width - PAD.l - PAD.r);
+  const Y = v => height - PAD.b - (v / yMax) * (height - PAD.t - PAD.b);
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.style.width = '100%';
+
+  // recessive grid: 3 horizontal lines + baseline
+  for (const f of [0.25, 0.5, 0.75, 1.0]) {
+    const y = Y(yMax * f);
+    const g = document.createElementNS(svgNS, 'line');
+    g.setAttribute('x1', PAD.l); g.setAttribute('x2', width - PAD.r);
+    g.setAttribute('y1', y); g.setAttribute('y2', y);
+    g.setAttribute('class', 'axis');
+    svg.appendChild(g);
+    const lbl = document.createElementNS(svgNS, 'text');
+    lbl.setAttribute('x', PAD.l - 6); lbl.setAttribute('y', y + 4);
+    lbl.setAttribute('text-anchor', 'end');
+    lbl.textContent = Math.round(yMax * f).toLocaleString();
+    svg.appendChild(lbl);
+  }
+  const base = document.createElementNS(svgNS, 'line');
+  base.setAttribute('x1', PAD.l); base.setAttribute('x2', width - PAD.r);
+  base.setAttribute('y1', Y(0)); base.setAttribute('y2', Y(0));
+  base.setAttribute('class', 'axis');
+  svg.appendChild(base);
+  if (showAxis) {
+    for (const f of [0, 0.5, 1.0]) {
+      const t = document.createElementNS(svgNS, 'text');
+      t.setAttribute('x', X(xMax * f)); t.setAttribute('y', height - 6);
+      t.setAttribute('text-anchor', f === 0 ? 'start' : f === 1 ? 'end' : 'middle');
+      t.textContent = Math.round(xMax * f) + 's';
+      svg.appendChild(t);
+    }
+  }
+
+  for (const s of seriesList) {
+    const pts = s.data.map(d => `${X(d[0]).toFixed(1)},${Y(d[1]).toFixed(1)}`).join(' ');
+    const pl = document.createElementNS(svgNS, 'polyline');
+    pl.setAttribute('points', pts);
+    pl.setAttribute('fill', 'none');
+    pl.setAttribute('stroke', s.color);
+    pl.setAttribute('stroke-width', '2');
+    pl.setAttribute('stroke-linejoin', 'round');
+    svg.appendChild(pl);
+  }
+
+  // crosshair + tooltip
+  const cross = document.createElementNS(svgNS, 'line');
+  cross.setAttribute('y1', PAD.t); cross.setAttribute('y2', height - PAD.b);
+  cross.setAttribute('stroke', css('--text-secondary'));
+  cross.setAttribute('stroke-width', '1');
+  cross.setAttribute('stroke-dasharray', '3,3');
+  cross.style.display = 'none';
+  svg.appendChild(cross);
+
+  const tt = document.getElementById('tt');
+  svg.addEventListener('mousemove', ev => {
+    const r = svg.getBoundingClientRect();
+    const px = (ev.clientX - r.left) * (width / r.width);
+    const t = Math.round(((px - PAD.l) / (width - PAD.l - PAD.r)) * xMax);
+    if (t < 0 || t > xMax) { cross.style.display = 'none'; tt.style.display = 'none'; return; }
+    cross.setAttribute('x1', X(t)); cross.setAttribute('x2', X(t));
+    cross.style.display = '';
+    const rows = seriesList.map(s => {
+      const hit = s.data.find(d => d[0] === t);
+      return `<span class="swatch" style="background:${s.color}"></span>${s.name}: ${(hit ? hit[1] : 0).toLocaleString()}${unit}`;
+    }).join('<br>');
+    tt.innerHTML = `t=+${t}s<br>${rows}`;
+    tt.style.display = 'block';
+    tt.style.left = (ev.clientX + 14) + 'px';
+    tt.style.top = (ev.clientY + 14) + 'px';
+  });
+  svg.addEventListener('mouseleave', () => { cross.style.display = 'none'; tt.style.display = 'none'; });
+
+  el.appendChild(svg);
+}
+
+// dense: fill missing seconds with explicit zeros, from t=0. Sparse
+// series make polylines interpolate ACROSS quiet periods (a stall reads
+// as a smooth ramp) and start mid-chart at the first event.
+function dense(series) {
+  if (!series.length) return [];
+  const byT = new Map(series);
+  const tMax = series[series.length - 1][0];
+  const out = [];
+  for (let t = 0; t <= tMax; t++) out.push([t, byT.get(t) || 0]);
+  return out;
+}
+
+function cumulative(series) {
+  let total = 0;
+  return dense(series).map(([t, n]) => [t, total += n]);
+}
+
+lineChart(document.getElementById('cumchart'), [
+  { name: 'created', color: css('--series-created'), data: cumulative(CREATED) },
+  { name: 'ready', color: css('--series-ready'), data: cumulative(READY) },
+], 960, 300, true, '');
+
+lineChart(document.getElementById('aggchart'), [
+  { name: 'created', color: css('--series-created'), data: dense(CREATED) },
+  { name: 'ready', color: css('--series-ready'), data: dense(READY) },
+], 960, 260, true);
+
+const facets = document.getElementById('facets');
+for (const [name, data] of Object.entries(PER_CLUSTER)) {
+  const div = document.createElement('div');
+  div.className = 'facet';
+  div.innerHTML = `<div class="t">${name}</div>`;
+  facets.appendChild(div);
+  lineChart(div, [{ name: name + ' ready', color: css('--series-ready'), data: dense(data) }], 300, 110, true);
+}
+</script>
+</body>
+</html>

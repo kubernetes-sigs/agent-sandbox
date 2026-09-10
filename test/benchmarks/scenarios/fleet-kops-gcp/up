@@ -1,0 +1,283 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# up: bring up the fleet's kOps clusters (idempotent) and export one
+# kubeconfig per cluster to FLEET_DIR. Clusters have deterministic names
+# (fleet-1..fleet-N) so re-running converges: existing clusters are
+# updated/validated rather than recreated. Bring-up runs in parallel;
+# per-cluster logs land in FLEET_DIR/logs/.
+#
+# The cluster config is the single-cluster campaign's keep-list:
+# pd-ssd volumes, nodeCIDRMaskSize=23, etcd quota 8GiB, kindnet without
+# its NetworkPolicy engine, lifted client/server rate limits, maxPods
+# 512, a dedicated node for the sandbox controller, and image prepull.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+FLEET_CLUSTER_COUNT="${FLEET_CLUSTER_COUNT:-2}"
+# Comma-separated zones, assigned round-robin to clusters. Spread across
+# regions: per-family CPU quotas and machine stock are regional.
+FLEET_ZONES="${FLEET_ZONES:-us-east4-b,us-central1-b}"
+FLEET_NODE_COUNT="${FLEET_NODE_COUNT:-3}"
+FLEET_NODE_SIZE="${FLEET_NODE_SIZE:-n2-standard-8}"
+FLEET_CONTROL_PLANE_SIZE="${FLEET_CONTROL_PLANE_SIZE:-n2-standard-4}"
+# Controller node: the sandbox->pod fan-out is CPU-bound (controller CPU
+# was the single-cluster campaign's dominant limiter), so the dedicated
+# node must be large. n2-standard-4 capped a full-size cluster at ~773/s
+# vs ~1,280/s on the campaign's n2-standard-16.
+FLEET_CONTROLLER_NODE_SIZE="${FLEET_CONTROLLER_NODE_SIZE:-n2-standard-16}"
+FLEET_MAX_PODS="${FLEET_MAX_PODS:-500}"
+FLEET_DIR="${FLEET_DIR:-${HOME}/.fleet-kops}"
+FLEET_VALIDATE_WAIT="${FLEET_VALIDATE_WAIT:-20m}"
+
+mkdir -p "${FLEET_DIR}/logs" "${FLEET_DIR}/kubeconfigs"
+
+BINDIR="${FLEET_DIR}/bin"
+mkdir -p "${BINDIR}"
+if [[ ! -x "${BINDIR}/kops" ]]; then
+  echo "Installing kOps to ${BINDIR}..."
+  GOBIN="${BINDIR}" go install k8s.io/kops/cmd/kops@v1.36.0
+fi
+export PATH="${BINDIR}:${PATH}"
+
+PROJECT_ID=$(gcloud config get-value project)
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+export KOPS_STATE_STORE="gs://kops-state-${PROJECT_NUMBER}"
+
+# Fresh projects (the 3-day billing accounts rotate) have no state store
+# bucket yet; create it idempotently.
+if ! gcloud storage buckets describe "${KOPS_STATE_STORE}" >/dev/null 2>&1; then
+  echo "Creating state store bucket ${KOPS_STATE_STORE}..."
+  gcloud storage buckets create "${KOPS_STATE_STORE}" --project="${PROJECT_ID}" --location=us-central1
+fi
+IMAGE_PREFIX="gcr.io/${PROJECT_ID}/agent-sandbox/"
+export IMAGE_PREFIX
+
+echo "Fleet: ${FLEET_CLUSTER_COUNT} clusters, zones [${FLEET_ZONES}], ${FLEET_NODE_COUNT} x ${FLEET_NODE_SIZE} nodes each"
+echo "State store: ${KOPS_STATE_STORE}; kubeconfigs -> ${FLEET_DIR}/kubeconfigs/"
+
+# Push the controller image once for all clusters.
+echo "Pushing agent-sandbox-controller image..."
+dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --images agent-sandbox-controller
+
+IFS=',' read -ra ZONES <<< "${FLEET_ZONES}"
+
+up_one() {
+  local i=$1
+  local zone="${ZONES[$(( (i-1) % ${#ZONES[@]} ))]}"
+  local region="${zone%-*}"
+  # Name clusters by zone (fleet-us-east4-a), not ordinal (fleet-3): the
+  # zone is the thing you actually care about when reading a per-cluster
+  # number in the report or picking a cluster to debug. Assumes one cluster
+  # per zone (FLEET_ZONES entries are distinct); the round-robin only
+  # repeats a zone if FLEET_CLUSTER_COUNT exceeds the zone list.
+  local name="fleet-${zone}"
+  local kubeconfig="${FLEET_DIR}/kubeconfigs/${name}.kubeconfig"
+
+  if ! kops get cluster "${name}" >/dev/null 2>&1; then
+    echo "[${name}] creating in ${zone}..."
+    kops create cluster \
+      --cloud=gce \
+      --gce-service-account=default \
+      --networking=kindnet \
+      --name="${name}" \
+      --zones="${zone}" \
+      --project="${PROJECT_ID}" \
+      --kubernetes-version=1.36.4 \
+      --control-plane-count=1 \
+      --control-plane-size="${FLEET_CONTROL_PLANE_SIZE}" \
+      --node-count="${FLEET_NODE_COUNT}" \
+      --node-size="${FLEET_NODE_SIZE}"
+
+    kops create -f - <<EOF
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  labels:
+    kops.k8s.io/cluster: ${name}
+  name: sandbox-controller
+spec:
+  role: Node
+  machineType: ${FLEET_CONTROLLER_NODE_SIZE}
+  minSize: 1
+  maxSize: 1
+  zones:
+  - ${zone}
+  subnets:
+  - ${region}
+EOF
+
+    # Worker root volume: pd-ssd, sized 100GB. 100 (not the kOps default
+    # 128) is deliberate: SSD_TOTAL_GB is a per-REGION quota (40,960), and
+    # when two clusters share a region 128GB caps them at ~160 nodes each
+    # (2 x 160 x 128 ~= 40,960), which starved those clusters out of the
+    # readiness window early. 100GB fits 200 nodes/cluster even doubled-up
+    # (2 x 200 x 100 = 40,000 < 40,960); 100GB is ample for OS + prepulled
+    # image + the sleep pods' negligible ephemeral use.
+    kops edit instancegroup --name "${name}" "nodes-${zone}" \
+      --set "spec.rootVolume.type=pd-ssd" \
+      --set "spec.rootVolume.size=${FLEET_NODE_VOLUME_SIZE:-100}"
+    kops edit instancegroup --name "${name}" "control-plane-${zone}" \
+      --set "spec.rootVolume.type=pd-ssd"
+
+    # IGs created via `kops create -f` don't get the channel's default
+    # image the way `kops create cluster` IGs do; copy it from the nodes IG.
+    local node_image
+    node_image=$(kops get ig --name "${name}" "nodes-${zone}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["spec"]["image"])')
+    kops edit instancegroup --name "${name}" sandbox-controller \
+      --set "spec.image=${node_image}" \
+      --set "spec.rootVolume.type=pd-ssd"
+
+  else
+    echo "[${name}] already exists, converging..."
+  fi
+
+  # Spec edits apply on EVERY run (idempotent state-store writes), so a
+  # converge pass picks up config added since the cluster was created.
+  # NOTE: kubelet-level changes (maxPods) only reach EXISTING nodes after
+  # a rolling update; freshly created fleets get them at first boot.
+  # The campaign keep-list; each knob's full rationale lives in
+    # test/benchmarks/scenarios/benchmarks-kops-gcp/run.
+  kops edit cluster --name "${name}" \
+    --set 'cluster.spec.networking.kindnet.networkPolicies=false' \
+    `# nodeCIDRMaskSize=23 gives ~509 usable pod IPs/node; maxPods must` \
+    `# stay below that or a packed node strands pods on kindnet "no IPs` \
+    `# available" (found on wxg0 with maxPods=512). maxPods=500 < 509 fits.` \
+    --set "cluster.spec.kubeControllerManager.nodeCIDRMaskSize=${FLEET_NODE_CIDR_MASK_SIZE:-23}" \
+    --set 'cluster.spec.etcdClusters[0].manager.env[0].name=ETCD_QUOTA_BACKEND_BYTES' \
+    --set 'cluster.spec.etcdClusters[0].manager.env[0].value=8589934592' \
+    --set 'cluster.spec.etcdClusters[1].manager.env[0].name=ETCD_QUOTA_BACKEND_BYTES' \
+    --set 'cluster.spec.etcdClusters[1].manager.env[0].value=8589934592' \
+    --set "cluster.spec.etcdClusters[0].etcdMembers[0].volumeType=pd-ssd" \
+    --set "cluster.spec.etcdClusters[1].etcdMembers[0].volumeType=pd-ssd" \
+    --set "cluster.spec.kubelet.maxPods=${FLEET_MAX_PODS}" \
+    --set 'cluster.spec.kubelet.kubeAPIQPS=1000' \
+    --set 'cluster.spec.kubelet.eventQPS=1' \
+    --set 'cluster.spec.kubelet.eventBurst=1' \
+    --set 'cluster.spec.kubeControllerManager.kubeAPIQPS=2000' \
+    --set 'cluster.spec.kubeControllerManager.kubeAPIBurst=2000' \
+    --set 'cluster.spec.kubeScheduler.qps=1000' \
+    --set 'cluster.spec.kubeScheduler.burst=1000' \
+    --set 'cluster.spec.kubeAPIServer.maxRequestsInflight=3200' \
+    --set 'cluster.spec.kubeAPIServer.maxMutatingRequestsInflight=1600'
+
+
+  kops update cluster --name "${name}" --yes
+  kops export kubecfg "${name}" --admin=48h --kubeconfig "${kubeconfig}"
+  kops validate cluster --name "${name}" --wait "${FLEET_VALIDATE_WAIT}" --kubeconfig "${kubeconfig}"
+
+  local KC="kubectl --kubeconfig=${kubeconfig}"
+
+  # Dedicated node for the controller: label AND taint after join (kOps
+  # GCE cannot render IG labels/taints - it emits GCE-invalid label keys;
+  # see the campaign notes). The taint is what actually keeps sandbox pods
+  # and system daemons off the node; the label drives the controller's
+  # nodeSelector. The node objects may take a moment to appear, so retry.
+  for _ in $(seq 1 30); do
+    ${KC} label --overwrite node -l kops.k8s.io/instancegroup=sandbox-controller dedicated=sandbox-controller 2>/dev/null | grep -q . && break
+    sleep 10
+  done
+  ${KC} taint nodes -l kops.k8s.io/instancegroup=sandbox-controller \
+    dedicated=sandbox-controller:NoSchedule --overwrite
+
+  # Controller tuning, ported from the single-cluster scaleup scenario:
+  # 400 concurrent reconcile workers (default 100 throttled per-cluster
+  # readiness to ~989/s vs ~1,280/s) and the status-write dampeners
+  # (transitional-status-window, write-behind-window) that cut redundant
+  # status writes during the launch burst. Full rationale in
+  # scaleup-kops-gcp/run.
+  echo "[${name}] deploying agent-sandbox controller..."
+  KUBECONFIG="${kubeconfig}" dev/tools/deploy-to-kube --image-prefix="${IMAGE_PREFIX}" \
+    --controller-args="${FLEET_CONTROLLER_ARGS:---kube-api-qps=2000 --kube-api-burst=4000 --sandbox-concurrent-workers=400 --sandbox-transitional-status-window=180s --sandbox-write-behind-window=1s}"
+  # Pin the controller to the dedicated node (nodeSelector) AND tolerate
+  # its taint, or the taint we just added would repel the controller too.
+  ${KC} patch deployment agent-sandbox-controller --namespace agent-sandbox-system --patch '{
+    "spec": {"template": {"spec": {
+      "nodeSelector": {"dedicated": "sandbox-controller"},
+      "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "sandbox-controller", "effect": "NoSchedule"}]
+    }}}}'
+  ${KC} rollout status deployment agent-sandbox-controller --namespace agent-sandbox-system --timeout=10m
+
+  # Serve only the beta API (see the single-cluster runner for why).
+  # Patch by VERSION NAME, not array index: the versions order is not
+  # guaranteed, and served=false on the wrong entry silently disables
+  # the API the driver uses.
+  for crd in sandboxes.agents.x-k8s.io sandboxclaims.extensions.agents.x-k8s.io sandboxtemplates.extensions.agents.x-k8s.io sandboxwarmpools.extensions.agents.x-k8s.io; do
+    ${KC} get crd "${crd}" >/dev/null 2>&1 || continue
+    local versions idx
+    versions=$(${KC} get crd "${crd}" -o jsonpath='{range .spec.versions[*]}{.name} {end}')
+    idx=0
+    for v in ${versions}; do
+      if [[ "${v}" == "v1alpha1" ]]; then
+        ${KC} patch crd "${crd}" --type=json \
+          -p "[{\"op\":\"replace\",\"path\":\"/spec/versions/${idx}/served\",\"value\":false}]"
+      else
+        ${KC} patch crd "${crd}" --type=json \
+          -p "[{\"op\":\"replace\",\"path\":\"/spec/versions/${idx}/served\",\"value\":true}]"
+      fi
+      idx=$((idx+1))
+    done
+  done
+
+  # Pre-pull the sandbox image on all workers so the run measures
+  # launches, not registry pulls.
+  ${KC} apply -f - <<'EOF'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: image-prepull
+  namespace: default
+spec:
+  selector: { matchLabels: { app: image-prepull } }
+  template:
+    metadata: { labels: { app: image-prepull } }
+    spec:
+      initContainers:
+      - name: pull
+        image: debian:latest
+        command: ["true"]
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+EOF
+  ${KC} rollout status daemonset/image-prepull --namespace default --timeout=10m
+  echo "[${name}] READY"
+}
+
+pids=()
+names=()
+for i in $(seq 1 "${FLEET_CLUSTER_COUNT}"); do
+  name="fleet-${ZONES[$(( (i-1) % ${#ZONES[@]} ))]}"
+  names+=("${name}")
+  up_one "${i}" > "${FLEET_DIR}/logs/up-${name}.log" 2>&1 &
+  pids+=($!)
+done
+
+fail=0
+for idx in "${!pids[@]}"; do
+  if ! wait "${pids[$idx]}"; then
+    echo "FLEET UP FAILED: ${names[$idx]} (see ${FLEET_DIR}/logs/up-${names[$idx]}.log)"
+    fail=1
+  fi
+done
+[[ $fail == 0 ]] || exit 1
+
+echo "Fleet up: ${FLEET_CLUSTER_COUNT} clusters ready."
+ls -la "${FLEET_DIR}/kubeconfigs/"

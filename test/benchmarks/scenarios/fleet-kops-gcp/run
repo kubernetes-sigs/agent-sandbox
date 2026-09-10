@@ -1,0 +1,130 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# run: drive the fleet launch test against clusters brought up by ./up.
+# Assumes kubeconfigs in FLEET_DIR/kubeconfigs. Artifacts (per-cluster
+# jsonl + summary.json) land in FLEET_ARTIFACTS.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+FLEET_DIR="${FLEET_DIR:-${HOME}/.fleet-kops}"
+FLEET_COUNT="${FLEET_COUNT:-2000}"
+FLEET_RATE="${FLEET_RATE:-200}"
+FLEET_ARTIFACTS="${FLEET_ARTIFACTS:-fleet-artifacts-$(date +%Y%m%d-%H%M%S)}"
+
+kubeconfigs=("${FLEET_DIR}"/kubeconfigs/*.kubeconfig)
+[[ -e "${kubeconfigs[0]}" ]] || { echo "no kubeconfigs in ${FLEET_DIR}/kubeconfigs - run ./up first"; exit 1; }
+echo "Fleet run: ${#kubeconfigs[@]} clusters, ${FLEET_COUNT} sandboxes at ${FLEET_RATE}/s aggregate -> ${FLEET_ARTIFACTS}"
+
+# Pre-flight 1: delete namespaces from previous runs AND WAIT. Leftover
+# sandboxes hold pod capacity: a prior run's stall left every node full
+# and the next run reported ready=0 with nothing visibly wrong. Waiting
+# matters as much as deleting - terminating pods still occupy slots.
+if [[ "${FLEET_SKIP_CLEANUP:-}" != "true" ]]; then
+  for kc in "${kubeconfigs[@]}"; do
+    (
+      KC="kubectl --kubeconfig=${kc}"
+      stale=$(${KC} get ns -o name 2>/dev/null | grep "^namespace/fleet-" | cut -d/ -f2 || true)
+      for ns in ${stale}; do
+        echo "[$(basename "${kc}" .kubeconfig)] deleting stale namespace ${ns}"
+        ${KC} delete ns "${ns}" --wait=false >/dev/null
+      done
+      # Poll rather than 'kubectl wait --for=delete': a watch established
+      # mid-deletion can miss the terminal event and hang indefinitely
+      # even after the namespace is gone.
+      for ns in ${stale}; do
+        for _ in $(seq 1 160); do  # 160 x 15s = 40m
+          ${KC} get ns "${ns}" >/dev/null 2>&1 || break
+          sleep 15
+        done
+        if ${KC} get ns "${ns}" >/dev/null 2>&1; then
+          echo "[$(basename "${kc}" .kubeconfig)] FAILED: namespace ${ns} still terminating after 40m"; exit 1
+        fi
+      done
+    ) &
+  done
+  wait
+fi
+
+# Pre-flight 2: prepull verification. Restart the image-prepull daemonset
+# and wait: every node re-proves the sandbox image is on disk (instant if
+# cached, pulls if a node was replaced since up). Rules the registry out
+# of the run entirely - Docker Hub backoffs have already turned one
+# launch into readiness waves.
+if [[ "${FLEET_SKIP_PREPULL_CHECK:-}" != "true" ]]; then
+  for kc in "${kubeconfigs[@]}"; do
+    (
+      KC="kubectl --kubeconfig=${kc}"
+      ${KC} rollout restart daemonset/image-prepull --namespace default >/dev/null
+      ${KC} rollout status daemonset/image-prepull --namespace default --timeout=15m >/dev/null || {
+        echo "[$(basename "${kc}" .kubeconfig)] FAILED: image prepull did not converge"; exit 1; }
+      echo "[$(basename "${kc}" .kubeconfig)] prepull verified on all nodes"
+    ) &
+  done
+  wait
+fi
+
+# Pre-flight 3: capacity check. Free pod slots per cluster must cover its
+# hash share. FLEET_SKIP_CAPACITY_CHECK=true for a heterogeneous fleet
+# where small clusters are meant to overflow (excess pods stay Pending).
+# hash share (~count/clusters) plus 10% imbalance margin; abort loudly
+# rather than burn a run discovering it in the ready curve.
+need_per_cluster=$(( FLEET_COUNT * 11 / 10 / ${#kubeconfigs[@]} ))
+if [[ "${FLEET_SKIP_CAPACITY_CHECK:-}" != "true" ]]; then
+for kc in "${kubeconfigs[@]}"; do
+  free=$(kubectl --kubeconfig="${kc}" get nodes -l '!node-role.kubernetes.io/control-plane,!dedicated' -o json 2>/dev/null \
+    | python3 -c '
+import json,sys
+nodes=json.load(sys.stdin)["items"]
+print(sum(int(n["status"]["allocatable"]["pods"]) for n in nodes))')
+  used=$(kubectl --kubeconfig="${kc}" get pods -A --field-selector=status.phase!=Succeeded,status.phase!=Failed --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  avail=$(( free - used ))
+  echo "[$(basename "${kc}" .kubeconfig)] pod capacity: allocatable=${free} used=${used} available=${avail} need~=${need_per_cluster}"
+  if (( avail < need_per_cluster )); then
+    echo "FAILED pre-flight: $(basename "${kc}" .kubeconfig) has ${avail} free pod slots, needs ~${need_per_cluster}"
+    exit 1
+  fi
+done
+fi
+
+go run ./test/fleet \
+  --kubeconfigs="${FLEET_DIR}/kubeconfigs/*.kubeconfig" \
+  --count="${FLEET_COUNT}" \
+  --rate="${FLEET_RATE}" \
+  --output-dir="${FLEET_ARTIFACTS}" \
+  ${FLEET_EXTRA_ARGS:-}
+
+echo "Artifacts in ${FLEET_ARTIFACTS}:"
+ls -la "${FLEET_ARTIFACTS}"
+cat "${FLEET_ARTIFACTS}/summary.json"
+
+# Fleet report: one self-contained HTML page over the run's jsonl.
+if python3 -c "import venv" >/dev/null 2>&1; then
+  REPORT_VENV="${FLEET_DIR}/report-venv"
+  [[ -x "${REPORT_VENV}/bin/python3" ]] || python3 -m venv "${REPORT_VENV}"
+  "${REPORT_VENV}/bin/pip" install --quiet 'duckdb>=1,<2' 'jinja2>=3,<4' 'pytz'
+  "${REPORT_VENV}/bin/python3" test/fleet/generate-report/generate_report.py \
+    --input-dir "${FLEET_ARTIFACTS}" \
+    --output "${FLEET_ARTIFACTS}/report.html"
+  # Stable pointer to the newest run's report, so an open browser tab
+  # never silently shows a previous run.
+  ln -sf "$(cd "${FLEET_ARTIFACTS}" && pwd)/report.html" fleet-report-latest.html
+  echo "Report: ${FLEET_ARTIFACTS}/report.html (also: fleet-report-latest.html)"
+fi

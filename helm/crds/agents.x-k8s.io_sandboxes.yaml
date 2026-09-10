@@ -4127,6 +4127,20 @@ spec:
                   - type
                   type: object
                 type: array
+              lifecycle:
+                properties:
+                  firstObservedTime:
+                    format: date-time
+                    type: string
+                  firstReadyRecordState:
+                    enum:
+                    - Recorded
+                    - RecordedUnknown
+                    type: string
+                  firstReadyTime:
+                    format: date-time
+                    type: string
+                type: object
               nodeName:
                 type: string
               podIPs:

@@ -32,5 +32,9 @@ test = [
     "pytest",
     "pytest-xdist",
     "anyio",
+    # Used by the probe tests to drive the ASGI app. It is currently pulled in
+    # transitively by fastmcp, but declare it so the suite does not silently
+    # depend on another package's dependency tree.
+    "httpx",
 ]
 

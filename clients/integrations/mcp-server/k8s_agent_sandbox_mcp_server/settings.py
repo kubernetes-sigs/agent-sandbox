@@ -41,9 +41,15 @@ class InClusterConnectionConfig(SandboxInClusterConnectionConfig):
 ConnectionType = Union[GatewayConnectionConfig, DirectConnectionConfig, InClusterConnectionConfig]
 
 class Settings(BaseSettings):
-    connection: ConnectionType = Field(default=..., discriminator='type')  
+    connection: ConnectionType = Field(default=..., discriminator='type')
     session_id_label_key: str = Field(
         default="mcp.k8s-agent-sandbox/session-id",
+    )
+    probe_namespace: str = Field(
+        default="default",
+        description="Namespace the /readyz probe lists SandboxClaims in to confirm "
+                    "the Kubernetes API is reachable. Must be a namespace the "
+                    "server's service account can list claims in.",
     )
 
     model_config = SettingsConfigDict(

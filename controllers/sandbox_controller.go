@@ -801,7 +801,7 @@ func NameHash(objectName string) string {
 	return string(buf[:])
 }
 
-func removeSandboxControllerReference(obj client.Object, sandbox *sandboxv1beta1.Sandbox) bool {
+func removeSandboxOwnerReferences(obj client.Object, sandbox *sandboxv1beta1.Sandbox) bool {
 	ownerRefs := obj.GetOwnerReferences()
 	filtered := make([]metav1.OwnerReference, 0, len(ownerRefs))
 	removed := false
@@ -1692,7 +1692,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 				}
 				logger.Info("Removing Sandbox owner reference from PVC because retention policy is Retain", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 				patch := client.MergeFromWithOptions(pvc.DeepCopy(), client.MergeFromWithOptimisticLock{})
-				if !removeSandboxControllerReference(pvc, sandbox) {
+				if !removeSandboxOwnerReferences(pvc, sandbox) {
 					continue
 				}
 				if err := r.Patch(ctx, pvc, patch); err != nil {

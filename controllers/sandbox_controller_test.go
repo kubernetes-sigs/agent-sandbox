@@ -4753,7 +4753,7 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 }
 
-func TestRemoveSandboxControllerReferencePreservesAliasedOwnerReferences(t *testing.T) {
+func TestRemoveSandboxOwnerReferencesPreservesAliasedOwnerReferences(t *testing.T) {
 	controller := true
 	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{UID: types.UID("sandbox-uid")}}
 	ownerRefs := []metav1.OwnerReference{
@@ -4764,21 +4764,22 @@ func TestRemoveSandboxControllerReferencePreservesAliasedOwnerReferences(t *test
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{OwnerReferences: ownerRefs}}
 	aliasedOwnerRefs := pvc.GetOwnerReferences()
 
-	require.True(t, removeSandboxControllerReference(pvc, sandbox))
+	require.True(t, removeSandboxOwnerReferences(pvc, sandbox))
 	require.Equal(t, originalOwnerRefs[1:], pvc.GetOwnerReferences())
 	require.Equal(t, originalOwnerRefs, aliasedOwnerRefs)
 }
 
-func TestRemoveSandboxControllerReferenceRemovesNonControllerSandboxReference(t *testing.T) {
+func TestRemoveSandboxOwnerReferencesRemovesAllSandboxReferences(t *testing.T) {
 	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{UID: types.UID("sandbox-uid")}}
 	controller := true
 	retainedRef := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "audit-marker", UID: types.UID("audit-marker-uid"), Controller: &controller}
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{
 		{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: sandboxv1beta1.SandboxKind, Name: "sandbox", UID: sandbox.UID},
+		{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: sandboxv1beta1.SandboxKind, Name: "sandbox", UID: sandbox.UID, Controller: &controller},
 		retainedRef,
 	}}}
 
-	require.True(t, removeSandboxControllerReference(pvc, sandbox))
+	require.True(t, removeSandboxOwnerReferences(pvc, sandbox))
 	require.Equal(t, []metav1.OwnerReference{retainedRef}, pvc.OwnerReferences)
 }
 

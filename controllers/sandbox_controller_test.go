@@ -1580,9 +1580,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// Reconciling an existing pod must not write the pod name annotation on the Sandbox as it is no longer written by the controller.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "persists owner reference when adopting unowned pod whose labels are already correct",
@@ -1632,9 +1631,6 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
 		},
 		{
 			name: "adopts unowned pod carrying legacy tracking label when adoptable label is absent",
@@ -1680,9 +1676,6 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
 		},
 		{
 			name:    "reconcilePod creates a new Pod",
@@ -1711,9 +1704,8 @@ func TestReconcilePod(t *testing.T) {
 					},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
+			// Reconciling a new pod must not write the pod name annotation on the Sandbox as it is no longer written by the controller.
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "drops user-supplied system-reserved labels and annotations to prevent hijacking",
@@ -1732,6 +1724,7 @@ func TestReconcilePod(t *testing.T) {
 							// Attacker attempts to hijack another Sandbox's routing label
 							// and to spoof an extensions-prefixed system label.
 							"agents.x-k8s.io/sandbox-name-hash":          "malicious-hijacked-hash",
+							extensionsv1beta1.SandboxIDLabel:             "malicious-claim-uid",
 							"extensions.agents.x-k8s.io/warm-pool-spoof": "evil",
 							"custom-label": "label-val",
 						},
@@ -1764,9 +1757,6 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
 		{
@@ -1819,9 +1809,6 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
 		},
 		{
 			name: "does not propagate system labels from Sandbox metadata to Pod",
@@ -1856,7 +1843,6 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
 		},
 		{
 			name: "does not propagate system labels from Sandbox PodTemplate to Pod",
@@ -1893,7 +1879,6 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
 		},
 		{
 			name: "does not propagate template-ref-hash from Sandbox metadata to Pod",
@@ -1928,7 +1913,6 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
 		},
 		{
 			name: "propagates warm pool label from Sandbox owner reference to Pod",
@@ -1973,7 +1957,6 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
 		},
 		{
 			name: "removes warm pool label from Pod when Sandbox is no longer owned by SandboxWarmPool",
@@ -2028,9 +2011,6 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
 		{
@@ -2099,9 +2079,6 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
 		},
 		{
 			name: "propagates template-ref-hash label from Sandbox labels to new Pod",
@@ -2146,7 +2123,6 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
 		},
 		{
 			name: "adds template-ref-hash label to existing Pod during reconciliation",
@@ -2210,7 +2186,114 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
+		},
+		{
+			name: "propagates claim UID label from Sandbox labels to new Pod",
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						extensionsv1beta1.SandboxIDLabel: "claim-uid",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "1",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						extensionsv1beta1.SandboxIDLabel:    "claim-uid",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{},
+		},
+		{
+			name: "adds claim UID label to existing Pod during reconciliation",
+			initialObjs: []runtime.Object{
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sandboxName,
+						Namespace:       sandboxNs,
+						ResourceVersion: "1",
+						Labels: map[string]string{
+							"agents.x-k8s.io/sandbox-name-hash": nameHash,
+							"custom-label":                      "label-val",
+						},
+						Annotations: map[string]string{
+							"agents.x-k8s.io/propagated-labels": "custom-label",
+						},
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+					},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+				},
+			},
+			sandbox: &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandboxName,
+					Namespace: sandboxNs,
+					UID:       sandboxUID,
+					Labels: map[string]string{
+						extensionsv1beta1.SandboxIDLabel: "claim-uid",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: extensionsv1beta1.GroupVersion.String(),
+							Kind:       extensionsv1beta1.SandboxClaimKind,
+							Name:       "my-claim",
+							UID:        "claim-uid",
+							Controller: new(true),
+						},
+					},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+					ObjectMeta: sandboxv1beta1.PodMetadata{Labels: map[string]string{"custom-label": "label-val"}},
+				}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			},
+			wantPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sandboxName,
+					Namespace:       sandboxNs,
+					ResourceVersion: "2",
+					Labels: map[string]string{
+						"agents.x-k8s.io/sandbox-name-hash": nameHash,
+						"custom-label":                      "label-val",
+						extensionsv1beta1.SandboxIDLabel:    "claim-uid",
+					},
+					Annotations: map[string]string{
+						"agents.x-k8s.io/propagated-labels": "custom-label",
+					},
+					OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
+			},
+			wantSandboxAnnotations: map[string]string{},
 		},
 		{
 			name: "both warm-pool-sandbox and template-ref-hash coexist on Pod",
@@ -2257,7 +2340,6 @@ func TestReconcilePod(t *testing.T) {
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}},
 			},
-			wantSandboxAnnotations: map[string]string{sandboxv1beta1.SandboxPodNameAnnotation: sandboxName},
 		},
 		{
 			name: "removes template-ref-hash label from Pod when Sandbox is not owned by extensions controller",
@@ -2310,9 +2392,6 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
 		{
@@ -2375,9 +2454,6 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
 		{
@@ -2806,9 +2882,6 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
 		},
 		{
 			name: "refuses to adopt unowned pod that lacks pool authorization label",
@@ -2875,9 +2948,6 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
 		},
 		{
 			name:        "normalizes invalid created-by label to unknown",
@@ -2909,9 +2979,6 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
 		{
@@ -2968,9 +3035,6 @@ func TestReconcilePod(t *testing.T) {
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
 			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
-			},
 		},
 		{
 			name: "removes created-by label from existing Pod when Sandbox lacks it",
@@ -3018,9 +3082,6 @@ func TestReconcilePod(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "test-container"}},
 				},
-			},
-			wantSandboxAnnotations: map[string]string{
-				sandboxv1beta1.SandboxPodNameAnnotation: sandboxName,
 			},
 		},
 	}
@@ -3157,7 +3218,7 @@ func TestReconcilePodRecoversOwnedPodWhenTrackedPodIsMissing(t *testing.T) {
 
 	liveSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sandbox), liveSandbox))
-	assert.Equal(t, survivor, liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
+	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
 }
 
 func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
@@ -3223,7 +3284,7 @@ func TestReconcilePodPrefersOwnedPodOverStaleAdoptionTarget(t *testing.T) {
 
 	liveSandbox := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sandbox), liveSandbox))
-	assert.Equal(t, survivor, liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
+	assert.Empty(t, liveSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation])
 }
 
 func TestReconcilePodFailsClosedForMultipleOwnedPods(t *testing.T) {

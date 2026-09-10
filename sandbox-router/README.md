@@ -61,7 +61,7 @@ The router validates the routing headers before constructing the upstream URL, m
 
 ### Endpoints
 
-- `GET /healthz` → `200 OK` with `{"status":"ok"}` (matches the Python contract; used by Gateway HealthCheckPolicy)
+- `GET /healthz` → `200 OK` with `{"status":"ok"}` (matches the Python contract; used by Gateway health checks, e.g. GKE HealthCheckPolicy)
 - Anything else → reverse-proxied to the resolved sandbox
 
 ### Error responses
@@ -98,6 +98,27 @@ The router also sets `X-Forwarded-Host` / `X-Forwarded-Proto` / `X-Forwarded-For
 
 Metrics for upgraded requests record `code="101"` once the handshake completes; the duration histogram records the full lifetime of the upgraded connection.
 
+### Browser-facing traffic: path-based routing
+
+Everything above assumes the caller can set `X-Sandbox-*` headers. A browser tab, an `<iframe>`, and — critically — a WebSocket handshake cannot: there is no web API for attaching custom headers to a top-level navigation, a subresource document load, or `new WebSocket(url, protocols)` (`protocols` only negotiates a subprotocol, it is not a headers map). This is a platform limitation, not something a Service Worker can work around either — WebSocket handshakes are explicitly not exposed to the `fetch` event, which is exactly why tools that need to intercept WebSocket traffic client-side (e.g. Mock Service Worker) have to patch the global `WebSocket` constructor instead of using a Service Worker at all. See [w3c/ServiceWorker#947](https://github.com/w3c/ServiceWorker/issues/947), still open.
+
+This bites concretely for any browser-facing dev tool proxied through this router — a web IDE whose terminal is a WebSocket (code-server is the common case), or a dev server whose hot-reload client opens one (Vite/webpack HMR). Both work fine once a request reaches the router with the right headers; the problem is entirely upstream of that, in getting the browser's own request there in the first place.
+
+Set `--path-routing-prefix` to give such traffic a second way in: a request whose path starts with the configured prefix is routed by `<prefix>/<namespace>/<id>/<port>/<rest...>` instead of headers — plain URL segments, which a browser can put in any navigation, `<iframe src>`, or `new WebSocket(...)` call with zero client-side code. Concretely, once a page is loaded at a URL under this prefix, any *relative* WebSocket URL that page's own JavaScript opens (which is how code-server and most dev-server HMR clients behave) automatically carries the same prefix along — the routing identity travels for free.
+
+This is strictly additive: the default is `""` (disabled), and a request whose path does not match the configured prefix falls straight through to `X-Sandbox-*` header parsing, unchanged. `X-Sandbox-Pod-IP` and `X-Sandbox-UID` have no path equivalent — both are dial-target overrides meant for SDKs that already hold cluster-internal knowledge, never for a browser tab, so path-routed requests always resolve through the DNS form or the namespace/name cache index, same as a header-routed request carrying only `X-Sandbox-ID`.
+
+**Enabling this flag claims the entire URL namespace under the prefix.** The fallback above only applies to a path that does not match the prefix as a path segment — `/routerish/...` shares the literal string `/router` but does not match, because there is no `/` boundary right after it, so it still falls through to headers like today. Once a request's path *does* match, it is committed to path-based routing and stays there — a malformed one (missing the port segment, an invalid namespace or ID, and so on) gets a `400` from `ParsePathRoute` directly and is **not** retried against `X-Sandbox-*` headers, even if the caller happened to also send them. Pick a prefix no real application route inside a sandbox needs to answer under, for exactly this reason.
+
+Everything after `<port>` is forwarded byte-for-byte, escaping included — an encoded separator inside a single upstream path segment (e.g. a filename containing `/`, sent as `%2F`) survives the hop unchanged rather than being silently decoded into an extra segment. `sandbox_router_requests_total` labels, the access log's `sandbox_id`/`sandbox_namespace` fields, and the `sandbox.id`/`sandbox.namespace` trace attributes all reflect the resolved target regardless of whether it came from a header or from the path.
+
+```sh
+curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  'http://sandbox-router-svc:8080/router/default/my-sandbox/8080/'
+# -> 101 Switching Protocols, no X-Sandbox-* header sent anywhere in this request
+```
+
 ## Flags
 
 Run `sandbox-router --help` for the full list. The most relevant:
@@ -116,6 +137,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
+| `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |
@@ -143,17 +165,17 @@ For every inbound request, the proxy resolves the upstream in this order: explic
 
 ## Authorization
 
-The router runs every request through an `authz.Authorizer` after header parsing and before resolving the upstream. The default — and the only one wired by `main.go` today — is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded.
+The router runs every request through an `authz.Authorizer` after header parsing and before resolving the upstream. The default is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded. Two other built-in authorizers — TokenReview and scoped-token, both described below — are selectable via `--authz-mode`.
 
 The `Authorizer` interface is intentionally simple:
 
 ```go
 type Authorizer interface {
-    Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error
+    Authorize(ctx context.Context, r *http.Request, target AuthorizationTarget) error
 }
 ```
 
-Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (TLS client cert via `authz.IdentityFromTLS`, Bearer token via `authz.BearerTokenFromRequest`, custom header) directly off the request.
+`AuthorizationTarget` carries the namespace, Sandbox name, Sandbox UID, execution port, normalized HTTP method, and the upstream path after path-routing prefixes have been removed. Returning `nil` allows the request; returning `authz.ErrUnauthenticated` produces a 401 JSON response, `authz.ErrForbidden` produces 403, anything else produces 500. Implementations pull whatever credential they need (TLS client cert, Bearer token via `authz.BearerTokenFromRequest`, custom header) directly off the request.
 
 The `sandbox_router_authz_decisions_total{decision="allow|deny",sandbox_namespace="…"}` counter records every verdict so deployments can see whether `AllowAll` is actually allowing the traffic shape they expect.
 
@@ -165,7 +187,7 @@ Flags:
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--authz-mode` | `allow-all` | `allow-all` or `tokenreview`. |
+| `--authz-mode` | `allow-all` | `allow-all`, `tokenreview`, or `scoped-token`. |
 | `--authz-tokenreview-ttl` | `30s` | Cache TTL for both positive and negative decisions. |
 | `--authz-tokenreview-cache-size` | `2048` | LRU bound. |
 | `--authz-tokenreview-require-token` | `false` | When false, tokenless requests pass (transitional). When true, missing token → 401. |
@@ -177,7 +199,11 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 ### Scoped-token authorizer
 
-Set `--authz-mode=scoped-token` to enable the built-in authorizer that closes exactly the gap called out above, but without requiring the caller to hold a cluster-verifiable K8s credential at all. A scoped token is a small HMAC-SHA256-signed value binding `(namespace, name, exp)` — minted with `authz.MintScopedToken`, wire format `v1.<payload>.<signature>` — and the authorizer both verifies the signature/expiry *and* checks that the token's `(namespace, name)` matches the sandbox actually being addressed. The leading `v1` version lets a future format coexist with outstanding tokens during a rollout, and the signature is domain-separated (MAC'd over a fixed context string) so it can't be cross-verified by any other component sharing the Secret. A token minted for `box-a` gets 403 against `box-b`; there is no TokenReview round-trip and no K8s API access implied by possessing the token. Requests carrying `X-Sandbox-Pod-IP` or `X-Sandbox-UID` are rejected outright in this mode: both override how the proxy picks the dial target *after* authorization (a raw IP, or a UID→IP cache lookup), which would let a token scoped to one sandbox reach a different pod while `X-Sandbox-ID` still names the authorized one. Rejecting them leaves resolution by `(namespace, name)` — exactly the identity the token authorizes — as the only routing path, so the dial target always matches what was authorized. Today that resolution is DNS, so scoped-token mode needs the sandbox reachable by its `(namespace, name)` DNS name (e.g. a headless `Service`), rather than the UID cache fast-path. A `(namespace, name)`-keyed cache name index (added in #1239) resolves the same identity and composes here without weakening the guarantee — it would lift the headless-`Service` requirement for warm-pool sandboxes; whichever of the two lands second should keep this sentence and #1239's wording in sync.
+Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
+
+Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
+
+V2 requires `X-Sandbox-UID` and `--cache-enabled`. It rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. The current cache still falls back from a missing UID entry to namespace and name. The v2 contract therefore does not yet prove same-name replacement fencing; that requires cache resolution to return the canonical UID it actually selected and to reject a stale UID instead of falling back.
 
 This is the primitive an agent-facing example needs to reproduce the credential-boundary story of `examples/containarium-ssh-sandbox` (agent holds one narrow, single-purpose credential, never a cluster token) using only pieces native to this project — no third-party SSH gateway, no vendor runtime image. `MintScopedToken` is exported so a Sandbox controller (or a test/example harness standing in for one) can mint a token at Sandbox-creation time and hand it to the agent; the router itself never mints, only verifies.
 
@@ -186,9 +212,69 @@ Flags:
 | Flag | Default | Notes |
 |---|---|---|
 | `--authz-mode` | `allow-all` | `allow-all`, `tokenreview`, or `scoped-token`. |
-| `--authz-scoped-token-secret-file` | `""` | Path to a file holding the shared HMAC-SHA256 secret. Required when `--authz-mode=scoped-token`; must match whatever minted the tokens (e.g. the same K8s Secret mounted into the controller and the router). At least 32 bytes after whitespace trimming (`authz.MinScopedTokenSecretLen`) — every observed token is an offline brute-force oracle for this secret, so short values are refused at startup. Minter and verifier both trim surrounding whitespace, so a trailing newline in the mounted file is harmless. |
+| `--authz-scoped-token-secret-file` | `""` | Path to the legacy v1 HMAC-SHA256 secret. Required unless v2 verification keys are configured. At least 32 bytes after whitespace trimming. |
+| `--authz-scoped-token-verification-keys-file` | `""` | Path to a JSON Ed25519 public-key set for v2. Requires `--cache-enabled`. |
+| `--authz-scoped-token-v1-accept-until` | `""` | Exclusive RFC3339 cutoff for v1 verification. Required when v1 and v2 readers overlap. |
 
-**Follow-up, not in this change.** Nothing here mints tokens automatically at Sandbox creation or rotates the shared secret without a restart — both are natural next steps once a controller-side minting story is agreed, tracked alongside the per-sandbox-authorization follow-up on TokenReview above.
+The v2 key file contains unpadded base64url public keys:
+
+```json
+{"keys":[{"kid":"2026-08","publicKey":"<base64url-ed25519-public-key>"}]}
+```
+
+A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+
+The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
+
+### Browser-session credentials
+
+Both authorizers above check `Authorization: Bearer <token>` by default (via `authz.TokenFromRequest`, which checks that header first) — which is exactly the gap [Browser-facing traffic: path-based routing](#browser-facing-traffic-path-based-routing) already documents for routing, applied to authorization instead. A top-level navigation, an `<iframe src>`, and a WebSocket handshake have no API for setting *any* request header — this isn't specific to `Authorization` being unusual; `fetch`/`XMLHttpRequest` can set it freely, but none of the three request types a browser actually needs for this router (opening an editor tab, embedding a dev-server preview, opening a terminal WebSocket) go through `fetch`. So `--path-routing-prefix` alone gets a browser to the right sandbox, but leaves it unable to present a `tokenreview` or `scoped-token` credential at all — the deployment is stuck on `allow-all` for that traffic.
+
+A cookie is the one credential channel a browser attaches automatically to every request toward an origin — including a WebSocket handshake, which is not subject to the Same-Origin Policy the way a `fetch` is. Set `--authz-cookie-name` (and, to actually get the cookie set, `--authz-cookie-query-param`) to let `TokenFromRequest` additionally accept a credential from a cookie or a URL query parameter, in this order: `Authorization` header, then query parameter, then cookie.
+
+**The bootstrap.** A page cannot set a cookie for another origin itself, so the very first request still needs the credential somewhere a browser *can* put it: the URL. A `GET`/`HEAD`, non-upgrade request that actually matched `--path-routing-prefix` and presented a valid credential via `--authz-cookie-query-param` gets it set as a cookie — scoped by `Path` to exactly `<path-routing-prefix>/<namespace>/<id>/<port>/`, so a browser never attaches sandbox A's cookie to a request under sandbox B's path — and is redirected (`302`) to the same URL with the parameter stripped. (A header-routed request carrying the same query parameter is authorized the same way but never bootstrapped: a cookie scoped to the path-routing shape could never match its URL, so setting one and stripping its only credential would just break the retry.) This collapses the credential's time in the URL, browser history, and any `Referer` a sub-resource load might send, to a single request. Every request after that — including the WebSocket handshake a web IDE's terminal or a dev server's HMR client opens — relies on the cookie instead:
+
+```sh
+# First load: token travels once, in the URL.
+curl -i 'https://sandbox-router-svc:8443/router/team/my-sandbox/8080/?token=v1.xxx.yyy'
+# -> 302, Set-Cookie: sid=v1.xxx.yyy; Path=/router/team/my-sandbox/8080/; HttpOnly; Secure; SameSite=Lax
+#    Location: https://sandbox-router-svc:8443/router/team/my-sandbox/8080/
+
+# Every later request, including a WebSocket handshake: the browser
+# attaches the cookie on its own, no client-side code involved.
+curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  -H 'Cookie: sid=v1.xxx.yyy' \
+  'https://sandbox-router-svc:8443/router/team/my-sandbox/8080/'
+# -> 101 Switching Protocols
+```
+
+(`https://` here because the cookie is `Secure` by default. Local development over plain HTTP needs `--authz-cookie-insecure` — see the flag below — and `http://` URLs throughout.)
+
+A missing or invalid credential on the bootstrap request behaves exactly like a missing or invalid one anywhere else — 401/403, no `Set-Cookie` — nothing about the redirect is trusted on its own.
+
+**`SameSite` — read this before choosing a value.** `SameSite` compares the registrable domain (eTLD+1), not the origin: a page on `atenea.example.com` embedding an iframe served from `sandboxes.example.com` is a **different origin but the same site**, and `SameSite=Lax` (the default) covers it without requiring HTTPS. Only a genuinely cross-site deployment — integrator and router on unrelated registrable domains — needs `SameSite=None`, and that requires `Secure` (browsers refuse to set a `SameSite=None` cookie without it — incompatible with `--authz-cookie-insecure`); some browsers additionally block a `SameSite=None` cookie outright as third-party, which no flag on this router can work around. Prefer a same-site deployment if you have the choice.
+
+**The Origin allowlist is not optional in this mode — and it does not cover everything.** A cookie is an ambient credential: unlike a header or a query parameter, the browser attaches it to a request that any page — including one an attacker controls — initiated, and this is *not* hypothetical for a WebSocket handshake specifically, which the Same-Origin Policy does not cover the way it covers `fetch` (this is the well-known Cross-Site WebSocket Hijacking class of bug). The router cannot lean on the upstream sandbox to catch a bad `Origin` either, since it strips `Origin` on upgrade requests for code-server's benefit (see [WebSockets and other protocol upgrades](#websockets-and-other-protocol-upgrades) above). So whenever the credential that authorized a request came from the cookie, the router separately checks the request's `Origin` against `--authz-cookie-allowed-origins` — *before* calling into the `Authorizer` at all — and rejects with 403 if it isn't allowed. A same-origin request (scheme AND host both matching the router's own) is always allowed regardless of the list; a request with no `Origin` header at all is let through this specific check, since browsers reliably send `Origin` on exactly the requests it exists to gate (every WebSocket handshake, every genuinely cross-site request) and there is nothing here to inspect otherwise. Header- and query-sourced credentials are exempt from this check entirely — a third-party page cannot forge either.
+
+But **every sandbox behind this router shares the same origin** — they differ only by path, and `Origin` cannot see path. So the allowlist protects against a page on a *different* origin, not against a page served *by one of your own sandboxes*: JavaScript running inside sandbox A can `fetch()`/open a WebSocket to sandbox B's path from the same browser, the request is same-origin by definition, and if that browser also holds a still-valid cookie for sandbox B (the same person has both open), the browser attaches it — cookie `Path` matching is about the request's target URL, not the initiating page's. Nothing in this design closes that gap; the real fix is giving each sandbox its own origin (a distinct hostname or subdomain), which is a bigger architectural change than this opt-in feature makes. Treat every sandbox behind a shared-origin router as at least as trusted as the browser session itself, same as you would for any other same-origin multi-tenant page.
+
+**Same-origin detection needs `--authz-trust-forwarded-proto` behind a TLS-terminating proxy.** The "same-origin request... is always allowed" claim above compares the browser's `Origin` against `scheme://host` derived from the request as *this process* sees it — and the scheme half defaults to `r.TLS != nil`, true only when TLS terminates in the router itself. Any load balancer or Gateway that terminates TLS and forwards plain HTTP to the backend (the standard shape on every major cloud) makes `r.TLS` always nil, so the router always computes its own origin as `http://<host>` while a browser loading the page over HTTPS sends `Origin: https://<host>` — a same-origin request misclassified as cross-origin, rejected unless it also happens to appear in `--authz-cookie-allowed-origins`. Set `--authz-trust-forwarded-proto` to read the scheme from `X-Forwarded-Proto` instead in that case — but only when the router is reachable exclusively through a proxy that sets this header itself and strips any client-supplied one first, since trusting it otherwise lets a client with direct network access forge its own scheme.
+
+**Interaction with the scoped-token authorizer's routing-override check.** `ScopedTokenAuthorizer` rejects any request carrying `X-Sandbox-Pod-IP` or `X-Sandbox-UID` (see above) — for a path-routed request those headers are already inert, since `ParsePathRoute` never populates them, so this fails closed on a browser request that (unusually) sends either header rather than ever creating an actual bypass. Worth knowing about, not something you need to work around.
+
+Flags:
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--authz-cookie-name` | `""` (disabled) | Name of the session cookie. Requires `--path-routing-prefix` and an `--authz-mode` other than `allow-all`. |
+| `--authz-cookie-query-param` | `""` | Name of the URL query parameter that bootstraps the cookie above. Requires `--authz-cookie-name`. |
+| `--authz-cookie-samesite` | `lax` | `lax`, `strict`, or `none` — see the `SameSite` note above. |
+| `--authz-cookie-insecure` | `false` | Omit `Secure` from the cookie. Local development over plain HTTP only; incompatible with `--authz-cookie-samesite=none`. |
+| `--authz-cookie-allowed-origins` | `""` | Comma-separated `scheme://host[:port]` allowlist checked against `Origin` whenever the credential came from the cookie. Same-origin is always allowed regardless. |
+| `--authz-trust-forwarded-proto` | `false` | Read the scheme for the same-origin check from the first value of `X-Forwarded-Proto` instead of `r.TLS != nil`. Needed behind any TLS-terminating load balancer or Gateway — see the note below. Only enable it when the router is reachable exclusively through a proxy that sets this header itself and strips any client-supplied one. |
+
+No `Max-Age`/`Expires` is ever set — the cookie lives for the browser session, and the underlying token still carries its own expiry. When it lapses, the browser needs a fresh bootstrap URL; there is no silent renewal.
 
 ## TLS / mTLS
 
@@ -302,7 +388,7 @@ The router today is a small, focused reverse proxy with a header-driven routing 
 - **Envoy as the edge** (TLS, mTLS, rate limit, circuit breaker, observability, JWT).
 - **This router as a backend** behind Envoy, owning only the sandbox-specific routing logic (header parsing → DNS construction → per-sandbox authz when that lands).
 
-The Python router's architecture already has this shape — a `Gateway` in front of the router. That `Gateway` can be Envoy, and you avoid rebuilding generic L7 concerns in Go.
+The Python router's architecture already has this shape — a Kubernetes Gateway API `Gateway` in front of the router. That Gateway can be backed by Istio, Envoy, a cloud-managed LB (GKE, ALB, etc.), or any conformant Gateway API controller — and you avoid rebuilding generic L7 concerns in Go.
 
 If you stay all-Go, the access log, OTel signals, hot-reloading certs, and retry/backoff give you the operational basics; the gaps (rate limit, circuit breaker, etc.) are tracked as future work.
 

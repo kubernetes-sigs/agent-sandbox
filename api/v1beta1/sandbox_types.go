@@ -123,6 +123,7 @@ const (
 	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
+	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
 	// SandboxTemplateRefAnnotation is the annotation used to track the sandbox template ref.
 	SandboxTemplateRefAnnotation = "agents.x-k8s.io/sandbox-template-ref"
@@ -246,6 +247,8 @@ func (p *PersistentVolumeClaimRetentionPolicy) EffectiveWhenDeleted() Persistent
 }
 
 // SandboxOperatingMode defines the desired operational state of the Sandbox.
+// +kubebuilder:validation:Enum=Running;Suspended
+//
 // It expresses intent ("running" vs. "suspended"), not observed status; whether the
 // Sandbox has actually reached that state is reported by conditions (see
 // SandboxConditionReady and SandboxConditionSuspended).
@@ -331,7 +334,6 @@ type SandboxSpec struct {
 	// actually up (see SandboxConditionReady).
 	// Defaults to Running if not specified.
 	// +kubebuilder:default=Running
-	// +kubebuilder:validation:Enum=Running;Suspended
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
 }
@@ -416,7 +418,6 @@ type SandboxStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
-// +kubebuilder:conversion:strategy=Webhook
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

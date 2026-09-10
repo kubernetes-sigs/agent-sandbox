@@ -32,6 +32,8 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -57,12 +59,24 @@ type connector struct {
 	strategy   ConnectionStrategy
 	httpClient *http.Client
 
-	sandboxID  string // sandbox name, used as X-Sandbox-ID header
-	namespace  string
-	serverPort int
-	baseURL    string
-	podIP      string
-	lastError  error
+	sandboxID           string // sandbox name, used as X-Sandbox-ID header
+	namespace           string
+	serverPort          int
+	baseURL             string
+	podIP               string
+	disablePodIPRouting bool
+	lastError           error
+
+	// routerHeaders controls whether X-Sandbox-* routing headers are sent.
+	// True only for transports that actually reach the sandbox-router; false
+	// for sandboxd and for any in-cluster dial, which address the pod and so
+	// have nothing to consume them.
+	routerHeaders bool
+	// grpcTarget is the dial address for sandboxd's ProcessService, published
+	// by whichever strategy resolved it (the pod tunnel once the port-forward
+	// is ready, or the in-cluster strategy once the address is known).
+	grpcTarget string
+	grpcConn   *grpc.ClientConn
 
 	requestTimeout    time.Duration
 	perAttemptTimeout time.Duration
@@ -78,15 +92,17 @@ type connector struct {
 
 // connectorConfig holds the parameters needed to construct a connector.
 type connectorConfig struct {
-	Strategy          ConnectionStrategy
-	Namespace         string
-	ServerPort        int
-	RequestTimeout    time.Duration
-	PerAttemptTimeout time.Duration
-	HTTPTransport     http.RoundTripper
-	Log               logr.Logger
-	Tracer            trace.Tracer
-	TraceServiceName  string
+	Strategy            ConnectionStrategy
+	Namespace           string
+	ServerPort          int
+	RouterHeaders       bool
+	RequestTimeout      time.Duration
+	PerAttemptTimeout   time.Duration
+	HTTPTransport       http.RoundTripper
+	DisablePodIPRouting bool
+	Log                 logr.Logger
+	Tracer              trace.Tracer
+	TraceServiceName    string
 }
 
 // newConnector creates a connector with the given configuration.
@@ -104,12 +120,14 @@ func newConnector(cfg connectorConfig) *connector {
 		}
 	}
 	return &connector{
-		strategy:          cfg.Strategy,
-		namespace:         cfg.Namespace,
-		serverPort:        cfg.ServerPort,
-		requestTimeout:    cfg.RequestTimeout,
-		perAttemptTimeout: cfg.PerAttemptTimeout,
-		ownsTransport:     cfg.HTTPTransport == nil,
+		strategy:            cfg.Strategy,
+		namespace:           cfg.Namespace,
+		serverPort:          cfg.ServerPort,
+		routerHeaders:       cfg.RouterHeaders,
+		requestTimeout:      cfg.RequestTimeout,
+		perAttemptTimeout:   cfg.PerAttemptTimeout,
+		disablePodIPRouting: cfg.DisablePodIPRouting,
+		ownsTransport:       cfg.HTTPTransport == nil,
 		httpClient: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -155,14 +173,60 @@ func (c *connector) Connect(ctx context.Context) error {
 	c.lastError = nil
 	c.mu.Unlock()
 	mode := "direct"
-	switch c.strategy.(type) {
+	switch s := c.strategy.(type) {
 	case *gatewayStrategy:
 		mode = "gateway"
 	case *tunnelStrategy:
 		mode = "port-forward"
+	case *podTunnelStrategy:
+		mode = "sandboxd-pod-tunnel"
+	case *inClusterStrategy:
+		mode = "in-cluster-pod-ip"
+		if s.useServiceDNS {
+			mode = "in-cluster-service"
+		}
 	}
 	c.log.Info("API URL discovered", "url", url, "mode", mode)
 	return nil
+}
+
+// SetGRPCTarget publishes the dial address for sandboxd's ProcessService.
+// Any previously dialed connection is closed so the next GRPCConn call
+// re-dials the new target (e.g. after a tunnel reconnect).
+func (c *connector) SetGRPCTarget(target string) {
+	c.mu.Lock()
+	old := c.grpcConn
+	c.grpcConn = nil
+	c.grpcTarget = target
+	c.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+}
+
+// GRPCConn returns a (lazily dialed) client connection to sandboxd's
+// ProcessService. The connection is plaintext, and what protects it depends on
+// the strategy that published the target: podTunnelStrategy only ever traverses
+// the port-forward tunnel to the pod's loopback listener. While inClusterStrategy
+// sends it across the pod network, where NetworkPolicy (or a mesh) confines it.
+func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.grpcConn != nil {
+		return c.grpcConn, nil
+	}
+	if c.grpcTarget == "" {
+		if c.lastError != nil {
+			return nil, fmt.Errorf("sandbox[%s/%s]: %w: %w", c.namespace, c.sandboxID, ErrNotReady, c.lastError)
+		}
+		return nil, fmt.Errorf("sandbox[%s/%s]: %w: sandboxd gRPC endpoint not connected", c.namespace, c.sandboxID, ErrNotReady)
+	}
+	conn, err := grpc.NewClient(c.grpcTarget, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("sandbox[%s/%s]: failed to create gRPC client: %w", c.namespace, c.sandboxID, err)
+	}
+	c.grpcConn = conn
+	return conn, nil
 }
 
 // Close clears state (so concurrent SendRequests see ErrNotReady
@@ -173,7 +237,13 @@ func (c *connector) Close() error {
 	c.lastError = nil
 	c.sandboxID = ""
 	c.podIP = ""
+	grpcConn := c.grpcConn
+	c.grpcConn = nil
+	c.grpcTarget = ""
 	c.mu.Unlock()
+	if grpcConn != nil {
+		_ = grpcConn.Close()
+	}
 	err := c.strategy.Close()
 	if c.ownsTransport {
 		c.httpClient.CloseIdleConnections()
@@ -289,23 +359,27 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			return nil, fmt.Errorf("sandbox: failed to create request: %w", err)
 		}
 
-		req.Header.Set(headerSandboxID, sandboxID)
-		req.Header.Set(headerSandboxNamespace, namespace)
-		req.Header.Set(headerSandboxPort, strconv.Itoa(port))
-		if deadline, ok := ctx.Deadline(); ok {
-			remaining := time.Until(deadline)
-			if remaining > 0 {
-				timeout := remaining
-				if c.perAttemptTimeout > 0 && c.perAttemptTimeout < timeout {
-					timeout = c.perAttemptTimeout
+		// Router headers only apply to router-based transports; the
+		// sandboxd pod tunnel talks to the pod directly.
+		if c.routerHeaders {
+			req.Header.Set(headerSandboxID, sandboxID)
+			req.Header.Set(headerSandboxNamespace, namespace)
+			req.Header.Set(headerSandboxPort, strconv.Itoa(port))
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if remaining > 0 {
+					timeout := remaining
+					if c.perAttemptTimeout > 0 && c.perAttemptTimeout < timeout {
+						timeout = c.perAttemptTimeout
+					}
+					req.Header.Set(headerSandboxTimeout, strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64))
 				}
-				req.Header.Set(headerSandboxTimeout, strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64))
+			}
+			if podIP != "" && !c.disablePodIPRouting {
+				req.Header.Set(headerSandboxPodIP, podIP)
 			}
 		}
 		req.Header.Set(headerRequestID, reqID)
-		if podIP != "" {
-			req.Header.Set(headerSandboxPodIP, podIP)
-		}
 		if contentType != "" {
 			req.Header.Set("Content-Type", contentType)
 		}

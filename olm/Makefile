@@ -3,7 +3,7 @@
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.5.4
+VERSION ?= 1.0.0
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -54,6 +54,9 @@ OPERATOR_SDK_VERSION ?= v1.42.2
 OPM_VERSION ?= v1.55.0
 # Image URL for the agent-sandbox-controller (built from the repo root Dockerfile).
 IMG ?= registry.k8s.io/agent-sandbox/agent-sandbox-controller:v$(VERSION)
+
+# Image URL for the sandbox-router (built from sandbox-router/Dockerfile).
+ROUTER_IMG ?= registry.k8s.io/agent-sandbox/sandbox-router-go:v$(VERSION)
 
 # Parent repo root (one level above this module); holds the controller Dockerfile and source.
 REPO_ROOT ?= ..
@@ -108,14 +111,19 @@ copy-k8s-config: ## Copy ../k8s into config/ (CRDs, RBAC .generated.yaml → rol
 	mkdir -p $(CONFIG_DIR)/crd/bases
 	rm -rf $(CONFIG_DIR)/crd/bases/*
 	cp $(K8S_ROOT)/crds/*.yaml $(CONFIG_DIR)/crd/bases/
-	@{ \
-		echo 'resources:'; \
-		for f in $(CONFIG_DIR)/crd/bases/*.yaml; do echo "- bases/$$(basename "$$f")"; done; \
-	} > $(CONFIG_DIR)/crd/kustomization.yaml
 	cp $(K8S_ROOT)/rbac.generated.yaml $(CONFIG_DIR)/rbac/role.yaml
 	cp $(K8S_ROOT)/extensions-rbac.generated.yaml $(CONFIG_DIR)/rbac/extensions_role.yaml
 	cp $(K8S_ROOT)/extensions.yaml $(CONFIG_DIR)/rbac/extensions_role_binding.yaml
-	go run ./hack/sync-k8s-manifests -controller $(K8S_ROOT)/controller.yaml -extensions $(K8S_ROOT)/extensions.controller.yaml -support-out $(CONFIG_DIR)/rbac/support.yaml -manager-out $(CONFIG_DIR)/manager/manager.yaml
+	mkdir -p $(CONFIG_DIR)/sandbox-router
+	rm -rf $(CONFIG_DIR)/sandbox-router/*
+	cp $(REPO_ROOT)/sandbox-router/deploy/*.yaml $(CONFIG_DIR)/sandbox-router/
+	go run ./hack/sync-k8s-manifests \
+		-controller $(K8S_ROOT)/controller.yaml \
+		-extensions $(K8S_ROOT)/extensions.controller.yaml \
+		-support-out $(CONFIG_DIR)/rbac/support.yaml \
+		-manager-out $(CONFIG_DIR)/manager/manager.yaml \
+		-router-dir $(CONFIG_DIR)/sandbox-router \
+		-crd-dir $(CONFIG_DIR)/crd/bases
 
 .PHONY: manifests
 manifests: copy-k8s-config ## Refresh config/ YAML from $(K8S_ROOT) (same layout as manual copy from k8s/).
@@ -234,12 +242,11 @@ KUBECTL ?= kubectl
 KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
-GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOLANGCI_LINT ?= go tool -modfile=$(REPO_ROOT)/dev/tools/go.mod golangci-lint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
-GOLANGCI_LINT_VERSION ?= v2.1.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -252,9 +259,8 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
 .PHONY: golangci-lint
-golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
-$(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+golangci-lint: ## Verify golangci-lint is available via dev/tools/go.mod.
+	$(GOLANGCI_LINT) version
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
@@ -300,10 +306,10 @@ endif
 bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	cd config/default && $(KUSTOMIZE) edit set image registry.k8s.io/agent-sandbox/sandbox-router-go=$(ROUTER_IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
 	sed -i.bak 's|containerImage: .*|containerImage: $(IMG)|' bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml && rm -f bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml.bak
 	$(OPERATOR_SDK) bundle validate ./bundle
-	hack/strip-csv-webhookdefs bundle/manifests/agent-sandbox-operator.clusterserviceversion.yaml webhookdefinitions
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.

@@ -116,6 +116,9 @@ type SandboxClaimSpec struct {
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`
 
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
+	// Label keys must carry a domain prefix from the controller's label-domain allowlist
+	// (default: sandbox.users.io, including subdomains), configured via the
+	// allowed-label-domains key of the optional agent-sandbox-config ConfigMap.
 	// Label values are limited to 63 characters and must match Kubernetes label value patterns.
 	// Annotations in restricted system domains are rejected, except cluster-autoscaler.kubernetes.io/safe-to-evict.
 	// +optional
@@ -158,6 +161,14 @@ type SandboxStatus struct {
 	// created or while the Sandbox is suspended).
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
+
+	// serviceFQDN is the in-cluster DNS name of the bound Sandbox's service,
+	// mirrored from the Sandbox's status.serviceFQDN so consumers can reach
+	// the sandbox from the claim alone. Like name and podIPs, it is eventually
+	// consistent: it may lag the Sandbox by a reconcile, and is cleared when
+	// the claim loses its sandbox.
+	// +optional
+	ServiceFQDN string `json:"serviceFQDN,omitempty"`
 }
 
 // +genclient
@@ -169,7 +180,6 @@ type SandboxStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
-// +kubebuilder:conversion:strategy=Webhook
 // SandboxClaim is the Schema for the sandbox Claim API.
 type SandboxClaim struct {
 	metav1.TypeMeta `json:",inline"`

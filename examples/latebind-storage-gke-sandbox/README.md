@@ -65,7 +65,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/lates
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/extensions.yaml
 ```
 
-**Note on API Versions**: The OSS controller serves the `v1beta1` API. If you use this installation, you must update the apiVersion in the YAML examples throughout this guide from `extensions.agents.x-k8s.io/v1alpha1` to `extensions.agents.x-k8s.io/v1beta1`.
+**Note on API Versions**: The OSS controller serves the `v1beta1` API. The examples throughout this guide use `v1beta1`.
 
 ### GKE Agent Sandbox Add-on (Cloud-Specific Alternative)
 
@@ -77,7 +77,10 @@ gcloud beta container clusters update ${CLUSTER_NAME} \
 --enable-agent-sandbox
 ```
 
-**Note**: The GKE add-on currently serves the `v1alpha1` API. The examples in this guide use `v1alpha1` for compatibility with this managed service.
+**Note**: The GKE add-on currently serves `v1alpha1`. If using the add-on, adapt the manifests as follows:
+
+- `SandboxTemplate` and `SandboxWarmPool`: change `apiVersion` to `extensions.agents.x-k8s.io/v1alpha1`. All field names are unchanged.
+- `SandboxClaim`: change `apiVersion`, and replace `spec.warmPoolRef.name: late-bind-warmpool` with `spec.sandboxTemplateRef.name: late-bind-template`. In `v1alpha1` a claim references the *template*; in `v1beta1` it references the *warm pool*.
 
 
 # Infrastructure Deployment
@@ -179,15 +182,15 @@ Apply the following `SandboxClaim`:
 
 ```shell
 kubectl apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
- name: user-111-claim
- finalizers:
-  - agent.sandbox/storage-cleanup
+  name: user-111-claim
+  finalizers:
+    - agent.sandbox/storage-cleanup
 spec:
- sandboxTemplateRef:
-  name: late-bind-template
+  warmPoolRef:
+    name: late-bind-warmpool
 EOF
 ```
 
@@ -278,7 +281,7 @@ Success: Bound Filestore folder user-111 to mount path inside of agent container
 
 ### Securing the Running Pod with a Dynamic Finalizer
 
-While we statically declared a finalizer on the SandboxClaim in [Submit a SandboxClaim](#submit-a-sandbox-claim), we must also place a finalizer on the `SandboxWarmPool` Pods that are bound to `SandboxClaim`s. [Kubernetes does not support](https://github.com/kubernetes-sigs/agent-sandbox/blob/aae8e6272688daaf45a4a890f813da29aa73de7e/api/v1alpha1/sandbox_types.go#L124-L127) defining static finalizers inside a `SandboxTemplate`'s `podTemplate.spec` block. Therefore, the orchestrator must dynamically apply the finalizer to the running Pod immediately after the storage is successfully bound. This establishes a secure 1:1 mapping between the bound storage and the pod lifecycle, ensuring that the pod cannot be deleted until the host-level mount is safely decoupled.
+While we statically declared a finalizer on the SandboxClaim in [Submit a SandboxClaim](#submit-a-sandbox-claim), we must also place a finalizer on the `SandboxWarmPool` Pods that are bound to `SandboxClaim`s. [Kubernetes does not support](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.4/api/v1beta1/sandbox_types.go#L136-L144) defining static finalizers inside a `SandboxTemplate`'s `podTemplate.spec` block. Therefore, the orchestrator must dynamically apply the finalizer to the running Pod immediately after the storage is successfully bound. This establishes a secure 1:1 mapping between the bound storage and the pod lifecycle, ensuring that the pod cannot be deleted until the host-level mount is safely decoupled.
 
 Execute the following commands to dynamically patch the pod-level finalizer:
 
@@ -424,15 +427,15 @@ kubectl patch pod $POD_NAME --type=merge -p '{"metadata":{"finalizers":[]}}'
 To resume the session, a new claim is created, which automatically assigns a fresh pre-warmed pod from the background warm pool.
 ```shell
 kubectl apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
- name: user-111-resume
- finalizers:
-  - agent.sandbox/storage-cleanup
+  name: user-111-resume
+  finalizers:
+    - agent.sandbox/storage-cleanup
 spec:
- sandboxTemplateRef:
-  name: late-bind-template
+  warmPoolRef:
+    name: late-bind-warmpool
 EOF
 ```
 
@@ -583,15 +586,15 @@ When the user requests a restoration, the orchestrator issues a new claim and in
 ```shell
 # 1. Create a new SandboxClaim for the restoration session
 kubectl apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
- name: user-111-snapshot-restore
- finalizers:
-  - agent.sandbox/storage-cleanup
+  name: user-111-snapshot-restore
+  finalizers:
+    - agent.sandbox/storage-cleanup
 spec:
- sandboxTemplateRef:
-  name: late-bind-template
+  warmPoolRef:
+    name: late-bind-warmpool
 EOF
 
 # 2. Capture metadata for the newly assigned warm pod
@@ -645,15 +648,15 @@ This step demonstrates that even when multiple tenants are active on the same Fi
 ### 1. Create the SandboxClaim for user-222
 ```shell
 kubectl apply -f - <<EOF
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxClaim
 metadata:
- name: user-222-claim
- finalizers:
-  - agent.sandbox/storage-cleanup
+  name: user-222-claim
+  finalizers:
+    - agent.sandbox/storage-cleanup
 spec:
- sandboxTemplateRef:
-  name: late-bind-template
+  warmPoolRef:
+    name: late-bind-warmpool
 EOF
 ```
 

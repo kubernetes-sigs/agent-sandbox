@@ -1,0 +1,33 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jupyter-sandbox-sa
+  namespace: gymnasium
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jupyter-sandbox-role
+  namespace: gymnasium
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jupyter-sandbox-rolebinding
+  namespace: gymnasium
+subjects:
+  - kind: ServiceAccount
+    name: jupyter-sandbox-sa
+    namespace: gymnasium
+roleRef:
+  kind: Role
+  name: jupyter-sandbox-role
+  apiGroup: rbac.authorization.k8s.io

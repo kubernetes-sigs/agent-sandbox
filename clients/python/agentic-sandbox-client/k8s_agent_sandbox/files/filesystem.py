@@ -22,9 +22,19 @@ from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import trace_span, trace
 
+
+def _sandboxd_files_endpoint(path: str) -> str:
+    """Return the sandboxd REST path for a sandbox-relative file path."""
+    return f"v1/files/{urllib.parse.quote(path, safe='')}"
+
+
 class Filesystem:
     """
     Handles file operations within the sandbox.
+
+    Speaks either the legacy python-runtime HTTP API or the sandboxd
+    Filesystem & Runtime REST API, selected by the connection config
+    (``connector.is_sandboxd()``).
     """
     def __init__(self, connector: SandboxConnector, tracer, trace_service_name: str):
         self.connector = connector
@@ -56,9 +66,19 @@ class Filesystem:
         if not allow_unsafe_paths:
             path = self._safe_upload_path(path)
 
-        files_payload = {'file': (path, content)}
-        self.connector.send_request("POST", "upload",
-                      files=files_payload, timeout=timeout)
+        if self.connector.is_sandboxd():
+            # sandboxd write is an idempotent PUT of the raw bytes; parent
+            # directories are created server-side (temp-file + rename).
+            self.connector.send_request(
+                "PUT", _sandboxd_files_endpoint(path),
+                data=content,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=timeout,
+            )
+        else:
+            files_payload = {'file': (path, content)}
+            self.connector.send_request("POST", "upload",
+                          files=files_payload, timeout=timeout)
         logging.info(f"File '{path}' uploaded successfully.")
 
     @staticmethod
@@ -106,9 +126,11 @@ class Filesystem:
         if not allow_unsafe_paths:
             path = self._safe_upload_path(path)
 
-        encoded_path = urllib.parse.quote(path, safe='')
-        response = self.connector.send_request(
-            "GET", f"download/{encoded_path}", timeout=timeout)
+        if self.connector.is_sandboxd():
+            endpoint = _sandboxd_files_endpoint(path)
+        else:
+            endpoint = f"download/{urllib.parse.quote(path, safe='')}"
+        response = self.connector.send_request("GET", endpoint, timeout=timeout)
         content = response.content
 
         if span.is_recording():
@@ -122,20 +144,42 @@ class Filesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         encoded_path = urllib.parse.quote(path, safe='')
-        response = self.connector.send_request("GET", f"list/{encoded_path}", timeout=timeout)
 
-        try:
-            entries = response.json()
-        except ValueError as e:
-            raise RuntimeError(f"Failed to decode JSON response from sandbox: {response.text}") from e
-
-        if not entries:
-            return []
-
-        try:
-            file_entries = [FileEntry(**e) for e in entries]
-        except Exception as e:
-            raise RuntimeError(f"Server returned invalid file entry format: {entries}") from e
+        if self.connector.is_sandboxd():
+            response = self.connector.send_request(
+                "GET", _sandboxd_files_endpoint(path), timeout=timeout)
+            try:
+                listing = response.json()
+            except ValueError as e:
+                raise RuntimeError(f"Failed to decode JSON response from sandbox: {response.text}") from e
+            # A directory listing is a DirectoryListing envelope; reject
+            # anything else rather than silently returning an empty list.
+            if not isinstance(listing, dict) or "entries" not in listing:
+                raise RuntimeError(f"Server returned invalid directory listing: {listing}")
+            file_entries = []
+            for e in listing.get("entries") or []:
+                # Skip entry types the SDK model does not represent (e.g. a
+                # stray "symlink") so one unknown entry does not fail the
+                # whole listing.
+                if e.get("type") not in ("file", "directory"):
+                    logging.info(f"Skipping unsupported file entry type: {e.get('type')!r}")
+                    continue
+                try:
+                    file_entries.append(FileEntry.from_sandboxd(e))
+                except Exception as ex:
+                    raise RuntimeError(f"Server returned invalid file entry format: {e}") from ex
+        else:
+            response = self.connector.send_request("GET", f"list/{encoded_path}", timeout=timeout)
+            try:
+                entries = response.json()
+            except ValueError as e:
+                raise RuntimeError(f"Failed to decode JSON response from sandbox: {response.text}") from e
+            if not entries:
+                return []
+            try:
+                file_entries = [FileEntry.from_legacy(e) for e in entries]
+            except Exception as e:
+                raise RuntimeError(f"Server returned invalid file entry format: {entries}") from e
 
         if span.is_recording():
             span.set_attribute("sandbox.file.count", len(file_entries))
@@ -147,14 +191,49 @@ class Filesystem:
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
         encoded_path = urllib.parse.quote(path, safe='')
+
+        if self.connector.is_sandboxd():
+            # sandboxd has no exists endpoint: HEAD answers existence
+            # (200 vs 404) without transferring the body. 404 is passed via
+            # allowed_statuses so it is returned instead of raising — a raise
+            # would tear down the connection (connector closes on error).
+            response = self.connector.send_request(
+                "HEAD", _sandboxd_files_endpoint(path),
+                timeout=timeout, allowed_statuses={404})
+            exists = response.status_code != 404
+            if span.is_recording():
+                span.set_attribute("sandbox.file.exists", exists)
+            return exists
+
         response = self.connector.send_request("GET", f"exists/{encoded_path}", timeout=timeout)
-        
         try:
             response_data = response.json()
         except ValueError as e:
             raise RuntimeError(f"Failed to decode JSON response from sandbox: {response.text}") from e
-            
+
         exists = response_data.get("exists", False)
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)
         return exists
+
+    @trace_span("delete")
+    def delete(self, path: str, recursive: bool = False, timeout: int = 60) -> None:
+        """Remove a file or directory. sandboxd runtime only.
+
+        With ``recursive=True`` directories are removed with their contents;
+        otherwise deleting a non-empty directory fails with a 409. The legacy
+        python-runtime has no delete endpoint and raises NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "delete() is only supported by the sandboxd runtime; the legacy "
+                "python-runtime has no delete endpoint"
+            )
+        endpoint = _sandboxd_files_endpoint(path)
+        if recursive:
+            endpoint += "?recursive=true"
+        self.connector.send_request("DELETE", endpoint, timeout=timeout)
+        logging.info(f"Path '{path}' deleted successfully.")

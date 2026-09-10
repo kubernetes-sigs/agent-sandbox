@@ -116,12 +116,10 @@ func isRetriableDialError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
 		return true
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok {
 		// "dial" covers connection refused, no route, ECONNRESET on connect,
 		// and dial deadline. Any other Op (e.g. "read", "write") happens
 		// after the body has been touched and is intentionally not retried.

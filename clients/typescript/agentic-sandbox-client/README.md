@@ -41,7 +41,7 @@ const sandbox = await client.createSandbox("my-warm-pool", "default", {
 
 The lifetime starts at the `createSandbox` call and includes provisioning time.
 The option sets an absolute `spec.lifecycle.shutdownTime` and
-`shutdownPolicy: "Delete"` on the claim, matching the Python SDK's
+`spec.lifecycle.shutdownPolicy: "Delete"` on the claim, matching the Python SDK's
 `shutdown_after_seconds`. It must be a positive integer that produces a valid
 RFC3339 deadline; invalid values reject with `SandboxError` before provisioning.
 Omitting it leaves expiration unset. Continue to call `sandbox.close()` when work

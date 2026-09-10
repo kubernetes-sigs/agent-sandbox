@@ -645,15 +645,21 @@ export class SandboxClient {
   }
 
   /**
-   * Lists all SandboxClaim names in the cluster for the given namespace.
+   * Lists SandboxClaim names, optionally filtered by a Kubernetes label selector.
+   * The selector matches SandboxClaim metadata.labels.
+   * Uses the client's default namespace when namespace is omitted or empty.
    */
-  async listAllSandboxes(namespace?: string): Promise<string[]> {
+  async listAllSandboxes(
+    namespace?: string,
+    labelSelector?: string,
+  ): Promise<string[]> {
     const ns = namespace || this.defaultNamespace;
     const response = await this.customObjectsApi.listNamespacedCustomObject({
       group: CLAIM_API_GROUP,
       version: CLAIM_API_VERSION,
       namespace: ns,
       plural: CLAIM_PLURAL_NAME,
+      ...(labelSelector !== undefined ? { labelSelector } : {}),
     });
     const list = response as {
       items?: Array<{ metadata?: { name?: string } }>;

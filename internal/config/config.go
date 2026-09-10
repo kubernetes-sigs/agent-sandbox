@@ -15,10 +15,10 @@
 // Package config applies controller tuning knobs from the
 // agent-sandbox-config ConfigMap as flag overrides.
 //
-// At startup the controller fetches the ConfigMap from the API server
-// (see fetchConfigMapData in cmd/agent-sandbox-controller) and passes its
-// data map to ApplyConfigMapData. To pick up changes, restart the
-// controller Deployment.
+// The ConfigMap is volume-mounted at /etc/sandbox-config/; at startup the
+// controller reads the directory and passes the key/value pairs to
+// ApplyConfigMapData. To pick up changes, restart the controller
+// Deployment.
 //
 // Resolution order: CLI flag > ConfigMap value > compiled default.
 package config
@@ -30,30 +30,37 @@ import (
 	"strings"
 )
 
-// NonTunableFlags is the set of structural/identity flags that must NOT
-// be overridden via the ConfigMap. Everything else is tunable.
-//
-// Zap flags are denylisted because ctrl.SetLogger runs before
-// ApplyConfigMapData; ConfigMap-supplied zap values would never reach the
-// process logger (including after re-exec).
-var NonTunableFlags = map[string]bool{
-	"configmap":                 true,
-	"version":                   true,
-	"cluster-domain":            true,
-	"metrics-bind-address":      true,
-	"health-probe-bind-address": true,
-	"leader-elect":              true,
-	"leader-election-namespace": true,
-	"extensions":                true,
-	"enable-tracing":            true,
-	"enable-pprof":              true,
-	"enable-pprof-debug":        true,
-	"cache-label-selectors":     true,
-	"zap-devel":                 true,
-	"zap-encoder":               true,
-	"zap-log-level":             true,
-	"zap-stacktrace-level":      true,
-	"zap-time-encoding":         true,
+// TunableFlags is the explicit set of flags that may be overridden via
+// the ConfigMap. Only flags in this allowlist are applied; everything
+// else is ignored and reported as skipped so typos surface immediately.
+var TunableFlags = map[string]bool{
+	"pprof-block-profile-rate":                         true,
+	"pprof-mutex-profile-fraction":                     true,
+	"kube-api-qps":                                     true,
+	"kube-api-burst":                                   true,
+	"api-connections":                                  true,
+	"separate-watch-connection":                        true,
+	"sandbox-concurrent-workers":                       true,
+	"sandbox-claim-concurrent-workers":                 true,
+	"sandbox-warm-pool-concurrent-workers":             true,
+	"sandbox-template-concurrent-workers":              true,
+	"sandbox-warm-pool-max-batch-size":                 true,
+	"sandbox-warm-pool-replenish-delay":                true,
+	"sandbox-warm-pool-max-refill-rate":                true,
+	"sandbox-claim-warm-candidate-grace-period":        true,
+	"sandbox-warm-pool-readiness-grace-period":         true,
+	"sandbox-warm-pool-unschedulable-recheck-interval": true,
+	"enable-warm-pool-eviction":                        true,
+	"disable-sandbox-events":                           true,
+	"disable-claim-events":                             true,
+	"disable-claim-observability-annotations":          true,
+	"sandbox-write-behind-window":                      true,
+}
+
+// KnownNonFlagKeys are ConfigMap keys consumed by other mechanisms
+// (e.g. volume-mounted files) that should not be reported as skipped.
+var KnownNonFlagKeys = map[string]bool{
+	"allowed-label-domains": true,
 }
 
 // IsIgnoredConfigKey reports whether a ConfigMap key is documentation-only
@@ -64,12 +71,18 @@ func IsIgnoredConfigKey(name string) bool {
 }
 
 // ApplyConfigMapData applies overrides from a ConfigMap data map to the
-// given flag set. Keys matching a registered flag name (that are not in
-// the NonTunableFlags denylist) are applied. Explicit CLI flags always
-// take precedence over ConfigMap values (CLI > file/ConfigMap > compiled defaults).
-func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Override, _ error) {
+// given flag set. Only keys in the TunableFlags allowlist that match a
+// registered flag name are applied. Explicit CLI flags always take
+// precedence over ConfigMap values (CLI > ConfigMap > compiled defaults).
+//
+// Keys that are not in the allowlist, not documentation-only, and not in
+// KnownNonFlagKeys are returned in the skipped slice so the caller can
+// log them (catches typos that would otherwise silently fall back to defaults).
+// Keys that match a tunable flag but were already set on the CLI are
+// returned in cliOverridden so the caller can log the precedence decision.
+func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Override, skipped, cliOverridden []string, _ error) {
 	if len(data) == 0 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// fs.Visit iterates only flags explicitly set on the command line,
@@ -89,14 +102,20 @@ func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Ove
 		if IsIgnoredConfigKey(name) {
 			continue
 		}
-		if NonTunableFlags[name] {
+		if KnownNonFlagKeys[name] {
+			continue
+		}
+		if !TunableFlags[name] {
+			skipped = append(skipped, name)
 			continue
 		}
 		f := fs.Lookup(name)
 		if f == nil {
+			skipped = append(skipped, name)
 			continue
 		}
 		if setOnCLI[name] {
+			cliOverridden = append(cliOverridden, name)
 			continue
 		}
 
@@ -112,9 +131,9 @@ func ApplyConfigMapData(data map[string]string, fs *flag.FlagSet) (applied []Ove
 	}
 
 	if len(errs) > 0 {
-		return applied, fmt.Errorf("configmap parse errors: %v", errs)
+		return applied, skipped, cliOverridden, fmt.Errorf("configmap parse errors: %v", errs)
 	}
-	return applied, nil
+	return applied, skipped, cliOverridden, nil
 }
 
 // Override records a single ConfigMap key that was applied to a flag.

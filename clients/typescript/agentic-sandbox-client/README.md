@@ -46,3 +46,27 @@ The option sets an absolute `spec.lifecycle.shutdownTime` and
 RFC3339 deadline; invalid values reject with `SandboxError` before provisioning.
 Omitting it leaves expiration unset. Continue to call `sandbox.close()` when work
 finishes; expiration provides a fallback if the client cannot clean up.
+
+## Listing sandboxes
+
+With Kubernetes credentials configured and permission to list SandboxClaims, run
+the following from this package directory after building locally:
+
+```ts
+import { SandboxClient } from "./dist/index.js";
+
+const client = new SandboxClient({ namespace: "default" });
+
+const allClaims = await client.listAllSandboxes("default");
+const appClaims = await client.listAllSandboxes("default", "app=my-agent");
+const devClaims = await client.listAllSandboxes(
+  undefined,
+  "env in (dev,test),!disabled",
+);
+```
+
+The optional second argument is a Kubernetes label selector for
+`SandboxClaim.metadata.labels` (set through `createSandbox`'s `labels` option),
+not Pod labels. Omitting the selector or passing an empty string lists all claims
+in the namespace. Omitting the namespace or passing `undefined` or an empty string
+uses the client's configured default namespace.

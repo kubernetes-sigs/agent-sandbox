@@ -220,7 +220,7 @@ The `restartPolicy` on a sandbox's pod template determines whether the container
 ### Why this matters
 
 When `restartPolicy` is omitted, Kubernetes defaults to `Always`. If a pool operator relies on
-`ttlSecondsAfterFinished` for cleanup, the sandbox never reaches a terminal state because the
+`ttlSecondsAfterFinished` (a SandboxClaim `spec.lifecycle` field in the extensions API) for cleanup, the sandbox never reaches a terminal state because the
 container is restarted each time it exits. The TTL never fires, and the sandbox runs indefinitely.
 
 This creates two failure modes:
@@ -235,9 +235,9 @@ Always set `restartPolicy` explicitly in your `SandboxTemplate`:
 
 - **`Never`** for ephemeral, one-shot workloads (single script execution, Playwright scrapes, CI test runs). TTL cleanup works reliably because the pod reaches a terminal state on exit.
 
-- **`OnFailure`** for interactive or long-running workloads (MCP servers, Jupyter kernels, coding agents). The container restarts on crashes but stays terminated on clean exit. Pair with `shutdownTime` or `maxLifetimeSeconds` for a hard cleanup deadline.
+- **`OnFailure`** for interactive or long-running workloads (MCP servers, Jupyter kernels, coding agents). The container restarts on crashes but stays terminated on clean exit. Pair with `shutdownTime` for a hard cleanup deadline.
 
-- **`Always`** only when you explicitly need indefinite restarts (rare). Always pair with `shutdownTime` or `maxLifetimeSeconds` — TTL-based cleanup will not work.
+- **`Always`** only when you explicitly need indefinite restarts (rare). Always pair with `shutdownTime` — TTL-based cleanup will not work.
 
 ```yaml
 apiVersion: extensions.agents.x-k8s.io/v1beta1

@@ -725,7 +725,8 @@ describe("SandboxClient (registry)", () => {
       expect(await client.listAllSandboxes("team-b", labelSelector)).toEqual([
         "sandbox-claim-aaa",
       ]);
-      expect(mockListNamespacedCustomObject).toHaveBeenCalledExactlyOnceWith({
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
         namespace: "team-b",
@@ -757,7 +758,8 @@ describe("SandboxClient (registry)", () => {
 
       await client.listAllSandboxes(namespace, "app=my-agent");
 
-      expect(mockListNamespacedCustomObject).toHaveBeenCalledExactlyOnceWith({
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
         namespace: "team-a",

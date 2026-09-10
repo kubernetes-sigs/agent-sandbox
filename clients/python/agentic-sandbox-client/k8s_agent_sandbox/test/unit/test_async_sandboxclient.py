@@ -670,6 +670,35 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         url = await connector._resolve_base_url()
         self.assertEqual(url, "http://my-sandbox.dev.svc.cluster.local:8888")
 
+    async def test_in_cluster_raises_when_dns_url_unset(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        connector._dns_url = None
+        with self.assertRaises(ValueError) as ctx:
+            await connector._resolve_base_url()
+        self.assertIn("in-cluster base URL", str(ctx.exception))
+
+    async def test_direct_raises_when_base_url_unresolved(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        # Simulate a path that skipped assignment so the post-resolve guard fires.
+        connector._base_url = None
+        connector.connection_config = MagicMock(spec=SandboxDirectConnectionConfig)
+        connector.connection_config.api_url = None
+        with self.assertRaises(ValueError) as ctx:
+            await connector._resolve_base_url()
+        self.assertIn("failed to resolve a base URL", str(ctx.exception))
+
     async def test_in_cluster_resolves_pod_ip_via_callable(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(

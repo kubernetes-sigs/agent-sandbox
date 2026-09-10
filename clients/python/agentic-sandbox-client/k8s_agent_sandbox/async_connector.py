@@ -126,15 +126,22 @@ class AsyncSandboxConnector:
         if isinstance(self.connection_config, SandboxInClusterConnectionConfig):
             if self._get_pod_ip:
                 if self._pod_ip_resolved:
-                    return self._cached_pod_ip_url or self._dns_url or ""
-                pod_ip = await self._get_pod_ip()
-                if pod_ip:
-                    self._pod_ip = pod_ip
-                    host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
-                    self._cached_pod_ip_url = f"http://{host}:{self._server_port}"
-                    self._pod_ip_resolved = True
-                    return self._cached_pod_ip_url
-            return self._dns_url or ""
+                    if self._cached_pod_ip_url:
+                        return self._cached_pod_ip_url
+                else:
+                    pod_ip = await self._get_pod_ip()
+                    if pod_ip:
+                        self._pod_ip = pod_ip
+                        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                        cached = f"http://{host}:{self._server_port}"
+                        self._cached_pod_ip_url = cached
+                        self._pod_ip_resolved = True
+                        return cached
+            if self._dns_url is None:
+                raise ValueError(
+                    "AsyncSandboxConnector failed to resolve an in-cluster base URL."
+                )
+            return self._dns_url
 
         if self._base_url:
             return self._base_url
@@ -154,6 +161,8 @@ class AsyncSandboxConnector:
                 f"AsyncSandboxConnector does not support {type(self.connection_config).__name__}."
             )
 
+        if not isinstance(self._base_url, str):
+            raise ValueError("AsyncSandboxConnector failed to resolve a base URL.")
         return self._base_url
 
     async def send_request(self, method: str, endpoint: str, **kwargs : Any) -> httpx.Response:

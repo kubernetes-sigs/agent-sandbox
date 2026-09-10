@@ -180,10 +180,13 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// Resolve the controller namespace early: needed to fetch the ConfigMap.
-	controllerNamespace := leaderElectionNamespace
+	// Prefer POD_NAMESPACE (injected via downward API) so the ConfigMap lookup
+	// targets the namespace where the controller actually runs, even when
+	// --leader-election-namespace points elsewhere.
+	controllerNamespace := os.Getenv("POD_NAMESPACE")
 	if controllerNamespace == "" {
-		if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-			controllerNamespace = ns
+		if leaderElectionNamespace != "" {
+			controllerNamespace = leaderElectionNamespace
 		} else {
 			controllerNamespace = "agent-sandbox-system"
 		}

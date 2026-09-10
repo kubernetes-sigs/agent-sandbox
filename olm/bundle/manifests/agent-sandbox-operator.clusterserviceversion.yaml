@@ -163,7 +163,7 @@ spec:
     | `pprof-block-profile-rate` | 1000000 | Block profile sampling rate (ns) |
     | `pprof-mutex-profile-fraction` | 10 | Mutex contention sampling fraction |
 
-    ConfigMap values take precedence over CLI flags. CLI flags override
+    CLI flags take precedence over ConfigMap values. ConfigMap values override
     compiled defaults.
   displayName: Agent Sandbox Operator
   icon:

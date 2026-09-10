@@ -3,7 +3,7 @@ data:
   _readme: |
     Tunable controller knobs. Add keys to this ConfigMap to override
     compiled defaults. Restart the controller Deployment to pick up
-    changes. ConfigMap values take precedence over CLI flags.
+    changes. CLI flags take precedence over ConfigMap values.
 
     Example keys (defaults shown):
       sandbox-concurrent-workers: "100"

@@ -244,7 +244,6 @@ class AsyncSandboxConnector:
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:
-                logger.error(f"Request to sandbox failed: {e}")
                 # 5xx: often a stale Pod IP after a pod swap, clear the cached
                 # routing state so the next request re-resolves.
                 if e.response.status_code >= 500:

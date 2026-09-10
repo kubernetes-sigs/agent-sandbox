@@ -112,7 +112,7 @@ and are not repeated here.
 
 ## Deployment Example
 
-To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. 
+To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. For an alternative that does not require manifest changes, see [agent-sandbox-config ConfigMap](#agent-sandbox-config-configmap).
 
 If using the core controller, update `sandbox.yaml`:
 
@@ -285,7 +285,20 @@ The controller's metrics server can optionally serve over HTTPS with configurabl
 
 A downstream operator can inject the cluster TLS profile by translating it into these flags and patching the controller Deployment.
 
-## SandboxClaim label-domain allowlist
+## agent-sandbox-config ConfigMap
+
+The controller reads runtime configuration from an optional ConfigMap named
+`agent-sandbox-config` in the controller's namespace. The ConfigMap is
+volume-mounted at `/etc/sandbox-config/`; each key becomes a file whose
+contents are the value. The ConfigMap is not shipped with the controller —
+create it yourself when you need to override defaults. Restart the
+controller Deployment after creating or changing the ConfigMap:
+
+```sh
+kubectl -n agent-sandbox-system rollout restart deploy/agent-sandbox-controller
+```
+
+### SandboxClaim label-domain allowlist
 
 Since v0.5.0, label keys in `SandboxClaim.spec.additionalPodMetadata.labels`
 must carry a domain prefix from an allowlist; claims with any other label
@@ -293,13 +306,12 @@ domain are rejected with `Ready=False, reason=InvalidMetadata`. The default
 allowlist is `sandbox.users.io` (subdomains of an allowed domain also pass).
 
 The extensions controller reads the allowlist **once at startup** from
-`/etc/sandbox-config/allowed-label-domains`, mounted from an optional
-ConfigMap named `agent-sandbox-config` in the controller's namespace. The
-file's contents **replace** the default rather than extending it, so include
-`sandbox.users.io` if existing consumers rely on it. Domains are separated
-by newlines or commas. An empty (or separator-only) file does not disable
-the allowlist — the controller treats it the same as an absent file and
-falls back to the `sandbox.users.io` default.
+`/etc/sandbox-config/allowed-label-domains`. The value **replaces** the default rather than
+extending it, so include `sandbox.users.io` if existing consumers rely on
+it. Domains are separated by newlines or commas. An empty (or
+separator-only) value does not disable the allowlist — the controller treats
+it the same as an absent key and falls back to the `sandbox.users.io`
+default.
 
 ```yaml
 apiVersion: v1
@@ -313,13 +325,33 @@ data:
     sandbox.users.io
 ```
 
-After creating or changing the ConfigMap, restart the controller so it
-re-reads the file:
-
-```sh
-kubectl -n agent-sandbox-system rollout restart deploy/agent-sandbox-controller
-```
-
 Annotations in `additionalPodMetadata` are governed separately by a
 restricted-domain blocklist (with `cluster-autoscaler.kubernetes.io/safe-to-evict`
 exempted), not by this allowlist.
+
+### Controller flag overrides
+
+Keys that match one of the tunable flag names below override the compiled
+default; explicit CLI flags always take precedence
+(CLI > ConfigMap > compiled default). The controller logs any ConfigMap key
+that is not in the list, so typos surface immediately instead of silently
+falling back to defaults. Keys set via CLI are also logged so the
+precedence decision is visible.
+
+Settable flags: `pprof-block-profile-rate`, `pprof-mutex-profile-fraction`,
+`kube-api-qps`, `kube-api-burst`, `api-connections`,
+`separate-watch-connection`, `sandbox-concurrent-workers`,
+`sandbox-claim-concurrent-workers`, `sandbox-warm-pool-concurrent-workers`,
+`sandbox-template-concurrent-workers`, `sandbox-warm-pool-max-batch-size`,
+`sandbox-warm-pool-replenish-delay`, `sandbox-warm-pool-max-refill-rate`,
+`sandbox-claim-warm-candidate-grace-period`,
+`sandbox-warm-pool-readiness-grace-period`,
+`sandbox-warm-pool-unschedulable-recheck-interval`,
+`enable-warm-pool-eviction`, `disable-sandbox-events`,
+`disable-claim-events`, `disable-claim-observability-annotations`,
+`sandbox-write-behind-window`.
+
+See the flag descriptions earlier in this document for defaults and
+semantics. Keys not in this list are ignored and logged as warnings.
+Documentation-only keys (prefixed with `_` or `.`) and the
+`allowed-label-domains` key are silently skipped.

@@ -271,7 +271,6 @@ type SandboxReconciler struct {
 	pendingCreationMetrics map[types.UID]struct{}
 }
 
-//+kubebuilder:rbac:groups=core,resources=configmaps,resourceNames=agent-sandbox-config,verbs=get
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/finalizers,verbs=get;update;patch
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes/status,verbs=get;update;patch

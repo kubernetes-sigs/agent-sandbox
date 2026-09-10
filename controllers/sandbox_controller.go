@@ -805,19 +805,9 @@ func NameHash(objectName string) string {
 	return string(buf[:])
 }
 
-func pvcRetentionWhenDeleted(sandbox *sandboxv1beta1.Sandbox) sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType {
-	if sandbox.Spec.PersistentVolumeClaimRetentionPolicy == nil {
-		return sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete
-	}
-	if sandbox.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted == "" {
-		return sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete
-	}
-	return sandbox.Spec.PersistentVolumeClaimRetentionPolicy.WhenDeleted
-}
-
 func removeSandboxControllerReference(obj client.Object, sandbox *sandboxv1beta1.Sandbox) bool {
 	ownerRefs := obj.GetOwnerReferences()
-	filtered := ownerRefs[:0]
+	filtered := make([]metav1.OwnerReference, 0, len(ownerRefs))
 	removed := false
 	for _, ref := range ownerRefs {
 		if ref.UID == sandbox.UID && ref.Controller != nil && *ref.Controller {
@@ -1683,7 +1673,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePVCs", nil)
 	defer end()
 
-	retentionWhenDeleted := pvcRetentionWhenDeleted(sandbox)
+	retentionWhenDeleted := sandbox.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted()
 
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -1731,7 +1721,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 					continue
 				}
 				logger.Info("Removing Sandbox owner reference from PVC because retention policy is Retain", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
-				patch := client.MergeFrom(pvc.DeepCopy())
+				patch := client.MergeFromWithOptions(pvc.DeepCopy(), client.MergeFromWithOptimisticLock{})
 				if !removeSandboxControllerReference(pvc, sandbox) {
 					continue
 				}

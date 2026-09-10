@@ -4692,6 +4692,82 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 }
 
+func TestRemoveSandboxControllerReferencePreservesAliasedOwnerReferences(t *testing.T) {
+	controller := true
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{UID: types.UID("sandbox-uid")}}
+	ownerRefs := []metav1.OwnerReference{
+		{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: sandboxv1beta1.SandboxKind, Name: "sandbox", UID: sandbox.UID, Controller: &controller},
+		{APIVersion: "v1", Kind: "ConfigMap", Name: "audit-marker", UID: types.UID("audit-marker-uid")},
+	}
+	originalOwnerRefs := append([]metav1.OwnerReference(nil), ownerRefs...)
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{OwnerReferences: ownerRefs}}
+	aliasedOwnerRefs := pvc.GetOwnerReferences()
+
+	require.True(t, removeSandboxControllerReference(pvc, sandbox))
+	require.Equal(t, originalOwnerRefs[1:], pvc.GetOwnerReferences())
+	require.Equal(t, originalOwnerRefs, aliasedOwnerRefs)
+}
+
+func TestReconcilePVCsRetentionConflictPreservesConcurrentOwnerReference(t *testing.T) {
+	const (
+		sandboxName = "retention-conflict-sandbox"
+		sandboxNs   = "retention-conflict-ns"
+		pvcName     = "data-retention-conflict-sandbox"
+	)
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+				EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("1Gi"),
+					}},
+				},
+			}},
+			PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+			},
+		}},
+	}
+	otherRef := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "audit-marker", UID: types.UID("audit-marker-uid")}
+	concurrentRef := metav1.OwnerReference{APIVersion: "v1", Kind: "Secret", Name: "concurrent-marker", UID: types.UID("concurrent-marker-uid")}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: pvcName, Namespace: sandboxNs,
+		OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName), otherRef},
+	}}
+
+	rawClient := newFakeClient(sandbox, pvc)
+	injected := false
+	fakeClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*corev1.PersistentVolumeClaim); ok && !injected {
+				injected = true
+				livePVC := &corev1.PersistentVolumeClaim{}
+				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(pvc), livePVC))
+				livePVC.OwnerReferences = append(livePVC.OwnerReferences, concurrentRef)
+				require.NoError(t, c.Update(ctx, livePVC))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	r := SandboxReconciler{Client: fakeClient, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	err := r.reconcilePVCs(t.Context(), sandbox, NameHash(sandboxName))
+	require.Error(t, err)
+	require.True(t, k8serrors.IsConflict(err), "expected owner-ref removal to use an optimistic-lock patch")
+
+	livePVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, rawClient.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+	require.ElementsMatch(t, []metav1.OwnerReference{sandboxControllerRef(sandboxName), otherRef, concurrentRef}, livePVC.OwnerReferences)
+
+	require.NoError(t, r.reconcilePVCs(t.Context(), sandbox, NameHash(sandboxName)))
+	require.NoError(t, rawClient.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+	require.ElementsMatch(t, []metav1.OwnerReference{otherRef, concurrentRef}, livePVC.OwnerReferences)
+}
+
 func TestSandboxExpiry(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 

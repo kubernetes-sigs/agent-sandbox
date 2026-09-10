@@ -559,7 +559,7 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 					needsUpdate = true
 				}
 			}
-			if persistentVolumeClaimRetentionWhenDeleted(sandbox.Spec.PersistentVolumeClaimRetentionPolicy) != persistentVolumeClaimRetentionWhenDeleted(template.Spec.PersistentVolumeClaimRetentionPolicy) {
+			if sandbox.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() != template.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() {
 				sandbox.Spec.PersistentVolumeClaimRetentionPolicy = template.Spec.PersistentVolumeClaimRetentionPolicy.DeepCopy()
 				needsUpdate = true
 			}

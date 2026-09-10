@@ -236,6 +236,15 @@ type PersistentVolumeClaimRetentionPolicy struct {
 	WhenDeleted PersistentVolumeClaimRetentionPolicyType `json:"whenDeleted,omitempty"`
 }
 
+// EffectiveWhenDeleted returns the configured PVC retention behavior, defaulting
+// to Delete when the policy or its field is unset.
+func (p *PersistentVolumeClaimRetentionPolicy) EffectiveWhenDeleted() PersistentVolumeClaimRetentionPolicyType {
+	if p == nil || p.WhenDeleted == "" {
+		return PersistentVolumeClaimRetentionPolicyDelete
+	}
+	return p.WhenDeleted
+}
+
 // SandboxOperatingMode defines the desired operational state of the Sandbox.
 // It expresses intent ("running" vs. "suspended"), not observed status; whether the
 // Sandbox has actually reached that state is reported by conditions (see

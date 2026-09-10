@@ -60,7 +60,11 @@ _Appears in:_
 
 PersistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created from volumeClaimTemplates.
 Set whenDeleted to Retain to preserve PVC data after Sandbox deletion; users are
-responsible for deleting retained PVCs when they are no longer needed.
+responsible for deleting retained PVCs when they are no longer needed. Retain
+takes effect when the controller observes the Sandbox reconciliation; deleting
+the Sandbox before that observation, or while the controller is unavailable,
+can leave the owner reference in place and allow garbage collection to delete
+the PVC.
 
 
 

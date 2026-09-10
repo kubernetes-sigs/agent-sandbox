@@ -4769,6 +4769,19 @@ func TestRemoveSandboxControllerReferencePreservesAliasedOwnerReferences(t *test
 	require.Equal(t, originalOwnerRefs, aliasedOwnerRefs)
 }
 
+func TestRemoveSandboxControllerReferenceRemovesNonControllerSandboxReference(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{UID: types.UID("sandbox-uid")}}
+	controller := true
+	retainedRef := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "audit-marker", UID: types.UID("audit-marker-uid"), Controller: &controller}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{
+		{APIVersion: sandboxv1beta1.GroupVersion.String(), Kind: sandboxv1beta1.SandboxKind, Name: "sandbox", UID: sandbox.UID},
+		retainedRef,
+	}}}
+
+	require.True(t, removeSandboxControllerReference(pvc, sandbox))
+	require.Equal(t, []metav1.OwnerReference{retainedRef}, pvc.OwnerReferences)
+}
+
 func TestReconcilePVCsRetentionConflictPreservesConcurrentOwnerReference(t *testing.T) {
 	const (
 		sandboxName = "retention-conflict-sandbox"

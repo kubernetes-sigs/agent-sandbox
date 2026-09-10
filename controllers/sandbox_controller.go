@@ -806,7 +806,7 @@ func removeSandboxControllerReference(obj client.Object, sandbox *sandboxv1beta1
 	filtered := make([]metav1.OwnerReference, 0, len(ownerRefs))
 	removed := false
 	for _, ref := range ownerRefs {
-		if ref.UID == sandbox.UID && ref.Controller != nil && *ref.Controller {
+		if ref.UID == sandbox.UID {
 			removed = true
 			continue
 		}

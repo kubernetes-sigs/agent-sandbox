@@ -22,6 +22,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -68,6 +69,15 @@ const (
 	// sub-second deferral cannot realistically lose the race), hence pod
 	// patches always flush within min(window, 1s).
 	podMetadataFlushBound = time.Second
+
+	// recreateBackoffBase / recreateBackoffMax are Job-style intervals used by
+	// Deployment-pattern in-memory backoff for podFailurePolicy=Recreate.
+	recreateBackoffBase = 5 * time.Second
+	recreateBackoffMax  = 5 * time.Minute
+	// recreateBackoffResetAfter is how long a replacement Pod must have been
+	// started before backoff is cleared. Matches kubelet CrashLoopBackOff
+	// decay (2 × max backoff).
+	recreateBackoffResetAfter = 2 * recreateBackoffMax
 )
 
 // PodCacheTransform is a client-go informer transform for the manager's Pod
@@ -255,6 +265,10 @@ type SandboxReconciler struct {
 	// for why this one piece of in-memory state is unavoidable and why
 	// losing it is harmless.
 	deferralClock deferredWriteClock
+
+	// recreateBackoff delays Pod creates after podFailurePolicy=Recreate
+	// deletes a Failed Pod (Deployment-style in-memory backoff).
+	recreateBackoff recreateBackoff
 }
 
 //+kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -284,6 +298,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if k8serrors.IsNotFound(err) {
 			logger.Info("sandbox resource not found. Ignoring since object must be deleted")
 			r.deferralClock.clear(req.NamespacedName)
+			r.recreateBackoff.clear(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -304,6 +319,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !sandbox.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox is being deleted")
 		r.deferralClock.clear(req.NamespacedName)
+		r.recreateBackoff.clear(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -351,12 +367,16 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				window: min(r.WriteBehindWindow, podMetadataFlushBound),
 			}
 		}
-		err = r.reconcileChildResources(ctx, sandbox, wd)
+		var recreateRequeue time.Duration
+		recreateRequeue, err = r.reconcileChildResources(ctx, sandbox, wd)
 		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
 		result.RequeueAfter = requeueAfter
 		if expiredAfterReconcile {
 			setSandboxExpiredCondition(sandbox)
 			result.RequeueAfter = immediateRequeueDelay
+		}
+		if recreateRequeue > 0 && (result.RequeueAfter == 0 || recreateRequeue < result.RequeueAfter) {
+			result.RequeueAfter = recreateRequeue
 		}
 		if wd != nil && err == nil {
 			if wd.deferred {
@@ -386,7 +406,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return result, err
 }
 
-func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) error {
+func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) (time.Duration, error) {
 	// Create a hash from the sandbox.Name and use it as label value
 	nameHash := NameHash(sandbox.Name)
 
@@ -399,7 +419,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	conditionErrors = errors.Join(conditionErrors, err)
 
 	// Reconcile Pod
-	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash, wd)
+	pod, recreateRequeue, podErr := r.reconcilePod(ctx, sandbox, nameHash, wd)
 	conditionErrors = errors.Join(conditionErrors, podErr)
 	podMappingConflict := isMultipleSandboxPodsError(podErr)
 	if podMappingConflict {
@@ -454,7 +474,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		}
 	}
 
-	return allErrors
+	return recreateRequeue, allErrors
 }
 
 func (r *SandboxReconciler) recordMultiplePodsEvent(sandbox *sandboxv1beta1.Sandbox, err error) {
@@ -1175,12 +1195,14 @@ func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1beta1.Sandbox) 
 	sandbox.Status.ServiceFQDN = ""
 }
 
-func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string, wd *writeDeferral) (*corev1.Pod, error) {
+func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string, wd *writeDeferral) (*corev1.Pod, time.Duration, error) {
 	logger := log.FromContext(ctx)
 
 	// Start a child span of ReconcileSandbox
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePod", nil)
 	defer end()
+
+	sandboxKey := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
 
 	// List all pods carrying this sandbox's tracking label (sandboxLabel),
 	// via the cache field index registered in SetupWithManager. The label only
@@ -1191,7 +1213,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		client.MatchingFields{podSandboxNameHashIndex: nameHash},
 	); err != nil {
 		logger.Error(err, "Failed to list pods")
-		return nil, fmt.Errorf("pod list failed: %w", err)
+		return nil, 0, fmt.Errorf("pod list failed: %w", err)
 	}
 
 	ownedPods := sandboxOwnedPods(podList.Items, sandbox)
@@ -1208,12 +1230,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	if err != nil {
 		if !k8serrors.IsNotFound(err) {
 			logger.Error(err, "Failed to get Pod")
-			return nil, fmt.Errorf("pod get failed: %w", err)
+			return nil, 0, fmt.Errorf("pod get failed: %w", err)
 		}
 		if podNameAnnotationExists {
 			logger.Info("Pod referenced by annotation not found, clearing annotation to recover state", "podName", podName)
 			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 		}
 		pod = nil
@@ -1226,7 +1248,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		ownedPods = append(ownedPods, pod)
 	}
 	if len(ownedPods) > 1 {
-		return nil, &multipleSandboxPodsError{count: len(ownedPods)}
+		return nil, 0, &multipleSandboxPodsError{count: len(ownedPods)}
 	}
 
 	// Owner UID is authoritative over the compatibility annotation. If an
@@ -1237,7 +1259,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			logger.Info("Tracked Pod differs from the owned Pod, repairing mapping",
 				"trackedPodName", podName, "ownedPodName", ownedPods[0].Name)
 			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 		}
 		pod = ownedPods[0].DeepCopy()
@@ -1251,13 +1273,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				if pod.DeletionTimestamp.IsZero() {
 					logger.Info("Deleting Pod because .Spec.OperatingMode is Suspended", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 					if err := r.Delete(ctx, pod); err != nil {
-						return pod, fmt.Errorf("failed to delete pod: %w", err)
+						return pod, 0, fmt.Errorf("failed to delete pod: %w", err)
 					}
 				} else {
-					logger.Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+					logger.V(4).Info("Pod is already being deleted", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 				}
 				// Return the deleting pod to track the transient suspending phase until garbage collection completes.
-				return pod, nil
+				return pod, 0, nil
 			case resourceUnowned:
 				logger.Info("Refusing to delete pod: pod has no controllerRef pointing to this sandbox",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name)
@@ -1270,13 +1292,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		// Remove the pod name annotation from the sandbox if it exists
 		if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-			return pod, err
+			return pod, 0, err
 		}
 
-		return pod, nil
+		return pod, 0, nil
 	}
 
-	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, error) {
+	reconcileExistingPod := func(pod *corev1.Pod) (*corev1.Pod, time.Duration, error) {
 		logger.Info("Found Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
 		if r.Tracer.IsRecording(ctx) {
@@ -1296,10 +1318,10 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				"Owner.Kind", controllerRef.Kind, "Owner.Name", controllerRef.Name, "Owner.UID", controllerRef.UID)
 
 			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 
-			return nil, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
+			return nil, 0, fmt.Errorf("pod %q is owned by %s/%s (UID: %s), not by sandbox %q",
 				pod.Name, controllerRef.Kind, controllerRef.Name, controllerRef.UID, sandbox.Name)
 
 		case resourceUnowned:
@@ -1309,12 +1331,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				logger.V(4).Info("Refusing to adopt unowned pod: missing pool authorization label or sandbox tracking label",
 					"Pod.Name", pod.Name, "Sandbox.Name", sandbox.Name,
 					"RequiredLabel", sandboxv1beta1.SandboxAdoptableLabel, "TrackingLabel", sandboxLabel)
-				return nil, fmt.Errorf("cannot adopt unowned pod %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
+				return nil, 0, fmt.Errorf("cannot adopt unowned pod %q: missing required pool authorization label (%q) or sandbox tracking label (%q)",
 					pod.Name, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
 			}
 
 			if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
-				return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+				return nil, 0, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 			}
 			needsUpdate = true
 
@@ -1322,56 +1344,125 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			// No additional action needed — label applied below.
 		}
 
-		// The pod metadata patch on the warm-pool adoption path is always a
-		// real patch: the adoption merge drops the warm-pool label from the
-		// pod, strips the safe-to-evict marker the pool stamped on it, and
-		// updates the propagated-keys tracking annotations.
-		//
-		// Nothing on the Sandbox-Ready path gates on this patch (the Service
-		// selector uses the name-hash label, which never changes), and every
-		// key it touches is recomputed from informer state on the next
-		// reconcile — so it is RECOVERABLE and eligible for deferral, with
-		// one bound: the safe-to-evict strip protects the adopted pod from
-		// cluster-autoscaler eviction, so a deferred write must land within
-		// min(window, podMetadataFlushBound) (<1s), well inside any
-		// realistic autoscaler scan interval. Synchronous mode
-		// (WriteBehindWindow 0, the default) keeps the single
-		// optimistic-lock-free merge patch: one API round-trip, no
-		// 409/backoff risk.
-		//
-		// Deferral mechanism (RequeueAfter): while the window has
-		// not elapsed, the patch is SKIPPED — the in-memory pod already
-		// carries the desired metadata for everything downstream of this
-		// pass (status/conditions computation) — and Reconcile returns
-		// RequeueAfter with the remaining window. The pass that runs at/after
-		// the deadline recomputes this exact drift from informer state and
-		// falls through to the same synchronous r.Patch below: identical
-		// targeted merge patch, no pending-mutation store.
-		//
-		// Deferral only applies when the pod is already owned by this
-		// sandbox: ownership transfers (SetControllerReference above,
-		// needsUpdate=true) are adoption-lock-adjacent and stay synchronous.
-		metadataUpdated := r.updatePodMetadata(ctx, pod, sandbox, nameHash)
-		if metadataUpdated || needsUpdate {
-			// deferred: no write this pass; Reconcile requeues this request
-			// for the flush pass.
-			deferrable := wd != nil && ownership == resourceOwnedBySandbox && !needsUpdate
-			deferred := deferrable && !wd.shouldWrite()
-			if !deferred {
+		recreateFailedPod := sandbox.Spec.PodFailurePolicy == sandboxv1beta1.PodFailurePolicyRecreate &&
+			pod.Status.Phase == corev1.PodFailed
+
+		// If we're about to recreate a Failed pod, only persist an ownership
+		// adoption. Other metadata changes would be discarded by the delete.
+		if recreateFailedPod {
+			if needsUpdate {
 				if err := r.Patch(ctx, pod, patch); err != nil {
-					return nil, fmt.Errorf("failed to patch pod: %w", err)
+					return nil, 0, fmt.Errorf("failed to patch pod: %w", err)
+				}
+			}
+		} else {
+			// The pod metadata patch on the warm-pool adoption path is always a
+			// real patch: the adoption merge drops the warm-pool label from the
+			// pod, strips the safe-to-evict marker the pool stamped on it, and
+			// updates the propagated-keys tracking annotations.
+			//
+			// Nothing on the Sandbox-Ready path gates on this patch (the Service
+			// selector uses the name-hash label, which never changes), and every
+			// key it touches is recomputed from informer state on the next
+			// reconcile — so it is RECOVERABLE and eligible for deferral, with
+			// one bound: the safe-to-evict strip protects the adopted pod from
+			// cluster-autoscaler eviction, so a deferred write must land within
+			// min(window, podMetadataFlushBound) (<1s), well inside any
+			// realistic autoscaler scan interval. Synchronous mode
+			// (WriteBehindWindow 0, the default) keeps the single
+			// optimistic-lock-free merge patch: one API round-trip, no
+			// 409/backoff risk.
+			//
+			// Deferral mechanism (RequeueAfter): while the window has
+			// not elapsed, the patch is SKIPPED — the in-memory pod already
+			// carries the desired metadata for everything downstream of this
+			// pass (status/conditions computation) — and Reconcile returns
+			// RequeueAfter with the remaining window. The pass that runs at/after
+			// the deadline recomputes this exact drift from informer state and
+			// falls through to the same synchronous r.Patch below: identical
+			// targeted merge patch, no pending-mutation store.
+			//
+			// Deferral only applies when the pod is already owned by this
+			// sandbox: ownership transfers (SetControllerReference above,
+			// needsUpdate=true) are adoption-lock-adjacent and stay synchronous.
+			metadataUpdated := r.updatePodMetadata(ctx, pod, sandbox, nameHash)
+			if metadataUpdated || needsUpdate {
+				// deferred: no write this pass; Reconcile requeues this request
+				// for the flush pass.
+				deferrable := wd != nil && ownership == resourceOwnedBySandbox && !needsUpdate
+				deferred := deferrable && !wd.shouldWrite()
+				if !deferred {
+					if err := r.Patch(ctx, pod, patch); err != nil {
+						return nil, 0, fmt.Errorf("failed to patch pod: %w", err)
+					}
 				}
 			}
 		}
 
+		// Opt-in Failed-pod recovery: delete the owned Failed pod so a later
+		// reconcile hits the missing-pod create path (subject to recreate
+		// backoff). Sandbox identity and PVCs are preserved. Ownership was
+		// already established above. See
+		// docs/keps/729-opt-in-pod-recreation-on-failure/.
+		if recreateFailedPod {
+			if pod.DeletionTimestamp.IsZero() {
+				logger.Info("Deleting Failed Pod because .Spec.PodFailurePolicy is Recreate",
+					"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+				if r.Tracer.IsRecording(ctx) {
+					r.Tracer.AddEvent(ctx, "FailedPodDeletedForRecreate", map[string]string{
+						"pod.Name": pod.Name,
+					})
+				}
+				if err := r.Delete(ctx, pod); err != nil {
+					if !k8serrors.IsNotFound(err) {
+						return nil, 0, fmt.Errorf("failed to delete Failed pod for recreate: %w", err)
+					}
+					// Stale-cache / already-gone: do not bump. A prior successful
+					// delete already counted this failure.
+				} else {
+					// Only bump when this pass initiates the delete so a
+					// terminating Pod or NotFound no-op does not double-count.
+					// A pod that ran for recreateBackoffResetAfter is treated as a
+					// new incident (kubelet CrashLoopBackOff decay).
+					if podLivedAtLeast(pod, r.recreateBackoff.clock()) {
+						r.recreateBackoff.reset(sandboxKey)
+					}
+					r.recreateBackoff.bump(sandboxKey)
+				}
+			} else {
+				logger.V(4).Info("Failed Pod is already being deleted for recreate",
+					"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			}
+			if err := r.clearPodNameAnnotation(ctx, sandbox); err != nil {
+				return nil, 0, err
+			}
+			// Do not Create in this pass; next missing-pod reconcile observes backoff.
+			return nil, r.recreateBackoff.delay(sandboxKey), nil
+		}
+
+		var resetRequeue time.Duration
+		if ownership == resourceOwnedBySandbox && pod.Status.Phase == corev1.PodRunning {
+			resetRequeue = r.recreateBackoff.maybeResetAfterStableRun(sandboxKey, pod)
+		}
+
 		// TODO - Do we enforce (change) spec if a pod exists ?
 		// r.Patch(ctx, pod, client.Apply, client.ForceOwnership, client.FieldOwner("sandbox-controller"))
-		return pod, nil
+		return pod, resetRequeue, nil
 	}
 
 	// 2. PATH: Existing Pod found (e.g., adopted from WarmPool or already exists)
 	if pod != nil {
 		return reconcileExistingPod(pod)
+	}
+
+	// Deployment-style recreate backoff: Owns(Pod) watches are not workqueue
+	// rate-limited, so gate Create after a Failed recreate delete.
+	if sandbox.Spec.PodFailurePolicy == sandboxv1beta1.PodFailurePolicyRecreate {
+		if wait := r.recreateBackoff.delay(sandboxKey); wait > 0 {
+			logger.V(4).Info("Deferring Pod create due to recreate backoff",
+				"Sandbox.Namespace", sandbox.Namespace, "Sandbox.Name", sandbox.Name, "wait", wait)
+			return nil, wait, nil
+		}
 	}
 
 	// Create new Pod
@@ -1448,7 +1539,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
-		return nil, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
+		return nil, 0, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 		if k8serrors.IsAlreadyExists(err) {
@@ -1456,12 +1547,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 			existingPod := &corev1.Pod{}
 			if getErr := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, existingPod); getErr != nil {
-				return nil, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
+				return nil, 0, fmt.Errorf("pod already exists but failed to fetch: %w", getErr)
 			}
 			return reconcileExistingPod(existingPod)
 		}
 		logger.Error(err, "Failed to create", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		return nil, err
+		return nil, 0, err
 	}
 
 	if r.Tracer.IsRecording(ctx) {
@@ -1471,7 +1562,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		})
 	}
 
-	return pod, nil
+	return pod, 0, nil
 }
 
 func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox, nameHash string) bool {
@@ -1856,4 +1947,147 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		Owns(&corev1.Service{}, builder.WithPredicates(labelSelectorPredicate)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentWorkers}).
 		Complete(r)
+}
+
+// In-memory exponential backoff for podFailurePolicy=Recreate.
+//
+// This follows the Deployment / workqueue pattern: retry state lives in the
+// controller process rather than SandboxStatus (the Job pattern). Watch-driven
+// Owns(Pod) events are not rate-limited by the workqueue, so Create must be
+// gated here; RequeueAfter wakes the request once the delay elapses.
+//
+// State is lost on process restart / leader failover (at most one immediate
+// recreate burst until the next Failed bump). Persisted status backoff remains
+// a possible follow-up.
+
+type recreateBackoffEntry struct {
+	failures   int
+	nextCreate time.Time
+}
+
+// recreateBackoff tracks per-Sandbox recreate delays after Failed-pod deletes.
+type recreateBackoff struct {
+	mu      sync.Mutex
+	entries map[types.NamespacedName]recreateBackoffEntry
+	// now is time.Now in production; tests override it.
+	now func() time.Time
+}
+
+func (b *recreateBackoff) clock() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+// delay returns how long to wait before creating a replacement Pod, or 0 if
+// create is allowed now.
+func (b *recreateBackoff) delay(key types.NamespacedName) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.entries == nil {
+		return 0
+	}
+	e, ok := b.entries[key]
+	if !ok {
+		return 0
+	}
+	wait := e.nextCreate.Sub(b.clock())
+	if wait <= 0 {
+		return 0
+	}
+	return wait
+}
+
+// has reports whether backoff state exists for key, including after the
+// delay has elapsed (failures still counted until reset).
+func (b *recreateBackoff) has(key types.NamespacedName) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.entries == nil {
+		return false
+	}
+	_, ok := b.entries[key]
+	return ok
+}
+
+// maybeResetAfterStableRun clears backoff once the pod has been started for
+// recreateBackoffResetAfter. If the window has not elapsed, it returns the
+// remaining wait so Reconcile can RequeueAfter rather than resetting on the
+// first Running observation (which would defeat exponential backoff for
+// crash loops that pass through Running).
+func (b *recreateBackoff) maybeResetAfterStableRun(key types.NamespacedName, pod *corev1.Pod) time.Duration {
+	if !b.has(key) {
+		return 0
+	}
+	now := b.clock()
+	if podLivedAtLeast(pod, now) {
+		b.reset(key)
+		return 0
+	}
+	return remainingPodLiveWait(pod, now)
+}
+
+// bump records a Failed-pod recreate delete and schedules the next create
+// after 5s * 2^(failures-1), capped at 5m (Job-style intervals).
+func (b *recreateBackoff) bump(key types.NamespacedName) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.entries == nil {
+		b.entries = make(map[types.NamespacedName]recreateBackoffEntry)
+	}
+	e := b.entries[key]
+	e.failures++
+	delay := recreateBackoffBase
+	for i := 1; i < e.failures; i++ {
+		if delay >= recreateBackoffMax/2 {
+			delay = recreateBackoffMax
+			break
+		}
+		delay *= 2
+	}
+	if delay > recreateBackoffMax {
+		delay = recreateBackoffMax
+	}
+	e.nextCreate = b.clock().Add(delay)
+	b.entries[key] = e
+}
+
+// reset clears backoff after the Sandbox has a healthy Pod that has been
+// Running long enough, or when a Failed pod itself ran that long.
+func (b *recreateBackoff) reset(key types.NamespacedName) {
+	b.clear(key)
+}
+
+// clear drops backoff state (Sandbox deleted, or healthy Pod observed).
+func (b *recreateBackoff) clear(key types.NamespacedName) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.entries == nil {
+		return
+	}
+	delete(b.entries, key)
+}
+
+// podLivedAtLeast reports whether kubelet-set Status.StartTime is at least
+// recreateBackoffResetAfter ago. Pods that never started (nil StartTime)
+// have not lived long enough.
+func podLivedAtLeast(pod *corev1.Pod, now time.Time) bool {
+	if pod == nil || pod.Status.StartTime == nil {
+		return false
+	}
+	return now.Sub(pod.Status.StartTime.Time) >= recreateBackoffResetAfter
+}
+
+// remainingPodLiveWait is how long until podLivedAtLeast becomes true, or 0
+// if StartTime is unknown so a deadline cannot be computed.
+func remainingPodLiveWait(pod *corev1.Pod, now time.Time) time.Duration {
+	if pod == nil || pod.Status.StartTime == nil {
+		return 0
+	}
+	elapsed := now.Sub(pod.Status.StartTime.Time)
+	if elapsed >= recreateBackoffResetAfter {
+		return 0
+	}
+	return recreateBackoffResetAfter - elapsed
 }

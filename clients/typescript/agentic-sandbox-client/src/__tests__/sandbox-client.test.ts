@@ -211,6 +211,7 @@ describe("SandboxClient (registry)", () => {
       expect(createArgs.plural).toBe(CLAIM_PLURAL_NAME);
       expect(createArgs.namespace).toBe("default");
       expect(createArgs.body.spec.warmPoolRef.name).toBe("test-template");
+      expect(createArgs.body.spec).not.toHaveProperty("lifecycle");
 
       // Verify two watches were used
       expect(mockWatchFn).toHaveBeenCalledTimes(2);
@@ -256,6 +257,63 @@ describe("SandboxClient (registry)", () => {
         env: "test",
         team: "infra",
       });
+    });
+
+    it("sets a deletion deadline from the create call, preserving namespace and labels", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-10T12:00:00.000Z"));
+        mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+        mockSandboxReadyFlow("sandbox-expiring");
+
+        const client = new SandboxClient();
+        const pending = client.createSandbox("tpl", "prod", {
+          shutdownAfterSeconds: 60,
+          labels: { team: "infra" },
+        });
+        // Time spent provisioning must not extend the requested lifetime.
+        vi.setSystemTime(new Date("2026-09-10T12:00:30.000Z"));
+        await pending;
+
+        const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+        expect(createArgs.namespace).toBe("prod");
+        expect(createArgs.body.metadata.labels).toEqual({ team: "infra" });
+        expect(createArgs.body.spec).toEqual({
+          warmPoolRef: { name: "tpl" },
+          lifecycle: {
+            shutdownTime: "2026-09-10T12:01:00.000Z",
+            shutdownPolicy: "Delete",
+          },
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ["zero", 0],
+      ["negative", -1],
+      ["fractional", 0.5],
+      ["NaN", Number.NaN],
+      ["Infinity", Number.POSITIVE_INFINITY],
+      ["-Infinity", Number.NEGATIVE_INFINITY],
+      ["outside the Date range", Number.MAX_VALUE],
+      ["beyond RFC3339's four-digit year", 253402300800],
+      ["string", "60"],
+      ["null", null],
+    ])("rejects invalid shutdownAfterSeconds (%s) before provisioning", async (_label, seconds) => {
+      mockSandboxReadyFlow("sandbox-invalid-ttl");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          // JavaScript callers do not have TypeScript's input checks.
+          shutdownAfterSeconds: seconds as number,
+        }),
+      ).rejects.toThrow(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
     it("throws when warmpool is empty", async () => {

@@ -44,6 +44,7 @@ import (
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/lifecycle"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
@@ -352,11 +353,74 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 		}
 		err = r.reconcileChildResources(ctx, sandbox, wd)
-		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
-		result.RequeueAfter = requeueAfter
-		if expiredAfterReconcile {
-			setSandboxExpiredCondition(sandbox)
-			result.RequeueAfter = immediateRequeueDelay
+
+		// Check idle lifecycle policy after reconciling child resources,
+		// so that lastActivityTime has been initialized/reset before evaluation.
+		action, idleRequeue := checkIdleLifecycle(sandbox, time.Now())
+		switch action {
+		case idleActionSuspend:
+			logger.Info("Idle TTL expired, suspending sandbox")
+			// Persist status first so lastActivityTime and conditions from
+			// reconcileChildResources are not lost.
+			if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+				return ctrl.Result{}, errors.Join(err, statusUpdateErr)
+			}
+			// Use optimistic lock: if the router/SDK bumped lastActivityTime
+			// (or anything else changed) since the status write, the patch
+			// fails and we requeue to re-evaluate against fresh activity data.
+			patch := client.MergeFromWithOptions(sandbox.DeepCopy(), client.MergeFromWithOptimisticLock{})
+			sandbox.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeSuspended
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = make(map[string]string)
+			}
+			sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation] = "true"
+			if patchErr := r.Patch(ctx, sandbox, patch); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{}, err
+		case idleActionDelete:
+			logger.Info("Idle TTL expired, deleting sandbox")
+			deleteOpts := &client.DeleteOptions{
+				Preconditions: &metav1.Preconditions{
+					UID:             &sandbox.UID,
+					ResourceVersion: &sandbox.ResourceVersion,
+				},
+			}
+			if delErr := r.Delete(ctx, sandbox, deleteOpts); delErr != nil && !k8serrors.IsNotFound(delErr) {
+				return ctrl.Result{}, delErr
+			}
+			sandboxDeleted = true
+		case idleActionRetain:
+			logger.Info("Suspended TTL expired, retaining sandbox")
+			meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
+				Type:    string(sandboxv1beta1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  sandboxv1beta1.SandboxReasonIdleRetained,
+				Message: "Sandbox suspended TTL expired, retained",
+			})
+			retainPatch := client.MergeFrom(sandbox.DeepCopy())
+			if sandbox.Annotations == nil {
+				sandbox.Annotations = make(map[string]string)
+			}
+			sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation] = "true"
+			if patchErr := r.Patch(ctx, sandbox, retainPatch); patchErr != nil {
+				err = errors.Join(err, patchErr)
+			}
+		case idleActionNone:
+			if idleRequeue > 0 {
+				result.RequeueAfter = idleRequeue
+			}
+		}
+
+		if !sandboxDeleted {
+			expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
+			if requeueAfter > 0 {
+				result.RequeueAfter = minPositiveDuration(result.RequeueAfter, requeueAfter)
+			}
+			if expiredAfterReconcile {
+				setSandboxExpiredCondition(sandbox)
+				result.RequeueAfter = immediateRequeueDelay
+			}
 		}
 		if wd != nil && err == nil {
 			if wd.deferred {
@@ -431,6 +495,11 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		conditionErrors = errors.Join(conditionErrors, err)
 	}
 
+	// Track whether the sandbox was fully suspended before computing conditions,
+	// so a resume can reset idle activity.
+	previousSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	wasSuspended := previousSuspended != nil && previousSuspended.Status == metav1.ConditionTrue
+
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, conditionErrors, svc, pod, podErr)
 	// Conditions that are only present while they apply: Finished has no
@@ -452,6 +521,28 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		if !present {
 			meta.RemoveStatusCondition(&sandbox.Status.Conditions, condType)
 		}
+	}
+
+	// Initialize lastActivityTime for idle lifecycle tracking.
+	if sandbox.Spec.IdleLifecycle != nil && sandbox.Status.LastActivityTime == nil {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
+	}
+
+	// State-based: clear idle annotations whenever Running. This retries
+	// automatically on the next reconcile if the patch fails, unlike the
+	// edge-triggered approach which would miss the retry window.
+	if sandbox.Spec.IdleLifecycle != nil && sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeRunning {
+		if err := r.clearIdleAnnotations(ctx, sandbox); err != nil {
+			allErrors = errors.Join(allErrors, err)
+		}
+	}
+
+	// Reset lastActivityTime after a fully suspended sandbox resumes.
+	currentSuspended := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if sandbox.Spec.IdleLifecycle != nil && wasSuspended && currentSuspended != nil && currentSuspended.Status == metav1.ConditionFalse {
+		now := metav1.Now()
+		sandbox.Status.LastActivityTime = &now
 	}
 
 	return allErrors
@@ -604,7 +695,13 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 
 	isSuspended := sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended
 	if isSuspended {
-		readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
+		if sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation] == "true" {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonIdleRetained
+		} else if sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation] == "true" {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonIdleSuspended
+		} else {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonSuspended
+		}
 		if pod != nil {
 			readyCondition.Message = "Sandbox is suspending"
 		} else {
@@ -1146,6 +1243,22 @@ func servicePortsEqual(a, b []corev1.ServicePort) bool {
 		}
 	}
 	return true
+}
+
+// clearIdleAnnotations removes idle-lifecycle annotations from the sandbox on resume.
+func (r *SandboxReconciler) clearIdleAnnotations(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
+	_, hasSuspended := sandbox.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation]
+	_, hasExpired := sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation]
+	if !hasSuspended && !hasExpired {
+		return nil
+	}
+	patch := client.MergeFrom(sandbox.DeepCopy())
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleExpiredAnnotation)
+	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		return fmt.Errorf("failed to clear idle annotations: %w", err)
+	}
+	return nil
 }
 
 // clearPodNameAnnotation removes the pod name annotation from the sandbox if it exists.
@@ -1818,6 +1931,116 @@ func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 func sandboxMarkedExpired(sandbox *sandboxv1beta1.Sandbox) bool {
 	cond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	return cond != nil && (cond.Reason == sandboxv1beta1.SandboxReasonExpired)
+}
+
+// idleAction represents what the controller should do based on idle lifecycle evaluation.
+type idleAction int
+
+const (
+	idleActionNone    idleAction = iota
+	idleActionSuspend            // auto-suspend due to active TTL expiry
+	idleActionDelete             // delete sandbox due to TTL expiry
+	idleActionRetain             // mark as expired but keep the object
+)
+
+// checkIdleLifecycle evaluates the idle lifecycle policy and returns the action
+// to take and when to recheck.
+func checkIdleLifecycle(sandbox *sandboxv1beta1.Sandbox, now time.Time) (idleAction, time.Duration) {
+	policy := sandbox.Spec.IdleLifecycle
+	if policy == nil {
+		return idleActionNone, 0
+	}
+
+	if sandboxMarkedExpired(sandbox) {
+		return idleActionNone, 0
+	}
+
+	if sandbox.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation] == "true" {
+		return idleActionNone, 0
+	}
+
+	switch sandbox.Spec.OperatingMode {
+	case sandboxv1beta1.SandboxOperatingModeRunning:
+		return checkActiveIdleTTL(sandbox, policy, now)
+	case sandboxv1beta1.SandboxOperatingModeSuspended:
+		return checkSuspendedIdleTTL(sandbox, policy, now)
+	}
+	return idleActionNone, 0
+}
+
+func checkActiveIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1beta1.IdleLifecyclePolicy, now time.Time) (idleAction, time.Duration) {
+	lastActivity := sandbox.Status.LastActivityTime
+	if lastActivity == nil {
+		// Fall back to creation time if lastActivityTime hasn't been initialized yet
+		lastActivity = &sandbox.CreationTimestamp
+	}
+
+	deadline := lifecycle.IdleExpireAt(lastActivity, policy.ActiveTTLSeconds)
+	if deadline != nil && !now.Before(*deadline) {
+		// TTL expired — determine action
+		activePolicy := sandboxv1beta1.IdleExpirationPolicySuspend
+		if policy.ActiveExpirationPolicy != nil {
+			activePolicy = *policy.ActiveExpirationPolicy
+		}
+		switch activePolicy {
+		case sandboxv1beta1.IdleExpirationPolicyDelete:
+			return idleActionDelete, 0
+		default:
+			return idleActionSuspend, 0
+		}
+	}
+
+	if deadline == nil {
+		return idleActionNone, 0
+	}
+	remaining := deadline.Sub(now)
+	return idleActionNone, max(remaining, 2*time.Second)
+}
+
+func checkSuspendedIdleTTL(sandbox *sandboxv1beta1.Sandbox, policy *sandboxv1beta1.IdleLifecyclePolicy, now time.Time) (idleAction, time.Duration) {
+	if policy.SuspendedTTLSeconds == nil {
+		return idleActionNone, 0
+	}
+
+	// Use the Suspended condition's transition time as the start of the suspended period
+	suspendedCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	if suspendedCond == nil || suspendedCond.Status != metav1.ConditionTrue {
+		return idleActionNone, 0
+	}
+
+	deadline := lifecycle.IdleExpireAt(&suspendedCond.LastTransitionTime, *policy.SuspendedTTLSeconds)
+	if deadline != nil && !now.Before(*deadline) {
+		suspendedPolicy := sandboxv1beta1.SuspendedExpirationPolicyDelete
+		if policy.SuspendedExpirationPolicy != nil {
+			suspendedPolicy = *policy.SuspendedExpirationPolicy
+		}
+		switch suspendedPolicy {
+		case sandboxv1beta1.SuspendedExpirationPolicyRetain:
+			return idleActionRetain, 0
+		default:
+			return idleActionDelete, 0
+		}
+	}
+
+	if deadline == nil {
+		return idleActionNone, 0
+	}
+	remaining := deadline.Sub(now)
+	return idleActionNone, max(remaining, 2*time.Second)
+}
+
+// minPositiveDuration returns the smaller of two durations, ignoring zero values.
+func minPositiveDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // podSandboxNameHashIndexer extracts the sandboxLabel value for the

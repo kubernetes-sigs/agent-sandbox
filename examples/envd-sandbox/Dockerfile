@@ -26,13 +26,16 @@
 # tracking the moving `main` branch.
 FROM --platform=$BUILDPLATFORM golang:1.26.2 AS builder
 
-# Pinned to a known-good commit. Override with --build-arg ENVD_VERSION=<ref>
-# to track upstream or pin to a different revision.
-# envd-v0.6.13 = commit 2acf2d51bd1e2fe146914f24c44f7ee07d2213c5.
-# Pin release tags rather than bare commit SHAs: upstream rebased its history
-# during the infra->runtime rename, which orphaned the previously pinned SHA
-# and broke this build (unreachable from any branch/tag).
+# Pinned to a known-good release tag, with the resolved commit verified below.
+# Override with --build-arg ENVD_VERSION=<ref> to track upstream or pin to a
+# different revision (also override ENVD_COMMIT, or set it empty to skip the
+# commit check).
+# Tags survive upstream rebases where bare SHAs do not: the infra->runtime
+# rename rewrote history and orphaned the previously pinned SHA, breaking this
+# build. The commit check restores immutability — if upstream ever moves the
+# tag, the build fails loudly instead of silently compiling different code.
 ARG ENVD_VERSION=envd-v0.6.13
+ARG ENVD_COMMIT=2acf2d51bd1e2fe146914f24c44f7ee07d2213c5
 ARG TARGETARCH=amd64
 
 WORKDIR /src
@@ -41,7 +44,11 @@ WORKDIR /src
 # Clone then checkout supports branches, tags, and commit hashes.
 RUN git clone https://github.com/e2b-dev/runtime.git /src/infra \
     && cd /src/infra \
-    && git checkout ${ENVD_VERSION}
+    && git checkout ${ENVD_VERSION} \
+    && if [ -n "${ENVD_COMMIT}" ] && [ "$(git rev-parse HEAD)" != "${ENVD_COMMIT}" ]; then \
+         echo "ERROR: ${ENVD_VERSION} resolved to $(git rev-parse HEAD), expected ${ENVD_COMMIT} — upstream tag moved"; \
+         exit 1; \
+       fi
 
 WORKDIR /src/infra/packages/envd
 

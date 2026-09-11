@@ -49,7 +49,7 @@ description: >
    > Remote deployment via kustomize (`?ref=${VERSION}`) requires `v1.0.3` or later; for earlier releases, deploy from a local clone (`kubectl apply -k sandbox-router/deploy/`).
 
    ```sh
-   kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox/sandbox-router/deploy?ref=${VERSION}"
+   kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox//sandbox-router/deploy?ref=${VERSION}"
 
    # Or from a local clone:
    # kubectl apply -k sandbox-router/deploy/

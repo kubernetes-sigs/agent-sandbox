@@ -6,6 +6,7 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 
 | File | What it does |
 |---|---|
+| `kustomization.yaml` | Kustomize resource list declaring the core components (`serviceaccount`, `rbac`, `deployment`, `service`, `pdb`). Excludes optional manifests (`rbac-tokenreview`, `networkpolicy`, `examples/`). |
 | `serviceaccount.yaml` | Identity for the router pods. |
 | `rbac.yaml` | ClusterRole + ClusterRoleBinding for `pods` get/list/watch. Required when `--cache-enabled=true`. The grant is cluster-wide on purpose — see the long-form comment at the top of the file for why narrowing to non-system namespaces isn't expressible in RBAC and how the runtime label selector keeps system Pods out of the cache anyway. Skip this file entirely when running DNS-only. |
 | `rbac-tokenreview.yaml` | Extra ClusterRoleBinding to the stock `system:auth-delegator` ClusterRole. Apply *in addition to* `rbac.yaml` only when `--authz-mode=tokenreview`. Default-mode deployments don't carry these create rights on `tokenreviews.authentication.k8s.io` / `subjectaccessreviews.authorization.k8s.io` they wouldn't use. |
@@ -17,14 +18,36 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 
 ## Apply
 
-```sh
-# Core router components
-kubectl apply -f sandbox-router/deploy/
+### Core components (recommended)
 
+Use `kubectl apply -k` with kustomize to apply the core components (`serviceaccount.yaml`, `rbac.yaml`, `deployment.yaml`, `service.yaml`, `pdb.yaml`):
+
+```sh
+# Remote install using a release tag:
+VERSION=$(curl -sSL https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r '.tag_name')
+kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox/sandbox-router/deploy?ref=${VERSION}"
+
+# Or from a local clone:
+kubectl apply -k sandbox-router/deploy/
+```
+
+> [!NOTE]
+> Avoid running `kubectl apply -f sandbox-router/deploy/` directly, as applying the entire directory will also apply optional manifests like `rbac-tokenreview.yaml` and `networkpolicy.yaml`. Use `kubectl apply -k` instead.
+
+### Optional components
+
+```sh
 # Optional: GKE Gateway API ingress.
 # Note: GKE Standard clusters require Gateway API to be explicitly enabled
 # using --gateway-api=standard. GKE Autopilot enables it by default.
 kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
+
+# Optional: RBAC for TokenReview authentication.
+# Only needed when running the router with --authz-mode=tokenreview.
+kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
+
+# Optional: NetworkPolicy (tune selectors for your cluster CNI and Gateway namespace first).
+kubectl apply -f sandbox-router/deploy/networkpolicy.yaml
 ```
 
 ## Things to change before production

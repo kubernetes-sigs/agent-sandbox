@@ -74,10 +74,7 @@ With Kata runtimes, direct pod port-forwarding is not compatible. Use the [Sandb
 
 ```bash
 # Deploy the router
-kubectl apply -f sandbox-router/deploy/serviceaccount.yaml \
-  -f sandbox-router/deploy/rbac.yaml \
-  -f sandbox-router/deploy/deployment.yaml \
-  -f sandbox-router/deploy/service.yaml
+kubectl apply -k sandbox-router/deploy/
 
 # Port-forward to the router service
 kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system

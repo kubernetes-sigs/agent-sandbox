@@ -19,7 +19,8 @@
 #   docker build -t envd-sandbox:latest .
 #   docker build -t envd-sandbox:latest --build-arg ENVD_VERSION=main .
 
-# Stage 1: Build envd binary from e2b-dev/infra source.
+# Stage 1: Build envd binary from e2b-dev/runtime source (formerly e2b-dev/infra;
+# the repo was renamed and its history restructured in Sep 2026).
 # NOTE: For production use, pin ENVD_VERSION to a specific commit or release
 # tag (e.g., --build-arg ENVD_VERSION=v0.1.0 or a commit hash) instead of
 # tracking the moving `main` branch.
@@ -27,14 +28,18 @@ FROM --platform=$BUILDPLATFORM golang:1.26.2 AS builder
 
 # Pinned to a known-good commit. Override with --build-arg ENVD_VERSION=<ref>
 # to track upstream or pin to a different revision.
-ARG ENVD_VERSION=411b63edf6dea8edd265d1c5e442f41a80b76b2a
+# envd-v0.6.13 = commit 2acf2d51bd1e2fe146914f24c44f7ee07d2213c5.
+# Pin release tags rather than bare commit SHAs: upstream rebased its history
+# during the infra->runtime rename, which orphaned the previously pinned SHA
+# and broke this build (unreachable from any branch/tag).
+ARG ENVD_VERSION=envd-v0.6.13
 ARG TARGETARCH=amd64
 
 WORKDIR /src
 
-# envd lives under packages/envd in the e2b-dev/infra monorepo.
+# envd lives under packages/envd in the e2b-dev/runtime monorepo.
 # Clone then checkout supports branches, tags, and commit hashes.
-RUN git clone https://github.com/e2b-dev/infra.git /src/infra \
+RUN git clone https://github.com/e2b-dev/runtime.git /src/infra \
     && cd /src/infra \
     && git checkout ${ENVD_VERSION}
 
@@ -62,7 +67,7 @@ COPY --from=builder /out/envd /usr/local/bin/envd
 
 # Create a non-root user for subprocess execution.
 # Following the e2b-dev debug.Dockerfile pattern:
-#   https://github.com/e2b-dev/infra/blob/main/packages/envd/debug.Dockerfile
+#   https://github.com/e2b-dev/runtime/blob/main/packages/envd/debug.Dockerfile
 #
 # Security model: envd runs as root (required for PTY, process management),
 # but user code spawned via /init's defaultUser runs as this unprivileged user.

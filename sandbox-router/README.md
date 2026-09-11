@@ -355,7 +355,7 @@ enable-otel-metrics: true
 Example K8s manifests live in [`deploy/`](deploy/) — Deployment, Service, PodDisruptionBudget, NetworkPolicy, plus a README that walks through what to tighten before production.
 
 ```sh
-kubectl apply -f sandbox-router/deploy/
+kubectl apply -k sandbox-router/deploy/
 ```
 
 ## Scaling guidance

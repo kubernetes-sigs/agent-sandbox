@@ -23,7 +23,7 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 Use `kubectl apply -k` with kustomize to apply the core components (`serviceaccount.yaml`, `rbac.yaml`, `deployment.yaml`, `service.yaml`, `pdb.yaml`):
 
 ```sh
-# Remote install using a release tag (requires v1.0.3+, or use ?ref=main):
+# Remote install using a release tag (requires v1.0.3+):
 VERSION=$(basename $(curl -sSL -o /dev/null -w "%{url_effective}" https://github.com/kubernetes-sigs/agent-sandbox/releases/latest))
 kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox/sandbox-router/deploy?ref=${VERSION}"
 
@@ -35,6 +35,8 @@ kubectl apply -k sandbox-router/deploy/
 > Avoid running `kubectl apply -f sandbox-router/deploy/` directly, as applying the entire directory will also apply optional manifests like `rbac-tokenreview.yaml` and `networkpolicy.yaml`. Use `kubectl apply -k` instead.
 
 ### Optional components
+
+From a local clone:
 
 ```sh
 # Optional: GKE Gateway API ingress.

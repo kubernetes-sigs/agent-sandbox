@@ -44,9 +44,9 @@ description: >
 
 3. Before using the client, you must deploy the `sandbox-router`. Follow these steps:
 
-   > [!NOTE]
-   > The default deployment operates with unauthenticated routing (`--authz-mode=allow-all`). See [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) for authentication and TLS options.
-   > Remote deployment via kustomize (`?ref=${VERSION}`) requires `v1.0.3` or later; for earlier releases, use `?ref=main`.
+   > [!WARNING]
+   > The default deployment operates with unauthenticated routing (`--authz-mode=allow-all`) for local testing. See [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) for production authentication and TLS options.
+   > Remote deployment via kustomize (`?ref=${VERSION}`) requires `v1.0.3` or later; for earlier releases, deploy from a local clone.
 
    ```sh
    kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox/sandbox-router/deploy?ref=${VERSION}"

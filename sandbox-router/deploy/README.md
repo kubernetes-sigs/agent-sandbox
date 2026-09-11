@@ -36,16 +36,29 @@ These manifests provide additional security hardening for production environment
 
 - **Caller authentication (`rbac-tokenreview.yaml`):** Grants `system:auth-delegator` so the router can validate caller bearer tokens via TokenReview and SubjectAccessReview APIs. Apply when running with `--authz-mode=tokenreview` (omitted by default to follow least privilege when running unauthenticated):
   ```sh
+  # Remote install:
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/rbac-tokenreview.yaml
+
+  # Or from a local clone:
   kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
   ```
 
 - **Network isolation (`networkpolicy.yaml`):** Locks down ingress strictly to proxy/metrics/health probe ports, and egress to DNS, sandbox pods, and the apiserver. Review and tune selectors for your cluster CNI and Gateway namespace before applying:
   ```sh
+  # Download to inspect and tune selectors:
+  curl -sSLO https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/networkpolicy.yaml
+  kubectl apply -f networkpolicy.yaml
+
+  # Or from a local clone:
   kubectl apply -f sandbox-router/deploy/networkpolicy.yaml
   ```
 
 - **External ingress (`examples/gateway-gke.yaml`):** GKE Gateway API configuration to expose `sandbox-router-svc` externally:
   ```sh
+  # Remote install:
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/examples/gateway-gke.yaml
+
+  # Or from a local clone:
   kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
   ```
 

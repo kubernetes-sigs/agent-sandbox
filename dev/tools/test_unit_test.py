@@ -31,6 +31,7 @@ _spec.loader.exec_module(test_unit)
 
 class RunGoTestsTest(unittest.TestCase):
     def test_includes_framework_without_running_cluster_tests(self):
+        """Verify framework inclusion and E2E exclusion across Go modules."""
         module = "sigs.k8s.io/agent-sandbox"
         repo_root = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
         artifact_dir = os.path.join(repo_root, "bin")

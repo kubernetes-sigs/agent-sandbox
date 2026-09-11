@@ -15,12 +15,14 @@
 
 import os
 import sys
+import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 # Make the test importable regardless of how it is invoked (pytest, unittest, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from scrape_controller_metrics import parse_histogram
+from scrape_controller_metrics import parse_histogram, write_junit
 
 
 class TestScrapeControllerMetrics(unittest.TestCase):
@@ -66,6 +68,51 @@ agent_sandbox_claim_controller_startup_latency_ms_bucket{le="+Inf"} 0
 """
         self.assertIsNone(parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", mock_data))
         self.assertIsNone(parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", ""))
+
+
+class TestWriteJunit(unittest.TestCase):
+    """Unit tests for the JUnit report emitted for perf-gate results."""
+
+    def test_all_passed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "junit_controller-metrics.xml")
+            write_junit(path, [
+                ("claim-adoption-latency-p50", None),
+                ("claim-adoption-latency-p99", None),
+            ])
+            suite = ET.parse(path).getroot()
+            self.assertEqual(suite.tag, "testsuite")
+            self.assertEqual(suite.get("tests"), "2")
+            self.assertEqual(suite.get("failures"), "0")
+            cases = suite.findall("testcase")
+            self.assertEqual(len(cases), 2)
+            for case in cases:
+                self.assertIsNone(case.find("failure"))
+
+    def test_failure_message_contains_measured_value_and_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "junit_controller-metrics.xml")
+            msg = "P99: ~562.5 ms exceeded target <= 500.0 ms"
+            write_junit(path, [
+                ("claim-adoption-latency-p50", None),
+                ("claim-adoption-latency-p99", msg),
+            ])
+            suite = ET.parse(path).getroot()
+            self.assertEqual(suite.get("tests"), "2")
+            self.assertEqual(suite.get("failures"), "1")
+            failed = suite.find("testcase[@name='claim-adoption-latency-p99']")
+            self.assertIsNotNone(failed)
+            failure = failed.find("failure")
+            self.assertIsNotNone(failure)
+            self.assertEqual(failure.get("message"), msg)
+            self.assertEqual(failure.text, msg)
+
+    def test_creates_missing_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "artifacts", "junit_controller-metrics.xml")
+            write_junit(path, [("claim-adoption-latency", "No metrics recorded")])
+            suite = ET.parse(path).getroot()
+            self.assertEqual(suite.get("failures"), "1")
 
 
 if __name__ == "__main__":

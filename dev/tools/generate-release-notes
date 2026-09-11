@@ -307,9 +307,6 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 
 # Extensions (opt-in):
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/{tag}/extensions.yaml
-
-# Sandbox Router (optional, for routing/Kata/gVisor):
-kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox/sandbox-router/deploy?ref={tag}"
 ```
 
 #### Python SDK

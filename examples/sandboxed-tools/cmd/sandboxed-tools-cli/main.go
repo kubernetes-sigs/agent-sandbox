@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sessions"
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/tools"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/toolsets"
 )
 
 func main() {
@@ -63,18 +64,21 @@ func main() {
 		sessionName = "default"
 	}
 
+	toolsetName := os.Getenv("TOOLSET")
+
 	var opts agent.RunOptions
 	opts.InitDefaults()
 	flag.StringVar(&sessionName, "session", sessionName, "session name")
 	flag.StringVar(&opts.Namespace, "namespace", opts.Namespace, "namespace")
-	flag.StringVar(&opts.Image, "image", opts.Image, "image")
+	flag.StringVar(&opts.Image, "image", opts.Image, "Sandbox container image; if empty, uses the toolset's default image.")
 	flag.StringVar(&opts.HomeDir, "homedir", opts.HomeDir, "Home directory in the sandbox; this is currently the only directory that we persist with snapshot/restore.")
+	flag.StringVar(&toolsetName, "toolset", toolsetName, fmt.Sprintf("Toolset (tools + system prompt) to expose to the LLM; one of: %s", strings.Join(toolsets.Names(), ", ")))
 	flag.DurationVar(&opts.ToolTimeout, "tool-timeout", opts.ToolTimeout, "Maximum duration a single tool invocation may run before it is cancelled (Go duration syntax, e.g. \"30s\", \"2m\"). <= 0 disables the timeout.")
 	flag.Parse()
 
 	log := klog.FromContext(ctx)
 
-	if err := run(signalCtx, opts, sessionName); err != nil {
+	if err := run(signalCtx, opts, sessionName, toolsetName); err != nil {
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "\n")
 			log.V(1).Info("context cancelled")
@@ -85,7 +89,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, opts agent.RunOptions, sessionName string) error {
+func run(ctx context.Context, opts agent.RunOptions, sessionName string, toolsetName string) error {
 	log := klog.FromContext(ctx)
 
 	if opts.HomeDir == "" {
@@ -98,6 +102,21 @@ func run(ctx context.Context, opts agent.RunOptions, sessionName string) error {
 
 	if err := sessions.ValidateSessionName(sessionName); err != nil {
 		return fmt.Errorf("invalid sessionName %q: %w", sessionName, err)
+	}
+
+	toolset, err := toolsets.Get(toolsetName)
+	if err != nil {
+		return err
+	}
+	opts.SystemPrompt = toolset.SystemPrompt()
+
+	// Image precedence: -image flag / SANDBOX_IMAGE env, then the toolset's
+	// preferred image, then the generic default.
+	if opts.Image == "" {
+		opts.Image = toolset.DefaultImage()
+	}
+	if opts.Image == "" {
+		opts.Image = agent.DefaultImage
 	}
 
 	llmClient, err := llm.NewFromEnv(opts.ModelName)
@@ -123,11 +142,7 @@ func run(ctx context.Context, opts agent.RunOptions, sessionName string) error {
 
 	toolsRegistry := tools.NewRegistry()
 	toolsRegistry.ToolTimeout = opts.ToolTimeout
-	toolsRegistry.Add(&tools.RunCommand{})
-
-	toolsRegistry.Add(&tools.ListFilesTool{})
-	toolsRegistry.Add(&tools.ReadFileTool{})
-	toolsRegistry.Add(&tools.WriteFileTool{})
+	toolset.RegisterTools(toolsRegistry)
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -161,6 +176,10 @@ func runREPL(ctx context.Context, harness *agent.Harness, session *agent.Session
 		fmt.Println("Type your message (or '/exit' or '/quit' to quit):")
 		fmt.Println("================================================================================")
 	} else {
+		// Note that it's possible that the tools are different from the original toolset.
+		// We are allowed to change the tools, (at the expense of the KV cache),
+		// whether this is useful or not in practice .... let's find out!
+
 		fmt.Println("================================================================================")
 		fmt.Printf("Resumed session %q with %d messages in history:\n", session.Name, len(session.Messages()))
 		fmt.Println("================================================================================")

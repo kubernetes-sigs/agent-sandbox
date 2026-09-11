@@ -1,0 +1,11 @@
+# Normalize line endings to LF for all text files, regardless of the
+# platform or the checkout's core.autocrlf setting. Without this, a Windows
+# checkout with the default core.autocrlf=true introduces CRLF line endings
+# that make CRLF-sensitive tooling (e.g. mdtoc, invoked by
+# dev/tools/verify-toc) report false-positive diffs.
+* text=auto eol=lf
+
+# Explicitly mark known binary assets so they are never subject to line
+# ending normalization even if git's text/binary heuristic misdetects them.
+*.png binary
+*.webp binary

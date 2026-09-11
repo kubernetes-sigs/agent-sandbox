@@ -133,6 +133,12 @@ class ClassifyRedRunTest(unittest.TestCase):
 
 
 class ColumnBuildIdTest(unittest.TestCase):
+    def test_takes_last_segment_when_id_carries_a_name_prefix(self):
+        # Live dashboards emit '\ue000<build-id>', but be robust to a
+        # '<name>\ue000<build-id>' layout too: the build ID is always last.
+        self.assertEqual(
+            flake_report.column_build_id(["job\ue000123"], 0), "123")
+
     def test_strips_testgrid_id_prefix(self):
         self.assertEqual(
             flake_report.column_build_id(["\ue0002098490053683580928"], 0),
@@ -307,6 +313,34 @@ class AnalyzeTabTest(unittest.TestCase):
         # TestQ: its only flaky cell sits in the aborted column, so it must
         # not be reported at all.
         self.assertNotIn("pkg.TestQ", findings)
+
+    def test_flaky_cell_is_a_test_story_not_pretest_breakage(self):
+        # FLAKY_STATUS records a real failure (failed, then passed on a
+        # rerun of the same column); a red run whose only failure is a
+        # flaky cell must not be reported as pre-test PR breakage.
+        table = {
+            "query": "kubernetes-ci-logs/pr-logs/directory/job",
+            "changelists": ["f0", "f1"],
+            "column_ids": ["\ue000f0", "\ue000f1"],
+            "timestamps": [200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 1])},
+                {"name": "pkg.TestF", "statuses": rle([13, 1])},
+            ],
+        }
+        art = {"f0": {"finished.json": {"result": "FAILURE",
+                                        "revision": "abc"}}}
+
+        def fake_fetcher(gcs_query, build_id):
+            return lambda name: art.get(build_id, {}).get(name)
+
+        with mock.patch.object(flake_report, "fetch_json",
+                               return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher",
+                               fake_fetcher):
+            _, _, infra = flake_report.analyze_tab("dash", "tab", 2)
+        self.assertEqual(infra["pretest_failures"], 0)
+        self.assertEqual(infra["infra_runs"], 0)
 
     def test_render_report_calls_out_benign_red_runs(self):
         flaky, consistent, infra = self.analyze()

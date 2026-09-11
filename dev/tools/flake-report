@@ -110,12 +110,14 @@ GCS_HTTP = "https://storage.googleapis.com"
 def column_build_id(column_ids, i):
     """Extracts the prow build ID TestGrid encodes into a column ID.
 
-    Column IDs look like '\ue000<build-id>' (possibly with more
-    U+E000-separated parts); returns None when the column has no ID.
+    Column IDs observed on live dashboards look like '\ue000<build-id>';
+    the build ID is always the final U+E000-separated part, so take the last
+    non-empty segment (robust also to a '<name>\ue000<build-id>' layout).
+    Returns None when the column has no ID.
     """
     if i >= len(column_ids) or not column_ids[i]:
         return None
-    for part in column_ids[i].split("\ue000"):
+    for part in reversed(column_ids[i].split("\ue000")):
         if part:
             return part
     return None
@@ -251,7 +253,8 @@ def analyze_tab(dashboard, tab, window):
             if cell(overall, i) not in FAIL_STATUSES:
                 continue
             col_class[i] = classify_red_run(
-                any(cell(s, i) in FAIL_STATUSES for s in test_rows.values()),
+                any(cell(s, i) in FAIL_STATUSES or cell(s, i) == FLAKY_STATUS
+                    for s in test_rows.values()),
                 any(cell(s, i) not in (0, RUNNING_STATUS)
                     for s in test_rows.values()),
                 make_artifact_fetcher(gcs_query, column_build_id(column_ids, i)),

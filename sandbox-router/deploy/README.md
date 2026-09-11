@@ -30,26 +30,24 @@ kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox//sandbox-router/deplo
 kubectl apply -k sandbox-router/deploy/
 ```
 
-> [!NOTE]
-> Avoid running `kubectl apply -f sandbox-router/deploy/` directly, as applying the entire directory will also apply optional manifests like `rbac-tokenreview.yaml` and `networkpolicy.yaml`. Use `kubectl apply -k` instead.
-
 ### Optional components
 
-From a local clone:
+These manifests provide additional security hardening for production environments:
 
-```sh
-# Optional: GKE Gateway API ingress.
-# Note: GKE Standard clusters require Gateway API to be explicitly enabled
-# using --gateway-api=standard. GKE Autopilot enables it by default.
-kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
+- **Caller authentication (`rbac-tokenreview.yaml`):** Grants `system:auth-delegator` so the router can validate caller bearer tokens via TokenReview and SubjectAccessReview APIs. Apply when running with `--authz-mode=tokenreview` (omitted by default to follow least privilege when running unauthenticated):
+  ```sh
+  kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
+  ```
 
-# Optional: RBAC for TokenReview authentication.
-# Only needed when running the router with --authz-mode=tokenreview.
-kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
+- **Network isolation (`networkpolicy.yaml`):** Locks down ingress strictly to proxy/metrics/health probe ports, and egress to DNS, sandbox pods, and the apiserver. Review and tune selectors for your cluster CNI and Gateway namespace before applying:
+  ```sh
+  kubectl apply -f sandbox-router/deploy/networkpolicy.yaml
+  ```
 
-# Optional: NetworkPolicy (tune selectors for your cluster CNI and Gateway namespace first).
-kubectl apply -f sandbox-router/deploy/networkpolicy.yaml
-```
+- **External ingress (`examples/gateway-gke.yaml`):** GKE Gateway API configuration to expose `sandbox-router-svc` externally:
+  ```sh
+  kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
+  ```
 
 ## Things to change before production
 

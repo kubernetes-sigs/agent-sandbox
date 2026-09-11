@@ -28,9 +28,11 @@ kind create cluster --name agent-sandbox
 Install k8s-agent-sandbox CRDs:
 
 ```bash
-export VERSION="v0.5.6"
+export VERSION="v1.0.0"
 
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
+
+kubectl rollout status deployment/agent-sandbox-controller-manager -n agent-sandbox-system --timeout=120s
 ```
 
 Install openshell:
@@ -39,6 +41,7 @@ Install openshell:
 helm upgrade --install openshell \
   oci://ghcr.io/nvidia/openshell/helm-chart \
   --namespace default \
+  --version 0.0.116 \
   --set server.disableTls=true \
   --set server.auth.allowUnauthenticatedUsers=true
 
@@ -80,13 +83,10 @@ openclaw config set agents.defaults.sandbox.workspaceAccess rw
 cat << 'EOF' > /root/openshell-wrapper.sh
 #!/bin/bash
 
-new_args=()
-for arg in "$@"; do
-  new_args+=("$arg")
-done
+new_args=("$@")
 
 # If the OpenClaw plugin is trying to detach with the buggy "true" command, replace it
-if [ "${new_args[-1]}" = "true" ] && [ "${new_args[-2]}" = "--" ]; then
+if [ "${#new_args[@]}" -ge 2 ] && [ "${new_args[-1]}" = "true" ] && [ "${new_args[-2]}" = "--" ]; then
   new_args[-1]="sleep"
   new_args+=("infinity")
 fi
@@ -112,13 +112,23 @@ To test openclaw, run the following commands:
 ```bash
 openclaw gateway run &
 
-# Poll status every 2 seconds until it reports "ok"
-while ! openclaw gateway status 2>/dev/null | grep -q "ok"; do sleep 2; done
+# Poll status every 2 seconds until it reports "ok" or times out (approx 60 seconds)
+MAX_RETRIES=30
+while ! openclaw gateway status 2>/dev/null | grep -q "ok"; do
+  if [ $count -ge $MAX_RETRIES ]; then
+    echo "Error: Timed out waiting for openclaw gateway to start." >&2
+    exit 1
+  fi
+  sleep 2
+  count=$((count+1))
+done
+
+echo "Gateway started successfully."
 
 openclaw agent --agent main --session-key agent:main:t1 --message "Write a Python script that prints 'Hello from the sandbox' and execute it."
 ```
 
-In another terminal check a new pod with `kubectl get pods`. You can exec into it and validate that the Python script was created inside the new sandbox.
+In another terminal, check the new sandbox resource and pod with `kubectl get sandboxes` and `kubectl get pods`. You can exec into the sandbox pod and validate that the Python script was created inside the new sandbox.
 
 ## Clean up
 

@@ -26,10 +26,10 @@ spec:
 
             # INSTALL OPENSHELL CLI
             if ! command -v openshell &> /dev/null; then
-              echo "Installing OpenShell CLI..."
-              curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh -o /tmp/openshell-install.sh
-              sh /tmp/openshell-install.sh
-              rm -f /tmp/openshell-install.sh
+                echo "Installing OpenShell CLI (v0.0.116)..."
+                curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.0.116/install.sh -o /tmp/openshell-install.sh
+                OPENSHELL_VERSION="v0.0.116" sh /tmp/openshell-install.sh
+                rm -f /tmp/openshell-install.sh
             fi
 
             # INSTALL NEMOCLAW CLI
@@ -70,4 +70,4 @@ spec:
               - /tmp/nemoclaw-ready
           initialDelaySeconds: 5
           periodSeconds: 5
-          failureThreshold: 30
+          failureThreshold: 60

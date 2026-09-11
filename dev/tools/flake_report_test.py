@@ -66,21 +66,44 @@ class ClassifyRedRunTest(unittest.TestCase):
             artifacts(finished={"result": "FAILURE", "revision": "abc"}))
         self.assertEqual(cls, "pretest_failure")
 
-    def test_clone_record_failed_is_a_clone_failure(self):
+    def test_clone_merge_conflict_is_a_clone_failure(self):
         cls = flake_report.classify_red_run(
             False, False,
             artifacts(
                 finished={"result": "FAILURE"},
-                clone_records=[{"refs": {"repo": ""}},
-                               {"refs": {"repo": "agent-sandbox"}, "failed": True}],
+                clone_records=[
+                    {"refs": {"repo": ""}},
+                    {"refs": {"repo": "agent-sandbox"}, "failed": True,
+                     "commands": [{"command": "git merge --no-ff abc",
+                                   "output": "CONFLICT (content): Merge "
+                                             "conflict in examples/README.md\n"
+                                             "Automatic merge failed",
+                                   "error": "exit status 1"}]},
+                ],
             ))
         self.assertEqual(cls, "clone_failure")
 
-    def test_missing_clone_records_with_no_revision_is_a_clone_failure(self):
-        # finished.json only records "revision" when the checkout succeeded.
+    def test_clone_failed_without_conflict_is_infra(self):
+        # clonerefs also sets failed=true on network/ref-fetch errors; only
+        # a verified merge conflict may be blamed on a stale PR.
+        cls = flake_report.classify_red_run(
+            False, False,
+            artifacts(
+                finished={"result": "FAILURE"},
+                clone_records=[
+                    {"refs": {"repo": "agent-sandbox"}, "failed": True,
+                     "commands": [{"command": "git fetch origin",
+                                   "output": "",
+                                   "error": "connection timed out"}]},
+                ],
+            ))
+        self.assertEqual(cls, "infra")
+
+    def test_missing_clone_records_with_no_revision_stays_infra(self):
+        # Without clone-records.json the cause cannot be proven benign.
         cls = flake_report.classify_red_run(
             False, False, artifacts(finished={"result": "FAILURE"}))
-        self.assertEqual(cls, "clone_failure")
+        self.assertEqual(cls, "infra")
 
     def test_no_junit_clean_clone_is_infra(self):
         cls = flake_report.classify_red_run(
@@ -204,7 +227,9 @@ class AnalyzeTabTest(unittest.TestCase):
     ARTIFACTS = {
         "b0": {"finished.json": {"result": "ABORTED"}},
         "b1": {"finished.json": {"result": "FAILURE"},
-               "clone-records.json": [{"failed": True}]},
+               "clone-records.json": [
+                   {"failed": True,
+                    "commands": [{"output": "Automatic merge failed"}]}]},
         "b2": {"finished.json": {"result": "FAILURE", "revision": "abc"}},
         "b3": {"finished.json": {"result": "FAILURE", "revision": "abc"},
                "clone-records.json": [{"failed": False}]},
@@ -247,6 +272,41 @@ class AnalyzeTabTest(unittest.TestCase):
         self.assertEqual(finding["fails"], 1)
         self.assertEqual(finding["last_failure_ts"], 200)
         self.assertEqual(finding["retest_flips"], 1)
+
+    def test_aborted_pass_does_not_create_a_retest_flip(self):
+        # TestP fails on changelist c1 and "passes" only inside the aborted
+        # rerun of the same changelist; that pass must not count as a flip.
+        table = {
+            "query": "kubernetes-ci-logs/pr-logs/directory/job",
+            "changelists": ["c1", "c1", "c2"],
+            "column_ids": ["\ue000a0", "\ue000a1", "\ue000a2"],
+            "timestamps": [300, 200, 100],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle([12, 12, 1])},
+                {"name": "pkg.TestP", "statuses": rle([1, 12, 1])},
+                {"name": "pkg.TestQ", "statuses": rle([13, 1, 1])},
+            ],
+        }
+        art = {"a0": {"finished.json": {"result": "ABORTED"}},
+               "a1": {"finished.json": {"result": "FAILURE",
+                                        "revision": "abc"}}}
+
+        def fake_fetcher(gcs_query, build_id):
+            return lambda name: art.get(build_id, {}).get(name)
+
+        with mock.patch.object(flake_report, "fetch_json",
+                               return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher",
+                               fake_fetcher):
+            flaky, consistent, _ = flake_report.analyze_tab("dash", "tab", 3)
+        findings = {f["test"]: f for f in flaky + consistent}
+        # TestP: one real failure on a single changelist. Before the fix the
+        # aborted rerun's pass counted as a retest flip, promoting it to a
+        # reported flake; now it is correctly treated as that PR's own bug.
+        self.assertNotIn("pkg.TestP", findings)
+        # TestQ: its only flaky cell sits in the aborted column, so it must
+        # not be reported at all.
+        self.assertNotIn("pkg.TestQ", findings)
 
     def test_render_report_calls_out_benign_red_runs(self):
         flaky, consistent, infra = self.analyze()

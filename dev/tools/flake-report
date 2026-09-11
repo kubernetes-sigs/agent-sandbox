@@ -159,6 +159,18 @@ def make_artifact_fetcher(gcs_query, build_id):
     return fetch
 
 
+def clone_merge_conflict(record):
+    """True when a failed clone record shows a merge conflict — the stale-PR
+    shape — rather than a network or ref-fetch error. clonerefs logs the
+    git output per command; a conflicted merge always prints "CONFLICT ("
+    and "Automatic merge failed"."""
+    for cmd in record.get("commands") or []:
+        text = "%s\n%s" % (cmd.get("output", ""), cmd.get("error", ""))
+        if "Automatic merge failed" in text or "CONFLICT (" in text:
+            return True
+    return False
+
+
 def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
     """Classifies why one red Overall column went red.
 
@@ -172,7 +184,9 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
                            the story
       "pretest_failure" -- junit exists with zero failing testcases: the PR
                            broke a pre-test gate, author-actionable
-      "clone_failure"   -- the PR no longer merges cleanly (rebase needed)
+      "clone_failure"   -- the PR no longer merges cleanly onto main: a
+                           merge conflict verified in clone-records.json
+                           (rebase needed)
       "infra"           -- pod started, produced no junit, and none of the
                            above explains the red run
 
@@ -189,12 +203,15 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
         return "pretest_failure"
     clone_records = fetch_artifact("clone-records.json")
     if clone_records is not None:
-        if any(record.get("failed") for record in clone_records):
-            return "clone_failure"
-    elif finished.get("result") and not finished.get("revision"):
-        # No clone-records.json artifact at all; podutils only record
-        # "revision" in finished.json when the checkout succeeded.
-        return "clone_failure"
+        failed = [r for r in clone_records if r.get("failed")]
+        if failed:
+            if any(clone_merge_conflict(r) for r in failed):
+                return "clone_failure"
+            # The clone failed without a merge conflict (network error,
+            # unreachable ref): that is infrastructure, not a stale PR.
+            return "infra"
+    # Without clone-records.json the cause of a junit-less red run cannot
+    # be proven benign, so it stays in the infra count.
     return "infra"
 
 
@@ -259,8 +276,12 @@ def analyze_tab(dashboard, tab, window):
         fail_cols = [i for i in range(ncols)
                      if cell(statuses, i) in FAIL_STATUSES
                      and i not in mass_cols and i not in aborted_cols]
-        pass_cols = [i for i in range(ncols) if cell(statuses, i) in PASS_STATUSES]
-        flaky_cells = [i for i in range(ncols) if cell(statuses, i) == FLAKY_STATUS]
+        pass_cols = [i for i in range(ncols)
+                     if cell(statuses, i) in PASS_STATUSES
+                     and i not in aborted_cols]
+        flaky_cells = [i for i in range(ncols)
+                       if cell(statuses, i) == FLAKY_STATUS
+                       and i not in aborted_cols]
         if not fail_cols and not flaky_cells:
             continue
 

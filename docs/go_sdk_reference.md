@@ -25,6 +25,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type Commands](<#Commands>)
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
+- [type Connectivity](<#Connectivity>)
 - [type DirectStrategy](<#DirectStrategy>)
   - [func \(s \*DirectStrategy\) Close\(\) error](<#DirectStrategy.Close>)
   - [func \(s \*DirectStrategy\) Connect\(\_ context.Context\) \(string, error\)](<#DirectStrategy.Connect>)
@@ -65,6 +66,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Sandbox.Read>)
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
+  - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
   - [func \(s \*Sandbox\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Sandbox.Write>)
   - [func \(s \*Sandbox\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Sandbox.WriteReader>)
 
@@ -76,8 +78,8 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 ```go
 const (
 
-    // PodNameAnnotation is the annotation key on a Sandbox resource that
-    // identifies the name of the underlying pod.
+    // PodNameAnnotation is the deprecated annotation key on a Sandbox resource that identifies the name of the underlying pod.
+    // Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
     PodNameAnnotation = "agents.x-k8s.io/pod-name"
 )
 ```
@@ -109,6 +111,7 @@ var (
     ErrTimeout          = errors.New("operation timed out")
     ErrClaimFailed      = errors.New("claim creation failed")
     ErrPortForwardDied  = errors.New("port-forward connection lost")
+    ErrNoSandboxService = errors.New("sandbox has no headless Service")
     ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
     ErrOrphanedClaim    = errors.New("orphaned claim; call Close() to retry deletion")
     ErrRetriesExhausted = errors.New("retries exhausted")
@@ -282,6 +285,51 @@ type ConnectionStrategy interface {
     Connect(ctx context.Context) (baseURL string, err error)
     Close() error
 }
+```
+
+<a name="Connectivity"></a>
+### type [Connectivity](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/options.go>)
+
+Connectivity selects the transport used to reach the in\-sandbox runtime.
+
+```go
+type Connectivity string
+```
+
+<a name="ConnectivityPortForward"></a>
+
+```go
+const (
+    // ConnectivityPortForward reaches the sandbox over a SPDY port-forward
+    // brokered by the apiserver. Works from anywhere a kubeconfig does,
+    // including a laptop or CI runner. Default.
+    ConnectivityPortForward Connectivity = "port-forward"
+    // ConnectivityInClusterService dials the Sandbox's headless Service by
+    // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
+    // and, for RuntimeLegacyPython, the sandbox-router, off the data path.
+    //
+    // Prefer this over ConnectivityInClusterPodIP when sandboxes cross a trust
+    // boundary. The Service's selector only ever matches its own Sandbox's
+    // pod, so a pod IP that Kubernetes has since reassigned to another
+    // tenant would be caught when the TTL expires. A deleted Sandbox takes
+    // its Service with it: connections then fail rather than landing on a stranger.
+    // (DNS caching still leaves a TTL-bounded window)
+    //
+    // Requires the Sandbox to have a Service — set spec.service: true on
+    // the template. Open fails when Status.ServiceFQDN is empty rather than
+    // falling back to the pod IP, so the safety property cannot be lost
+    // silently.
+    ConnectivityInClusterService Connectivity = "in-cluster-service"
+
+    // ConnectivityInClusterPodIP dials Status.PodIP. It needs no Service, so
+    // it works against any Sandbox without template changes.
+    //
+    // It carries the pod IP's reuse hazard: nothing detects that the sandbox
+    // pod was rescheduled, so requests can continue to a stale address that
+    // Kubernetes may have since reassigned to an unrelated pod. Use
+    // ConnectivityInClusterService where that matters.
+    ConnectivityInClusterPodIP Connectivity = "in-cluster-pod-ip"
+)
 ```
 
 <a name="DirectStrategy"></a>
@@ -545,10 +593,17 @@ type Options struct {
     WarmPoolName string
 
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-    // RuntimeSandboxd connects via a pod port-forward, so GatewayName is not
-    // supported with it. APIURL remains available as an advanced/testing
-    // escape hatch for the REST endpoint.
+    // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
+    // so GatewayName is not supported with it. APIURL remains available as an
+    // advanced/testing escape hatch for the REST endpoint.
     Runtime Runtime
+
+    // Connectivity selects the transport. Default: ConnectivityPortForward.
+    //
+    // The in-cluster values conflict with both GatewayName and APIURL, and
+    // require that this process runs inside the same cluster as the sandbox
+    // pods.
+    Connectivity Connectivity
 
     // SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
     // REST API. Only used with RuntimeSandboxd. Default: 8080.
@@ -562,7 +617,7 @@ type Options struct {
     // Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
     Namespace string
 
-    // GatewayName enables production mode. The client watches this Gateway resource
+    // GatewayName enables Gateway mode. The client watches this Gateway resource
     // for an external IP, then routes through the sandbox-router.
     // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
     GatewayName string
@@ -575,12 +630,16 @@ type Options struct {
     // from the Gateway's address. Default: "http".
     GatewayScheme string
 
-    // APIURL enables advanced mode. The client connects directly to this URL,
+    // APIURL enables Direct URL mode. The client connects directly to this URL,
     // bypassing gateway discovery. Takes precedence over GatewayName.
     APIURL string
 
     // ServerPort is the port the sandbox runtime listens on. Default: 8888.
     ServerPort int
+
+    // Env is the list of environment variables to inject into the SandboxClaim.
+    // Setting Env forces a cold start from the warm pool template.
+    Env []extv1beta1.EnvVar
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration
@@ -675,12 +734,13 @@ type Runtime string
 const (
     // RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
     // GET /download|list|exists/{path}, POST /execute on port 8888),
-    // reached through the sandbox-router. Default.
+    // reached through the sandbox-router unless Connectivity selects a
+    // direct pod dial. Default.
     RuntimeLegacyPython Runtime = "legacy-python"
     // RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
     // REST filesystem (/v1/files/...) on port 8080 plus gRPC
-    // ProcessService on port 9090. The SDK connects over a pod port-forward
-    // to the sandbox pod.
+    // ProcessService on port 9090. The SDK reaches the sandbox pod directly
+    // or over a port-forward (default), see Connectivity.
     RuntimeSandboxd Runtime = "sandboxd"
 )
 ```
@@ -848,6 +908,15 @@ func (s *Sandbox) SandboxName() string
 ```
 
 
+
+<a name="Sandbox.ServiceFQDN"></a>
+#### func \(\*Sandbox\) [ServiceFQDN](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) ServiceFQDN() string
+```
+
+ServiceFQDN returns the in\-cluster DNS name of the Sandbox's headless Service, or "" when it has none \(spec.service unset or false\). Not part of the Info interface, which is frozen for backward compatibility.
 
 <a name="Sandbox.Write"></a>
 #### func \(\*Sandbox\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)

@@ -29,7 +29,7 @@ cd examples/agent-sandbox-rl
 # single run (run_swebench_fleet.py)
 PYTHONPATH="$(pwd)" \
 WARMPOOL_STRATEGY=sliding TASKS_LIMIT=10 MAX_CONCURRENT=5 \
-NAMESPACE=rl-tunix-swebench \
+NAMESPACE=agent-sandbox-rl \
 NODE_SELECTOR_KEY=cloud.google.com/gke-nodepool NODE_SELECTOR_VAL=e2-pool \
 REPORT_DIR="$(pwd)/performance_reports" \
 python examples/run_swebench_fleet.py

@@ -102,7 +102,7 @@ If user-supplied template metadata is propagated verbatim, a tenant can set a sy
 2. Tenant B (malicious) creates `Sandbox B` with `spec.podTemplate.metadata.labels["agents.x-k8s.io/sandbox-name-hash"] = <hash(A)>`.
 3. Tenant B's Pod now also matches Sandbox A's Service selector, so traffic intended for Sandbox A can be delivered to the attacker's Pod (a network-isolation bypass / traffic-hijack primitive).
 
-Related abuses: forging system-prefixed labels or overwriting controller-managed annotations such as `agents.x-k8s.io/pod-name`.
+Related abuses: forging system-prefixed labels or overwriting controller-managed annotations.
 
 ### Mitigations
 

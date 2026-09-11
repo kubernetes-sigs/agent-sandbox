@@ -59,8 +59,7 @@ To access the Aider browser interface, we need to route traffic from your local 
 
 ```bash
 sandbox_name=$(kubectl get sandboxclaim user-session-aider -o jsonpath='{.status.sandbox.name}')
-pod_name=$(kubectl get sandbox "${sandbox_name}" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
-kubectl port-forward "pod/${pod_name}" 8501:8501
+kubectl port-forward "pod/${sandbox_name}" 8501:8501
 ```
 
 Because the sandbox automatically cloned the target GitHub repository into the `/workspace` directory, Aider is fully context-aware from the moment you connect. You can immediately ask it to analyze the codebase, write new features, or run local shell commands. Here is an example of what that looks like:

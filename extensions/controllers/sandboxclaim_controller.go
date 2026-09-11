@@ -58,8 +58,6 @@ import (
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
-const ObservabilityAnnotation = "agents.x-k8s.io/controller-first-observed-at"
-
 const (
 	immediateRequeueDelay = time.Millisecond
 	// warmCandidateGracePeriod gives a newly created claim two seconds for a
@@ -313,8 +311,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Pending warm candidates are expected transient state, not a claim failure.
 	// Return before status calculation so the grace period does not publish a
 	// misleading SandboxMissing or ReconcilerError condition.
-	var pendingWarmCandidates *warmCandidatesPendingError
-	if errors.As(reconcileErr, &pendingWarmCandidates) {
+	if pendingWarmCandidates, ok := errors.AsType[*warmCandidatesPendingError](reconcileErr); ok {
 		logger.V(4).Info("Waiting for warm pool candidates to report Pod IPs",
 			"claim", claim.Name,
 			"warmPool", claim.Spec.WarmPoolRef.Name,
@@ -1130,12 +1127,9 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 
 		// Wrap the API logic in a closure
 		success, err := func() (bool, error) {
-			poolName := "none"
-			if wpName := getWarmPoolName(adopted); wpName != "" {
-				poolName = wpName
-			}
+			poolName := getWarmPoolName(adopted)
 
-			logger.Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
+			logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
 
 			// Update claim to record adoption (optimistic lock)
 			if claim.Annotations == nil {
@@ -1244,12 +1238,6 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	if adopted.Annotations == nil {
 		adopted.Annotations = make(map[string]string)
 	}
-
-	// Ensure the adopted sandbox records its pod name before it can be observed Ready.
-	if podName := adopted.Annotations[v1beta1.SandboxPodNameAnnotation]; podName != adopted.Name {
-		adopted.Annotations[v1beta1.SandboxPodNameAnnotation] = adopted.Name
-	}
-
 	if traceContext, ok := claim.Annotations[asmetrics.TraceContextAnnotation]; ok {
 		adopted.Annotations[asmetrics.TraceContextAnnotation] = traceContext
 	}
@@ -1572,7 +1560,7 @@ func (r *SandboxClaimReconciler) validateAdditionalPodMetadata(claimMeta *v1beta
 				}
 			}
 			if !allowed {
-				return fmt.Errorf("label domain %q is not in the allowlist", domain)
+				return fmt.Errorf("label domain %q is not in the allowlist (configure the allowed-label-domains key of the agent-sandbox-config ConfigMap in the controller namespace; default: sandbox.users.io)", domain)
 			}
 		} else {
 			// For annotations, we use the blocklist

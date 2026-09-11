@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 from .constants import SANDBOX_NAME_HASH_LABEL
+from .models import SandboxClaimEnvVar
 
 
 def record_latency(metric):
@@ -51,7 +52,6 @@ def record_latency(metric):
                     metric.labels(status=status).observe(duration)
         return wrapper
     return decorator
-
 
 def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
     """Construct a SandboxClaim lifecycle spec dict from a TTL in seconds.
@@ -191,3 +191,14 @@ def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
             return value.strip() or None
 
     return None
+
+
+def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[SandboxClaimEnvVar]:
+    """Construct SandboxClaim env spec entries from a mapping of names to values."""
+    if not env:
+        return []
+
+    return [
+        SandboxClaimEnvVar(name=name, value=value)
+        for name, value in env.items()
+    ]

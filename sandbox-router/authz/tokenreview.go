@@ -72,6 +72,12 @@ type TokenReviewOptions struct {
 	// Empty means "no audience check at the API server" — the default,
 	// matching how K8s itself authenticates kubelet tokens.
 	Audiences []string
+	// TokenLocations additionally lets Authorize find the token in a
+	// URL query parameter or a cookie, beyond the Authorization header
+	// it always checks first (see authz.TokenFromRequest). The zero
+	// value keeps this authorizer's behavior exactly as it was before
+	// this field existed: Authorization header only.
+	TokenLocations TokenLocations
 }
 
 // TokenReviewAuthorizer authenticates requests by submitting their
@@ -95,6 +101,7 @@ type TokenReviewAuthorizer struct {
 	timeout   time.Duration
 	require   bool
 	audiences []string
+	locs      TokenLocations
 }
 
 // tokenDecision is the cached result of a TokenReview call. Stored by
@@ -149,16 +156,17 @@ func NewTokenReviewAuthorizer(o TokenReviewOptions) (*TokenReviewAuthorizer, err
 		timeout:   o.RequestTimeout,
 		require:   o.RequireToken,
 		audiences: append([]string(nil), o.Audiences...),
+		locs:      o.TokenLocations,
 	}, nil
 }
 
 // Authorize implements the Authorizer interface.
-func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error {
-	token, ok := BearerTokenFromRequest(r)
+func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, target AuthorizationTarget) error {
+	token, _, ok := TokenFromRequest(r, a.locs)
 	if !ok {
 		if a.require {
 			a.log.V(1).Info("authz deny: missing Bearer token",
-				"sandbox", sandboxName, "namespace", sandboxNamespace)
+				"sandbox", target.SandboxName, "namespace", target.Namespace)
 			return ErrUnauthenticated
 		}
 		// Token not required and not provided → allow. This matches the
@@ -170,7 +178,7 @@ func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, 
 	key := hashToken(token)
 	if v, hit := a.cache.Get(key); hit {
 		d := v.(*tokenDecision)
-		return a.decide(d, sandboxName, sandboxNamespace, true)
+		return a.decide(d, target.SandboxName, target.Namespace, true)
 	}
 
 	// Bound the TokenReview RPC; the proxy's per-request deadline still
@@ -194,7 +202,7 @@ func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, 
 		ttl := max(a.ttl/3, time.Second)
 		a.cache.Add(key, d, ttl)
 		a.log.Error(err, "tokenreview API call failed",
-			"sandbox", sandboxName, "namespace", sandboxNamespace)
+			"sandbox", target.SandboxName, "namespace", target.Namespace)
 		return fmt.Errorf("tokenreview: %w", err)
 	}
 	d.authenticated = out.Status.Authenticated
@@ -215,7 +223,7 @@ func (a *TokenReviewAuthorizer) Authorize(ctx context.Context, r *http.Request, 
 			"ttl", a.ttl,
 		)
 	}
-	return a.decide(d, sandboxName, sandboxNamespace, false)
+	return a.decide(d, target.SandboxName, target.Namespace, false)
 }
 
 // decide converts a tokenDecision into an authz error or nil. Logs at

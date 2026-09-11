@@ -26,8 +26,8 @@ const (
 	gatewayAPIVersion = "v1"
 	gatewayPlural     = "gateways"
 
-	// PodNameAnnotation is the annotation key on a Sandbox resource that
-	// identifies the name of the underlying pod.
+	// PodNameAnnotation is the deprecated annotation key on a Sandbox resource that identifies the name of the underlying pod.
+	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
 	PodNameAnnotation = "agents.x-k8s.io/pod-name"
 
 	headerSandboxID        = "X-Sandbox-ID"
@@ -44,6 +44,7 @@ var (
 	ErrTimeout          = errors.New("operation timed out")
 	ErrClaimFailed      = errors.New("claim creation failed")
 	ErrPortForwardDied  = errors.New("port-forward connection lost")
+	ErrNoSandboxService = errors.New("sandbox has no headless Service")
 	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
 	ErrOrphanedClaim    = errors.New("orphaned claim; call Close() to retry deletion")
 	ErrRetriesExhausted = errors.New("retries exhausted")

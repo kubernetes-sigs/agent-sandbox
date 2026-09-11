@@ -20,9 +20,6 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-// buildManagerOptions constructs the controller manager options used by
-// main(). The webhook server option is applied separately in main() when the
-// webhook subsystem is enabled.
 func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Options, probeAddr string, enableLeaderElection bool, leaderElectionNamespace string) ctrl.Options {
 	return ctrl.Options{
 		Scheme:                  scheme,

@@ -84,17 +84,20 @@ build-sandboxd:
 	go build -ldflags "$(LD_FLAGS)" -o bin/sandboxd ./packages/sandboxd/cmd/sandboxd
 
 KIND_CLUSTER=agent-sandbox
-CONTAINER_ENGINE ?= docker
 
+# `make deploy-kind` delegates to dev/tools/deploy-kind, which reads its
+# configuration from environment variables (GNU make exports command-line
+# variables to recipe subprocesses):
+#   SKIP_BUILD=true       deploy published images instead of building locally
+#   IMAGE_TAG=vX.Y.Z      pin the published image tag (with SKIP_BUILD=true)
+#   EXTENSIONS=true       deploy the extensions controller and CRDs
+#   CONTROLLER_ONLY=true  build and push only the controller image
+#   CONTROLLER_ARGS=...   extra controller flags
+#   CONTAINER_ENGINE=...  docker or podman
+#   KIND_CLUSTER_NAME=... cluster name (default: agent-sandbox)
 .PHONY: deploy-kind
-# `EXTENSIONS=true make deploy-kind` to deploy with Extensions enabled.
-# `CONTROLLER_ARGS="--enable-pprof-debug --zap-log-level=debug" make deploy-kind` to deploy with custom controller flags.
-# `CONTROLLER_ONLY=true make deploy-kind` to build and push only the controller image.
-# `CONTAINER_ENGINE=podman make deploy-kind` to use podman instead of docker.
 deploy-kind:
-	./dev/tools/create-kind-cluster --recreate ${KIND_CLUSTER} --kubeconfig bin/KUBECONFIG --container-engine=${CONTAINER_ENGINE}
-	./dev/tools/push-images --image-prefix=kind.local/ --kind-cluster-name=${KIND_CLUSTER} --container-engine=${CONTAINER_ENGINE} $(if $(filter true,$(CONTROLLER_ONLY)),--controller-only)
-	./dev/tools/deploy-to-kube --image-prefix=kind.local/ $(if $(filter true,$(EXTENSIONS)),--extensions) $(if $(CONTROLLER_ARGS),--controller-args="$(CONTROLLER_ARGS)")
+	KIND_CLUSTER_NAME="$${KIND_CLUSTER_NAME:-$(KIND_CLUSTER)}" ./dev/tools/deploy-kind
 
 .PHONY: deploy-cloud-provider-kind
 deploy-cloud-provider-kind:
@@ -143,6 +146,14 @@ lint-api:
 .PHONY: fix-api
 fix-api:
 	./dev/tools/lint-api --fix
+
+.PHONY: verify-chart-version
+verify-chart-version:
+	./dev/tools/verify-chart-version
+
+.PHONY: bump-chart-version
+bump-chart-version:
+	./dev/tools/bump-chart-version
 
 # Location of your local k8s.io repo (can be overridden: make release-promote TAG=v0.1.0 K8S_IO_DIR=../other/k8s.io)
 K8S_IO_DIR ?= ../../kubernetes/k8s.io
@@ -202,6 +213,10 @@ fix-olm-manifests:
 .PHONY: verify-olm
 verify-olm:
 	./dev/tools/verify-olm-manifests
+
+.PHONY: verify-olm-bundle
+verify-olm-bundle:
+	./dev/tools/verify-olm-bundle
 
 .PHONY: clean
 clean:

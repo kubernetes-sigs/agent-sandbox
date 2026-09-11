@@ -33,6 +33,7 @@ def create_kind_config(kubelet_verbosity, containerd_loglevel=None):
           kubeadmConfigPatches:
           - |
             kind: ClusterConfiguration
+            apiVersion: kubeadm.k8s.io/v1beta4
             apiServer:
               extraArgs:
                 - name: "enable-admission-plugins"

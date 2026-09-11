@@ -15,7 +15,9 @@
 import re
 from datetime import datetime, timezone
 from typing import Literal, Optional, Union
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+_ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
 
 class ExecutionResult(BaseModel):
     """A structured object for holding the result of a command execution."""
@@ -57,6 +59,26 @@ class FileEntry(BaseModel):
             modified=datetime.fromisoformat(entry["modified_at"].replace("Z", "+00:00")),
             mode=entry.get("mode"),
         )
+
+class SandboxClaimEnvVar(BaseModel):
+    """Represents an environment variable entry in a SandboxClaim spec."""
+    name: str  # Name of the environment variable.
+    value: str  # Value of the environment variable.
+    container_name: str | None = Field(default=None, serialization_alias="containerName")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not _ENV_VAR_NAME_RE.match(v):
+            raise ValueError(
+                "Invalid environment variable name: must consist of alphabetic "
+                "characters, digits, '_', '-', or '.', and must not start with a digit"
+            )
+        if v == "." or v == ".." or v.startswith(".."):
+            raise ValueError(
+                "Invalid environment variable name: must not be '.', '..', or start with '..'"
+            )
+        return v
 
 class SandboxDirectConnectionConfig(BaseModel):
     """Configuration for connecting directly to a Sandbox URL."""
@@ -122,4 +144,3 @@ class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
     enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.
     trace_service_name: str = "sandbox-client"  # Service name used for traces.
-    

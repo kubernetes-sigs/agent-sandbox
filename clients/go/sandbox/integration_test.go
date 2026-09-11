@@ -27,7 +27,7 @@ import (
 
 var (
 	warmPoolName     = flag.String("warmpool-name", "python-sandbox-warmpool", "SandboxWarmPool name")
-	gatewayName      = flag.String("gateway-name", "", "Gateway name for production mode")
+	gatewayName      = flag.String("gateway-name", "", "Gateway name for Gateway mode")
 	gatewayNamespace = flag.String("gateway-namespace", "", "Gateway namespace (defaults to --namespace)")
 	apiURL           = flag.String("api-url", "", "Direct API URL")
 	namespace        = flag.String("namespace", "default", "Kubernetes namespace")

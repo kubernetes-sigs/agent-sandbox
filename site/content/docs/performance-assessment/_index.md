@@ -16,11 +16,19 @@ The `agent-sandbox-controller` exposes several flags that directly affect throug
 |------|---------|-------------|
 | `--sandbox-concurrent-workers` | `100` | Max concurrent reconciles for the Sandbox controller |
 | `--sandbox-claim-concurrent-workers` | `50` | Max concurrent reconciles for the SandboxClaim controller |
-| `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller |
+| `--sandbox-warm-pool-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxWarmPool controller. Reconciles are serialized per pool key by the workqueue, so workers provide concurrency across distinct pools. Size to the number of active warm pools in the cluster. |
 | `--sandbox-template-concurrent-workers` | `1` | Max concurrent reconciles for the SandboxTemplate controller |
 | `--sandbox-warm-pool-max-batch-size` | `300` | Max sandboxes the SandboxWarmPool controller creates or deletes in a single batch |
 | `--kube-api-qps` | `-1` (no client-side throttling) | Disables client-side rate limiting to the Kubernetes API server. Server-side throttling (API Priority and Fairness) still applies. When setting a positive value, use at least the sum of all `--*-concurrent-workers` flags to avoid starving reconcile loops. |
 | `--kube-api-burst` | `10` | Max burst for API server throttle requests. Ignored when `--kube-api-qps` is `-1`. When `--kube-api-qps` is set to a positive value, set this to equal or greater than `--kube-api-qps`. Must stay a positive integer even when unused — the controller exits on startup if it's `<= 0`. |
+| `--separate-watch-connection` | `false` | Dedicates an isolated HTTP/2 connection to the API server for list/watch streams, preventing write traffic from starving informer watch frames |
+| `--api-connections` | `1` | Number of independent HTTP/2 connections for non-watch requests, sharding writes to bypass the API server's per-connection concurrency limit (`SETTINGS_MAX_CONCURRENT_STREAMS`) |
+| `--sandbox-warm-pool-max-refill-rate` | `0` (unpaced) | Max sandboxes/sec created per pool to pace replenishment and prevent API server write bursts |
+| `--sandbox-warm-pool-replenish-delay` | `0` | Defer warm pool replenishment after claims adopt members so burst adoptions get API server priority |
+| `--disable-claim-events` | `false` | Suppresses Kubernetes Event emission from the SandboxClaim controller to cut API and etcd write traffic |
+| `--disable-claim-observability-annotations` | `false` | Skips persisting first-observed timestamp and trace annotations to etcd while preserving in-memory metrics |
+| `--cache-label-selectors` | `false` | Scopes Pod and Service informer caches to sandbox tracking labels, avoiding caching unrelated cluster resources. Caveat: externally pre-provisioned Pods and Services relying on adoption must carry `agents.x-k8s.io/sandbox-name-hash` set to the owning sandbox's name hash to be visible to the controller. |
+| `--sandbox-write-behind-window` | `0` | Coalescing window for recoverable metadata-only writes on Sandboxes |
 
 ### Choosing worker counts
 
@@ -142,6 +150,12 @@ patches:
       name: agent-sandbox-controller
       namespace: agent-sandbox-system
 ```
+
+### High-Throughput & Scale Tuning
+
+For high-throughput workloads (such as sustained claim rates of 10–20+ claims/sec or large warm pools with >1,000 replicas), standard worker tuning alone may lead to API server throttling, HTTP/2 stream saturation, or watch frame starvation behind large write bursts.
+
+For in-depth architectural explanations, recommended flag combinations, and a complete tuned Deployment manifest, refer to the [High-Throughput & Scale Tuning](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md#high-throughput--scale-tuning) section in `docs/configuration.md`.
 
 ---
 

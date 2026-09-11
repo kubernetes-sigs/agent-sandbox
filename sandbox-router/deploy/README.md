@@ -17,14 +17,33 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 
 ## Apply
 
+### From release assets
+
+Install the pinned release manifest (includes ServiceAccount, RBAC, Deployment, Service, and PDB):
+
 ```sh
-# Core router components
-kubectl apply -f sandbox-router/deploy/
+VERSION=$(curl -sSL https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r '.tag_name')
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-router.yaml
+```
+
+### From source
+
+```sh
+# Core router components (serviceaccount, rbac, deployment, service, pdb)
+kubectl apply -f sandbox-router/deploy/serviceaccount.yaml \
+  -f sandbox-router/deploy/rbac.yaml \
+  -f sandbox-router/deploy/deployment.yaml \
+  -f sandbox-router/deploy/service.yaml \
+  -f sandbox-router/deploy/pdb.yaml
 
 # Optional: GKE Gateway API ingress.
 # Note: GKE Standard clusters require Gateway API to be explicitly enabled
 # using --gateway-api=standard. GKE Autopilot enables it by default.
 kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
+
+# Optional: RBAC for TokenReview authentication
+# Only needed when running the router with --authz-mode=tokenreview.
+kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
 ```
 
 ## Things to change before production

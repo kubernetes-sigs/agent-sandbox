@@ -139,6 +139,45 @@ def check_install_manifest_drift(
         sys.exit(1)
 
 
+ROUTER_MANIFEST_FILES = (
+    "sandbox-router/deploy/serviceaccount.yaml",
+    "sandbox-router/deploy/rbac.yaml",
+    "sandbox-router/deploy/deployment.yaml",
+    "sandbox-router/deploy/service.yaml",
+    "sandbox-router/deploy/pdb.yaml",
+)
+
+
+def replace_controller_image(text, tag):
+    """Replace the ko:// image placeholder with the published controller image."""
+    image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{tag}"
+    return re.sub(
+        r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
+        image_url,
+        text,
+    )
+
+
+def replace_router_image(text, tag):
+    """Replace the sandbox router image with the published release tag image."""
+    image_url = f"registry.k8s.io/agent-sandbox/sandbox-router-go:{tag}"
+    return re.sub(
+        r"registry\.k8s\.io/agent-sandbox/sandbox-router-go(?::\S+)?",
+        image_url,
+        text,
+    )
+
+
+def generate_router_manifest(tag, files=ROUTER_MANIFEST_FILES):
+    """Generate the combined sandbox-router.yaml manifest with the release image tag."""
+    manifest_parts = []
+    for fname in files:
+        with open(fname) as infile:
+            manifest_parts.append(infile.read().strip())
+    combined = "\n---\n".join(manifest_parts) + "\n"
+    return replace_router_image(combined, tag)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate release manifests.")
     parser.add_argument("--tag", required=True, help="The git tag for the release.")
@@ -168,11 +207,7 @@ def main():
 
     def replace_image(text):
         """Replace the ko:// image placeholder with the published controller image."""
-        return re.sub(
-            r"ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller.*",
-            image_url,
-            text,
-        )
+        return replace_controller_image(text, args.tag)
 
     # --- Generate sandbox.yaml (core only) ---
     print("INFO: Preparing core sandbox.yaml")
@@ -247,15 +282,24 @@ def main():
         file.write(replace_image(result.stdout))
     print("INFO: Successfully created release_assets/sandbox-with-extensions.yaml")
 
+    # --- Generate sandbox-router.yaml ---
+    print("INFO: Preparing sandbox-router.yaml")
+    router_manifest = generate_router_manifest(tag)
+    with open("release_assets/sandbox-router.yaml", "w") as file:
+        file.write(router_manifest)
+    print("INFO: Successfully created release_assets/sandbox-router.yaml")
+
     # --- Publish Draft Release ---
     if args.publish:
         print(f"INFO: Publishing draft release {tag} to GitHub...")
         core_path = "release_assets/sandbox.yaml"
         extensions_path = "release_assets/extensions.yaml"
         all_in_one_path = "release_assets/sandbox-with-extensions.yaml"
+        router_path = "release_assets/sandbox-router.yaml"
 
         if not all(
-            os.path.exists(p) for p in (core_path, extensions_path, all_in_one_path)
+            os.path.exists(p)
+            for p in (core_path, extensions_path, all_in_one_path, router_path)
         ):
             print("❌ Release assets missing. Cannot publish.")
             sys.exit(1)
@@ -276,6 +320,7 @@ def main():
                 core_path,
                 extensions_path,
                 all_in_one_path,
+                router_path,
                 "--clobber",
                 "--repo", "kubernetes-sigs/agent-sandbox",
             ])
@@ -304,6 +349,7 @@ def main():
                 core_path,
                 extensions_path,
                 all_in_one_path,
+                router_path,
             ]
 
             if notes_file:

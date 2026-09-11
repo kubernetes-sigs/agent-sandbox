@@ -168,5 +168,90 @@ class CheckInstallManifestDriftTest(unittest.TestCase):
             )
 
 
+class ReplaceRouterImageTest(unittest.TestCase):
+    def test_replaces_latest_tag(self):
+        text = "image: registry.k8s.io/agent-sandbox/sandbox-router-go:latest\n"
+        got = release.replace_router_image(text, "v1.2.3")
+        self.assertEqual(
+            got,
+            "image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.2.3\n",
+        )
+
+    def test_replaces_existing_version_tag(self):
+        text = "image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.0\n"
+        got = release.replace_router_image(text, "v1.2.3")
+        self.assertEqual(
+            got,
+            "image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.2.3\n",
+        )
+
+    def test_leaves_unrelated_images_alone(self):
+        text = (
+            "image: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.0\n"
+            "image: other-registry/sandbox-router-go:latest\n"
+        )
+        got = release.replace_router_image(text, "v1.2.3")
+        self.assertEqual(got, text)
+
+
+class GenerateRouterManifestTest(unittest.TestCase):
+    def setUp(self):
+        self._temp_files = []
+
+    def tearDown(self):
+        for p in self._temp_files:
+            if os.path.exists(p):
+                os.unlink(p)
+
+    def _create_temp_manifest(self, content):
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        tmp.write(textwrap.dedent(content))
+        tmp.close()
+        self._temp_files.append(tmp.name)
+        return tmp.name
+
+    def test_combines_and_replaces_image(self):
+        f1 = self._create_temp_manifest("""
+            apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: sandbox-router
+        """)
+        f2 = self._create_temp_manifest("""
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: sandbox-router
+            spec:
+              template:
+                spec:
+                  containers:
+                  - name: sandbox-router
+                    image: registry.k8s.io/agent-sandbox/sandbox-router-go:latest
+        """)
+        got = release.generate_router_manifest("v1.5.0", files=[f1, f2])
+        self.assertIn("kind: ServiceAccount", got)
+        self.assertIn("kind: Deployment", got)
+        self.assertIn("image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.5.0", got)
+        self.assertNotIn(":latest", got)
+
+    def test_default_manifest_files_exist_and_exclude_optional(self):
+        # Verify the declared ROUTER_MANIFEST_FILES exist in repo and do not
+        # include optional manifests like rbac-tokenreview, networkpolicy, or examples.
+        for path in release.ROUTER_MANIFEST_FILES:
+            self.assertTrue(
+                os.path.exists(path),
+                f"Router manifest file not found: {path}",
+            )
+        filenames = [os.path.basename(p) for p in release.ROUTER_MANIFEST_FILES]
+        self.assertNotIn("rbac-tokenreview.yaml", filenames)
+        self.assertNotIn("networkpolicy.yaml", filenames)
+        self.assertIn("serviceaccount.yaml", filenames)
+        self.assertIn("rbac.yaml", filenames)
+        self.assertIn("deployment.yaml", filenames)
+        self.assertIn("service.yaml", filenames)
+        self.assertIn("pdb.yaml", filenames)
+
+
 if __name__ == "__main__":
     unittest.main()

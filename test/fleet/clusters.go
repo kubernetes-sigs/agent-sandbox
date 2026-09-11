@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"net/http"
+	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -73,7 +74,15 @@ func connectClusters(ctx context.Context, cfg config) ([]*cluster, error) {
 		for j := 0; j < cfg.ConnsPerCluster; j++ {
 			shard := *restConfig
 			j := j
-			shard.WrapTransport = func(rt http.RoundTripper) http.RoundTripper { _ = j; return rt }
+			shard.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+				_ = j
+				if ht, ok := rt.(*http.Transport); ok {
+					ht.MaxIdleConns = 10000
+					ht.MaxIdleConnsPerHost = 500
+					ht.IdleConnTimeout = 90 * time.Second
+				}
+				return rt
+			}
 			dc, err := dynamic.NewForConfig(&shard)
 			if err != nil {
 				return nil, fmt.Errorf("client for %s: %w", name, err)

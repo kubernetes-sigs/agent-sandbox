@@ -13,6 +13,11 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 * `--kube-api-qps` (default: -1, no client-side rate limiting): Client-side QPS limit for the Kubernetes API client.
 * `--kube-api-burst` (default: 10): The maximum burst for client-side throttling of the Kubernetes API client.
 
+## Status Write Settings
+
+* `--sandbox-write-behind-window` (default: `0`, synchronous): Defer non-urgent Pod metadata patches (label/annotation drift on an already-owned Pod) for up to this long, capped at 1s, so they coalesce with the next write.
+* `--sandbox-transitional-status-window` (default: `0`, synchronous): While a Sandbox is younger than this window, skip *transitional* status writes (reason/message churn, nodeName/podIPs fills, PodScheduled Unknown/True) and write only *material* changes (condition value flips, terminal Ready reasons such as Expired/PodFailed, PodScheduled=False). A Sandbox that becomes Ready inside the window writes status exactly once; one that is stuck flushes an explanatory status once the window elapses. Also enables skipping reconcile passes whose cached Sandbox predates the controller's own last write. Recommended for high launch rates: `180s`.
+
 ## Cluster Settings
 
 * `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to

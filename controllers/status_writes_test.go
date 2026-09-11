@@ -186,6 +186,24 @@ func TestUpdateStatusTransitionalWindow(t *testing.T) {
 		wantDefer bool
 	}{
 		{
+			name: "nodeName-only change on young sandbox is deferred, not dropped",
+			age:  1 * time.Second,
+			mutate: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Status.NodeName = "node-1"
+			},
+			wantWrite: false,
+			wantDefer: true,
+		},
+		{
+			name: "nodeName-only change past the window is written",
+			age:  window + time.Second,
+			mutate: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Status.NodeName = "node-1"
+			},
+			wantWrite: true,
+			wantDefer: false,
+		},
+		{
 			name: "transitional change on young sandbox is deferred",
 			age:  1 * time.Second,
 			mutate: func(sb *sandboxv1beta1.Sandbox) {
@@ -315,6 +333,20 @@ func TestStaleCacheGuard(t *testing.T) {
 	}
 	if g.stillStale(key, "5") {
 		t.Error("record should have been dropped after catch-up")
+	}
+
+	// Two writes in one pass (metadata 5->6, then status 6->7): the informer
+	// replays 5 and 6 before 7, and both must read as stale.
+	g.record(key, "5", "6")
+	g.record(key, "6", "7")
+	if !g.stillStale(key, "5") {
+		t.Error("first pre-write rv of a double write: stillStale = false, want true")
+	}
+	if !g.stillStale(key, "6") {
+		t.Error("second pre-write rv of a double write: stillStale = false, want true")
+	}
+	if g.stillStale(key, "7") {
+		t.Error("post-write rv of a double write: stillStale = true, want false")
 	}
 
 	// A third-party write (any rv other than pre-write) also clears.

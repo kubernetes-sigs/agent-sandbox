@@ -125,12 +125,6 @@ func materialStatusChange(oldStatus, newStatus *sandboxv1beta1.SandboxStatus) bo
 	return false
 }
 
-// rvPair is one recorded sandbox write: the resourceVersion the write was
-// issued against and the resourceVersion it produced.
-type rvPair struct {
-	before, after string
-}
-
 // staleCacheGuard remembers, per sandbox, the resourceVersions bracketing
 // this controller's most recent write to that sandbox (main resource or
 // status). A reconcile pass whose informer copy still shows the pre-write
@@ -154,11 +148,17 @@ type rvPair struct {
 // crash or failover costs at most one redundant no-op PATCH per object.
 type staleCacheGuard struct {
 	mu sync.Mutex
-	m  map[types.NamespacedName]rvPair
+	// m holds, per key, the pre-write resourceVersions of this controller's
+	// outstanding writes. One reconcile can write twice (metadata, then
+	// status: 5->6 then 6->7), and the informer will replay 5 and 6 before
+	// 7, so every pre-write version must count as stale until an
+	// observation outside the set proves the cache has caught up.
+	m map[types.NamespacedName]map[string]struct{}
 }
 
 // record notes a successful write that moved key from rvBefore to rvAfter.
-// No-op writes (rvAfter empty or equal to rvBefore) are ignored.
+// No-op writes (rvAfter empty or equal to rvBefore) are ignored: they
+// produce no watch event that could ever clear them.
 func (g *staleCacheGuard) record(key types.NamespacedName, rvBefore, rvAfter string) {
 	if rvAfter == "" || rvAfter == rvBefore {
 		return
@@ -166,23 +166,28 @@ func (g *staleCacheGuard) record(key types.NamespacedName, rvBefore, rvAfter str
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.m == nil {
-		g.m = make(map[types.NamespacedName]rvPair)
+		g.m = make(map[types.NamespacedName]map[string]struct{})
 	}
-	g.m[key] = rvPair{before: rvBefore, after: rvAfter}
+	befores, ok := g.m[key]
+	if !ok {
+		befores = make(map[string]struct{}, 2)
+		g.m[key] = befores
+	}
+	befores[rvBefore] = struct{}{}
 }
 
 // stillStale reports whether a pass observing observedRV for key is running
-// behind this controller's own last write. Any observation other than the
+// behind this controller's own writes. Any observation other than a
 // recorded pre-write version proves the cache has caught up (or moved
 // further) and drops the record.
 func (g *staleCacheGuard) stillStale(key types.NamespacedName, observedRV string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	pair, ok := g.m[key]
+	befores, ok := g.m[key]
 	if !ok {
 		return false
 	}
-	if observedRV == pair.before {
+	if _, stale := befores[observedRV]; stale {
 		return true
 	}
 	delete(g.m, key)

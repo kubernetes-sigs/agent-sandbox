@@ -311,7 +311,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// from superseded state and every write it could issue would be a no-op
 	// the apiserver still has to serve. Skip the pass; the recorded write
 	// guarantees a watch event (hence a fresh reconcile) is on its way.
-	if r.staleWrites.stillStale(req.NamespacedName, sandbox.ResourceVersion) {
+	// Only with the window enabled: the default (window 0) keeps main's
+	// reconcile path unchanged.
+	if r.TransitionalStatusWindow > 0 && r.staleWrites.stillStale(req.NamespacedName, sandbox.ResourceVersion) {
 		return ctrl.Result{}, nil
 	}
 
@@ -347,7 +349,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
 			return ctrl.Result{}, err
 		}
-		r.staleWrites.record(req.NamespacedName, rvBefore, sandbox.ResourceVersion)
+		r.recordSandboxWrite(req.NamespacedName, rvBefore, sandbox.ResourceVersion)
 	}
 
 	oldStatus := sandbox.Status.DeepCopy()
@@ -779,7 +781,11 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 	// Ready the deferral no longer applies -- a node change on a Ready
 	// sandbox should be impossible, but if it happens, write it through
 	// rather than leave a Ready sandbox with a wrong or missing node name.
-	if nodeNameOnlyChange(oldStatus, &sandbox.Status) &&
+	// With the transitional window enabled this special case is subsumed:
+	// a nodeName-only change is transitional, so it is deferred below and
+	// flushed at age == window instead of waiting for a later write.
+	if r.TransitionalStatusWindow == 0 &&
+		nodeNameOnlyChange(oldStatus, &sandbox.Status) &&
 		!meta.IsStatusConditionTrue(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)) {
 		return 0, nil
 	}
@@ -821,10 +827,20 @@ func (r *SandboxReconciler) updateStatus(ctx context.Context, oldStatus *sandbox
 		logger.Error(err, "Failed to patch sandbox status")
 		return 0, err
 	}
-	r.staleWrites.record(client.ObjectKeyFromObject(sandbox), rvBefore, sandbox.ResourceVersion)
+	r.recordSandboxWrite(client.ObjectKeyFromObject(sandbox), rvBefore, sandbox.ResourceVersion)
 
 	// Surface error
 	return 0, nil
+}
+
+// recordSandboxWrite notes one of this controller's own Sandbox writes for
+// the stale-cache guard. It is a no-op unless the transitional window is
+// enabled, so the default configuration keeps main's behavior exactly.
+func (r *SandboxReconciler) recordSandboxWrite(key types.NamespacedName, rvBefore, rvAfter string) {
+	if r.TransitionalStatusWindow == 0 {
+		return
+	}
+	r.staleWrites.record(key, rvBefore, rvAfter)
 }
 
 // nodeNameOnlyChange reports whether the node assignment is the only
@@ -1221,7 +1237,7 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
 		return fmt.Errorf("failed to clear pod name annotation: %w", err)
 	}
-	r.staleWrites.record(client.ObjectKeyFromObject(sandbox), rvBefore, sandbox.ResourceVersion)
+	r.recordSandboxWrite(client.ObjectKeyFromObject(sandbox), rvBefore, sandbox.ResourceVersion)
 	logger.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 	return nil
 }

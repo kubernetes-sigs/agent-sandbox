@@ -32,6 +32,11 @@ import (
 // contain the word "forbidden" from matching.
 const rbacDenialMarker = "is forbidden: User"
 
+const (
+	controllerNamespace   = "agent-sandbox-system"
+	controllerPodSelector = "app=agent-sandbox-controller"
+)
+
 // ScanControllerRBACDenials fetches the logs of every controller pod and
 // returns any lines showing an RBAC denial. The e2e suites call this from
 // TestMain after all tests have run: the suite exercises every controller
@@ -50,11 +55,17 @@ func ScanControllerRBACDenials(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("building clientset: %w", err)
 	}
 
-	pods, err := clientset.CoreV1().Pods("agent-sandbox-system").List(
-		ctx, metav1.ListOptions{LabelSelector: "app=agent-sandbox-controller"},
+	pods, err := clientset.CoreV1().Pods(controllerNamespace).List(
+		ctx, metav1.ListOptions{LabelSelector: controllerPodSelector},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("listing controller pods: %w", err)
+	}
+	// Zero matches means the namespace or label selector drifted from the
+	// deployment manifests; erroring keeps the guard from silently becoming
+	// a no-op.
+	if len(pods.Items) == 0 {
+		return nil, fmt.Errorf("no controller pods found in namespace %q matching %q; RBAC denial scan did not run", controllerNamespace, controllerPodSelector)
 	}
 
 	var denials []string

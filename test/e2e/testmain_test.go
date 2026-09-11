@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 )
@@ -32,7 +33,11 @@ import (
 func TestMain(m *testing.M) {
 	code := m.Run()
 
-	denials, err := framework.ScanControllerRBACDenials(context.Background())
+	// Bound the scan so a wedged apiserver or log stream cannot hang the
+	// whole suite; a timeout surfaces as the warning below instead.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	denials, err := framework.ScanControllerRBACDenials(ctx)
+	cancel()
 	switch {
 	case err != nil:
 		// Don't mask test results over a log-fetch problem, but say so.

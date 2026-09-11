@@ -30,7 +30,7 @@ description: >
 2. Install the agent-sandbox controller and its CRDs with the following command:
    ```sh
    # Get the latest version of the release:
-   VERSION=$(curl https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r '.tag_name')
+   VERSION=$(basename $(curl -sSL -o /dev/null -w "%{url_effective}" https://github.com/kubernetes-sigs/agent-sandbox/releases/latest))
 
    # To install only the core components:
    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml

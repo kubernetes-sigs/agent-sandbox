@@ -24,7 +24,7 @@ Use `kubectl apply -k` with kustomize to apply the core components (`serviceacco
 
 ```sh
 # Remote install using a release tag:
-VERSION=$(curl -sSL https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r '.tag_name')
+VERSION=$(basename $(curl -sSL -o /dev/null -w "%{url_effective}" https://github.com/kubernetes-sigs/agent-sandbox/releases/latest))
 kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox/sandbox-router/deploy?ref=${VERSION}"
 
 # Or from a local clone:

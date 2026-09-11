@@ -23,9 +23,8 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 Use `kubectl apply -k` with kustomize to apply the core components (`serviceaccount.yaml`, `rbac.yaml`, `deployment.yaml`, `service.yaml`, `pdb.yaml`):
 
 ```sh
-# Remote install using a release tag (requires v1.0.3+):
-VERSION=$(basename $(curl -sSL -o /dev/null -w "%{url_effective}" https://github.com/kubernetes-sigs/agent-sandbox/releases/latest))
-kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox//sandbox-router/deploy?ref=${VERSION}"
+# Remote install from main:
+kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox//sandbox-router/deploy?ref=main"
 
 # Or from a local clone:
 kubectl apply -k sandbox-router/deploy/
@@ -54,7 +53,7 @@ kubectl apply -f sandbox-router/deploy/networkpolicy.yaml
 
 ## Things to change before production
 
-1. **Image tag.** `deployment.yaml` uses `:latest`. Pin a real version once you publish one.
+1. **Image tag.** `kustomization.yaml` defaults to the latest published release (`v1.0.2`). Pin to a specific digest or custom version as needed.
 2. **Replica count.** 2 is the HA minimum, not a capacity recommendation. See "Scaling guidance" in the package README.
 3. **Resource requests.** The defaults assume modest load. Right-size from load test numbers.
 4. **NetworkPolicy selectors.** The example allows ingress from any namespace (`namespaceSelector: {}`). Tighten to your Gateway namespace.

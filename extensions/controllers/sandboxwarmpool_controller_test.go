@@ -731,8 +731,9 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 		sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
 		sb.Status.Conditions = []metav1.Condition{
 			{
-				Type:   string(sandboxv1beta1.SandboxConditionReady),
-				Status: ready,
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             ready,
+				ObservedGeneration: sb.Generation,
 			},
 		}
 		return sb
@@ -782,6 +783,21 @@ func TestReconcilePoolReadyReplicas(t *testing.T) {
 				createSandboxWithReadyCondition("-ghi789", metav1.ConditionTrue),
 			},
 			expectedReadyReplicas: 1,
+		},
+		{
+			name: "stale ready condition is not counted",
+			initialObjs: []runtime.Object{
+				template,
+				func() *sandboxv1beta1.Sandbox {
+					sb := createSandboxWithReadyCondition("-abc123", metav1.ConditionTrue)
+					sb.Generation = 2
+					sb.Status.Conditions[0].ObservedGeneration = 1
+					return sb
+				}(),
+				createSandboxWithReadyCondition("-def456", metav1.ConditionFalse),
+				createSandboxWithReadyCondition("-ghi789", metav1.ConditionUnknown),
+			},
+			expectedReadyReplicas: 0,
 		},
 	}
 

@@ -138,7 +138,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
 | `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
-| `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
+| `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/sandbox-router.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |
 | `--enable-tracing` | auto | OTel traces via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; pass `--enable-tracing=false` to override. |
@@ -157,7 +157,7 @@ For every inbound request, the proxy resolves the upstream in this order: explic
 
 **Cache content.** Only Pods that pass `PodReady=True` and have a non-empty `Status.PodIP` are stored. Pods that flip out of Ready are removed automatically by the informer event handler so traffic doesn't get steered at a degraded Pod. Unclaimed warm-pool Pods are stored but not name-indexed (see resolution priority above); adoption by a SandboxClaim removes the `agents.x-k8s.io/warm-pool-sandbox` label and the resulting Pod update makes the entry name-routable.
 
-**RBAC.** Cluster-wide `get`, `list`, `watch` on `pods`. The example `deploy/rbac.yaml` is a `ClusterRole` + `ClusterRoleBinding`; narrow to a `Role` + `RoleBinding` when `--cache-namespace` is set. Note that K8s RBAC has no negative-namespace primitive, so the grant cannot say "all namespaces except kube-system" — the runtime label selector (`agents.x-k8s.io/sandbox-name-hash`) is what keeps system Pods out of the actual watch and the cache. The file's header comment spells this out for auditors.
+**RBAC.** Cluster-wide `get`, `list`, `watch` on `pods`. The RBAC in `deploy/sandbox-router.yaml` provides a `ClusterRole` + `ClusterRoleBinding`; narrow to a `Role` + `RoleBinding` when `--cache-namespace` is set. Note that K8s RBAC has no negative-namespace primitive, so the grant cannot say "all namespaces except kube-system" — the runtime label selector (`agents.x-k8s.io/sandbox-name-hash`) is what keeps system Pods out of the actual watch and the cache. The file's header comment spells this out for auditors.
 
 **Readiness gating.** The router's `/readyz` does not flip to ready until the initial Pod LIST has completed. A misconfigured RBAC therefore fails fast at startup rather than silently degrading the router to DNS-only service.
 
@@ -193,7 +193,7 @@ Flags:
 | `--authz-tokenreview-require-token` | `false` | When false, tokenless requests pass (transitional). When true, missing token → 401. |
 | `--authz-tokenreview-audiences` | `""` | Comma-separated audience filter — required for projected ServiceAccount tokens minted with `--audience`. |
 
-RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants exactly this and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac.yaml` example wires it.
+RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants exactly this and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac-tokenreview.yaml` manifest wires it.
 
 **Scope of v1.** TokenReview only **authenticates** the caller — it verifies the token belongs to a known principal in the cluster. It does **not** check whether that principal is allowed to access the specific sandbox they named in `X-Sandbox-ID`. Tightening to per-sandbox authorization needs an agreed identity contract on the Sandbox CR (owner label, annotation, or a SubjectAccessReview-style policy) and is tracked as follow-up after KEP-NNNN lands.
 

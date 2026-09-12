@@ -8,7 +8,7 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 |---|---|
 | `sandbox-router.yaml` | Core router components (`ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, `Deployment`, `Service`, `PodDisruptionBudget`). Deploys 2 replicas with topology spread, distroless image, restricted SecurityContext, and Pod-IP cache enabled. |
 | `rbac-tokenreview.yaml` | Extra ClusterRoleBinding to the stock `system:auth-delegator` ClusterRole. Apply *in addition to* `sandbox-router.yaml` only when `--authz-mode=tokenreview`. Default-mode deployments don't carry these create rights on `tokenreviews.authentication.k8s.io` / `subjectaccessreviews.authorization.k8s.io` they wouldn't use. |
-| `networkpolicy.yaml` | Locks down ingress to proxy/metrics/probe ports; egress to DNS, sandbox port, OTel collector. **Tighten the selectors for your tenancy model.** |
+| `networkpolicy.yaml` | Locks down ingress to proxy/metrics/probe ports; egress to DNS, sandbox pods, apiserver, and OTel collector. **Tighten the selectors for your tenancy model.** |
 | `examples/gateway-gke.yaml` | Optional GKE Gateway, HTTPRoute, and HealthCheckPolicy for external ingress in front of `sandbox-router-svc`. |
 
 ## Apply
@@ -38,7 +38,7 @@ These manifests provide additional security hardening for production environment
   kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml
   ```
 
-- **Network isolation (`networkpolicy.yaml`):** Locks down ingress strictly to proxy/metrics/health probe ports, and egress to DNS, sandbox pods, and the apiserver. Review and tune selectors for your cluster CNI and Gateway namespace before applying:
+- **Network isolation (`networkpolicy.yaml`):** Locks down ingress strictly to proxy/metrics/health probe ports, and egress to DNS, sandbox pods, apiserver, and OTel collector. Review and tune selectors for your cluster CNI and Gateway namespace before applying:
   ```sh
   # Download to inspect and tune selectors:
   curl -sSLO https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/networkpolicy.yaml
@@ -66,7 +66,7 @@ These manifests provide additional security hardening for production environment
 5. **TLS.** The example is plain-HTTP. To enable TLS:
    - Add `--https-bind-address=:8443` and `--tls-cert-file` / `--tls-key-file` args.
    - Mount a Secret (cert-manager is the typical source) as a projected volume at `/tls`.
-   - Uncomment the `proxy-tls` port in `service.yaml`.
+   - Uncomment the `proxy-tls` port in the Service document in `sandbox-router.yaml`.
    - Uncomment the `8443` ingress rule in `networkpolicy.yaml`.
 6. **Observability.** Set `--enable-tracing` and `--enable-otel-metrics` and provide `OTEL_EXPORTER_OTLP_ENDPOINT` to push to your collector.
 7. **HorizontalPodAutoscaler.** Not included by default. The router is CPU-bound at high RPS; a target CPU utilization HPA usually works. Use `sandbox_router_inflight_requests` as a custom metric if you want load-based scaling.

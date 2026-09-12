@@ -44,4 +44,12 @@ export interface Logger {
 export interface CreateSandboxOptions {
   sandboxReadyTimeout?: number;
   labels?: Record<string, string>;
+  /**
+   * Delete the claim and its sandbox after this many seconds, measured from
+   * the createSandbox call (including provisioning time). Sets the claim's
+   * `spec.lifecycle.shutdownTime` to that absolute deadline and its
+   * `spec.lifecycle.shutdownPolicy` to `"Delete"`. Must be a positive integer
+   * that produces a valid RFC3339 deadline. Omit to leave expiration unset.
+   */
+  shutdownAfterSeconds?: number;
 }

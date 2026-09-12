@@ -21,10 +21,14 @@ Requires the ``async`` optional dependencies::
 
 import atexit
 import asyncio
+import copy
 import logging
 import sys
 import uuid
 from typing import Generic, TypeVar
+
+from kubernetes import client as sync_client
+from kubernetes_asyncio import client as async_client
 
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
@@ -43,6 +47,24 @@ T = TypeVar("T", bound=AsyncSandbox)
 # (used by the synchronous K8sHelper) has no default read timeout, so an
 # unresponsive apiserver would otherwise hang process exit indefinitely.
 _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS = 300
+
+def _sync_configuration_from_async(async_configuration) -> sync_client.Configuration:
+    """Mirrors an injected ``kubernetes_asyncio`` ``Configuration`` onto a
+    ``kubernetes`` one, so atexit cleanup's synchronous ``K8sHelper`` targets
+    the same cluster/credentials as the caller's injected ``api_client``.
+
+    Shallow copying and reclassing is used as the two classes have the same underlying
+    layout (plain ``__dict__`` attribute bags) but are different types, so re-using the configuration
+    object directly would break the sync client due to its async methods returning unawaited coroutines.
+    """
+    sync_configuration = copy.copy(async_configuration)
+    sync_configuration.__class__ = sync_client.Configuration
+    # The sync client reads this unconditionally when a proxy is set, but the async Configuration class
+    # never sets it, so we give it an explicit default.
+    sync_configuration.no_proxy = None
+    # An async refresh hook would never be awaited by the sync client, so we use the existing api_key value.
+    sync_configuration.refresh_api_key_hook = None
+    return sync_configuration
 
 
 class AsyncSandboxClient(Generic[T]):
@@ -81,6 +103,7 @@ class AsyncSandboxClient(Generic[T]):
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         cleanup: bool = True,
+        api_client: async_client.ApiClient | None = None,
     ):
         """
         Args:
@@ -100,6 +123,9 @@ class AsyncSandboxClient(Generic[T]):
                 caller forgets to clean up; pass ``cleanup=False`` to opt
                 out. Note this differs from the synchronous ``SandboxClient``,
                 which defaults to False.
+            api_client: Optional pre-configured ``kubernetes_asyncio`` ``ApiClient``
+                forwarded to the underlying ``AsyncK8sHelper`` to target a specific
+                cluster/context.
         """
         if connection_config is None:
             raise ValueError(
@@ -116,7 +142,9 @@ class AsyncSandboxClient(Generic[T]):
             initialize_tracer(self.tracer_config.trace_service_name)
         self.tracing_manager, self.tracer = create_tracer_manager(self.tracer_config)
 
-        self.k8s_helper = AsyncK8sHelper()
+        self.k8s_helper = AsyncK8sHelper(api_client=api_client)
+        # Held so atexit cleanup can read configuration/default_headers/cookie live at cleanup time
+        self._injected_api_client = api_client
 
         self._active_connection_sandboxes: dict[tuple[str, str], T] = {}
         self._lock = asyncio.Lock()
@@ -387,21 +415,33 @@ class AsyncSandboxClient(Generic[T]):
 
         Uses the synchronous :class:`K8sHelper` rather than kubernetes_asyncio,
         even though this class is otherwise fully async. atexit runs during
-        interpreter shutdown, after Python has begun tearing down its
-        process-wide thread pool; kubernetes_asyncio's aiohttp transport does a
+        interpreter shutdown, after Python has begun blocking new work on any
+        ``ThreadPoolExecutor``; kubernetes_asyncio's aiohttp transport does a
         per-request netrc lookup via a background thread, which raises "cannot
-        schedule new futures after interpreter shutdown" once that teardown has
-        started. The synchronous client's urllib3 transport has no event loop or
-        executor dependency, so it isn't affected. Per-claim failures emit
-        warnings to ``sys.stderr`` rather than raising — atexit cleanup is
-        best-effort.
+        schedule new futures after interpreter shutdown" once that block has
+        taken effect. The synchronous client's urllib3 transport has no event loop or
+        executor dependency, so it isn't affected. When an ApiClient is
+        injected, its configuration/default_headers/cookie are read live off
+        that client at cleanup time (so a caller that refreshes credentials
+        after construction still gets a cleanup client with current
+        credentials) and mirrored onto a fresh sync ApiClient so cleanup targets the same
+        cluster instead of falling back to the ambient kubeconfig.
         """
         try:
             claims = list(self._active_connection_sandboxes.keys())
             if not claims:
                 return
 
-            helper = K8sHelper()
+            atexit_api_client = None
+            if self._injected_api_client is not None:
+                atexit_api_client = sync_client.ApiClient(
+                    configuration=_sync_configuration_from_async(self._injected_api_client.configuration),
+                    cookie=self._injected_api_client.cookie,
+                )
+                for name, value in dict(self._injected_api_client.default_headers).items():
+                    atexit_api_client.set_default_header(name, value)
+
+            helper = K8sHelper(api_client=atexit_api_client)
             for ns, claim_name in claims:
                 try:
                     helper.delete_sandbox_claim(

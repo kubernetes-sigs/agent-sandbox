@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
-import os
 import posixpath
 import urllib.parse
-from typing import List
+from typing import Any, List
+
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import FileEntry
-from k8s_agent_sandbox.trace_manager import trace_span, trace
+from k8s_agent_sandbox.trace_manager import trace, trace_span
+
 
 
 def _sandboxd_files_endpoint(path: str) -> str:
@@ -36,7 +36,9 @@ class Filesystem:
     Filesystem & Runtime REST API, selected by the connection config
     (``connector.is_sandboxd()``).
     """
-    def __init__(self, connector: SandboxConnector, tracer, trace_service_name: str):
+    def __init__(
+        self, connector: SandboxConnector, tracer: Any, trace_service_name: str
+    ) -> None:
         self.connector = connector
         self.tracer = tracer
         self.trace_service_name = trace_service_name
@@ -54,7 +56,7 @@ class Filesystem:
             span.set_attribute("sandbox.file.size", len(content))
 
         if isinstance(content, str):
-            content = content.encode('utf-8')
+            content = content.encode("utf-8")
 
         # The sandbox runtime uses the multipart ``filename`` field as a
         # relative destination path under its base directory (e.g. /app).
@@ -157,17 +159,17 @@ class Filesystem:
             if not isinstance(listing, dict) or "entries" not in listing:
                 raise RuntimeError(f"Server returned invalid directory listing: {listing}")
             file_entries = []
-            for e in listing.get("entries") or []:
+            for entry in listing.get("entries") or []:
                 # Skip entry types the SDK model does not represent (e.g. a
                 # stray "symlink") so one unknown entry does not fail the
                 # whole listing.
-                if e.get("type") not in ("file", "directory"):
-                    logging.info(f"Skipping unsupported file entry type: {e.get('type')!r}")
+                if entry.get("type") not in ("file", "directory"):
+                    logging.info(f"Skipping unsupported file entry type: {entry.get('type')!r}")
                     continue
                 try:
-                    file_entries.append(FileEntry.from_sandboxd(e))
+                    file_entries.append(FileEntry.from_sandboxd(entry))
                 except Exception as ex:
-                    raise RuntimeError(f"Server returned invalid file entry format: {e}") from ex
+                    raise RuntimeError(f"Server returned invalid file entry format: {entry}") from ex
         else:
             response = self.connector.send_request("GET", f"list/{encoded_path}", timeout=timeout)
             try:

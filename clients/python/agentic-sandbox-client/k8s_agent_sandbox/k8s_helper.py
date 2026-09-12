@@ -14,8 +14,8 @@
 
 import logging
 import time
-from datetime import datetime, UTC
-from typing import List
+from datetime import UTC, datetime
+from typing import Any, List
 from kubernetes import client, config, watch
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
@@ -42,7 +42,7 @@ from .constants import (
 class K8sHelper:
     """Helper class for Kubernetes API interactions."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         try:
             config.load_incluster_config()
         except config.ConfigException:
@@ -83,7 +83,7 @@ class K8sHelper:
             }
         }
 
-        spec = {
+        spec: dict[str, Any] = {
             "warmPoolRef": {
                 "name": warmpool
             }
@@ -299,7 +299,7 @@ class K8sHelper:
 
     def delete_sandbox_claim(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None
-    ):
+    ) -> None:
         """Deletes a SandboxClaim custom resource.
 
         Args:
@@ -321,7 +321,7 @@ class K8sHelper:
                 logging.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
-    def get_sandbox(self, name: str, namespace: str):
+    def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""
         try:
             return self.custom_objects_api.get_namespaced_custom_object(
@@ -329,7 +329,7 @@ class K8sHelper:
                 version=SANDBOX_API_VERSION,
                 namespace=namespace,
                 plural=SANDBOX_PLURAL_NAME,
-                name=name
+                name=name,
             )
         except client.ApiException as e:
             if e.status == 404:

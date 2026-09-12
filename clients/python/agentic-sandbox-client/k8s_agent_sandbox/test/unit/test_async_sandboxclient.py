@@ -670,6 +670,35 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         url = await connector._resolve_base_url()
         self.assertEqual(url, "http://my-sandbox.dev.svc.cluster.local:8888")
 
+    async def test_in_cluster_raises_when_dns_url_unset(self):
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        connector._dns_url = None
+        with self.assertRaises(ValueError) as ctx:
+            await connector._resolve_base_url()
+        self.assertIn("in-cluster base URL", str(ctx.exception))
+
+    async def test_direct_raises_when_base_url_unresolved(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        # Simulate a path that skipped assignment so the post-resolve guard fires.
+        connector._base_url = None
+        connector.connection_config = MagicMock(spec=SandboxDirectConnectionConfig)
+        connector.connection_config.api_url = None
+        with self.assertRaises(ValueError) as ctx:
+            await connector._resolve_base_url()
+        self.assertIn("failed to resolve a base URL", str(ctx.exception))
+
     async def test_in_cluster_resolves_pod_ip_via_callable(self):
         config = SandboxInClusterConnectionConfig(server_port=8888)
         connector = AsyncSandboxConnector(
@@ -898,6 +927,9 @@ def _stop_stub_server(server, thread):
 
 
 class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
+    port: int
+    server: HTTPServer
+    server_thread: Thread
 
     @classmethod
     def setUpClass(cls):
@@ -1323,7 +1355,7 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
 class SandboxClaimDeleteHandler(BaseHTTPRequestHandler):
     """Stub K8s apiserver; only handles the DELETE call atexit cleanup makes."""
 
-    received_deletes = []
+    received_deletes: list[str] = []
 
     def do_DELETE(self):
         self.__class__.received_deletes.append(self.path)
@@ -1343,6 +1375,10 @@ class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
     kubernetes_asyncio's aiohttp transport dispatches a per-request netrc lookup via a background thread, which fails
     once Python's own thread-pool teardown has begun. No in-process test can reproduce that condition because the 
     interpreter never actually exits mid-suite, so this spawns a real subprocess and lets it exit for real."""
+
+    port: int
+    server: HTTPServer
+    server_thread: Thread
 
     @classmethod
     def setUpClass(cls):

@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
 import logging
 import uuid
 import time
-from typing import Callable, Literal
+from typing import Literal
+from collections.abc import Callable
 from datetime import datetime, timezone
 from kubernetes.client import ApiException
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
@@ -29,7 +31,11 @@ from k8s_agent_sandbox.constants import (
     PODSNAPSHOTMANUALTRIGGER_API_KIND,
     PODSNAPSHOTMANUALTRIGGER_PLURAL,
 )
-from .utils import wait_for_snapshot_to_be_completed, wait_for_snapshot_deletion, normalize_datetime
+from .utils import (
+    wait_for_snapshot_to_be_completed,
+    wait_for_snapshot_deletion,
+    normalize_datetime,
+)
 
 SNAPSHOT_SUCCESS_CODE = 0
 SNAPSHOT_ERROR_CODE = 1
@@ -96,15 +102,15 @@ class SnapshotEngine:
     def __init__(
         self,
         namespace: str,
-        k8s_helper,
+        k8s_helper: Any,
         get_pod_name_func: Callable[[], str],
         get_sandbox_name_hash_func: Callable[[], str | None],
-    ):
+    ) -> None:
         self.namespace = namespace
         self.k8s_helper = k8s_helper
         self.get_pod_name_func = get_pod_name_func
         self.get_sandbox_name_hash_func = get_sandbox_name_hash_func
-        self.created_manual_triggers = []
+        self.created_manual_triggers: list[str] = []
 
     def create(
         self, trigger_name: str, podsnapshot_timeout: int = 180
@@ -219,7 +225,7 @@ class SnapshotEngine:
                 error_code=SNAPSHOT_ERROR_CODE,
             )
 
-    def delete_manual_triggers(self, max_retries: int = 3):
+    def delete_manual_triggers(self, max_retries: int = 3) -> None:
         """Cleans up the manual trigger related resources created by this Sandbox."""
         remaining_triggers = list(self.created_manual_triggers)
 
@@ -311,7 +317,7 @@ class SnapshotEngine:
                 error_reason="Sandbox name hash not found.",
                 error_code=SNAPSHOT_ERROR_CODE,
             )
-        
+
         selectors.append(f"{SANDBOX_NAME_HASH_LABEL}={sandbox_name_hash}")
 
         label_selector = ",".join(selectors)
@@ -353,15 +359,21 @@ class SnapshotEngine:
                             f"Invalid creationTimestamp format '{creation_time_str}' for snapshot '{metadata.get('name', 'Unknown')}': {e}"
                         )
 
-                if filter_by.created_after and (not creation_time or creation_time < filter_by.created_after):
+                if filter_by.created_after and (
+                    not creation_time or creation_time < filter_by.created_after
+                ):
                     continue
-                if filter_by.created_before and (not creation_time or creation_time > filter_by.created_before):
+                if filter_by.created_before and (
+                    not creation_time or creation_time > filter_by.created_before
+                ):
                     continue
 
                 try:
+                    if not (name := metadata.get("name")):
+                        continue
                     valid_snapshots.append(
                         SnapshotDetail(
-                            snapshot_uid=metadata.get("name"),
+                            snapshot_uid=name,
                             source_pod=metadata.get("annotations", {}).get(
                                 PODSNAPSHOT_POD_NAME_ANNOTATION, "Unknown"
                             ),
@@ -546,7 +558,9 @@ class SnapshotEngine:
                         "timestamp must be a datetime/str when deleting by created_after"
                     )
                 logger.info(f"Deleting snapshots after timestamp: {timestamp}")
-                return self._execute_deletion(scope="global", created_after=timestamp, timeout=timeout)
+                return self._execute_deletion(
+                    scope="global", created_after=timestamp, timeout=timeout
+                )
 
             case "created_before":
                 if not isinstance(timestamp, (datetime, str)):
@@ -554,7 +568,9 @@ class SnapshotEngine:
                         "timestamp must be a datetime/str when deleting by created_before"
                     )
                 logger.info(f"Deleting snapshots before timestamp: {timestamp}")
-                return self._execute_deletion(scope="global", created_before=timestamp, timeout=timeout)
+                return self._execute_deletion(
+                    scope="global", created_before=timestamp, timeout=timeout
+                )
 
             case _:
                 raise ValueError(f"Unsupported deletion strategy: {delete_by}")

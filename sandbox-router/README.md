@@ -131,6 +131,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--health-probe-bind-address` | `:8081` | `/healthz` and `/readyz`. |
 | `--tls-cert-file` / `--tls-key-file` | — | PEM-encoded server cert and key. Hot-reloaded on file change (via fsnotify on the parent directory, so atomic Secret rotation just works). |
 | `--tls-client-ca-file` | — | CA bundle for verifying client certs when mTLS is on. |
+| `--tls-min-version` | `""` (TLS 1.2) | Minimum TLS version: `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13`. Honors `TLS_MIN_VERSION`. |
+| `--tls-cipher-suites` | `""` (Go defaults) | Comma-separated Go cipher-suite names. Honors `TLS_CIPHER_SUITES`. Ignored when min version is TLS 1.3. |
 | `--mtls-mode` | `off` | `off` / `optional` / `required`. |
 | `--cluster-domain` | `cluster.local` | Honors `CLUSTER_DOMAIN` env var (Python parity). |
 | `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
@@ -286,7 +288,7 @@ The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read
 - `optional` — if the client presents a cert, it must validate against `--tls-client-ca-file`; if it doesn't, the request proceeds.
 - `required` — every connection must present a cert that validates against the CA bundle.
 
-`tls.Config.MinVersion = TLS 1.2`. ALPN advertises `h2` and `http/1.1`.
+`tls.Config.MinVersion` defaults to TLS 1.2 and is configurable via `--tls-min-version` (or the `TLS_MIN_VERSION` env var). Cipher suites can be set via `--tls-cipher-suites` (or `TLS_CIPHER_SUITES`); when omitted, Go defaults apply. ALPN advertises `h2` and `http/1.1`. A downstream operator can inject the cluster TLS profile via these flags or env vars.
 
 ## Metrics
 
@@ -340,6 +342,8 @@ https-bind-address: ":8443"
 tls-cert-file: "/tls/tls.crt"
 tls-key-file: "/tls/tls.key"
 tls-client-ca-file: "/tls/ca.crt"
+tls-min-version: "VersionTLS12"
+tls-cipher-suites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
 mtls-mode: "required"
 cluster-domain: "cluster.local"
 proxy-timeout: "180s"

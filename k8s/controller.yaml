@@ -72,6 +72,12 @@ spec:
         image: ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller # placeholder value, replaced by deployment scripts
         args:
         - --leader-elect=true
+        # Uncomment to serve metrics over HTTPS with a TLS profile:
+        # - --metrics-secure-serving
+        # - --metrics-bind-address=:8443
+        # - --metrics-cert-dir=/etc/metrics-certs
+        # - --tls-min-version=VersionTLS12
+        # - --tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
         ports:
         - name: metrics
           containerPort: 8080
@@ -79,4 +85,13 @@ spec:
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        # Uncomment when --metrics-secure-serving is enabled:
+        # volumeMounts:
+        # - name: metrics-certs
+        #   mountPath: /etc/metrics-certs
+        #   readOnly: true
+      # volumes:
+      # - name: metrics-certs
+      #   secret:
+      #     secretName: agent-sandbox-metrics-tls
 

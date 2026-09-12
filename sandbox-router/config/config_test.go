@@ -73,6 +73,25 @@ func TestApplyEnvDefaults(t *testing.T) {
 			want: func(c *Config) bool { return c.ClusterDomain == "cluster.local" },
 		},
 		{
+			name: "tls min version from env",
+			env:  map[string]string{EnvTLSMinVersion: "VersionTLS13"},
+			want: func(c *Config) bool { return c.TLSMinVersion == "VersionTLS13" },
+		},
+		{
+			name: "tls cipher suites from env",
+			env:  map[string]string{EnvTLSCipherSuites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+			want: func(c *Config) bool {
+				return len(c.TLSCipherSuites) == 2 &&
+					c.TLSCipherSuites[0] == "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256" &&
+					c.TLSCipherSuites[1] == "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+			},
+		},
+		{
+			name: "empty tls min version keeps default",
+			env:  map[string]string{EnvTLSMinVersion: ""},
+			want: func(c *Config) bool { return c.TLSMinVersion == "" },
+		},
+		{
 			name: "no env keeps defaults",
 			env:  map[string]string{},
 			want: func(c *Config) bool {
@@ -270,6 +289,33 @@ func TestValidate(t *testing.T) {
 				c.MTLSMode = MTLSOptional
 			},
 			wantErr: "tls-client-ca-file",
+		},
+		{
+			name: "invalid tls min version",
+			mut: func(c *Config) {
+				c.HTTPSAddr = ":8443"
+				c.TLSCertFile = "/c"
+				c.TLSKeyFile = "/k"
+				c.TLSMinVersion = "TLS1.2"
+			},
+			wantErr: "invalid --tls-min-version",
+		},
+		{
+			name: "valid tls min version",
+			mut: func(c *Config) {
+				c.HTTPSAddr = ":8443"
+				c.TLSCertFile = "/c"
+				c.TLSKeyFile = "/k"
+				c.TLSMinVersion = "VersionTLS12"
+			},
+			wantErr: "",
+		},
+		{
+			name: "tls min version ignored without https",
+			mut: func(c *Config) {
+				c.TLSMinVersion = "VersionTLS12"
+			},
+			wantErr: "",
 		},
 		{
 			name:    "negative proxy timeout",

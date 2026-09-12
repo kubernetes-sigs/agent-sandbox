@@ -1246,7 +1246,8 @@ func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, ac
 func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
 	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
 		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&
-		equality.Semantic.DeepEqual(template.Spec.Service, actualSandboxSpec.Service)
+		equality.Semantic.DeepEqual(template.Spec.SandboxBlueprint.Service, actualSandboxSpec.Service) &&
+		template.Spec.SandboxBlueprint.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() == actualSandboxSpec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted()
 }
 
 // sandboxWarmPoolLabelIndexer extracts the warmPoolSandboxLabel value for the

@@ -213,6 +213,43 @@ type PersistentVolumeClaimTemplate struct {
 	Spec corev1.PersistentVolumeClaimSpec `json:"spec"`
 }
 
+// PersistentVolumeClaimRetentionPolicyType describes how PVCs created from
+// volumeClaimTemplates are handled when the owning Sandbox is deleted.
+type PersistentVolumeClaimRetentionPolicyType string
+
+const (
+	// PersistentVolumeClaimRetentionPolicyDelete deletes PVCs when the Sandbox is deleted.
+	PersistentVolumeClaimRetentionPolicyDelete PersistentVolumeClaimRetentionPolicyType = "Delete"
+	// PersistentVolumeClaimRetentionPolicyRetain keeps PVCs when the Sandbox is deleted.
+	PersistentVolumeClaimRetentionPolicyRetain PersistentVolumeClaimRetentionPolicyType = "Retain"
+)
+
+// PersistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created from volumeClaimTemplates.
+// Set whenDeleted to Retain to preserve PVC data after Sandbox deletion; users are
+// responsible for deleting retained PVCs when they are no longer needed. Retain
+// takes effect when the controller observes the Sandbox reconciliation; deleting
+// the Sandbox before that observation, or while the controller is unavailable,
+// can leave the owner reference in place and allow garbage collection to delete
+// the PVC.
+type PersistentVolumeClaimRetentionPolicy struct {
+	// whenDeleted controls whether PVCs created from volumeClaimTemplates are
+	// deleted when the owning Sandbox is deleted. When set to Retain, PVCs are
+	// orphaned and survive Sandbox deletion. Defaults to Delete for backward compatibility.
+	// +kubebuilder:validation:Enum=Delete;Retain
+	// +kubebuilder:default=Delete
+	// +optional
+	WhenDeleted PersistentVolumeClaimRetentionPolicyType `json:"whenDeleted,omitempty"`
+}
+
+// EffectiveWhenDeleted returns the configured PVC retention behavior, defaulting
+// to Delete when the policy or its field is unset.
+func (p *PersistentVolumeClaimRetentionPolicy) EffectiveWhenDeleted() PersistentVolumeClaimRetentionPolicyType {
+	if p == nil || p.WhenDeleted == "" {
+		return PersistentVolumeClaimRetentionPolicyDelete
+	}
+	return p.WhenDeleted
+}
+
 // SandboxOperatingMode defines the desired operational state of the Sandbox.
 // +kubebuilder:validation:Enum=Running;Suspended
 //
@@ -257,6 +294,12 @@ type SandboxBlueprint struct {
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
+
+	// persistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created
+	// from volumeClaimTemplates.
+	// Defaults to Delete for backward compatibility.
+	// +optional
+	PersistentVolumeClaimRetentionPolicy *PersistentVolumeClaimRetentionPolicy `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
 
 	// service controls whether the controller should automatically create a
 	// headless Service for the Sandbox workload.

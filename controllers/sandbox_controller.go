@@ -801,6 +801,23 @@ func NameHash(objectName string) string {
 	return string(buf[:])
 }
 
+func removeSandboxOwnerReferences(obj client.Object, sandbox *sandboxv1beta1.Sandbox) bool {
+	ownerRefs := obj.GetOwnerReferences()
+	filtered := make([]metav1.OwnerReference, 0, len(ownerRefs))
+	removed := false
+	for _, ref := range ownerRefs {
+		if ref.UID == sandbox.UID {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, ref)
+	}
+	if removed {
+		obj.SetOwnerReferences(filtered)
+	}
+	return removed
+}
+
 // hasSystemReservedPrefix reports whether a key uses a label/annotation prefix
 // reserved for the sandbox system or its extensions.
 func hasSystemReservedPrefix(key string) bool {
@@ -1626,6 +1643,8 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 	ctx, end := r.Tracer.StartSpan(ctx, nil, "reconcilePVCs", nil)
 	defer end()
 
+	retentionWhenDeleted := sandbox.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted()
+
 	for _, pvcTemplate := range sandbox.Spec.VolumeClaimTemplates {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcName := pvcTemplate.Name + "-" + sandbox.Name
@@ -1651,6 +1670,11 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 						pvcName, sandboxv1beta1.SandboxAdoptableLabel, sandboxLabel)
 				}
 
+				if retentionWhenDeleted == sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
+					logger.V(4).Info("Using unowned PVC without adopting because retention policy is Retain", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+					continue
+				}
+
 				logger.Info("Adopting unowned PVC", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
 
 				patch := client.MergeFrom(pvc.DeepCopy())
@@ -1662,7 +1686,18 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 				}
 
 			case resourceOwnedBySandbox:
-				// Already owned by this sandbox — no action needed.
+				if retentionWhenDeleted != sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
+					// Already owned by this sandbox — no action needed.
+					continue
+				}
+				logger.Info("Removing Sandbox owner reference from PVC because retention policy is Retain", "PVC.Name", pvcName, "Sandbox.Name", sandbox.Name)
+				patch := client.MergeFromWithOptions(pvc.DeepCopy(), client.MergeFromWithOptimisticLock{})
+				if !removeSandboxOwnerReferences(pvc, sandbox) {
+					continue
+				}
+				if err := r.Patch(ctx, pvc, patch); err != nil {
+					return fmt.Errorf("failed to patch PVC without owner reference: %w", err)
+				}
 			}
 			continue
 		}
@@ -1688,8 +1723,10 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			},
 			Spec: pvcTemplate.Spec,
 		}
-		if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
-			return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+		if retentionWhenDeleted != sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain {
+			if err := ctrl.SetControllerReference(sandbox, pvc, r.Scheme); err != nil {
+				return fmt.Errorf("SetControllerReference for PVC failed: %w", err)
+			}
 		}
 		if err := r.Create(ctx, pvc, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 			logger.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)

@@ -117,16 +117,12 @@ kind load docker-image "${ROUTER_IMAGE}" --name "${CLUSTER_NAME}"
 # --- 3. Apply deploy manifests, with the smoke image. --------------------
 log "Applying deploy manifests"
 kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f sandbox-router/deploy/serviceaccount.yaml
-kubectl apply -f sandbox-router/deploy/rbac.yaml
-kubectl apply -f sandbox-router/deploy/service.yaml
-# Use sed to swap the image and to add the tokenreview flags. The example
-# deployment.yaml uses a published tag with imagePullPolicy=IfNotPresent; we
-# pin to the locally-loaded smoke image and Never so kubelet doesn't
-# attempt a pull.
+# Use sed to swap the image. The example sandbox-router.yaml uses a
+# published tag with imagePullPolicy=IfNotPresent; we pin to the
+# locally-loaded smoke image and Never so kubelet doesn't attempt a pull.
 sed -E "s|registry.k8s.io/agent-sandbox/sandbox-router-go:[^ \"']+|${ROUTER_IMAGE}|" \
     -e "s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|" \
-    sandbox-router/deploy/deployment.yaml \
+    sandbox-router/deploy/sandbox-router.yaml \
   | kubectl apply -f -
 
 log "Waiting for router rollout"

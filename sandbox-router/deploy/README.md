@@ -6,13 +6,8 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 
 | File | What it does |
 |---|---|
-| `kustomization.yaml` | Kustomize resource list declaring the core components (`serviceaccount`, `rbac`, `deployment`, `service`, `pdb`). Excludes optional manifests (`rbac-tokenreview`, `networkpolicy`, `examples/`). |
-| `serviceaccount.yaml` | Identity for the router pods. |
-| `rbac.yaml` | ClusterRole + ClusterRoleBinding for `pods` get/list/watch. Required when `--cache-enabled=true`. The grant is cluster-wide on purpose — see the long-form comment at the top of the file for why narrowing to non-system namespaces isn't expressible in RBAC and how the runtime label selector keeps system Pods out of the cache anyway. Skip this file entirely when running DNS-only. |
-| `rbac-tokenreview.yaml` | Extra ClusterRoleBinding to the stock `system:auth-delegator` ClusterRole. Apply *in addition to* `rbac.yaml` only when `--authz-mode=tokenreview`. Default-mode deployments don't carry these create rights on `tokenreviews.authentication.k8s.io` / `subjectaccessreviews.authorization.k8s.io` they wouldn't use. |
-| `deployment.yaml` | 2 replicas, topology spread, distroless image, restricted SecurityContext, liveness/readiness probes. Enables `--cache-enabled=true` by default. |
-| `service.yaml` | Cluster-IP service named `sandbox-router-svc` (preserves the Python router's name — existing Gateway/HTTPRoute resources work unchanged). |
-| `pdb.yaml` | Prevents voluntary disruptions from taking the whole fleet offline. |
+| `sandbox-router.yaml` | Core router components (`ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, `Deployment`, `Service`, `PodDisruptionBudget`). Deploys 2 replicas with topology spread, distroless image, restricted SecurityContext, and Pod-IP cache enabled. |
+| `rbac-tokenreview.yaml` | Extra ClusterRoleBinding to the stock `system:auth-delegator` ClusterRole. Apply *in addition to* `sandbox-router.yaml` only when `--authz-mode=tokenreview`. Default-mode deployments don't carry these create rights on `tokenreviews.authentication.k8s.io` / `subjectaccessreviews.authorization.k8s.io` they wouldn't use. |
 | `networkpolicy.yaml` | Locks down ingress to proxy/metrics/probe ports; egress to DNS, sandbox port, OTel collector. **Tighten the selectors for your tenancy model.** |
 | `examples/gateway-gke.yaml` | Optional GKE Gateway, HTTPRoute, and HealthCheckPolicy for external ingress in front of `sandbox-router-svc`. |
 
@@ -20,14 +15,14 @@ Drop-in starting point for running the Go sandbox-router in Kubernetes. These ma
 
 ### Core components (recommended)
 
-Use `kubectl apply -k` with kustomize to apply the core components (`serviceaccount.yaml`, `rbac.yaml`, `deployment.yaml`, `service.yaml`, `pdb.yaml`):
+Apply the core components (`ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, `Deployment`, `Service`, `PodDisruptionBudget`):
 
 ```sh
-# Remote install from main:
-kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox//sandbox-router/deploy?ref=main"
+# Remote install:
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/sandbox-router.yaml
 
 # Or from a local clone:
-kubectl apply -k sandbox-router/deploy/
+kubectl apply -f sandbox-router/deploy/sandbox-router.yaml
 ```
 
 ### Optional components

@@ -63,7 +63,7 @@ With gVisor or Kata runtimes, direct pod port-forwarding is not compatible. Use 
 
 ```bash
 # Deploy the router
-kubectl apply -k sandbox-router/deploy/
+kubectl apply -f sandbox-router/deploy/sandbox-router.yaml
 
 # Port-forward to the router service
 kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system

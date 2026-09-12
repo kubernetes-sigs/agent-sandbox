@@ -48,10 +48,10 @@ description: >
    > The default deployment operates with unauthenticated routing (`--authz-mode=allow-all`) for local testing. See [sandbox-router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) for production authentication and TLS options.
 
    ```sh
-   kubectl apply -k "github.com/kubernetes-sigs/agent-sandbox//sandbox-router/deploy?ref=main"
+   kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/sandbox-router.yaml
 
    # Or from a local clone:
-   # kubectl apply -k sandbox-router/deploy/
+   # kubectl apply -f sandbox-router/deploy/sandbox-router.yaml
 
    # Wait until all router pods are running:
    kubectl -n agent-sandbox-system rollout status deployment/sandbox-router --timeout=90s

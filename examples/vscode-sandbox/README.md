@@ -188,11 +188,8 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
 
 1.  **Deploy the Router (Required for All Modes):**
     ```bash
-    # Deploys the Deployment, Service, ServiceAccount, and RBAC
-    kubectl apply -f ../../sandbox-router/deploy/serviceaccount.yaml \
-      -f ../../sandbox-router/deploy/rbac.yaml \
-      -f ../../sandbox-router/deploy/deployment.yaml \
-      -f ../../sandbox-router/deploy/service.yaml
+    # Deploys the Deployment, Service, ServiceAccount, RBAC, and PDB
+    kubectl apply -f ../../sandbox-router/deploy/sandbox-router.yaml
     ```
 
 2.  **Deploy the Gateway (Production Only):**

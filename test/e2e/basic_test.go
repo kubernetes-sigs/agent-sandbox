@@ -17,6 +17,7 @@ package e2e
 import (
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,4 +152,47 @@ func TestSimpleSandbox(t *testing.T) {
 	service.Name = "my-sandbox"
 	service.Namespace = ns.Name
 	tc.MustMatchPredicates(service, p...)
+}
+
+func TestSandboxServiceNameValidation(t *testing.T) {
+	tc := framework.NewTestContext(t)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("sandbox-name-validation-%d", time.Now().UnixNano())}}
+	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
+
+	newSandbox := func(name string, service *bool) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns.Name},
+			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				Service: service,
+				PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  "pause",
+					Image: "registry.k8s.io/pause:3.10",
+				}}}},
+			}},
+		}
+	}
+
+	t.Run("63 characters with service succeeds", func(t *testing.T) {
+		err := tc.CreateWithCleanup(t.Context(), newSandbox(strings.Repeat("a", 63), new(true)))
+		require.NoError(t, err)
+	})
+
+	t.Run("64 characters with service is rejected", func(t *testing.T) {
+		err := tc.CreateWithCleanup(t.Context(), newSandbox(strings.Repeat("b", 64), new(true)))
+		require.ErrorContains(t, err, "metadata.name must not exceed 63 characters when spec.service is true")
+	})
+
+	t.Run("64 characters without service succeeds but enabling service is rejected", func(t *testing.T) {
+		sandbox := newSandbox(strings.Repeat("c", 64), new(false))
+		require.NoError(t, tc.CreateWithCleanup(t.Context(), sandbox))
+
+		sandbox.Spec.Service = new(true)
+		err := tc.Update(t.Context(), sandbox)
+		require.ErrorContains(t, err, "metadata.name must not exceed 63 characters when spec.service is true")
+	})
+
+	t.Run("64 characters with service unset succeeds", func(t *testing.T) {
+		err := tc.CreateWithCleanup(t.Context(), newSandbox(strings.Repeat("d", 64), nil))
+		require.NoError(t, err)
+	})
 }

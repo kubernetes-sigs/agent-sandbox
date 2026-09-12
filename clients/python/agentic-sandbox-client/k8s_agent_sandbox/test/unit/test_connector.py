@@ -634,6 +634,28 @@ class TestLocalTunnelPreflightCheck(unittest.TestCase):
         self.assertIn("custom-ns", str(ctx.exception))
         self.assertIn("router_namespace", str(ctx.exception))
 
+    @patch("subprocess.run")
+    def test_connect_omits_namespace_hint_on_unrelated_crash(self, mock_run):
+        """A crash unrelated to a missing service must not blame router_namespace."""
+        mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+        strategy = self._make_strategy(router_namespace="custom-ns")
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+        mock_proc.communicate.return_value = (
+            b"",
+            b"error: unable to listen on port 19876: address already in use",
+        )
+
+        with patch("subprocess.Popen", return_value=mock_proc):
+            with patch.object(strategy, "_get_free_port", return_value=19876):
+                with self.assertRaises(SandboxPortForwardError) as ctx:
+                    strategy.connect()
+
+        message = str(ctx.exception)
+        self.assertNotIn("router_namespace", message)
+        self.assertIn("address already in use", message)
+
 
 if __name__ == "__main__":
     unittest.main()

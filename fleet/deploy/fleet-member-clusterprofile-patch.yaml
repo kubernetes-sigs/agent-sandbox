@@ -1,0 +1,84 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# Opt-in overlay: make an already-deployed fleet-member ALSO publish its
+# capacity into its own ClusterProfile status on the hub.
+#
+# Kept as a patch rather than folded into fleet-member-deployment{,-wi}.yaml on
+# purpose. ClusterProfile publishing is additive -- the member keeps writing
+# GCS exactly as before and the planner keeps reading GCS by default -- so the
+# base manifests stay the thing that works with no hub at all, and this file is
+# the whole diff. It also means turning the integration off is a revert of one
+# patch, not an edit of the deployment everything else depends on.
+#
+# APPLY (per member cluster, after the base deployment exists):
+#
+#   ./deploy/gen-hub-kubeconfig.sh --hub-cluster fleet-hub \
+#       --hub-location us-central1 | kubectl apply -f -
+#
+#   CLUSTER_NAME=cluster-a FLEET_BUCKET=my-bucket SANDBOX_CAPACITY=50000 \
+#     ./deploy/render.sh deploy/fleet-member-clusterprofile-patch.yaml \
+#     | kubectl patch deployment fleet-member -n multi-cluster-fleet \
+#         --patch-file /dev/stdin
+#
+#   HUB_NAMESPACE and HUB_API_VERSION are templated too; render.sh defaults
+#   them to fleet-system and v1alpha1, which is what setup-hub.sh installs
+#   unless you passed --hub-namespace / --hub-api-version. If you did, set
+#   the same values here -- see the --hub-api-version note below for what a
+#   mismatch actually does.
+#
+# VERIFY -- publishing is wrapped in try/except so the member survives a broken
+# hub, which also means a misconfiguration is quiet. Check all three:
+#
+#   kubectl logs -n multi-cluster-fleet deploy/fleet-member | grep -i clusterprofile
+#   kubectl --context hub get clusterprofile <cluster> -n fleet-system \
+#     -o jsonpath='{.status.properties}' | tr ',' '\n' | grep agents.x-k8s.io
+#   kubectl --context hub get clusterprofile <cluster> -n fleet-system \
+#     -o jsonpath='{.metadata.managedFields[*].manager}'
+#
+# The last one is the real check. If `agent-sandbox-fleet-member` is not in
+# that list, the applies are landing as merge-patches and own nothing --
+# assert_ssa_configured() should have caught it at startup, but the managedFields
+# are the ground truth.
+spec:
+  template:
+    spec:
+      containers:
+        - name: fleet-member
+          args:
+            # Patching `args` REPLACES the list -- a strategic merge patch
+            # cannot append to it, because args is a plain []string with no
+            # patchMergeKey. So every base flag is repeated here. Keep this in
+            # sync with fleet-member-deployment-wi.yaml; drifting one of the
+            # intervals is the likely way this bites.
+            - --cluster-name=${CLUSTER_NAME}
+            - --bucket=${FLEET_BUCKET}
+            - --namespace=multi-cluster-fleet
+            - --log-level=INFO
+            - --reconcile-interval=5
+            - --capacity-interval=5
+            - --capacity-detail=light
+            # -- ClusterProfile publishing ---------------------------------- #
+            - --publish-clusterprofile
+            - --hub-kubeconfig=/etc/fleet-hub/kubeconfig
+            - --hub-namespace=${HUB_NAMESPACE}
+            # No credentials in that kubeconfig; the token comes from the GKE
+            # metadata server as this pod's Workload Identity GSA.
+            - --hub-token-source=gke-metadata
+            # Must match the planner's --hub-api-version. A mismatch does not
+            # error -- with no conversion webhook the apiserver serves the same
+            # object under either version -- it just splits ownership across
+            # two managedFields entries under one manager name.
+            - --hub-api-version=${HUB_API_VERSION}
+            # How many sandboxes this cluster can hold. A member cannot infer
+            # this, and the planner derives placement weights from it, so a
+            # wrong number here silently skews the whole fleet's placement.
+            - --sandbox-capacity=${SANDBOX_CAPACITY}
+          volumeMounts:
+            - name: hub-kubeconfig
+              mountPath: /etc/fleet-hub
+              readOnly: true
+      volumes:
+        - name: hub-kubeconfig
+          configMap:
+            name: hub-kubeconfig

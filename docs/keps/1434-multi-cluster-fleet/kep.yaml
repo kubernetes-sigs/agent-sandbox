@@ -1,0 +1,17 @@
+title: Multi-Cluster Fleet for Batch and RL Sandbox Workloads
+kep-number: 1434
+authors:
+  - "@vicentefb"
+status: implementable
+creation-date: "2026-08-24"
+last-updated: "2026-08-24"
+reviewers:
+  - "@aditya-shantanu"
+  - "@justinsb"
+  - "@barney-s"
+  - "@janetkuo"
+approvers:
+  - "@aditya-shantanu"
+  - "@justinsb"
+  - "@barney-s"
+  - "@janetkuo"

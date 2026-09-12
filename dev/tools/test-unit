@@ -47,6 +47,14 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("dev", "ci", "presubmits", "shared"),
     },
     {
+        "name": "dev-ci-periodics",
+        # Collect dev/ci/periodics test suites (e.g.
+        # test_testgrid_failure_issues_test.py). Stdlib-only, like
+        # dev-tools-shared above.
+        "dir": os.path.join("dev", "ci", "periodics"),
+        "requirements": "requirements.txt",
+    },
+    {
         "name": "hermes-agent",
         # chat_hermes.py only uses stdlib (urllib.request, json), so the test
         # needs no requirements.txt -- just pytest, installed unconditionally

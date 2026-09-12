@@ -43,6 +43,13 @@ from .exceptions import (
 )
 
 ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
+# Only appended when stderr indicates a missing service; on an unrelated
+# failure (port conflict, auth) this hint points at the wrong culprit.
+ROUTER_NAMESPACE_HINT = (
+    "If the router is deployed in a different namespace, set router_namespace "
+    "accordingly, e.g. "
+    "SandboxLocalTunnelConnectionConfig(router_namespace=\"<your-namespace>\"). "
+)
 # POST endpoints include command execution, so replaying them can duplicate
 # side effects after the server handled a request but returned a 5xx response.
 RETRYABLE_METHODS = frozenset({"GET", "PUT", "DELETE"})
@@ -224,9 +231,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     raise SandboxPortForwardError(
                         f"Router service '{ROUTER_SERVICE_NAME}' not found in namespace "
                         f"'{self.config.router_namespace}'. "
-                        f"If the router is deployed in a different namespace, set "
-                        f"router_namespace accordingly, e.g. "
-                        f"SandboxLocalTunnelConnectionConfig(router_namespace=\"<your-namespace>\"). "
+                        f"{ROUTER_NAMESPACE_HINT}"
                         f"kubectl stderr: {stderr_text}"
                     )
                 # Any other non-zero exit (RBAC, transient) — log and proceed.
@@ -291,12 +296,11 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                 if self.port_forward_process.poll() is not None:
                     _, stderr = self.port_forward_process.communicate()
                     stderr_text = stderr.decode(errors="replace")
+                    hint = ROUTER_NAMESPACE_HINT if "not found" in stderr_text.lower() else ""
                     raise SandboxPortForwardError(
                         f"Tunnel to router service '{ROUTER_SERVICE_NAME}' in namespace "
                         f"'{self.config.router_namespace}' crashed. "
-                        f"If the router is deployed in a different namespace, set "
-                        f"router_namespace accordingly, e.g. "
-                        f"SandboxLocalTunnelConnectionConfig(router_namespace=\"<your-namespace>\"). "
+                        f"{hint}"
                         f"kubectl stderr: {stderr_text}"
                     )
 

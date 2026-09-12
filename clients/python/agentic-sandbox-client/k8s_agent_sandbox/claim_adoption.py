@@ -1,0 +1,185 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Validation for safely adopting an existing SandboxClaim."""
+
+import re
+
+from pydantic import BaseModel, ConfigDict
+
+from .constants import (
+    CLAIM_API_GROUP,
+    CLAIM_API_VERSION,
+    CREATED_BY_LABEL,
+)
+from .claim_status import get_claim_sandbox_name
+from .utils import construct_sandbox_claim_env_spec
+
+
+_DNS1123_SUBDOMAIN_RE = re.compile(
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+)
+_DNS1123_SUBDOMAIN_MAX_LENGTH = 253
+
+
+class ValidatedClaimIdentity(BaseModel):
+    """Stable identity needed to continue watching a validated Claim."""
+
+    model_config = ConfigDict(frozen=True)
+
+    resource_version: str
+    uid: str
+
+
+def validate_claim_identity(
+    claim: dict,
+    *,
+    claim_name: str,
+    namespace: str,
+    expected_uid: str | None = None,
+) -> ValidatedClaimIdentity:
+    """Validate the stable identity of a Claim observed by the client."""
+    if not isinstance(claim, dict):
+        _reject(claim_name, "object representation")
+
+    expected_api_version = f"{CLAIM_API_GROUP}/{CLAIM_API_VERSION}"
+    if claim.get("apiVersion") != expected_api_version:
+        _reject(claim_name, "apiVersion")
+    if claim.get("kind") != "SandboxClaim":
+        _reject(claim_name, "kind")
+
+    metadata = claim.get("metadata")
+    if not isinstance(metadata, dict):
+        _reject(claim_name, "metadata")
+    if metadata.get("name") != claim_name:
+        _reject(claim_name, "metadata.name")
+    if metadata.get("namespace") != namespace:
+        _reject(claim_name, "metadata.namespace")
+    if metadata.get("deletionTimestamp"):
+        _reject(claim_name, "metadata.deletionTimestamp")
+
+    resource_version = metadata.get("resourceVersion")
+    if not isinstance(resource_version, str) or not resource_version:
+        _reject(claim_name, "metadata.resourceVersion")
+    uid = metadata.get("uid")
+    if not isinstance(uid, str) or not uid:
+        _reject(claim_name, "metadata.uid")
+    if expected_uid is not None and uid != expected_uid:
+        _reject(claim_name, "metadata.uid")
+    return ValidatedClaimIdentity(resource_version=resource_version, uid=uid)
+
+
+def validate_claim_name(name: str) -> None:
+    """Validates an explicit SandboxClaim name as a DNS-1123 subdomain."""
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > _DNS1123_SUBDOMAIN_MAX_LENGTH
+        or not _DNS1123_SUBDOMAIN_RE.fullmatch(name)
+    ):
+        raise ValueError(
+            f"Claim name '{name}' must be a valid DNS-1123 subdomain "
+            "(lowercase alphanumerics, '-' and '.', starting and ending with an "
+            f"alphanumeric; max {_DNS1123_SUBDOMAIN_MAX_LENGTH} characters)."
+        )
+
+
+def _reject(claim_name: str, field: str) -> None:
+    raise ValueError(
+        f"SandboxClaim '{claim_name}' has a different {field}; refusing to use it."
+    )
+
+
+def _normalized_optional(value):
+    return value or None
+
+
+def _serialized_env(env: dict[str, str] | None) -> list[dict]:
+    return [
+        env_var.model_dump(by_alias=True, exclude_none=True)
+        for env_var in construct_sandbox_claim_env_spec(env)
+    ]
+
+
+def get_ready_sandbox_name(claim: dict, claim_name: str) -> str | None:
+    """Returns the Sandbox already observed as Ready on an adopted Claim."""
+    return get_claim_sandbox_name(
+        claim,
+        claim_name,
+        require_ready=True,
+        require_current_generation=True,
+    )
+
+
+def validate_claim_for_adoption(
+    claim: dict,
+    *,
+    claim_name: str,
+    namespace: str,
+    warmpool: str,
+    labels: dict[str, str] | None,
+    lifecycle: dict | None,
+    volume_claim_templates: list[dict] | None,
+    pod_metadata: dict | None,
+    env: dict[str, str] | None,
+    expected_uid: str | None = None,
+) -> ValidatedClaimIdentity:
+    """Validates that an existing Claim is the exact requested allocation.
+
+    Additional labels and spec fields are tolerated because controllers and
+    admission may add or default them. Fields controlled by this client must
+    still match the request exactly.
+
+    Returns the existing object's identity for a watch that cannot miss a
+    readiness transition or silently switch to a recreated object.
+    """
+    identity = validate_claim_identity(
+        claim,
+        claim_name=claim_name,
+        namespace=namespace,
+        expected_uid=expected_uid,
+    )
+    metadata = claim["metadata"]
+    generation = metadata.get("generation")
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        _reject(claim_name, "metadata.generation")
+
+    existing_labels = metadata.get("labels") or {}
+    if not isinstance(existing_labels, dict):
+        _reject(claim_name, "metadata.labels")
+    expected_labels = {**(labels or {}), CREATED_BY_LABEL: "python-client"}
+    for key, value in expected_labels.items():
+        if existing_labels.get(key) != value:
+            _reject(claim_name, f"metadata.labels[{key}]")
+
+    spec = claim.get("spec")
+    if not isinstance(spec, dict):
+        _reject(claim_name, "spec")
+    if spec.get("warmPoolRef") != {"name": warmpool}:
+        _reject(claim_name, "spec.warmPoolRef")
+
+    optional_fields = {
+        "lifecycle": lifecycle,
+        "volumeClaimTemplates": volume_claim_templates,
+        "additionalPodMetadata": pod_metadata,
+        "env": _serialized_env(env),
+    }
+    for field, expected in optional_fields.items():
+        if _normalized_optional(spec.get(field)) != _normalized_optional(expected):
+            _reject(claim_name, f"spec.{field}")
+
+    return identity

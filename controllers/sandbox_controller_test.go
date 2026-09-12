@@ -33,8 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,6 +57,22 @@ func newFakeClient(initialObjs ...runtime.Object) client.WithWatch {
 		WithRuntimeObjects(initialObjs...).
 		Build()
 }
+
+// invalidServiceNameError mirrors the apiserver's rejection of a Service whose
+// metadata.name exceeds the 63-character DNS-1035 label limit. The fake client
+// does not run apiserver name validation, so tests inject this via an
+// interceptor to reproduce the real permanent-failure path.
+func invalidServiceNameError(name string) error {
+	return k8serrors.NewInvalid(
+		schema.GroupKind{Kind: "Service"},
+		name,
+		field.ErrorList{
+			field.Invalid(field.NewPath("metadata.name"), name, "must be no more than 63 characters"),
+		},
+	)
+}
+
+const overlongSandboxName = "sandbox-name-deliberately-exceeding-the-sixty-three-char-service-label-limit"
 
 const sandboxUID = types.UID("test-sandbox-uid")
 
@@ -103,6 +121,11 @@ func TestComputeConditions(t *testing.T) {
 		}}
 		return pod
 	}
+
+	// A permanent apiserver validation error (a derived Service name over the
+	// 63-character limit) must map to Ready=False/InvalidConfiguration rather than
+	// the generic ReconcilerError.
+	invalidNameErr := invalidServiceNameError("too-long-service-name")
 
 	testCases := []struct {
 		name               string
@@ -479,6 +502,18 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "MultiplePods", Message: "multiple Pods (2) are controlled by this Sandbox; refusing to choose or create a Pod"},
 			},
 		},
+		{
+			// A permanent apiserver Invalid error (e.g. a derived Service name over
+			// the 63-character limit) is reported as InvalidConfiguration, not the
+			// generic ReconcilerError, so operators get an actionable reason.
+			name:    "17. Invalid child-resource name reports InvalidConfiguration",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			err:     invalidNameErr,
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "InvalidConfiguration", Message: invalidNameErr.Error()},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -492,6 +527,67 @@ func TestComputeConditions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue is a regression
+// test for a Sandbox whose name yields a Service name over Kubernetes'
+// 63-character limit. The apiserver permanently rejects the Service create, and
+// the controller must surface that as Ready=False/InvalidConfiguration WITHOUT
+// returning the error from Reconcile -- returning it would trigger a
+// rate-limited requeue and error-level logging on a create that can never
+// succeed, hot-looping until the Sandbox is recreated.
+func TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       overlongSandboxName,
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				Service: ptr.To(true),
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main"}},
+					},
+				},
+			},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+		},
+	}
+
+	// The fake client does not enforce apiserver name validation, so inject the
+	// Service name-length rejection the real apiserver would return -- and only
+	// for names over the limit, so the test proves it is the overlong derived
+	// name (not just any Service create) that trips the permanent-failure path.
+	fc := interceptor.NewClient(newFakeClient(sandbox), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if svc, ok := obj.(*corev1.Service); ok && len(svc.Name) > 63 {
+				return invalidServiceNameError(svc.Name)
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	res, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err, "permanent Invalid error must not be returned from Reconcile (would hot-loop)")
+	require.Zero(t, res.RequeueAfter, "must not schedule a requeue for a permanent misconfiguration")
+
+	updated := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, updated))
+	ready := meta.FindStatusCondition(updated.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonInvalidConfiguration, ready.Reason)
+	require.Contains(t, ready.Message, "must be no more than 63 characters")
 }
 
 func TestResolvePodName(t *testing.T) {

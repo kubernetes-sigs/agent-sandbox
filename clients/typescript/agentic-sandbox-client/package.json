@@ -34,6 +34,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
+    "@bufbuild/protobuf": "^2.14.1",
+    "@connectrpc/connect": "^2.1.2",
+    "@connectrpc/connect-node": "^2.1.2",
     "@opentelemetry/api": "^1.9.0",
     "@types/node": "^22.0.0",
     "typescript": "^7.0.2",
@@ -43,6 +46,9 @@
     "@kubernetes/client-node": "^2.0.0"
   },
   "peerDependencies": {
+    "@bufbuild/protobuf": "^2.14.1",
+    "@connectrpc/connect": "^2.1.2",
+    "@connectrpc/connect-node": "^2.1.2",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-grpc": ">=0.200.0",
     "@opentelemetry/resources": "^2.0.0",
@@ -50,6 +56,15 @@
     "@opentelemetry/sdk-trace-node": "^2.0.0"
   },
   "peerDependenciesMeta": {
+    "@bufbuild/protobuf": {
+      "optional": true
+    },
+    "@connectrpc/connect": {
+      "optional": true
+    },
+    "@connectrpc/connect-node": {
+      "optional": true
+    },
     "@opentelemetry/api": {
       "optional": true
     },

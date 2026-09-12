@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for AsyncSandboxClient lifecycle and transport behavior."""
+
 import asyncio
 import json
 import os
@@ -38,6 +40,7 @@ from k8s_agent_sandbox.models import (
     SandboxGatewayConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
 )
 
 
@@ -245,6 +248,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError) as ctx:
             AsyncSandboxClient(connection_config=None)
         self.assertIn("connection_config is required", str(ctx.exception))
+        self.assertNotIn(
+            "SandboxGatewayConnectionConfig, or SandboxInCluster",
+            str(ctx.exception),
+        )
 
     def test_cleanup_default_registers_atexit(self):
         """Constructing without cleanup= should default to True and register the hook."""
@@ -266,9 +273,15 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     def test_atexit_cleanup_deletes_tracked_claims(self):
         """_atexit_cleanup should open a fresh K8sHelper and delete all tracked claims."""
+        first_sandbox = MagicMock()
+        first_sandbox.close_connection = AsyncMock()
+        first_sandbox._close_for_atexit = MagicMock()
+        second_sandbox = MagicMock()
+        second_sandbox.close_connection = AsyncMock()
+        second_sandbox._close_for_atexit = MagicMock()
         self.client._active_connection_sandboxes = {
-            ("default", "claim-abc"): MagicMock(),
-            ("other-ns", "claim-xyz"): MagicMock(),
+            ("default", "claim-abc"): first_sandbox,
+            ("other-ns", "claim-xyz"): second_sandbox,
         }
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock()
@@ -282,6 +295,30 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_helper_instance.delete_sandbox_claim.assert_any_call(
             "claim-xyz", "other-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
         )
+        first_sandbox._close_for_atexit.assert_called_once_with()
+        second_sandbox._close_for_atexit.assert_called_once_with()
+        first_sandbox.close_connection.assert_not_awaited()
+        second_sandbox.close_connection.assert_not_awaited()
+
+    def test_atexit_cleanup_uses_loop_independent_handle_cleanup(self):
+        """atexit must not await handles created by an earlier event loop."""
+        sandbox = MagicMock()
+        sandbox.close_connection = AsyncMock()
+        sandbox._close_for_atexit = MagicMock()
+        self.client._active_connection_sandboxes = {
+            ("default", "claim-abc"): sandbox,
+        }
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ):
+            self.client._atexit_cleanup()
+
+        sandbox._close_for_atexit.assert_called_once_with()
+        sandbox.close_connection.assert_not_awaited()
 
     def test_atexit_cleanup_skips_when_no_sandboxes(self):
         """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
@@ -293,7 +330,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     def test_atexit_cleanup_suppresses_errors(self):
         """_atexit_cleanup should not propagate exceptions — cleanup is best-effort.
         A warning is printed to stderr so the user knows a sandbox was orphaned."""
-        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+        sandbox = MagicMock()
+        sandbox.close_connection = AsyncMock()
+        sandbox._close_for_atexit = MagicMock()
+        self.client._active_connection_sandboxes = {("default", "claim-abc"): sandbox}
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock(side_effect=Exception("network error"))
 
@@ -563,6 +603,13 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         config = SandboxInClusterConnectionConfig()
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
         self.assertIsInstance(client.connection_config, SandboxInClusterConnectionConfig)
+
+    async def test_sandboxd_config_accepted(self):
+        config = SandboxdPodTunnelConnectionConfig()
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
+        self.assertIsInstance(
+            client.connection_config, SandboxdPodTunnelConnectionConfig
+        )
 
     async def test_in_cluster_connection_config_passed_to_sandbox(self):
         config = SandboxInClusterConnectionConfig()

@@ -152,6 +152,11 @@ class TestSandboxdFilesystem(unittest.TestCase):
         args, _ = self._last_call()
         self.assertEqual(args[1], "v1/files/f.txt")
 
+    def test_delete_rejects_empty_path(self):
+        with self.assertRaisesRegex(ValueError, "path must not be empty"):
+            self._fs.delete("")
+        self._connector.send_request.assert_not_called()
+
 
 class TestLegacyDeleteUnsupported(unittest.TestCase):
     def test_delete_raises_on_legacy(self):

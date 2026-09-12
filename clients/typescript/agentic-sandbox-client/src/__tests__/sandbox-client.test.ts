@@ -184,6 +184,41 @@ describe("SandboxClient (registry)", () => {
     it("throws SandboxError for empty namespace", () => {
       expect(() => new SandboxClient({ namespace: "" })).toThrow(SandboxError);
     });
+
+    it("accepts a fully-specified sandboxd options bag", () => {
+      expect(
+        () =>
+          new SandboxClient({
+            sandboxd: {
+              restPort: 8080,
+              grpcPort: 9090,
+              portForwardReadyTimeoutMs: 10_000,
+              maxDownloadSize: 1024,
+              maxUploadSize: 1024,
+              maxMetadataResponseSize: 1024,
+              maxCommandOutputSize: 1024,
+            },
+          }),
+      ).not.toThrow();
+    });
+
+    it.each([
+      ["restPort", 0],
+      ["restPort", 65536],
+      ["restPort", 1.5],
+      ["grpcPort", -1],
+      ["portForwardReadyTimeoutMs", 0],
+      ["portForwardReadyTimeoutMs", Number.NaN],
+      ["portForwardReadyTimeoutMs", Number.POSITIVE_INFINITY],
+      ["maxDownloadSize", 0],
+      ["maxUploadSize", -5],
+      ["maxMetadataResponseSize", 0],
+      ["maxCommandOutputSize", 0xffffffff + 1],
+    ] as const)("throws SandboxError for sandboxd.%s = %p", (key, value) => {
+      expect(() => new SandboxClient({ sandboxd: { [key]: value } })).toThrow(
+        SandboxError,
+      );
+    });
   });
 
   // ===== createSandbox =====

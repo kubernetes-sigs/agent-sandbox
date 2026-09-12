@@ -36,7 +36,11 @@ import {
 } from "../constants.js";
 import { SandboxError } from "../exceptions.js";
 import type { SandboxInit } from "../sandbox.js";
-import { raceWithTimeout, Sandbox } from "../sandbox.js";
+import {
+  normalizeSandboxdOptions,
+  raceWithTimeout,
+  Sandbox,
+} from "../sandbox.js";
 
 // ---------- helpers ----------
 
@@ -44,6 +48,10 @@ function makeMockCustomObjectsApi() {
   return {
     deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
   } as unknown as import("@kubernetes/client-node").CustomObjectsApi;
+}
+
+function makeMockKubeConfig() {
+  return {} as unknown as import("@kubernetes/client-node").KubeConfig;
 }
 
 function makeFakeTracingManager() {
@@ -59,7 +67,10 @@ function createTestInit(overrides: Partial<SandboxInit> = {}): SandboxInit {
     podName: "test-pod",
     namespace: "default",
     customObjectsApi: makeMockCustomObjectsApi(),
+    kubeConfig: makeMockKubeConfig(),
+    sandboxdOptions: normalizeSandboxdOptions(),
     tracingManager: null,
+    traceServiceName: "test-service",
     ...overrides,
   };
 }

@@ -37,8 +37,12 @@ import {
   SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
 import { resolveLogger } from "./logger.js";
-import type { SandboxInit } from "./sandbox.js";
-import { raceWithTimeout, Sandbox } from "./sandbox.js";
+import type { ResolvedSandboxdOptions, SandboxInit } from "./sandbox.js";
+import {
+  normalizeSandboxdOptions,
+  raceWithTimeout,
+  Sandbox,
+} from "./sandbox.js";
 import type { Tracer } from "./trace-manager.js";
 import {
   getCurrentSpan,
@@ -199,6 +203,7 @@ export class SandboxClient {
   private readonly enableTracing: boolean;
   private readonly traceServiceName: string;
   private readonly logger: Logger;
+  private readonly sandboxdOptions: ResolvedSandboxdOptions;
 
   private tracerInitialized = false;
   private autoCleanupActive = false;
@@ -260,6 +265,7 @@ export class SandboxClient {
     this.enableTracing = options.enableTracing ?? false;
     this.traceServiceName = options.traceServiceName ?? "sandbox-client";
     this.logger = resolveLogger(options.logger, options.quiet);
+    this.sandboxdOptions = normalizeSandboxdOptions(options.sandboxd);
 
     this.kubeConfig = new k8s.KubeConfig();
     this.kubeConfig.loadFromDefault();
@@ -451,7 +457,10 @@ export class SandboxClient {
       podName,
       namespace: ns,
       customObjectsApi: this.customObjectsApi,
+      kubeConfig: this.kubeConfig,
+      sandboxdOptions: this.sandboxdOptions,
       tracingManager: sandboxTracingManager,
+      traceServiceName: this.traceServiceName,
       logger: this.logger,
     };
 
@@ -637,7 +646,10 @@ export class SandboxClient {
       podName,
       namespace: ns,
       customObjectsApi: this.customObjectsApi,
+      kubeConfig: this.kubeConfig,
+      sandboxdOptions: this.sandboxdOptions,
       tracingManager: sandboxTracingManager,
+      traceServiceName: this.traceServiceName,
       logger: this.logger,
     };
 

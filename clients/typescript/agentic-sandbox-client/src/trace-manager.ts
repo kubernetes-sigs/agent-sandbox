@@ -199,12 +199,30 @@ function recordSpanError(span: Span, err: unknown): void {
   span.setStatus({ code: otelApi?.SpanStatusCode.ERROR ?? 2, message });
 }
 
+/**
+ * The numeric ERROR status code for the active OpenTelemetry API, or its
+ * fixed fallback when OpenTelemetry is not installed. Connection-layer error
+ * hooks use this instead of recordException()/recordSpanError() so that only
+ * a fixed `sandbox.error.code` and safe message are ever recorded — never the
+ * raw exception.
+ */
+export function spanErrorStatusCode(): number {
+  return otelApi?.SpanStatusCode.ERROR ?? 2;
+}
+
 export async function withSpan<T>(
   tracer: Tracer | null,
   serviceName: string,
   spanSuffix: string,
   fn: (span: Span) => T | Promise<T>,
   parentContext?: unknown,
+  /**
+   * When provided, replaces the default recordSpanError()/recordException()
+   * behavior. The connection layer uses this to record only a fixed
+   * `sandbox.error.code` and safe status message — never the raw exception,
+   * which may carry a command string, path, or server response body.
+   */
+  onError?: (span: Span, err: unknown) => void,
 ): Promise<T> {
   if (!tracer) {
     return fn(new NoOpSpan());
@@ -215,7 +233,11 @@ export async function withSpan<T>(
       try {
         return await fn(span);
       } catch (err) {
-        recordSpanError(span, err);
+        if (onError) {
+          onError(span, err);
+        } else {
+          recordSpanError(span, err);
+        }
         throw err;
       } finally {
         span.end();

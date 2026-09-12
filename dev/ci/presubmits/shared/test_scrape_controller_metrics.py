@@ -22,7 +22,11 @@ import xml.etree.ElementTree as ET
 # Make the test importable regardless of how it is invoked (pytest, unittest, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from scrape_controller_metrics import parse_histogram, write_junit
+from scrape_controller_metrics import main, parse_histogram, write_junit
+
+import http.server
+import threading
+from unittest import mock
 
 
 class TestScrapeControllerMetrics(unittest.TestCase):
@@ -113,6 +117,79 @@ class TestWriteJunit(unittest.TestCase):
             write_junit(path, [("claim-adoption-latency", "No metrics recorded")])
             suite = ET.parse(path).getroot()
             self.assertEqual(suite.get("failures"), "1")
+
+
+class TestMainCLI(unittest.TestCase):
+    """End-to-end tests of main(): fetch, validate, exit code, junit."""
+
+    PASSING = (
+        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="100"} 100\n'
+        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="+Inf"} 100\n'
+    )
+    VIOLATING = (
+        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="100"} 0\n'
+        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="1000"} 100\n'
+        'agent_sandbox_claim_controller_startup_latency_ms_bucket{le="+Inf"} 100\n'
+    )
+
+    def serve(self, body):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self, _body=body.encode()):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(_body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}/metrics"
+
+    def run_main(self, url, junit_path):
+        argv = ["scrape_controller_metrics.py", "--metrics-url", url,
+                "--threshold-50", "300", "--threshold-90", "300",
+                "--threshold-99", "500", "--junit-out", junit_path]
+        with mock.patch.object(sys, "argv", argv):
+            try:
+                main()
+            except SystemExit as e:
+                return e.code or 0
+        return 0
+
+    def junit(self, path):
+        return ET.parse(path).getroot().find(".")
+
+    def test_violation_exits_nonzero_with_failing_junit(self):
+        with tempfile.TemporaryDirectory() as d:
+            junit_path = os.path.join(d, "junit.xml")
+            code = self.run_main(self.serve(self.VIOLATING), junit_path)
+            self.assertEqual(code, 1)
+            suite = ET.parse(junit_path).getroot()
+            self.assertEqual(suite.get("failures"), "3")
+            messages = [f.get("message") for f in suite.iter("failure")]
+            self.assertTrue(any("exceeded target" in m for m in messages))
+
+    def test_metrics_unavailable_exits_nonzero_with_failing_junit(self):
+        with tempfile.TemporaryDirectory() as d:
+            junit_path = os.path.join(d, "junit.xml")
+            # Nothing listens on port 1; the fetch fails immediately.
+            code = self.run_main("http://127.0.0.1:1/metrics", junit_path)
+            self.assertEqual(code, 1)
+            suite = ET.parse(junit_path).getroot()
+            self.assertEqual(suite.get("failures"), "1")
+            (failure,) = list(suite.iter("failure"))
+            self.assertIn("Could not fetch metrics", failure.get("message"))
+
+    def test_passing_run_exits_zero_with_clean_junit(self):
+        with tempfile.TemporaryDirectory() as d:
+            junit_path = os.path.join(d, "junit.xml")
+            code = self.run_main(self.serve(self.PASSING), junit_path)
+            self.assertEqual(code, 0)
+            suite = ET.parse(junit_path).getroot()
+            self.assertEqual(suite.get("failures"), "0")
+            self.assertEqual(suite.get("tests"), "3")
 
 
 if __name__ == "__main__":

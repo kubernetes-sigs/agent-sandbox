@@ -183,13 +183,18 @@ CONTROLLER_PID=$!
 # `go run` compiles the controller first, which can take well over a fixed
 # sleep on a cold pod. If ClusterLoader2 starts creating claims before the
 # controller is serving, the early samples inflate the adoption-latency gate.
-echo "Waiting for controller readiness (:8082/readyz)..."
+# /readyz only proves the probe server is up (it is a healthz.Ping check);
+# reconcilers serve once leader election and cache sync finish, which
+# controller-runtime logs as "Starting workers" — wait for both. Each curl
+# probe is bounded so a wedged connection cannot outlive the loop's budget.
+echo "Waiting for controller readiness (:8082/readyz + worker startup)..."
 CONTROLLER_READY=false
 for _ in $(seq 1 60); do
   if ! kill -0 "${CONTROLLER_PID}" 2>/dev/null; then
     break
   fi
-  if curl -fsS "http://127.0.0.1:8082/readyz" >/dev/null 2>&1; then
+  if curl --connect-timeout 1 --max-time 1 -fsS "http://127.0.0.1:8082/readyz" >/dev/null 2>&1 \
+      && grep -q "Starting workers" "${WORKDIR}/controller.log"; then
     CONTROLLER_READY=true
     break
   fi

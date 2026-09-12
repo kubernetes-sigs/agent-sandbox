@@ -393,19 +393,37 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	var allErrors error
 	var conditionErrors error
 
+	// recordChildErr routes a child-resource reconcile error. It always feeds the
+	// condition error set (so the Ready condition reflects the failure), but a
+	// permanent apiserver validation error (Invalid) is deliberately kept out of
+	// allErrors, which is what Reconcile returns. Returning such an error would
+	// make controller-runtime requeue and re-log (at error level, with a
+	// stacktrace) a create that can never succeed on retry -- for example a
+	// Sandbox name that yields a Service name over Kubernetes' 63-character limit
+	// -- hot-looping until the Sandbox is recreated. These permanent
+	// misconfigurations surface only through Ready=False/InvalidConfiguration.
+	recordChildErr := func(err error) {
+		if err == nil {
+			return
+		}
+		conditionErrors = errors.Join(conditionErrors, err)
+		if k8serrors.IsInvalid(err) {
+			return
+		}
+		allErrors = errors.Join(allErrors, err)
+	}
+
 	// Reconcile PVCs from volumeClaimTemplates
-	err := r.reconcilePVCs(ctx, sandbox, nameHash)
-	allErrors = errors.Join(allErrors, err)
-	conditionErrors = errors.Join(conditionErrors, err)
+	recordChildErr(r.reconcilePVCs(ctx, sandbox, nameHash))
 
 	// Reconcile Pod
 	pod, podErr := r.reconcilePod(ctx, sandbox, nameHash, wd)
-	conditionErrors = errors.Join(conditionErrors, podErr)
 	podMappingConflict := isMultipleSandboxPodsError(podErr)
 	if podMappingConflict {
+		conditionErrors = errors.Join(conditionErrors, podErr)
 		r.recordMultiplePodsEvent(sandbox, podErr)
 	} else {
-		allErrors = errors.Join(allErrors, podErr)
+		recordChildErr(podErr)
 	}
 
 	if pod == nil {
@@ -426,9 +444,9 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	// ambiguous. Existing Services are left untouched for an operator to inspect.
 	var svc *corev1.Service
 	if !podMappingConflict {
-		svc, err = r.reconcileService(ctx, sandbox, nameHash)
-		allErrors = errors.Join(allErrors, err)
-		conditionErrors = errors.Join(conditionErrors, err)
+		var svcErr error
+		svc, svcErr = r.reconcileService(ctx, sandbox, nameHash)
+		recordChildErr(svcErr)
 	}
 
 	// compute and set overall conditions
@@ -595,6 +613,14 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 		if multiplePodsErr := asMultipleSandboxPodsError(err); multiplePodsErr != nil {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonMultiplePods
 			readyCondition.Message = multiplePodsErr.Error()
+			return readyCondition
+		}
+		// A permanent apiserver validation error (e.g. a derived Service name over
+		// the 63-character limit) is reported with a specific, actionable reason
+		// rather than the generic ReconcilerError, and is not requeued upstream.
+		if k8serrors.IsInvalid(err) {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonInvalidConfiguration
+			readyCondition.Message = err.Error()
 			return readyCondition
 		}
 		readyCondition.Reason = "ReconcilerError"
@@ -1018,6 +1044,11 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 			}
 			err := r.Create(ctx, service, client.FieldOwner(sandboxControllerFieldOwner))
 			if err != nil {
+				if k8serrors.IsInvalid(err) {
+					logger.V(4).Info("Refusing to create Service: invalid configuration",
+						"Service.Namespace", service.Namespace, "Service.Name", service.Name, "error", err.Error())
+					return nil, err
+				}
 				logger.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
 				return nil, err
 			}

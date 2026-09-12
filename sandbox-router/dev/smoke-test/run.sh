@@ -121,10 +121,10 @@ kubectl apply -f sandbox-router/deploy/serviceaccount.yaml
 kubectl apply -f sandbox-router/deploy/rbac.yaml
 kubectl apply -f sandbox-router/deploy/service.yaml
 # Use sed to swap the image and to add the tokenreview flags. The example
-# deployment.yaml uses :latest with imagePullPolicy=IfNotPresent; we
+# deployment.yaml uses a published tag with imagePullPolicy=IfNotPresent; we
 # pin to the locally-loaded smoke image and Never so kubelet doesn't
 # attempt a pull.
-sed -e "s|registry.k8s.io/agent-sandbox/sandbox-router-go:latest|${ROUTER_IMAGE}|" \
+sed -E "s|registry.k8s.io/agent-sandbox/sandbox-router-go:[^ \"']+|${ROUTER_IMAGE}|" \
     -e "s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|" \
     sandbox-router/deploy/deployment.yaml \
   | kubectl apply -f -

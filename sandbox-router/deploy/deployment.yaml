@@ -54,7 +54,7 @@ spec:
         # Replace with the published image. The Go router image is
         # `sandbox-router-go` to avoid colliding with the Python router's
         # `sandbox-router` image — see sandbox-router/README.md.
-        image: registry.k8s.io/agent-sandbox/sandbox-router-go:latest
+        image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.2
         imagePullPolicy: IfNotPresent
         args:
         - --http-bind-address=:8080

@@ -64,7 +64,7 @@ These manifests provide additional security hardening for production environment
 
 ## Things to change before production
 
-1. **Image tag.** `kustomization.yaml` defaults to the latest published release (`v1.0.2`). Pin to a specific digest or custom version as needed.
+1. **Image tag.** `deployment.yaml` defaults to the latest published release (`v1.0.2`). Pin to a specific digest or custom version as needed.
 2. **Replica count.** 2 is the HA minimum, not a capacity recommendation. See "Scaling guidance" in the package README.
 3. **Resource requests.** The defaults assume modest load. Right-size from load test numbers.
 4. **NetworkPolicy selectors.** The example allows ingress from any namespace (`namespaceSelector: {}`). Tighten to your Gateway namespace.

@@ -7,7 +7,3 @@ resources:
   - deployment.yaml
   - service.yaml
   - pdb.yaml
-
-images:
-  - name: registry.k8s.io/agent-sandbox/sandbox-router-go
-    newTag: v1.0.2

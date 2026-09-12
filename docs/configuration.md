@@ -34,6 +34,11 @@ For the benchmark data and sizing rationale behind these settings — including 
 * `--cache-label-selectors` (default: `false`): Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label (`agents.x-k8s.io/sandbox-name-hash`). The controller only ever creates/looks up Pods and Services it labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources that rely on the `agents.x-k8s.io/adoptable=true` adoption path MUST also carry the tracking label (value = the owning sandbox's name hash) to remain visible to the controller when this flag is enabled.
 * `--sandbox-write-behind-window` (default: `0`): Coalescing window for the Sandbox controller's recoverable metadata-only writes. `0` disables coalescing.
 
+## Status Write Settings
+
+* `--sandbox-write-behind-window` (default: `0`, synchronous): Defer non-urgent Pod metadata patches (label/annotation drift on an already-owned Pod) for up to this long, capped at 1s, so they coalesce with the next write.
+* `--sandbox-transitional-status-window` (default: `0`, synchronous): While a Sandbox is younger than this window, skip *transitional* status writes (reason/message churn, nodeName/podIPs fills, PodScheduled Unknown/True) and write only *material* changes (condition value flips, terminal Ready reasons such as Expired/PodFailed, PodScheduled=False). A Sandbox that becomes Ready inside the window writes status exactly once; one that is stuck flushes an explanatory status once the window elapses. Also enables skipping reconcile passes whose cached Sandbox predates the controller's own last write. Recommended for high launch rates: `180s`.
+
 ## Cluster Settings
 
 * `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to

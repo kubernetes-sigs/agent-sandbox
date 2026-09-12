@@ -39,11 +39,13 @@
     "@connectrpc/connect-node": "^2.1.2",
     "@opentelemetry/api": "^1.9.0",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   },
   "dependencies": {
-    "@kubernetes/client-node": "^2.0.0"
+    "@kubernetes/client-node": "^2.0.0",
+    "ws": "^8.18.1"
   },
   "peerDependencies": {
     "@bufbuild/protobuf": "^2.14.1",

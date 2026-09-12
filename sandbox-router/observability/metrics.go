@@ -18,6 +18,7 @@ package observability
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -42,6 +43,19 @@ type Metrics struct {
 	CacheInvalidationsTotal *prometheus.CounterVec
 	AuthzDecisionsTotal     *prometheus.CounterVec
 	BuildInfo               prometheus.Collector
+	// ClientRxBytesTotal counts bytes received from clients (request bodies).
+	ClientRxBytesTotal *prometheus.CounterVec
+	// ClientTxBytesTotal counts bytes sent to clients (response bodies).
+	ClientTxBytesTotal *prometheus.CounterVec
+	// UpstreamRxBytesTotal counts bytes read from upstream sandbox backends.
+	UpstreamRxBytesTotal *prometheus.CounterVec
+	// UpstreamTxBytesTotal counts bytes written to upstream sandbox backends.
+	UpstreamTxBytesTotal *prometheus.CounterVec
+	// RequestSizeBytes observes request body size distributions.
+	RequestSizeBytes *prometheus.HistogramVec
+	// ResponseSizeBytes observes response body size distributions. SSE
+	// streaming responses can be very large.
+	ResponseSizeBytes *prometheus.HistogramVec
 }
 
 // NewMetrics creates a fresh set of collectors and registers them with reg.
@@ -90,6 +104,38 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help: "Per-request authorization outcomes, labeled by sandbox namespace and decision (allow / deny).",
 		}, []string{"sandbox_namespace", "decision"}),
 
+		ClientRxBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandbox_router_client_rx_bytes_total",
+			Help: "Total bytes received from clients (request bodies), labeled by sandbox namespace.",
+		}, []string{"sandbox_namespace"}),
+
+		ClientTxBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandbox_router_client_tx_bytes_total",
+			Help: "Total bytes sent to clients (response bodies), labeled by sandbox namespace.",
+		}, []string{"sandbox_namespace"}),
+
+		UpstreamRxBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandbox_router_upstream_rx_bytes_total",
+			Help: "Total bytes read from upstream sandbox backends, labeled by sandbox namespace.",
+		}, []string{"sandbox_namespace"}),
+
+		UpstreamTxBytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandbox_router_upstream_tx_bytes_total",
+			Help: "Total bytes written to upstream sandbox backends, labeled by sandbox namespace.",
+		}, []string{"sandbox_namespace"}),
+
+		RequestSizeBytes: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "sandbox_router_request_size_bytes",
+			Help:    "Distribution of request body sizes in bytes, labeled by sandbox namespace.",
+			Buckets: []float64{100, 1024, 10240, 102400, 1048576, 10485760, 104857600, 1073741824},
+		}, []string{"sandbox_namespace"}),
+
+		ResponseSizeBytes: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "sandbox_router_response_size_bytes",
+			Help:    "Distribution of response body sizes in bytes, labeled by sandbox namespace. SSE streaming responses may be very large.",
+			Buckets: []float64{100, 1024, 10240, 102400, 1048576, 10485760, 104857600, 1073741824},
+		}, []string{"sandbox_namespace"}),
+
 		BuildInfo: buildInfoCollector(),
 	}
 
@@ -102,6 +148,12 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.UpstreamRetriesTotal,
 		m.CacheInvalidationsTotal,
 		m.AuthzDecisionsTotal,
+		m.ClientRxBytesTotal,
+		m.ClientTxBytesTotal,
+		m.UpstreamRxBytesTotal,
+		m.UpstreamTxBytesTotal,
+		m.RequestSizeBytes,
+		m.ResponseSizeBytes,
 		m.BuildInfo,
 	)
 	return m
@@ -146,6 +198,18 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 
 		ctx, labels := LabelsForRequest(r.Context())
 		ww := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		// Wrap the request body so we can count bytes received from the
+		// client (client_rx_bytes_total + request_size_bytes). Skip
+		// http.NoBody — the stdlib uses it as a sentinel for bodyless
+		// requests (GET/HEAD); wrapping it would record a zero-byte
+		// observation that skews the size histogram without adding signal.
+		var reqBodyCounter *countingReadCloser
+		if r.Body != nil && r.Body != http.NoBody {
+			reqBodyCounter = &countingReadCloser{rc: r.Body}
+			r.Body = reqBodyCounter
+		}
+
 		start := time.Now()
 		next.ServeHTTP(ww, r.WithContext(ctx))
 		dur := time.Since(start).Seconds()
@@ -157,6 +221,18 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 		code := strconv.Itoa(ww.status)
 		m.RequestsTotal.WithLabelValues(r.Method, code, ns).Inc()
 		m.RequestDurationSeconds.WithLabelValues(r.Method, code, ns).Observe(dur)
+
+		// Record client byte-transfer metrics. The request-body counter
+		// is nil when the inbound request had no body (e.g. GET); in that
+		// case there's nothing to observe for the rx / size metrics.
+		if reqBodyCounter != nil {
+			rxBytes := float64(reqBodyCounter.bytes)
+			m.ClientRxBytesTotal.WithLabelValues(ns).Add(rxBytes)
+			m.RequestSizeBytes.WithLabelValues(ns).Observe(rxBytes)
+		}
+		txBytes := float64(ww.bytesWritten)
+		m.ClientTxBytesTotal.WithLabelValues(ns).Add(txBytes)
+		m.ResponseSizeBytes.WithLabelValues(ns).Observe(txBytes)
 	})
 }
 
@@ -165,8 +241,9 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 // semantics, and we mirror that.
 type statusRecorder struct {
 	http.ResponseWriter
-	status      int
-	wroteHeader bool
+	status       int
+	bytesWritten int64
+	wroteHeader  bool
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
@@ -183,7 +260,34 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 		s.status = http.StatusOK
 		s.wroteHeader = true
 	}
-	return s.ResponseWriter.Write(b)
+	n, err := s.ResponseWriter.Write(b)
+	s.bytesWritten += int64(n)
+	return n, err
+}
+
+// ReadFrom implements io.ReaderFrom. io.Copy prefers this method over
+// Write when the source is not a WriterTo, so without it the underlying
+// ResponseWriter's ReadFrom path (e.g. sendfile / splice fast paths)
+// would silently bypass bytesWritten accounting. We delegate to the
+// underlying writer's ReadFrom when it supports one; otherwise we copy
+// through our own Write() via an io.Writer-only view of s, which
+// prevents io.Copy from detecting that s implements ReaderFrom and
+// recursing back into this method.
+func (s *statusRecorder) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := s.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(r)
+		// The delegate path commits the response (an implicit 200 when
+		// no explicit WriteHeader preceded it). Record that so a later
+		// WriteHeader on an error path cannot silently overwrite the
+		// status the underlying ResponseWriter already sent.
+		if n > 0 && !s.wroteHeader {
+			s.status = http.StatusOK
+			s.wroteHeader = true
+		}
+		s.bytesWritten += n
+		return n, err
+	}
+	return io.Copy(struct{ io.Writer }{s}, r)
 }
 
 // Flush forwards to the underlying ResponseWriter if it supports it; this
@@ -214,4 +318,24 @@ func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Flush/Hijack implementations under middleware wrappers.
 func (s *statusRecorder) Unwrap() http.ResponseWriter {
 	return s.ResponseWriter
+}
+
+// countingReadCloser wraps an io.ReadCloser and counts bytes read through
+// it. Used by the metrics middleware to track client request body sizes
+// without interfering with the downstream handler's consumption of the
+// body. Close is forwarded unchanged; byte accounting stops mattering
+// once the body is closed because no further Read calls are expected.
+type countingReadCloser struct {
+	rc    io.ReadCloser
+	bytes int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	c.bytes += int64(n)
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	return c.rc.Close()
 }

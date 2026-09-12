@@ -91,6 +91,15 @@ const (
 	// more than one Pod is controlled by its UID and the controller cannot choose
 	// a canonical stateful Pod safely.
 	SandboxReasonMultiplePods = "MultiplePods"
+	// SandboxReasonInvalidConfiguration is a Ready=False reason: reconciling a
+	// child resource failed with a permanent apiserver validation error that
+	// retrying cannot fix. The common trigger is a Sandbox name that yields a
+	// derived Service name exceeding Kubernetes' 63-character limit (Sandbox and
+	// Pod names may be up to 253 characters, but a Service name is a DNS-1035
+	// label). The controller reports the failure here and stops requeuing instead
+	// of hot-looping on a create that can never succeed; recreate the Sandbox with
+	// a shorter name to resolve it.
+	SandboxReasonInvalidConfiguration = "InvalidConfiguration"
 	// SandboxReasonSuspended is a Ready=False reason: the Sandbox has been administratively
 	// suspended (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"

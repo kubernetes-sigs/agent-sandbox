@@ -165,7 +165,7 @@ module:
   - disableWatch: true
     source: ../docs
     target: assets/additional/docs
-    files: ["testing.md", "api.md", "api-migration-guide.md", "python_sdk_reference.md", "go_sdk_reference.md"]
+    files: ["testing.md", "api.md", "api-migration-guide.md", "python_sdk_reference.md", "go_sdk_reference.md", "metrics.md"]
 
   imports:
     - path: github.com/google/docsy

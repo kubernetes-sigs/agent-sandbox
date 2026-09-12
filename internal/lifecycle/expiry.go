@@ -80,3 +80,15 @@ func TimeLeft(now time.Time, shutdownTime *metav1.Time, ttlSecondsAfterFinished 
 	}
 	return false, expireAt.Sub(now)
 }
+
+// TimeLeftAfterCreated reports whether an age-based TTL has expired and, if not, how long remains.
+func TimeLeftAfterCreated(now time.Time, creationTime metav1.Time, ttlSecondsAfterCreated *int32) (bool, time.Duration) {
+	if ttlSecondsAfterCreated == nil || creationTime.IsZero() {
+		return false, 0
+	}
+	expireAt := creationTime.Add(time.Duration(*ttlSecondsAfterCreated) * time.Second)
+	if !now.Before(expireAt) {
+		return true, 0
+	}
+	return false, expireAt.Sub(now)
+}

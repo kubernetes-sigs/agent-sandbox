@@ -111,6 +111,16 @@ type SandboxClaimSpec struct {
 	// +required
 	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
 
+	// ttlSecondsAfterCreated initializes lifecycle.shutdownTime to CreationTimestamp+TTL
+	// when shutdownTime is unset.
+	// A nil lifecycle is initialized with the Delete policy. If lifecycle is non-nil
+	// but shutdownTime is unset, shutdownPolicy is overwritten with Delete. An explicit
+	// shutdownTime is never overwritten. Once initialized, later changes to
+	// ttlSecondsAfterCreated do not update shutdownTime.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
+
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`

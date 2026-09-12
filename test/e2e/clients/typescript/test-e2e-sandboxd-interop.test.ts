@@ -28,7 +28,7 @@ limitations under the License.
 import * as net from "node:net";
 import { Writable } from "node:stream";
 import { create } from "@bufbuild/protobuf";
-import { createClient } from "@connectrpc/connect";
+import { type Client, createClient } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
 import * as k8s from "@kubernetes/client-node";
 import {
@@ -234,6 +234,39 @@ async function waitForHealthy(
   );
 }
 
+/**
+ * Bounded-retry gRPC readiness probe. sandboxd starts its REST and gRPC
+ * servers in separate goroutines, so waitForHealthy() succeeding on the
+ * REST port doesn't guarantee the gRPC listener is already accepting
+ * connections, and @connectrpc/connect does not retry calls on its own.
+ */
+async function waitForGrpcReady(
+  client: Client<typeof ProcessService>,
+  attempts = 20,
+  intervalMs = 250,
+): Promise<void> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await client.execute(
+        create(ExecuteRequestSchema, {
+          config: create(ProcessConfigSchema, {
+            command: ["/bin/sh", "-c", "true"],
+          }),
+        }),
+        { timeoutMs: intervalMs * 4 },
+      );
+      return;
+    } catch (e) {
+      lastError = e;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `sandboxd gRPC server did not become ready over the port-forward: ${String(lastError)}`,
+  );
+}
+
 describe("TypeScript SDK E2E — sandboxd interop smoke test", () => {
   let tc: TestContext;
   let namespace: string;
@@ -290,8 +323,8 @@ describe("TypeScript SDK E2E — sandboxd interop smoke test", () => {
       );
       tunnels.push(grpcTunnel);
 
-      // Confirms both port-forwards actually work before spending the real
-      // assertion on the gRPC call.
+      // Confirms the REST port-forward works. This does not prove the gRPC
+      // port-forward is ready too — see waitForGrpcReady() below.
       await waitForHealthy(restTunnel.localPort);
 
       // createGrpcTransport() always speaks gRPC over HTTP/2 (cleartext
@@ -306,6 +339,7 @@ describe("TypeScript SDK E2E — sandboxd interop smoke test", () => {
         readMaxBytes: 4 * 1024 * 1024,
       });
       const client = createClient(ProcessService, transport);
+      await waitForGrpcReady(client);
 
       const resp = await client.execute(
         create(ExecuteRequestSchema, {

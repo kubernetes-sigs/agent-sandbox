@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -292,6 +293,185 @@ func TestReconcilePool(t *testing.T) {
 			require.Equal(t, expectedSelector, warmPool.Status.Selector, "Status.Selector mismatch")
 		})
 	}
+}
+
+func TestReconcilePool_MissingTemplateEmitsNotProgressing(t *testing.T) {
+	poolName := "testing-pool"
+	poolNamespace := "default"
+	templateName := "does-not-exist"
+	replicas := int32(1)
+	poolUID := types.UID("warmpool-uid-1570")
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	newPool := func() *extensionsv1beta1.SandboxWarmPool {
+		return &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: poolNamespace,
+				UID:       poolUID,
+			},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas: &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+					Name: templateName,
+				},
+			},
+		}
+	}
+
+	countPoolSandboxes := func(t *testing.T, c client.Client) int {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		require.NoError(t, c.List(context.Background(), list, &client.ListOptions{Namespace: poolNamespace}))
+		n := 0
+		for _, sb := range list.Items {
+			if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("missing template emits one warning and creates nothing", func(t *testing.T) {
+		warmPool := newPool()
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Equal(t, missingTemplateRequeueDelay, requeue)
+		require.Equal(t, 0, countPoolSandboxes(t, r.Client))
+		require.Equal(t, int32(0), warmPool.Status.Replicas)
+		require.Equal(t, int32(0), warmPool.Status.ReadyReplicas)
+
+		select {
+		case e := <-recorder.Events:
+			require.Contains(t, e, reasonWarmPoolNotProgressing)
+			require.Contains(t, e, corev1.EventTypeWarning)
+			require.Contains(t, e, `SandboxTemplate "does-not-exist" not found`)
+		default:
+			t.Fatal("expected a WarmPoolNotProgressing event for a missing template")
+		}
+
+		requeue, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Equal(t, missingTemplateRequeueDelay, requeue)
+		select {
+		case e := <-recorder.Events:
+			t.Fatalf("unexpected duplicate event while the template is still missing: %s", e)
+		default:
+		}
+	})
+
+	t.Run("template appearing resumes progress and creates sandboxes", func(t *testing.T) {
+		warmPool := newPool()
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		_, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		select {
+		case e := <-recorder.Events:
+			require.Contains(t, e, reasonWarmPoolNotProgressing)
+		default:
+			t.Fatal("expected a WarmPoolNotProgressing event before the template appears")
+		}
+
+		template := createTemplate(poolNamespace)
+		template.Name = templateName
+		require.NoError(t, r.Create(ctx, template))
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Zero(t, requeue)
+		require.Equal(t, int(replicas), countPoolSandboxes(t, r.Client))
+
+		select {
+		case e := <-recorder.Events:
+			require.Contains(t, e, reasonWarmPoolProgressing)
+			require.Contains(t, e, corev1.EventTypeNormal)
+		default:
+			t.Fatal("expected a WarmPoolProgressing event once the template appears")
+		}
+	})
+
+	t.Run("missing template does not delete existing members", func(t *testing.T) {
+		warmPool := newPool()
+		existing := createPoolSandbox(poolName, poolNamespace, poolNameHash, nil, "-keep")
+		existing.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+			Name:       poolName,
+			UID:        poolUID,
+			Controller: new(true),
+		}}
+
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme, existing),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Equal(t, missingTemplateRequeueDelay, requeue)
+		require.Equal(t, 1, countPoolSandboxes(t, r.Client), "existing pool members must not be deleted when the template is missing")
+		require.Equal(t, int32(1), warmPool.Status.Replicas)
+
+		got := &sandboxv1beta1.Sandbox{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: existing.Name}, got))
+
+		select {
+		case e := <-recorder.Events:
+			require.Contains(t, e, reasonWarmPoolNotProgressing)
+			require.Contains(t, e, corev1.EventTypeWarning)
+			require.Contains(t, e, `SandboxTemplate "does-not-exist" not found`)
+		default:
+			t.Fatal("expected a WarmPoolNotProgressing event when the template is missing")
+		}
+	})
+
+	t.Run("scaled to zero does not warn or requeue for a missing template", func(t *testing.T) {
+		zero := int32(0)
+		warmPool := newPool()
+		warmPool.Spec.Replicas = &zero
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Zero(t, requeue, "a scaled-to-zero pool must not requeue for a missing template")
+		require.Equal(t, 0, countPoolSandboxes(t, r.Client))
+		require.Equal(t, int32(0), warmPool.Status.Replicas)
+
+		select {
+		case e := <-recorder.Events:
+			t.Fatalf("scaled-to-zero pool must not emit WarmPoolNotProgressing for a missing template: %s", e)
+		default:
+		}
+	})
 }
 
 func TestReconcilePoolControllerRef(t *testing.T) {

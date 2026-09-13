@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 """Synchronous filesystem operations for legacy and sandboxd runtimes."""
 import logging
 import posixpath
+import secrets
 import urllib.parse
-from typing import Any, List, Protocol
+from collections.abc import Iterator
+from typing import Any, BinaryIO, List, Protocol
+
+from urllib3.fields import RequestField
 
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.exceptions import SandboxRequestError
@@ -47,6 +52,53 @@ def _write_all(destination: BinaryWriter, content: bytes) -> int:
             raise OSError("Download destination reported an invalid write count.")
         written += count
     return written
+
+
+def _validate_binary_stream(content: BinaryIO) -> None:
+    """Reject text streams and objects that do not provide a read method."""
+    if isinstance(content, (io.StringIO, io.TextIOBase)):
+        raise TypeError("File content must be opened in binary mode.")
+    if not callable(getattr(content, "read", None)):
+        raise TypeError("File content must be bytes, str, or a binary file object.")
+
+
+def _read_binary_chunk(content: BinaryIO) -> bytes:
+    """Read one bounded chunk and enforce the BinaryIO return contract."""
+    chunk = content.read(_STREAM_CHUNK_SIZE)
+    if isinstance(chunk, str):
+        raise TypeError("File content must be opened in binary mode.")
+    if not isinstance(chunk, (bytes, bytearray, memoryview)):
+        raise TypeError("Binary file objects must return bytes from read().")
+    return bytes(chunk)
+
+
+def _iter_binary_chunks(content: BinaryIO) -> Iterator[bytes]:
+    while chunk := _read_binary_chunk(content):
+        yield chunk
+
+
+def _multipart_framing(path: str) -> tuple[bytes, bytes, str]:
+    """Build the framing for a streaming, single-file multipart request."""
+    boundary = secrets.token_hex(16)
+    field = RequestField(name="file", data=b"", filename=path)
+    field.make_multipart(content_disposition="form-data")
+    prefix = (
+        f"--{boundary}\r\n".encode()
+        + field.render_headers().encode("utf-8")
+    )
+    suffix = f"\r\n--{boundary}--\r\n".encode()
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return prefix, suffix, content_type
+
+
+def _iter_multipart_body(
+    prefix: bytes,
+    content: BinaryIO,
+    suffix: bytes,
+) -> Iterator[bytes]:
+    yield prefix
+    yield from _iter_binary_chunks(content)
+    yield suffix
 
 
 def _sandboxd_files_endpoint(path: str) -> str:
@@ -80,18 +132,23 @@ class Filesystem:
     @trace_span("write")
     def write(
         self,
-        path: str, content: bytes | str,
+        path: str,
+        content: bytes | str | BinaryIO,
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
-    ):
-        """Write bytes or UTF-8 text to a sandbox-relative path."""
+    ) -> None:
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        elif isinstance(content, (bytearray, memoryview)):
+            content = bytes(content)
+        elif not isinstance(content, bytes):
+            _validate_binary_stream(content)
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-            span.set_attribute("sandbox.file.size", len(content))
-
-        if isinstance(content, str):
-            content = content.encode("utf-8")
+            if isinstance(content, bytes):
+                span.set_attribute("sandbox.file.size", len(content))
 
         # The sandbox runtime uses the multipart ``filename`` field as a
         # relative destination path under its base directory (e.g. /app).
@@ -106,10 +163,29 @@ class Filesystem:
         if self.connector.is_sandboxd():
             # sandboxd write is an idempotent PUT of the raw bytes; parent
             # directories are created server-side (temp-file + rename).
+            data: bytes | Iterator[bytes]
+            if isinstance(content, bytes):
+                data = content
+                disable_retries = False
+            else:
+                data = _iter_binary_chunks(content)
+                disable_retries = True
             self.connector.send_request(
                 "PUT", _sandboxd_files_endpoint(path),
-                data=content,
+                data=data,
                 headers={"Content-Type": "application/octet-stream"},
+                timeout=timeout,
+                _disable_retries=disable_retries,
+            )
+        elif not isinstance(content, bytes):
+            prefix, suffix, content_type = _multipart_framing(path)
+            # POST is intentionally absent from RETRYABLE_METHODS. Making it
+            # retryable would replay this consumed generator as an empty body.
+            self.connector.send_request(
+                "POST",
+                "upload",
+                data=_iter_multipart_body(prefix, content, suffix),
+                headers={"Content-Type": content_type},
                 timeout=timeout,
             )
         else:

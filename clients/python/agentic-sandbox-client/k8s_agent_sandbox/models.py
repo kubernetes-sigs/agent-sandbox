@@ -65,6 +65,47 @@ class LegacyExecuteRequest(BaseModel):
     command: str  # Shell command to run.
     timeout_seconds: Optional[float] = None  # Limit on how long the command may run; omitted when unset.
 
+class ProcessOutputEvent(BaseModel):
+    """A chunk of stdout or stderr from a process started with commands.start().
+
+    ``data`` is raw bytes, not text: a multi-byte character can be split
+    across two chunks, so callers decode the stream rather than each chunk.
+    A PTY process never produces ``stderr`` events, because the terminal
+    merges stderr into stdout.
+    """
+    type: Literal["stdout", "stderr"]
+    data: bytes
+
+class ProcessExitEvent(BaseModel):
+    """Terminal event of a process started with commands.start().
+
+    ``exit_code`` is -1 when the process was killed by a signal: sandboxd
+    reports Go's ExitCode(), not the shell's 128+N convention.
+    """
+    type: Literal["exit"] = "exit"
+    exit_code: int
+
+# Discriminated union of events ProcessHandle.events() yields. The init event
+# sandboxd sends first is consumed by commands.start() to populate the
+# handle's process_id, so it is not part of the public event stream. This
+# mirrors the Go SDK's ProcessEvent and the TypeScript SDK's ProcessEvent.
+ProcessEvent = Union[ProcessOutputEvent, ProcessExitEvent]
+
+class PtySize(BaseModel):
+    """Pseudo-terminal geometry for commands.start().
+
+    Mirrors the TypeScript SDK's ``PtySize``.
+    """
+    cols: int = 80
+    rows: int = 24
+
+    @field_validator("cols", "rows")
+    @classmethod
+    def _validate_positive(cls, v: int) -> int:
+        if v < 1 or v > 65535:
+            raise ValueError("cols/rows must be between 1 and 65535")
+        return v
+
 class FileEntry(BaseModel):
     """Represents a file or directory entry in the sandbox.
 

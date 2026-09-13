@@ -724,6 +724,67 @@ import logging
 logging.basicConfig(level=logging.INFO)
 ```
 
+### 15. Streaming Exec and Cancellation (sandboxd runtime)
+
+`sandbox.commands.run()` waits for the whole command to finish before returning
+its output — fine for short one-shots, but not for long-running builds, hung
+processes, or anything you might need to cancel from the outside. On the
+**sandboxd runtime**, the SDK also exposes a streaming variant that yields
+stdout/stderr in real time and lets you deliver POSIX signals to the running process.
+`commands.start()`.
+
+Install the SDK with the `grpc` extra to enable it:
+
+```bash
+pip install "k8s-agent-sandbox[grpc]"
+```
+
+`sandbox.commands.start(command)` returns a `ProcessHandle` context manager.
+Its `process_id` is set before `start()` returns, so you can signal the process
+without first consuming an event. Iterate `handle.events()` for typed events
+(`ProcessOutputEvent`, then a terminal `ProcessExitEvent`) and call
+`handle.signal(sig)` to cancel:
+
+```python
+import sys
+import signal as sig
+from k8s_agent_sandbox import SandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
+sandbox = client.create_sandbox(warmpool="sandboxd-warmpool", namespace="default")
+try:
+    with sandbox.commands.start("python long_task.py") as handle:
+        for event in handle.events():
+            if event.type in ("stdout", "stderr"):
+                sys.stdout.write(event.data.decode())
+            elif event.type == "exit":
+                print(f"exited with {event.exit_code}")
+            if user_hit_ctrl_c():
+                handle.signal(sig.SIGINT)
+finally:
+    sandbox.terminate()
+```
+
+`signal()` accepts either the cross-SDK name (`"SIGINT"`) or Python's own
+`signal.SIGINT`. `env` and `cwd` work as they do on `run()`. Passing
+`pty=PtySize(cols=120, rows=40)` (from `k8s_agent_sandbox.models`) allocates a
+pseudo-terminal, which merges stderr into stdout.
+
+The async client mirrors the interface via `async with` / `async for` /
+`await`:
+
+```python
+async with await sandbox.commands.start("python long_task.py") as handle:
+    async for event in handle.events():
+        ...
+    await handle.signal(sig.SIGINT)
+```
+
+`start()` is only available on the sandboxd runtime and raises
+`NotImplementedError` on the legacy python-runtime connector, which does not
+expose a streaming exec endpoint.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

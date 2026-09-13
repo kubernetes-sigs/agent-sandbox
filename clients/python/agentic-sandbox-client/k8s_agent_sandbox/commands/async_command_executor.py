@@ -16,13 +16,14 @@ from typing import Any, cast
 """Non-blocking command execution for legacy and sandboxd runtimes."""
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
+from k8s_agent_sandbox.commands._process_handle import AsyncProcessHandle
 from k8s_agent_sandbox.commands.command_executor import (
     _check_process_options,
     _execute_request,
     _extract_executable,
     _process_config,
 )
-from k8s_agent_sandbox.models import ExecutionResult
+from k8s_agent_sandbox.models import ExecutionResult, PtySize
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
 
 
@@ -161,3 +162,70 @@ class AsyncCommandExecutor:
             stderr=response.stderr.decode("utf-8", errors="replace"),
             exit_code=response.exit_code,
         )
+
+    @async_trace_span("start")
+    async def start(
+        self,
+        command: str,
+        timeout: int = 60,
+        *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        pty: PtySize | None = None,
+    ) -> AsyncProcessHandle:
+        """Start a command and stream its output as it is produced.
+
+        Async mirror of :meth:`CommandExecutor.start`, returning an
+        :class:`AsyncProcessHandle` whose ``events()`` is an async iterator
+        and whose ``signal()`` is awaitable.
+
+        Only the sandboxd runtime implements ProcessService.Start; the legacy
+        python-runtime raises ``NotImplementedError``.
+        """
+        sandboxd = self.connector.is_sandboxd()
+        if not sandboxd:
+            raise NotImplementedError(
+                "commands.start() requires the sandboxd runtime; the legacy "
+                "python-runtime does not expose a streaming exec endpoint"
+            )
+        _check_process_options(env, cwd, sandboxd)
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute(
+                "sandbox.command.executable", _extract_executable(command))
+
+        try:
+            import grpc
+            from k8s_agent_sandbox.commands._process_stubs import (
+                process_pb2,
+                process_pb2_grpc,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "the sandboxd runtime requires gRPC support; install the "
+                "'grpc' extra: pip install k8s-agent-sandbox[grpc]"
+            ) from e
+
+        # Publish the selected sandboxd gRPC target before dialing, as
+        # _run_sandboxd does: a direct Pod IP connection refreshes its target
+        # for every command.
+        await self.connector.connect()
+        channel = await self.connector.grpc_channel()
+        stub = process_pb2_grpc.ProcessServiceStub(channel)
+        request = process_pb2.StartRequest(
+            config=_process_config(process_pb2, command, env, cwd),
+            pty=process_pb2.PTY(cols=pty.cols, rows=pty.rows) if pty else None,
+        )
+        # An aio streaming call reports failures on the first read, not on the
+        # call itself, so both are covered by one handler.
+        try:
+            stream_call = stub.Start(request, timeout=timeout)
+            return await AsyncProcessHandle.from_stream(
+                stub, process_pb2, stream_call)
+        except grpc.RpcError as e:
+            rpc_error = cast("grpc.aio.AioRpcError", e)
+            if rpc_error.code() == grpc.StatusCode.UNAVAILABLE:
+                await self.connector.invalidate_sandboxd_transport(channel)
+            raise RuntimeError(
+                f"sandboxd Start failed ({rpc_error.code()}): {rpc_error.details()}"
+            ) from e

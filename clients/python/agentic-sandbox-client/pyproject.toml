@@ -16,6 +16,7 @@ classifiers = [
 dependencies = [
     "kubernetes",
     "requests",
+    "urllib3",
     "pydantic",
     "prometheus-client",
 ]

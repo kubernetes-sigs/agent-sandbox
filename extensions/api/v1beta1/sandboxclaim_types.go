@@ -91,7 +91,7 @@ type Lifecycle struct {
 	//   - DeleteForeground: like Delete, but with foreground cascade deletion so the
 	//     SandboxClaim remains (with a deletionTimestamp) until the underlying
 	//     Sandbox and Pod are fully terminated.
-	// This field has no effect while the SandboxClaim never expires (i.e. while both
+	// This field has no effect while the SandboxClaim never expires (e.g. when both
 	// shutdownTime and ttlSecondsAfterFinished are unset).
 	// +kubebuilder:default=Retain
 	// +optional
@@ -175,6 +175,8 @@ type SandboxStatus struct {
 	// This is populated only while the backing Sandbox has a running pod with assigned
 	// IPs; it is cleared whenever the pod is absent (e.g. before the pod has been
 	// created or while the Sandbox is suspended).
+	// When a suspended Sandbox is resumed, a new pod is created and this field is
+	// repopulated from that pod's status.
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
 

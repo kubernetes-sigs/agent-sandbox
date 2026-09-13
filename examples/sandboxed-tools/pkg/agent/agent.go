@@ -58,11 +58,6 @@ const SandboxInactivityTimeout = 5 * time.Minute
 // of blocking the agent loop indefinitely.
 const DefaultToolTimeout = 2 * time.Minute
 
-// systemPrompt seeds every new session.
-const systemPrompt = "You are a helpful AI assistant with access to a sandboxed environment. " +
-	"You can use the available tools (like run_command to execute shell commands, ls to list files, read to read files, and write to write files) to answer user questions or perform tasks. " +
-	"Always explain what you are doing."
-
 // SandboxClient is a simple low-level client for managing Sandbox resources directly.
 type SandboxClient struct {
 	agentsClient agentsclientset.Interface
@@ -612,17 +607,25 @@ type RunOptions struct {
 	// ModelName is the name of the model to use with the LLM.
 	ModelName string
 
+	// SystemPrompt seeds every new session. It is provided by the selected
+	// toolset, so the prompt always matches the registered tools.
+	SystemPrompt string
+
 	// ToolTimeout bounds how long a single tool invocation may run before it
 	// is cancelled. <= 0 disables the timeout. Default: DefaultToolTimeout.
 	ToolTimeout time.Duration
 }
 
+// DefaultImage is the sandbox image used when neither the flags, the
+// environment, nor the selected toolset specify one.
+const DefaultImage = "debian:bookworm-slim"
+
 // InitDefaults populates the options from environment variables and defaults.
+// Image is left empty when SANDBOX_IMAGE is unset, so callers can
+// distinguish "unset" from an explicit choice and apply the toolset's
+// default image (falling back to DefaultImage).
 func (o *RunOptions) InitDefaults() {
 	o.Image = os.Getenv("SANDBOX_IMAGE")
-	if o.Image == "" {
-		o.Image = "debian:bookworm-slim"
-	}
 
 	o.Namespace = os.Getenv("SANDBOX_NAMESPACE")
 	if o.Namespace == "" {
@@ -724,13 +727,16 @@ func (h *Harness) BuildSession(ctx context.Context, sessionStore sessions.Store,
 	return session, nil
 }
 
-// EnsureSystemPrompt seeds a new session with the system prompt. It is a
-// no-op for resumed sessions that already have history.
+// EnsureSystemPrompt seeds a new session with the configured system prompt.
+// It is a no-op for resumed sessions that already have history.
 func (h *Harness) EnsureSystemPrompt(ctx context.Context, session *Session) error {
 	if len(session.messages) > 0 {
 		return nil
 	}
-	prompt := systemPrompt
+	if h.opts.SystemPrompt == "" {
+		return fmt.Errorf("SystemPrompt is not configured")
+	}
+	prompt := h.opts.SystemPrompt
 	return session.AddMessages(ctx, llm.Message{Role: "system", Content: &prompt})
 }
 

@@ -5485,3 +5485,146 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
 }
+
+func TestReconcileNamespaceTerminatingRequeue(t *testing.T) {
+	testCases := []struct {
+		name      string
+		mutate    func(*sandboxv1beta1.Sandbox)
+		setupObjs func(*sandboxv1beta1.Sandbox) []runtime.Object
+		failObj   func(client.Object) bool
+	}{
+		{
+			name: "pod creation in terminating namespace requeues without error",
+			failObj: func(obj client.Object) bool {
+				_, isPod := obj.(*corev1.Pod)
+				return isPod
+			},
+		},
+		{
+			name: "pvc creation in terminating namespace requeues without error",
+			mutate: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					{
+						EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						},
+					},
+				}
+			},
+			failObj: func(obj client.Object) bool {
+				_, isPVC := obj.(*corev1.PersistentVolumeClaim)
+				return isPVC
+			},
+		},
+		{
+			name: "service creation in terminating namespace requeues without error",
+			mutate: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.Service = new(true)
+			},
+			setupObjs: func(sb *sandboxv1beta1.Sandbox) []runtime.Object {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            sb.Name,
+						Namespace:       sb.Namespace,
+						OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sb.Name)},
+						Labels:          map[string]string{sandboxLabel: NameHash(sb.Name)},
+					},
+				}
+				return []runtime.Object{pod}
+			},
+			failObj: func(obj client.Object) bool {
+				_, isSvc := obj.(*corev1.Service)
+				return isSvc
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "ns-term-sb",
+					Namespace:  "terminating-ns",
+					UID:        sandboxUID,
+					Generation: 1,
+				},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						PodTemplate: sandboxv1beta1.PodTemplate{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test-container"}},
+							},
+						},
+					},
+				},
+			}
+			if tc.mutate != nil {
+				tc.mutate(sb)
+			}
+
+			var initialObjs []runtime.Object
+			initialObjs = append(initialObjs, sb)
+			if tc.setupObjs != nil {
+				initialObjs = append(initialObjs, tc.setupObjs(sb)...)
+			}
+
+			fc := interceptor.NewClient(newFakeClient(initialObjs...), interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if tc.failObj(obj) {
+						return newNamespaceTerminatingError(obj.GetNamespace())
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			})
+
+			r := &SandboxReconciler{
+				Client: fc,
+				Scheme: Scheme,
+				Tracer: asmetrics.NewNoOp(),
+			}
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: sb.Namespace}}
+			result, err := r.Reconcile(t.Context(), req)
+			require.NoError(t, err, "reconcile must not return an error when namespace is terminating")
+			assert.Equal(t, ctrl.Result{RequeueAfter: namespaceTerminatingRequeue}, result)
+		})
+	}
+}
+
+func TestReconcileNonTerminatingErrorPropagates(t *testing.T) {
+	sb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "err-sb",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container"}},
+					},
+				},
+			},
+		},
+	}
+	fc := interceptor.NewClient(newFakeClient(sb), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod {
+				return k8serrors.NewInternalError(errors.New("internal server error"))
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sb.Name, Namespace: sb.Namespace}}
+	_, err := r.Reconcile(t.Context(), req)
+	require.Error(t, err, "non-terminating error must be returned to trigger retry")
+	assert.False(t, isNamespaceTerminatingError(err))
+}

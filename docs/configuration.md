@@ -2,6 +2,8 @@
 
 The `agent-sandbox-controller` supports several command-line flags to tune performance and scalability under high load or in large clusters.
 
+For the benchmark data and sizing rationale behind these settings — including burst vs. sustained traffic profiles — see [Performance Tuning](performance-tuning.md).
+
 ## Concurrency Settings
 
 * `--sandbox-concurrent-workers` (default: 100): The maximum number of concurrent reconciles for the Sandbox controller.
@@ -22,7 +24,7 @@ The `agent-sandbox-controller` supports several command-line flags to tune perfo
 ## Warm Pool Replenishment Shaping
 
 * `--sandbox-warm-pool-max-refill-rate` (default: `0`, unpaced): Max rate (sandboxes/second, per pool) at which the SandboxWarmPool controller creates replacement sandboxes, pacing replenishment via a token bucket into a smooth stream instead of full-deficit bursts that flood the write path and compete with claim adoption. `0` (default) leaves refill unpaced (whole deficit per reconcile).
-* `--sandbox-warm-pool-replenish-delay` (default: `0`): How long the SandboxWarmPool controller defers creating replacement sandboxes after pool members drop out of the pool (e.g. a burst of SandboxClaims adopting warm sandboxes), so the burst gets API server priority. The hold re-arms while members keep dropping. `0` (default) replenishes immediately.
+* `--sandbox-warm-pool-replenish-delay` (default: `0`): How long the SandboxWarmPool controller defers creating replacement sandboxes after pool members drop out of the pool (e.g. a burst of SandboxClaims adopting warm sandboxes), so the burst gets API server priority. The hold re-arms while members keep dropping. `0` (default) replenishes immediately. Caution: while refill is deferred, a failed claim create can leave the pool drained — see the fragility warning in [Performance Tuning](performance-tuning.md#warm-pool-refill-shaping) before enabling.
 * `--enable-warm-pool-eviction` (default: `true`): Mark pods created by a warm pool as ready-to-evict by default.
 
 ## API Write and Cache Optimization
@@ -112,7 +114,7 @@ patches:
 
 ## High-Throughput & Scale Tuning
 
-When running high sustained claim rates (e.g., 10–20+ claims/second) or managing large warm pools (e.g., 1,000–2,500+ replicas), standard controller deployments can experience API server bottlenecks and warm-pool replenishment stalls:
+When running high sustained claim rates (e.g., 10–20+ claims/second) or managing large warm pools (e.g., 1,000–2,500+ replicas), standard controller deployments can experience API server bottlenecks and warm-pool replenishment stalls. The benchmark evidence behind the recommendations below, plus burst-vs-sustained profile guidance, is in [Performance Tuning](performance-tuning.md). The main bottlenecks and fixes:
 
 1. **Watch Stream Starvation & The Expectations Gate**:
    The `SandboxWarmPool` reconciler gates sandbox creation using an in-flight expectations tracker (`warmPoolExpectations`). When creating replacement sandboxes, it waits for the informer cache to observe all watch `ADD` events before issuing further creates.

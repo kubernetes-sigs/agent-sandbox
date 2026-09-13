@@ -382,9 +382,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			err = errors.Join(err, statusUpdateErr)
 		}
 	}
+
+	// Avoid a retry thundering-herd when we delete a namespace and the pod happens to be deleted before the sandbox.
+	if isNamespaceTerminatingError(err) {
+		return ctrl.Result{RequeueAfter: namespaceTerminatingRequeue}, nil
+	}
+
 	// return errors seen
 	return result, err
 }
+
+// namespaceTerminatingRequeue is how long to wait before re-checking a
+// Sandbox whose namespace is terminating; normally it is gone by then.
+const namespaceTerminatingRequeue = 30 * time.Second
 
 func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) error {
 	// Create a hash from the sandbox.Name and use it as label value

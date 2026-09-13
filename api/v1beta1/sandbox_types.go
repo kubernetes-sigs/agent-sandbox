@@ -362,6 +362,8 @@ type SandboxStatus struct {
 	// This field is populated only while a backing pod exists. It is cleared whenever
 	// the pod is absent, for example when the Sandbox is suspended
 	// (operatingMode: Suspended) or before the pod has been created.
+	// When a suspended Sandbox is resumed, a new pod is created and this field is
+	// repopulated from that pod's status.
 	// +optional
 	PodIPs []string `json:"podIPs,omitempty"`
 

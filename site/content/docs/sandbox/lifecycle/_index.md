@@ -11,6 +11,13 @@ In many agentic workflows, you don't need a sandbox running indefinitely. To pre
 
 While standard sandboxes run until manually deleted, configuring a `shutdownTime` allows you to schedule an exact expiration timestamp. Once this timestamp is reached, the sandbox and its associated resources are automatically garbage-collected by the control plane.
 
+## Default Behavior
+
+If `shutdownTime` is unset, the sandbox has no expiry: it runs until it is explicitly deleted. `shutdownPolicy` defaults to `Retain` and only takes effect once the sandbox expires. On expiry the controller always tears down the underlying Pod and Service; `shutdownPolicy` governs only the `Sandbox` object itself:
+
+- `Retain` (default): the `Sandbox` object is kept after its Pod and Service are torn down. Its live status fields (such as `status.podIPs`) are cleared, and its `Ready` condition is set to `False` with reason `SandboxExpired` so the expiry is observable.
+- `Delete`: the `Sandbox` object is deleted as well, once its underlying resources are removed.
+
 ## Prerequisites
 
 This guide uses `kubectl` directly and is compatible with any Kubernetes environment (KinD, Minikube, Docker Desktop, GKE, etc.).

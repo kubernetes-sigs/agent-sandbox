@@ -64,7 +64,9 @@ type Lifecycle struct {
 	// This time governs the lifecycle of the claim. It is not propagated to the
 	// underlying Sandbox. Instead, the SandboxClaim controller enforces this
 	// expiration by deleting the Sandbox resources when the time is reached.
-	// If this field is omitted or set to nil, the SandboxClaim itself won't expire.
+	// If this field is omitted or set to nil, the SandboxClaim never expires at a
+	// scheduled time and lives until it is explicitly deleted, unless
+	// ttlSecondsAfterFinished expires it after its sandbox has finished.
 	// This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported.
 	// +kubebuilder:validation:Format="date-time"
 	// +optional
@@ -76,7 +78,21 @@ type Lifecycle struct {
 	// +optional
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
-	// shutdownPolicy determines the behavior when the SandboxClaim expires.
+	// shutdownPolicy determines what happens to the SandboxClaim object itself when it
+	// expires (i.e. when shutdownTime is reached, or ttlSecondsAfterFinished elapses
+	// after the sandbox has finished). The underlying Sandbox (and with it the
+	// sandbox's Pod and Service) is released on expiry regardless of this policy;
+	// shutdownPolicy governs only the SandboxClaim object:
+	//   - Retain (default): the SandboxClaim is kept after the underlying Sandbox is
+	//     deleted. Its Ready condition is set to False with reason ClaimExpired so
+	//     the expiry is observable.
+	//   - Delete: the SandboxClaim is deleted when expired, which cascades to the
+	//     underlying Sandbox.
+	//   - DeleteForeground: like Delete, but with foreground cascade deletion so the
+	//     SandboxClaim remains (with a deletionTimestamp) until the underlying
+	//     Sandbox and Pod are fully terminated.
+	// This field has no effect while the SandboxClaim never expires (i.e. while both
+	// shutdownTime and ttlSecondsAfterFinished are unset).
 	// +kubebuilder:default=Retain
 	// +optional
 	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`

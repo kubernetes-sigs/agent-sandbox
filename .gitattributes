@@ -1,0 +1,7 @@
+# mdtoc (used by dev/tools/verify-toc and dev/tools/update-toc) does not
+# understand CRLF line endings: it treats the trailing carriage return as part
+# of a code fence, so fenced code blocks are never closed and headings inside
+# them leak into the generated table of contents. Checking out KEP markdown
+# with LF keeps `make toc-verify` consistent on Windows, where core.autocrlf
+# defaults to true, and matches the Linux/macOS checkouts.
+docs/keps/**/*.md text eol=lf

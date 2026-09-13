@@ -12,14 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Asynchronous filesystem operations for sandbox runtimes."""
+
+import asyncio
 import logging
 import urllib.parse
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, BinaryIO
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
-from k8s_agent_sandbox.files.filesystem import Filesystem
+from k8s_agent_sandbox.files.filesystem import (
+    Filesystem,
+    _multipart_framing,
+    _read_binary_chunk,
+    _validate_binary_stream,
+)
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
+
+
+async def _iter_multipart_body(
+    prefix: bytes,
+    content: BinaryIO,
+    suffix: bytes,
+) -> AsyncIterator[bytes]:
+    yield prefix
+    while chunk := await asyncio.to_thread(_read_binary_chunk, content):
+        yield chunk
+    yield suffix
 
 
 class AsyncFilesystem:
@@ -37,17 +57,23 @@ class AsyncFilesystem:
     @async_trace_span("write")
     async def write(
         self,
-        path: str, content: bytes | str,
+        path: str,
+        content: bytes | str | BinaryIO,
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
-    ):
+    ) -> None:
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        elif isinstance(content, (bytearray, memoryview)):
+            content = bytes(content)
+        elif not isinstance(content, bytes):
+            _validate_binary_stream(content)
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-            span.set_attribute("sandbox.file.size", len(content))
-
-        if isinstance(content, str):
-            content = content.encode("utf-8")
+            if isinstance(content, bytes):
+                span.set_attribute("sandbox.file.size", len(content))
 
         # Use the same hardened sanitizer as the sync twin — rejects
         # empty / bare-'.', embedded NUL and ASCII control characters,
@@ -57,10 +83,22 @@ class AsyncFilesystem:
         # runtime's C layer.
         if not allow_unsafe_paths:
             path = Filesystem._safe_upload_path(path)
-        files_payload = {"file": (path, content)}
-        await self.connector.send_request(
-            "POST", "upload", files=files_payload, timeout=timeout
-        )
+        if isinstance(content, bytes):
+            files_payload = {"file": (path, content)}
+            await self.connector.send_request(
+                "POST", "upload", files=files_payload, timeout=timeout
+            )
+        else:
+            prefix, suffix, content_type = _multipart_framing(path)
+            # This async iterator is one-shot. AsyncSandboxConnector must not
+            # add automatic POST retries, which would replay it as an empty body.
+            await self.connector.send_request(
+                "POST",
+                "upload",
+                content=_iter_multipart_body(prefix, content, suffix),
+                headers={"Content-Type": content_type},
+                timeout=timeout,
+            )
         logging.info(f"File '{path}' uploaded successfully.")
 
     @async_trace_span("read")

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Unit tests for synchronous connection strategies and HTTP transport."""
+
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -327,6 +329,22 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
 
         call_args, call_kwargs = mock_session.request.call_args
         self.assertFalse(call_kwargs.get("allow_redirects", True))
+
+    @patch("k8s_agent_sandbox.connector.requests.request")
+    def test_disable_retries_uses_one_shot_request(self, mock_request):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        strategy = DirectConnectionStrategy(config)
+        connector, mock_session = self._make_connector_with_strategy(strategy, config)
+        mock_request.return_value = self._mock_ok_response()
+
+        connector.send_request(
+            "PUT", "/upload", data=iter([b"payload"]), _disable_retries=True
+        )
+
+        mock_session.request.assert_not_called()
+        _, call_kwargs = mock_request.call_args
+        self.assertNotIn("_disable_retries", call_kwargs)
+        self.assertFalse(call_kwargs["allow_redirects"])
 
     def test_redirect_raises_error(self):
         config = SandboxDirectConnectionConfig(api_url="http://router")

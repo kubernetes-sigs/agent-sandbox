@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import os
 from test.e2e.clients.python.framework.context import TestContext
 
@@ -174,6 +175,22 @@ def run_sdk_tests(sandbox):
     read_content = sandbox.files.read(file_path).decode("utf-8")
     print(f"Read content: '{read_content}'")
     assert read_content == file_content, f"File content mismatch: {read_content}"
+
+    # Exercise the streaming multipart path through the real SDK, Router, and
+    # runtime. Start after a prefix to verify that write() honors the caller's
+    # current file position instead of rewinding the stream.
+    stream_content = b"streamed through the Python SDK"
+    stream = io.BytesIO(b"skip-" + stream_content)
+    stream.seek(len(b"skip-"))
+    stream_path = "streamed.txt"
+    print(f"Streaming content to '{stream_path}'...")
+    sandbox.files.write(stream_path, stream)
+    assert not stream.closed, "write() must not close caller-owned streams"
+
+    streamed_content = sandbox.files.read(stream_path)
+    assert streamed_content == stream_content, (
+        f"Streamed file content mismatch: {streamed_content!r}"
+    )
 
 
 def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_router, sandbox_coldpool):
@@ -390,4 +407,3 @@ def test_python_sdk_volume_claim_templates(
 
     finally:
         client.delete_all()
-

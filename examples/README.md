@@ -36,6 +36,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**n8n-mcp**](./n8n-mcp): An example of connecting n8n workflows to sandboxes through the MCP server integration.
 - [**nono-sandbox**](./nono-sandbox): An example of running nono inside an Agent Sandbox, with fine-grained filesystem isolation, network filtering, credential brokering, and ephemeral per-tool micro-sandboxes.
 - [**nullclaw-sandbox**](./nullclaw-sandbox): An example of running Nullclaw, a minimal AI assistant runtime, inside the Agent Sandbox.
+- [**openclaw-fleet-gke**](./openclaw-fleet-gke): A measured enterprise-fleet blueprint on GKE: sub-second warm claims with late-bound per-employee Filestore workspaces, stable per-employee URLs, two-tier sleep/wake, and rolling updates.
 - [**openclaw-gvisor-sandbox**](./openclaw-gvisor-sandbox): A production-shaped, gVisor-isolated OpenClaw sandbox using the template/claim pattern and persistent storage.
 - [**openclaw-kata-aks-sandbox**](./openclaw-kata-aks-sandbox): An OpenClaw sandbox isolated by Kata Containers on AKS, so the agent runtime gets its own VM and guest kernel.
 - [**pi-code-agent**](./pi-code-agent): An example of running the pi code agent inside a sandbox.

@@ -150,7 +150,7 @@ sandboxd (runtime daemon)
 
 `sandboxd` can be the Sandbox's dedicated runtime container or can be injected into an existing application image. A separate sidecar is also possible, but commands run inside that sidecar and cannot use binaries from neighboring containers; containers share the pod network and mounted volumes, not their root filesystems.
 
-Both ports bind to `0.0.0.0` by default, so clients with pod-network access can reach them through the Pod IP or a Service. Deployments must provide pod isolation and NetworkPolicy; use `--listen-host=127.0.0.1` when loopback-only access is required. The current `sandbox-router` is HTTP/1.1-only and cannot carry the gRPC `ProcessService`, so it is not a complete transport for `sandboxd`.
+Both ports bind to `0.0.0.0` by default, so clients with pod-network access can reach them through the Pod IP or a Service. Deployments must provide pod isolation and NetworkPolicy; use `--listen-host=127.0.0.1` when loopback-only access is required. The current `sandbox-router` accepts HTTP/2 client connections, but disables HTTP/2 on its upstream connections and therefore cannot carry the gRPC `ProcessService`, so it is not a complete transport for `sandboxd`.
 
 Workload-local or custom clients may use environment variables such as the following to configure their own endpoint discovery:
 

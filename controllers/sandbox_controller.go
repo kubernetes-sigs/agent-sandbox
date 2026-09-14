@@ -1262,12 +1262,16 @@ func (r *SandboxReconciler) clearIdleAnnotations(ctx context.Context, sandbox *s
 	if !hasSuspended && !hasExpired {
 		return nil
 	}
-	patch := client.MergeFrom(sandbox.DeepCopy())
-	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
-	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleExpiredAnnotation)
-	if err := r.Patch(ctx, sandbox, patch); err != nil {
+	patched := sandbox.DeepCopy()
+	patch := client.MergeFrom(patched.DeepCopy())
+	delete(patched.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
+	delete(patched.Annotations, sandboxv1beta1.SandboxIdleExpiredAnnotation)
+	if err := r.Patch(ctx, patched, patch); err != nil {
 		return fmt.Errorf("failed to clear idle annotations: %w", err)
 	}
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
+	delete(sandbox.Annotations, sandboxv1beta1.SandboxIdleExpiredAnnotation)
+	sandbox.ResourceVersion = patched.ResourceVersion
 	return nil
 }
 

@@ -5861,3 +5861,159 @@ func TestMinPositiveDuration(t *testing.T) {
 	assert.Equal(t, 10*time.Second, minPositiveDuration(0, 10*time.Second))
 	assert.Equal(t, 5*time.Second, minPositiveDuration(5*time.Second, 0))
 }
+
+func TestReconcileResumePreservesStatusAndClearsIdleAnnotations(t *testing.T) {
+	staleActivity := metav1.NewTime(time.Now().Add(-time.Hour))
+	lastSuspended := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "resume-idle-sandbox",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+			Annotations: map[string]string{
+				sandboxv1beta1.SandboxIdleSuspendedAnnotation: "true",
+			},
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "busybox"}},
+				}},
+			},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{ActiveTTLSeconds: 60},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			LastActivityTime: &staleActivity,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: lastSuspended,
+				},
+				{
+					Type:   string(sandboxv1beta1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+					Reason: sandboxv1beta1.SandboxReasonIdleSuspended,
+				},
+			},
+		},
+	}
+
+	r := &SandboxReconciler{
+		Client:        newFakeClient(sandbox),
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeRunning, live.Spec.OperatingMode)
+	assert.NotContains(t, live.Annotations, sandboxv1beta1.SandboxIdleSuspendedAnnotation)
+	assert.NotContains(t, live.Annotations, sandboxv1beta1.SandboxIdleExpiredAnnotation)
+	require.NotNil(t, live.Status.LastActivityTime)
+	assert.True(t, live.Status.LastActivityTime.After(staleActivity.Time))
+
+	suspended := meta.FindStatusCondition(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended))
+	require.NotNil(t, suspended)
+	assert.Equal(t, metav1.ConditionFalse, suspended.Status)
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, &corev1.Pod{}))
+}
+
+func TestReconcileIdleSuspendPersistsStatusBeforeSpecPatch(t *testing.T) {
+	staleActivity := metav1.NewTime(time.Now().Add(-time.Hour))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "suspend-idle-sandbox",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "busybox"}},
+				}},
+			},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{ActiveTTLSeconds: 60},
+		},
+		Status: sandboxv1beta1.SandboxStatus{LastActivityTime: &staleActivity},
+	}
+
+	r := &SandboxReconciler{
+		Client:        newFakeClient(sandbox),
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	assert.Equal(t, sandboxv1beta1.SandboxOperatingModeSuspended, live.Spec.OperatingMode)
+	assert.Equal(t, "true", live.Annotations[sandboxv1beta1.SandboxIdleSuspendedAnnotation])
+	require.NotNil(t, meta.FindStatusCondition(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)))
+	assert.NotNil(t, meta.FindStatusCondition(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionSuspended)))
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, &corev1.Pod{}), "the first suspend pass must persist status before deleting the pod")
+}
+
+func TestReconcileIdleRetainPersistsAndStaysRetained(t *testing.T) {
+	suspendedTTL := int32(60)
+	lastSuspended := metav1.NewTime(time.Now().Add(-time.Hour))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "retain-idle-sandbox",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test-container", Image: "busybox"}},
+				}},
+			},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
+			IdleLifecycle: &sandboxv1beta1.IdleLifecyclePolicy{
+				ActiveTTLSeconds:          60,
+				SuspendedTTLSeconds:       &suspendedTTL,
+				SuspendedExpirationPolicy: ptr.To(sandboxv1beta1.SuspendedExpirationPolicyRetain),
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionSuspended),
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: lastSuspended,
+		}}},
+	}
+
+	r := &SandboxReconciler{
+		Client:        newFakeClient(sandbox),
+		Scheme:        Scheme,
+		Tracer:        asmetrics.NewNoOp(),
+		ClusterDomain: "cluster.local",
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, live))
+	assert.Equal(t, "true", live.Annotations[sandboxv1beta1.SandboxIdleExpiredAnnotation])
+	ready := meta.FindStatusCondition(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	assert.Equal(t, sandboxv1beta1.SandboxReasonIdleRetained, ready.Reason)
+}

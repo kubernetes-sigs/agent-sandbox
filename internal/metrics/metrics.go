@@ -18,7 +18,6 @@ package metrics
 import (
 	"context"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -86,10 +85,6 @@ const (
 	// CreationLatencyRecordedAnnotation marks a SandboxClaim whose startup/creation latency
 	// has already been recorded, preventing double-recording (e.g. after a suspend/resume).
 	CreationLatencyRecordedAnnotation = "agents.x-k8s.io/creation-latency-recorded"
-
-	// StageLatencyRecordedAnnotation holds a comma-separated set of stage names whose
-	// latency has already been recorded for a Sandbox, preventing double-recording.
-	StageLatencyRecordedAnnotation = "agents.x-k8s.io/stage-latency-recorded"
 )
 
 // creationLatencyBuckets are shared by SandboxCreationLatency and SandboxStageLatency.
@@ -396,15 +391,11 @@ func LabelsFromSandbox(sandbox *sandboxv1beta1.Sandbox) SandboxMetricLabels {
 	return labels
 }
 
-// ParseStageLatencyRecorded returns the set of stages already recorded from the annotation value.
-// Unknown tokens are ignored so they cannot collide with allowlisted stage names.
-func ParseStageLatencyRecorded(value string) map[string]struct{} {
+// RecordedStageSet returns the set of allowlisted stages already recorded.
+// Unknown names are ignored so they cannot collide with allowlisted stage names.
+func RecordedStageSet(stages []string) map[string]struct{} {
 	recorded := make(map[string]struct{})
-	if value == "" {
-		return recorded
-	}
-	for stage := range strings.SplitSeq(value, ",") {
-		stage = strings.TrimSpace(stage)
+	for _, stage := range stages {
 		switch stage {
 		case StagePodCreated, StagePodScheduled, StagePodRunning, StagePodReady, StagePVCBound, StageServiceReady:
 			recorded[stage] = struct{}{}
@@ -413,17 +404,17 @@ func ParseStageLatencyRecorded(value string) map[string]struct{} {
 	return recorded
 }
 
-// FormatStageLatencyRecorded serializes recorded stage names as a stable comma-separated list.
-func FormatStageLatencyRecorded(recorded map[string]struct{}) string {
+// SortedRecordedStages serializes recorded stage names as a stable list.
+func SortedRecordedStages(recorded map[string]struct{}) []string {
 	if len(recorded) == 0 {
-		return ""
+		return nil
 	}
 	stages := make([]string, 0, len(recorded))
 	for stage := range recorded {
 		stages = append(stages, stage)
 	}
 	slices.Sort(stages)
-	return strings.Join(stages, ",")
+	return stages
 }
 
 // RecordSandboxClaimCreation increments the total count of created sandbox claims.

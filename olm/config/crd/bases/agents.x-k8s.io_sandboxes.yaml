@@ -4004,6 +4004,25 @@ spec:
                   - type
                   type: object
                 type: array
+              lifecycle:
+                properties:
+                  firstObservedTime:
+                    format: date-time
+                    type: string
+                  recordedStages:
+                    items:
+                      enum:
+                      - pod_created
+                      - pod_scheduled
+                      - pod_running
+                      - pod_ready
+                      - pvc_bound
+                      - service_ready
+                      type: string
+                    maxItems: 6
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
               nodeName:
                 type: string
               podIPs:

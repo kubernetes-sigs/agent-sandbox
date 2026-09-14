@@ -1468,6 +1468,7 @@ func TestReconcile(t *testing.T) {
 				require.NoError(t, err)
 				opts := []cmp.Option{
 					cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime"),
+					cmpopts.IgnoreFields(sandboxv1beta1.SandboxStatus{}, "Lifecycle"),
 				}
 				if diff := cmp.Diff(tc.wantStatus, liveSandbox.Status, opts...); diff != "" {
 					t.Fatalf("unexpected sandbox status (-want,+got):\n%s", diff)
@@ -4383,7 +4384,8 @@ func TestReconcileChildResourcesSuspendedForeignPodDoesNotLeakIPOrNodeName(t *te
 	}
 
 	// Refusing to delete a foreign pod is a steady state, not an error.
-	require.NoError(t, r.reconcileChildResources(t.Context(), sandboxObj, nil))
+	_, err := r.reconcileChildResources(t.Context(), sandboxObj, nil)
+	require.NoError(t, err)
 
 	assert.Nil(t, sandboxObj.Status.PodIPs, "foreign pod IPs must NOT leak into sandbox status")
 	assert.Empty(t, sandboxObj.Status.NodeName, "foreign pod NodeName must NOT leak into sandbox status")
@@ -5122,6 +5124,18 @@ func TestReconcileCoalescesNodeNameStatusWrite(t *testing.T) {
 	assert.Equal(t, "node-2", live.Status.NodeName, "node changes on a Ready sandbox must be written immediately")
 }
 
+func lifecycleStatusWithObservedAt(t time.Time) *sandboxv1beta1.SandboxLifecycleStatus {
+	mt := metav1.NewTime(t)
+	return &sandboxv1beta1.SandboxLifecycleStatus{FirstObservedTime: &mt}
+}
+
+func recordedStages(sb *sandboxv1beta1.Sandbox) map[string]struct{} {
+	if sb.Status.Lifecycle == nil {
+		return map[string]struct{}{}
+	}
+	return asmetrics.RecordedStageSet(sb.Status.Lifecycle.RecordedStages)
+}
+
 func TestRecordStageLatenciesOneShot(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
@@ -5131,9 +5145,6 @@ func TestRecordStageLatenciesOneShot(t *testing.T) {
 			Name:      "stage-sb",
 			Namespace: "default",
 			UID:       sandboxUID,
-			Annotations: map[string]string{
-				asmetrics.ObservabilityAnnotation: observedAt.Format(time.RFC3339Nano),
-			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -5144,6 +5155,9 @@ func TestRecordStageLatenciesOneShot(t *testing.T) {
 					},
 				},
 			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
 		},
 	}
 
@@ -5180,13 +5194,14 @@ func TestRecordStageLatenciesOneShot(t *testing.T) {
 	c := newFakeClient(sandbox, pod, svc)
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
 
-	r.recordStageLatencies(context.Background(), sandbox, pod, svc)
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, svc)
+	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency),
+		"metrics must not emit before status persist")
+	emitStageLatencies(context.Background(), sandbox, pending)
 	require.Equal(t, uint64(5), histogramSampleCount(t, asmetrics.SandboxStageLatency),
 		"expected pod_created, pod_scheduled, pod_running, pod_ready, service_ready")
 
-	updated := &sandboxv1beta1.Sandbox{}
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, updated))
-	recorded := asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation])
+	recorded := recordedStages(sandbox)
 	require.Contains(t, recorded, asmetrics.StagePodCreated)
 	require.Contains(t, recorded, asmetrics.StagePodScheduled)
 	require.Contains(t, recorded, asmetrics.StagePodRunning)
@@ -5195,8 +5210,8 @@ func TestRecordStageLatenciesOneShot(t *testing.T) {
 	require.NotContains(t, recorded, asmetrics.StagePVCBound)
 
 	// Second call must not double-count observations (CollectAndCount only checks series).
-	sandbox.Annotations = updated.Annotations
-	r.recordStageLatencies(context.Background(), sandbox, pod, svc)
+	pending = r.prepareStageLatencies(context.Background(), sandbox, pod, svc)
+	emitStageLatencies(context.Background(), sandbox, pending)
 	require.Equal(t, uint64(5), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
@@ -5211,9 +5226,6 @@ func TestRecordStageLatenciesSkipsPreObservationStages(t *testing.T) {
 			Name:      "warm-sb",
 			Namespace: "default",
 			UID:       sandboxUID,
-			Annotations: map[string]string{
-				asmetrics.ObservabilityAnnotation: observedAt.Format(time.RFC3339Nano),
-			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -5224,6 +5236,9 @@ func TestRecordStageLatenciesSkipsPreObservationStages(t *testing.T) {
 					},
 				},
 			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
 		},
 	}
 	ltt := metav1.NewTime(readyAt)
@@ -5259,13 +5274,12 @@ func TestRecordStageLatenciesSkipsPreObservationStages(t *testing.T) {
 	c := newFakeClient(sandbox, pod, svc)
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
 
-	r.recordStageLatencies(context.Background(), sandbox, pod, svc)
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, svc)
+	emitStageLatencies(context.Background(), sandbox, pending)
 	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxStageLatency),
 		"pre-observation stages must not emit near-zero samples")
 
-	updated := &sandboxv1beta1.Sandbox{}
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, updated))
-	recorded := asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation])
+	recorded := recordedStages(sandbox)
 	require.Contains(t, recorded, asmetrics.StagePodCreated)
 	require.Contains(t, recorded, asmetrics.StagePodReady)
 	require.Contains(t, recorded, asmetrics.StageServiceReady)
@@ -5280,9 +5294,6 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 			Name:      "pvc-sb",
 			Namespace: "default",
 			UID:       sandboxUID,
-			Annotations: map[string]string{
-				asmetrics.ObservabilityAnnotation: observedAt.Format(time.RFC3339Nano),
-			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -5296,6 +5307,9 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 					},
 				},
 			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
 		},
 	}
 	// CreationTimestamp is near t0; if used as bind time, latency would be ~50ms.
@@ -5313,20 +5327,19 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 	c := newFakeClient(sandbox, pvc)
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
 
-	r.recordStageLatencies(context.Background(), sandbox, nil, nil)
+	pending := r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
 
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
-	updated := &sandboxv1beta1.Sandbox{}
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, updated))
-	require.Contains(t, asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation]), asmetrics.StagePVCBound)
+	require.Contains(t, recordedStages(sandbox), asmetrics.StagePVCBound)
 
 	// Second call must skip PVC Gets (stage already recorded) and not double-count.
-	sandbox.Annotations = updated.Annotations
-	r.recordStageLatencies(context.Background(), sandbox, nil, nil)
+	pending = r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
-func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
+func TestReconcileStampsFirstObservedTimeAndRecordsPodCreated(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
 	sandbox := &sandboxv1beta1.Sandbox{
@@ -5335,10 +5348,6 @@ func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
 			Namespace:  "default",
 			UID:        sandboxUID,
 			Generation: 1,
-			// Nonempty but unparseable: ensure must treat as missing and replace.
-			Annotations: map[string]string{
-				asmetrics.ObservabilityAnnotation: "not-a-timestamp",
-			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -5361,14 +5370,14 @@ func TestReconcileStampsObservabilityAndRecordsPodCreated(t *testing.T) {
 
 	updated := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
-	require.NotEqual(t, "not-a-timestamp", updated.Annotations[asmetrics.ObservabilityAnnotation])
-	_, err = time.Parse(time.RFC3339Nano, updated.Annotations[asmetrics.ObservabilityAnnotation])
-	require.NoError(t, err, "invalid observation annotation must be replaced with RFC3339Nano")
-	require.Contains(t, asmetrics.ParseStageLatencyRecorded(updated.Annotations[asmetrics.StageLatencyRecordedAnnotation]), asmetrics.StagePodCreated)
+	require.NotNil(t, updated.Status.Lifecycle)
+	require.NotNil(t, updated.Status.Lifecycle.FirstObservedTime)
+	require.False(t, updated.Status.Lifecycle.FirstObservedTime.IsZero())
+	require.Contains(t, recordedStages(updated), asmetrics.StagePodCreated)
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
-func TestRecordStageLatenciesSkipsMissingObservabilityAnnotation(t *testing.T) {
+func TestPrepareStageLatenciesSkipsMissingFirstObservedTime(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
 	sandbox := &sandboxv1beta1.Sandbox{
@@ -5401,16 +5410,14 @@ func TestRecordStageLatenciesSkipsMissingObservabilityAnnotation(t *testing.T) {
 	c := newFakeClient(sandbox, pod)
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
 
-	r.recordStageLatencies(context.Background(), sandbox, pod, nil)
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
 
-	updated := &sandboxv1beta1.Sandbox{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
-	require.Empty(t, updated.Annotations[asmetrics.ObservabilityAnnotation])
-	require.Empty(t, updated.Annotations[asmetrics.StageLatencyRecordedAnnotation])
+	require.Empty(t, recordedStages(sandbox))
 	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
-func TestRecordStageLatenciesPatchFailureDoesNotEmitMetrics(t *testing.T) {
+func TestPrepareStageLatenciesDoesNotEmitUntilPersist(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
 	observedAt := time.Now().Add(-2 * time.Second).UTC()
@@ -5419,9 +5426,6 @@ func TestRecordStageLatenciesPatchFailureDoesNotEmitMetrics(t *testing.T) {
 			Name:      "fail-sb",
 			Namespace: "default",
 			UID:       sandboxUID,
-			Annotations: map[string]string{
-				asmetrics.ObservabilityAnnotation: observedAt.Format(time.RFC3339Nano),
-			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -5431,6 +5435,9 @@ func TestRecordStageLatenciesPatchFailureDoesNotEmitMetrics(t *testing.T) {
 					},
 				},
 			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
 		},
 	}
 	pod := &corev1.Pod{
@@ -5444,48 +5451,105 @@ func TestRecordStageLatenciesPatchFailureDoesNotEmitMetrics(t *testing.T) {
 		},
 	}
 
-	// Client without the Sandbox object: Patch will fail.
-	c := newFakeClient(pod)
+	c := newFakeClient(sandbox, pod)
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
 
-	r.recordStageLatencies(context.Background(), sandbox, pod, nil)
+	pending := r.prepareStageLatencies(context.Background(), sandbox, pod, nil)
+	require.NotEmpty(t, pending)
 	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxStageLatency),
-		"metrics must not emit when annotation patch fails")
+		"metrics must not emit until lifecycle status is persisted")
 }
 
-func TestEnsureSandboxObservabilityAnnotationsPatchFailureIsBestEffort(t *testing.T) {
-	sandbox := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "obs-fail-sb",
-			Namespace: "default",
-			UID:       sandboxUID,
-		},
-		Spec: sandboxv1beta1.SandboxSpec{
-			OperatingMode: sandboxv1beta1.SandboxOperatingModeSuspended,
-			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate: sandboxv1beta1.PodTemplate{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+func TestSandboxLifecycleStatusStamping(t *testing.T) {
+	sandboxName := "sandbox-observe"
+	sandboxNs := "default"
+
+	t.Run("firstObservedTime set on first reconcile", func(t *testing.T) {
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       sandboxName,
+				Namespace:  sandboxNs,
+				UID:        sandboxUID,
+				Generation: 1,
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
 					},
 				},
 			},
-		},
-		Status: sandboxv1beta1.SandboxStatus{
-			ServiceFQDN: "keep-me.svc.cluster.local",
-		},
-	}
-	statusBefore := sandbox.Status.DeepCopy()
-	// Client without the Sandbox: Patch fails. Must not panic or block callers.
-	c := newFakeClient()
-	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
-	r.ensureSandboxObservabilityAnnotations(context.Background(), sandbox)
+		}
 
-	// Best-effort: local annotation mutate is kept for this reconcile; status is restored.
-	require.NotEmpty(t, sandbox.Annotations[asmetrics.ObservabilityAnnotation])
-	require.Equal(t, *statusBefore, sandbox.Status)
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+
+		var got sandboxv1beta1.Sandbox
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, &got))
+		require.NotNil(t, got.Status.Lifecycle)
+		require.NotNil(t, got.Status.Lifecycle.FirstObservedTime, "firstObservedTime should be set after first reconcile")
+	})
+
+	t.Run("firstObservedTime not overwritten on subsequent reconcile", func(t *testing.T) {
+		existingTime := metav1.NewTime(time.Now().Add(-1 * time.Hour).UTC())
+		sb := &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       sandboxName,
+				Namespace:  sandboxNs,
+				UID:        sandboxUID,
+				Generation: 1,
+			},
+			Spec: sandboxv1beta1.SandboxSpec{
+				SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container"}},
+						},
+					},
+				},
+			},
+			Status: sandboxv1beta1.SandboxStatus{
+				Lifecycle: &sandboxv1beta1.SandboxLifecycleStatus{
+					FirstObservedTime: &existingTime,
+				},
+			},
+		}
+
+		r := SandboxReconciler{
+			Client:        newFakeClient(sb),
+			Scheme:        Scheme,
+			Tracer:        asmetrics.NewNoOp(),
+			ClusterDomain: "cluster.local",
+		}
+
+		_, err := r.Reconcile(t.Context(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: sandboxNs},
+		})
+		require.NoError(t, err)
+
+		var got sandboxv1beta1.Sandbox
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, &got))
+		require.NotNil(t, got.Status.Lifecycle)
+		require.NotNil(t, got.Status.Lifecycle.FirstObservedTime)
+		assert.Equal(t,
+			existingTime.UTC().Format(time.RFC3339),
+			got.Status.Lifecycle.FirstObservedTime.UTC().Format(time.RFC3339),
+			"firstObservedTime should not be overwritten on subsequent reconcile")
+	})
 }
 
-func TestReconcileSuspendedStampsObservabilityViaEnsure(t *testing.T) {
+func TestReconcileSuspendedStampsFirstObservedTime(t *testing.T) {
 	asmetrics.SandboxStageLatency.Reset()
 
 	sandbox := &sandboxv1beta1.Sandbox{
@@ -5516,9 +5580,10 @@ func TestReconcileSuspendedStampsObservabilityViaEnsure(t *testing.T) {
 
 	updated := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(sandbox), updated))
-	require.NotEmpty(t, updated.Annotations[asmetrics.ObservabilityAnnotation],
-		"Suspended sandboxes stamp ObservabilityAnnotation in ensureSandboxObservabilityAnnotations")
-	require.Empty(t, updated.Annotations[asmetrics.StageLatencyRecordedAnnotation],
+	require.NotNil(t, updated.Status.Lifecycle)
+	require.NotNil(t, updated.Status.Lifecycle.FirstObservedTime,
+		"Suspended sandboxes stamp firstObservedTime")
+	require.Empty(t, updated.Status.Lifecycle.RecordedStages,
 		"stage latency is skipped while Suspended")
 	require.Equal(t, 0, testutil.CollectAndCount(asmetrics.SandboxStageLatency))
 }
@@ -5534,9 +5599,6 @@ func TestReconcileChildResourcesStageLatencyDoesNotBlockReady(t *testing.T) {
 			Namespace:  "default",
 			UID:        sandboxUID,
 			Generation: 1,
-			Annotations: map[string]string{
-				asmetrics.ObservabilityAnnotation: observedAt.Format(time.RFC3339Nano),
-			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
 			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
@@ -5547,6 +5609,9 @@ func TestReconcileChildResourcesStageLatencyDoesNotBlockReady(t *testing.T) {
 					},
 				},
 			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
 		},
 	}
 	pod := &corev1.Pod{
@@ -5583,7 +5648,7 @@ func TestReconcileChildResourcesStageLatencyDoesNotBlockReady(t *testing.T) {
 	c := newFakeClient(sandbox, pod, svc)
 	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
 
-	err := r.reconcileChildResources(context.Background(), sandbox, nil)
+	_, err := r.reconcileChildResources(context.Background(), sandbox, nil)
 	require.NoError(t, err, "stage-latency bookkeeping must not fail reconcile")
 
 	ready := false
@@ -5593,7 +5658,7 @@ func TestReconcileChildResourcesStageLatencyDoesNotBlockReady(t *testing.T) {
 			require.NotEqual(t, "ReconcilerError", cond.Reason)
 		}
 	}
-	require.True(t, ready, "healthy sandbox must remain Ready when only telemetry patches are involved")
+	require.True(t, ready, "healthy sandbox must remain Ready when only telemetry bookkeeping is involved")
 }
 
 func TestRecordChildReconcileErrorOnOwnershipConflict(t *testing.T) {

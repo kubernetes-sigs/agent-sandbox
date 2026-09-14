@@ -265,12 +265,16 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize observability annotations for active resources missing them.
-	// Best-effort: annotation patch failures must not stall reconcile.
-	r.ensureSandboxObservabilityAnnotations(ctx, sandbox)
-
 	oldStatus := sandbox.Status.DeepCopy()
+
+	// Initialize the optional trace-context annotation. Best-effort: patch
+	// failures must not stall reconcile.
+	r.ensureSandboxTraceContext(ctx, sandbox)
+
+	ensureSandboxFirstObservedTime(sandbox)
+
 	var err error
+	var pendingStageLatencies []pendingStageLatency
 	sandboxDeleted := false
 	result := ctrl.Result{}
 
@@ -299,7 +303,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				window: min(r.WriteBehindWindow, podMetadataFlushBound),
 			}
 		}
-		err = r.reconcileChildResources(ctx, sandbox, wd)
+		pendingStageLatencies, err = r.reconcileChildResources(ctx, sandbox, wd)
 		expiredAfterReconcile, requeueAfter := checkSandboxExpiry(sandbox, time.Now())
 		result.RequeueAfter = requeueAfter
 		if expiredAfterReconcile {
@@ -328,17 +332,20 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
 			// Surface update error
 			err = errors.Join(err, statusUpdateErr)
+		} else {
+			emitStageLatencies(ctx, sandbox, pendingStageLatencies)
 		}
 	}
 	// return errors seen
 	return result, err
 }
 
-func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) error {
+func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, wd *writeDeferral) ([]pendingStageLatency, error) {
 	// Create a hash from the sandbox.Name and use it as label value
 	nameHash := NameHash(sandbox.Name)
 
 	var allErrors error
+	var pending []pendingStageLatency
 
 	// Reconcile PVCs from volumeClaimTemplates
 	err := r.reconcilePVCs(ctx, sandbox, nameHash)
@@ -370,10 +377,10 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	svc, err := r.reconcileService(ctx, sandbox, nameHash)
 	allErrors = errors.Join(allErrors, err)
 
-	// Record Ready-path stage latencies once per stage (skip while suspending).
-	// Best-effort: annotation patch failures must not affect Ready.
+	// Prepare Ready-path stage latencies once per stage (skip while suspending).
+	// Samples are emitted only after the lifecycle status persist succeeds.
 	if sandbox.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
-		r.recordStageLatencies(ctx, sandbox, pod, svc)
+		pending = r.prepareStageLatencies(ctx, sandbox, pod, svc)
 	}
 
 	// compute and set overall conditions
@@ -399,7 +406,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		}
 	}
 
-	return allErrors
+	return pending, allErrors
 }
 
 func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, err error, svc *corev1.Service, pod *corev1.Pod, podErr error) []metav1.Condition {
@@ -1087,11 +1094,16 @@ func (r *SandboxReconciler) clearPodNameAnnotation(ctx context.Context, sandbox 
 		return nil
 	}
 	logger := log.FromContext(ctx)
+	// Metadata patches return the stored object and can clobber in-memory status
+	// that has not been persisted yet (e.g. firstObservedTime).
+	statusCopy := sandbox.Status.DeepCopy()
 	patch := client.MergeFrom(sandbox.DeepCopy())
 	delete(sandbox.Annotations, sandboxv1beta1.SandboxPodNameAnnotation)
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
+		sandbox.Status = *statusCopy
 		return fmt.Errorf("failed to clear pod name annotation: %w", err)
 	}
+	sandbox.Status = *statusCopy
 	logger.Info("Removed pod name annotation from sandbox", "Sandbox.Name", sandbox.Name)
 	return nil
 }
@@ -1207,15 +1219,18 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			return nil
 		}
 
+		statusCopy := sandbox.Status.DeepCopy()
 		patch := client.MergeFrom(sandbox.DeepCopy())
 		if sandbox.Annotations == nil {
 			sandbox.Annotations = make(map[string]string)
 		}
 		sandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] = podName
 		if err := r.Patch(ctx, sandbox, patch); err != nil {
+			sandbox.Status = *statusCopy
 			r.recordChildReconcileError(sandbox, asmetrics.ResourcePod, asmetrics.ReasonOther, err)
 			return fmt.Errorf("failed to set pod name annotation: %w", err)
 		}
+		sandbox.Status = *statusCopy
 
 		return nil
 	}
@@ -1737,9 +1752,11 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	// If we reach here, sandbox is not deleted
 	// Only update "expired" status if cleanup was successful
 	if allErrors == nil {
-		// Drop live-resource status while retaining terminal conditions.
+		// Drop live-resource status while retaining terminal conditions and
+		// controller-observed lifecycle bookkeeping.
 		conditions := sandbox.Status.Conditions
-		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
+		lifecycle := sandbox.Status.Lifecycle
+		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions, Lifecycle: lifecycle}
 		// Update status to mark as expired
 		meta.SetStatusCondition(&sandbox.Status.Conditions, metav1.Condition{
 			Type:               string(sandboxv1beta1.SandboxConditionReady),
@@ -1833,17 +1850,13 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		Complete(r)
 }
 
-// ensureSandboxObservabilityAnnotations stamps optional trace context and
-// controller-first-observed-at before child reconciliation.
+// ensureSandboxTraceContext stamps the optional W3C trace-context annotation.
 // Annotation persistence is best-effort: patch failures are logged and do not
 // fail reconcile.
-func (r *SandboxReconciler) ensureSandboxObservabilityAnnotations(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
+func (r *SandboxReconciler) ensureSandboxTraceContext(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
 	logger := log.FromContext(ctx)
 	tc := r.Tracer.GetTraceContext(ctx)
-	_, hasObservability := sandboxObservedAt(sandbox)
-	needObservability := !hasObservability
-	needTraceContext := tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "")
-	if !needObservability && !needTraceContext {
+	if tc == "" || (sandbox.Annotations != nil && sandbox.Annotations[asmetrics.TraceContextAnnotation] != "") {
 		return
 	}
 
@@ -1852,18 +1865,42 @@ func (r *SandboxReconciler) ensureSandboxObservabilityAnnotations(ctx context.Co
 	if sandbox.Annotations == nil {
 		sandbox.Annotations = make(map[string]string)
 	}
-	if needObservability {
-		sandbox.Annotations[asmetrics.ObservabilityAnnotation] = time.Now().Format(time.RFC3339Nano)
-	}
-	if needTraceContext {
-		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
-	}
+	sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
 	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		logger.Error(err, "failed to patch sandbox observability annotations; will retry")
+		logger.Error(err, "failed to patch sandbox trace context annotation; will retry")
 		sandbox.Status = *statusCopy
 		return
 	}
 	sandbox.Status = *statusCopy
+}
+
+// ensureSandboxFirstObservedTime records when the controller first saw this
+// Sandbox. It is persisted later with the regular status write.
+func ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) {
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	if lifecycle.FirstObservedTime != nil && !lifecycle.FirstObservedTime.IsZero() {
+		return
+	}
+	now := metav1.Now()
+	lifecycle.FirstObservedTime = &now
+}
+
+func ensureSandboxLifecycleStatus(status *sandboxv1beta1.SandboxStatus) *sandboxv1beta1.SandboxLifecycleStatus {
+	if status.Lifecycle == nil {
+		status.Lifecycle = &sandboxv1beta1.SandboxLifecycleStatus{}
+	}
+	return status.Lifecycle
+}
+
+func sandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) (time.Time, bool) {
+	if sandbox.Status.Lifecycle == nil || sandbox.Status.Lifecycle.FirstObservedTime == nil {
+		return time.Time{}, false
+	}
+	t := sandbox.Status.Lifecycle.FirstObservedTime.Time
+	if t.IsZero() {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // recordChildReconcileError increments the child reconcile error counter with an allowlisted reason.
@@ -1879,39 +1916,32 @@ type pendingStageLatency struct {
 	latency time.Duration
 }
 
-// recordStageLatencies observes Ready-path stage latencies once per stage.
-// Annotation persistence is best-effort: patch failures are logged and do not
-// fail reconcile or affect Ready. Metrics are emitted only after a successful
-// patch so a retry cannot double-count.
-func (r *SandboxReconciler) recordStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, svc *corev1.Service) {
-	logger := log.FromContext(ctx)
-	now := time.Now()
-	t0, ok := sandboxObservedAt(sandbox)
-	if !ok {
-		logger.V(1).Info("Skipping stage latencies: missing controller-first-observed-at annotation")
+func emitStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pending []pendingStageLatency) {
+	if len(pending) == 0 {
 		return
 	}
-
-	statusCopy := sandbox.Status.DeepCopy()
-	if sandbox.Annotations == nil {
-		sandbox.Annotations = make(map[string]string)
-	}
-	patchBase := sandbox.DeepCopy()
-	if patchBase.Annotations == nil {
-		patchBase.Annotations = make(map[string]string)
-	}
-	// Re-include controller-first-observed-at in the stage patch so a prior
-	// best-effort write failure does not strand later stage observations without
-	// a persisted baseline.
-	delete(patchBase.Annotations, asmetrics.ObservabilityAnnotation)
-	if len(patchBase.Annotations) == 0 {
-		patchBase.Annotations = nil
-	}
-	patch := client.MergeFrom(patchBase)
-
+	logger := log.FromContext(ctx)
 	labels := asmetrics.LabelsFromSandbox(sandbox)
+	for _, p := range pending {
+		asmetrics.RecordStageLatency(p.latency, labels.Namespace, labels.LaunchType, labels.Template, labels.OwnedBy, p.stage)
+		logger.V(4).Info("Recorded sandbox stage latency", "stage", p.stage, "latencyMs", p.latency.Milliseconds())
+	}
+}
 
-	recorded := asmetrics.ParseStageLatencyRecorded(sandbox.Annotations[asmetrics.StageLatencyRecordedAnnotation])
+// prepareStageLatencies updates status.lifecycle.recordedStages for Ready-path
+// stages that have been reached. Histogram samples are returned so the caller
+// can emit them only after the durable lifecycle state has been persisted.
+func (r *SandboxReconciler) prepareStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, svc *corev1.Service) []pendingStageLatency {
+	logger := log.FromContext(ctx)
+	now := time.Now()
+	t0, ok := sandboxFirstObservedTime(sandbox)
+	if !ok {
+		logger.V(1).Info("Skipping stage latencies: missing firstObservedTime")
+		return nil
+	}
+
+	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
+	recorded := asmetrics.RecordedStageSet(lifecycle.RecordedStages)
 	updated := false
 	var pending []pendingStageLatency
 
@@ -1959,37 +1989,11 @@ func (r *SandboxReconciler) recordStageLatencies(ctx context.Context, sandbox *s
 	}
 
 	if !updated {
-		return
+		return nil
 	}
 
-	if len(recorded) > 0 {
-		sandbox.Annotations[asmetrics.StageLatencyRecordedAnnotation] = asmetrics.FormatStageLatencyRecorded(recorded)
-	}
-	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		// Best-effort telemetry: never surface annotation patch failures into
-		// Ready/reconcile errors. Metrics were not emitted, so a later reconcile
-		// can retry without double-counting.
-		logger.Error(err, "failed to patch sandbox stage latency annotations; will retry")
-		sandbox.Status = *statusCopy
-		return
-	}
-	sandbox.Status = *statusCopy
-
-	for _, p := range pending {
-		asmetrics.RecordStageLatency(p.latency, labels.Namespace, labels.LaunchType, labels.Template, labels.OwnedBy, p.stage)
-		logger.V(4).Info("Recorded sandbox stage latency", "stage", p.stage, "latencyMs", p.latency.Milliseconds())
-	}
-}
-
-func sandboxObservedAt(sandbox *sandboxv1beta1.Sandbox) (time.Time, bool) {
-	if sandbox.Annotations != nil {
-		if raw := sandbox.Annotations[asmetrics.ObservabilityAnnotation]; raw != "" {
-			if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-				return t, true
-			}
-		}
-	}
-	return time.Time{}, false
+	lifecycle.RecordedStages = asmetrics.SortedRecordedStages(recorded)
+	return pending
 }
 
 func podCreated(pod *corev1.Pod) bool {

@@ -261,6 +261,24 @@ type Lifecycle struct {
 	ShutdownPolicy *ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
+// SandboxLifecycleStatus stores controller-observed lifecycle timestamps and
+// metric dedupe state for a Sandbox.
+type SandboxLifecycleStatus struct {
+	// firstObservedTime is when the controller first observed this Sandbox.
+	// +kubebuilder:validation:Format="date-time"
+	// +optional
+	FirstObservedTime *metav1.Time `json:"firstObservedTime,omitempty"`
+
+	// recordedStages lists Ready-path stages whose latency has already been
+	// accounted for. Each value is recorded at most once, including warm or
+	// pre-existing stages that are marked recorded without a histogram sample.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=6
+	// +kubebuilder:validation:items:Enum=pod_created;pod_scheduled;pod_running;pod_ready;pvc_bound;service_ready
+	RecordedStages []string `json:"recordedStages,omitempty"`
+}
+
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {
 	// serviceFQDN that is valid for default cluster settings
@@ -275,6 +293,11 @@ type SandboxStatus struct {
 	// conditions defines the status conditions array
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// lifecycle stores controller-observed lifecycle timestamps and metric
+	// recording state for this Sandbox.
+	// +optional
+	Lifecycle *SandboxLifecycleStatus `json:"lifecycle,omitempty"`
 
 	// selector is the label selector for pods.
 	// +optional

@@ -102,11 +102,12 @@ and of the Network Policy API `ClusterNetworkPolicy`. It runs as a DaemonSet and
   and kube-network-policies. This makes it usable on any cluster whose network
   plugin does not implement these APIs, including the kind cluster used here
   (kindnet already enforces standard `NetworkPolicy` with the same library).
-- Any conformant implementation can be used instead. Only the install step is
-  specific to kube-network-policies; if your CNI implements
-  `ClusterNetworkPolicy` (see the
-  [implementations list](https://network-policy-api.sigs.k8s.io/implementations/)),
-  skip step 2 and apply the same manifests.
+- Any implementation that supports the experimental `domainNames` extension can
+  be used instead. Only the install step is specific to kube-network-policies;
+  if your CNI implements `ClusterNetworkPolicy` (see the
+  [implementations list](https://network-policy-api.sigs.k8s.io/implementations/))
+  and this extension, skip step 2 and apply the same manifests. An implementation
+  supporting only the standard channel must replace or omit the FQDN manifests.
 
 For domain names, kube-network-policies observes the DNS answers delivered to
 pods on each node and keeps a per-node domain→IP cache (TTL clamped to

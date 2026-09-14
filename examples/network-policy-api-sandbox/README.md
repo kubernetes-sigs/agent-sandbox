@@ -20,7 +20,7 @@ agent-sandbox already creates keeps working.
 ## Why this example exists
 
 agent-sandbox's built-in networking is a per-template Kubernetes
-`NetworkPolicy` ([details](../policy/network-policy-management/README.md)).
+`NetworkPolicy` ([details](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/policy/network-policy-management/README.md)).
 Its Secure-by-Default posture blocks the cluster network, the metadata server
 and CoreDNS, and allows the public internet. That is a reasonable default, but
 Kubernetes `NetworkPolicy` has two limitations that matter for sandboxes:

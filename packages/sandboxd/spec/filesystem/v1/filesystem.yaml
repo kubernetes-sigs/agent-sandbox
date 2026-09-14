@@ -42,7 +42,7 @@ paths:
         schema:
           type: string
         description: >
-          Sandbox-relative path (e.g. workspace/main.py or workspace/src/).
+          Sandbox-relative path (e.g. main.py or src/main.py).
           Path segments containing '/' must be URL-encoded (%2F) by clients
           when constructing the request URL. The server decodes the full path
           before resolving it against the sandbox root.

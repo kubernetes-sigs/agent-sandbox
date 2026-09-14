@@ -255,11 +255,11 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
 class SandboxdPodTunnelStrategy(ConnectionStrategy):
     """Port-forwards directly to the sandbox pod for the sandboxd runtime.
 
-    sandboxd binds loopback-only inside the pod (KEP-539.2), so it cannot be
-    reached through the sandbox-router. This strategy forwards both sandboxd
-    listeners from the pod: the REST filesystem port and the gRPC
-    ProcessService port. ``connect()`` returns the REST base URL; the gRPC
-    target is exposed via ``grpc_target``.
+    sandboxd binds to the pod network by default, but the current
+    sandbox-router cannot proxy its gRPC ProcessService. This strategy forwards
+    both sandboxd listeners directly from the pod: the REST filesystem port and
+    the gRPC ProcessService port. ``connect()`` returns the REST base URL; the
+    gRPC target is exposed via ``grpc_target``.
     """
 
     def __init__(
@@ -484,8 +484,9 @@ class SandboxConnector:
     def grpc_channel(self):
         """Return a lazily created gRPC channel to sandboxd's ProcessService.
 
-        The channel is plaintext: it only ever traverses the port-forward
-        tunnel to the pod's loopback listener. Requires the ``grpc`` extra.
+        The channel is plaintext and reaches the pod's sandboxd listener
+        through the apiserver-authorized port-forward. Requires the ``grpc``
+        extra.
         """
         if not self.is_sandboxd():
             raise RuntimeError("grpc_channel() is only available for the sandboxd runtime")

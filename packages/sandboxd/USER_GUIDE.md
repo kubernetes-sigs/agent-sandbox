@@ -325,10 +325,13 @@ from k8s_agent_sandbox import SandboxClient
 from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
 
 client = SandboxClient(connection_config=SandboxdPodTunnelConnectionConfig())
-with client.claim("my-pool") as sandbox:
-    sandbox.files.write("src/notes.txt", data)    # PUT /v1/files/...
+sandbox = client.create_sandbox(warmpool="my-pool")
+try:
+    sandbox.files.write("src/notes.txt", b"hello\n")  # PUT /v1/files/...
     result = sandbox.commands.run("cat src/notes.txt")  # gRPC Execute
-    sandbox.files.delete("src", recursive=True)   # sandboxd-only
+    sandbox.files.delete("src", recursive=True)        # sandboxd-only
+finally:
+    sandbox.terminate()
 ```
 
 The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[grpc]`.

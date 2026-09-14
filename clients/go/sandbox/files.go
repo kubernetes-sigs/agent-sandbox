@@ -25,6 +25,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	pathpkg "path"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -381,7 +382,7 @@ func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, 
 		recordError(span, err)
 		return 0, err
 	}
-	if destination == nil {
+	if isNilWriter(destination) {
 		err := fmt.Errorf("%s: read(%q): destination writer must not be nil", f.errPrefix(), path)
 		recordError(span, err)
 		return 0, err
@@ -428,6 +429,20 @@ func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, 
 	span.SetAttributes(AttrFileSize.Int64(written))
 	f.log.V(1).Info("read completed", "path", path, "size", written)
 	return written, nil
+}
+
+func isNilWriter(writer io.Writer) bool {
+	if writer == nil {
+		return true
+	}
+
+	value := reflect.ValueOf(writer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // List returns the contents of a directory in the sandbox.

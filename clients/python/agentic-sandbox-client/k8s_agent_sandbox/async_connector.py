@@ -212,6 +212,9 @@ class AsyncSandboxConnector:
         # arguments when calling httpx.AsyncClient.request.
         kwargs.pop("follow_redirects", None)
 
+        auth_supplied = stream and "auth" in kwargs
+        auth = kwargs.pop("auth") if auth_supplied else None
+
         if self._inject_router_headers:
             headers["X-Sandbox-ID"] = self.id
             headers["X-Sandbox-Namespace"] = self.namespace
@@ -243,9 +246,19 @@ class AsyncSandboxConnector:
                     request = self.client.build_request(
                         method, url, headers=headers, **kwargs
                     )
-                    response = await self.client.send(
-                        request, follow_redirects=False, stream=True
-                    )
+                    if auth_supplied:
+                        response = await self.client.send(
+                            request,
+                            auth=auth,
+                            follow_redirects=False,
+                            stream=True,
+                        )
+                    else:
+                        response = await self.client.send(
+                            request,
+                            follow_redirects=False,
+                            stream=True,
+                        )
                 else:
                     response = await self.client.request(
                         method, url, headers=headers, follow_redirects=False, **kwargs

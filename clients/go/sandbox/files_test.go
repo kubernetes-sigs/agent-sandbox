@@ -410,6 +410,14 @@ func TestReadTo_RejectsNilDestination(t *testing.T) {
 	}
 }
 
+func TestReadTo_RejectsTypedNilDestination(t *testing.T) {
+	c := newReadyTestSandbox("http://unused.invalid")
+	var destination *bytes.Buffer
+	if _, err := c.ReadTo(context.Background(), "file.bin", destination); err == nil || !strings.Contains(err.Error(), "must not be nil") {
+		t.Fatalf("ReadTo() error = %v, want typed nil destination error", err)
+	}
+}
+
 func TestOperations_URLEncodesSpecialChars(t *testing.T) {
 	cases := []struct {
 		name     string

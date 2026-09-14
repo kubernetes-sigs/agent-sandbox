@@ -15,6 +15,7 @@
 """Tests for filesystem path safety and runtime-specific operations."""
 
 import asyncio
+import io
 import unittest
 import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +23,73 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.async_filesystem import AsyncFilesystem
 from k8s_agent_sandbox.files.filesystem import Filesystem, _sandboxd_files_endpoint
+
+
+class PartialWriter:
+    def __init__(self, max_write: int):
+        self.max_write = max_write
+        self.content = bytearray()
+        self.closed = False
+
+    def write(self, content: bytes) -> int:
+        accepted = min(len(content), self.max_write)
+        self.content.extend(content[:accepted])
+        return accepted
+
+    def close(self):
+        self.closed = True
+
+
+class FailingWriter:
+    def write(self, content: bytes) -> int:
+        raise OSError("destination failed")
+
+
+class AsyncPartialWriter:
+    def __init__(self, max_write: int):
+        self.max_write = max_write
+        self.content = bytearray()
+        self.closed = False
+
+    async def write(self, content: bytes) -> int:
+        accepted = min(len(content), self.max_write)
+        self.content.extend(content[:accepted])
+        return accepted
+
+    async def close(self):
+        self.closed = True
+
+
+class AsyncFailingWriter:
+    async def write(self, content: bytes) -> int:
+        raise OSError("destination failed")
+
+
+def streaming_response(chunks: list[bytes], content_length: int | None = None):
+    response = MagicMock()
+    response.headers = {}
+    if content_length is not None:
+        response.headers["Content-Length"] = str(content_length)
+    response.iter_content.return_value = iter(chunks)
+    return response
+
+
+def async_streaming_response(
+    chunks: list[bytes], content_length: int | None = None
+):
+    response = MagicMock()
+    response.headers = {}
+    if content_length is not None:
+        response.headers["Content-Length"] = str(content_length)
+
+    async def iterate(*, chunk_size: int):
+        del chunk_size
+        for chunk in chunks:
+            yield chunk
+
+    response.aiter_bytes = iterate
+    response.aclose = AsyncMock()
+    return response
 
 
 class TestFilesystemSafeUploadPath(unittest.TestCase):
@@ -268,6 +336,157 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         await self.fs.delete("dir")
 
         span.set_attribute.assert_called_once_with("sandbox.file.path", "dir")
+
+class TestFilesystemStreamingRead(unittest.TestCase):
+    def setUp(self):
+        self.connector = MagicMock()
+        self.connector.is_sandboxd.return_value = False
+        self.filesystem = Filesystem(
+            self.connector, MagicMock(), trace_service_name="test"
+        )
+
+    def test_read_to_streams_chunks_and_handles_partial_writes(self):
+        chunks = [b"a" * (64 * 1024), b"b" * (64 * 1024)]
+        response = streaming_response(chunks)
+        self.connector.send_request.return_value = response
+        destination = PartialWriter(max_write=8192)
+
+        written = self.filesystem.read_to("dir/file.bin", destination)
+
+        self.assertEqual(written, 128 * 1024)
+        self.assertEqual(destination.content, b"".join(chunks))
+        self.assertFalse(destination.closed)
+        response.close.assert_called_once_with()
+        self.connector.send_request.assert_called_once_with(
+            "GET", "download/dir%2Ffile.bin", timeout=60, stream=True
+        )
+
+    def test_read_to_supports_sandboxd(self):
+        self.connector.is_sandboxd.return_value = True
+        response = streaming_response([b"sandboxd"])
+        self.connector.send_request.return_value = response
+        destination = io.BytesIO()
+
+        written = self.filesystem.read_to("dir/file.bin", destination)
+
+        self.assertEqual(written, 8)
+        self.assertEqual(destination.getvalue(), b"sandboxd")
+        self.connector.send_request.assert_called_once_with(
+            "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
+        )
+
+    def test_read_to_enforces_unknown_length_limit_while_streaming(self):
+        response = streaming_response([b"abc", b"def"])
+        self.connector.send_request.return_value = response
+        destination = io.BytesIO()
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds limit"):
+            self.filesystem.read_to("file.bin", destination, max_bytes=4)
+
+        self.assertEqual(destination.getvalue(), b"abcd")
+        response.close.assert_called_once_with()
+
+    def test_read_to_rejects_declared_oversize_before_writing(self):
+        response = streaming_response([b"ignored"], content_length=7)
+        self.connector.send_request.return_value = response
+        destination = io.BytesIO()
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds limit"):
+            self.filesystem.read_to("file.bin", destination, max_bytes=6)
+
+        self.assertEqual(destination.getvalue(), b"")
+        response.close.assert_called_once_with()
+
+    def test_read_to_closes_response_after_destination_error(self):
+        response = streaming_response([b"content"])
+        self.connector.send_request.return_value = response
+
+        with self.assertRaisesRegex(OSError, "destination failed"):
+            self.filesystem.read_to("file.bin", FailingWriter())
+
+        response.close.assert_called_once_with()
+
+    def test_read_to_rejects_invalid_destination_and_limit(self):
+        with self.assertRaisesRegex(TypeError, "write"):
+            self.filesystem.read_to("file.bin", None)
+        with self.assertRaisesRegex(ValueError, "max_bytes"):
+            self.filesystem.read_to("file.bin", io.BytesIO(), max_bytes=-1)
+        self.connector.send_request.assert_not_called()
+
+
+class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.connector = AsyncMock()
+        self.filesystem = AsyncFilesystem(
+            self.connector, MagicMock(), trace_service_name="test"
+        )
+
+    async def test_read_to_streams_chunks_and_handles_partial_writes(self):
+        chunks = [b"a" * (64 * 1024), b"b" * (64 * 1024)]
+        response = async_streaming_response(chunks)
+        self.connector.send_request.return_value = response
+        destination = AsyncPartialWriter(max_write=8192)
+
+        written = await self.filesystem.read_to("dir/file.bin", destination)
+
+        self.assertEqual(written, 128 * 1024)
+        self.assertEqual(destination.content, b"".join(chunks))
+        self.assertFalse(destination.closed)
+        response.aclose.assert_awaited_once_with()
+        self.connector.send_request.assert_awaited_once_with(
+            "GET", "download/dir%2Ffile.bin", timeout=60, stream=True
+        )
+
+    async def test_read_to_enforces_unknown_length_limit_while_streaming(self):
+        response = async_streaming_response([b"abc", b"def"])
+        self.connector.send_request.return_value = response
+        destination = AsyncPartialWriter(max_write=10)
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds limit"):
+            await self.filesystem.read_to("file.bin", destination, max_bytes=4)
+
+        self.assertEqual(destination.content, b"abcd")
+        response.aclose.assert_awaited_once_with()
+
+    async def test_read_to_closes_response_when_cancelled(self):
+        response = async_streaming_response([b"content"])
+        self.connector.send_request.return_value = response
+        destination = MagicMock()
+        destination.write = AsyncMock(side_effect=asyncio.CancelledError)
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.filesystem.read_to("file.bin", destination)
+
+        response.aclose.assert_awaited_once_with()
+
+    async def test_read_to_closes_response_after_destination_error(self):
+        response = async_streaming_response([b"content"])
+        self.connector.send_request.return_value = response
+
+        with self.assertRaisesRegex(OSError, "destination failed"):
+            await self.filesystem.read_to("file.bin", AsyncFailingWriter())
+
+        response.aclose.assert_awaited_once_with()
+
+    async def test_read_to_rejects_declared_oversize_before_writing(self):
+        response = async_streaming_response([b"ignored"], content_length=7)
+        self.connector.send_request.return_value = response
+        destination = AsyncPartialWriter(max_write=10)
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds limit"):
+            await self.filesystem.read_to("file.bin", destination, max_bytes=6)
+
+        self.assertEqual(destination.content, b"")
+        response.aclose.assert_awaited_once_with()
+
+    async def test_read_to_rejects_invalid_destination_and_limit(self):
+        with self.assertRaisesRegex(TypeError, "write"):
+            await self.filesystem.read_to("file.bin", None)
+        with self.assertRaisesRegex(ValueError, "max_bytes"):
+            await self.filesystem.read_to(
+                "file.bin", AsyncPartialWriter(max_write=10), max_bytes=-1
+            )
+        self.connector.send_request.assert_not_awaited()
 
 if __name__ == '__main__':
     unittest.main()

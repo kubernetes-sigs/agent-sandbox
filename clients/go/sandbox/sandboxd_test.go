@@ -15,6 +15,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -187,6 +188,26 @@ func TestSandboxdRead_GetsFileBytes(t *testing.T) {
 	}
 	if string(data) != "hello" {
 		t.Errorf("unexpected content: %q", data)
+	}
+}
+
+func TestSandboxdReadTo_GetsFileBytes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/v1/files/notes%2Fhello.txt" {
+			t.Errorf("unexpected path: %s", r.URL.EscapedPath())
+		}
+		_, _ = w.Write([]byte("hello"))
+	}))
+	defer server.Close()
+
+	c := newReadySandboxdTestSandbox(server.URL)
+	var destination bytes.Buffer
+	written, err := c.ReadTo(context.Background(), "notes/hello.txt", &destination)
+	if err != nil {
+		t.Fatalf("ReadTo() error: %v", err)
+	}
+	if written != 5 || destination.String() != "hello" {
+		t.Fatalf("ReadTo() = (%d, %q), want (5, %q)", written, destination.String(), "hello")
 	}
 }
 

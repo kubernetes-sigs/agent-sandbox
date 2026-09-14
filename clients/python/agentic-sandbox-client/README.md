@@ -229,6 +229,39 @@ client = SandboxClient(
 sandbox = client.create_sandbox(warmpool="node-sandbox-warmpool", namespace="default")
 ```
 
+### File Operations
+
+`read()` remains convenient for small files and returns the complete contents as
+`bytes`. Use `read_to()` for large files so the response is copied incrementally
+into a caller-owned binary destination:
+
+```python
+with open("artifact-copy.tar", "wb") as destination:
+    written = sandbox.files.read_to(
+        "artifact.tar",
+        destination,
+        max_bytes=512 * 1024 * 1024,
+    )
+
+print(f"downloaded {written} bytes")
+```
+
+`read_to()` never closes the destination. It always closes the HTTP response,
+including after a size-limit violation or destination error. If an error occurs,
+data already written remains in the destination. Omitting `max_bytes` disables
+the optional per-call download limit.
+
+`AsyncFilesystem.read_to()` provides the same behavior for an asynchronous sink
+whose `write(bytes)` method is awaitable and returns the number of bytes accepted:
+
+```python
+written = await sandbox.files.read_to(
+    "artifact.tar",
+    async_destination,
+    max_bytes=512 * 1024 * 1024,
+)
+```
+
 ### 6. Async Client
 
 For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.

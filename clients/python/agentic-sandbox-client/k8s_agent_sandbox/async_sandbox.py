@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Async handle for one running Sandbox and its local client resources."""
+
 import logging
 
 from .async_connector import AsyncSandboxConnector
@@ -51,7 +53,7 @@ class AsyncSandbox:
             raise ValueError(
                 "connection_config is required for AsyncSandbox. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
-                "or SandboxInClusterConnectionConfig."
+                "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig."
             )
 
         self.claim_name = claim_name
@@ -67,6 +69,7 @@ class AsyncSandbox:
             connection_config=self.connection_config,
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
+            get_pod_name=self.get_pod_name,
         )
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
@@ -147,10 +150,12 @@ class AsyncSandbox:
 
     @property
     def commands(self) -> AsyncCommandExecutor | None:
+        """Return the command client while this handle is active."""
         return self._commands
 
     @property
     def files(self) -> AsyncFilesystem | None:
+        """Return the filesystem client while this handle is active."""
         return self._files
 
     @property
@@ -184,6 +189,13 @@ class AsyncSandbox:
 
         self._is_closed = True
         logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
+
+    def _close_for_atexit(self) -> None:
+        """Release local resources without touching the owning event loop."""
+        self.connector._close_for_atexit()
+        self._commands = None
+        self._files = None
+        self._is_closed = True
 
     async def terminate(self):
         """

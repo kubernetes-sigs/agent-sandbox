@@ -14,6 +14,7 @@
 
 import logging
 import urllib.parse
+from typing import Any
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.files.filesystem import Filesystem
@@ -26,7 +27,9 @@ class AsyncFilesystem:
     Handles async file operations within the sandbox.
     """
 
-    def __init__(self, connector: AsyncSandboxConnector, tracer, trace_service_name: str):
+    def __init__(
+        self, connector: AsyncSandboxConnector, tracer: Any, trace_service_name: str
+    ) -> None:
         self.connector = connector
         self.tracer = tracer
         self.trace_service_name = trace_service_name

@@ -69,7 +69,7 @@ sequenceDiagram
     participant D as storage daemon
     participant O as OpenClaw pod (warm, spin-waiting)
 
-    Note over O: started minutes ago by the warm pool;<br/>waiting for /workspace/.ready
+    Note over O: started minutes ago by the warm pool,<br/>waiting for /workspace/.ready
     P->>K: create SandboxClaim oc-alice
     C->>K: adopt warm sandbox (2-3 metadata writes)
     Note over C,K: SUB-SECOND: no scheduling, no image pull,<br/>no container start

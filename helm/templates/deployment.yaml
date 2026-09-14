@@ -25,6 +25,10 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: agent-sandbox-controller
         image: {{ include "agent-sandbox.image" . }}
@@ -37,9 +41,6 @@ spec:
           protocol: TCP
         - name: healthz
           containerPort: 8081
-          protocol: TCP
-        - name: webhook
-          containerPort: 9443
           protocol: TCP
 
         livenessProbe:

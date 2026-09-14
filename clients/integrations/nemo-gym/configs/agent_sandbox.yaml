@@ -1,0 +1,74 @@
+# Agent Sandbox provider config for NVIDIA NeMo Gym.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `agent_sandbox` selects the provider class (published through the
+# `nemo_gym.sandbox_providers` entry-point group by nemo-gym-k8s-agent-sandbox) and
+# its value is passed to the provider constructor.
+#
+# Every shipped NeMo Gym provider config binds the same name `sandbox`, so swapping
+# providers is swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   ng_run "+config_paths=[$AGENT, /path/to/configs/agent_sandbox.yaml, $MODEL]"
+#
+# Requires a cluster with the agent-sandbox controller + extensions (SandboxClaim /
+# SandboxWarmPool CRDs) installed, and at least one SandboxWarmPool whose
+# SandboxTemplate image serves the sandbox runtime REST API (see ../README.md).
+sandbox:
+  default_metadata:
+    sandbox-api: agent-sandbox-k8s
+  agent_sandbox:
+    connection:
+      # in_cluster: exec/file traffic goes straight to sandbox pod IPs (run the NeMo
+      # Gym resource servers inside the same cluster — the recommended RL setup).
+      # gateway: route through a Gateway API resource fronting the sandbox router.
+      # direct: fixed URL to an already-reachable sandbox router.
+      mode: ${oc.env:AGENT_SANDBOX_CONNECTION_MODE,in_cluster}
+      # Port the runtime server inside the sandbox container listens on.
+      server_port: 8888
+      # gateway mode only:
+      # gateway_name: sandbox-gateway
+      # gateway_namespace: default
+      # gateway_ready_timeout_s: 180
+      # direct mode only:
+      # api_url: http://localhost:8000
+    create:
+      # Default SandboxWarmPool to claim from when the agent's sandbox_spec names no
+      # image (or names one with no image_warmpools entry).
+      warmpool: ${oc.env:AGENT_SANDBOX_WARMPOOL,nemo-gym-pool}
+      namespace: ${oc.env:AGENT_SANDBOX_NAMESPACE,default}
+      # Images are baked into each pool's SandboxTemplate, so per-create images are
+      # routed to pools rather than pulled: exact `sandbox_spec.image` string -> pool.
+      image_warmpools: {}
+      #   docker.io/library/python:3.12: python-pool
+      #   my-registry/swebench-runtime:latest: swebench-pool
+      # Claim-bind wait. Warm pool hits bind in seconds; a miss falls back to a cold
+      # pod start, so leave headroom for an image pull.
+      ready_timeout_s: 180
+    exec:
+      default_timeout_s: 180
+      # File staging execs and file API transfers use this instead of default_timeout_s.
+      transfer_timeout_s: 300
+      # Commands run as `<exec_shell> -c <script>`; cwd/env are folded into the script
+      # because the runtime API executes without a shell.
+      exec_shell: /bin/sh
+    probe:
+      # A bound claim proves the pod is Ready, not that the runtime HTTP server (or a
+      # gateway route) is reachable yet — poll a cheap exec before handing the sandbox out.
+      command: printf agent-sandbox-ready
+      expected_stdout: agent-sandbox-ready
+      timeout_s: 30
+      # null = poll without a time limit (until stable_count consecutive passes).
+      deadline_s: 60
+      stable_count: 1
+      stable_delay_s: 1.0
+    operations:
+      # Claim deletion returns once accepted; pod teardown and warm pool backfill
+      # continue asynchronously. Keep false for RL churn; true for deterministic tests.
+      close_wait_deleted: false
+      close_timeout_s: 60
+      poll_interval_s: 1.0
+      # Off: NeMo Gym owns the lifecycle, and claim TTLs (sandbox_spec.ttl_s ->
+      # lifecycle shutdownTime) are the crash-safety net.
+      atexit_cleanup: false

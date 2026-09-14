@@ -3,7 +3,7 @@ title: "Agent Sandbox Installation"
 linkTitle: "Agent Sandbox Installation"
 weight: 2
 description: >
-  This guide shows how to install Agent Sandbox resources in [Kubernetes in Docker (KinD)](https://kind.sigs.k8s.io/) and in [GKE](https://cloud.google.com/kubernetes-engine).
+  This guide shows how to install Agent Sandbox resources on [Kubernetes in Docker (KinD)](https://kind.sigs.k8s.io/) and on [GKE](https://cloud.google.com/kubernetes-engine).
 ---
 
 ## Prerequisites
@@ -17,9 +17,9 @@ description: >
 * For GKE cluster you need:
     * [gcloud CLI](https://cloud.google.com/cli)
 
-1. Run command to create a cluster in KinD:
+1. Run command to create a cluster using KinD:
    ```sh
-   kind create cluster --name agent-sandbox-test
+   kind create cluster --wait 90s --name agent-sandbox-test
    ```
    Or run these commands to create a cluster in GKE and get credentials to your cluster:
    ```sh
@@ -38,21 +38,23 @@ description: >
    # To install the extensions components:
    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
 
-   # Make sure the controller pods are running:
-   kubectl -n agent-sandbox-system get pods
+   # Wait until all agent-sandbox-controller pods are running:
+   kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=90s
    ```
 
-3. Before using the client, you must deploy the `sandbox-router`. Follow these three steps:
-   ```sh
-   curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml | sed 's|${ROUTER_IMAGE}|us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router:latest-main|g' > sandbox_router.yaml
-   kubectl apply -f sandbox_router.yaml
+3. Before using the client, you must deploy the `sandbox-router`. Follow these steps:
 
-   # Make sure the router pods are running:
-   kubectl get pods
+   > [!WARNING]
+   > The command below disables router authentication. Use only for local testing.
+
+   ```sh
+   curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml | sed 's|${ROUTER_IMAGE}|us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router:latest-main|g' | sed '/ALLOW_UNAUTHENTICATED_ROUTER/{n;s/value: "false"/value: "true"/}' | kubectl -n agent-sandbox-system apply -f -
+
+   # Wait until all router pods are running:
+   kubectl -n agent-sandbox-system rollout status deployment/sandbox-router-deployment --timeout=90s
    ```
 
 4. Create a Sandbox Template. For example the `python-runtime-sandbox`. More information about this runtime can be found [here](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/python-runtime-sandbox/).
    ```bash
-   curl -sSLO https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/python-sandbox-template.yaml
-   kubectl apply -f python-sandbox-template.yaml
+   curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/python-sandbox-template.yaml | sed -e 's|${SANDBOX_NAMESPACE}|default|g' -e 's|${SANDBOX_TEMPLATE_NAME}|test-sandbox-template|g' | kubectl apply -f -
    ```

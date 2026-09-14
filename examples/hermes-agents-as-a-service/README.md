@@ -116,7 +116,7 @@ Three things worth noticing:
 ## 3. Talk to the agent
 
 ```sh
-POD=$(kubectl -n hermes-demo get sandbox "$SB" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD="$SB"
 kubectl -n hermes-demo port-forward "pod/$POD" 9119:9119 8642:8642 &
 PF_PID=$!
 ```
@@ -185,7 +185,7 @@ holds the user's first request during this wait: "wake-on-connect".)
 Verify state survived the pod's death:
 
 ```sh
-POD=$(kubectl -n hermes-demo get sandbox "$SB" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+POD="$SB"
 kubectl -n hermes-demo exec "$POD" -- cat /opt/data/marker.txt   # -> remember me
 ```
 
@@ -286,7 +286,7 @@ to send bearer headers):
 
 ```sh
 BOB_SB=$(kubectl -n hermes-demo get sandboxclaim hermes-bob -o jsonpath='{.status.sandbox.name}')
-BOB_POD=$(kubectl -n hermes-demo get sandbox "$BOB_SB" -o jsonpath='{.metadata.annotations.agents\.x-k8s\.io/pod-name}')
+BOB_POD="$BOB_SB"
 kubectl -n hermes-demo port-forward "pod/$BOB_POD" 9119:9119 &
 ```
 

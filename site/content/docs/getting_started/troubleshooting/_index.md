@@ -143,8 +143,8 @@ kubectl describe sandboxclaim <claim-name>
 Finally, the Sandbox Router is responsible for translating the SDK's REST calls into cluster actions. Viewing its logs will reveal deeper backend issues:
 ```bash
 # Locate the sandbox-router pod
-kubectl get pods -n default | grep sandbox-router
+kubectl get pods -n agent-sandbox-system | grep sandbox-router
 
 # Tail the logs for errors
-kubectl logs -n default <sandbox-router-pod-name> -f
+kubectl logs -n agent-sandbox-system <sandbox-router-pod-name> -f
 ```

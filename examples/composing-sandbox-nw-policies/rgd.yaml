@@ -8,7 +8,7 @@ spec:
   # This follows a simplified specification: https://kro.run/docs/concepts/simple-schema/
   schema:
     # The user facing CRD that KRO will create
-    apiVersion: v1alpha1
+    apiVersion: v1beta1
     group: custom.agents.x-k8s.io
     kind: AgenticSandbox
     # Spec fields that users can provide.

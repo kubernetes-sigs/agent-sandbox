@@ -22,8 +22,7 @@ SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
 cd "${SCRIPT_ROOT}"
 
 CMD="go run -modfile=tools.mod k8s.io/code-generator"
-API_PKG_COMMAS="sigs.k8s.io/agent-sandbox/api/v1alpha1,sigs.k8s.io/agent-sandbox/api/v1beta1"
-API_PKG_SPACES="sigs.k8s.io/agent-sandbox/api/v1alpha1 sigs.k8s.io/agent-sandbox/api/v1beta1"
+API_PKG="sigs.k8s.io/agent-sandbox/api/v1beta1"
 CLIENT_PKG="sigs.k8s.io/agent-sandbox/clients/k8s"
 
 echo "Generating clientset..."
@@ -32,13 +31,13 @@ ${CMD}/cmd/client-gen \
   --output-pkg "${CLIENT_PKG}/clientset" \
   --clientset-name "versioned" \
   --input-base "" \
-  --input "${API_PKG_COMMAS}"
+  --input "${API_PKG}"
 
 echo "Generating listers..."
 ${CMD}/cmd/lister-gen \
   --output-dir "clients/k8s/listers" \
   --output-pkg "${CLIENT_PKG}/listers" \
-  ${API_PKG_SPACES}
+  ${API_PKG}
 
 echo "Generating informers..."
 ${CMD}/cmd/informer-gen \
@@ -46,11 +45,10 @@ ${CMD}/cmd/informer-gen \
   --output-pkg "${CLIENT_PKG}/informers" \
   --versioned-clientset-package "${CLIENT_PKG}/clientset/versioned" \
   --listers-package "${CLIENT_PKG}/listers" \
-  ${API_PKG_SPACES}
+  ${API_PKG}
 
 
-EXT_API_PKG_COMMAS="sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1,sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
-EXT_API_PKG_SPACES="sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1 sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+EXT_API_PKG="sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 EXT_CLIENT_PKG="sigs.k8s.io/agent-sandbox/clients/k8s/extensions"
 
 echo "Generating extensions clientset..."
@@ -59,13 +57,13 @@ ${CMD}/cmd/client-gen \
   --output-pkg "${EXT_CLIENT_PKG}/clientset" \
   --clientset-name "versioned" \
   --input-base "" \
-  --input "${EXT_API_PKG_COMMAS}"
+  --input "${EXT_API_PKG}"
 
 echo "Generating extensions listers..."
 ${CMD}/cmd/lister-gen \
   --output-dir "clients/k8s/extensions/listers" \
   --output-pkg "${EXT_CLIENT_PKG}/listers" \
-  ${EXT_API_PKG_SPACES}
+  ${EXT_API_PKG}
 
 echo "Generating extensions informers..."
 ${CMD}/cmd/informer-gen \
@@ -73,7 +71,7 @@ ${CMD}/cmd/informer-gen \
   --output-pkg "${EXT_CLIENT_PKG}/informers" \
   --versioned-clientset-package "${EXT_CLIENT_PKG}/clientset/versioned" \
   --listers-package "${EXT_CLIENT_PKG}/listers" \
-  ${EXT_API_PKG_SPACES}
+  ${EXT_API_PKG}
 
 echo "Fixing license headers..."
 "${SCRIPT_ROOT}"/dev/tools/fix-boilerplate

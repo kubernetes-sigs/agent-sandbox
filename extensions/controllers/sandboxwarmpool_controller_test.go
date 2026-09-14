@@ -1409,8 +1409,6 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 		},
 	}
 
-	r := &SandboxWarmPoolReconciler{}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			template := &extensionsv1beta1.SandboxTemplate{
@@ -1433,7 +1431,7 @@ func TestComparePodSpecsNormalization(t *testing.T) {
 				ApplySandboxSecureDefaults(template, actualSpecCopy)
 			}
 
-			result := r.comparePodSpecs(template, actualSpecCopy)
+			result := comparePodSpecs(template, actualSpecCopy)
 			if result != tt.expectedResult {
 				t.Errorf("comparePodSpecs() = %v, want %v", result, tt.expectedResult)
 			}
@@ -2283,8 +2281,6 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 		},
 	}
 
-	r := &SandboxWarmPoolReconciler{}
-
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			template := &extensionsv1beta1.SandboxTemplate{
@@ -2293,7 +2289,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 					SandboxBlueprint:        tt.templateSandboxBlueprint,
 				},
 			}
-			result := r.compareSandboxBlueprint(template, &tt.actualSandboxBlueprint)
+			result := compareSandboxBlueprint(template, &tt.actualSandboxBlueprint)
 			require.Equal(t, tt.expectedResult, result)
 		})
 	}

@@ -130,15 +130,21 @@ func buildInfoCollector() prometheus.Collector {
 
 // Middleware records inflight count, total requests, and request duration
 // for every handled request. The sandbox_namespace label is read from the
-// per-request *Labels attached to the request context — the proxy handler
-// populates Labels.SandboxNamespace once header parsing succeeds.
+// per-request *Labels attached to the request context via LabelsForRequest
+// — the proxy handler populates Labels.SandboxNamespace once routing
+// resolves, regardless of whether that came from headers or (with
+// path-based routing enabled) the URL path. LabelsForRequest reuses an
+// outer middleware's Labels when one is already attached (as
+// TracingMiddleware's is, in the real chain) rather than shadowing it with
+// a second, disconnected instance the proxy handler would never see —
+// see its doc comment — and falls back to allocating its own when none is
+// attached, so this middleware still works correctly wired up standalone.
 func (m *Metrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.InflightRequests.Inc()
 		defer m.InflightRequests.Dec()
 
-		labels := &Labels{}
-		ctx := WithLabels(r.Context(), labels)
+		ctx, labels := LabelsForRequest(r.Context())
 		ww := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
 		next.ServeHTTP(ww, r.WithContext(ctx))

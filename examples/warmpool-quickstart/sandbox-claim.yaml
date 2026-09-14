@@ -24,7 +24,7 @@ spec:
           requests:
             storage: 6Gi
   lifecycle:
-    # Policy can be "Delete" (clean up everything) or "Retain" (stop resources but keep objects).
+    # Policy can be "Delete", "DeleteForeground", or "Retain" (stop resources but keep the claim object).
     # Default is "Retain".
     shutdownPolicy: Delete
 

@@ -24,8 +24,19 @@ import (
 )
 
 // TracingMiddleware opens a server span for every inbound request, extracts
-// trace context from inbound headers using prop, and decorates the span with
-// the routing headers so per-sandbox traces are searchable.
+// trace context from inbound headers using prop, and decorates the span
+// with the resolved sandbox identity so per-sandbox traces are searchable.
+//
+// That identity is read from Labels — via LabelsForRequest, allocated here
+// since this is the outermost layer in the real middleware chain — and
+// applied to the span only AFTER next.ServeHTTP returns, alongside the
+// existing http.status_code attribute: the proxy handler is what resolves
+// the Target (from X-Sandbox-* headers, or, when path-based routing is
+// enabled, from the URL path instead — see ParsePathRoute), and that
+// resolution hasn't happened yet at span-start time. Reading
+// X-Sandbox-Id/-Namespace straight from the request headers here, as an
+// earlier version of this middleware did, silently produced empty
+// sandbox.id/sandbox.namespace attributes for every path-routed request.
 //
 // When base is non-zero, a per-request logger is derived from it with the
 // trace_id and span_id baked in as fields, and stashed in the request
@@ -39,13 +50,12 @@ func TracingMiddleware(tracer trace.Tracer, prop propagation.TextMapPropagator, 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+			ctx, labels := LabelsForRequest(ctx)
 			ctx, span := tracer.Start(ctx, "HTTP "+r.Method,
 				trace.WithSpanKind(trace.SpanKindServer),
 				trace.WithAttributes(
 					attribute.String("http.method", r.Method),
 					attribute.String("http.target", r.URL.Path),
-					attribute.String("sandbox.id", r.Header.Get("X-Sandbox-Id")),
-					attribute.String("sandbox.namespace", r.Header.Get("X-Sandbox-Namespace")),
 				))
 			defer span.End()
 
@@ -65,7 +75,11 @@ func TracingMiddleware(tracer trace.Tracer, prop propagation.TextMapPropagator, 
 
 			ww := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(ww, r.WithContext(ctx))
-			span.SetAttributes(attribute.Int("http.status_code", ww.status))
+			span.SetAttributes(
+				attribute.Int("http.status_code", ww.status),
+				attribute.String("sandbox.id", labels.SandboxID),
+				attribute.String("sandbox.namespace", labels.SandboxNamespace),
+			)
 		})
 	}
 }

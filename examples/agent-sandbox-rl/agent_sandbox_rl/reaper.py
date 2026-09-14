@@ -16,11 +16,11 @@
 sweep for an **orphaned** run whose driver died without tearing down.
 
     from agent_sandbox_rl import reap
-    reap(run_id="ab12cd34ef56", context="my-ctx", namespace="rl")   # one run (recommended)
-    reap(all_managed=True, context="my-ctx", namespace="rl")        # EVERY run (opt-in)
+    reap(run_id="ab12cd34ef56", context="my-ctx", namespace="agent-sandbox-rl")   # one run (recommended)
+    reap(all_managed=True, context="my-ctx", namespace="agent-sandbox-rl")        # EVERY run (opt-in)
 
-    python -m agent_sandbox_rl.reaper --run-id ab12cd34ef56 --context my-ctx --namespace rl
-    python -m agent_sandbox_rl.reaper --all --namespace rl          # every run (opt-in)
+    python -m agent_sandbox_rl.reaper --run-id ab12cd34ef56 --context my-ctx --namespace agent-sandbox-rl
+    python -m agent_sandbox_rl.reaper --all --namespace agent-sandbox-rl          # every run (opt-in)
 
 Deletes claims → warmpools → sandboxes → templates (order matters: claims first so
 they stop holding sandboxes; warmpools next so the controller stops replenishing),

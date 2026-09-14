@@ -21,5 +21,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	// gRPC (used by the sandboxd runtime tests) keeps an internal
+	// CallbackSerializer goroutine that is not guaranteed to have exited by
+	// the time goleak inspects at process exit, even after ClientConn.Close.
+	// Ignore that known background goroutine; connections are still closed
+	// by the connector and the tests' own cleanup.
+	goleak.VerifyTestMain(m,
+		goleak.IgnoreTopFunction("google.golang.org/grpc/internal/grpcsync.(*CallbackSerializer).run"),
+	)
 }

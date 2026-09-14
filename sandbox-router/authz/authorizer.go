@@ -27,43 +27,85 @@ import (
 	"context"
 	"errors"
 	"net/http"
-
-	authenticationv1 "k8s.io/api/authentication/v1"
+	"net/url"
+	"strings"
 )
 
-// Identity is the authenticated principal extracted from a request. The
-// router does not invent identities — it pulls one from a TLS client
-// cert (mTLS deployments) or from a Bearer token (TokenReview
-// deployments) and hands the struct to the Authorizer. An Identity with
-// Source=="" represents an unauthenticated caller; whether that is
-// acceptable is the Authorizer's call.
-//
-// The fields mirror authenticationv1.UserInfo so callers that delegate
-// to TokenReview can pass the SubjectAccessReview body through
-// unchanged.
-type Identity struct {
-	// Username is the principal name. For TLS clients this is the
-	// certificate Subject CN (or first SPIFFE URI / DNS SAN, in that
-	// order of preference); for Bearer tokens it is the value reported
-	// by TokenReview.
-	Username string
-	// UID is the durable identifier returned by TokenReview, when
-	// available. Empty for TLS-derived identities.
-	UID string
-	// Groups are the authenticated groups for this principal.
-	Groups []string
-	// Extra carries provider-specific attributes (e.g. K8s authenticator
-	// extras). May be nil.
-	Extra map[string][]string
-	// Source records how the identity was derived, for logging and
-	// authorizer dispatch. One of "tls", "bearer-token", or "" (unset).
-	Source string
+// AuthorizationTarget is the canonical request identity an Authorizer
+// evaluates. The proxy constructs it only after routing has selected the
+// sandbox and stripped any path-routing prefix, so Path is the path the
+// upstream sandbox will receive rather than the router-facing path.
+type AuthorizationTarget struct {
+	Namespace   string
+	SandboxName string
+	SandboxUID  string
+	Port        int
+	Method      string
+	Path        string
 }
 
-// IsAuthenticated reports whether the identity carries enough
-// information for an Authorizer to reason about it.
-func (i Identity) IsAuthenticated() bool {
-	return i.Username != "" || i.UID != "" || len(i.Groups) > 0
+// NormalizeAuthorizationTarget returns the stable representation used in
+// scoped-token claims and request comparisons.
+func NormalizeAuthorizationTarget(target AuthorizationTarget) (AuthorizationTarget, error) {
+	target.Method = strings.ToUpper(strings.TrimSpace(target.Method))
+	if !validHTTPMethod(target.Method) {
+		return AuthorizationTarget{}, errors.New("authorization target: invalid HTTP method")
+	}
+	if target.Namespace == "" || target.SandboxName == "" {
+		return AuthorizationTarget{}, errors.New("authorization target: namespace and sandbox name are required")
+	}
+	if target.Port < 1 || target.Port > 65535 {
+		return AuthorizationTarget{}, errors.New("authorization target: port must be between 1 and 65535")
+	}
+	if target.Path == "" {
+		target.Path = "/"
+	}
+	if !strings.HasPrefix(target.Path, "/") {
+		return AuthorizationTarget{}, errors.New("authorization target: path must be absolute")
+	}
+	decodedPath, err := url.PathUnescape(target.Path)
+	if err != nil {
+		return AuthorizationTarget{}, errors.New("authorization target: path has invalid percent-encoding")
+	}
+	pathURL := &url.URL{Path: decodedPath, RawPath: target.Path}
+	target.Path = uppercasePercentEncoding(pathURL.EscapedPath())
+	return target, nil
+}
+
+func uppercasePercentEncoding(value string) string {
+	encoded := []byte(value)
+	for i := 0; i+2 < len(encoded); i++ {
+		if encoded[i] != '%' {
+			continue
+		}
+		encoded[i+1] = uppercaseHex(encoded[i+1])
+		encoded[i+2] = uppercaseHex(encoded[i+2])
+		i += 2
+	}
+	return string(encoded)
+}
+
+func uppercaseHex(value byte) byte {
+	if value >= 'a' && value <= 'f' {
+		return value - ('a' - 'A')
+	}
+	return value
+}
+
+func validHTTPMethod(method string) bool {
+	if method == "" {
+		return false
+	}
+	for i := range len(method) {
+		c := method[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Authorizer decides whether the principal carried by an inbound
@@ -74,14 +116,14 @@ func (i Identity) IsAuthenticated() bool {
 // they need from r (TLS client cert, Bearer token, custom header) and
 // turning it into a verified identity — that flow is highly
 // implementation-specific (TokenReview, JWT validation, mesh-issued
-// SVID, etc.). Helpers IdentityFromTLS and BearerTokenFromRequest live
-// in identity.go for the common cases.
+// SVID, etc.). Helper BearerTokenFromRequest lives in identity.go for
+// the common case.
 //
 // The returned error, when non-nil, should be one of the sentinel
 // errors declared in this package so the caller can map it to the
 // right HTTP status code.
 type Authorizer interface {
-	Authorize(ctx context.Context, r *http.Request, sandboxNamespace, sandboxName string) error
+	Authorize(ctx context.Context, r *http.Request, target AuthorizationTarget) error
 }
 
 // Sentinel errors returned by Authorizer implementations. The proxy
@@ -120,26 +162,6 @@ func HTTPStatusFor(err error) int {
 type AllowAll struct{}
 
 // Authorize always returns nil.
-func (AllowAll) Authorize(_ context.Context, _ *http.Request, _, _ string) error {
+func (AllowAll) Authorize(_ context.Context, _ *http.Request, _ AuthorizationTarget) error {
 	return nil
-}
-
-// FromUserInfo builds an Identity from a UserInfo as returned by the
-// authentication.k8s.io/v1 TokenReview API. Provided so the
-// TokenReview-based authorizer in tokenreview.go and any other
-// authorizer that talks to K8s authn can produce a consistent log shape.
-func FromUserInfo(u authenticationv1.UserInfo, source string) Identity {
-	id := Identity{
-		Username: u.Username,
-		UID:      u.UID,
-		Groups:   append([]string(nil), u.Groups...),
-		Source:   source,
-	}
-	if len(u.Extra) > 0 {
-		id.Extra = make(map[string][]string, len(u.Extra))
-		for k, v := range u.Extra {
-			id.Extra[k] = append([]string(nil), v...)
-		}
-	}
-	return id
 }

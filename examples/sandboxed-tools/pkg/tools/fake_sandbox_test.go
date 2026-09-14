@@ -23,6 +23,12 @@ import (
 type fakeResponse struct {
 	result *ExecCommandResult
 	err    error
+
+	// block, if true, makes ExecCommand ignore result/err and instead block
+	// until the call's context is done, then return its Err(). This lets
+	// tests deterministically exercise cancellation/timeout behavior without
+	// real sleeps or polling.
+	block bool
 }
 
 // fakeSandbox is a test double for the Sandbox interface. It records every
@@ -31,17 +37,23 @@ type fakeResponse struct {
 // can be exercised by queueing multiple responses.
 type fakeSandbox struct {
 	calls     []ExecCommandOptions
+	ctxs      []context.Context
 	responses []fakeResponse
 }
 
-func (f *fakeSandbox) ExecCommand(_ context.Context, opts ExecCommandOptions) (*ExecCommandResult, error) {
+func (f *fakeSandbox) ExecCommand(ctx context.Context, opts ExecCommandOptions) (*ExecCommandResult, error) {
 	i := len(f.calls)
 	f.calls = append(f.calls, opts)
+	f.ctxs = append(f.ctxs, ctx)
 
 	if i >= len(f.responses) {
 		return nil, fmt.Errorf("unexpected ExecCommand call %d", i+1)
 	}
 	resp := f.responses[i]
+	if resp.block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if resp.err != nil {
 		return nil, resp.err
 	}

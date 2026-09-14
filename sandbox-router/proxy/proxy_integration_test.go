@@ -259,58 +259,6 @@ func TestIntegration_UpstreamConnectErrorReturns502(t *testing.T) {
 	}
 }
 
-// stubLookup is a minimal Lookup for integration tests of cache wiring.
-// GetByName scans entries so tests only have to populate one map. A
-// mutex guards the maps/slices because the handler mutates them from
-// the httptest server goroutine while assertions read from the test
-// goroutine.
-type stubLookup struct {
-	mu                sync.Mutex
-	entries           map[types.UID]cache.Entry
-	invalidated       []types.UID
-	invalidatedByName []string
-}
-
-func (s *stubLookup) Get(uid types.UID) (cache.Entry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[uid]
-	return e, ok
-}
-
-func (s *stubLookup) GetByName(namespace, name string) (cache.Entry, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, e := range s.entries {
-		if e.Namespace == namespace && e.SandboxName == name {
-			return e, true
-		}
-	}
-	return cache.Entry{}, false
-}
-
-func (s *stubLookup) Invalidate(uid types.UID) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.entries[uid]
-	delete(s.entries, uid)
-	s.invalidated = append(s.invalidated, uid)
-	return ok
-}
-
-func (s *stubLookup) InvalidateByName(namespace, name, podIP string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.invalidatedByName = append(s.invalidatedByName, namespace+"/"+name+"="+podIP)
-	for uid, e := range s.entries {
-		if e.Namespace == namespace && e.SandboxName == name && e.PodIP == podIP {
-			delete(s.entries, uid)
-			return true
-		}
-	}
-	return false
-}
-
 // TestIntegration_CacheInvalidationOnDialError exercises the KEP-NNNN
 // active invalidation: when the proxy dials a cached IP and the dial
 // fails because the host is unreachable, the cache entry is evicted so

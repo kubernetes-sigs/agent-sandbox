@@ -1,0 +1,45 @@
+# Substitute ${DEMO_IMAGE} before applying (envsubst).
+#
+# Every field of this pod spec feeds GKE's snapshot-matching hash: change the
+# image, resources, securityContext, etc. and existing whole-pod snapshots
+# stop matching (new pods cold-start until you take a new snapshot).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: podsnap-golden-sa
+  namespace: default
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: podsnap-golden-template
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        # matched by the PodSnapshotPolicy selector AND used as its snapshot
+        # group key — a dedicated key (not a generic one like "app") so no
+        # unrelated pod can accidentally join the golden group
+        golden-pool: podsnap-demo
+    spec:
+      # Pod Snapshots require GKE Sandbox (gVisor)
+      runtimeClassName: gvisor
+      # the KSA whose Workload Identity principal has access to the bucket
+      serviceAccountName: podsnap-golden-sa
+      containers:
+        - name: probe
+          image: ${DEMO_IMAGE}
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: /state
+              port: 8888
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "512Mi"

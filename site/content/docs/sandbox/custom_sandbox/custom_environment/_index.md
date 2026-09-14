@@ -339,7 +339,7 @@ func runWithEnv(ctx context.Context, sb *sandbox.Sandbox, namespace string, payl
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://sandbox-router-svc.default.svc.cluster.local:8080/execute", bytes.NewReader(body))
+		"http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080/execute", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

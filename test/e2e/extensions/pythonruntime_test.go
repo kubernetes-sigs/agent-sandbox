@@ -28,7 +28,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -306,16 +305,10 @@ func TestRunPythonRuntimeSandboxWarmpool(testingT *testing.T) {
 
 	require.NoError(testingT, testContext.WaitForSandboxReady(testingT.Context(), sandboxID))
 
-	// Get the Sandbox to extract the pod name
-	sandbox, err := testContext.GetSandbox(ctx, sandboxID)
+	_, err = testContext.GetSandbox(ctx, sandboxID)
 	require.NoError(testingT, err)
 
-	// The pod-name annotation is set by the sandbox controller for adopted pods.
-	// For warm pool sandboxes the pod name defaults to the sandbox name.
-	podName, _, _ := unstructured.NestedString(sandbox.Object, "metadata", "annotations", "agents.x-k8s.io/pod-name")
-	if podName == "" {
-		podName = sandboxName
-	}
+	podName := sandboxName
 	testingT.Logf("DEBUG: Using pod name: %s", podName)
 
 	podID := types.NamespacedName{

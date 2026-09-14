@@ -4,6 +4,7 @@ linters:
     - depguard
     - errcheck
     - exptostd
+    - ginkgolinter
     - godot
     - goheader
     - govet

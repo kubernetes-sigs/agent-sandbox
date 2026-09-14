@@ -49,6 +49,21 @@ class TestGetSafePath:
         with pytest.raises(ValueError):
             get_safe_path("foo/../../bar")
 
+    def test_respects_configured_base_dir(self, tmp_path):
+        with patch.dict(os.environ, {"SANDBOX_BASE_DIR": str(tmp_path)}):
+            expected = os.path.join(os.path.realpath(str(tmp_path)), "foo.txt")
+            assert get_safe_path("foo.txt") == expected
+
+    def test_rejects_traversal_from_configured_base_dir(self, tmp_path):
+        with patch.dict(os.environ, {"SANDBOX_BASE_DIR": str(tmp_path)}):
+            with pytest.raises(ValueError):
+                get_safe_path("../escape.txt")
+
+    def test_blank_base_dir_falls_back_to_default(self):
+        with patch.dict(os.environ, {"SANDBOX_BASE_DIR": "   "}):
+            base_dir = os.path.realpath("/app")
+            assert get_safe_path("foo.txt") == os.path.join(base_dir, "foo.txt")
+
 
 def _mock_process(mock_popen, stdout="", stderr="", returncode=0, pid=1234):
     """Configures mock_popen (a patched main.subprocess.Popen) to behave like
@@ -103,6 +118,17 @@ def test_execute_command_falls_back_to_default_on_invalid_timeout(mock_popen):
     mock_process.communicate.assert_called_once_with(timeout=300.0)
 
 
+@patch('main.subprocess.Popen')
+def test_execute_command_runs_from_configured_base_dir(mock_popen, tmp_path):
+    _mock_process(mock_popen)
+
+    with patch.dict(os.environ, {"SANDBOX_BASE_DIR": str(tmp_path)}):
+        response = client.post("/execute", json={"command": "pwd"})
+
+    assert response.status_code == 200
+    assert mock_popen.call_args.kwargs["cwd"] == str(tmp_path)
+
+
 @patch('main.os.killpg')
 @patch('main.os.getpgid', return_value=4321)
 @patch('main.subprocess.Popen')
@@ -143,6 +169,16 @@ def test_upload_file_writes_to_safe_path(tmp_path):
 
     assert response.status_code == 200
     assert target.read_bytes() == b"hello world"
+
+
+def test_upload_file_creates_parent_directories(tmp_path):
+    target = tmp_path / "nested" / "dir" / "uploaded.txt"
+
+    with patch('main.get_safe_path', return_value=str(target)):
+        response = client.post("/upload", files={"file": ("nested/dir/uploaded.txt", b"hello")})
+
+    assert response.status_code == 200
+    assert target.read_bytes() == b"hello"
 
 
 def test_upload_file_rejects_path_traversal():

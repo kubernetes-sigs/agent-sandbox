@@ -246,7 +246,7 @@ from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 
 async def main():
     config = SandboxDirectConnectionConfig(
-        api_url="http://sandbox-router-svc.default.svc.cluster.local:8080"
+        api_url="http://sandbox-router-svc.agent-sandbox-system.svc.cluster.local:8080"
     )
     async with AsyncSandboxClient(connection_config=config) as client:
         sandbox = await client.create_sandbox(

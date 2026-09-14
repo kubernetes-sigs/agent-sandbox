@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=61.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nemo-gym-k8s-agent-sandbox"
+description = "NVIDIA NeMo Gym sandbox provider backed by Kubernetes agent-sandbox warm pools."
+readme = "README.md"
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version"]
+# This package's own floor. nemo-gym publishes requires-python >=3.13.14 —
+# no released 3.13.x satisfies that (3.14+ does), and it appears in upstream's
+# source pyproject too, so it is likely a typo for >=3.13.1 that only they can
+# fix. We deliberately do NOT mirror it: on 3.13.x pip surfaces the rejection
+# from nemo-gym's own metadata, and this wheel starts working the moment
+# upstream relaxes theirs — no re-release needed here.
+requires-python = ">=3.13"
+dependencies = [
+    # The provider instantiates NeMo Gym's provider-neutral types (SandboxHandle,
+    # SandboxExecResult, ...) and error classes; the SandboxProvider protocol and the
+    # entry-point registry both ship in nemo-gym 0.5.0.
+    "nemo-gym>=0.5.0",
+    # ~=0.5.1: create_sandbox(volume_claim_templates=...) landed in 0.5.1 and the
+    # provider passes it unconditionally.
+    "k8s-agent-sandbox[async]~=0.5.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/integrations/nemo-gym"
+Repository = "https://github.com/kubernetes-sigs/agent-sandbox"
+Documentation = "https://github.com/kubernetes-sigs/agent-sandbox/tree/main/clients/integrations/nemo-gym"
+
+# NeMo Gym discovers third-party sandbox providers through this entry-point group
+# (see nemo_gym/sandbox/providers/registry.py). Installing this package next to
+# nemo-gym makes `agent_sandbox` a valid provider name with no registration code.
+[project.entry-points."nemo_gym.sandbox_providers"]
+agent_sandbox = "nemo_gym_k8s_agent_sandbox.provider:AgentSandboxProvider"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["nemo_gym_k8s_agent_sandbox*"]
+exclude = ["tests*"]
+
+[tool.setuptools.exclude-package-data]
+# setuptools_scm automatically bundles tracked files as package data.
+# We need to explicitly exclude test directories and files from being bundled.
+"*" = ["test/*", "tests/*", "*/test/*", "*/tests/*", "test_*.py", "*_test.py"]
+
+[tool.setuptools_scm]
+root = "../../.."
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

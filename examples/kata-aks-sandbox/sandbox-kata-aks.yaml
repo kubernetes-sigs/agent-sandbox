@@ -9,6 +9,7 @@ spec:
       # Its scheduling nodeSelector automatically places the pod on a
       # KataVmIsolation node pool, so no explicit nodeSelector is needed.
       runtimeClassName: kata-vm-isolation
+      restartPolicy: Never
       containers:
       - name: hello-kata
         image: busybox:1.37

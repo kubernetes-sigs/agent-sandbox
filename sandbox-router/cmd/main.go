@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -191,6 +192,17 @@ func run(cfg *config.Config, log logr.Logger) error {
 	}
 
 	// --- Authorization -----------------------------------------------------
+	// tokenLocations is the zero value (both fields "") unless
+	// --authz-cookie-name is set, in which case Validate() has already
+	// ensured --path-routing-prefix and a non-allow-all --authz-mode are
+	// also set. Passed to whichever Authorizer gets built below so it
+	// additionally accepts a credential from the query parameter (to
+	// bootstrap) or the cookie (every request after) — see the
+	// "Browser-session credentials" section of the README.
+	tokenLocations := authz.TokenLocations{
+		QueryParam: cfg.AuthzCookieQueryParam,
+		CookieName: cfg.AuthzCookieName,
+	}
 	var authorizer authz.Authorizer = authz.AllowAll{}
 	if cfg.AuthzMode == config.AuthzTokenReview {
 		tr, err := authz.NewTokenReviewAuthorizer(authz.TokenReviewOptions{
@@ -201,6 +213,7 @@ func run(cfg *config.Config, log logr.Logger) error {
 			RequireToken:   cfg.AuthzTokenReviewRequireToken,
 			Audiences:      cfg.AuthzTokenReviewAudiences,
 			RequestTimeout: 0,
+			TokenLocations: tokenLocations,
 		})
 		if err != nil {
 			return fmt.Errorf("build tokenreview authorizer: %w", err)
@@ -208,14 +221,40 @@ func run(cfg *config.Config, log logr.Logger) error {
 		authorizer = tr
 	}
 	if cfg.AuthzMode == config.AuthzScopedToken {
-		secret, err := os.ReadFile(cfg.AuthzScopedTokenSecretFile)
-		if err != nil {
-			return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
+		var secret []byte
+		if cfg.AuthzScopedTokenSecretFile != "" {
+			var err error
+			secret, err = os.ReadFile(cfg.AuthzScopedTokenSecretFile)
+			if err != nil {
+				return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
+			}
+		}
+		var verificationKeys map[string]ed25519.PublicKey
+		if cfg.AuthzScopedTokenVerificationKeysFile != "" {
+			keyData, err := os.ReadFile(cfg.AuthzScopedTokenVerificationKeysFile)
+			if err != nil {
+				return fmt.Errorf("read --authz-scoped-token-verification-keys-file: %w", err)
+			}
+			verificationKeys, err = authz.ParseScopedTokenVerificationKeys(keyData)
+			if err != nil {
+				return fmt.Errorf("parse --authz-scoped-token-verification-keys-file: %w", err)
+			}
+		}
+		var v1AcceptUntil time.Time
+		if cfg.AuthzScopedTokenV1AcceptUntil != "" {
+			var err error
+			v1AcceptUntil, err = time.Parse(time.RFC3339, cfg.AuthzScopedTokenV1AcceptUntil)
+			if err != nil {
+				return fmt.Errorf("parse --authz-scoped-token-v1-accept-until: %w", err)
+			}
 		}
 		st, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
 			// NewScopedTokenAuthorizer trims whitespace itself, so a
 			// mounted Secret with a trailing newline just works.
-			Secret: secret,
+			Secret:           secret,
+			VerificationKeys: verificationKeys,
+			V1AcceptUntil:    v1AcceptUntil,
+			TokenLocations:   tokenLocations,
 		})
 		if err != nil {
 			return fmt.Errorf("build scoped-token authorizer: %w", err)

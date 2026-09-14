@@ -111,6 +111,7 @@ class TestSandbox(unittest.TestCase):
             connection_config=mock_connection_config,
             k8s_helper=mock_k8s_helper_instance,
             get_pod_ip=sandbox.get_pod_ip,
+            get_pod_name=sandbox.get_pod_name,
         )
 
         mock_create_tracer_manager.assert_called_once_with(mock_tracer_config)
@@ -157,6 +158,21 @@ class TestSandbox(unittest.TestCase):
     def test_get_pod_name_fallback(self):
         self.mock_k8s_helper.get_sandbox.return_value = None
         self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
+
+    def test_get_pod_name_empty_annotation_falls_back(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "metadata": {
+                "annotations": {
+                    'agents.x-k8s.io/pod-name': ""
+                }
+            }
+        }
+        self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
+
+        # The fallback value is cached and not re-queried from Kubernetes.
+        self.mock_k8s_helper.get_sandbox.reset_mock()
+        self.assertEqual(self.sandbox.get_pod_name(), self.sandbox_id)
+        self.mock_k8s_helper.get_sandbox.assert_not_called()
 
     def test_status_not_found(self):
         self.mock_k8s_helper.get_sandbox.return_value = None
@@ -305,7 +321,7 @@ class TestSandbox(unittest.TestCase):
 
 class TestSandboxTerminateIdempotent(unittest.TestCase):
     """`Sandbox.terminate()` must be idempotent — a second call must not
-    issue a redundant DELETE that would return 404."""
+    issue a redundant DELETE."""
 
     @patch('k8s_agent_sandbox.sandbox.Filesystem')
     @patch('k8s_agent_sandbox.sandbox.CommandExecutor')

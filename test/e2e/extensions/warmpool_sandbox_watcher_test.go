@@ -15,7 +15,6 @@
 package extensions
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -23,10 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/watch"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
@@ -96,59 +92,6 @@ func isClaimReady(claim *extensionsv1beta1.SandboxClaim) bool {
 	return false
 }
 
-func requirePodNameAnnotationWhenReady(
-	t *testing.T,
-	tc *framework.TestContext,
-	namespace string,
-	claim *extensionsv1beta1.SandboxClaim,
-) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-
-	// Use a direct API watch to avoid the async subscription race in framework.Watch
-	sandboxWatcher, err := tc.DynamicClient().Resource(
-		sandboxv1beta1.GroupVersion.WithResource("sandboxes"),
-	).Namespace(namespace).Watch(ctx, metav1.ListOptions{})
-	require.NoError(t, err)
-	defer sandboxWatcher.Stop()
-
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), claim))
-
-	for {
-		select {
-		case <-ctx.Done():
-			t.Fatalf("timed out watching adopted sandbox readiness: %v", ctx.Err())
-		case event, ok := <-sandboxWatcher.ResultChan():
-			require.True(t, ok, "sandbox watch closed before observing adopted sandbox readiness")
-			require.NotEqual(t, watch.Error, event.Type, "received error event while watching sandboxes")
-
-			if event.Type == watch.Deleted {
-				continue
-			}
-
-			u, ok := event.Object.(*unstructured.Unstructured)
-			require.True(t, ok, "unexpected sandbox watch event object type: %T", event.Object)
-
-			sb := &sandboxv1beta1.Sandbox{}
-			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, sb))
-
-			controllerRef := metav1.GetControllerOf(sb)
-			if controllerRef == nil || controllerRef.Kind != "SandboxClaim" || controllerRef.Name != claim.Name {
-				continue
-			}
-			if !isSandboxReady(sb) {
-				continue
-			}
-			if sb.Annotations[sandboxv1beta1.SandboxPodNameAnnotation] == "" {
-				t.Fatalf("observed adopted sandbox %s Ready=True without %s annotation", sb.Name, sandboxv1beta1.SandboxPodNameAnnotation)
-			}
-			return
-		}
-	}
-}
-
 func TestWarmPoolSandboxWatcher(t *testing.T) {
 	tc := framework.NewTestContext(t)
 
@@ -189,13 +132,8 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 	}, adoptedSandbox))
 	require.True(t, metav1.IsControlledBy(adoptedSandbox, claim), "adopted sandbox should be controlled by claim")
 
-	// Find the pod belonging to the adopted sandbox
-	podName := adoptedSandbox.Name
-	if ann, ok := adoptedSandbox.Annotations[sandboxv1beta1.SandboxPodNameAnnotation]; ok && ann != "" {
-		podName = ann
-	}
 	adoptedPod := &corev1.Pod{}
-	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: ns.Name}, adoptedPod))
+	require.NoError(t, tc.Get(t.Context(), types.NamespacedName{Name: adoptedSandbox.Name, Namespace: ns.Name}, adoptedPod))
 
 	// Wait for the sandbox controller to finish adopting the warm pool pod.
 	require.Eventually(t, func() bool {
@@ -206,14 +144,7 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 			return false
 		}
 
-		var podName string
-		if ann, ok := adoptedSandbox.Annotations["agents.x-k8s.io/pod-name"]; ok && ann != "" {
-			podName = ann
-		} else {
-			return false
-		}
-
-		if err := tc.Get(t.Context(), types.NamespacedName{Name: podName, Namespace: ns.Name}, adoptedPod); err != nil {
+		if err := tc.Get(t.Context(), types.NamespacedName{Name: adoptedSandbox.Name, Namespace: ns.Name}, adoptedPod); err != nil {
 			return false
 		}
 
@@ -239,36 +170,4 @@ func TestWarmPoolSandboxWatcher(t *testing.T) {
 		}
 		return false
 	}, 30*time.Second, 100*time.Millisecond, "sandbox should become not-ready after pod deletion")
-}
-
-// TestWarmPoolPodNameAnnotationBeforeReady verifies that a warm-pool sandbox
-// records its pod-name annotation before adoption can be observed as Ready.
-func TestWarmPoolPodNameAnnotationBeforeReady(t *testing.T) {
-	tc := framework.NewTestContext(t)
-
-	ns := &corev1.Namespace{}
-	ns.Name = fmt.Sprintf("warmpool-ready-annotation-test-%d", time.Now().UnixNano())
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), ns))
-
-	template := newWarmPoolTemplate(ns.Name)
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), template))
-
-	warmPool := &extensionsv1beta1.SandboxWarmPool{}
-	warmPool.Name = "test-warmpool"
-	warmPool.Namespace = ns.Name
-	warmPool.Spec.TemplateRef.Name = template.Name
-	replicas := int32(1)
-	warmPool.Spec.Replicas = &replicas
-	require.NoError(t, tc.CreateWithCleanup(t.Context(), warmPool))
-
-	// Start from a Ready warm-pool Sandbox so the claim reconcile path must adopt it
-	waitForWarmPoolSandboxReady(t, tc, ns.Name, warmPool)
-
-	claim := &extensionsv1beta1.SandboxClaim{}
-	claim.Name = "test-claim"
-	claim.Namespace = ns.Name
-	claim.Spec.WarmPoolRef.Name = warmPool.Name
-
-	// Creating the claim should not observe Ready before the pod-name annotation is set
-	requirePodNameAnnotationWhenReady(t, tc, ns.Name, claim)
 }

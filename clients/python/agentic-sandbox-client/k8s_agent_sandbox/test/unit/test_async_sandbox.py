@@ -190,6 +190,21 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         self.mock_k8s_helper.get_sandbox.return_value = None
         self.assertEqual(await self.sandbox.get_pod_name(), self.sandbox_id)
 
+    async def test_get_pod_name_empty_annotation_falls_back(self):
+        self.mock_k8s_helper.get_sandbox.return_value = {
+            "metadata": {
+                "annotations": {
+                    "agents.x-k8s.io/pod-name": "",
+                },
+            },
+        }
+        self.assertEqual(await self.sandbox.get_pod_name(), self.sandbox_id)
+
+        # The fallback value is cached and not re-queried from Kubernetes.
+        self.mock_k8s_helper.get_sandbox.reset_mock()
+        self.assertEqual(await self.sandbox.get_pod_name(), self.sandbox_id)
+        self.mock_k8s_helper.get_sandbox.assert_not_awaited()
+
     async def test_get_pod_name_caching(self):
         self.mock_k8s_helper.get_sandbox.return_value = {
             "metadata": {

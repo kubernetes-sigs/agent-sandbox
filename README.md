@@ -12,7 +12,7 @@
 
 [Website](https://agent-sandbox.sigs.k8s.io) · [Docs](https://agent-sandbox.sigs.k8s.io/docs/) · [DeepWiki](https://deepwiki.com/kubernetes-sigs/agent-sandbox) · [Getting Started](https://agent-sandbox.sigs.k8s.io/docs/getting_started/) · [Examples](examples/) · [Roadmap](roadmap.md)
 
-**agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes.**
+**agent-sandbox enables easy management of isolated, stateful, singleton workloads, ideal for use cases like AI agent runtimes and reinforcement learning.**
 
 This project is developing a `Sandbox` Custom Resource Definition (CRD) and controller for Kubernetes, under the umbrella of [SIG Apps](https://github.com/kubernetes/community/tree/master/sig-apps). The goal is to provide a declarative, standardized API for managing workloads that require the characteristics of a long-running, stateful, singleton container with a stable identity, much like a lightweight, single-container VM experience built on Kubernetes primitives.
 
@@ -88,15 +88,14 @@ flowchart LR
 
 ### Standard Install (Core + Extensions)
 
-Recommended for most users and GitOps engines (Argo CD, Config Sync, kustomize).
-`sandbox-with-extensions.yaml` is a single, collision-free asset (the controller is
-declared once with extensions enabled):
+Recommended for most users:
 
 ```sh
-# Replace "vX.Y.Z" with a specific version tag (e.g., "v0.1.0") from
-# https://github.com/kubernetes-sigs/agent-sandbox/releases
-export VERSION="vX.Y.Z"
+# Quick install (latest release):
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox-with-extensions.yaml
 
+# Or pin to a specific version (recommended for production and GitOps):
+export VERSION="v1.0.2"
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
 ```
 
@@ -108,10 +107,12 @@ If you prefer to install components separately:
 
 ```sh
 # Core only:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml
 
 # Extensions (opt-in):
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/extensions.yaml
+
+# To pin to a specific version, replace "latest/download" with "download/<version>".
 ```
 
 ### Go SDK
@@ -127,9 +128,19 @@ For detailed installation and usage instructions, please refer to the [Go SDK RE
 
 ### Python SDK
 
-To interact with the agent-sandbox programmatically, you can use the Python SDK. This client library provides a high-level interface for creating and managing sandboxes.
+To interact with the agent-sandbox programmatically from Python, use the Python SDK:
+
+```sh
+pip install k8s-agent-sandbox
+```
 
 For detailed installation and usage instructions, please refer to the [Python SDK README](clients/python/agentic-sandbox-client/README.md).
+
+### Sandbox Router (Optional)
+
+The [Sandbox Router](sandbox-router/) is an HTTP reverse proxy that routes traffic from SDKs and external clients to sandbox pods. It is useful for workloads using the Go or Python SDKs, or runtime environments (like Kata Containers and gVisor) where direct pod port-forwarding is unavailable.
+
+For deployment manifests and setup options, see [sandbox-router/deploy/](sandbox-router/deploy/).
 
 ### Verify Installation
 
@@ -161,10 +172,13 @@ kubectl get crd sandboxtemplates.extensions.agents.x-k8s.io >/dev/null 2>&1 && k
 
 > **Warning**: Deleting the CRDs will **cascade-delete all custom resources** of those types across all namespaces.
 
-Once you have confirmed no resources are in use (or you are prepared to lose them), uninstall by deleting the same manifest you used to install:
+Once you have confirmed no resources are in use (or you are prepared to lose them), uninstall by deleting the manifest for the version installed on your cluster:
 
 ```sh
-# Standard Install (Core + Extensions):
+# Set the version installed on your cluster (e.g., "v1.0.2"):
+export VERSION="v1.0.2"
+
+# Standard Install:
 kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
 
 # Or, if you used the Selective Install:
@@ -205,6 +219,7 @@ Kubernetes excels at managing stateless, replicated applications (Deployments) a
 
 *   **Development Environments:** Isolated, persistent, network-accessible cloud environments for developers.
 *   **AI Agent Runtimes:** Isolated environments for executing untrusted, LLM-generated code.
+*   **Reinforcement Learning (RL) & Evaluation:** High-throughput, isolated execution sandboxes for training and evaluation loops (e.g., SWE-bench, R2E-Gym, Ray/RLlib) with low-latency warm-pool claims.
 *   **Notebooks and Research Tools:** Persistent, single-container sessions for tools like Jupyter Notebooks.
 *   **Stateful Single-Pod Services:** Hosting single-instance applications (e.g., build agents, small databases) needing a stable identity without StatefulSet overhead.
 

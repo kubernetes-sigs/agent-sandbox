@@ -13,10 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import re
 import subprocess
+
+
+# Where published agent-sandbox images live (see dev/tools/release).
+PUBLISHED_IMAGE_PREFIX = "registry.k8s.io/agent-sandbox/"
 
 
 # Version strings derived from git refs are interpolated unquoted into the
@@ -53,6 +57,67 @@ def git_sha():
         ["git", "rev-parse", "--short", "HEAD"], text=True
     ).strip()
     return _validate_version_string(raw_sha, "git sha")
+
+
+def build_date():
+    """Gets the build date in RFC3339 UTC format (%Y-%m-%dT%H:%M:%SZ).
+
+    If BUILD_DATE env var is set, it is returned.
+    Otherwise:
+    - If the repository is clean, returns the HEAD commit date.
+    - If the repository is dirty, returns the mtime of the most recently modified file.
+    """
+    env_date = os.getenv("BUILD_DATE")
+    if env_date:
+        return env_date
+
+    repo_root = get_repo_root()
+
+    res = subprocess.run(
+        ["git", "status", "--porcelain", "-z"],
+        cwd=repo_root,
+        capture_output=True,
+        check=True,
+    )
+    raw_status = res.stdout
+
+    if not raw_status:
+        # Repo is clean -> return HEAD commit date
+        ts_str = subprocess.check_output(
+            ["git", "log", "-1", "--format=%ct"],
+            cwd=repo_root,
+            text=True,
+        ).strip()
+        dt = datetime.fromtimestamp(int(ts_str), tz=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Repo is dirty -> find most recently changed dirty file
+    entries = raw_status.split(b"\x00")
+    mtimes = []
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        if not entry:
+            i += 1
+            continue
+        status = entry[:2]
+        filename = entry[3:].decode("utf-8", errors="replace")
+        # If rename or copy (R or C), the next entry in -z output is the old path
+        if status[0:1] in (b"R", b"C") or status[1:2] in (b"R", b"C"):
+            i += 1  # skip old path
+        abs_path = os.path.join(repo_root, filename)
+        if os.path.exists(abs_path):
+            try:
+                mtimes.append(os.path.getmtime(abs_path))
+            except OSError:
+                pass
+        i += 1
+
+    if mtimes:
+        latest_dt = datetime.fromtimestamp(max(mtimes), tz=timezone.utc)
+        return latest_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def get_image_tag():

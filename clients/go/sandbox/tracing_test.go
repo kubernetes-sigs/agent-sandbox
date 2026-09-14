@@ -131,9 +131,6 @@ func setupTracedWatch(agentsCS *fakeagents.Clientset, extensionsCS *fakeextensio
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      claim.Name,
 						Namespace: claim.Namespace,
-						Annotations: map[string]string{
-							PodNameAnnotation: claim.Name + "-pod",
-						},
 					},
 					Status: sandboxv1beta1.SandboxStatus{
 						Conditions: []metav1.Condition{{

@@ -22,14 +22,15 @@ spec:
     spec:
       containers:
         - name: chrome
-          image: registry.k8s.io/chrome-sandbox
+          image: chrome-sandbox:local
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9222
 ```
 
 ## How to Run
 
-Apply the Sandbox:
+Save the manifest above as `chrome-sandbox.yaml`, then apply it:
 
 ```bash
 kubectl apply -f chrome-sandbox.yaml
@@ -45,10 +46,7 @@ kubectl port-forward pod/chrome-sandbox 9222:9222
 
 This example can be run locally using Docker for development and debugging purposes. It is already integrated with the `agent-sandbox` framework and used in end-to-end (e2e) tests via the Sandbox CRD.
 
-Currently you can test it out by running `run-test`; it will build a (local) container image, then run it. The image will capture screenshots roughly every 100ms so you can observe the progress as Chrome launches and opens (currently) https://google.com
-
-The screenshots are in an unusual xwg format, so the script depends on the `convert`
-utility to convert those to an animated gif.
+Currently you can test it out by running `run-test`; it builds a local container image and runs it for ~5 seconds. The container starts a VNC server (display `:1`) and Chromium, and exposes the Chrome DevTools Protocol on port 9222 (readiness is probed via `http://localhost:9222/json/version`).
 
 ---
 
@@ -61,10 +59,11 @@ The Chrome sandbox is already used in the project’s end-to-end tests.
 - The test creates a `Sandbox` resource running Chrome
 - This ensures Chrome runs correctly inside a Sandbox environment
 
-The container image used is available at:
+The container image is built locally (there is no published `chrome-sandbox` image):
 
 ```bash
-docker pull registry.k8s.io/chrome-sandbox
+docker buildx build --load --tag chrome-sandbox:local .
+kind load docker-image chrome-sandbox:local   # when running against a kind cluster
 ```
 ---
 

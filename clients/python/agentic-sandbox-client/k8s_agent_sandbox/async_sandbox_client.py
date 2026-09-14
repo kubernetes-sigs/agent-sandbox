@@ -29,6 +29,7 @@ from typing import Generic, TypeVar
 from .async_k8s_helper import AsyncK8sHelper
 from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
+from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
 from .utils import construct_sandbox_claim_lifecycle_spec
 from .models import SandboxConnectionConfig, SandboxInClusterConnectionConfig, SandboxTracerConfig
@@ -37,6 +38,11 @@ from .trace_manager import async_trace_span, create_tracer_manager, initialize_t
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=AsyncSandbox)
+
+# Bounds each per-claim delete issued by the atexit cleanup below. urllib3
+# (used by the synchronous K8sHelper) has no default read timeout, so an
+# unresponsive apiserver would otherwise hang process exit indefinitely.
+_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS = 300
 
 
 class AsyncSandboxClient(Generic[T]):
@@ -85,14 +91,15 @@ class AsyncSandboxClient(Generic[T]):
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
             cleanup: If True, registers an atexit hook to automatically delete
                 all tracked sandboxes when the program terminates. The hook
-                snapshots the tracked claim names and opens fresh async
-                resources in a new event loop, so it is safe to call after
-                the main event loop has exited. Cleanup is best-effort —
-                per-claim and top-level failures emit warnings to
-                ``sys.stderr`` rather than raising. Defaults to True so that
-                sandboxes are not leaked when a caller forgets to clean up;
-                pass ``cleanup=False`` to opt out. Note this differs from the
-                synchronous ``SandboxClient``, which defaults to False.
+                uses a snapshot of the tracked claim names and the
+                synchronous ``K8sHelper``, which has no event loop
+                dependency, so it works correctly during interpreter
+                shutdown. Cleanup is best-effort — per-claim and top-level
+                failures emit warnings to ``sys.stderr`` rather than raising.
+                Defaults to True so that sandboxes are not leaked when a
+                caller forgets to clean up; pass ``cleanup=False`` to opt
+                out. Note this differs from the synchronous ``SandboxClient``,
+                which defaults to False.
         """
         if connection_config is None:
             raise ValueError(
@@ -148,6 +155,7 @@ class AsyncSandboxClient(Generic[T]):
         volume_claim_templates: list[dict] | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> T:
         """Provisions a new Sandbox claim and returns an async Sandbox handle.
 
@@ -170,6 +178,10 @@ class AsyncSandboxClient(Generic[T]):
                 the sandbox through the Downward API.
             pod_annotations: Optional annotations stamped onto the running
                 Sandbox **Pod** via ``spec.additionalPodMetadata.annotations``.
+            env: Optional environment variables to inject into the SandboxClaim.
+                Setting this populates ``spec.env`` and forces a cold start
+                from the warm pool template instead of adopting a pre-warmed
+                pod, which may increase startup latency.
 
         Example::
 
@@ -197,7 +209,8 @@ class AsyncSandboxClient(Generic[T]):
                 labels=labels,
                 lifecycle=lifecycle,
                 volume_claim_templates=volume_claim_templates,
-                pod_metadata=pod_metadata
+                pod_metadata=pod_metadata,
+                env=env,
             )
             # Wait for the claim to be bound and Ready in a single watch.
             # The claim status carries the sandbox name (which differs from
@@ -370,38 +383,37 @@ class AsyncSandboxClient(Generic[T]):
                 logger.error(f"Cleanup failed for {claim_name} in namespace {ns}: {e}")
 
     def _atexit_cleanup(self):
-        """Best-effort atexit handler that deletes all tracked sandbox claims.
+        """Best-effort atexit handler that deletes the current snapshot of tracked sandbox claims.
 
-        Uses a snapshot of the tracked claims and a fresh :class:`AsyncK8sHelper`
-        so that no loop-bound objects from the original client are reused across
-        event loop boundaries. Per-claim failures and top-level errors emit
+        Uses the synchronous :class:`K8sHelper` rather than kubernetes_asyncio,
+        even though this class is otherwise fully async. atexit runs during
+        interpreter shutdown, after Python has begun tearing down its
+        process-wide thread pool; kubernetes_asyncio's aiohttp transport does a
+        per-request netrc lookup via a background thread, which raises "cannot
+        schedule new futures after interpreter shutdown" once that teardown has
+        started. The synchronous client's urllib3 transport has no event loop or
+        executor dependency, so it isn't affected. Per-claim failures emit
         warnings to ``sys.stderr`` rather than raising — atexit cleanup is
         best-effort.
         """
-        claims = list(self._active_connection_sandboxes.keys())
-        if not claims:
-            return
-
-        async def _do_cleanup():
-            helper = AsyncK8sHelper()
-            try:
-                async def _delete_one(ns, claim_name):
-                    try:
-                        await helper.delete_sandbox_claim(claim_name, ns)
-                    except Exception as e:
-                        if sys.stderr is not None:
-                            print(
-                                f"[agent-sandbox] Warning: failed to delete sandbox claim "
-                                f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
-                                file=sys.stderr,
-                            )
-
-                await asyncio.gather(*(_delete_one(ns, claim_name) for ns, claim_name in claims))
-            finally:
-                await helper.close()
-
         try:
-            asyncio.run(_do_cleanup())
+            claims = list(self._active_connection_sandboxes.keys())
+            if not claims:
+                return
+
+            helper = K8sHelper()
+            for ns, claim_name in claims:
+                try:
+                    helper.delete_sandbox_claim(
+                        claim_name, ns, _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+                    )
+                except Exception as e:
+                    if sys.stderr is not None:
+                        print(
+                            f"[agent-sandbox] Warning: failed to delete sandbox claim "
+                            f"'{claim_name}' in namespace '{ns}' during atexit cleanup: {e}",
+                            file=sys.stderr,
+                        )
         except Exception as e:
             if sys.stderr is not None:
                 print(
@@ -419,6 +431,7 @@ class AsyncSandboxClient(Generic[T]):
         lifecycle: dict | None = None,
         volume_claim_templates: list[dict] | None = None,
         pod_metadata: dict | None = None,
+        env: dict[str, str] | None = None,
     ):
         span = trace.get_current_span()
         if span.is_recording():
@@ -441,7 +454,8 @@ class AsyncSandboxClient(Generic[T]):
             labels=labels,
             lifecycle=lifecycle,
             volume_claim_templates=volume_claim_templates,
-            pod_metadata=pod_metadata
+            pod_metadata=pod_metadata,
+            env=env,
         )
 
     @async_trace_span("wait_for_claim_ready")

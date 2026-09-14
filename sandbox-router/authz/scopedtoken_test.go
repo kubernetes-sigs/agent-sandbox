@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestScopedToken_ValidTokenAllowsItsOwnSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	if err := auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box-a"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box-a")); err != nil {
 		t.Fatalf("expected allow, got %v", err)
 	}
 }
@@ -48,7 +49,7 @@ func TestScopedToken_RejectsOtherSandbox(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
-	err = auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box-b")
+	err = auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box-b"))
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
 	}
@@ -61,7 +62,7 @@ func TestScopedToken_RejectsOtherNamespace(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
-	err = auth.Authorize(context.Background(), reqWithBearer(tok), "ns-b", "box")
+	err = auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns-b", "box"))
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
 	}
@@ -73,7 +74,7 @@ func TestScopedToken_RejectsWrongSecret(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: []byte("bbbb456789abcdef0123456789abcdef")})
-	err = auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box")
+	err = auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
@@ -89,7 +90,7 @@ func TestScopedToken_RejectsExpiredToken(t *testing.T) {
 		Secret: secret,
 		Clock:  func() time.Time { return time.Now().Add(time.Hour) },
 	})
-	err = auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box")
+	err = auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
@@ -97,7 +98,7 @@ func TestScopedToken_RejectsExpiredToken(t *testing.T) {
 
 func TestScopedToken_RejectsMalformedToken(t *testing.T) {
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: []byte("0123456789abcdef0123456789abcdef")})
-	err := auth.Authorize(context.Background(), reqWithBearer("not-a-real-token"), "ns", "box")
+	err := auth.Authorize(context.Background(), reqWithBearer("not-a-real-token"), testAuthorizationTarget("ns", "box"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
@@ -105,7 +106,7 @@ func TestScopedToken_RejectsMalformedToken(t *testing.T) {
 
 func TestScopedToken_MissingBearerRejected(t *testing.T) {
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: []byte("0123456789abcdef0123456789abcdef")})
-	err := auth.Authorize(context.Background(), reqWithBearer(""), "ns", "box")
+	err := auth.Authorize(context.Background(), reqWithBearer(""), testAuthorizationTarget("ns", "box"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated, got %v", err)
 	}
@@ -129,7 +130,7 @@ func TestScopedToken_RejectsRoutingOverrides(t *testing.T) {
 		t.Run(tc.header, func(t *testing.T) {
 			req := reqWithBearer(tok)
 			req.Header.Set(tc.header, tc.value)
-			err := auth.Authorize(context.Background(), req, "ns", "box-a")
+			err := auth.Authorize(context.Background(), req, testAuthorizationTarget("ns", "box-a"))
 			if !errors.Is(err, ErrForbidden) {
 				t.Fatalf("expected ErrForbidden with %s override, got %v", tc.header, err)
 			}
@@ -171,7 +172,7 @@ func TestScopedToken_RejectsTokenAtExactExpiry(t *testing.T) {
 		Secret: secret,
 		Clock:  func() time.Time { return exp },
 	})
-	err = auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box")
+	err = auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated at exact expiry, got %v", err)
 	}
@@ -193,7 +194,7 @@ func TestScopedToken_ShortestTTLIsNotBornExpired(t *testing.T) {
 		Secret: secret,
 		Clock:  func() time.Time { return minted },
 	})
-	if err := auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box")); err != nil {
 		t.Fatalf("expected allow for a 1s token at mint time, got %v", err)
 	}
 }
@@ -208,7 +209,7 @@ func TestScopedToken_SecretWhitespaceNormalized(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
-	if err := auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box")); err != nil {
 		t.Fatalf("expected allow across newline-suffixed secret, got %v", err)
 	}
 }
@@ -226,7 +227,7 @@ func TestScopedToken_SecretIsCopied(t *testing.T) {
 	for i := range callerOwned {
 		callerOwned[i] = 'x'
 	}
-	if err := auth.Authorize(context.Background(), reqWithBearer(tok), "ns", "box"); err != nil {
+	if err := auth.Authorize(context.Background(), reqWithBearer(tok), testAuthorizationTarget("ns", "box")); err != nil {
 		t.Fatalf("expected allow after mutating caller's slice, got %v", err)
 	}
 }
@@ -259,7 +260,7 @@ func TestScopedToken_RejectsUnversionedToken(t *testing.T) {
 	}
 	unversioned := strings.TrimPrefix(tok, "v1.")
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
-	err = auth.Authorize(context.Background(), reqWithBearer(unversioned), "ns", "box")
+	err = auth.Authorize(context.Background(), reqWithBearer(unversioned), testAuthorizationTarget("ns", "box"))
 	if !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated for unversioned token, got %v", err)
 	}
@@ -288,7 +289,7 @@ func TestScopedToken_MACIsDomainSeparated(t *testing.T) {
 	forged := "v1." + encPayload + "." + bareSig
 
 	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
-	if err := auth.Authorize(context.Background(), reqWithBearer(forged), "ns", "box"); !errors.Is(err, ErrUnauthenticated) {
+	if err := auth.Authorize(context.Background(), reqWithBearer(forged), testAuthorizationTarget("ns", "box")); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected ErrUnauthenticated for context-less signature, got %v", err)
 	}
 }
@@ -299,6 +300,69 @@ func TestNewScopedTokenAuthorizer_RequiresSecret(t *testing.T) {
 	}
 	if _, err := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: []byte("short")}); err == nil {
 		t.Fatalf("expected error for secret shorter than %d bytes", MinScopedTokenSecretLen)
+	}
+}
+
+// A scoped token presented via a query parameter or a cookie must
+// authorize exactly like one presented via the Authorization header —
+// this is what lets ScopedTokenAuthorizer work behind
+// --path-routing-prefix, where the caller is a browser that cannot set
+// a header at all.
+func TestScopedToken_AuthorizesFromQueryAndCookie(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box-a", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth, err := NewScopedTokenAuthorizer(ScopedTokenOptions{
+		Secret:         secret,
+		TokenLocations: TokenLocations{QueryParam: "token", CookieName: "sid"},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	t.Run("query", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "/?token="+tok, nil)
+		if err := auth.Authorize(context.Background(), req, testAuthorizationTarget("ns", "box-a")); err != nil {
+			t.Fatalf("expected allow, got %v", err)
+		}
+	})
+	t.Run("cookie", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: tok})
+		if err := auth.Authorize(context.Background(), req, testAuthorizationTarget("ns", "box-a")); err != nil {
+			t.Fatalf("expected allow, got %v", err)
+		}
+	})
+	// Still scoped: a token for box-a, however it arrives, is forbidden
+	// against box-b.
+	t.Run("cookie against other sandbox", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: "sid", Value: tok})
+		err := auth.Authorize(context.Background(), req, testAuthorizationTarget("ns", "box-b"))
+		if !errors.Is(err, ErrForbidden) {
+			t.Fatalf("expected ErrForbidden, got %v", err)
+		}
+	})
+}
+
+// With TokenLocations left at its zero value, a token in the query
+// string or a cookie must be ignored exactly as before this field
+// existed — a deployment that hasn't opted in is unaffected.
+func TestScopedToken_IgnoresQueryAndCookieByDefault(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box-a", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth, _ := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
+
+	req, _ := http.NewRequest("GET", "/?token="+tok, nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: tok})
+	err = auth.Authorize(context.Background(), req, testAuthorizationTarget("ns", "box-a"))
+	if !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected ErrUnauthenticated with locations disabled, got %v", err)
 	}
 }
 

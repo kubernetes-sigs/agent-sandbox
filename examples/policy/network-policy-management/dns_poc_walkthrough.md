@@ -71,6 +71,7 @@ spec:
 
 ```bash
 kubectl apply -f dns-poc-template.yaml
+kubectl apply -f dns-poc-warmpool.yaml
 kubectl apply -f dns-poc-claim.yaml
 ```
 

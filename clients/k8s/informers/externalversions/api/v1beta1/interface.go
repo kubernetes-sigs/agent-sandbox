@@ -23,7 +23,7 @@ import (
 // Interface provides access to all the informers in this group version.
 type Interface interface {
 	// Sandboxes returns a SandboxInformer.
-	Sandboxes() SandboxInformer
+	Sandboxes() TypedSandboxInformer
 }
 
 type version struct {
@@ -37,7 +37,7 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
-// Sandboxes returns a SandboxInformer.
-func (v *version) Sandboxes() SandboxInformer {
+// Sandboxes returns a TypedSandboxInformer.
+func (v *version) Sandboxes() TypedSandboxInformer {
 	return &sandboxInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

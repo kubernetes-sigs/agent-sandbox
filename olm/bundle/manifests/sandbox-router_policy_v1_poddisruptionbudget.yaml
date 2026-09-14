@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/component: sandbox-router
+    app.kubernetes.io/name: sandbox-router
+  name: sandbox-router
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: sandbox-router
+      app.kubernetes.io/name: sandbox-router

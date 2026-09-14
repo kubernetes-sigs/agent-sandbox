@@ -67,6 +67,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
     head:
       summary: Check whether a file or directory exists
@@ -75,9 +77,11 @@ paths:
         "200":
           description: Path exists
         "403":
-          $ref: "#/components/responses/Forbidden"
+          description: Path escapes sandbox root or permission denied
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: Path does not exist within the sandbox
+        "500":
+          description: Internal filesystem error
 
     put:
       summary: Write or overwrite a file (Idempotent)
@@ -116,6 +120,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
     delete:
       summary: Remove a file or directory
@@ -130,12 +136,16 @@ paths:
       responses:
         "204":
           description: Removed successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /health:
     get:
@@ -273,6 +283,12 @@ components:
             $ref: "#/components/schemas/Error"
     Conflict:
       description: Directory not empty when recursive=false
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalServerError:
+      description: Internal filesystem error
       content:
         application/json:
           schema:

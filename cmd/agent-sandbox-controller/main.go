@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -84,6 +85,10 @@ func main() {
 	var printVersion bool
 	var disableClaimEvents bool
 	var disableClaimObservabilityAnnotations bool
+	var metricsSecureServing bool
+	var metricsCertDir string
+	var tlsMinVersion string
+	var tlsCipherSuites string
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit.")
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster domain for service FQDN generation")
@@ -157,6 +162,22 @@ func main() {
 			"by the previous process. Default false (annotations persisted).")
 	flag.DurationVar(&sandboxWriteBehindWindow, "sandbox-write-behind-window", 0,
 		"Coalescing window for the Sandbox controller's recoverable metadata-only writes. 0 disables coalescing.")
+	flag.BoolVar(&metricsSecureServing, "metrics-secure-serving", false,
+		"Serve metrics over HTTPS instead of HTTP. When enabled without --metrics-cert-dir, "+
+			"a self-signed certificate is generated automatically. Conventional HTTPS metrics port is :8443.")
+	flag.StringVar(&metricsCertDir, "metrics-cert-dir", "",
+		"Directory containing tls.crt and tls.key for the metrics server. "+
+			"Only used when --metrics-secure-serving is enabled.")
+	flag.StringVar(&tlsMinVersion, "tls-min-version", "",
+		"Minimum TLS version for the metrics server. "+
+			"Accepted values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13. "+
+			"If not set, the Go default applies (TLS 1.2). "+
+			"A downstream operator can use this flag to inject the cluster TLS profile.")
+	flag.StringVar(&tlsCipherSuites, "tls-cipher-suites", "",
+		"Comma-separated list of cipher suites for the metrics server, "+
+			"using Go cipher-suite names (e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). "+
+			"If not set, the Go default applies. TLS 1.3 cipher suites are not configurable. "+
+			"A downstream operator can use this flag to inject the cluster TLS profile.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -279,6 +300,39 @@ func main() {
 
 	metricsOpts := metricsserver.Options{
 		BindAddress: metricsAddr,
+	}
+	if metricsSecureServing {
+		metricsOpts.SecureServing = true
+		if metricsCertDir != "" {
+			certPath := filepath.Join(metricsCertDir, "tls.crt")
+			keyPath := filepath.Join(metricsCertDir, "tls.key")
+			if _, err := os.Stat(certPath); err != nil {
+				setupLog.Error(err, "metrics cert not found", "path", certPath)
+				os.Exit(1)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				setupLog.Error(err, "metrics key not found", "path", keyPath)
+				os.Exit(1)
+			}
+			metricsOpts.CertDir = metricsCertDir
+		}
+		setupLog.Info("metrics server TLS enabled (--metrics-secure-serving)")
+		tlsOpts, err := buildMetricsTLSOpts(tlsMinVersion, tlsCipherSuites)
+		if err != nil {
+			setupLog.Error(err, "invalid TLS configuration")
+			os.Exit(1)
+		}
+		if len(tlsOpts) > 0 {
+			metricsOpts.TLSOpts = append(metricsOpts.TLSOpts, tlsOpts...)
+			kv := []any{"minVersion", tlsMinVersion}
+			if tlsCipherSuites != "" && tlsMinVersion != "VersionTLS13" {
+				kv = append(kv, "cipherSuites", tlsCipherSuites)
+			}
+			setupLog.Info("TLS configuration applied to metrics server", kv...)
+		}
+	} else if metricsCertDir != "" || tlsMinVersion != "" || tlsCipherSuites != "" {
+		setupLog.Error(nil, "TLS flags require --metrics-secure-serving")
+		os.Exit(1)
 	}
 	if enablePprof || enablePprofDebug {
 		setupLog.Info("pprof enabled", "debug", enablePprofDebug)

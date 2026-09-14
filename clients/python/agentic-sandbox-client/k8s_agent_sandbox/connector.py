@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+"""Synchronous HTTP connectivity for sandbox runtimes."""
+
 import logging
 import math
 import socket
 import subprocess
 import time
 from collections.abc import Callable
+from typing import Any
+
 import requests
 from abc import ABC, abstractmethod
 from requests.adapters import HTTPAdapter
@@ -571,6 +574,7 @@ class SandboxConnector:
         # returned as-is instead of raising — which is important because the
         # raise path also calls self.close() and tears down the connection.
         allowed_statuses = kwargs.pop("allowed_statuses", None)
+        stream_response = bool(kwargs.get("stream", False))
         try:
             # Establish connection (re-establishes if closed/dead)
             base_url = self.connect()
@@ -636,6 +640,12 @@ class SandboxConnector:
         except requests.exceptions.RequestException as e:
             resp = getattr(e, "response", None)
             status_code = resp.status_code if resp is not None else None
+
+            # A streamed response is caller-owned only after this method
+            # returns successfully. Close failures here so an unread error
+            # body cannot leak a connection from the session pool.
+            if stream_response and resp is not None:
+                resp.close()
 
             # No response: transport may be dead, reset the Pod IP and close.
             # 5xx: often a stale Pod IP after a pod swap, drop it but keep the tunnel.

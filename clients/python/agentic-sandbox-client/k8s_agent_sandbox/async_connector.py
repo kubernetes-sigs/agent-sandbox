@@ -195,7 +195,7 @@ class AsyncSandboxConnector:
         return self._base_url
 
     async def send_request(
-        self, method: str, endpoint: str, **kwargs: Any
+        self, method: str, endpoint: str, *, stream: bool = False, **kwargs: Any
     ) -> httpx.Response:
         """Sends an HTTP request asynchronously to the sandbox with standard parameters.
 
@@ -206,6 +206,8 @@ class AsyncSandboxConnector:
         Args:
             method: The HTTP method (e.g., "GET", "POST").
             endpoint: The API endpoint path.
+            stream: Return the response without buffering its body. The caller
+                must close streaming responses with ``aclose()``.
             **kwargs: Extra keyword arguments passed directly to the underlying
                 `httpx.AsyncClient.request` invocation. Note that 'follow_redirects'
                 is explicitly popped and overridden. `allowed_statuses` may be
@@ -276,14 +278,24 @@ class AsyncSandboxConnector:
         last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                response = await self.client.request(
-                    method, url, headers=headers, follow_redirects=False, **kwargs
-                )
+                if stream:
+                    request = self.client.build_request(
+                        method, url, headers=headers, **kwargs
+                    )
+                    response = await self.client.send(
+                        request, follow_redirects=False, stream=True
+                    )
+                else:
+                    response = await self.client.request(
+                        method, url, headers=headers, follow_redirects=False, **kwargs
+                    )
                 if (
                     method.upper() in RETRYABLE_METHODS
                     and response.status_code in RETRYABLE_STATUS_CODES
                     and attempt < MAX_RETRIES
                 ):
+                    if stream:
+                        await response.aclose()
                     delay = BACKOFF_FACTOR * (2 ** attempt)
                     logger.warning(
                         f"Retryable status {response.status_code} from {url}, "
@@ -303,6 +315,8 @@ class AsyncSandboxConnector:
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:
+                if stream:
+                    await e.response.aclose()
                 logger.error(f"Request to sandbox failed: {e}")
                 # 5xx: often a stale Pod IP after a pod swap, clear the cached
                 # routing state so the next request re-resolves.

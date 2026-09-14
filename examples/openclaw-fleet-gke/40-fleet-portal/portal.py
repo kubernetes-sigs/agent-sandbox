@@ -156,7 +156,7 @@ def pod_of(employee: str, not_before: float = 0.0):
     return live[0] if live else None
 
 
-def daemon_bind(pod, employee: str, action: str = "bind"):
+def daemon_bind(pod, employee: str, action: str = "bind", retries: int = 60):
     """Ask the storage daemon on the pod's node to (un)bind the workspace.
 
     Retries: right after pod creation the emptyDir may not exist on the
@@ -178,13 +178,52 @@ def daemon_bind(pod, employee: str, action: str = "bind"):
     url = f"http://{daemons[0].status.pod_ip}:9090"
     headers = {"Authorization": f"Bearer {DAEMON_TOKEN}"}
     last = None
-    for _ in range(60):
+    for _ in range(retries):
         r = requests.post(url, json=payload, headers=headers, timeout=10)
         if r.ok:
             return
         last = r.text
         time.sleep(0.5)
     raise RuntimeError(f"storage daemon {action} failed: {last}")
+
+
+def pod_of_any(employee: str):
+    """Like pod_of, but includes terminating pods (needed for teardown)."""
+    pods = core.list_namespaced_pod(
+        NAMESPACE, label_selector=f"{EMPLOYEE_LABEL}={employee}").items
+    return pods[0] if pods else None
+
+
+def unbind_workspace(employee: str):
+    """Unbind the employee's workspace BEFORE any pod teardown is triggered.
+
+    Ordering is load-bearing, empirically verified on GKE: if the bind is
+    still present when the pod starts terminating, the emptyDir cleanup
+    during teardown deletes THROUGH the mount and wipes the employee's NFS
+    workspace; if instead the unbind completes first, teardown only touches
+    the local emptyDir and the workspace survives. (Unbinding first also
+    prevents the pod wedging in Terminating on the busy mount.) The lazy
+    umount keeps already-open file handles working for the process's last
+    moments; writes to NEW files in the sub-second gap before SIGTERM land
+    on the local emptyDir and are discarded — acceptable for suspend and
+    rebuild, where the process is being stopped anyway.
+    """
+    pod = pod_of_any(employee)
+    if pod is None or pod.metadata.deletion_timestamp is not None:
+        return
+    try:
+        daemon_bind(pod, employee, action="unbind", retries=3)
+    except Exception as e:  # noqa: BLE001 - already-unmounted is fine
+        print(f"unbind {employee}: {e}", flush=True)
+
+
+def wait_pod_gone(employee: str, timeout: int) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pod_of_any(employee) is None:
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def daemon_delete_workspace(employee: str):
@@ -207,15 +246,21 @@ def openclaw_url(sandbox) -> str | None:
     return f"http://{fqdn}:{OPENCLAW_PORT}/" if fqdn else None
 
 
-def wait_app_ready(sandbox, deadline: float) -> bool:
+def wait_app_ready(sandbox_name: str, deadline: float) -> bool:
     """Poll OpenClaw itself — pod Ready only means the spin-wait is running.
 
-    Any HTTP response (even 4xx) proves the gateway process is up.
+    Re-reads the Sandbox until status.serviceFQDN is published (cold-start
+    fallbacks reach here before it is). Any HTTP response (even 4xx) proves
+    the gateway process is up.
     """
-    url = openclaw_url(sandbox)
-    if url is None:
-        return False
-    while time.time() < deadline:
+    url = None
+    while time.time() < deadline and url is None:
+        sandbox = crd.get_namespaced_custom_object(
+            CORE_GROUP, VERSION, NAMESPACE, "sandboxes", sandbox_name)
+        url = openclaw_url(sandbox)
+        if url is None:
+            time.sleep(0.2)
+    while url is not None and time.time() < deadline:
         try:
             requests.get(url, timeout=2)
             return True
@@ -231,7 +276,13 @@ def upsert_alias(employee: str, sandbox_name: str):
     fixed employee-facing name is a CNAME the router resolves via DNS:
       /router/<ns>/oc-<employee>/<port>/... just works, and the alias is
     simply repointed on rebuild while suspend/resume needs no change at all.
+
+    Cold-start fallbacks name the sandbox after the claim, so its own
+    headless Service already IS oc-<employee> — no alias needed (and
+    patching it into an ExternalName would break it).
     """
+    if sandbox_name == claim_name(employee):
+        return
     body = client.V1Service(
         metadata=client.V1ObjectMeta(
             name=claim_name(employee), labels={"app": "openclaw-alias"}),
@@ -282,13 +333,15 @@ def provision(employee: str, annotations: dict) -> tuple[dict, dict]:
     pod = None
     while time.time() < deadline and pod is None:
         pod = pod_of(employee)
+        if pod is not None and not pod.spec.node_name:
+            pod = None  # cold-start fallback: pod exists but not scheduled yet
         time.sleep(0.05) if pod is None else None
     if pod is None:
-        raise RuntimeError("adopted pod never appeared")
+        raise RuntimeError("pod never appeared/scheduled")
     daemon_bind(pod, employee)
     t_bound = time.monotonic()
 
-    if not wait_app_ready(sandbox, deadline):
+    if not wait_app_ready(sandbox["metadata"]["name"], deadline):
         raise RuntimeError("OpenClaw did not come up")
     t_app = time.monotonic()
 
@@ -367,9 +420,14 @@ def suspend_employee(employee):
     sandbox = sandbox_of(claim)
     if sandbox is None:
         return jsonify(error="no sandbox"), 409
+    t0 = time.monotonic()
+    unbind_workspace(employee)  # MUST precede the teardown trigger
     set_operating_mode(sandbox["metadata"]["name"], "Suspended")
-    return jsonify(employee=employee, state="Suspending",
-                   note="pod is torn down; Service, alias and workspace survive")
+    if not wait_pod_gone(employee, WAKE_TIMEOUT):
+        return jsonify(error="pod did not terminate"), 504
+    return jsonify(employee=employee, state="Suspended",
+                   suspend_ms=round((time.monotonic() - t0) * 1000),
+                   note="pod released; Service, alias and workspace survive")
 
 
 @app.post("/employees/<employee>/wake")
@@ -391,12 +449,14 @@ def wake_employee(employee):
     pod = None
     while time.time() < deadline and pod is None:
         pod = pod_of(employee, not_before=wall0 - 1)
+        if pod is not None and not pod.spec.node_name:
+            pod = None  # wait for scheduling before asking its node to bind
         time.sleep(0.1) if pod is None else None
     if pod is None:
         return jsonify(error="resumed pod never appeared"), 504
     daemon_bind(pod, employee)
-    if not wait_app_ready(sandbox, deadline):
-        return jsonify(error="OpenClaw did not come back", ), 504
+    if not wait_app_ready(sandbox["metadata"]["name"], deadline):
+        return jsonify(error="OpenClaw did not come back"), 504
     last_activity[employee] = time.time()
     return jsonify(employee=employee, state="Ready",
                    wake_ms=round((time.monotonic() - t0) * 1000))
@@ -416,8 +476,11 @@ def rebuild_employee(employee):
                    (claim["metadata"].get("annotations") or {})
                    .get(TOKEN_ANNOTATION, "")}
     t0 = time.monotonic()
+    unbind_workspace(employee)  # MUST precede the teardown trigger
     crd.delete_namespaced_custom_object(
         GROUP, VERSION, NAMESPACE, "sandboxclaims", claim_name(employee))
+    if not wait_pod_gone(employee, WAKE_TIMEOUT):
+        return jsonify(error="old pod did not terminate"), 504
     deadline = time.time() + WAKE_TIMEOUT
     while time.time() < deadline and get_claim(employee) is not None:
         time.sleep(0.1)
@@ -437,20 +500,14 @@ def delete_employee(employee):
     if not authorized(claim):
         return jsonify(error="unauthorized"), 401
     purge = request.args.get("purge", "").lower() == "true"
-    # Best-effort unbind so the host mount does not linger while the pod
-    # terminates (the kubelet cleans the emptyDir afterwards).
-    pod = pod_of(employee)
-    if pod is not None:
-        try:
-            daemon_bind(pod, employee, action="unbind")
-        except Exception as e:  # noqa: BLE001 - cleanup is best-effort
-            print(f"unbind {employee}: {e}", flush=True)
+    unbind_workspace(employee)  # MUST precede the teardown trigger
     try:
         crd.delete_namespaced_custom_object(
             GROUP, VERSION, NAMESPACE, "sandboxclaims", claim_name(employee))
     except client.ApiException as e:
         if e.status != 404:
             raise
+    wait_pod_gone(employee, WAKE_TIMEOUT)
     try:
         core.delete_namespaced_service(claim_name(employee), NAMESPACE)
     except client.ApiException as e:

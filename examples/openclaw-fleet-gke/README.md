@@ -190,18 +190,31 @@ IMAGE_REPO=us-central1-docker.pkg.dev/<project>/fleet ./run-test-gke.sh
 
 ## Measured results
 
-Environment: GKE Standard, `n2-standard-8` gVisor node pool, Filestore
-Basic HDD (`standard-rwx`), warm pool of 5.
+Measured 2026-09-14 on GKE Standard `1.36.4-gke.1247000`, gVisor node pool
+on `c3-standard-8` (`GVISOR_MACHINE_TYPE=c3-standard-8`), image streaming
+on, Filestore Basic HDD (`standard-rwx`), warm pool of 5, OpenClaw
+`2026.3.23`. `run-test-gke.sh` asserted every row; percentiles are from
+`tools/measure-claim-latency.sh` over 5 provisions.
 
 | Checklist item | Expected | Measured |
 |---|---|---|
-| Warm claim adoption (`adopted_ms`) | < 1 s | _run `run-test-gke.sh`_ |
-| Signup end-to-end (`total_ms`, incl. OpenClaw boot) | a few seconds | _run `run-test-gke.sh`_ |
-| Cold start (pool empty, cached image) | ~3–15 s | _optional comparison run_ |
-| Suspend → resources released | pod gone | _run `run-test-gke.sh`_ |
-| Wake (`wake_ms`, disk tier) | seconds | _run `run-test-gke.sh`_ |
-| Rebuild downtime (`downtime_ms`) | seconds | _run `run-test-gke.sh`_ |
-| Deletion → everything released | complete | _run `run-test-gke.sh`_ |
+| Warm claim adoption (`adopted_ms`) | < 1 s | **p50 174 ms, max 201 ms** |
+| + workspace bind (`bound_ms`) | sub-second | p50 177 ms |
+| + OpenClaw boot (`app_ready_ms`) | seconds | p50 2.9 s |
+| Signup end-to-end (`total_ms`) | a few seconds | **p50 3.26 s, max 3.32 s** |
+| Cold start (pool empty, image cached via streaming) | ~3–15 s | 5.7 s end-to-end |
+| Suspend → resources released | pod gone | ~1.7 s, pod deleted; Service/alias/workspace retained |
+| Wake (`wake_ms`, disk tier: pod recreate + re-bind + boot) | seconds | 22.3 s |
+| Rebuild downtime (`downtime_ms`, template image/CPU change) | seconds | 5.2 s |
+| Deletion → everything released (incl. workspace purge) | complete | verified, no residue |
+
+The warm-vs-cold contrast is the warm pool's value: the *claim* is ~174 ms
+vs ~5.7 s cold — and cold assumes the image is already node-local (the
+first-ever pull of the 1.2 GB OpenClaw image took ~27 s, which is what
+image streaming / secondary boot disks remove for batch creation). Wake is
+dominated by pod recreation and OpenClaw's boot; for wake-with-memory-state
+(skipping the boot), see the Pod Snapshots tier in
+[`60-snapshots/`](60-snapshots/).
 
 ## Design notes for large fleets
 

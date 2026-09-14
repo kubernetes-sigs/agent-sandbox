@@ -110,7 +110,9 @@ spec:
           # Same image as the upstream deploy manifests. The Go router
           # image is `sandbox-router-go` (the plain `sandbox-router` name
           # belongs to the legacy Python router).
-          image: registry.k8s.io/agent-sandbox/sandbox-router-go:latest
+          # Pinned: registry.k8s.io publishes versioned tags only (no
+          # :latest). Bump alongside agent-sandbox releases.
+          image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.1
           imagePullPolicy: IfNotPresent
           args:
             - --http-bind-address=:8080

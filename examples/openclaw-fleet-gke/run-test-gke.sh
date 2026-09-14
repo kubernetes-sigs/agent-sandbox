@@ -46,10 +46,12 @@ kubectl apply -f 00-prereqs.yaml
 kubectl -n "${NS}" get secret storage-daemon-token >/dev/null 2>&1 || \
   kubectl -n "${NS}" create secret generic storage-daemon-token \
     --from-literal=token="$(openssl rand -hex 24)"
+# Always resync: on re-runs a stale secret would 401 this run's token. The
+# portal reads it via env, so it is restarted after deploy below.
 ADMIN_TOKEN="${ADMIN_TOKEN:-$(openssl rand -hex 24)}"
-kubectl -n "${NS}" get secret fleet-admin >/dev/null 2>&1 || \
-  kubectl -n "${NS}" create secret generic fleet-admin \
-    --from-literal=sha256="$(printf %s "${ADMIN_TOKEN}" | sha256sum | cut -d' ' -f1)"
+kubectl -n "${NS}" create secret generic fleet-admin \
+  --from-literal=sha256="$(printf %s "${ADMIN_TOKEN}" | sha256sum | cut -d' ' -f1)" \
+  --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f 10-storage.yaml
 # First Filestore provision takes several minutes; the daemon can't start
 # until the RWX volume binds.
@@ -68,10 +70,19 @@ done
 echo "warm pool ready: ${ready}/5"
 
 log "0b. Fleet portal"
-docker build -q -t "${PORTAL_IMAGE}" 40-fleet-portal/
-docker push -q "${PORTAL_IMAGE}"
+if [ "${SKIP_IMAGE_BUILD:-false}" != "true" ]; then
+  # GKE nodes are amd64; force the platform so arm64 workstations work too.
+  # (No local docker? Push once with:
+  #   gcloud builds submit --tag ${PORTAL_IMAGE} 40-fleet-portal/
+  # and re-run with SKIP_IMAGE_BUILD=true.)
+  docker build -q --platform "${DOCKER_PLATFORM:-linux/amd64}" \
+    -t "${PORTAL_IMAGE}" 40-fleet-portal/
+  docker push -q "${PORTAL_IMAGE}"
+fi
 sed "s|image: fleet-portal:demo|image: ${PORTAL_IMAGE}|" \
   40-fleet-portal/portal.yaml | kubectl apply -f -
+# Restart so the pod resolves the (possibly resynced) fleet-admin secret.
+kubectl -n "${NS}" rollout restart deploy/fleet-portal
 kubectl -n "${NS}" rollout status deploy/fleet-portal --timeout=5m
 kubectl apply -f 50-router/10-router.yaml
 kubectl -n "${NS}" rollout status deploy/sandbox-router --timeout=5m

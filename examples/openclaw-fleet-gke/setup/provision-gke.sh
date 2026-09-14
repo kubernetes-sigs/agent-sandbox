@@ -93,6 +93,7 @@ else
         --enable-image-streaming \
         --workload-pool "${PROJECT_ID}.svc.id.goog" \
         --gateway-api standard \
+        --enable-dataplane-v2 \
         --addons GcpFilestoreCsiDriver,HttpLoadBalancing,HorizontalPodAutoscaling
 fi
 

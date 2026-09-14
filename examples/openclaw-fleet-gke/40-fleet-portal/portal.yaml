@@ -69,7 +69,9 @@ spec:
       containers:
         - name: portal
           image: fleet-portal:demo
-          imagePullPolicy: IfNotPresent
+          # Always: the walkthrough iterates on this image under one tag;
+          # IfNotPresent would silently keep a stale cached build.
+          imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

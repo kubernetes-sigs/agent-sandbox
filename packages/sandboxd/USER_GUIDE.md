@@ -19,8 +19,9 @@ sandboxd (runtime daemon)
 
 Both listeners bind to `--listen-host` (default `0.0.0.0`), so the daemon is
 reachable through the Pod IP, a Kubernetes Service, or an SDK pod
-port-forward. The current `sandbox-router` is HTTP/1.1-only and cannot carry
-the gRPC `ProcessService`, so it is not a complete `sandboxd` transport.
+port-forward. The current `sandbox-router` accepts HTTP/2 client connections,
+but disables HTTP/2 on its upstream connections and therefore cannot carry the
+gRPC `ProcessService`, so it is not a complete `sandboxd` transport.
 Containment is provided by pod isolation and NetworkPolicy, not loopback
 binding; pass `--listen-host=127.0.0.1` to restrict to loopback (e.g. local
 development).

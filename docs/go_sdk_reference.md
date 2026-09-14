@@ -278,7 +278,7 @@ WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run is
 <a name="ConnectionStrategy"></a>
 ### type [ConnectionStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go>)
 
-ConnectionStrategy defines how the SDK discovers the sandbox\-router URL.
+ConnectionStrategy defines how the SDK discovers or reaches a runtime's HTTP endpoint, either directly or through the sandbox\-router.
 
 ```go
 type ConnectionStrategy interface {

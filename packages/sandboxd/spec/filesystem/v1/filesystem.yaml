@@ -77,11 +77,11 @@ paths:
         "200":
           description: Path exists
         "403":
-          description: Path escapes sandbox root or permission denied
+          description: Path escapes sandbox root, or permission is denied during path lookup or file open
         "404":
           description: Path does not exist within the sandbox
         "500":
-          description: Internal filesystem error
+          description: Permission is denied while reading a directory, or another internal filesystem error
 
     put:
       summary: Write or overwrite a file (Idempotent)

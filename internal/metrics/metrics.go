@@ -159,9 +159,9 @@ var (
 	// Labels:
 	// - namespace: the namespace of the sandbox
 	// - launch_type: "warm", "cold", "unknown"
-	// - sandbox_template: the SandboxTemplateRef
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None"
 	// - stage: allowlisted stage name (see Stage* constants).
+	// sandbox_template is omitted: template names are unbounded user input.
 	SandboxStageLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "agent_sandbox_stage_latency_ms",
@@ -169,7 +169,7 @@ var (
 				"Stages reached before first observation (warm launch or pre-existing sandboxes) are omitted to avoid near-zero samples.",
 			Buckets: creationLatencyBuckets,
 		},
-		[]string{"namespace", "launch_type", "sandbox_template", "owned_by", "stage"},
+		[]string{"namespace", "launch_type", "owned_by", "stage"},
 	)
 
 	// ChildReconcileErrors counts Sandbox child-resource reconcile failures.
@@ -298,11 +298,10 @@ func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType,
 
 // RecordStageLatency records the measured latency for a single Sandbox Ready-path stage.
 // The stage value is normalized to the allowlist; unknown stages become ReasonOther-equivalent "other".
-func RecordStageLatency(duration time.Duration, namespace, launchType, templateName, ownedBy, stage string) {
+func RecordStageLatency(duration time.Duration, namespace, launchType, ownedBy, stage string) {
 	SandboxStageLatency.WithLabelValues(
 		namespace,
 		launchType,
-		templateName,
 		ownedBy,
 		NormalizeStage(stage),
 	).Observe(float64(duration.Milliseconds()))

@@ -5703,6 +5703,7 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 			Name:              "data-pvc-sb",
 			Namespace:         "default",
 			CreationTimestamp: metav1.NewTime(observedAt.Add(50 * time.Millisecond)),
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef("pvc-sb")},
 		},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
@@ -5720,6 +5721,59 @@ func TestRecordStageLatenciesPVCBoundUsesObservationTime(t *testing.T) {
 	pending = r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
 	emitStageLatencies(context.Background(), sandbox, pending)
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+}
+
+func TestRecordStageLatenciesPVCBoundIgnoresForeignOwner(t *testing.T) {
+	asmetrics.SandboxStageLatency.Reset()
+
+	observedAt := time.Now().Add(-10 * time.Second).UTC()
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-sb",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec:                   corev1.PersistentVolumeClaimSpec{},
+				}},
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+		Status: sandboxv1beta1.SandboxStatus{
+			Lifecycle: lifecycleStatusWithObservedAt(observedAt),
+		},
+	}
+	otherOwner := true
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "data-pvc-sb",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "other",
+				UID:        "other-uid",
+				Controller: &otherOwner,
+			}},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	c := newFakeClient(sandbox, pvc)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	pending := r.prepareStageLatencies(context.Background(), sandbox, nil, nil)
+	emitStageLatencies(context.Background(), sandbox, pending)
+
+	require.NotContains(t, recordedStages(sandbox), asmetrics.StagePVCBound)
+	require.Equal(t, uint64(0), histogramSampleCount(t, asmetrics.SandboxStageLatency))
 }
 
 func TestReconcileStampsFirstObservedTimeAndRecordsPodCreated(t *testing.T) {
@@ -5758,6 +5812,66 @@ func TestReconcileStampsFirstObservedTimeAndRecordsPodCreated(t *testing.T) {
 	require.False(t, updated.Status.Lifecycle.FirstObservedTime.IsZero())
 	require.Contains(t, recordedStages(updated), asmetrics.StagePodCreated)
 	require.Equal(t, uint64(1), histogramSampleCount(t, asmetrics.SandboxStageLatency))
+}
+
+func TestReconcileDoesNotCreateChildrenBeforeFirstObservedTimePersist(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "fot-retry-sb",
+			Namespace:  "default",
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img"}},
+					},
+				},
+			},
+		},
+	}
+
+	failStatusPatch := true
+	childCreates := 0
+	inner := newFakeClient(sandbox)
+	fc := interceptor.NewClient(inner, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if failStatusPatch && subResourceName == "status" {
+				return k8serrors.NewInternalError(errors.New("status persist failed"))
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			switch obj.(type) {
+			case *corev1.Pod, *corev1.Service, *corev1.PersistentVolumeClaim:
+				childCreates++
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+	_, err := r.Reconcile(context.Background(), req)
+	require.Error(t, err)
+	require.Equal(t, 0, childCreates, "child resources must not be created before firstObservedTime is persisted")
+
+	got := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), req.NamespacedName, got))
+	require.True(t, got.Status.Lifecycle == nil || got.Status.Lifecycle.FirstObservedTime == nil,
+		"failed status persist must not leave firstObservedTime on the Sandbox")
+
+	failStatusPatch = false
+	_, err = r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	require.Positive(t, childCreates, "retry after a successful status write must create child resources")
+
+	require.NoError(t, r.Get(context.Background(), req.NamespacedName, got))
+	require.NotNil(t, got.Status.Lifecycle)
+	require.NotNil(t, got.Status.Lifecycle.FirstObservedTime)
+	require.False(t, got.Status.Lifecycle.FirstObservedTime.IsZero())
 }
 
 func TestPrepareStageLatenciesSkipsMissingFirstObservedTime(t *testing.T) {

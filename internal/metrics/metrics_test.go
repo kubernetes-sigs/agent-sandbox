@@ -149,7 +149,7 @@ func TestBuildInfo(t *testing.T) {
 
 func TestStageLatencyRecording(t *testing.T) {
 	SandboxStageLatency.Reset()
-	RecordStageLatency(500*time.Millisecond, "default", LaunchTypeCold, "tmpl", OwnedByNone, StagePodReady)
+	RecordStageLatency(500*time.Millisecond, "default", LaunchTypeCold, OwnedByNone, StagePodReady)
 	if testutil.CollectAndCount(SandboxStageLatency) != 1 {
 		t.Errorf("Expected 1 observation for SandboxStageLatency")
 	}

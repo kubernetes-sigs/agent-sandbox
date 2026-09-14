@@ -314,6 +314,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	r.ensureSandboxTraceContext(ctx, sandbox)
 
 	ensureSandboxFirstObservedTime(sandbox)
+	// Persist firstObservedTime before creating children. If this write fails,
+	// retry must not have already created child resources against a later t0.
+	if statusUpdateErr := r.updateStatus(ctx, oldStatus, sandbox); statusUpdateErr != nil {
+		return ctrl.Result{}, statusUpdateErr
+	}
+	oldStatus = sandbox.Status.DeepCopy()
 
 	var err error
 	var pendingStageLatencies []pendingStageLatency
@@ -1944,7 +1950,7 @@ func (r *SandboxReconciler) ensureSandboxTraceContext(ctx context.Context, sandb
 }
 
 // ensureSandboxFirstObservedTime records when the controller first saw this
-// Sandbox. It is persisted later with the regular status write.
+// Sandbox. The caller persists it before creating child resources.
 func ensureSandboxFirstObservedTime(sandbox *sandboxv1beta1.Sandbox) {
 	lifecycle := ensureSandboxLifecycleStatus(&sandbox.Status)
 	if lifecycle.FirstObservedTime != nil && !lifecycle.FirstObservedTime.IsZero() {
@@ -1992,7 +1998,7 @@ func emitStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pe
 	logger := log.FromContext(ctx)
 	labels := asmetrics.LabelsFromSandbox(sandbox)
 	for _, p := range pending {
-		asmetrics.RecordStageLatency(p.latency, labels.Namespace, labels.LaunchType, labels.Template, labels.OwnedBy, p.stage)
+		asmetrics.RecordStageLatency(p.latency, labels.Namespace, labels.LaunchType, labels.OwnedBy, p.stage)
 		logger.V(4).Info("Recorded sandbox stage latency", "stage", p.stage, "latencyMs", p.latency.Milliseconds())
 	}
 }
@@ -2148,7 +2154,9 @@ func serviceReadyTime(svc *corev1.Service, fallback time.Time) time.Time {
 	return fallback
 }
 
-// pvcsBound reports whether every VCT-backed PVC is Bound, and the latest Bound observation time.
+// pvcsBound reports whether every VCT-backed PVC is owned by the Sandbox and Bound,
+// and the latest Bound observation time. Unowned, foreign-owned, or unbound PVCs
+// fall through to not-bound so the stage is not recorded against a foreign claim.
 func (r *SandboxReconciler) pvcsBound(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, fallback time.Time) (bool, time.Time) {
 	if len(sandbox.Spec.VolumeClaimTemplates) == 0 {
 		return false, fallback
@@ -2160,7 +2168,8 @@ func (r *SandboxReconciler) pvcsBound(ctx context.Context, sandbox *sandboxv1bet
 		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: sandbox.Namespace}, pvc); err != nil {
 			return false, fallback
 		}
-		if pvc.Status.Phase != corev1.ClaimBound {
+		ownership, _ := checkOwnership(pvc, sandbox)
+		if ownership != resourceOwnedBySandbox || pvc.Status.Phase != corev1.ClaimBound {
 			return false, fallback
 		}
 		boundAt := pvcBoundTransitionTime(pvc, fallback)

@@ -32,10 +32,12 @@ import (
 
 // podTunnelStrategy establishes a SPDY port-forward directly to the sandbox
 // pod, carrying both sandboxd listeners: the Filesystem & Runtime REST API
-// and the gRPC ProcessService. This is the only external transport that can
-// reach sandboxd, which binds loopback-only inside the pod (KEP-539.2) —
-// port-forward dials from within the pod's network namespace, whereas the
-// sandbox-router dials the pod IP and is HTTP/1.1-only besides.
+// and the gRPC ProcessService. It is the default sandboxd transport because
+// the tunnel is brokered by the apiserver, so it works from a laptop or CI
+// runner with no route to pod IPs. The sandbox-router is HTTP/1.1-only besides.
+//
+// Callers can go for a shorter path with inClusterStrategy (incluster.go),
+// which dials the pod IP directly and keeps the apiserver off the data path.
 //
 // Structure mirrors tunnelStrategy (tunnel.go), which forwards to the
 // sandbox-router service for the legacy runtime instead.

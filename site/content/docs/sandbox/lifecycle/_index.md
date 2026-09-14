@@ -49,6 +49,7 @@ spec:
   shutdownTime: "${SHUTDOWN_TIME}"
   podTemplate:
     spec:
+      restartPolicy: Never
       containers:
       - name: workspace
         image: alpine:latest
@@ -69,7 +70,7 @@ kubectl get sandbox dynamic-ephemeral-sandbox
 When creating a new sandbox via the `k8s_agent_sandbox` SDK, you can customize its readiness checks and lifecycle behavior using optional parameters:
 
 * **`sandbox_ready_timeout`**: The maximum time (in seconds) the client will wait for the sandbox environment to become ready before timing out.
-* **`shutdown_after_seconds`**: A Time-To-Live (TTL) integer in seconds. Setting this parameter tells the SDK to automatically populate the underlying Kubernetes claim's `spec.lifecycle` with a `shutdownPolicy` of `"Delete"` and schedule the deletion for *now + shutdown_after_seconds* (UTC). 
+* **`shutdown_after_seconds`**: A Time-To-Live (TTL) integer in seconds. Setting this parameter tells the SDK to automatically populate the underlying Kubernetes claim's `spec.lifecycle` with a `shutdownPolicy` of `"Delete"` and schedule the deletion for *now + shutdown_after_seconds* (UTC).
 
 The following example demonstrates how to pass these parameters. Notice how the SDK handles the cluster cleanup policy for you:
 
@@ -231,4 +232,52 @@ spec:
 With `podFailurePolicy: Recreate`, the controller deletes the controller-owned Failed Pod and creates a new one from `podTemplate`. PVCs from `volumeClaimTemplates` stay owned by the Sandbox and are remounted.
 
 `PodSucceeded` is unchanged (still terminal). Combining `Recreate` with `restartPolicy: Never` and a container that always exits non-zero can recreate repeatedly; the controller applies Deployment-style in-memory exponential backoff (5s, doubling up to 5m) between replacement Creates so a crash loop cannot hot-loop the API server. Backoff resets after the replacement Pod has been Running for 10 minutes. See [KEP-729](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/keps/729-opt-in-pod-recreation-on-failure/README.md).
+
+## Restart Policy and Cleanup Interaction
+
+The `restartPolicy` on a sandbox's pod template determines whether the container restarts after it exits. This directly affects which cleanup mechanisms work:
+
+| `restartPolicy` | Container behavior on exit | TTL fires? | `shutdownTime` fires? | Risk if no lifecycle set |
+|---|---|---|---|---|
+| `Never` | Container stays terminated | **Yes** — pod reaches `Failed` or `Succeeded` | Yes | Low — TTL handles cleanup |
+| `OnFailure` | Restarts on non-zero exit only | Only on clean exit (exit 0) | Yes | Medium — crashes don't trigger TTL |
+| `Always` (Kubernetes default) | Restarts on any exit | **Never** — container restarts indefinitely | Yes | **High — no cleanup without `shutdownTime`** |
+
+### Why this matters
+
+When `restartPolicy` is omitted, Kubernetes defaults to `Always`. If a pool operator relies on
+`ttlSecondsAfterFinished` (a SandboxClaim `spec.lifecycle` field in the extensions API) for cleanup, the sandbox never reaches a terminal state because the
+container is restarted each time it exits. The TTL never fires, and the sandbox runs indefinitely.
+
+This creates two failure modes:
+
+1. **Zombie sandboxes.** A batch workload finishes, the container exits, but `Always` restarts it. The sandbox sits idle consuming resources until manually deleted.
+
+2. **Unbounded CrashLoopBackOff.** A container that OOMs or panics on startup enters `CrashLoopBackOff` indefinitely. The pod is never terminal, TTL never fires, and the sandbox consumes resources in a crash loop with no escape.
+
+### Recommendations
+
+Always set `restartPolicy` explicitly in your `SandboxTemplate`:
+
+- **`Never`** for ephemeral, one-shot workloads (single script execution, Playwright scrapes, CI test runs). TTL cleanup works reliably because the pod reaches a terminal state on exit.
+
+- **`OnFailure`** for interactive or long-running workloads (MCP servers, Jupyter kernels, coding agents). The container restarts on crashes but stays terminated on clean exit. Pair with `shutdownTime` for a hard cleanup deadline.
+
+- **`Always`** only when you explicitly need indefinite restarts (rare). Always pair with `shutdownTime` — TTL-based cleanup will not work.
+
+```yaml
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: batch-template
+spec:
+  podTemplate:
+    spec:
+      # Never: container stays terminated on exit, TTL cleanup works reliably.
+      restartPolicy: "Never"
+      containers:
+      - name: workspace
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c", "python run_task.py"]
+```
 

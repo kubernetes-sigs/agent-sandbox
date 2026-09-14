@@ -84,6 +84,11 @@ class ConnectionStrategy(ABC):
         """Returns True if X-Sandbox-* router headers should be injected into requests."""
         pass
 
+    def invalidate_pod_ip(self):
+        """Drops any Pod IP cached by the strategy so the next connect() re-resolves it,
+        without tearing down the connection. No-op unless the strategy caches a Pod IP."""
+        pass
+
 class DirectConnectionStrategy(ConnectionStrategy):
     def __init__(self, config: SandboxDirectConnectionConfig):
         self.config = config
@@ -397,6 +402,10 @@ class InClusterConnectionStrategy(ConnectionStrategy):
         self._resolved = False
         self._cached_pod_ip_url = None
 
+    def invalidate_pod_ip(self):
+        self._resolved = False
+        self._cached_pod_ip_url = None
+
     def should_inject_router_headers(self) -> bool:
         return False
 
@@ -436,6 +445,10 @@ class SandboxConnector:
             backoff_factor=0.5,
             status_forcelist=[500, 502, 503, 504],
             allowed_methods=RETRYABLE_METHODS,
+            # Return the final 5xx response instead of raising RetryError (which
+            # carries no response): send_request's raise_for_status then sees the
+            # status, so a stale-Pod-IP 5xx keeps the tunnel instead of closing.
+            raise_on_status=False,
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
@@ -612,10 +625,21 @@ class SandboxConnector:
             resp = getattr(e, "response", None)
             status_code = resp.status_code if resp is not None else None
 
-            logging.error(f"Request to sandbox failed: {e}")
-            self._pod_ip_resolved = False
-            self._pod_ip = None
-            self.close()
+            # No response: transport may be dead, reset the Pod IP and close.
+            # 5xx: often a stale Pod IP after a pod swap, drop it but keep the tunnel.
+            # 4xx: sandbox answered a client error, routing is fine, keep all.
+            if status_code is None:
+                logging.error(f"Request to sandbox failed: {e}")
+                self._pod_ip_resolved = False
+                self._pod_ip = None
+                self.close()
+            elif status_code >= 500:
+                self._pod_ip_resolved = False
+                self._pod_ip = None
+                # In-cluster routing caches the Pod IP in the strategy's base
+                # URL, not the header above; invalidate it too so connect()
+                # re-resolves instead of reusing the stale Pod.
+                self.strategy.invalidate_pod_ip()
             raise SandboxRequestError(
                 f"Failed to communicate with the sandbox at {url}.",
                 status_code=status_code,

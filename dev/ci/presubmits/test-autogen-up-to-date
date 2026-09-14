@@ -47,5 +47,13 @@ def main():
         print(f"{'='*60}")
         run_and_verify_no_changes([script])
 
+    # The generated chart content is versioned by helm/Chart.yaml rather than by
+    # the file contents, so changing it requires an accompanying version bump.
+    print(f"\n{'='*60}")
+    print("Running: dev/tools/verify-chart-version")
+    print(f"{'='*60}")
+    subprocess.run(["dev/tools/verify-chart-version"], check=True)
+
+
 if __name__ == "__main__":
     main()

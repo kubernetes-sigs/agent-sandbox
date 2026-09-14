@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import unittest
-from unittest.mock import MagicMock
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -366,6 +368,141 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         mock_session.request.return_value = mock_resp
 
         connector.send_request("GET", "/execute")
+
+class TestSandboxConnectorErrorHandling(unittest.TestCase):
+    def _make_connector(self):
+        config = SandboxDirectConnectionConfig(api_url="http://router")
+        connector = SandboxConnector(
+            sandbox_id="sb",
+            namespace="ns",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        connector.strategy = DirectConnectionStrategy(config)
+        connector.session = MagicMock()
+        # Pretend a Pod IP was already resolved so a reset is detectable.
+        connector._pod_ip = "10.0.0.5"
+        connector._pod_ip_resolved = True
+        return connector
+
+    def _error_response(self, status_code):
+        resp = MagicMock(spec=requests.Response)
+        resp.status_code = status_code
+        resp.is_redirect = False
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=resp)
+        return resp
+
+    def test_client_error_keeps_connection(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = self._make_connector()
+        connector.session.request.return_value = self._error_response(404)
+
+        with self.assertRaises(SandboxRequestError) as ctx:
+            connector.send_request("GET", "download/missing.txt")
+
+        # A 404 means the sandbox answered: the connection must be left intact.
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(connector._pod_ip, "10.0.0.5")
+        self.assertTrue(connector._pod_ip_resolved)
+        connector.session.close.assert_not_called()
+
+    def test_server_error_clears_pod_ip_but_keeps_tunnel(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = self._make_connector()
+        connector.session.request.return_value = self._error_response(503)
+
+        with self.assertRaises(SandboxRequestError) as ctx:
+            connector.send_request("GET", "run")
+
+        # A 5xx often means the cached Pod IP went stale after a pod
+        # replacement: drop it so the next request re-resolves, but the
+        # tunnel carried a full response and must stay open.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIsNone(connector._pod_ip)
+        self.assertFalse(connector._pod_ip_resolved)
+        connector.session.close.assert_not_called()
+
+    def test_transport_failure_resets_connection(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = self._make_connector()
+        connector.session.request.side_effect = requests.exceptions.ConnectionError("refused")
+
+        with self.assertRaises(SandboxRequestError):
+            connector.send_request("GET", "download/x")
+
+        # A genuine transport failure should reset the Pod IP and close the tunnel.
+        self.assertIsNone(connector._pod_ip)
+        self.assertFalse(connector._pod_ip_resolved)
+        connector.session.close.assert_called()
+
+
+class TestSandboxConnectorRetryExhaustion(unittest.TestCase):
+    """A 5xx that exhausts urllib3's status retries must still reach the 5xx
+    branch rather than surface as a responseless RetryError."""
+
+    def _serve_503(self):
+        class _H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b"unavailable")
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _H)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_exhausted_retry_5xx_preserves_status_and_keeps_tunnel(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = SandboxConnector(
+            sandbox_id="sb",
+            namespace="ns",
+            connection_config=SandboxDirectConnectionConfig(api_url=self._serve_503()),
+            k8s_helper=MagicMock(),
+        )
+        connector._pod_ip = "10.0.0.5"
+        connector._pod_ip_resolved = True
+        close_spy = MagicMock(wraps=connector.session.close)
+        connector.session.close = close_spy
+
+        # Patch sleep so urllib3's real backoff between the 5 retries is instant.
+        with patch("time.sleep"):
+            with self.assertRaises(SandboxRequestError) as ctx:
+                connector.send_request("GET", "run")
+
+        # raise_on_status=False lets the final 503 reach raise_for_status, so
+        # the 5xx branch fires: status preserved, Pod IP dropped, tunnel kept.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertIsNone(connector._pod_ip)
+        self.assertFalse(connector._pod_ip_resolved)
+        close_spy.assert_not_called()
+
+    def test_in_cluster_5xx_reresolves_pod_ip(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        api = self._serve_503()
+        port = int(api.rsplit(":", 1)[1])
+        ips = iter(["127.0.0.1", "10.0.0.99"])
+        connector = SandboxConnector(
+            sandbox_id="sb",
+            namespace="ns",
+            connection_config=SandboxInClusterConnectionConfig(server_port=port),
+            k8s_helper=MagicMock(),
+            get_pod_ip=lambda: next(ips),
+        )
+
+        with patch("time.sleep"):
+            with self.assertRaises(SandboxRequestError) as ctx:
+                connector.send_request("GET", "run")
+
+        # In-cluster caches the Pod IP in the strategy's base URL; a 5xx must
+        # invalidate it so the next connect() resolves the replacement Pod.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertFalse(connector.strategy._resolved)
+        self.assertEqual(connector.connect(), f"http://10.0.0.99:{port}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1120,8 +1120,12 @@ class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTe
 class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
     """Tests for Bug Fix #2: Cache invalidation on HTTPStatusError."""
 
-    async def test_http_status_error_clears_pod_ip_cache(self):
-        """Verify HTTPStatusError (4xx/5xx) clears pod IP cache (Bug Fix #2)."""
+    async def test_server_error_clears_pod_ip_cache(self):
+        """Verify a 5xx clears the pod IP cache so the next request re-resolves.
+
+        A 5xx is how a stale cached Pod IP commonly surfaces after the pod is
+        replaced, so the cached routing state is dropped.
+        """
         config = SandboxInClusterConnectionConfig(server_port=8888)
 
         # Mock get_pod_ip to track how many times it's called
@@ -1138,7 +1142,67 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
             get_pod_ip=mock_get_pod_ip,
         )
 
-        # Mock httpx client to return 404 on first request
+        # Mock httpx client to return 503 on first request
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "503 Service Unavailable",
+            request=MagicMock(),
+            response=mock_response
+        )
+
+        connector.client.request = AsyncMock(return_value=mock_response)
+
+        try:
+            with patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                # First request should fail with 503
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "test")
+
+                # Verify cache was cleared (pod_ip_resolved reset)
+                self.assertFalse(connector._pod_ip_resolved,
+                               "A 5xx should clear pod_ip_resolved flag")
+                self.assertIsNone(connector._cached_pod_ip_url,
+                                "A 5xx should clear cached pod IP URL")
+
+                # Second request should re-resolve pod IP (call count increases)
+                initial_count = call_count[0]
+                mock_response.status_code = 200
+                mock_response.raise_for_status.side_effect = None
+                connector.client.request = AsyncMock(return_value=mock_response)
+
+                await connector.send_request("GET", "test")
+
+                self.assertEqual(call_count[0], initial_count + 1,
+                               "After cache invalidation, pod IP should be re-resolved")
+        finally:
+            await connector.close()
+
+    async def test_client_error_keeps_pod_ip_cache(self):
+        """Verify a 4xx leaves the pod IP cache intact.
+
+        A 4xx means the sandbox answered a well-formed request with a client
+        error; routing is fine, so the cached Pod IP must be preserved.
+        """
+        config = SandboxInClusterConnectionConfig(server_port=8888)
+
+        call_count = [0]
+        async def mock_get_pod_ip():
+            call_count[0] += 1
+            return "10.244.0.5"
+
+        connector = AsyncSandboxConnector(
+            sandbox_id="test-sandbox",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+            get_pod_ip=mock_get_pod_ip,
+        )
+
         mock_response = MagicMock()
         mock_response.status_code = 404
         mock_response.is_redirect = False
@@ -1151,17 +1215,16 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         connector.client.request = AsyncMock(return_value=mock_response)
 
         try:
-            # First request should fail with 404
             with self.assertRaises(SandboxRequestError):
                 await connector.send_request("GET", "test")
 
-            # Verify cache was cleared (pod_ip_resolved reset)
-            self.assertFalse(connector._pod_ip_resolved,
-                           "HTTPStatusError should clear pod_ip_resolved flag")
-            self.assertIsNone(connector._cached_pod_ip_url,
-                            "HTTPStatusError should clear cached pod IP URL")
+            # The 404 resolved a Pod IP once, it must stay cached.
+            self.assertTrue(connector._pod_ip_resolved,
+                            "A 4xx must not clear pod_ip_resolved flag")
+            self.assertIsNotNone(connector._cached_pod_ip_url,
+                                 "A 4xx must not clear cached pod IP URL")
 
-            # Second request should re-resolve pod IP (call count increases)
+            # A second request must reuse the cache.
             initial_count = call_count[0]
             mock_response.status_code = 200
             mock_response.raise_for_status.side_effect = None
@@ -1169,8 +1232,8 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
 
             await connector.send_request("GET", "test")
 
-            self.assertEqual(call_count[0], initial_count + 1,
-                           "After cache invalidation, pod IP should be re-resolved")
+            self.assertEqual(call_count[0], initial_count,
+                             "A 4xx must leave the pod IP cached")
         finally:
             await connector.close()
 

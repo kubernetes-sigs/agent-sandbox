@@ -44,6 +44,7 @@ var (
 	ErrTimeout          = errors.New("operation timed out")
 	ErrClaimFailed      = errors.New("claim creation failed")
 	ErrPortForwardDied  = errors.New("port-forward connection lost")
+	ErrNoSandboxService = errors.New("sandbox has no headless Service")
 	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
 	ErrOrphanedClaim    = errors.New("orphaned claim; call Close() to retry deletion")
 	ErrRetriesExhausted = errors.New("retries exhausted")

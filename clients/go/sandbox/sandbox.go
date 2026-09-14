@@ -42,6 +42,7 @@ type Sandbox struct {
 	sandboxName string
 	podName     string
 	podIP       string
+	serviceFQDN string
 	annotations map[string]string
 
 	lifecycleSem chan struct{}
@@ -86,10 +87,26 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	switch {
 	case opts.APIURL != "":
 		strategy = &DirectStrategy{URL: opts.APIURL}
+	case opts.Connectivity.isInCluster():
+		// Caller is on the pod network and has opted to dial
+		// the runtime on the pod IP.
+		ics := &inClusterStrategy{
+			httpPort:      opts.ServerPort,
+			useServiceDNS: opts.Connectivity == ConnectivityInClusterService,
+			log:           opts.Logger,
+			tracer:        tracer,
+			svcName:       svcName,
+		}
+		if opts.Runtime == RuntimeSandboxd {
+			ics.httpPort = opts.SandboxdRESTPort
+			ics.grpcPort = opts.SandboxdGRPCPort
+		}
+		strategy = ics
 	case opts.Runtime == RuntimeSandboxd:
-		// sandboxd binds loopback-only inside the pod, so the only viable
-		// external transport is a port-forward directly to the sandbox pod
-		// (validated earlier: GatewayName is rejected with RuntimeSandboxd).
+		// sandboxd talks to the sandbox pod, not the sandbox-router, and the
+		// default transport reaches it without pod-network access: a
+		// port-forward directly to the pod (validated earlier: GatewayName is
+		// rejected with RuntimeSandboxd).
 		strategy = &podTunnelStrategy{
 			coreClient: k8s.CoreClient,
 			restConfig: k8s.RestConfig,
@@ -129,7 +146,7 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 		Strategy:            strategy,
 		Namespace:           opts.Namespace,
 		ServerPort:          opts.ServerPort,
-		RouterHeaders:       opts.Runtime != RuntimeSandboxd,
+		RouterHeaders:       opts.Runtime != RuntimeSandboxd && !opts.Connectivity.isInCluster(),
 		RequestTimeout:      opts.RequestTimeout,
 		PerAttemptTimeout:   opts.PerAttemptTimeout,
 		HTTPTransport:       opts.HTTPTransport,
@@ -146,6 +163,9 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.connector = conn
+	}
+	if ics, ok := strategy.(*inClusterStrategy); ok {
+		ics.connector = conn
 	}
 
 	s := &Sandbox{
@@ -191,8 +211,13 @@ func New(_ context.Context, opts Options) (*Sandbox, error) {
 	}
 
 	// The pod tunnel needs the resolved pod name at Connect time.
+	// The in-cluster strategy needs the pod IP.
 	if pts, ok := strategy.(*podTunnelStrategy); ok {
 		pts.getPodName = s.PodName
+	}
+	if ics, ok := strategy.(*inClusterStrategy); ok {
+		ics.getServiceFQDN = s.ServiceFQDN
+		ics.getPodIP = s.PodIP
 	}
 
 	return s, nil
@@ -330,6 +355,8 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 			s.claimName = ""
 			s.sandboxName = ""
 			s.podName = ""
+			s.podIP = ""
+			s.serviceFQDN = ""
 			s.annotations = nil
 			s.mu.Unlock()
 			retErr := fmt.Errorf("%w: %w", ErrSandboxDeleted, err)
@@ -338,6 +365,8 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		}
 		s.sandboxName = ""
 		s.podName = ""
+		s.podIP = ""
+		s.serviceFQDN = ""
 		s.annotations = nil
 		s.mu.Unlock()
 		recordError(span, err)
@@ -350,6 +379,8 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 		if k8serrors.IsNotFound(err) {
 			s.sandboxName = ""
 			s.podName = ""
+			s.podIP = ""
+			s.serviceFQDN = ""
 			s.annotations = nil
 		}
 		// Non-NotFound: sandboxName preserved so the next Open() can re-verify
@@ -387,6 +418,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	s.sandboxName = ""
 	s.podName = ""
 	s.podIP = ""
+	s.serviceFQDN = ""
 	s.annotations = nil
 	if cleanupErr == nil {
 		s.claimName = ""
@@ -474,6 +506,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	s.sandboxName = ""
 	s.podName = ""
 	s.podIP = ""
+	s.serviceFQDN = ""
 	s.annotations = nil
 	if err != nil && s.claimName != "" {
 		s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
@@ -611,6 +644,15 @@ func (s *Sandbox) PodIP() string {
 	return s.podIP
 }
 
+// ServiceFQDN returns the in-cluster DNS name of the Sandbox's headless
+// Service, or "" when it has none (spec.service unset or false). Not part of
+// the Info interface, which is frozen for backward compatibility.
+func (s *Sandbox) ServiceFQDN() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.serviceFQDN
+}
+
 func (s *Sandbox) Annotations() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -654,5 +696,6 @@ func (s *Sandbox) setState(state *sandboxState) {
 	s.sandboxName = state.SandboxName
 	s.podName = state.PodName
 	s.podIP = state.PodIP
+	s.serviceFQDN = state.ServiceFQDN
 	s.annotations = state.Annotations
 }

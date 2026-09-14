@@ -1,0 +1,22 @@
+# Two tenant namespaces for sandboxes and one namespace with an in-cluster
+# service. The `team` label is used by 60-cnp-admin-team-b-allow-pypi.yaml;
+# the cluster-wide policies select pods by the agents.x-k8s.io/sandbox-name-hash
+# label instead, so new sandbox namespaces need no labels.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-team-a
+  labels:
+    team: a
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-team-b
+  labels:
+    team: b
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shared-tools

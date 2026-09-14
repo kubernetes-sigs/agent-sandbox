@@ -216,7 +216,7 @@ The `sandboxd` wire protocol is not compatible with the unversioned `python-runt
 
 #### SDK Migration Plan
 1. **Explicit Runtime Selection:** The Go SDK selects `sandboxd` with `Options.Runtime = RuntimeSandboxd`; the synchronous Python SDK selects it with `SandboxdPodTunnelConnectionConfig`. The legacy `python-runtime` remains available and is still the default when `sandboxd` is not selected.
-2. **Explicit Connectivity Selection:** The Go SDK and synchronous Python SDK can port-forward directly to the sandbox Pod. The Go SDK additionally supports direct in-cluster Pod IP and headless Service connectivity. Gateway connectivity through the current `sandbox-router` is not supported for `sandboxd` because the router does not proxy the gRPC surface.
+2. **Explicit Connectivity Selection:** The Go SDK and synchronous Python SDK can port-forward directly to the sandbox Pod. The Go SDK additionally supports direct in-cluster Pod IP and headless Service connectivity. These in-cluster modes require an ingress policy that admits the calling workload; the default managed NetworkPolicy allows ingress only from `sandbox-router`. Gateway connectivity through the current `sandbox-router` is not supported for `sandboxd` because the router does not proxy the gRPC surface.
 3. **Application Endpoint Convention:** `SANDBOXD_REST_ADDR` and `SANDBOXD_GRPC_ADDR` may be injected for workload-local or custom clients, but the supported SDKs do not inspect these variables or automatically fall back between runtimes.
 
 #### Security Considerations

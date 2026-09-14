@@ -307,7 +307,14 @@ _ = sb.Delete(ctx, "src", true)                // sandboxd-only
 
 For an in-cluster caller, set `Connectivity` explicitly. Service connectivity
 requires `spec.service: true` on the Sandbox template; Pod IP connectivity
-does not, but it carries the risk of addressing a recycled Pod IP.
+does not, but it carries the risk of addressing a recycled Pod IP. Both modes
+must also be allowed by the template's network policy. The default `Managed`
+policy allows ingress only from `sandbox-router`, so direct clients require a
+custom `spec.networkPolicy.ingress` rule that admits the caller (normally on
+TCP ports `8080` and `9090`). Supplying `spec.networkPolicy` replaces all
+secure defaults, so preserve every required ingress and egress rule. Use
+`networkPolicyManagement: Unmanaged` only when another policy system provides
+equivalent isolation.
 
 ```go
 sb, _ := sandbox.New(ctx, sandbox.Options{

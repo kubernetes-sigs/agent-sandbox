@@ -201,7 +201,8 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 
 ```bash
 # Write a file (atomic, parents auto-created)
-curl -sf -X PUT --data-binary @local.py "localhost:8080/v1/files/src/main.py?mode=0644"
+curl -sf -X PUT -H "Content-Type: application/octet-stream" \
+  --data-binary @local.py "localhost:8080/v1/files/src/main.py?mode=0644"
 
 # Read it back
 curl -sf localhost:8080/v1/files/src/main.py
@@ -238,29 +239,27 @@ grpcurl -plaintext \
   localhost:9090 process.v1.ProcessService/Start
 ```
 
-### Python
+### Python (REST)
 
 ```python
 import os
+from pathlib import Path
 
-import grpc
 import requests
 
-from process.v1 import process_pb2, process_pb2_grpc  # generated from spec/process/v1/process.proto
-
 REST = f"http://{os.environ['SANDBOXD_REST_ADDR']}/v1"
-GRPC = os.environ["SANDBOXD_GRPC_ADDR"]
 
 # Upload code over REST
-requests.put(f"{REST}/files/main.py", data=open("main.py", "rb").read()).raise_for_status()
-
-# Run it over gRPC
-channel = grpc.insecure_channel(GRPC)
-stub = process_pb2_grpc.ProcessServiceStub(channel)
-resp = stub.Execute(process_pb2.ExecuteRequest(
-    config=process_pb2.ProcessConfig(command=["python3", "main.py"])))
-print(resp.exit_code, resp.stdout.decode())
+requests.put(
+    f"{REST}/files/main.py",
+    data=Path("main.py").read_bytes(),
+    headers={"Content-Type": "application/octet-stream"},
+).raise_for_status()
 ```
+
+Use `grpcurl` above for direct ProcessService calls, or use the supported
+[Python SDK](#agent-sandbox-sdk-access), which bundles the generated gRPC
+stubs and manages connectivity and sandbox lifecycle.
 
 ### Go
 

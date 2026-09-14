@@ -43,9 +43,9 @@ paths:
           type: string
         description: >
           Sandbox-relative path (e.g. main.py or src/main.py).
-          Path segments containing '/' must be URL-encoded (%2F) by clients
-          when constructing the request URL. The server decodes the full path
-          before resolving it against the sandbox root.
+          Nested paths may use literal '/' separators or percent-encoded '%2F'.
+          The supported SDKs encode the complete path value. The server decodes
+          the request path before resolving it against the sandbox root.
 
     get:
       summary: Read a file or list a directory

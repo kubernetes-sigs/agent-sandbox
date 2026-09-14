@@ -299,6 +299,12 @@ class TestFilesystemStreamingRead(unittest.TestCase):
             self.filesystem.read_to("file.bin", None)
         with self.assertRaisesRegex(ValueError, "max_bytes"):
             self.filesystem.read_to("file.bin", io.BytesIO(), max_bytes=-1)
+        for invalid_limit in (1.5, True, "10"):
+            with self.subTest(max_bytes=invalid_limit):
+                with self.assertRaisesRegex(ValueError, "integer"):
+                    self.filesystem.read_to(
+                        "file.bin", io.BytesIO(), max_bytes=invalid_limit
+                    )
         self.connector.send_request.assert_not_called()
 
 
@@ -374,6 +380,14 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
             await self.filesystem.read_to(
                 "file.bin", AsyncPartialWriter(max_write=10), max_bytes=-1
             )
+        for invalid_limit in (1.5, True, "10"):
+            with self.subTest(max_bytes=invalid_limit):
+                with self.assertRaisesRegex(ValueError, "integer"):
+                    await self.filesystem.read_to(
+                        "file.bin",
+                        AsyncPartialWriter(max_write=10),
+                        max_bytes=invalid_limit,
+                    )
         self.connector.send_request.assert_not_awaited()
 
 if __name__ == '__main__':

@@ -177,8 +177,11 @@ class Filesystem:
         """
         if destination is None or not callable(getattr(destination, "write", None)):
             raise TypeError("Download destination must provide a write(bytes) method.")
-        if max_bytes is not None and max_bytes < 0:
-            raise ValueError("max_bytes must be greater than or equal to zero.")
+        if max_bytes is not None:
+            if type(max_bytes) is not int:
+                raise ValueError("max_bytes must be an integer or None.")
+            if max_bytes < 0:
+                raise ValueError("max_bytes must be greater than or equal to zero.")
 
         span = trace.get_current_span()
         if span.is_recording():

@@ -126,20 +126,23 @@ default) via symlink-aware sanitization; traversal attempts return
 
 ### Concurrency semantics
 
-Requests are handled in parallel (no server-side serialization); clients do
-not need their own locking for correctness:
+Requests are handled in parallel, with no server-side serialization. The
+atomic-write strategy prevents partial file contents, but it does not impose an
+ordering across requests:
 
-- **Write vs. read** — writes are atomic (temp file + rename), so a
-  concurrent reader sees either the complete previous file or the complete
-  new one, never partial content.
-- **Write vs. delete** — last operation wins: the path ends up present (new
-  content) or absent, with no torn state.
-- **Delete vs. read** — an in-flight download completes even if the file is
-  deleted mid-transfer.
-- **Concurrent writes to one path** — the last write wins atomically.
+- **Write vs. read** — a successful read sees either the complete previous
+  file or the complete new one, never partial content. A read racing with a
+  rename or delete may instead fail.
+- **Write vs. delete** — either operation may fail depending on ordering. For
+  example, a recursive delete can remove a writer's temporary file or parent
+  directory before the final rename.
+- **Delete vs. read** — a download that has already opened the file can
+  complete after the path is deleted; a read that has not opened it may fail.
+- **Concurrent writes to one path** — each successful rename is atomic; the
+  last successful rename determines the final contents.
 
 There is no cross-request transaction or compare-and-swap; agents that need
-coordination on shared paths must layer it themselves.
+ordering or coordination on shared paths must layer it themselves.
 
 ## Deployment topologies
 

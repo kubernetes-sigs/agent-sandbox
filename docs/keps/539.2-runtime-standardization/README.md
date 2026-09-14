@@ -140,13 +140,15 @@ Inspired by E2B's `envd`, this approach uses a binary protocol over HTTP/2.
 
 ### Concrete Implementation: `sandboxd` Hybrid gRPC/REST Architecture
 
-To realize the hybrid model described above without forcing users to choose between two separate sidecar binaries (`execd` vs `envd`), we propose a unified portable daemon called **`sandboxd`** that serves both protocols from explicit, dedicated ports within the sidecar container:
+To realize the hybrid model described above without forcing users to choose between two separate binaries (`execd` vs `envd`), we propose a unified portable daemon called **`sandboxd`** that serves both protocols from explicit, dedicated ports in whichever container hosts the daemon:
 
 ```text
-sandboxd (sidecar)
+sandboxd (runtime daemon)
 ├── gRPC  :9090  →  ProcessService    (streaming process I/O)
 └── HTTP  :8080  →  FilesystemService (stateless file operations & runtime probes)
 ```
+
+`sandboxd` can be the Sandbox's dedicated runtime container or can be injected into an existing application image. A separate sidecar is also possible, but commands run inside that sidecar and cannot use binaries from neighboring containers; containers share the pod network and mounted volumes, not their root filesystems.
 
 Both ports bind to `0.0.0.0` by default, so clients with pod-network access can reach them through the Pod IP or a Service. Deployments must provide pod isolation and NetworkPolicy; use `--listen-host=127.0.0.1` when loopback-only access is required. The current `sandbox-router` is HTTP/1.1-only and cannot carry the gRPC `ProcessService`, so it is not a complete transport for `sandboxd`.
 

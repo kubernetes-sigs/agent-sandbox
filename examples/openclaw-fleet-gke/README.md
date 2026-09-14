@@ -298,3 +298,18 @@ storage quotas, HA for the portal, TLS + real edge auth throughout, and the
 router's non-demo authorization modes. The daemon's HTTP contract
 (`bind`/`unbind`/`delete`) is deliberately tiny so it can be replaced by a
 proper controller reconciling a `WorkspaceBinding`-style CRD.
+
+Two teardown rules learned from live validation (both encoded in the
+portal, both worth a finalizer in production, as in
+[latebind-storage-gke-sandbox](../latebind-storage-gke-sandbox/)):
+
+1. **Always unbind before any pod teardown begins.** If the bind is still
+   mounted when termination starts, the emptyDir cleanup deletes THROUGH
+   it and wipes the employee's NFS workspace; if it is unbound first, the
+   workspace provably survives.
+2. **Pods deleted outside the portal wedge in `Terminating`.** Any path
+   that bypasses the unbind (kubectl delete pod, namespace deletion, node
+   drain) leaves the mount in place and the kubelet cannot clean the
+   volume — recover with a manual daemon `unbind` (or force-delete when
+   discarding the cluster). A finalizer on the claim/sandbox is the
+   production answer.

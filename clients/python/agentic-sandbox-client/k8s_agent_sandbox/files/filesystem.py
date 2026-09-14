@@ -12,15 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Synchronous file operations for sandbox runtimes."""
+
+import json
 import logging
 import posixpath
 import urllib.parse
-from typing import Any, List
+from typing import Any, BinaryIO, List
 
 from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
+
+
+_STREAM_CHUNK_SIZE = 64 * 1024
+
+
+def _write_all(destination: BinaryIO, content: bytes) -> int:
+    """Write all content, including to destinations that perform partial writes."""
+    written = 0
+    while written < len(content):
+        count = destination.write(content[written:])
+        if count is None or count <= 0:
+            raise OSError("Download destination did not accept file content.")
+        if count > len(content) - written:
+            raise OSError("Download destination reported an invalid write count.")
+        written += count
+    return written
 
 
 def _sandboxd_files_endpoint(path: str) -> str:
@@ -139,6 +158,74 @@ class Filesystem:
             span.set_attribute("sandbox.file.size", len(content))
 
         return content
+
+    @trace_span("read_to")
+    def read_to(
+        self,
+        path: str,
+        destination: BinaryIO,
+        timeout: int = 60,
+        allow_unsafe_paths: bool = False,
+        max_bytes: int | None = None,
+    ) -> int:
+        """Stream a sandbox file into a caller-owned binary destination.
+
+        The destination is never closed. If ``max_bytes`` is set, at most that
+        many bytes are written before an oversized download raises
+        ``RuntimeError``. Data written before an error remains in the
+        destination. The returned value is the number of bytes written.
+        """
+        if destination is None or not callable(getattr(destination, "write", None)):
+            raise TypeError("Download destination must provide a write(bytes) method.")
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be greater than or equal to zero.")
+
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+
+        if not allow_unsafe_paths:
+            path = self._safe_upload_path(path)
+
+        if self.connector.is_sandboxd():
+            endpoint = _sandboxd_files_endpoint(path)
+        else:
+            endpoint = f"download/{urllib.parse.quote(path, safe='')}"
+
+        response = self.connector.send_request(
+            "GET", endpoint, timeout=timeout, stream=True
+        )
+        total = 0
+        try:
+            content_length = response.headers.get("Content-Length")
+            if max_bytes is not None and content_length is not None:
+                try:
+                    declared_size = int(content_length)
+                except (TypeError, ValueError):
+                    declared_size = None
+                if declared_size is not None and declared_size > max_bytes:
+                    raise RuntimeError(
+                        f"File size exceeds limit of {max_bytes} bytes."
+                    )
+
+            for chunk in response.iter_content(chunk_size=_STREAM_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                if max_bytes is not None:
+                    remaining = max_bytes - total
+                    if len(chunk) > remaining:
+                        if remaining > 0:
+                            total += _write_all(destination, chunk[:remaining])
+                        raise RuntimeError(
+                            f"File size exceeds limit of {max_bytes} bytes."
+                        )
+                total += _write_all(destination, chunk)
+        finally:
+            response.close()
+
+        if span.is_recording():
+            span.set_attribute("sandbox.file.size", total)
+        return total
 
     @trace_span("list")
     def list(self, path: str, timeout: int = 60) -> List[FileEntry]:

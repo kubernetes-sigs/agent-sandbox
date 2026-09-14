@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Unit tests for synchronous sandbox connectivity."""
+
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -404,6 +406,18 @@ class TestSandboxConnectorErrorHandling(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(connector._pod_ip, "10.0.0.5")
         self.assertTrue(connector._pod_ip_resolved)
+        connector.session.close.assert_not_called()
+
+    def test_streaming_client_error_closes_response(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = self._make_connector()
+        response = self._error_response(404)
+        connector.session.request.return_value = response
+
+        with self.assertRaises(SandboxRequestError):
+            connector.send_request("GET", "download/missing.txt", stream=True)
+
+        response.close.assert_called_once_with()
         connector.session.close.assert_not_called()
 
     def test_server_error_clears_pod_ip_but_keeps_tunnel(self):

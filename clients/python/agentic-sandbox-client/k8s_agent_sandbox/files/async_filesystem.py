@@ -12,14 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Asynchronous file operations for sandbox runtimes."""
+
 import logging
 import urllib.parse
-from typing import Any
+from typing import Any, Awaitable, Protocol
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
-from k8s_agent_sandbox.files.filesystem import Filesystem
+from k8s_agent_sandbox.files.filesystem import Filesystem, _STREAM_CHUNK_SIZE
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
+
+
+class AsyncBinaryWriter(Protocol):
+    """An asynchronous destination that accepts binary file content."""
+
+    def write(self, content: bytes) -> Awaitable[int]:
+        """Write content and return the number of accepted bytes."""
+        ...
+
+
+async def _write_all(destination: AsyncBinaryWriter, content: bytes) -> int:
+    """Write all content, including to destinations that perform partial writes."""
+    written = 0
+    while written < len(content):
+        count = await destination.write(content[written:])
+        if count is None or count <= 0:
+            raise OSError("Download destination did not accept file content.")
+        if count > len(content) - written:
+            raise OSError("Download destination reported an invalid write count.")
+        written += count
+    return written
 
 
 class AsyncFilesystem:
@@ -86,6 +109,69 @@ class AsyncFilesystem:
             span.set_attribute("sandbox.file.size", len(content))
 
         return content
+
+    @async_trace_span("read_to")
+    async def read_to(
+        self,
+        path: str,
+        destination: AsyncBinaryWriter,
+        timeout: int = 60,
+        allow_unsafe_paths: bool = False,
+        max_bytes: int | None = None,
+    ) -> int:
+        """Stream a sandbox file into a caller-owned asynchronous destination.
+
+        The destination is never closed. If ``max_bytes`` is set, at most that
+        many bytes are written before an oversized download raises
+        ``RuntimeError``. Data written before an error or cancellation remains
+        in the destination. The returned value is the number of bytes written.
+        """
+        if destination is None or not callable(getattr(destination, "write", None)):
+            raise TypeError("Download destination must provide a write(bytes) method.")
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be greater than or equal to zero.")
+
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+
+        if not allow_unsafe_paths:
+            path = Filesystem._safe_upload_path(path)
+        encoded_path = urllib.parse.quote(path, safe="")
+        response = await self.connector.send_request(
+            "GET", f"download/{encoded_path}", timeout=timeout, stream=True
+        )
+        total = 0
+        try:
+            content_length = response.headers.get("Content-Length")
+            if max_bytes is not None and content_length is not None:
+                try:
+                    declared_size = int(content_length)
+                except (TypeError, ValueError):
+                    declared_size = None
+                if declared_size is not None and declared_size > max_bytes:
+                    raise RuntimeError(
+                        f"File size exceeds limit of {max_bytes} bytes."
+                    )
+
+            async for chunk in response.aiter_bytes(chunk_size=_STREAM_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                if max_bytes is not None:
+                    remaining = max_bytes - total
+                    if len(chunk) > remaining:
+                        if remaining > 0:
+                            total += await _write_all(destination, chunk[:remaining])
+                        raise RuntimeError(
+                            f"File size exceeds limit of {max_bytes} bytes."
+                        )
+                total += await _write_all(destination, chunk)
+        finally:
+            await response.aclose()
+
+        if span.is_recording():
+            span.set_attribute("sandbox.file.size", total)
+        return total
 
     @async_trace_span("list")
     async def list(self, path: str, timeout: int = 60) -> list[FileEntry]:

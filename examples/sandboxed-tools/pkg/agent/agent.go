@@ -718,8 +718,11 @@ func (h *Harness) BuildSession(ctx context.Context, sessionStore sessions.Store,
 		Namespace: h.opts.Namespace,
 	}
 
+	// A missing session is simply a new one here: the CLI and ACP's
+	// session/new both create-or-resume by name. Callers that must not
+	// create (ACP's session/load) check the store for ErrNotFound first.
 	messages, err := sessionStore.LoadSession(ctx, session.Name)
-	if err != nil {
+	if err != nil && !errors.Is(err, sessions.ErrNotFound) {
 		return nil, fmt.Errorf("loading session: %w", err)
 	}
 	session.messages = messages

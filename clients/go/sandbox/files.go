@@ -403,7 +403,6 @@ func (f *Files) readTo(ctx context.Context, path string, destination io.Writer, 
 		recordError(span, retErr)
 		return 0, retErr
 	}
-	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes)) }()
 	if resp.ContentLength > f.maxDownload {
 		err := fmt.Errorf("%s: file size exceeds limit of %d bytes", f.errPrefix(), f.maxDownload)
 		recordError(span, err)

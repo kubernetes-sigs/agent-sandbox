@@ -251,7 +251,13 @@ type failAfterWriter struct {
 
 type closeTrackingBody struct {
 	io.Reader
+	reads  int
 	closed bool
+}
+
+func (b *closeTrackingBody) Read(p []byte) (int, error) {
+	b.reads++
+	return b.Reader.Read(p)
 }
 
 func (b *closeTrackingBody) Close() error {
@@ -342,6 +348,9 @@ func TestReadTo_DestinationErrorClosesResponse(t *testing.T) {
 	}
 	if !body.closed {
 		t.Fatal("ReadTo() did not close the response body after destination failure")
+	}
+	if body.reads != 1 {
+		t.Fatalf("ReadTo() read the response body %d times after destination failure, want 1", body.reads)
 	}
 }
 

@@ -83,6 +83,9 @@
 {{- if hasKey .Values.controller "disableClaimObservabilityAnnotations" }}
 - --disable-claim-observability-annotations={{ .Values.controller.disableClaimObservabilityAnnotations }}
 {{- end }}
+{{- if .Values.controller.watchNamespaces }}
+- --watch-namespaces={{ join "," .Values.controller.watchNamespaces }}
+{{- end }}
 {{- range .Values.controller.extraArgs }}
 - {{ . | quote }}
 {{- end }}

@@ -41,14 +41,22 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Validate controller.watchNamespaces: every entry must be non-blank.
-Include this template to fail early on lists like [""] or ["team-a", ""].
+Validate controller.watchNamespaces: every entry must be non-blank,
+must not have leading/trailing whitespace, and must be unique.
 */}}
 {{- define "agent-sandbox.validateWatchNamespaces" -}}
+{{- $seen := dict }}
 {{- range .Values.controller.watchNamespaces }}
 {{- if not (trim .) }}
 {{- fail "controller.watchNamespaces contains a blank entry; every namespace must be a non-empty string" }}
 {{- end }}
+{{- if ne (trim .) . }}
+{{- fail (printf "controller.watchNamespaces entry %q has leading/trailing whitespace; use %q" . (trim .)) }}
+{{- end }}
+{{- if hasKey $seen . }}
+{{- fail (printf "controller.watchNamespaces contains duplicate entry %q" .) }}
+{{- end }}
+{{- $_ := set $seen . true }}
 {{- end }}
 {{- end }}
 

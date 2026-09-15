@@ -100,8 +100,10 @@ and of the Network Policy API `ClusterNetworkPolicy`. It runs as a DaemonSet and
 - It is additive and does not depend on the CNI. It adds a second policy
   engine in the packet path, so a connection has to be allowed by both the CNI
   and kube-network-policies. This makes it usable on any cluster whose network
-  plugin does not implement these APIs, including the kind cluster used here
-  (kindnet already enforces standard `NetworkPolicy` with the same library).
+  plugin does not implement these APIs, including the kind cluster used here:
+  kindnet, kind's default CNI, implements standard `NetworkPolicy` by embedding
+  this same library, and the DaemonSet installed in step 2 adds
+  `ClusterNetworkPolicy` on top.
 - Any implementation that supports the experimental `domainNames` extension can
   be used instead. Only the install step is specific to kube-network-policies;
   if your CNI implements `ClusterNetworkPolicy` (see the
@@ -129,7 +131,7 @@ Versions are pinned in [env.sh](https://github.com/kubernetes-sigs/agent-sandbox
 |---|---|---|
 | network-policy-api | `v0.2.0` | `ClusterNetworkPolicy` CRD, **experimental channel** (`domainNames` is not in the standard channel yet) |
 | kube-network-policies | `v1.1.1` | `install-cnp.yaml` + image `…:v1.1.1-npa-v1alpha2`, with `--fail-open=false` added (see [notes](#notes-and-gotchas)) |
-| agent-sandbox | latest release | core + extensions (`sandbox-with-extensions.yaml`) |
+| agent-sandbox | `v1.0.2` | core + extensions (`sandbox-with-extensions.yaml`); `AGENT_SANDBOX_VERSION=latest` picks the newest release |
 
 ## Quick start
 
@@ -147,7 +149,7 @@ document walks the same phases by hand.
 |---|---|
 | `scripts/01-create-cluster.sh` | kind cluster, 1 control-plane + 1 worker, default CNI. |
 | `scripts/02-install-network-policies.sh` | `ClusterNetworkPolicy` CRD (experimental channel) + kube-network-policies CNP DaemonSet, pinned, fail-closed. |
-| `scripts/03-install-agent-sandbox.sh` | agent-sandbox core + extensions from the latest GitHub release. |
+| `scripts/03-install-agent-sandbox.sh` | agent-sandbox core + extensions from the pinned GitHub release. |
 | `scripts/04-deploy-demo.sh` | Namespaces, tool server, one `SandboxTemplate` + `SandboxWarmPool` + `SandboxClaim` per tenant. **No CNP yet.** |
 | `scripts/test.sh` | Phase-by-phase assertions; non-zero exit on any failure. |
 | `scripts/teardown.sh` | Removes the demo resources; `--all` deletes the kind cluster. |

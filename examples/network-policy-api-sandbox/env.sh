@@ -28,11 +28,18 @@ export NETWORK_POLICY_API_VERSION="${NETWORK_POLICY_API_VERSION:-v0.2.0}"
 # kube-network-policies release: both the install manifest and the image tag.
 export KUBE_NETWORK_POLICIES_VERSION="${KUBE_NETWORK_POLICIES_VERSION:-v1.1.1}"
 
-# agent-sandbox release tag, or "latest" to auto-discover the newest GitHub release.
-export AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-latest}"
+# agent-sandbox release tag the walkthrough was verified with. Set to "latest" to
+# auto-discover the newest GitHub release instead.
+export AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.2}"
 
 # Not overridable: the namespaces are hard-coded in manifests/*.yaml and in the
 # README, so an override here would only desynchronise the scripts from them.
 export NS_A=sandbox-team-a
 export NS_B=sandbox-team-b
 export NS_TOOLS=shared-tools
+
+# The ClusterNetworkPolicy manifests this example owns, in removal order. The
+# scripts delete exactly these and never touch other policies in the cluster.
+# shellcheck disable=SC2034 # consumed by the scripts that source this file
+CNP_MANIFESTS=(80-cnp-baseline-default-deny 70-cnp-admin-pass-shared-tools 60-cnp-admin-team-b-allow-pypi
+               50-cnp-admin-allow-github 40-cnp-admin-allow-dns 30-cnp-admin-default-deny)

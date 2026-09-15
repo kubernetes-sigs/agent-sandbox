@@ -71,14 +71,14 @@ pip_probe() { # ns pod
 
 check() { # desc expected(ok|fail) probe args...
   local desc="$1" expected="$2"; shift 2
-  local actual attempt
+  local actual
   # An "ok" outcome depends on the public internet and on the DNS answer being
   # seen by the agent (its capture queue is fail-open), so allow a couple of
   # retries. A "fail" outcome is asserted on the first attempt only: a single
   # successful connection means the policy did not deny it.
-  for attempt in 1 2 3; do
+  for _ in 1 2 3; do
     actual="$("$@")"
-    [ "$expected" = "fail" ] || [ "$actual" = "ok" ] && break
+    if [ "$expected" = "fail" ] || [ "$actual" = "ok" ]; then break; fi
     sleep 2
   done
   case "$actual" in
@@ -95,12 +95,16 @@ check() { # desc expected(ok|fail) probe args...
 apply() { # manifest
   # Without -e a failed apply would let the phase run against the previous policy set.
   kubectl apply -f "$M/$1" || { echo "FAIL: could not apply $1, aborting"; exit 1; }
-  sleep 3 # small propagation delay for the DaemonSet informers
+  # kube-network-policies exposes no per-policy sync signal, so give its informers
+  # a fixed settle time. Propagation on kind is well under a second.
+  sleep 5
 }
 
 # --- reset to phase-1 state ---------------------------------------------------
-echo "== Reset: removing any ClusterNetworkPolicy and the raw sandbox from a previous run =="
-kubectl delete clusternetworkpolicy --all --ignore-not-found >/dev/null
+echo "== Reset: removing this example's ClusterNetworkPolicies and the raw sandbox from a previous run =="
+for f in "${CNP_MANIFESTS[@]}"; do
+  kubectl delete -f "$M/$f.yaml" --ignore-not-found >/dev/null
+done
 kubectl delete -f "$M/90-raw-sandbox.yaml" --ignore-not-found >/dev/null
 sleep 3
 

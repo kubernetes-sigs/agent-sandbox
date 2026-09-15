@@ -129,8 +129,9 @@ const repoRoot = "../.."
 // separate binary with its own registry, nested modules are not built into the
 // controller, and .git holds no Go source of ours.
 func TestPrometheusImportsStayInMetricsPackage(t *testing.T) {
-	// WalkDir builds paths from the relative root above, so the excused
-	// directories need the same spelling.
+	// WalkDir builds paths from the relative root above, so the excused paths
+	// need the same spelling. git collapses a wholly ignored directory into one
+	// entry but lists an ignored file in a tracked directory on its own.
 	allowed := filepath.Join(repoRoot, "internal", "metrics")
 	skipped := append(gitIgnored(t),
 		filepath.Join(repoRoot, "sandbox-router"),
@@ -147,7 +148,8 @@ func TestPrometheusImportsStayInMetricsPackage(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || filepath.Dir(path) == allowed {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			filepath.Dir(path) == allowed || slices.Contains(skipped, path) {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution|parser.ImportsOnly)

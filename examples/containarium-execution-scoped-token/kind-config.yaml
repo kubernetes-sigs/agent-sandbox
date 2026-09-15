@@ -1,0 +1,20 @@
+# kind cluster for the execution-scoped-token example.
+#
+# `disableDefaultCNI: true` is the whole reason this file exists. kind's
+# default CNI (kindnet) does not enforce NetworkPolicy, so applying
+# networkpolicy.yaml on a default kind cluster silently does nothing — the
+# "direct egress to the provider is blocked" check would pass trivially
+# while proving nothing. Cilium is installed over this cluster by
+# run-test-kind.sh and DOES enforce it; examples/demo-cilium-egress is the
+# precedent in this repo for reaching for Cilium when a policy claim has to
+# actually hold.
+#
+# kube-proxy is left in place: Cilium runs happily beside it and the example
+# needs nothing from kubeProxyReplacement. One node is enough — every flow
+# under test is pod -> pod or pod -> internet.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+nodes:
+  - role: control-plane

@@ -1,19 +1,37 @@
 # OpenClaw Fleet on GKE: sub-second claims, per-employee workspaces, full lifecycle
 
-This example is a complete, measured blueprint for operating a **fleet of
-per-employee [OpenClaw](https://openclaw.ai) sandboxes on GKE Standard** —
-the shape an enterprise takes when it gives every employee (thousands of
-them) a personal, persistent AI-agent workspace. It demonstrates, with an
-asserting test script, the six capabilities such a deployment must prove:
+## Customer requirements
 
-| # | Fleet requirement | Mechanism | Verified by |
+This example exists to serve a concrete customer shape: an enterprise
+preparing to deploy **~9,000 per-employee [OpenClaw](https://openclaw.ai)
+sandboxes on GKE**, anchored on four architectural pillars — (a) sandbox
+identity and storage isolation keyed by employee ID, (b) warm-pool
+management that keeps cold-start latency inside tight targets, (c)
+end-to-end lifecycle orchestration (provision, image/config rollout,
+suspend/resume), and (d) scalability with **20 GB of NAS-backed storage per
+employee** and dynamic storage allocation. The customer's PoC test
+checklist defines the P0 bar, and **everything deployed by this example
+meets every P0 row** — options that trade away a P0 (e.g. hard storage
+isolation at the cost of warm claims, or Autopilot at the cost of the
+storage daemon) appear only in the [appendix](#appendix-alternatives),
+never in the main path.
+
+| P0 | Requirement (from the PoC checklist) | Mechanism in this example | Verified by |
 |---|---|---|---|
-| 1 | Startup: sub-second sandbox claims, image-cache-accelerated batch creation | `SandboxWarmPool` + warm `SandboxClaim` adoption; image streaming + optional secondary boot disk | `run-test-gke.sh` §1, [`tools/measure-claim-latency.sh`](tools/measure-claim-latency.sh) |
-| 2 | Deletion releases every resource | claim delete cascades sandbox/pod/Service; portal purges alias + workspace | `run-test-gke.sh` §2 |
+| 1 | Startup: warm-pool claims (record expected vs. actual), image-cache-accelerated batch creation | `SandboxWarmPool` + warm `SandboxClaim` adoption; image streaming + optional secondary boot disk | `run-test-gke.sh` §1, [`tools/measure-claim-latency.sh`](tools/measure-claim-latency.sh) |
+| 2 | Deletion succeeds; all resources released | claim delete cascades sandbox/pod/Service; portal purges alias + workspace | `run-test-gke.sh` §2 |
 | 3 | Sleep releases resources; wake-up duration recorded | `Sandbox.spec.operatingMode` (disk-tier) and GKE Pod Snapshots (memory-tier) | `run-test-gke.sh` §3, [`60-snapshots/`](60-snapshots/) |
-| 4 | Image/config updates + CPU/memory changes across the fleet | template bump → `Recreate` pool refresh → rate-limited per-employee rebuilds | `run-test-gke.sh` §4, [`70-rolling-update.sh`](70-rolling-update.sh) |
-| 5 | NAS storage that scales to thousands of users (20 GB each) | ONE shared Filestore RWX volume, per-employee subdirectories **late-bound** into running warm pods | `run-test-gke.sh` §5, [`tools/fio-workspace-job.yaml`](tools/fio-workspace-job.yaml) |
-| 6 | Distinct, stable address per employee (e.g. employee ID) | per-sandbox headless Service + `oc-<employee>` alias + Gateway API + [sandbox-router](../../sandbox-router/) path routing | `run-test-gke.sh` §6 |
+| 4 | Image updates for sandboxes AND the warm pool, auto-restart post-update; CPU/memory scale-up plan | template bump → `Recreate` pool refresh → rate-limited per-employee rebuilds (same path resizes CPU/memory) | `run-test-gke.sh` §4, [`70-rolling-update.sh`](70-rolling-update.sh) |
+| 5 | Storage: high-speed NAS ONLY (block SSD too expensive); NAS attach limits need a solution for 9,000 users × 20 GB | ONE shared Filestore **zonal (high-speed SSD NAS)** volume, per-employee subdirectories **late-bound** into running warm pods — 1 PV per ~5,000 users | `run-test-gke.sh` §5 |
+| 6 | Distinct, persistent access address per sandbox (e.g. employee ID) | per-sandbox headless Service + `oc-<employee>` alias + Gateway API + [sandbox-router](../../sandbox-router/) path routing | `run-test-gke.sh` §6 |
+| 10 | I/O performance testing on the NAS tier *(customer test team)* | ready-to-run fio harness against the deployed workspace volume | [`tools/fio-workspace-job.yaml`](tools/fio-workspace-job.yaml) |
+| 11 | Multi-agent, Feishu/Lark integration, business validation *(customer test team)* | stock OpenClaw with persistent per-employee config; NetworkPolicy egress allows DNS + 443 (provider APIs, Feishu/Lark HTTPS/WSS); inbound webhooks ride the stable per-employee URL | template NetworkPolicy in [`20-openclaw-template.yaml`](20-openclaw-template.yaml) |
+
+P1 rows (daily cost per runtime profile, DR backup/restore, security
+testing) are addressed directionally in [Cost dials](#cost-dials),
+[`60-snapshots/`](60-snapshots/) (workspace + snapshot restore paths), and
+[SSO / IdP integration](#sso--idp-integration); the honest deltas live in
+[Known gaps](#known-gaps).
 
 The central design rule, from which everything else follows: **a warm claim
 is only sub-second because it changes nothing about the running pod except
@@ -119,8 +137,10 @@ PROJECT_ID=<your-project> ./setup/provision-gke.sh
 
 Creates a GKE **Standard** cluster (the storage daemon needs
 `privileged` + writable `hostPath`, which Autopilot rejects — see
-[Autopilot notes](#autopilot) below), with a gVisor node pool on
-`n2-standard-8` (non-E2, so Pod Snapshots work), image streaming, the
+[Known gaps](#known-gaps) and the [appendix](#appendix-alternatives)),
+with a gVisor node pool on `c3-standard-8` (non-E2 and the same series as
+the measured results — Pod Snapshots restore only onto the same machine
+series, so pick one series and keep the fleet on it), image streaming, the
 Filestore CSI driver, Gateway API, and the agent-sandbox controller with
 extensions.
 
@@ -192,9 +212,13 @@ IMAGE_REPO=us-central1-docker.pkg.dev/<project>/fleet ./run-test-gke.sh
 
 Measured 2026-09-14 on GKE Standard `1.36.4-gke.1247000`, gVisor node pool
 on `c3-standard-8` (`GVISOR_MACHINE_TYPE=c3-standard-8`), image streaming
-on, Filestore Basic HDD (`standard-rwx`), warm pool of 5, OpenClaw
-`2026.3.23`. `run-test-gke.sh` asserted every row; percentiles are from
-`tools/measure-claim-latency.sh` over 5 provisions.
+on, warm pool of 5, OpenClaw `2026.3.23`. `run-test-gke.sh` asserted every
+row; percentiles are from `tools/measure-claim-latency.sh` over 5
+provisions. One caveat: this run used the Filestore Basic HDD tier
+(`standard-rwx`); the example now defaults to the P0-compliant high-speed
+`zonal-rwx` tier, on which bind/boot numbers can only improve — re-run
+`run-test-gke.sh` and the fio harness (checklist item 10) on the deployed
+tier to record the numbers of record.
 
 | Checklist item | Expected | Measured |
 |---|---|---|
@@ -221,37 +245,29 @@ dominated by pod recreation and OpenClaw's boot; for wake-with-memory-state
 ### Storage: why one shared volume + subdirectories
 
 At 20 GB per employee, thousands of individual PVs hit two walls: NAS
-volume-count limits and cost. The two workable Filestore shapes:
+volume-count limits and cost — P0-5 makes both explicit ("only high-speed
+NAS", "a solution is required for 9,000 PVs"). This example uses **one
+shared Filestore zonal (high-speed SSD NAS) volume with a per-employee
+subdirectory late-bound into the running warm pod**: 1 PV per ~5,000
+employees (zonal scales to 100 TiB/instance, so a 9,000-seat fleet shards
+across 2 instances), and the only storage shape compatible with
+**sub-second claims**, because nothing about the pod spec changes per
+user. Isolation is directory-level: the bind mount scopes each pod to its
+own subdirectory (the enforcing boundary is the daemon, not the storage
+API — see [Known gaps](#known-gaps)).
 
-| | Shared volume + subdirectories (this example) | [Filestore multishares](https://cloud.google.com/filestore/docs/multishares) |
-|---|---|---|
-| PVs for 9,000 users | **1 per ~5,000 users** (zonal tier scales to 100 TiB/instance) | 9,000 (80 shares/instance ⇒ ~113 Enterprise instances) |
-| Claim-time attach | instant `mount --bind` into a running pod | PVC attach ⇒ pod restart ⇒ cold start |
-| Isolation | directory-level: the bind mount scopes each pod to its own subdir, but the boundary is the daemon, not the storage API | true per-share capacity isolation, per-PV observability, CMEK |
-| Resizing | grow the instance; per-user quotas are your controller's job | per-share resize, both directions |
-| Snapshots | subdirectory copies (`snapshots/<id>`, restorable in sub-seconds via bind) | not supported on multishare instances |
+**Dynamic allocation and resizing**: the shared instance grows online —
+patch `fleet-master-pvc`'s storage request and the Filestore CSI driver
+expands the instance with no pod restarts. Provision for the current
+fleet, not the theoretical maximum, and grow ahead of demand. Two honest
+limits, both in [Known gaps](#known-gaps): shrink is not supported on this
+shape, and per-user quota enforcement is your fleet controller's job.
+Per-employee snapshots are subdirectory copies (`snapshots/<id>`),
+restorable in sub-seconds via re-bind.
 
-This example chooses subdirectories because it is the only shape compatible
-with **sub-second claims** (nothing about the pod spec changes per user).
-Fleets needing hard storage isolation should weigh multishares and accept
-direct-built sandboxes (~15 s) for persistent-workspace users.
-
-### <a name="autopilot"></a>Autopilot
-
-The storage daemon requires `privileged: true` and a writable `hostPath`;
-GKE Warden rejects both on Autopilot (`autogke-disallow-privilege`,
-`autogke-no-write-mode-hostpath`). Current options:
-
-- **GKE Standard** (this example): everything works today; node management
-  is the trade-off.
-- **Autopilot + customer-managed
-  [WorkloadAllowlist](https://cloud.google.com/kubernetes-engine/docs/how-to/autopilot-privileged-allowlists)**:
-  Autopilot can exempt exactly these two constraints for approved
-  workloads, but customer-managed allowlists require eligibility approval
-  through Cloud Customer Care.
-- **Autopilot without the daemon**: pre-provisioned per-user PVCs (e.g.
-  multishares) with direct-built sandboxes — zero node ops, but claim time
-  moves from ~1 s to ~15 s for persistent-workspace users.
+Alternative storage shapes (per-user PVCs, Filestore multishares) trade
+away P0-1 or P0-5 and therefore live in the
+[appendix](#appendix-alternatives) only.
 
 ### Warm pool sizing and batch creation
 
@@ -289,6 +305,79 @@ idle sweeper (`IDLE_TIMEOUT`) automates this; Pod Snapshots
 sessions. Warm pools can follow the daily curve with HPA/KEDA
 ([hpa-swp-scaling](../hpa-swp-scaling/), [keda-scale-to-zero](../keda-scale-to-zero/)).
 
+## Known gaps
+
+What this example does **not** yet deliver against the customer's
+requirements, found during live validation and a platform-level gap review.
+None of these break a P0 checklist row as tested, but all of them are real
+costs on the road from PoC to 9,000-seat production.
+
+1. **The Autopilot trilemma is unresolved.** The customer wants zero node
+   ops (Autopilot) + ~1 s warm claims + claim-time persistent workspaces
+   *simultaneously*. The storage daemon needs `privileged` + writable
+   `hostPath`, which GKE Warden rejects on Autopilot
+   (`autogke-disallow-privilege`, `autogke-no-write-mode-hostpath`), so
+   this example requires **GKE Standard**. Every known Autopilot path
+   today gives something up (see [appendix](#appendix-alternatives));
+   productizing storage late-binding as a managed, Autopilot-compatible
+   capability is an open ask on the platform.
+2. **The late-bind safety invariant is convention, not platform.**
+   "Unbind before any pod teardown" lives in portal code; any out-of-band
+   pod delete (kubectl, node drain, namespace delete) either wedges the
+   pod in `Terminating` or — worse — lets emptyDir cleanup delete
+   *through* the bind and wipe the employee's NFS workspace. The platform
+   has no finalizer hook or `WorkspaceBinding`-style CRD for this
+   lifecycle yet; the teardown rules below are the mitigation.
+3. **Memory-tier sleep is a manual, GKE-only runbook with sharp edges.**
+   Platform-native suspend is disk-tier (pod deleted; wake = reschedule +
+   app boot, measured 22.3 s). Memory-intact wake rides GKE Pod Snapshots:
+   manual trigger objects, gVisor-only, same-machine-series restores (never
+   E2), and **the pod spec is the cache key — any P0-4 template update
+   silently invalidates every hibernated session's snapshot** (they cold
+   start, no error, no event). Namespace-wide trigger RBAC is the tenancy
+   boundary, and there is a controller-version pin caveat. See
+   [`60-snapshots/30-snapshot-hibernate.md`](60-snapshots/30-snapshot-hibernate.md).
+4. **No in-platform idle detection or auto-suspend.** The suspend
+   *primitive* is platform (`operatingMode`, lifecycle `shutdownTime`);
+   deciding *when* is the operator's job. The portal's `IDLE_TIMEOUT`
+   sweeper is demo-grade: in-memory clock, single replica, and it only
+   sees portal traffic, not router traffic. Auto-suspend/scale-to-zero are
+   on the agent-sandbox roadmap.
+5. **Per-claim customization is deliberately narrow.** Warm claims allow
+   only metadata; per-claim env/volumes force cold starts (and this
+   template rejects them). There is **no per-claim CPU/memory sizing** —
+   employee size tiers require one template + one warm pool per size
+   class. Per-employee secrets ride the workspace mount, not pod env.
+6. **Dynamic storage resizing is grow-only, and quotas are unenforced.**
+   The shared zonal instance grows online, but cannot shrink, and nothing
+   stops one employee filling space budgeted for another — per-user quota
+   enforcement (or a move to an enforcing storage shape, with its P0
+   trade-offs) is required before production.
+7. **Image-cache acceleration for batch creation is half-delivered.**
+   Image streaming is automated; the stronger secondary-boot-disk preload
+   is a documented sketch in `provision-gke.sh`, deliberately not
+   automated. P0-1's batch bar currently rests on streaming alone (first
+   ever pull of the 1.2 GB image: ~27 s; streamed cold start: 5.7 s).
+8. **Sub-second is conditional on warm spares.** Pool-empty claims degrade
+   gracefully to ~5.7 s cold starts; refill throughput (~85 sandbox
+   creates/s cluster-wide, serialized per pool) bounds batch onboarding.
+   The full 9,000-seat shape — including ~2 Service objects per employee
+   (~18k Services) and cluster-DNS load — has not been validated at scale;
+   documented validation covers pools of 1,000–2,500 and 10–20 claims/s.
+9. **The portal and daemon are example-grade glue.** Single-replica Flask
+   portal with in-memory state and shared admin token; privileged daemon
+   with node-root hostPath whose single shared token authorizes
+   bind/unbind/delete on any workspace; NetworkPolicies that are silently
+   unenforced without Dataplane V2 (the provisioning script enables it —
+   verify on existing clusters). The customer's web-portal ask (async
+   jobs, bulk rate-limited ops, monitoring, audit, SSO+RBAC) is a
+   production build on these patterns, not a shipped component.
+10. **Measured numbers predate the tier switch.** The results table was
+    recorded on `standard-rwx` (HDD); the example now deploys `zonal-rwx`
+    (high-speed SSD NAS) to meet P0-5. Bind and boot latencies should be
+    equal or better on SSD — re-measure on the deployed tier, and run
+    checklist item 10's fio harness there.
+
 ## Production hardening notes
 
 The storage daemon and portal are example-grade orchestration, kept small
@@ -313,3 +402,47 @@ portal, both worth a finalizer in production, as in
    volume — recover with a manual daemon `unbind` (or force-delete when
    discarding the cluster). A finalizer on the claim/sandbox is the
    production answer.
+
+## <a name="appendix-alternatives"></a>Appendix: alternatives that do not meet the P0 bar
+
+Everything in the example's main path satisfies every P0 checklist row.
+The options below solve real problems, but each one trades away a P0 —
+they are documented here so the trade is made consciously, never by
+default.
+
+### Filestore multishares / per-user PVCs (trades away P0-1, and per-user PVCs also P0-5)
+
+| | Shared volume + subdirectories (main path) | [Filestore multishares](https://cloud.google.com/filestore/docs/multishares) | Per-user `volumeClaimTemplates` PVCs |
+|---|---|---|---|
+| PVs for 9,000 users | **1 per ~5,000 users** | 9,000 (80 shares/instance ⇒ ~113 Enterprise instances) | 9,000 — hits NAS attachment limits (**violates P0-5**) |
+| Claim-time attach | instant `mount --bind` into a running pod | PVC attach ⇒ pod restart ⇒ **cold start ~15 s (violates P0-1)** | same cold-start violation |
+| Isolation | directory-level, enforced by the daemon | true per-share capacity isolation, per-PV observability, CMEK | true per-PV isolation |
+| Resizing | grow-only on the instance; quotas your controller's job | per-share resize, both directions | per-PVC resize |
+| Snapshots | subdirectory copies, sub-second restore via bind | not supported on multishare instances | storage-class dependent |
+
+Choose multishares only if hard storage-API isolation outranks warm
+claims for your fleet — and record that this abandons the ~1 s claim
+target for persistent-workspace users.
+
+### Autopilot paths (trade away P0-1 or add an approval gate)
+
+The daemon's `privileged` + writable `hostPath` are Warden-rejected on
+Autopilot, so the main path requires GKE Standard. If zero node ops is
+non-negotiable:
+
+- **Autopilot + customer-managed
+  [WorkloadAllowlist](https://cloud.google.com/kubernetes-engine/docs/how-to/autopilot-privileged-allowlists)**:
+  exempts exactly these two constraints for approved workloads — keeps
+  every P0 intact, but customer-managed allowlists require eligibility
+  approval through Cloud Customer Care, so it cannot be the default here.
+- **Autopilot without the daemon**: pre-provisioned per-user PVCs (e.g.
+  multishares) with direct-built sandboxes — zero node ops, but claim
+  time moves from ~1 s to ~15 s (**violates P0-1**) and inherits the
+  per-user-PV shape above.
+
+### Demo-cost storage tier (trades away P0-5)
+
+`standard-rwx` (Filestore Basic HDD) halves the demo's storage cost and
+is fine for a throwaway validation cluster, but it is not "high-speed
+NAS" — switch `10-storage.yaml` back only for clusters whose numbers you
+will not present as the PoC record.

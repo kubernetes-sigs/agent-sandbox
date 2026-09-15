@@ -21,13 +21,16 @@ metadata:
   namespace: openclaw-fleet
 spec:
   accessModes: [ReadWriteMany]
-  # standard-rwx (Filestore Basic HDD, 1 TiB minimum) keeps the demo cheap.
-  # For the customer's "high-speed NAS" requirement switch to premium-rwx
-  # (Basic SSD) or zonal-rwx (High Scale SSD, up to 100 TiB — at 20 GB per
-  # employee that is ~5,000 employees per instance, so a 9,000-seat fleet
-  # shards across 2+ instances). Run tools/fio-workspace-job.yaml against
-  # each tier to record I/O numbers (test-checklist item 10).
-  storageClassName: standard-rwx
+  # zonal-rwx = Filestore zonal (high-speed SSD NAS): the P0-5 bar is "only
+  # high-speed NAS", so that is the default here. Scales to 100 TiB per
+  # instance — at 20 GB per employee that is ~5,000 employees per instance,
+  # so a 9,000-seat fleet shards across 2+ instances — and supports ONLINE
+  # GROWTH by patching this PVC's storage request (shrink is not supported;
+  # see the README's known-gaps section). premium-rwx (Basic SSD) also meets
+  # the bar. Run tools/fio-workspace-job.yaml against your tier to record
+  # I/O numbers (test-checklist item 10). The cheaper standard-rwx HDD tier
+  # does NOT meet P0-5 — appendix-only, for throwaway demo clusters.
+  storageClassName: zonal-rwx
   resources:
     requests: {storage: 1Ti}
 ---

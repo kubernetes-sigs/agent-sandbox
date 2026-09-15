@@ -33,7 +33,10 @@ PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)
 REGION="${REGION:-us-central1}"
 ZONE="${ZONE:-us-central1-a}"
 CLUSTER_NAME="${CLUSTER_NAME:-openclaw-fleet-poc}"
-GVISOR_MACHINE_TYPE="${GVISOR_MACHINE_TYPE:-n2-standard-8}"
+# c3-standard-8 matches the series the measured results were taken on. Pod
+# Snapshots (memory-tier sleep) restore only onto the SAME machine series
+# (and never E2), so pick one series for the whole fleet and keep it.
+GVISOR_MACHINE_TYPE="${GVISOR_MACHINE_TYPE:-c3-standard-8}"
 GVISOR_NODES="${GVISOR_NODES:-3}"
 SNAPSHOT_BUCKET="${SNAPSHOT_BUCKET:-${PROJECT_ID}-openclaw-fleet-snapshots}"
 # Minimum 1.36.0-gke.3302001: first GKE version that supports the gVisor
@@ -103,7 +106,8 @@ gcloud container clusters get-credentials "${CLUSTER_NAME}" \
 
 echo "### Step 3: Creating gVisor node pool ###"
 # Pod Snapshots require gVisor sandboxed nodes AND a non-E2 machine type
-# (hence n2-standard-8 by default). Image streaming keeps first pulls of
+# (hence c3-standard-8 by default; restores also require the SAME series,
+# so keep the whole fleet on one). Image streaming keeps first pulls of
 # the OpenClaw image fast on freshly scaled nodes.
 if gcloud container node-pools describe gvisor-pool \
         --cluster "${CLUSTER_NAME}" --zone "${ZONE}" \

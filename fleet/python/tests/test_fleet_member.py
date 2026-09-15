@@ -112,7 +112,10 @@ class _FakeGCS:
         return self.obj
 
 
-def test_fetch_assignments_clears_etag_when_object_disappears():
+def test_object_disappearing_mid_run_keeps_the_last_assignment(caplog):
+    # Absence is not an instruction: the planner drains by publishing an
+    # explicit empty payload, never by deleting the object. A missing object
+    # means "no plan published" and must not tear anything down.
     gcs = _FakeGCS()
     gcs.obj = (b'{"generation": 7, "clusters": {}}', "etag-1")
     fm = _bare_member(gcs=gcs)
@@ -120,17 +123,16 @@ def test_fetch_assignments_clears_etag_when_object_disappears():
     assignments, changed = fm._fetch_assignments()
     assert changed is True
     assert assignments.generation == 7
+    fm._last_assignment = assignments          # what _reconcile_once does
     assert fm._last_etag == "etag-1"
 
-    # Object deleted: one changed=True to signal the transition...
     gcs.obj = None
-    _, changed = fm._fetch_assignments()
-    assert changed is True
-    assert fm._last_etag == "", "stale etag survived the delete"
-
-    # ...and then quiet, instead of re-reporting a change every single tick.
-    _, changed = fm._fetch_assignments()
+    with caplog.at_level(logging.WARNING):
+        got, changed = fm._fetch_assignments()
     assert changed is False
+    assert got is assignments, "the member must keep serving its last plan"
+    assert fm._last_etag == "", "stale etag survived the delete"
+    assert "GONE" in caplog.text
 
 
 def test_fetch_assignments_rereads_after_delete_and_recreate():
@@ -162,12 +164,77 @@ def test_fetch_assignments_reports_unchanged_on_matching_etag():
     assert again is first
 
 
-def test_fetch_assignments_missing_from_the_start_is_not_a_change():
+def test_missing_from_the_start_skips_instead_of_reconciling_empty():
+    # Fresh start + no assignments.json = "no plan published yet" (bootstrap,
+    # a wiped bucket, or a mistyped --bucket). Substituting an empty plan
+    # would let the first-pass clause sweep every managed pool — same shape
+    # as the schema-refusal and parse-failure paths, same answer: skip.
     gcs = _FakeGCS()
     fm = _bare_member(gcs=gcs)
     assignments, changed = fm._fetch_assignments()
     assert changed is False
-    assert assignments == Assignments()
+    assert assignments is None
+
+    deleted: list[str] = []
+
+    class _Recorder:
+        def delete_namespaced_custom_object(self, **kw):
+            deleted.append(kw["name"])
+
+    fm.custom_objects = _Recorder()
+    fm._list_managed_pool_names = lambda: ["pool-from-a-previous-world"]
+    fm._reconcile_once()
+    assert deleted == [], "an absent object swept the managed pools"
+
+
+def test_a_malformed_pool_does_not_cache_the_etag_or_tear_down():
+    # THE BLOCKER (part-1 review): the etag was cached before the pool parse,
+    # so a payload with a valid schema_version but a malformed pool
+    # (from_json raising on a missing required field) left the etag cached.
+    # The next tick short-circuited on it, substituted an empty Assignments()
+    # with _last_assignment still None, fell through the first-pass clause,
+    # and the orphan sweep deleted every managed pool.
+    gcs = _FakeGCS()
+    gcs.obj = (
+        b'{"schema_version": 1, "generation": 5, "clusters": {"test": '
+        b'{"pools": [{"warmpool": "wp-a", "replicas": 1}]}}}',  # no "template"
+        "etag-bad",
+    )
+    fm = _bare_member(gcs=gcs)
+
+    with pytest.raises(TypeError):
+        fm._fetch_assignments()
+    assert fm._last_etag == "", "etag cached for bytes that never parsed"
+
+    # The next tick re-reads and fails loudly again — never quiet, never empty.
+    with pytest.raises(TypeError):
+        fm._fetch_assignments()
+    assert fm._last_etag == ""
+
+    # Through the reconcile path: the pass fails, and nothing is deleted.
+    deleted: list[str] = []
+
+    class _Recorder:
+        def delete_namespaced_custom_object(self, **kw):
+            deleted.append(kw["name"])
+
+    fm.custom_objects = _Recorder()
+    fm._list_managed_pool_names = lambda: ["pool-from-previous-pod"]
+    with pytest.raises(TypeError):
+        fm._reconcile_once()
+    assert deleted == []
+    assert fm._last_assignment is None
+
+
+def test_pool_label_value_fits_or_is_truncated_with_a_hash():
+    from agent_sandbox_fleet.fleet_member import _label_value
+    assert _label_value("tpl-a-pool") == "tpl-a-pool"
+    long_a = "x" * 80 + "-pool"
+    long_b = "x" * 79 + "y-pool"
+    va, vb = _label_value(long_a), _label_value(long_b)
+    assert len(va) == 63 and len(vb) == 63
+    assert va != vb, "distinct names must map to distinct label values"
+    assert va == _label_value(long_a), "must be deterministic"
 
 
 # --------------------------------------------------------------------------- #

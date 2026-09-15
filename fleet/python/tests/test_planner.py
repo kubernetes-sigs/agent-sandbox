@@ -725,3 +725,23 @@ def test_pinned_other_policies_ignore_the_cluster_field():
     assn = plan(spec, _registry())  # must not raise, pins are decorative here
     placed = sum(len(c.pools) for c in assn.clusters.values())
     assert placed == 3
+
+
+def test_an_oversized_template_name_is_rejected_at_spec_load():
+    # "<template_name>-pool" must be a valid object name; reject where the
+    # error can name the model, not as a create failure on every member.
+    with pytest.raises(ValueError, match="object name"):
+        ModelSpec(template_name="t" * 260, target_tasks=5)
+
+
+def test_an_invalid_template_name_is_rejected_at_spec_load():
+    with pytest.raises(ValueError, match="object name"):
+        ModelSpec(template_name="Bad_Name", target_tasks=5)
+
+
+def test_a_long_but_valid_template_name_is_accepted_with_a_warning(caplog):
+    # >63 chars is a valid object name but exceeds the label-value cap; the
+    # member truncates+hashes the label, so this is a warning, not an error.
+    with caplog.at_level(logging.WARNING):
+        ModelSpec(template_name="t" * 100, target_tasks=5)
+    assert "truncate" in caplog.text

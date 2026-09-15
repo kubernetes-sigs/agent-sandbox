@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import math
+import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -79,6 +80,33 @@ class ModelSpec(BaseModel):
     # holds the image). Required on every model when placement_policy=pinned;
     # ignored by every other policy.
     cluster: str | None = None
+
+    @field_validator("template_name")
+    @classmethod
+    def _template_name_renders_a_valid_pool_name(cls, v: str) -> str:
+        """Reject at spec load a template_name whose rendered pool name
+        ("<template_name>-pool") cannot be a Kubernetes object name — where
+        the error can name the offending model, instead of surfacing as a
+        create failure on every member. Names longer than 63 chars are valid
+        objects but exceed the label-value cap; the member truncates+hashes
+        the pool label in that case, so only warn.
+        """
+        pool = f"{v}-pool"
+        if len(pool) > 253 or not _DNS1123_SUBDOMAIN.match(pool):
+            raise ValueError(
+                f"template_name {v!r} renders warm-pool name {pool!r}, which "
+                "is not a valid Kubernetes object name (DNS-1123 subdomain, "
+                "max 253 chars); every member's pool create would fail")
+        if len(pool) > 63:
+            logger.warning(
+                "template_name %r renders a %d-char pool name; the member "
+                "will truncate+hash its pool label (values cap at 63)",
+                v, len(pool))
+        return v
+
+
+_DNS1123_SUBDOMAIN = re.compile(
+    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 
 
 class FleetSpec(BaseModel):

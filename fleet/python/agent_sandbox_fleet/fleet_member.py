@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
@@ -371,23 +372,40 @@ class FleetMember:
     def _fetch_assignments(self) -> tuple[Assignments | None, bool]:
         """Return (assignments, changed). `changed` is False if etag matched.
 
-        `assignments` is None only when the payload was refused AND no plan
-        has been parsed since this process started, so there is nothing
-        last-good to keep serving. The caller must skip the pass outright.
+        `assignments` is None when the payload was refused OR the object is
+        absent, AND no plan has been parsed since this process started, so
+        there is nothing last-good to keep serving. The caller must skip the
+        pass outright.
         """
         try:
             obj_bytes, etag = self.gcs.get_with_etag(self.paths.assignments)
         except FileNotFoundError:
-            # Drop the cached etag too. Reporting changed=True while leaving
-            # _last_etag set makes every subsequent tick report changed=True
-            # again, so the member re-reconciles to empty forever; and a later
-            # object that happens to hash back to the old etag would then be
-            # read as unchanged and silently skipped.
-            was_present = self._last_etag != ""
+            # Absence is not an instruction. The planner drains by publishing
+            # an explicit empty `clusters` payload (fleet-spec-drain); it
+            # never deletes the object. A missing object therefore means "no
+            # plan published" — bootstrap, a wiped bucket, or a mistyped
+            # --bucket — and tearing down every managed pool over missing
+            # data is the exact response the planner's own no-data guard
+            # exists to prevent. Keep serving whatever is cached; on a fresh
+            # start, skip the pass entirely. Drop the cached etag so a
+            # recreated object is always re-read, even if it hashes back to
+            # the old etag.
+            if self._last_etag != "" or self._last_assignment is not None:
+                log.warning(
+                    "assignments.json is GONE from the bucket; keeping the "
+                    "current pool set and NOT reconciling. Publish a drain "
+                    "spec to tear the fleet down deliberately.")
             self._last_etag = ""
-            return Assignments(), was_present
+            return self._last_assignment, False
         if etag == self._last_etag:
-            return self._last_assignment or Assignments(), False
+            # The invariant that makes this branch safe: _last_etag is only
+            # written after a successful parse (below), so a cached etag
+            # implies a cached assignment. Guard the None case anyway — an
+            # empty substitute here reads as "tear everything down" to a
+            # first-pass reconcile.
+            if self._last_assignment is None:
+                return None, False
+            return self._last_assignment, False
         raw = json.loads(obj_bytes.decode())
 
         # Compatibility gate, checked BEFORE anything else is read out of the
@@ -431,7 +449,6 @@ class FleetMember:
             )
             return self._last_assignment, False
 
-        self._last_etag = etag
         clusters = {
             name: ClusterAssignment(
                 pools=[
@@ -440,6 +457,14 @@ class FleetMember:
             )
             for name, body in raw.get("clusters", {}).items()
         }
+        # Cached only AFTER the parse above succeeded. Caching before it left
+        # the etag pointing at bytes that never became an assignment when
+        # from_json raised on a malformed pool: the next tick short-circuited
+        # on the etag and, on a fresh-start member, substituted an empty plan
+        # — the same managed-pool teardown the schema gate refuses. A failed
+        # parse now re-reads (and re-fails, loudly) every tick until the plan
+        # is fixed, exactly like a refused schema_version.
+        self._last_etag = etag
         return Assignments(
             schema_version=version,
             generation=raw.get("generation", 0),
@@ -579,7 +604,8 @@ class FleetMember:
         return [pool["metadata"]["name"] for pool in self._iter_managed_pools()]
 
     def _labels_for(self, pool: AssignmentPool) -> dict[str, str]:
-        return {MANAGED_LABEL: "true", POOL_NAME_LABEL: pool.warmpool}
+        return {MANAGED_LABEL: "true",
+                POOL_NAME_LABEL: _label_value(pool.warmpool)}
 
     # -- Capacity report loop -----------------------------------------------
 
@@ -807,6 +833,21 @@ def _parse_mem_bytes(s: str | None) -> int:
         return int(float(s))
     except ValueError:
         return 0
+
+
+def _label_value(name: str) -> str:
+    """A valid label value for a pool name: the name itself when it fits,
+    else a truncated prefix + content hash. Label values cap at 63 chars
+    while object names run to 253, and the pool name is operator-authored
+    (template_name + "-pool") — repo convention is to never put a full
+    resource name in a label value. Deterministic, so the same pool always
+    carries the same label; nothing selects on this label (the sweep uses
+    MANAGED_LABEL), it exists for humans and kubectl filtering.
+    """
+    if len(name) <= 63:
+        return name
+    digest = hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()[:12]
+    return f"{name[:50]}-{digest}"
 
 
 def _now_iso() -> str:

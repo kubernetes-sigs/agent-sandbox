@@ -131,8 +131,18 @@ spec:
               # so warm claims stay warm.
               node -e '
                 const fs = require("fs");
-                const base = "/etc/openclaw/openclaw.json";
+                const eff = "/etc/openclaw/openclaw.json";
+                const pristine = "/etc/openclaw/openclaw.base.json";
                 const ovr = "/workspace/.openclaw/openclaw.overrides.json";
+                // The writable /etc/openclaw emptyDir OUTLIVES container
+                // restarts (restartPolicy: OnFailure reruns this command
+                // but not the init container), so the effective config is
+                // ALWAYS rebuilt from a pristine snapshot of the fleet
+                // base taken on first launch — never from the previous
+                // merge output, which would let a removed or quarantined
+                // override linger forever.
+                if (!fs.existsSync(pristine)) fs.copyFileSync(eff, pristine);
+                let effective = JSON.parse(fs.readFileSync(pristine, "utf8"));
                 if (fs.existsSync(ovr)) {
                   // The portal validates seeded overrides, but the file
                   // lives in the employee-writable workspace, so it can be
@@ -154,15 +164,15 @@ spec:
                       }
                       return a;
                     };
-                    const merged = merge(JSON.parse(fs.readFileSync(base, "utf8")), parsed);
-                    fs.writeFileSync(base, JSON.stringify(merged, null, 2));
+                    effective = merge(effective, parsed);
                     console.log("Applied per-employee config overrides.");
                   } catch (e) {
                     fs.renameSync(ovr, ovr + ".invalid");
                     console.error("WARNING: quarantined invalid openclaw.overrides.json " +
                                   "(-> .invalid); starting on base config: " + e.message);
                   }
-                }'
+                }
+                fs.writeFileSync(eff, JSON.stringify(effective, null, 2));'
               echo "Workspace bound; starting OpenClaw gateway."
               node dist/index.js gateway --bind=lan --port 18789 --allow-unconfigured --verbose
           ports:

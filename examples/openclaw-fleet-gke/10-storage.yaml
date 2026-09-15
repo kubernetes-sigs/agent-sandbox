@@ -167,7 +167,7 @@ spec:
                   os.chown(source, 1000, 1000)
                   seeded = 0
                   for rel, content in files.items():
-                    if not isinstance(content, str) or len(content) > 65536:
+                    if not isinstance(content, str) or len(content.encode('utf-8')) > 65536:
                       raise ValueError(f"content of {rel!r} must be a string <= 64KiB")
                     parts = [require_segment('file path segment', p) for p in rel.split('/')]
                     dfd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

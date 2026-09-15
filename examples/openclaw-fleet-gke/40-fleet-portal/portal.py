@@ -255,6 +255,7 @@ def daemon_delete_workspace(employee: str):
 CONFIG_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MAX_CONFIG_FILES = 16
 MAX_CONFIG_BYTES = 256 * 1024
+MAX_FILE_BYTES = 64 * 1024  # keep in sync with the daemon's per-file cap
 
 
 def validate_config(config) -> dict:
@@ -267,7 +268,12 @@ def validate_config(config) -> dict:
         segments = rel.split("/")
         if not all(CONFIG_SEGMENT.fullmatch(s) for s in segments) or len(segments) > 4:
             raise ValueError(f"invalid config path: {rel!r}")
-        total += len(content.encode("utf-8"))
+        size = len(content.encode("utf-8"))
+        # Mirror the daemon's per-file cap so an oversized file 400s here
+        # instead of surfacing as the daemon's 500 mid-provision.
+        if size > MAX_FILE_BYTES:
+            raise ValueError(f"{rel!r} exceeds {MAX_FILE_BYTES} bytes")
+        total += size
     if total > MAX_CONFIG_BYTES:
         raise ValueError(f"config exceeds {MAX_CONFIG_BYTES} bytes")
     # The entrypoint deep-merges this file over the base config, which only

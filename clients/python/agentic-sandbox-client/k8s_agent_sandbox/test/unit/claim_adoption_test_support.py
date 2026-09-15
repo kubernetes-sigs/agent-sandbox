@@ -14,6 +14,7 @@
 """Shared public-client scenarios for deterministic SandboxClaim adoption."""
 
 from copy import deepcopy
+from typing import Any
 
 from k8s_agent_sandbox.constants import (
     CREATED_BY_LABEL,
@@ -49,7 +50,7 @@ def claim_for_request(
     resource_version: str = "created-rv",
 ) -> dict:
     """Returns an apiserver response matching one create request."""
-    claim = {
+    claim: dict[str, Any] = {
         "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
         "kind": "SandboxClaim",
         "metadata": {

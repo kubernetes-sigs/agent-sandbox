@@ -250,10 +250,11 @@ class AsyncSandboxClient(Generic[T]):
 
         lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
 
-        generated_claim_name = claim_name is None
-        if generated_claim_name:
+        if claim_name is None:
+            generated_claim_name = True
             claim_name = f"sandbox-claim-{uuid.uuid4().hex[:8]}"
         else:
+            generated_claim_name = False
             validate_claim_name(claim_name)
 
         key = (namespace, claim_name)

@@ -384,7 +384,7 @@ class AsyncK8sHelper:
         """Delete a Claim, optionally constrained to its Kubernetes UID."""
         await self._ensure_initialized()
 
-        delete_kwargs: dict[str, object] = {}
+        delete_kwargs: dict[str, Any] = {}
         if expected_uid is not None:
             delete_kwargs["body"] = client.V1DeleteOptions(
                 preconditions=client.V1Preconditions(uid=expected_uid)

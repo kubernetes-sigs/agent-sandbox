@@ -14,6 +14,7 @@
 """Validation for safely adopting an existing SandboxClaim."""
 
 import re
+from typing import Never
 
 from pydantic import BaseModel, ConfigDict
 
@@ -94,7 +95,7 @@ def validate_claim_name(name: str) -> None:
         )
 
 
-def _reject(claim_name: str, field: str) -> None:
+def _reject(claim_name: str, field: str) -> Never:
     raise ValueError(
         f"SandboxClaim '{claim_name}' has a different {field}; refusing to use it."
     )

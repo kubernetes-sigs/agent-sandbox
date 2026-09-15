@@ -20,6 +20,16 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 M="$(dirname "${BASH_SOURCE[0]}")/../manifests"
 
+# A previous walkthrough or test.sh run leaves the policies and the raw sandbox
+# behind; remove this example's own objects so the demo starts in phase 1.
+if kubectl get crd clusternetworkpolicies.policy.networking.k8s.io >/dev/null 2>&1; then
+  for f in 80-cnp-baseline-default-deny 70-cnp-admin-pass-shared-tools 60-cnp-admin-team-b-allow-pypi \
+           50-cnp-admin-allow-github 40-cnp-admin-allow-dns 30-cnp-admin-default-deny; do
+    kubectl delete -f "$M/$f.yaml" --ignore-not-found
+  done
+fi
+kubectl delete -f "$M/90-raw-sandbox.yaml" --ignore-not-found
+
 kubectl apply -f "$M/00-namespaces.yaml"
 kubectl apply -f "$M/10-shared-tools.yaml"
 kubectl apply -f "$M/20-sandbox-templates.yaml"

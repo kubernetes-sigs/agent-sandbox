@@ -12,6 +12,8 @@ metadata:
 spec:
   podTemplate:
     spec:
+      # Templates get this from the controller's secure defaults; a raw Sandbox does not.
+      automountServiceAccountToken: false
       containers:
         - name: agent
           image: python:3.12-slim

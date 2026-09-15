@@ -29,8 +29,14 @@ kubectl wait --for=condition=Established crd/clusternetworkpolicies.policy.netwo
 echo "Installing kube-network-policies ${KUBE_NETWORK_POLICIES_VERSION} (ClusterNetworkPolicy variant) ..."
 # install-cnp.yaml does not include the CRDs. The manifest is taken from the
 # release tag and the image pinned to the same release.
+# The upstream default is --fail-open=true (the nfqueue rule carries the bypass
+# flag), which lets traffic through while the agent is down or restarting. This
+# example is about a default-deny guardrail, so make it fail closed; the
+# trade-off is that pod traffic is dropped if the DaemonSet pod crashes. Node
+# traffic from root (kubelet, containerd) is not queued and is unaffected.
 curl -fsSL "${knp_raw}/install-cnp.yaml" \
   | sed -E "s#(image: registry.k8s.io/networking/kube-network-policies:).*#\1${KUBE_NETWORK_POLICIES_VERSION}-npa-v1alpha2#" \
+  | awk '{ print } /^ *- \/bin\/netpol$/ { sub(/\/bin\/netpol/, "--fail-open=false"); print }' \
   | kubectl apply -f -
 kubectl rollout status daemonset/kube-network-policies -n kube-system --timeout=180s
 echo "OK: ClusterNetworkPolicy API and kube-network-policies installed."

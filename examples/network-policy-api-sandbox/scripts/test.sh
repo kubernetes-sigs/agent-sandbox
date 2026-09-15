@@ -92,7 +92,11 @@ check() { # desc expected(ok|fail) probe args...
   fi
 }
 
-apply() { kubectl apply -f "$M/$1"; sleep 3; } # small propagation delay for the DaemonSet informers
+apply() { # manifest
+  # Without -e a failed apply would let the phase run against the previous policy set.
+  kubectl apply -f "$M/$1" || { echo "FAIL: could not apply $1, aborting"; exit 1; }
+  sleep 3 # small propagation delay for the DaemonSet informers
+}
 
 # --- reset to phase-1 state ---------------------------------------------------
 echo "== Reset: removing any ClusterNetworkPolicy and the raw sandbox from a previous run =="

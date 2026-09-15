@@ -37,7 +37,7 @@ Kubernetes `NetworkPolicy` has two limitations that matter for sandboxes:
 
 ### Why the templates stay `Managed`
 
-The [network policy management guide](../policy/network-policy-management/README.md#troubleshooting)
+The [network policy management guide](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/policy/network-policy-management/README.md#troubleshooting)
 suggests `networkPolicyManagement: Unmanaged` when you need FQDN or L7 rules,
 because vendor policy CRDs usually replace Kubernetes `NetworkPolicy` rather
 than work with it. This example keeps the templates `Managed` instead:
@@ -123,12 +123,12 @@ step.
 - Outbound internet from the kind nodes (the sandboxes hit github.com and
   pypi.org; images are pulled from registry.k8s.io and Docker Hub).
 
-Versions are pinned in [env.sh](env.sh):
+Versions are pinned in [env.sh](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/network-policy-api-sandbox/env.sh):
 
 | Component | Version | Notes |
 |---|---|---|
 | network-policy-api | `v0.2.0` | `ClusterNetworkPolicy` CRD, **experimental channel** (`domainNames` is not in the standard channel yet) |
-| kube-network-policies | `v1.1.1` | `install-cnp.yaml` + image `…:v1.1.1-npa-v1alpha2` |
+| kube-network-policies | `v1.1.1` | `install-cnp.yaml` + image `…:v1.1.1-npa-v1alpha2`, with `--fail-open=false` added (see [notes](#notes-and-gotchas)) |
 | agent-sandbox | latest release | core + extensions (`sandbox-with-extensions.yaml`) |
 
 ## Quick start
@@ -146,7 +146,7 @@ document walks the same phases by hand.
 | Script | Purpose |
 |---|---|
 | `scripts/01-create-cluster.sh` | kind cluster, 1 control-plane + 1 worker, default CNI. |
-| `scripts/02-install-network-policies.sh` | `ClusterNetworkPolicy` CRD (experimental channel) + kube-network-policies CNP DaemonSet, pinned. |
+| `scripts/02-install-network-policies.sh` | `ClusterNetworkPolicy` CRD (experimental channel) + kube-network-policies CNP DaemonSet, pinned, fail-closed. |
 | `scripts/03-install-agent-sandbox.sh` | agent-sandbox core + extensions from the latest GitHub release. |
 | `scripts/04-deploy-demo.sh` | Namespaces, tool server, one `SandboxTemplate` + `SandboxWarmPool` + `SandboxClaim` per tenant. **No CNP yet.** |
 | `scripts/test.sh` | Phase-by-phase assertions; non-zero exit on any failure. |
@@ -268,7 +268,10 @@ kubectl apply -f manifests/40-cnp-admin-allow-dns.yaml
 
 Priority 10 is evaluated before 100. The policy allows UDP/TCP 53 to the
 CoreDNS pods and to the two public resolvers agent-sandbox injects, and nothing
-else: an unrestricted port-53 rule can be used to exfiltrate data.
+else: an unrestricted port-53 rule would let a sandbox talk to any DNS server
+directly. Query names are not inspected, so data can still be tunnelled through
+the allowed recursive resolvers; closing that needs a DNS proxy with a
+query-name policy, which is out of scope here.
 
 ```bash
 dns  sandbox-team-a "$A" github.com          # ok   (via 8.8.8.8)
@@ -433,11 +436,19 @@ for `jq` (see the
   standard-channel CRD does not have the field, so `kubectl apply` of
   `50-`/`60-` fails schema validation with it. Graduation is tracked in the
   [FQDN NPEP](https://network-policy-api.sigs.k8s.io/npeps/npep-133-fqdn-egress-selector/).
+- The install script adds `--fail-open=false` to the kube-network-policies
+  DaemonSet. The upstream default is fail-open: the nfqueue rule carries the
+  `bypass` flag, so while the agent is down or restarting packets are accepted
+  unevaluated and a default-deny guardrail silently disappears. Fail-closed
+  drops new pod connections during that window instead (node traffic from root,
+  such as kubelet and image pulls, is not queued). Pick the side of that
+  trade-off deliberately before reusing the manifest on a real cluster.
 - DNS is part of the allowlist. The FQDN cache is fed by the DNS answers the
   pod actually received; if a sandbox resolves through a path that is not
   allowed (a hard-coded resolver, DoH), its names never enter the cache and the
   connection is denied. This is the intended fail-closed behaviour. The DNS
-  capture queue itself is fail-open (`queue flags bypass`), so under heavy load
+  capture queue itself is always fail-open (`queue flags bypass`, independent
+  of `--fail-open`), so under heavy load
   an answer can slip past the agent; the connection that follows is denied and
   works once the name is resolved again. `test.sh` retries the "allowed"
   checks for this reason.
@@ -457,7 +468,7 @@ for `jq` (see the
   why `python:3.12-slim` can still be pulled under default-deny.
 - All policies in this example are egress-only. The
   sandbox-router path documented in
-  [network-policy-management](../policy/network-policy-management/README.md)
+  [network-policy-management](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/policy/network-policy-management/README.md)
   keeps working; add `ingress` rules to the Admin policies if you want a
   cluster-wide ingress floor too.
 

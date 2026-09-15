@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Shared configuration for the ClusterNetworkPolicy + agent-sandbox codelab.
-# Override any value by exporting it before sourcing, e.g.
+# Override any version or the cluster name by exporting it before sourcing, e.g.
 #   KIND_CLUSTER_NAME=cnp-demo ./scripts/setup-all.sh
 
 export KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agent-sandbox-cnp}"
@@ -31,7 +31,8 @@ export KUBE_NETWORK_POLICIES_VERSION="${KUBE_NETWORK_POLICIES_VERSION:-v1.1.1}"
 # agent-sandbox release tag, or "latest" to auto-discover the newest GitHub release.
 export AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-latest}"
 
-# Namespaces are hard-coded in manifests/*.yaml; keep these in sync if you change them.
-export NS_A="${NS_A:-sandbox-team-a}"
-export NS_B="${NS_B:-sandbox-team-b}"
-export NS_TOOLS="${NS_TOOLS:-shared-tools}"
+# Not overridable: the namespaces are hard-coded in manifests/*.yaml and in the
+# README, so an override here would only desynchronise the scripts from them.
+export NS_A=sandbox-team-a
+export NS_B=sandbox-team-b
+export NS_TOOLS=shared-tools

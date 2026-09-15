@@ -86,6 +86,7 @@
 - --disable-claim-observability-annotations={{ .Values.controller.disableClaimObservabilityAnnotations }}
 {{- end }}
 {{- if .Values.controller.watchNamespaces }}
+{{- include "agent-sandbox.validateWatchNamespaces" . }}
 - --watch-namespaces={{ join "," .Values.controller.watchNamespaces }}
 {{- end }}
 {{- range .Values.controller.extraArgs }}

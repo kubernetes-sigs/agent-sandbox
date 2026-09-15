@@ -41,6 +41,18 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Validate controller.watchNamespaces: every entry must be non-blank.
+Include this template to fail early on lists like [""] or ["team-a", ""].
+*/}}
+{{- define "agent-sandbox.validateWatchNamespaces" -}}
+{{- range .Values.controller.watchNamespaces }}
+{{- if not (trim .) }}
+{{- fail "controller.watchNamespaces contains a blank entry; every namespace must be a non-empty string" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 The effective leader-election namespace: explicit if set, otherwise the
 controller's deployment namespace.
 */}}

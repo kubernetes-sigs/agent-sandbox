@@ -47,8 +47,8 @@ For the benchmark data and sizing rationale behind these settings — including 
   one replica reconciles at a time. Disable it only for single-replica deployments that cannot
   create the leader-election Lease, for example a namespace-scoped install without
   `coordination.k8s.io` RBAC.
-* `--leader-election-namespace` (default: the controller's own namespace): Namespace in which
-  the leader-election resource is created.
+* `--leader-election-namespace` (default: `""`): Namespace in which the leader-election resource
+  is created. When empty, the controller auto-detects the namespace it is running in.
 * `--extensions` (default: `false`): Enable the extensions controllers (`SandboxTemplate`,
   `SandboxWarmPool`, `SandboxClaim`).
 * `--version`: Print version information and exit.

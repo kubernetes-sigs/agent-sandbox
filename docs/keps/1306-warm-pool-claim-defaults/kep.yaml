@@ -1,0 +1,13 @@
+title: Warm Pool Claim Defaults
+kep-number: 1306
+authors:
+  - "@vvoronko"
+status: provisional
+creation-date: 2026-08-23
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/1306"

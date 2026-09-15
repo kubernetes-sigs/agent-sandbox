@@ -232,7 +232,7 @@ percentile detail for claims is from `tools/measure-claim-latency.sh`
 
 | Checklist item | Expected | Measured |
 |---|---|---|
-| Warm claim adoption (`adopted_ms`) | < 1 s | **236 ms (SSD run); p50 174 ms, max 201 ms over 5** |
+| Warm claim adoption (`adopted_ms`) | < 1 s | **175–236 ms across the SSD run's three provisions** (earlier HDD run: p50 174 ms, max 201 ms over 5 — adoption never touches the data path, so the tiers match) |
 | + workspace bind (`bound_ms`) | sub-second | p50 177 ms |
 | + OpenClaw boot (`app_ready_ms`) | seconds | p50 2.9 s |
 | Signup end-to-end (`total_ms`) | a few seconds | **p50 3.26 s, max 3.32 s** |
@@ -463,8 +463,10 @@ costs on the road from PoC to 9,000-seat production.
 The storage daemon and portal are example-grade orchestration, kept small
 so every mechanism is visible. A production fleet manager adds: a durable
 job queue with rate-limited bulk operations, audit logging, per-user
-storage quotas, HA for the portal, TLS + real edge auth throughout, and the
-router's non-demo authorization modes. The daemon's HTTP contract
+storage quotas, HA for the portal, TLS + real edge auth throughout —
+including the portal→daemon hop, which the demo protects only with a
+bearer token + NetworkPolicy over cleartext HTTP (mTLS or a mesh boundary
+in production) — and the router's non-demo authorization modes. The daemon's HTTP contract
 (`bind`/`unbind`/`delete`) is deliberately tiny so it can be replaced by a
 proper controller reconciling a `WorkspaceBinding`-style CRD.
 

@@ -154,27 +154,44 @@ spec:
                   # OpenClaw's start, without touching the pod spec (the
                   # warm claim stays sub-second). CREATE-IF-ABSENT ONLY: a
                   # returning employee's live state is never clobbered.
+                  #
+                  # The workspace contents are EMPLOYEE-CONTROLLED (their
+                  # sandbox writes here), so every path segment is walked
+                  # with O_NOFOLLOW against directory fds: a planted symlink
+                  # (e.g. after delete-without-purge + re-signup) must not
+                  # let a seed traverse into another employee's directory.
                   files = data.get('files') or {}
                   if not isinstance(files, dict) or len(files) > 32:
                     raise ValueError("files must be a dict of <= 32 entries")
                   os.makedirs(source, exist_ok=True)
+                  os.chown(source, 1000, 1000)
                   seeded = 0
                   for rel, content in files.items():
                     if not isinstance(content, str) or len(content) > 65536:
                       raise ValueError(f"content of {rel!r} must be a string <= 64KiB")
                     parts = [require_segment('file path segment', p) for p in rel.split('/')]
-                    path = safe_join(source, *parts)
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    dfd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                     try:
-                      fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                    except FileExistsError:
-                      continue
-                    with os.fdopen(fd, 'w') as f:
-                      f.write(content)
-                    seeded += 1
-                  # OpenClaw runs as uid 1000; the bind-time chown is
-                  # deliberately non-recursive, so ownership is fixed here.
-                  subprocess.run(["chown", "-R", "1000:1000", source], check=True)
+                      for part in parts[:-1]:
+                        try:
+                          nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+                        except FileNotFoundError:
+                          os.mkdir(part, 0o700, dir_fd=dfd)
+                          os.chown(part, 1000, 1000, dir_fd=dfd, follow_symlinks=False)
+                          nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+                        os.close(dfd)
+                        dfd = nfd
+                      try:
+                        fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     0o600, dir_fd=dfd)
+                      except FileExistsError:
+                        continue
+                      with os.fdopen(fd, 'w') as f:
+                        f.write(content)
+                        os.fchown(f.fileno(), 1000, 1000)
+                      seeded += 1
+                    finally:
+                      os.close(dfd)
                   msg = f"Success: Seeded {seeded} file(s) for {user_id}"
                 elif action == "unbind":
                   subprocess.run(["umount", "-l", target], check=True)

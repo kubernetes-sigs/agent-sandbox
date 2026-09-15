@@ -267,9 +267,20 @@ def validate_config(config) -> dict:
         segments = rel.split("/")
         if not all(CONFIG_SEGMENT.fullmatch(s) for s in segments) or len(segments) > 4:
             raise ValueError(f"invalid config path: {rel!r}")
-        total += len(content)
+        total += len(content.encode("utf-8"))
     if total > MAX_CONFIG_BYTES:
         raise ValueError(f"config exceeds {MAX_CONFIG_BYTES} bytes")
+    # The entrypoint deep-merges this file over the base config, which only
+    # makes sense for a JSON object — reject anything else up front (a
+    # malformed file would otherwise persist forever: seeds are
+    # create-if-absent).
+    if "openclaw.overrides.json" in config:
+        try:
+            parsed = json.loads(config["openclaw.overrides.json"])
+        except ValueError as e:
+            raise ValueError(f"openclaw.overrides.json is not valid JSON: {e}")
+        if not isinstance(parsed, dict):
+            raise ValueError("openclaw.overrides.json must be a JSON object")
     return config
 
 
@@ -430,7 +441,9 @@ def create_employee():
             or len(employee) > MAX_EMPLOYEE_LEN:
         return jsonify(error="body must be {'employee': '<dns-1123 label>'}"), 400
     try:
-        config = validate_config(body.get("config") or {})
+        # Distinguish "config absent" from "config present but invalid":
+        # a supplied [], false or "" must 400, not silently become {}.
+        config = validate_config(body["config"]) if "config" in body else {}
     except ValueError as e:
         return jsonify(error=str(e)), 400
     if get_claim(employee) is not None:

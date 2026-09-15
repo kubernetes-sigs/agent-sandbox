@@ -249,7 +249,18 @@ if [ "${SKIP_RESIZE:-false}" = "true" ]; then
 else
   cur=$(kubectl -n "${NS}" get pvc fleet-master-pvc -o jsonpath='{.status.capacity.storage}')
   cur_gi=$(echo "${cur}" | sed 's/Gi//; s/Ti/*1024/' | bc)
-  target_gi=$((cur_gi + 256))   # zonal lower band grows in exact 256 GiB steps
+  # Zonal steps are band-specific: 256 GiB below 9.75 TiB, 2.5 TiB in the
+  # 10-100 TiB band. The band itself is fixed at instance creation: a
+  # lower-band volume tops out at 9984 Gi forever — at that point the only
+  # growth path is a new >=10 TiB instance + data migration.
+  if [ "${cur_gi}" -ge 10240 ]; then
+    step=2560
+  elif [ "${cur_gi}" -ge 9984 ]; then
+    fail "PVC is at the lower-band ceiling (9.75 TiB); growth requires migrating to a new >=10 TiB instance"
+  else
+    step=256
+  fi
+  target_gi=$((cur_gi + step))
   # Re-fetch: [4]'s rebuild replaced the pod behind ${POD}.
   POD=$(kubectl -n "${NS}" get pod -l sandbox.users.io/employee="${EMP}" \
     --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')

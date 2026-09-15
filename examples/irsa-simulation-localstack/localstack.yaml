@@ -19,6 +19,30 @@ spec:
       # and so ownership isn't left to an implementation detail of emptyDir.
       securityContext:
         fsGroup: 1000
+      # cert-manager's Secret keeps tls.key/tls.crt as separate files, but
+      # LocalStack's CUSTOM_SSL_CERT_PATH expects one PEM file containing
+      # both (see localstack-tls.yaml). This concatenates them once into the
+      # shared tls-combined emptyDir before the main container starts.
+      initContainers:
+      - name: combine-tls-cert
+        image: python:3.12-slim
+        command:
+          - sh
+          - -c
+          - "cat /tls-secret/tls.key /tls-secret/tls.crt > /tls-combined/localstack.pem"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tls-secret
+          mountPath: /tls-secret
+          readOnly: true
+        - name: tls-combined
+          mountPath: /tls-combined
       containers:
       - name: localstack
         image: localstack/localstack:3.8
@@ -27,6 +51,8 @@ spec:
         env:
         - name: SERVICES
           value: "sts"
+        - name: CUSTOM_SSL_CERT_PATH
+          value: "/tls-combined/localstack.pem"
         # The image runs as root by default and writes to /tmp/localstack and
         # /var/lib/localstack/cache at startup; without the emptyDir mounts
         # below, running as non-root fails with repeated PermissionErrors on
@@ -44,6 +70,14 @@ spec:
           mountPath: /tmp
         - name: localstack-var
           mountPath: /var/lib/localstack
+        - name: tls-combined
+          mountPath: /tls-combined
+          readOnly: true
+        # Plain HTTP, not HTTPS: LocalStack's edge proxy auto-detects the
+        # protocol per connection and serves both on the same port
+        # regardless of CUSTOM_SSL_CERT_PATH, so a plain readiness check
+        # avoids needing this probe to trust the (at this point, possibly
+        # not-yet-loaded) custom cert.
         readinessProbe:
           httpGet:
             path: /_localstack/health
@@ -54,6 +88,11 @@ spec:
       - name: tmp
         emptyDir: {}
       - name: localstack-var
+        emptyDir: {}
+      - name: tls-secret
+        secret:
+          secretName: localstack-tls
+      - name: tls-combined
         emptyDir: {}
 ---
 apiVersion: v1

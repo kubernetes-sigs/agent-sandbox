@@ -189,6 +189,99 @@ if [ "${SKIP_GATEWAY}" != "true" ]; then
   echo "PASS [6]: http://${GW_IP}/router/${NS}/oc-${EMP}/18789/ -> HTTP ${code}"
 fi
 
+log "7. Per-employee config injection (seed-before-bind, warm claim intact)"
+EMP_CFG="${EMP}-cfg"
+CFG_MARKER="cfg-marker-${EMP_CFG}"
+out=$(curl -fsS -X POST "${PORTAL}/employees" -H 'Content-Type: application/json' -d "{
+  \"employee\": \"${EMP_CFG}\",
+  \"config\": {
+    \"settings.json\": \"{\\\"marker\\\": \\\"${CFG_MARKER}\\\"}\",
+    \"openclaw.overrides.json\": \"{\\\"gateway\\\": {\\\"controlUi\\\": {\\\"allowedOrigins\\\": [\\\"http://${CFG_MARKER}.example\\\"]}}}\",
+    \"secrets/provider.key\": \"sk-test-${EMP_CFG}\"
+  }}")
+TOKEN_CFG=$(echo "${out}" | sed -n 's/.*"token": *"\([^"]*\)".*/\1/p')
+adopted_cfg_ms=$(echo "${out}" | sed -n 's/.*"adopted_ms": *\([0-9]*\).*/\1/p')
+seed_ms=$(echo "${out}" | sed -n 's/.*"seed_ms": *\([0-9]*\).*/\1/p')
+# The seed must not cost the warm claim: same sub-second assertion as [1].
+[ "${adopted_cfg_ms}" -lt 2000 ] || fail "adoption with config took ${adopted_cfg_ms}ms"
+DAEMON=$(kubectl -n "${NS}" get pod -l app=storage-node-daemon \
+  -o jsonpath='{.items[0].metadata.name}')
+# Seeded on the master volume (daemon ground truth):
+kubectl -n "${NS}" exec "${DAEMON}" -- \
+  grep -q "${CFG_MARKER}" "/mnt/master-volume/users/${EMP_CFG}/settings.json" \
+  || fail "seeded settings.json missing on master volume"
+POD_CFG=$(kubectl -n "${NS}" get pod -l sandbox.users.io/employee="${EMP_CFG}" \
+  -o jsonpath='{.items[0].metadata.name}')
+# Visible in-pod with correct content:
+kubectl -n "${NS}" exec "${POD_CFG}" -c openclaw -- \
+  grep -q "${CFG_MARKER}" /workspace/.openclaw/settings.json \
+  || fail "seeded settings.json not visible in pod"
+# Secret hygiene — 0600, owned by the OpenClaw uid:
+perms=$(kubectl -n "${NS}" exec "${POD_CFG}" -c openclaw -- \
+  stat -c '%a %u' /workspace/.openclaw/secrets/provider.key)
+[ "${perms}" = "600 1000" ] || fail "secret file perms/owner wrong: ${perms}"
+# The entrypoint merged the overrides into the effective config pre-launch:
+kubectl -n "${NS}" exec "${POD_CFG}" -c openclaw -- \
+  grep -q "${CFG_MARKER}.example" /etc/openclaw/openclaw.json \
+  || fail "per-employee override not merged into effective config"
+# Warm-compatible metadata channel: employee label via downwardAPI volume.
+kubectl -n "${NS}" exec "${POD_CFG}" -c openclaw -- \
+  grep -q "sandbox.users.io/employee=\"${EMP_CFG}\"" /etc/podinfo/labels \
+  || fail "employee label not visible via downwardAPI"
+# No-clobber: mutate seeded state, rebuild, assert the MUTATION survives
+# (create-if-absent means re-provisioning never resets a live workspace).
+kubectl -n "${NS}" exec "${POD_CFG}" -c openclaw -- \
+  sh -c 'echo "{\"marker\": \"mutated-by-user\"}" > /workspace/.openclaw/settings.json'
+curl -fsS -X POST "${PORTAL}/employees/${EMP_CFG}/rebuild" \
+  -H "Authorization: Bearer ${TOKEN_CFG}" >/dev/null
+POD_CFG=$(kubectl -n "${NS}" get pod -l sandbox.users.io/employee="${EMP_CFG}" \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+kubectl -n "${NS}" exec "${POD_CFG}" -c openclaw -- \
+  grep -q "mutated-by-user" /workspace/.openclaw/settings.json \
+  || fail "rebuild clobbered user state (seed must be create-if-absent)"
+curl -fsS -X DELETE "${PORTAL}/employees/${EMP_CFG}?purge=true" \
+  -H "Authorization: Bearer ${TOKEN_CFG}" >/dev/null
+echo "PASS [7]: config seeded pre-bind (seed_ms=${seed_ms}), warm claim kept (${adopted_cfg_ms}ms), merge + hygiene + no-clobber verified"
+
+log "8. Dynamic storage resize: grow the shared volume online (no restarts)"
+if [ "${SKIP_RESIZE:-false}" = "true" ]; then
+  echo "SKIP [8]: SKIP_RESIZE=true (note: growth permanently raises the PVC size)"
+else
+  cur=$(kubectl -n "${NS}" get pvc fleet-master-pvc -o jsonpath='{.status.capacity.storage}')
+  cur_gi=$(echo "${cur}" | sed 's/Gi//; s/Ti/*1024/' | bc)
+  target_gi=$((cur_gi + 256))   # zonal lower band grows in exact 256 GiB steps
+  # Re-fetch: [4]'s rebuild replaced the pod behind ${POD}.
+  POD=$(kubectl -n "${NS}" get pod -l sandbox.users.io/employee="${EMP}" \
+    --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+  before_pod=$(kubectl -n "${NS}" exec "${POD}" -c openclaw -- \
+    df -B1 /workspace/.openclaw | awk 'NR==2 {print $2}')
+  t_resize0=$(date +%s)
+  kubectl -n "${NS}" patch pvc fleet-master-pvc --type=merge \
+    -p "{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"${target_gi}Gi\"}}}}"
+  # No FileSystemResizePending ever appears: the Filestore CSI driver has no
+  # node-expand stage, so poll status.capacity directly.
+  for i in $(seq 1 120); do
+    now=$(kubectl -n "${NS}" get pvc fleet-master-pvc -o jsonpath='{.status.capacity.storage}')
+    [ "${now}" = "${target_gi}Gi" ] && break
+    sleep 10
+  done
+  [ "${now}" = "${target_gi}Gi" ] || fail "PVC never reached ${target_gi}Gi (stuck at ${now})"
+  resize_s=$(( $(date +%s) - t_resize0 ))
+  # The ALREADY-RUNNING sandbox sees the new size with no restart (NFS
+  # statfs is served fresh by the server; assert inside gVisor, where
+  # fsstat reporting has historical caveats — gvisor#5457):
+  after_pod=$(kubectl -n "${NS}" exec "${POD}" -c openclaw -- \
+    df -B1 /workspace/.openclaw | awk 'NR==2 {print $2}')
+  [ "${after_pod}" -gt "${before_pod}" ] \
+    || fail "running sandbox did not observe the growth (${before_pod} -> ${after_pod})"
+  # And the K8s shrink story, demonstrated: the API rejects any decrease.
+  if kubectl -n "${NS}" patch pvc fleet-master-pvc --type=merge \
+       -p "{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"${cur}\"}}}}" 2>/dev/null; then
+    fail "API accepted a PVC shrink (it must not)"
+  fi
+  echo "PASS [8]: grew ${cur} -> ${target_gi}Gi online in ${resize_s}s; live pod saw it; shrink correctly rejected"
+fi
+
 log "2. Deletion: everything released, workspace purged"
 curl -fsS -X DELETE "${PORTAL}/employees/${EMP}?purge=true" \
   -H "Authorization: Bearer ${TOKEN}" >/dev/null
@@ -210,3 +303,5 @@ echo "ALL CHECKS PASSED"
 echo "  [1] warm adoption:      ${adopted_ms}ms"
 echo "  [3] wake:               ${wake_ms}ms"
 echo "  [4] rebuild downtime:   ${downtime_ms}ms"
+echo "  [7] config seed:        ${seed_ms:-n/a}ms (adoption with config: ${adopted_cfg_ms:-n/a}ms)"
+echo "  [8] volume grow:        ${resize_s:-skipped}s"

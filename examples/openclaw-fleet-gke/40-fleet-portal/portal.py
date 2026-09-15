@@ -54,6 +54,7 @@ operations and audit logging on exactly this resource model.
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -226,17 +227,58 @@ def wait_pod_gone(employee: str, timeout: int) -> bool:
     return False
 
 
-def daemon_delete_workspace(employee: str):
-    """Delete the employee's workspace (any daemon can, storage is shared)."""
+def _any_daemon_ip() -> str:
     daemons = core.list_namespaced_pod(
         NAMESPACE, label_selector="app=storage-node-daemon").items
     ready = [d for d in daemons if d.status.pod_ip]
     if not ready:
         raise RuntimeError("no storage daemon available")
+    return ready[0].status.pod_ip
+
+
+def daemon_delete_workspace(employee: str):
+    """Delete the employee's workspace (any daemon can, storage is shared)."""
     r = requests.post(
-        f"http://{ready[0].status.pod_ip}:9090",
+        f"http://{_any_daemon_ip()}:9090",
         json={"action": "delete", "pod_uid": "unused", "user_id": employee,
               "volume_name": VOLUME_NAME, "sub_dir": SUB_DIR},
+        headers={"Authorization": f"Bearer {DAEMON_TOKEN}"}, timeout=30)
+    r.raise_for_status()
+
+
+# Per-employee config injection (follow-up P0): files are written into
+# users/<employee> BEFORE the claim is created, so they exist before the
+# bind and before OpenClaw starts — per-employee config without touching
+# the pod spec, which is what keeps the claim warm (sub-second). The daemon
+# writes create-if-absent, so a returning employee's state never gets
+# clobbered. Paths are relative to the employee's ~/.openclaw.
+CONFIG_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+MAX_CONFIG_FILES = 16
+MAX_CONFIG_BYTES = 256 * 1024
+
+
+def validate_config(config) -> dict:
+    if not isinstance(config, dict) or len(config) > MAX_CONFIG_FILES:
+        raise ValueError(f"config must be an object of <= {MAX_CONFIG_FILES} files")
+    total = 0
+    for rel, content in config.items():
+        if not isinstance(rel, str) or not isinstance(content, str):
+            raise ValueError("config keys and values must be strings")
+        segments = rel.split("/")
+        if not all(CONFIG_SEGMENT.fullmatch(s) for s in segments) or len(segments) > 4:
+            raise ValueError(f"invalid config path: {rel!r}")
+        total += len(content)
+    if total > MAX_CONFIG_BYTES:
+        raise ValueError(f"config exceeds {MAX_CONFIG_BYTES} bytes")
+    return config
+
+
+def daemon_seed_workspace(employee: str, files: dict):
+    """Seed per-employee files pre-bind (any daemon can, storage is shared)."""
+    r = requests.post(
+        f"http://{_any_daemon_ip()}:9090",
+        json={"action": "seed", "pod_uid": "unused", "user_id": employee,
+              "volume_name": VOLUME_NAME, "sub_dir": SUB_DIR, "files": files},
         headers={"Authorization": f"Bearer {DAEMON_TOKEN}"}, timeout=30)
     r.raise_for_status()
 
@@ -297,11 +339,19 @@ def upsert_alias(employee: str, sandbox_name: str):
         core.patch_namespaced_service(claim_name(employee), NAMESPACE, body)
 
 
-def provision(employee: str, annotations: dict) -> tuple[dict, dict]:
-    """Create claim -> adopt -> bind storage -> app ready. Returns
-    (claim, timings). The timing breakdown is the PoC's primary startup
-    measurement (adoption is the sub-second part; app_ready adds OpenClaw's
-    own boot on top)."""
+def provision(employee: str, annotations: dict,
+              config: dict | None = None) -> tuple[dict, dict]:
+    """Seed config -> create claim -> adopt -> bind storage -> app ready.
+    Returns (claim, timings). The timing breakdown is the PoC's primary
+    startup measurement (adoption is the sub-second part; app_ready adds
+    OpenClaw's own boot on top). Seeding happens BEFORE the claim so it is
+    ordered ahead of the bind and entirely off the adoption-latency path."""
+    t_start = time.monotonic()
+    seed = dict(config or {})
+    # Every employee gets a profile marker; caller-supplied files win only
+    # by name (create-if-absent applies to all of them equally).
+    seed.setdefault("profile.json", json.dumps({"employee": employee}))
+    daemon_seed_workspace(employee, seed)
     t0 = time.monotonic()
     crd.create_namespaced_custom_object(
         GROUP, VERSION, NAMESPACE, "sandboxclaims", {
@@ -347,10 +397,11 @@ def provision(employee: str, annotations: dict) -> tuple[dict, dict]:
 
     upsert_alias(employee, sandbox["metadata"]["name"])
     timings = {
+        "seed_ms": round((t0 - t_start) * 1000),
         "adopted_ms": round((t_adopted - t0) * 1000),
         "bound_ms": round((t_bound - t_adopted) * 1000),
         "app_ready_ms": round((t_app - t_bound) * 1000),
-        "total_ms": round((t_app - t0) * 1000),
+        "total_ms": round((t_app - t_start) * 1000),
     }
     return claim, timings
 
@@ -373,16 +424,22 @@ def healthz():
 
 @app.post("/employees")
 def create_employee():
-    employee = (request.get_json(silent=True) or {}).get("employee", "")
+    body = request.get_json(silent=True) or {}
+    employee = body.get("employee", "")
     if not isinstance(employee, str) or not DNS1123_LABEL.fullmatch(employee) \
             or len(employee) > MAX_EMPLOYEE_LEN:
         return jsonify(error="body must be {'employee': '<dns-1123 label>'}"), 400
+    try:
+        config = validate_config(body.get("config") or {})
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
     if get_claim(employee) is not None:
         return jsonify(error="employee exists"), 409
     token = secrets.token_urlsafe(32)
     try:
         claim, timings = provision(employee, {
-            TOKEN_ANNOTATION: hashlib.sha256(token.encode()).hexdigest()})
+            TOKEN_ANNOTATION: hashlib.sha256(token.encode()).hexdigest()},
+            config=config)
     except client.ApiException as e:
         if e.status == 409:  # lost a concurrent-signup race
             return jsonify(error="employee exists"), 409

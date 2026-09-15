@@ -26,6 +26,8 @@ never in the main path.
 | 6 | Distinct, persistent access address per sandbox (e.g. employee ID) | per-sandbox headless Service + `oc-<employee>` alias + Gateway API + [sandbox-router](../../sandbox-router/) path routing | `run-test-gke.sh` §6 |
 | 10 | I/O performance testing on the NAS tier *(customer test team)* | ready-to-run fio harness against the deployed workspace volume | [`tools/fio-workspace-job.yaml`](tools/fio-workspace-job.yaml) |
 | 11 | Multi-agent, Feishu/Lark integration, business validation *(customer test team)* | stock OpenClaw with persistent per-employee config; NetworkPolicy egress allows DNS + 443 (provider APIs, Feishu/Lark HTTPS/WSS); inbound webhooks ride the stable per-employee URL | template NetworkPolicy in [`20-openclaw-template.yaml`](20-openclaw-template.yaml) |
+| F1 | *(follow-up P0)* Per-employee config injection — profiles, settings, keys — without losing warm claims | portal **seeds files pre-claim** via a pod-independent daemon `seed` action (create-if-absent); entrypoint merges `openclaw.overrides.json` over the fleet base pre-launch; claim-time labels + downwardAPI carry small runtime values | `run-test-gke.sh` §7 |
+| F2 | *(follow-up P0)* Dynamic storage resizing to eliminate excess capacity overhead | **online in-band growth**: patch the shared PVC in 256 GiB steps, already-running sandboxes see the new capacity with no restart; shrink and per-user quotas: see [Known gaps](#known-gaps) | `run-test-gke.sh` §8 |
 
 P1 rows (daily cost per runtime profile, DR backup/restore, security
 testing) are addressed directionally in [Cost dials](#cost-dials),
@@ -125,7 +127,7 @@ stateDiagram-v2
 | [`60-snapshots/`](60-snapshots/) | Memory-tier sleep/wake: GKE Pod Snapshots manifests + runbooks for both sleep tiers. |
 | [`70-rolling-update.sh`](70-rolling-update.sh) | Rate-limited fleet-wide rebuild after a template change. |
 | [`tools/`](tools/) | Claim-latency measurement (percentiles) and a fio job for NAS I/O testing. |
-| [`run-test-gke.sh`](run-test-gke.sh) | Asserting end-to-end walkthrough of items 1–6. |
+| [`run-test-gke.sh`](run-test-gke.sh) | Asserting end-to-end walkthrough of the P0 checklist plus both follow-up P0s (§1–§8). |
 
 ## Walkthrough
 
@@ -172,6 +174,16 @@ kubectl -n openclaw-fleet get gateway openclaw-fleet-gateway -w   # wait for an 
 ```sh
 GW=$(kubectl -n openclaw-fleet get gateway openclaw-fleet-gateway -o jsonpath='{.status.addresses[0].value}')
 curl -X POST http://$GW/employees -H 'Content-Type: application/json' -d '{"employee": "alice"}'
+# Or with per-employee config injected before her workspace is bound
+# (paths relative to ~/.openclaw; create-if-absent; see §Per-employee
+# config injection):
+curl -X POST http://$GW/employees -H 'Content-Type: application/json' -d '{
+  "employee": "alice",
+  "config": {
+    "settings.json": "{\"theme\": \"dark\"}",
+    "openclaw.overrides.json": "{\"agents\": {\"defaults\": {\"model\": \"google/gemini-3-flash-preview\"}}}",
+    "secrets/provider.key": "sk-alice-personal-key"
+  }}'
 ```
 
 ```json
@@ -210,26 +222,26 @@ IMAGE_REPO=us-central1-docker.pkg.dev/<project>/fleet ./run-test-gke.sh
 
 ## Measured results
 
-Measured 2026-09-14 on GKE Standard `1.36.4-gke.1247000`, gVisor node pool
-on `c3-standard-8` (`GVISOR_MACHINE_TYPE=c3-standard-8`), image streaming
-on, warm pool of 5, OpenClaw `2026.3.23`. `run-test-gke.sh` asserted every
-row; percentiles are from `tools/measure-claim-latency.sh` over 5
-provisions. One caveat: this run used the Filestore Basic HDD tier
-(`standard-rwx`); the example now defaults to the P0-compliant high-speed
-`zonal-rwx` tier, on which bind/boot numbers can only improve — re-run
-`run-test-gke.sh` and the fio harness (checklist item 10) on the deployed
-tier to record the numbers of record.
+Measured 2026-09-15 on GKE Standard (us-east4-a), gVisor node pool on
+`c3-standard-8`, image streaming on, **Filestore zonal (`zonal-rwx`,
+high-speed SSD NAS — the P0-5 tier)**, warm pool of 5, OpenClaw
+`2026.3.23`. `run-test-gke.sh` asserted every row end-to-end (§1–§8);
+percentile detail for claims is from `tools/measure-claim-latency.sh`
+(an earlier same-config run on HDD measured p50 174 ms / max 201 ms over
+5 provisions — SSD numbers match).
 
 | Checklist item | Expected | Measured |
 |---|---|---|
-| Warm claim adoption (`adopted_ms`) | < 1 s | **p50 174 ms, max 201 ms** |
+| Warm claim adoption (`adopted_ms`) | < 1 s | **236 ms (SSD run); p50 174 ms, max 201 ms over 5** |
 | + workspace bind (`bound_ms`) | sub-second | p50 177 ms |
 | + OpenClaw boot (`app_ready_ms`) | seconds | p50 2.9 s |
 | Signup end-to-end (`total_ms`) | a few seconds | **p50 3.26 s, max 3.32 s** |
 | Cold start (pool empty, image cached via streaming) | ~3–15 s | 5.7 s end-to-end |
 | Suspend → resources released | pod gone | ~1.7 s, pod deleted; Service/alias/workspace retained |
-| Wake (`wake_ms`, disk tier: pod recreate + re-bind + boot) | seconds | 22.3 s |
-| Rebuild downtime (`downtime_ms`, template image/CPU change) | seconds | 5.2 s |
+| Wake (`wake_ms`, disk tier: pod recreate + re-bind + boot) | seconds | 22.5 s |
+| Rebuild downtime (`downtime_ms`, template image/CPU change) | seconds | 5.6 s |
+| **Config injection** (`seed_ms`, pre-bind seed of per-employee files) | must not cost the warm claim | **115 ms seed; adoption with config 175 ms — warm claim intact** |
+| **Volume growth** (PVC patch 1 Ti → 1280 Gi, online) | minutes | **214 s; running sandbox saw the new size, no restart; shrink correctly rejected by the API** |
 | Deletion → everything released (incl. workspace purge) | complete | verified, no residue |
 
 The warm-vs-cold contrast is the warm pool's value: the *claim* is ~174 ms
@@ -256,14 +268,65 @@ user. Isolation is directory-level: the bind mount scopes each pod to its
 own subdirectory (the enforcing boundary is the daemon, not the storage
 API — see [Known gaps](#known-gaps)).
 
-**Dynamic allocation and resizing**: the shared instance grows online —
-patch `fleet-master-pvc`'s storage request and the Filestore CSI driver
-expands the instance with no pod restarts. Provision for the current
-fleet, not the theoretical maximum, and grow ahead of demand. Two honest
-limits, both in [Known gaps](#known-gaps): shrink is not supported on this
-shape, and per-user quota enforcement is your fleet controller's job.
-Per-employee snapshots are subdirectory copies (`snapshots/<id>`),
+**Dynamic allocation and resizing (follow-up P0, tested in §8)**: the
+shared instance grows **online** — patch `fleet-master-pvc`'s storage
+request (built-in `zonal-rwx` ships `allowVolumeExpansion: true`) and the
+Filestore CSI driver expands the instance while reads and writes continue;
+already-running sandboxes see the new capacity on their next `statfs`,
+with no remount and no restart. Growth is in exact steps (256 GiB in the
+1–9.75 TiB band, 2.5 TiB in the 10–100 TiB band), and there is **no**
+`FileSystemResizePending` phase to wait on — the driver has no node-expand
+stage, so watch `pvc.status.capacity`. So: provision for the current
+fleet, not the theoretical maximum, and grow ahead of demand in steps.
+**One irreversible decision**: the zonal capacity *band* is chosen at
+instance creation forever — a 1 TiB instance can never grow past 9.75 TiB
+(~500 employees at 20 GB), so production shards must be **created at
+≥ 10 TiB**. The honest limits (all in [Known gaps](#known-gaps)): PVC
+shrink does not exist in Kubernetes (§8 demonstrates the API rejecting
+it), Filestore-level shrink is out-of-band with permanently stale PVC
+accounting, and per-user quota enforcement is your fleet controller's
+job. Per-employee snapshots are subdirectory copies (`snapshots/<id>`),
 restorable in sub-seconds via re-bind.
+
+### Per-employee config injection
+
+Warm claims forbid per-employee pod-spec differences — and upstream makes
+that a design decision, not a limitation
+([KEP-0208](../../docs/keps/208-mutually-exclusive-field-in-sandboxclaim/):
+claim-time `env`/`volumeClaimTemplates` deliberately bypass the warm pool;
+[#1480](https://github.com/kubernetes-sigs/agent-sandbox/issues/1480)
+records the maintainers rejecting in-band post-adoption injection). So
+per-employee config arrives **out-of-band, ordered before the app
+starts** (tested in §7):
+
+1. **Seed-before-bind (the primary channel).** `POST /employees` accepts
+   an optional `config` object (`{<relpath>: <content>}`, paths relative
+   to the employee's `~/.openclaw`). The portal calls the storage daemon's
+   pod-independent `seed` action **before creating the claim**: files land
+   in `users/<employee>` as `0600 uid 1000`, **create-if-absent** (a
+   returning employee's live state is never clobbered), strictly ordered
+   before the bind and OpenClaw's start, and entirely off the
+   adoption-latency path — §7 asserts the claim stays sub-second.
+2. **Config layering made deterministic.** If the seed includes
+   `openclaw.overrides.json`, the shared entrypoint deep-merges it over
+   the fleet base config after the `.ready` signal and before launch —
+   the merge command is byte-identical for every employee, so the pod
+   spec stays uniform. (This sidesteps the open question of OpenClaw's
+   native `OPENCLAW_CONFIG_PATH`-vs-`~/.openclaw` precedence.)
+3. **Small runtime values ride metadata.** The claim already stamps
+   `sandbox.users.io/employee`; the template mounts pod labels via a
+   downwardAPI volume at `/etc/podinfo/labels` (KEP-0174: labels are
+   live-patched onto adopted pods and kubelet refreshes downwardAPI
+   volume files in place). Eventually consistent and unordered w.r.t.
+   `.ready` — for non-secret, non-boot-critical values only.
+4. **Per-employee secrets** (provider keys for billing separation) ride
+   channel 1 as `0600` files — with an honest caveat: they rest on the
+   shared NFS volume, where the isolation boundary is the privileged
+   daemon, not the storage API. Prefer seeding a short-lived bootstrap
+   token that the agent exchanges over its allowed 443 egress. True
+   per-sandbox identity fetch is the roadmap's "Sandbox / Pod Identity
+   Association" (Planned); claim-time env — the cold-start path — is
+   [appendix](#appendix-alternatives)-only.
 
 Alternative storage shapes (per-user PVCs, Filestore multishares) trade
 away P0-1 or P0-5 and therefore live in the
@@ -330,7 +393,7 @@ costs on the road from PoC to 9,000-seat production.
    lifecycle yet; the teardown rules below are the mitigation.
 3. **Memory-tier sleep is a manual, GKE-only runbook with sharp edges.**
    Platform-native suspend is disk-tier (pod deleted; wake = reschedule +
-   app boot, measured 22.3 s). Memory-intact wake rides GKE Pod Snapshots:
+   app boot, measured 22.5 s). Memory-intact wake rides GKE Pod Snapshots:
    manual trigger objects, gVisor-only, same-machine-series restores (never
    E2), and **the pod spec is the cache key — any P0-4 template update
    silently invalidates every hibernated session's snapshot** (they cold
@@ -343,16 +406,39 @@ costs on the road from PoC to 9,000-seat production.
    sweeper is demo-grade: in-memory clock, single replica, and it only
    sees portal traffic, not router traffic. Auto-suspend/scale-to-zero are
    on the agent-sandbox roadmap.
-5. **Per-claim customization is deliberately narrow.** Warm claims allow
-   only metadata; per-claim env/volumes force cold starts (and this
-   template rejects them). There is **no per-claim CPU/memory sizing** —
-   employee size tiers require one template + one warm pool per size
-   class. Per-employee secrets ride the workspace mount, not pod env.
-6. **Dynamic storage resizing is grow-only, and quotas are unenforced.**
-   The shared zonal instance grows online, but cannot shrink, and nothing
-   stops one employee filling space budgeted for another — per-user quota
-   enforcement (or a move to an enforcing storage shape, with its P0
-   trade-offs) is required before production.
+5. **Per-claim customization is deliberately narrow — and upstream says
+   so.** Warm claims allow only metadata
+   ([KEP-0208](../../docs/keps/208-mutually-exclusive-field-in-sandboxclaim/)
+   makes cold-start-on-customization the design; in-band post-adoption
+   injection was rejected on
+   [#1480](https://github.com/kubernetes-sigs/agent-sandbox/issues/1480)).
+   The seed-before-bind pattern (§7) covers per-employee *config and
+   files*, but there is still **no per-claim CPU/memory sizing**
+   ([#1478](https://github.com/kubernetes-sigs/agent-sandbox/issues/1478),
+   [#1437](https://github.com/kubernetes-sigs/agent-sandbox/issues/1437)
+   open, unanswered) — employee size tiers require one template + one
+   warm pool per size class. Per-employee secrets ride the workspace
+   mount at rest on shared NFS (daemon is the boundary); real per-sandbox
+   identity fetch is roadmap-Planned. Warm-compatible late-bound storage
+   is upstream
+   [#554](https://github.com/kubernetes-sigs/agent-sandbox/issues/554);
+   until it lands, the daemon here is the glue (and it is GKE-only —
+   [#1607](https://github.com/kubernetes-sigs/agent-sandbox/issues/1607)
+   reports the bind-propagation mechanic does not work on plain
+   containerd).
+6. **Storage resize: grow is in-band and online (§8); shrink and quotas
+   are not.** Three hard limits: (a) the zonal **capacity band is
+   permanent** — an instance created in the 1–9.75 TiB band never grows
+   past 9.75 TiB (~500 employees), so production shards must be created
+   at ≥ 10 TiB; (b) **Kubernetes cannot shrink a PVC** (§8 demonstrates
+   the rejection) — Filestore-level shrink exists for zonal (online,
+   step-sized, not below used bytes) but only out-of-band via `gcloud`,
+   leaving PV/PVC capacity permanently overstated and off the supported
+   GKE path; the clean shrink is migrate-to-smaller-instance; (c) **no
+   per-employee hard quotas exist on zonal Filestore** — the default is
+   soft enforcement (daemon/portal `du` sweeps + suspend-on-overage,
+   eventually consistent); hard caps mean loopback images (appendix) or
+   an enforcing storage backend (multishares/NetApp — P0 trade-offs).
 7. **Image-cache acceleration for batch creation is half-delivered.**
    Image streaming is automated; the stronger secondary-boot-disk preload
    is a documented sketch in `provision-gke.sh`, deliberately not
@@ -372,12 +458,6 @@ costs on the road from PoC to 9,000-seat production.
    verify on existing clusters). The customer's web-portal ask (async
    jobs, bulk rate-limited ops, monitoring, audit, SSO+RBAC) is a
    production build on these patterns, not a shipped component.
-10. **Measured numbers predate the tier switch.** The results table was
-    recorded on `standard-rwx` (HDD); the example now deploys `zonal-rwx`
-    (high-speed SSD NAS) to meet P0-5. Bind and boot latencies should be
-    equal or better on SSD — re-measure on the deployed tier, and run
-    checklist item 10's fio harness there.
-
 ## Production hardening notes
 
 The storage daemon and portal are example-grade orchestration, kept small
@@ -439,6 +519,29 @@ non-negotiable:
   multishares) with direct-built sandboxes — zero node ops, but claim
   time moves from ~1 s to ~15 s (**violates P0-1**) and inherits the
   per-user-PV shape above.
+
+### Claim-time env / volumeClaimTemplates injection (trades away P0-1)
+
+`SandboxClaim.spec.env` and `spec.volumeClaimTemplates` exist upstream
+(merged via #960/#961) and deliver true per-employee pod-level injection —
+but **any use of them bypasses the warm pool and cold-starts the claim by
+design** (KEP-0208), which is why this template sets both policies to
+`Disallowed` and per-employee config rides the seed-before-bind path
+instead. Use them only for employees who genuinely need pod-spec-level
+customization and can pay the ~5.7 s+ cold start.
+
+### Loopback images for per-employee hard storage caps (operational footgun)
+
+A sparse `.img` file per employee on the shared volume
+(`losetup` + `mkfs` + mount by the daemon, instead of a directory bind)
+would give true hard caps, growable (`truncate` + online `resize2fs`) and
+shrinkable (offline). Not the default because loop-over-NFS at fleet
+scale is documented footgun territory: zombie loop devices when NFS
+hiccups (no force-detach; node reboot to recover), ENOSPC corrupting the
+inner filesystem if the shared volume fills under sparse images, and
+strict single-node-attach discipline. Soft quota sweeps are the
+defensible default; enforcing backends (multishares/NetApp) trade P0s as
+above.
 
 ### Demo-cost storage tier (trades away P0-5)
 

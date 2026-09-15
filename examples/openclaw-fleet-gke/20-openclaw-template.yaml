@@ -122,6 +122,31 @@ spec:
               # check is instant — no NFS cache delays).
               echo "Waiting for workspace late-bind signal..."
               while [ ! -f /workspace/.ready ]; do sleep 0.1; done
+              # Per-employee config injection (follow-up P0): if the portal
+              # seeded ~/.openclaw/openclaw.overrides.json before the bind,
+              # deep-merge it over the fleet base config. Doing the merge
+              # here — after the bind, before launch — makes the layering
+              # deterministic regardless of OpenClaw's own config-precedence
+              # rules, and the command stays IDENTICAL for every employee,
+              # so warm claims stay warm.
+              node -e '
+                const fs = require("fs");
+                const base = "/etc/openclaw/openclaw.json";
+                const ovr = "/workspace/.openclaw/openclaw.overrides.json";
+                if (fs.existsSync(ovr)) {
+                  const merge = (a, b) => {
+                    for (const k of Object.keys(b)) {
+                      a[k] = (b[k] && typeof b[k] === "object" && !Array.isArray(b[k])
+                              && a[k] && typeof a[k] === "object" && !Array.isArray(a[k]))
+                        ? merge(a[k], b[k]) : b[k];
+                    }
+                    return a;
+                  };
+                  const merged = merge(JSON.parse(fs.readFileSync(base, "utf8")),
+                                       JSON.parse(fs.readFileSync(ovr, "utf8")));
+                  fs.writeFileSync(base, JSON.stringify(merged, null, 2));
+                  console.log("Applied per-employee config overrides.");
+                }'
               echo "Workspace bound; starting OpenClaw gateway."
               node dist/index.js gateway --bind=lan --port 18789 --allow-unconfigured --verbose
           ports:
@@ -146,12 +171,27 @@ spec:
               mountPropagation: HostToContainer
             - name: openclaw-etc-writable
               mountPath: /etc/openclaw
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
       volumes:
         - name: cm-volume
           configMap:
             name: openclaw-fleet-config
         - name: openclaw-etc-writable
           emptyDir: {}
+        # Warm-compatible metadata channel (KEP-174): claim-time
+        # additionalPodMetadata labels (e.g. sandbox.users.io/employee) are
+        # live-patched onto the adopted pod, and the kubelet refreshes
+        # downwardAPI VOLUME files in place — so the workload can read
+        # small, non-secret per-employee values here without any pod-spec
+        # difference between employees. Eventually consistent; not ordered
+        # against .ready — boot-critical config rides the workspace seed.
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: labels
+                fieldRef: {fieldPath: metadata.labels}
         # Standard emptyDir used as the late-binding anchor; the employee's
         # NFS subdirectory is bind-mounted at /workspace/.openclaw.
         - name: workspace-volume

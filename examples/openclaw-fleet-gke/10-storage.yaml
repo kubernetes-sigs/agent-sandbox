@@ -32,6 +32,13 @@ spec:
   # does NOT meet P0-5 — appendix-only, for throwaway demo clusters.
   storageClassName: zonal-rwx
   resources:
+    # 1Ti keeps the PoC cheap, but note the zonal tier's PERMANENT band
+    # rule: an instance created in the 1-9.75 TiB band can never grow past
+    # 9.75 TiB (~500 employees at 20 GB). Production shards must be CREATED
+    # at >= 10 TiB to land in the 10-100 TiB band. Growth is online and
+    # in-band only: patch this request UP in 256 GiB steps (lower band;
+    # 2.5 TiB steps in the higher band) and the CSI driver expands the
+    # instance with no pod restarts. Kubernetes cannot shrink a PVC.
     requests: {storage: 1Ti}
 ---
 apiVersion: apps/v1
@@ -140,6 +147,52 @@ spec:
                   # and negative-lookup caching delays.
                   with open(f"{parent_dir}/.ready", "w") as f: f.write("ready")
                   msg = f"Success: Bound workspace {user_id} into pod {pod_uid}"
+                elif action == "seed":
+                  # Pre-bind, pod-independent (like delete): write per-
+                  # employee config files into users/<id> BEFORE the claim
+                  # exists, so they are strictly ordered before the bind and
+                  # OpenClaw's start, without touching the pod spec (the
+                  # warm claim stays sub-second). CREATE-IF-ABSENT ONLY: a
+                  # returning employee's live state is never clobbered.
+                  #
+                  # The workspace contents are EMPLOYEE-CONTROLLED (their
+                  # sandbox writes here), so every path segment is walked
+                  # with O_NOFOLLOW against directory fds: a planted symlink
+                  # (e.g. after delete-without-purge + re-signup) must not
+                  # let a seed traverse into another employee's directory.
+                  files = data.get('files') or {}
+                  if not isinstance(files, dict) or len(files) > 32:
+                    raise ValueError("files must be a dict of <= 32 entries")
+                  os.makedirs(source, exist_ok=True)
+                  os.chown(source, 1000, 1000)
+                  seeded = 0
+                  for rel, content in files.items():
+                    if not isinstance(content, str) or len(content.encode('utf-8')) > 65536:
+                      raise ValueError(f"content of {rel!r} must be a string <= 64KiB")
+                    parts = [require_segment('file path segment', p) for p in rel.split('/')]
+                    dfd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                      for part in parts[:-1]:
+                        try:
+                          nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+                        except FileNotFoundError:
+                          os.mkdir(part, 0o700, dir_fd=dfd)
+                          os.chown(part, 1000, 1000, dir_fd=dfd, follow_symlinks=False)
+                          nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+                        os.close(dfd)
+                        dfd = nfd
+                      try:
+                        fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     0o600, dir_fd=dfd)
+                      except FileExistsError:
+                        continue
+                      with os.fdopen(fd, 'w') as f:
+                        f.write(content)
+                        os.fchown(f.fileno(), 1000, 1000)
+                      seeded += 1
+                    finally:
+                      os.close(dfd)
+                  msg = f"Success: Seeded {seeded} file(s) for {user_id}"
                 elif action == "unbind":
                   subprocess.run(["umount", "-l", target], check=True)
                   msg = f"Success: Unbound {pod_uid}"

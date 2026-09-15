@@ -1,6 +1,2 @@
 resources:
-- deployment.yaml
-- pdb.yaml
-- rbac.yaml
-- service.yaml
-- serviceaccount.yaml
+- sandbox-router.yaml

@@ -1,0 +1,189 @@
+# Fleet storage: ONE shared Filestore RWX volume holding a subdirectory per
+# employee (users/<employee-id>), late-bound into already-running warm-pool
+# pods at claim time by the privileged node daemon below. This is how the
+# fleet gets BOTH sub-second claims AND per-employee persistent workspaces:
+# a per-claim volumeClaimTemplate would force a cold start (and one PV per
+# employee runs into NAS attachment limits at 9,000 users — see the README's
+# storage-at-scale section for the subdirectory-vs-multishare trade-off).
+#
+# The daemon pattern is adapted from ../latebind-storage-gke-sandbox with
+# two hardening changes: it listens on its pod IP behind a NetworkPolicy
+# that only admits the fleet portal, and it requires a bearer token
+# (storage-daemon-token Secret, see 00-prereqs.yaml).
+#
+# Privileged + writable hostPath means GKE STANDARD only: Autopilot rejects
+# both (autogke-disallow-privilege, autogke-no-write-mode-hostpath) unless
+# the project is approved for a customer-managed WorkloadAllowlist.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fleet-master-pvc
+  namespace: openclaw-fleet
+spec:
+  accessModes: [ReadWriteMany]
+  # zonal-rwx = Filestore zonal (high-speed SSD NAS): the P0-5 bar is "only
+  # high-speed NAS", so that is the default here. Scales to 100 TiB per
+  # instance — at 20 GB per employee that is ~5,000 employees per instance,
+  # so a 9,000-seat fleet shards across 2+ instances — and supports ONLINE
+  # GROWTH by patching this PVC's storage request (shrink is not supported;
+  # see the README's known-gaps section). premium-rwx (Basic SSD) also meets
+  # the bar. Run tools/fio-workspace-job.yaml against your tier to record
+  # I/O numbers (test-checklist item 10). The cheaper standard-rwx HDD tier
+  # does NOT meet P0-5 — appendix-only, for throwaway demo clusters.
+  storageClassName: zonal-rwx
+  resources:
+    requests: {storage: 1Ti}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: storage-node-daemon
+  namespace: openclaw-fleet
+spec:
+  selector:
+    matchLabels: {app: storage-node-daemon}
+  template:
+    metadata:
+      labels: {app: storage-node-daemon}
+    spec:
+      nodeSelector:
+        sandbox.gke.io/runtime: gvisor
+      tolerations:
+      - key: "sandbox.gke.io/runtime"
+        operator: "Equal"
+        value: "gvisor"
+        effect: "NoSchedule"
+      containers:
+      - name: daemon
+        image: python:3.11-slim
+        securityContext: {privileged: true}
+        ports:
+        - containerPort: 9090
+        env:
+        - name: DAEMON_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: storage-daemon-token
+              key: token
+        volumeMounts:
+        - {name: host-root, mountPath: /host-root, mountPropagation: Bidirectional}
+        - {name: master-filestore, mountPath: /mnt/master-volume}
+        command: ["python3", "-u", "-c"]
+        args:
+        - |
+          import hmac, os, json, subprocess, traceback, shutil
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+          TOKEN = os.environ["DAEMON_TOKEN"]
+
+          def safe_join(base, *parts):
+            base = os.path.abspath(base)
+            path = os.path.abspath(os.path.join(base, *parts))
+            if os.path.commonpath([base, path]) != base:
+              raise ValueError(f"path escapes base directory: {path}")
+            return path
+
+          def require_segment(name, value):
+            if not value or value in {".", ".."} or value != os.path.basename(value):
+              raise ValueError(f"invalid {name}: {value!r}")
+            return value
+
+          class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+              try:
+                # Constant-time token check; the NetworkPolicy below is the
+                # first line of defense, this is the second.
+                got = self.headers.get('Authorization', '').removeprefix('Bearer ')
+                if not hmac.compare_digest(got, TOKEN):
+                  self.send_response(401); self.end_headers(); return
+                content_len = int(self.headers.get('Content-Length', 0))
+                data = json.loads(self.rfile.read(content_len))
+                pod_uid = require_segment('pod_uid', data['pod_uid'])
+                user_id = require_segment('user_id', data['user_id'])
+                action = data['action']
+                volume_name = require_segment('volume_name', data['volume_name'])
+                sub_dir = require_segment('sub_dir', data['sub_dir'])
+                is_readonly = data.get('is_readonly', False)
+                snapshot_id = data.get('snapshot_id')
+                if snapshot_id is not None:
+                  snapshot_id = require_segment('snapshot_id', snapshot_id)
+
+                # Path to the local emptyDir on the host
+                parent_dir = safe_join("/host-root/var/lib/kubelet/pods", pod_uid, "volumes/kubernetes.io~empty-dir", volume_name)
+                target = safe_join(parent_dir, sub_dir)
+
+                # Resume from the employee's live workspace, or from a
+                # point-in-time snapshot subdirectory.
+                if snapshot_id:
+                    source = safe_join("/mnt/master-volume/snapshots", snapshot_id)
+                    if not os.path.exists(source):
+                        raise FileNotFoundError(f"Requested snapshot source does not exist: {source}")
+                else:
+                    source = safe_join("/mnt/master-volume/users", user_id)
+
+                if action == "bind":
+                  if not snapshot_id:
+                    os.makedirs(source, exist_ok=True)
+                  os.makedirs(target, exist_ok=True)
+
+                  # Bind mount the kernel NFS Filestore directory
+                  subprocess.run(["mount", "--bind", source, target], check=True)
+
+                  if is_readonly:
+                    subprocess.run(["mount", "-o", "remount,ro,bind", target], check=True)
+                  else:
+                    subprocess.run(["chown", "1000:1000", target], check=True)
+
+                  # Write the signal file to the parent emptyDir (local host
+                  # filesystem) instead of the NFS-mounted subdirectory, so
+                  # the pod detects it instantly, bypassing NFS attribute
+                  # and negative-lookup caching delays.
+                  with open(f"{parent_dir}/.ready", "w") as f: f.write("ready")
+                  msg = f"Success: Bound workspace {user_id} into pod {pod_uid}"
+                elif action == "unbind":
+                  subprocess.run(["umount", "-l", target], check=True)
+                  msg = f"Success: Unbound {pod_uid}"
+                elif action == "delete":
+                  if os.path.exists(source):
+                    shutil.rmtree(source)
+                    msg = f"Success: Deleted {'snapshot ' + snapshot_id if snapshot_id else 'workspace for ' + user_id}"
+                  else:
+                    msg = "Nothing to delete."
+                else:
+                  raise ValueError(f"unknown action: {action!r}")
+
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(msg.encode())
+              except Exception:
+                tb = traceback.format_exc()
+                print(f"Exception handling request:\n{tb}")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(tb.encode())
+
+          HTTPServer(('0.0.0.0', 9090), Handler).serve_forever()
+      volumes:
+      - {name: host-root, hostPath: {path: /}}
+      - name: master-filestore
+        persistentVolumeClaim:
+          claimName: fleet-master-pvc
+---
+# Only the fleet portal may reach the storage daemon. Sandboxes themselves
+# never talk to it — the bind mount arrives via the kubelet's host mount
+# namespace, not the pod network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: storage-node-daemon
+  namespace: openclaw-fleet
+spec:
+  podSelector:
+    matchLabels: {app: storage-node-daemon}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels: {app: fleet-portal}
+    ports:
+    - {protocol: TCP, port: 9090}

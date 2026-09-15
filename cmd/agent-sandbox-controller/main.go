@@ -154,8 +154,9 @@ func main() {
 			"this flag is enabled.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
 		"Comma-separated list of namespaces to watch. When set, the controller's informer cache is restricted "+
-			"to the specified namespaces via cache.Options.DefaultNamespaces; deploying with namespace-scoped "+
-			"Role+RoleBinding (instead of a ClusterRoleBinding) additionally requires matching RBAC manifests. "+
+			"to the specified namespaces via cache.Options.DefaultNamespaces. The Helm chart automatically "+
+			"switches from ClusterRole+ClusterRoleBinding to namespace-scoped Role+RoleBinding in each listed "+
+			"namespace when controller.watchNamespaces is configured. "+
 			"When empty (default), the controller watches all namespaces (cluster-wide, backwards compatible).")
 	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+

@@ -34,9 +34,16 @@ echo "Installing kube-network-policies ${KUBE_NETWORK_POLICIES_VERSION} (Cluster
 # example is about a default-deny guardrail, so make it fail closed; the
 # trade-off is that pod traffic is dropped if the DaemonSet pod crashes. Node
 # traffic from root (kubelet, containerd) is not queued and is unaffected.
-curl -fsSL "${knp_raw}/install-cnp.yaml" \
-  | sed -E "s#(image: registry.k8s.io/networking/kube-network-policies:).*#\1${KUBE_NETWORK_POLICIES_VERSION}-npa-v1alpha2#" \
-  | awk '{ print } /^ *- \/bin\/netpol$/ { sub(/\/bin\/netpol/, "--fail-open=false"); print }' \
-  | kubectl apply -f -
+image="registry.k8s.io/networking/kube-network-policies:${KUBE_NETWORK_POLICIES_VERSION}-npa-v1alpha2"
+manifest="$(curl -fsSL "${knp_raw}/install-cnp.yaml" \
+  | sed -E "s#image: registry.k8s.io/networking/kube-network-policies:.*#image: ${image}#" \
+  | awk '{ print } /^ *- \/bin\/netpol$/ { sub(/\/bin\/netpol/, "--fail-open=false"); print }')"
+# Both rewrites match on the upstream layout and would no-op silently if it
+# changes; the default deny would then quietly be fail-open again.
+for want in "image: ${image}" "- --fail-open=false"; do
+  grep -qF -- "$want" <<<"$manifest" \
+    || { echo "ERROR: rendered install-cnp.yaml does not contain '${want}'; the upstream manifest layout changed" >&2; exit 1; }
+done
+kubectl apply -f - <<<"$manifest"
 kubectl rollout status daemonset/kube-network-policies -n kube-system --timeout=180s
 echo "OK: ClusterNetworkPolicy API and kube-network-policies installed."

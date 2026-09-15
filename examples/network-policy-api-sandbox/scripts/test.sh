@@ -30,11 +30,14 @@ pod_of() { kubectl get sandboxclaim agent -n "$1" -o jsonpath='{.status.sandbox.
 
 # HTTP(S) GET from inside a sandbox. Prints "ok" or "fail". Denied traffic is
 # dropped, not rejected, so the 5s timeout is what turns a deny into "fail".
+# An HTTP error status still means the connection was allowed.
 http_probe() { # ns pod url
   kubectl exec -n "$1" "$2" -- python3 -c '
-import sys, urllib.request
+import sys, urllib.request, urllib.error
 try:
     urllib.request.urlopen(sys.argv[1], timeout=5).read(1)
+    print("ok")
+except urllib.error.HTTPError:
     print("ok")
 except Exception as e:
     print("fail")' "$3" 2>/dev/null | tail -n1
@@ -111,7 +114,8 @@ sleep 3
 A="$(pod_of "$NS_A")"; B="$(pod_of "$NS_B")"
 TOOLS_IP="$(kubectl get svc tool-server -n "$NS_TOOLS" -o jsonpath='{.spec.clusterIP}')"
 TOOLS_URL="http://${TOOLS_IP}:8080/hostname"
-if [ -z "$A" ] || [ -z "$B" ] || [ -z "$TOOLS_IP" ]; then
+DNS_IP="$(kubectl get svc kube-dns -n kube-system -o jsonpath='{.spec.clusterIP}')"
+if [ -z "$A" ] || [ -z "$B" ] || [ -z "$TOOLS_IP" ] || [ -z "$DNS_IP" ]; then
   echo "FAIL: demo not deployed (run scripts/04-deploy-demo.sh first)"; exit 1
 fi
 echo "team-a pod: $A   team-b pod: $B   tool-server: $TOOLS_URL"
@@ -134,7 +138,8 @@ echo
 echo "== Phase 3: allow DNS (priority 10) =="
 apply 40-cnp-admin-allow-dns.yaml
 check "team-a resolves via the public resolvers"                        ok   dns_probe  "$NS_A" "$A" github.com
-check "team-b resolves via CoreDNS"                                     ok   dns_probe  "$NS_B" "$B" github.com
+check "team-b resolves via CoreDNS (Pass -> its NetworkPolicy allows)"  ok   dns_probe  "$NS_B" "$B" github.com
+check "team-a is still denied CoreDNS (Pass -> secure default blocks it)" fail tcp_probe "$NS_A" "$A" "$DNS_IP" 53
 check "team-a still cannot connect to github.com"                       fail http_probe "$NS_A" "$A" https://github.com
 echo
 

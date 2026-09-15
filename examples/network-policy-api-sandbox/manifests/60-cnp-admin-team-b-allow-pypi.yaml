@@ -4,6 +4,9 @@
 # pod selector is kept so the policy does not select non-sandbox pods in the
 # same namespace.
 #
+# Labels are not authentication: whoever can label or create namespaces can
+# opt into this allowlist, so `team` has to be a label only cluster admins set.
+#
 # pip needs both pypi.org (index) and files.pythonhosted.org (downloads).
 apiVersion: policy.networking.k8s.io/v1alpha2
 kind: ClusterNetworkPolicy

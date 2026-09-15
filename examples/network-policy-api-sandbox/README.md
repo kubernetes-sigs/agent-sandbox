@@ -47,10 +47,11 @@ than work with it. This example keeps the templates `Managed` instead:
   and the `Pass` action exists to delegate a decision to it. With `Unmanaged`
   there is no `NetworkPolicy` to delegate to, so the cluster admin has to
   encode every tenant's needs in Admin-tier policies.
-- The controller's defaults keep applying: ingress only from the
-  sandbox-router, the RFC1918 and metadata carve-outs, the DNS override, and
-  the `networkPolicy.egress` field that template authors already use. The
-  `ClusterNetworkPolicy` objects are added on top.
+- The controller keeps managing one `NetworkPolicy` per template: the secure
+  default (ingress only from the sandbox-router, the RFC1918 and metadata
+  carve-outs, the DNS override) for templates without custom rules, or the
+  template's own `networkPolicy` rules otherwise. The `ClusterNetworkPolicy`
+  objects are added on top, and `Pass` hands decisions back to that policy.
 - Everything is upstream Kubernetes API. `NetworkPolicy`,
   `ClusterNetworkPolicy` and the labels the controller puts on pods behave the
   same on any cluster and with any conformant implementation.
@@ -68,7 +69,7 @@ flowchart LR
   subgraph A["Admin tier — ClusterNetworkPolicy, cluster admin"]
     direction TB
     A5["prio 5: Pass → shared-tools:8080"]
-    A10["prio 10: Accept DNS → CoreDNS, 8.8.8.8, 1.1.1.1"]
+    A10["prio 10: Pass DNS → CoreDNS; Accept DNS → 8.8.8.8, 1.1.1.1"]
     A20["prio 20: Accept tcp/443 → github.com, *.github.com, *.githubusercontent.com"]
     A30["prio 30: Accept tcp/443 → pypi.org, files.pythonhosted.org (team=b only)"]
     A100["prio 100: Deny → 0.0.0.0/0, ::/0"]
@@ -139,7 +140,7 @@ Versions are pinned in [env.sh](https://github.com/kubernetes-sigs/agent-sandbox
 cd examples/network-policy-api-sandbox
 
 ./scripts/setup-all.sh   # kind cluster → CNP CRD + kube-network-policies → agent-sandbox → demo workloads
-./scripts/test.sh        # applies the policies phase by phase and asserts 22 allow/deny outcomes
+./scripts/test.sh        # applies the policies phase by phase and asserts 23 allow/deny outcomes
 ```
 
 `test.sh` finishes in about three minutes and is re-runnable. The rest of this
@@ -160,7 +161,7 @@ document walks the same phases by hand.
 | `manifests/10-shared-tools.yaml` | — | An in-cluster HTTP "tool server" (agnhost `netexec` on :8080). |
 | `manifests/20-sandbox-templates.yaml` | NetworkPolicy | Two Managed templates: team-a uses the secure default; team-b adds egress to `shared-tools`. |
 | `manifests/30-cnp-admin-default-deny.yaml` | Admin / 100 | Deny all egress from every sandbox pod. |
-| `manifests/40-cnp-admin-allow-dns.yaml` | Admin / 10 | Accept UDP+TCP 53 to CoreDNS and to `8.8.8.8`, `1.1.1.1`. |
+| `manifests/40-cnp-admin-allow-dns.yaml` | Admin / 10 | `Pass` UDP+TCP 53 to CoreDNS → the template's NetworkPolicy decides; Accept UDP+TCP 53 to `8.8.8.8`, `1.1.1.1`. |
 | `manifests/50-cnp-admin-allow-github.yaml` | Admin / 20 | Accept tcp/443 to `github.com`, `*.github.com`, `*.githubusercontent.com`. |
 | `manifests/60-cnp-admin-team-b-allow-pypi.yaml` | Admin / 30 | Accept tcp/443 to `pypi.org`, `files.pythonhosted.org` — `team=b` namespaces only. |
 | `manifests/70-cnp-admin-pass-shared-tools.yaml` | Admin / 5 | `Pass` tcp/8080 to `shared-tools` → the template's NetworkPolicy decides. |
@@ -180,8 +181,9 @@ A=$(kubectl get sandboxclaim agent -n sandbox-team-a -o jsonpath='{.status.sandb
 B=$(kubectl get sandboxclaim agent -n sandbox-team-b -o jsonpath='{.status.sandbox.name}')
 TOOLS=http://$(kubectl get svc tool-server -n shared-tools -o jsonpath='{.spec.clusterIP}'):8080/hostname
 
-http() { kubectl exec -n "$1" "$2" -- python3 -c 'import sys,urllib.request
+http() { kubectl exec -n "$1" "$2" -- python3 -c 'import sys,urllib.request,urllib.error
 try: urllib.request.urlopen(sys.argv[1], timeout=5).read(1); print("ok")
+except urllib.error.HTTPError: print("ok")   # reached it; the HTTP status is not the point
 except Exception: print("fail")' "$3"; }
 dns()  { kubectl exec -n "$1" "$2" -- python3 -c 'import sys,socket
 try: socket.getaddrinfo(sys.argv[1], 443); print("ok")
@@ -226,6 +228,11 @@ sandbox-team-b   agent              1/1     Running   0          6s
 sandbox-team-b   agent-pool-gsn5l   1/1     Running   0          8s
 ```
 
+The label binds the code running *inside* the sandbox, which has no API
+credentials; it does not bind namespace principals, since anyone with `update`
+on pods could strip it. Guarding against that is an admission-control problem,
+not a network-policy one.
+
 ### Phase 2 — Admin-tier default deny
 
 ```bash
@@ -268,16 +275,24 @@ is unaffected and still governed by the template's `NetworkPolicy`.
 kubectl apply -f manifests/40-cnp-admin-allow-dns.yaml
 ```
 
-Priority 10 is evaluated before 100. The policy allows UDP/TCP 53 to the
-CoreDNS pods and to the two public resolvers agent-sandbox injects, and nothing
-else: an unrestricted port-53 rule would let a sandbox talk to any DNS server
-directly. Query names are not inspected, so data can still be tunnelled through
-the allowed recursive resolvers; closing that needs a DNS proxy with a
-query-name policy, which is out of scope here.
+Priority 10 is evaluated before 100. The policy Accepts UDP/TCP 53 to the two
+public resolvers agent-sandbox injects, and nothing else: an unrestricted
+port-53 rule would let a sandbox talk to any DNS server directly. Query names
+are not inspected, so data can still be tunnelled through the allowed recursive
+resolvers; closing that needs a DNS proxy with a query-name policy, which is out
+of scope here.
+
+CoreDNS is a `Pass`, not an `Accept`. An Admin-tier `Accept` is final, and
+team-a's secure default deliberately blocks the cluster resolver so internal
+service names cannot be enumerated; an `Accept` here would silently reopen it
+for every sandbox. `Pass` hands the decision back to each template's
+`NetworkPolicy`: team-b's allows kube-dns, team-a's does not.
 
 ```bash
 dns  sandbox-team-a "$A" github.com          # ok   (via 8.8.8.8)
-dns  sandbox-team-b "$B" github.com          # ok   (via CoreDNS)
+dns  sandbox-team-b "$B" github.com          # ok   (via CoreDNS: Pass → team-b's NetworkPolicy allows it)
+kubectl exec -n sandbox-team-a "$A" -- python3 -c \
+  'import socket; socket.create_connection(("10.96.0.10", 53), timeout=5)'   # times out: Pass → secure default blocks RFC1918
 http sandbox-team-a "$A" https://github.com  # fail (resolves, but tcp/443 is still denied)
 ```
 
@@ -328,8 +343,10 @@ kubectl apply -f manifests/60-cnp-admin-team-b-allow-pypi.yaml
 
 Same policy shape with a narrower subject:
 `namespaceSelector: {matchLabels: {team: b}}`. The pod selector is kept so the
-policy does not cover non-sandbox pods in the namespace. `pip` needs both the
-index and the file host:
+policy does not cover non-sandbox pods in the namespace. Labels are not
+authentication: whoever can create or label namespaces can opt into this
+allowlist, so `team` has to be a label only cluster admins set. `pip` needs
+both the index and the file host:
 
 ```bash
 kubectl exec -n sandbox-team-b "$B" -- pip download --no-deps -q -d /tmp/pkgs requests && echo ok   # ok

@@ -322,7 +322,60 @@ Behavioral notes:
   domain allow-list and system-label restrictions are enforced server-side and
   are not replicated client-side.
 
-### 8. Custom Volume Claim Templates
+### 8. Deterministic, Retry-Safe Claim Creation
+
+By default, `create_sandbox` continues to generate a new random
+`SandboxClaim` name for every call. For a workflow that may retry after an
+ambiguous response or process failover, pass a stable `claim_name` and opt in
+to safe adoption:
+
+```python
+sandbox = client.create_sandbox(
+    warmpool="python-sandbox-warmpool",
+    namespace="default",
+    claim_name="sandbox-workflow-123",
+    adopt_existing=True,
+    labels={"workflow": "workflow-123"},
+)
+```
+
+The same keyword arguments are available on
+`AsyncSandboxClient.create_sandbox`. A deterministic name must be a valid
+Kubernetes DNS-1123 subdomain of at most 253 characters.
+`adopt_existing=True` requires an explicit `claim_name`.
+
+Safe adoption happens only when the create request returns HTTP `409 Conflict`.
+The client reads that exact claim and validates its API identity, UID, name,
+namespace, generation, resource version, requested claim labels, warm pool,
+lifecycle, volume claim templates, additional Pod metadata, and environment
+variables before attaching. Extra labels added by admission or controllers are
+allowed; unknown or different spec behavior fails closed. A terminating claim
+is never adopted. If the observed claim is already Ready for its current
+generation, the client returns it immediately. Otherwise, it starts the
+existing readiness watch from the observed resource version. Every watched
+object is revalidated against the same UID and request contract, including
+after an expired watch restarts.
+
+A successful create with an explicit name uses the same validation boundary.
+The canonical response returned by the apiserver must match the request, and
+its UID and resource version seed the readiness watch. This prevents an expired
+watch from silently attaching to a same-name Claim that was deleted and
+recreated with a different identity or contract.
+
+Explicit names also define a different cleanup ownership boundary. The client
+never automatically deletes an explicitly named claim, whether creation fails
+or succeeds; the caller owns that claim and may safely retry or inspect it.
+Context-manager and `atexit` cleanup select internally generated claims and
+handles returned by `get_sandbox()`, preserving the existing reattachment
+behavior. Each successful create or reattachment records the observed
+Kubernetes UID, and automatic deletion uses that UID as a precondition so it
+cannot delete a same-name replacement. The explicit `delete_sandbox` and
+`delete_all` methods remain available for deliberate deletion; `delete_all`
+preserves its existing behavior of deleting every tracked handle. Because
+`shutdown_after_seconds` produces a different absolute shutdown time on every
+retry, it cannot be combined with `adopt_existing=True`.
+
+### 9. Custom Volume Claim Templates
 
 You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
 
@@ -350,7 +403,7 @@ sandbox = client.create_sandbox(
 
 The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
-### 9. Startup Latency: How the SDK Waits for Readiness
+### 10. Startup Latency: How the SDK Waits for Readiness
 
 `create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
 API on an interval, so there is no poll-interval latency added on top of the

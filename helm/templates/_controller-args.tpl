@@ -59,6 +59,7 @@
 - --enable-warm-pool-eviction={{ .Values.controller.enableWarmPoolEviction }}
 {{- end }}
 {{- if .Values.controller.watchNamespaces }}
+{{- include "agent-sandbox.validateWatchNamespaces" . }}
 - --watch-namespaces={{ join "," .Values.controller.watchNamespaces }}
 {{- end }}
 {{- range .Values.controller.extraArgs }}

@@ -220,6 +220,58 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             "testtag",
         )
 
+class DockerfileOverridesTest(unittest.TestCase):
+    """Per-Dockerfile overrides in main() must produce the documented image
+    name and build context; otherwise discovery would build the example
+    from its own directory (where the COPY of go.mod fails) under a name
+    the manifests do not use."""
+
+    def _build_calls(self, discovered_dockerfiles):
+        args = argparse.Namespace(
+            controller_only=False,
+            image_tag="testtag",
+            images=[],
+            container_engine="docker",
+            kind_cluster_name=None,
+        )
+        with (
+            mock.patch.object(
+                push_images.os,
+                "walk",
+                return_value=discovered_dockerfiles,
+            ),
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+            ),
+            mock.patch.object(
+                push_images,
+                "build_and_push_image",
+            ) as build_image,
+        ):
+            push_images.main(args)
+        return build_image.call_args_list
+
+    def test_sandboxed_tools_acp_server_builds_from_repo_root(self):
+        acp_server_dir = os.path.join(
+            ".", "examples", "sandboxed-tools", "cmd", "acp-server")
+        calls = self._build_calls([(acp_server_dir, [], ["Dockerfile"])])
+        self.assertEqual(len(calls), 1)
+        _, service_name, context_dir, dockerfile_path, _ = calls[0].args
+        self.assertEqual(service_name, "sandboxed-tools-acp-server")
+        self.assertEqual(context_dir, ".")
+        self.assertEqual(dockerfile_path, os.path.join(acp_server_dir, "Dockerfile"))
+
+    def test_geminicli_toolbox_builds_from_repo_root(self):
+        toolbox_dir = os.path.join(
+            ".", "examples", "sandboxed-tools", "images", "geminicli-toolbox")
+        calls = self._build_calls([(toolbox_dir, [], ["Dockerfile"])])
+        self.assertEqual(len(calls), 1)
+        _, service_name, context_dir, _, _ = calls[0].args
+        self.assertEqual(service_name, "geminicli-toolbox")
+        self.assertEqual(context_dir, ".")
+
+
 class KindLoadImagesExtraTagsTest(unittest.TestCase):
     """kind load docker-images should include extra tags as well."""
 

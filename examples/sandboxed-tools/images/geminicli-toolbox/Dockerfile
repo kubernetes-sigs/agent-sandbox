@@ -17,18 +17,24 @@
 # Then run the example with the geminicli toolset, which uses this image by
 # default:
 #
-#   go run ./examples/sandboxed-tools/cmd/sandboxed-tools-cli \
-#     -session mysession -toolset geminicli
+#   cd examples/sandboxed-tools
+#   go run ./cmd/sandboxed-tools-cli -session mysession -toolset geminicli
 
 FROM golang:1.26-bookworm AS build
 WORKDIR /src
+# examples/sandboxed-tools is its own module that replaces the root module
+# and the agentclientprotocol example with local paths, so all three go.mod
+# files must be present for go mod download to resolve the graph.
 COPY go.mod go.sum ./
+COPY examples/agentclientprotocol/go.mod examples/agentclientprotocol/
+COPY examples/sandboxed-tools/go.mod examples/sandboxed-tools/go.sum examples/sandboxed-tools/
+WORKDIR /src/examples/sandboxed-tools
 RUN go mod download
-COPY examples/sandboxed-tools ./examples/sandboxed-tools
+COPY examples/sandboxed-tools /src/examples/sandboxed-tools
 # -buildvcs=false: the build context includes .git, but git metadata is not
 # usable inside the build container (and version stamping is not needed here).
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" \
-      -o /geminicli-toolbox ./examples/sandboxed-tools/cmd/geminicli-toolbox
+      -o /geminicli-toolbox ./cmd/geminicli-toolbox
 
 FROM debian:bookworm-slim
 RUN apt-get update \

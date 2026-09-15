@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import http.client
 import logging
 import time
 from datetime import datetime, UTC
@@ -260,16 +259,15 @@ class K8sHelper:
                     continue
                 raise
             except (
-                urllib3.exceptions.HTTPError,
-                http.client.HTTPException,
+                urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.ReadTimeoutError,
                 ConnectionError,
             ) as e:
                 logging.warning(
                     f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
-                    "restarting from current state"
+                    "reconnecting..."
                 )
-                rv = "0"
-                time.sleep(0.5)
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
                 continue
 
     def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
@@ -312,15 +310,15 @@ class K8sHelper:
                         w.stop()
                         raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
             except (
-                urllib3.exceptions.HTTPError,
-                http.client.HTTPException,
+                urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.ReadTimeoutError,
                 ConnectionError,
             ) as e:
                 logging.warning(
                     f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
                     "reconnecting..."
                 )
-                time.sleep(0.5)
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
                 continue
 
     def delete_sandbox_claim(

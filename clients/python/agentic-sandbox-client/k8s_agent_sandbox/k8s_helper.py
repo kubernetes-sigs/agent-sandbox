@@ -17,6 +17,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any, List
 from kubernetes import client, config, watch
+import urllib3.exceptions
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
@@ -257,6 +258,17 @@ class K8sHelper:
                     rv = "0"
                     continue
                 raise
+            except (
+                urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.ReadTimeoutError,
+                ConnectionError,
+            ) as e:
+                logging.warning(
+                    f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
 
     def wait_for_sandbox_ready(self, name: str, namespace: str, timeout: int) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
@@ -271,31 +283,43 @@ class K8sHelper:
             if remaining <= 0:
                 raise TimeoutError(f"Sandbox {name} did not become ready within {timeout} seconds.")
             w = watch.Watch()
-            for event in w.stream(
-                func=self.custom_objects_api.list_namespaced_custom_object,
-                namespace=namespace,
-                group=SANDBOX_API_GROUP,
-                version=SANDBOX_API_VERSION,
-                plural=SANDBOX_PLURAL_NAME,
-                field_selector=f"metadata.name={name}",
-                timeout_seconds=remaining
-            ):
-                if event is None:
-                    continue
-                if event["type"] in ["ADDED", "MODIFIED"]:
-                    sandbox_object = event['object']
-                    status = sandbox_object.get('status') or {}
-                    conditions = status.get('conditions', [])
-                    for cond in conditions:
-                        if cond.get('type') == 'Ready' and cond.get('status') == 'True':
-                            logging.info(f"Sandbox {name} is ready.")
-                            w.stop()
-                            pod_ips = status.get('podIPs', [])
-                            return select_pod_ip(pod_ips)
-                elif event["type"] == "DELETED":
-                    logging.error(f"Sandbox {name} was deleted before becoming ready.")
-                    w.stop()
-                    raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
+            try:
+                for event in w.stream(
+                    func=self.custom_objects_api.list_namespaced_custom_object,
+                    namespace=namespace,
+                    group=SANDBOX_API_GROUP,
+                    version=SANDBOX_API_VERSION,
+                    plural=SANDBOX_PLURAL_NAME,
+                    field_selector=f"metadata.name={name}",
+                    timeout_seconds=remaining
+                ):
+                    if event is None:
+                        continue
+                    if event["type"] in ["ADDED", "MODIFIED"]:
+                        sandbox_object = event['object']
+                        status = sandbox_object.get('status') or {}
+                        conditions = status.get('conditions', [])
+                        for cond in conditions:
+                            if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                                logging.info(f"Sandbox {name} is ready.")
+                                w.stop()
+                                pod_ips = status.get('podIPs', [])
+                                return select_pod_ip(pod_ips)
+                    elif event["type"] == "DELETED":
+                        logging.error(f"Sandbox {name} was deleted before becoming ready.")
+                        w.stop()
+                        raise SandboxNotFoundError(f"Sandbox {name} was deleted before becoming ready.")
+            except (
+                urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.ReadTimeoutError,
+                ConnectionError,
+            ) as e:
+                logging.warning(
+                    f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
 
     def delete_sandbox_claim(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None

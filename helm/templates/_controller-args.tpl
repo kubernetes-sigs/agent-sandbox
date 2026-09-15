@@ -56,6 +56,9 @@
 {{- if hasKey .Values.controller "enableWarmPoolEviction" }}
 - --enable-warm-pool-eviction={{ .Values.controller.enableWarmPoolEviction }}
 {{- end }}
+{{- if .Values.controller.watchNamespaces }}
+- --watch-namespaces={{ join "," .Values.controller.watchNamespaces }}
+{{- end }}
 {{- range .Values.controller.extraArgs }}
 - {{ . | quote }}
 {{- end }}

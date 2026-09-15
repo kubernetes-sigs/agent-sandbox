@@ -379,6 +379,7 @@ type SandboxStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.service) || !self.spec.service || size(self.metadata.name) <= 63",message="metadata.name must not exceed 63 characters when spec.service is true"
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

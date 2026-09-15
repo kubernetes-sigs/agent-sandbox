@@ -7,6 +7,8 @@
 {{- end }}
 {{- if hasKey .Values.controller "leaderElectionNamespace" }}
 - --leader-election-namespace={{ .Values.controller.leaderElectionNamespace }}
+{{- else if .Values.controller.watchNamespaces }}
+- --leader-election-namespace={{ include "agent-sandbox.namespace" . }}
 {{- end }}
 {{- if hasKey .Values.controller "extensions" }}
 - --extensions={{ .Values.controller.extensions }}

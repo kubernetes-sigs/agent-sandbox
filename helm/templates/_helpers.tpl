@@ -41,6 +41,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+The effective leader-election namespace: explicit if set, otherwise the
+controller's deployment namespace.
+*/}}
+{{- define "agent-sandbox.leaderElectionNamespace" -}}
+{{- default (include "agent-sandbox.namespace" .) .Values.controller.leaderElectionNamespace }}
+{{- end }}
+
+{{/*
 The controller image reference.
 */}}
 {{- define "agent-sandbox.image" -}}

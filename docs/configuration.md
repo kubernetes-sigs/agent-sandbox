@@ -39,6 +39,48 @@ For the benchmark data and sizing rationale behind these settings — including 
 * `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to
   construct service FQDNs. Only change this if your cluster is configured with a non-default
   domain (e.g. `my-company.local`).
+* `--metrics-bind-address` (default: `:8080`): Address the metrics endpoint binds to. When
+  `--metrics-secure-serving` is enabled the conventional port is `:8443`; see [TLS Settings](#tls-settings).
+* `--health-probe-bind-address` (default: `:8081`): Address the health probe endpoints
+  (`/healthz`, `/readyz`) bind to.
+* `--leader-elect` (default: `true`): Enable leader election for the controller manager so only
+  one replica reconciles at a time. Disable it only for single-replica deployments that cannot
+  create the leader-election Lease, for example a namespace-scoped install without
+  `coordination.k8s.io` RBAC.
+* `--leader-election-namespace` (default: the controller's own namespace): Namespace in which
+  the leader-election resource is created.
+* `--extensions` (default: `false`): Enable the extensions controllers (`SandboxTemplate`,
+  `SandboxWarmPool`, `SandboxClaim`).
+* `--version`: Print version information and exit.
+
+## Observability & Profiling
+
+Tracing and profiling are opt-in. The profile endpoints are served by the metrics server, so
+they share its address and TLS settings — keep that port cluster-internal before enabling the
+debug endpoints.
+
+* `--enable-tracing` (default: `false`): Enable OpenTelemetry tracing over OTLP.
+* `--enable-pprof` (default: `false`): Enable the CPU profile endpoint (`/debug/pprof/profile`)
+  on the metrics server.
+* `--enable-pprof-debug` (default: `false`): Enable the remaining pprof endpoints — `/debug/pprof/`
+  (index), `cmdline`, `symbol`, `heap`, `goroutine`, `allocs`, `block`, `mutex`, `trace` — plus
+  `/debug/fgprof`. Implies `--enable-pprof`. Concurrent profiling requests are rejected instead
+  of queued.
+  **WARNING:** these endpoints expose process internals (heap contents, command line, goroutine
+  stacks) and the sampling they enable adds runtime overhead. Leave this disabled in production,
+  or expose the metrics port only to trusted scrapers.
+* `--pprof-block-profile-rate` (default: `1000000`): Block-profile sampling rate applied when
+  `--enable-pprof-debug` is set. `<=0` disables the block profile; `1` samples all blocking
+  events; `>=2` sets the rate in nanoseconds (e.g. `1000000` ≈ 1ms). Negative values are clamped
+  to `0` at startup.
+* `--pprof-mutex-profile-fraction` (default: `10`): Mutex-contention sampling rate applied when
+  `--enable-pprof-debug` is set. `<=0` disables the mutex profile; `1` samples all events;
+  `N>1` samples roughly `1/N` events (e.g. `10` ≈ 1/10, `100` ≈ 1/100). Negative values are
+  clamped to `0` at startup.
+
+The Helm chart exposes the same settings as `controller.enableTracing`, `controller.enablePprof`,
+`controller.enablePprofDebug`, `controller.pprofBlockProfileRate` and
+`controller.pprofMutexProfileFraction`; see [helm/README.md](../helm/README.md).
 
 ## Deployment Example
 

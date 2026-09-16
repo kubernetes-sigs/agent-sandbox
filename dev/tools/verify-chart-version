@@ -38,6 +38,7 @@ CHART_PATH = "helm/Chart.yaml"
 # directives that target helm/.
 GENERATED_CHART_PATHS = [
     "helm/crds/",
+    "helm/files/",
     "helm/templates/rbac.generated.yaml",
     "helm/templates/extensions-rbac.generated.yaml",
 ]

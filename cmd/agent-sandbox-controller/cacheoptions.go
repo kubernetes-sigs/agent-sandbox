@@ -16,6 +16,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,6 +32,9 @@ import (
 // trimming whitespace and discarding empty tokens. It returns an error if the
 // raw value is non-empty but yields no valid namespace (e.g. "," or "  ").
 func parseWatchNamespaces(raw string) ([]string, error) {
+	if raw == "" {
+		raw = os.Getenv("WATCH_NAMESPACE")
+	}
 	if raw == "" {
 		return nil, nil
 	}

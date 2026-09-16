@@ -39,8 +39,6 @@ CHART_PATH = "helm/Chart.yaml"
 GENERATED_CHART_PATHS = [
     "helm/crds/",
     "helm/files/",
-    "helm/templates/rbac.generated.yaml",
-    "helm/templates/extensions-rbac.generated.yaml",
 ]
 
 VERSION_RE = re.compile(r"^version:\s*[\"']?(\d+)\.(\d+)\.(\d+)[\"']?\s*$", re.MULTILINE)

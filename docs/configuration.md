@@ -82,6 +82,12 @@ The Helm chart exposes the same settings as `controller.enableTracing`, `control
 `controller.enablePprofDebug`, `controller.pprofBlockProfileRate` and
 `controller.pprofMutexProfileFraction`; see [helm/README.md](../helm/README.md).
 
+The controller also binds controller-runtime's standard zap logging flags — `--zap-devel`,
+`--zap-encoder`, `--zap-log-level`, `--zap-stacktrace-level` and `--zap-time-encoding`. Their
+semantics are documented in
+[controller-runtime](https://github.com/kubernetes-sigs/controller-runtime/blob/main/pkg/log/zap/zap.go)
+and are not repeated here.
+
 ## Deployment Example
 
 To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. 

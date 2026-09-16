@@ -1,12 +1,7 @@
 {{- if and .Values.controller.watchNamespaces (hasKey .Values.controller "leaderElect") .Values.controller.leaderElect }}
 {{- $leNs := include "agent-sandbox.leaderElectionNamespace" . }}
-{{- $alreadyCovered := false }}
-{{- range .Values.controller.watchNamespaces }}
-{{- if eq . $leNs }}
-{{- $alreadyCovered = true }}
-{{- end }}
-{{- end }}
-{{- if not $alreadyCovered }}
+{{- $controllerNs := include "agent-sandbox.namespace" . }}
+{{- if eq $leNs $controllerNs }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -46,7 +41,7 @@ metadata:
 subjects:
 - kind: ServiceAccount
   name: agent-sandbox-controller
-  namespace: {{ include "agent-sandbox.namespace" . }}
+  namespace: {{ $controllerNs }}
 roleRef:
   kind: Role
   name: agent-sandbox-controller-leader-election

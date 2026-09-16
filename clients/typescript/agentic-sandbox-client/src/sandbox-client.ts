@@ -664,13 +664,14 @@ export class SandboxClient {
   }
 
   /**
-   * Returns the WarmPool name referenced by a SandboxClaim.
+   * Returns the WarmPool name referenced by a SandboxClaim, or `undefined` when
+   * the claim is not warm-pool-backed (`spec.warmPoolRef` is absent).
    * Throws SandboxNotFoundError if the claim does not exist.
    */
   async getSandboxClaimWarmpoolName(
     claimName: string,
     namespace?: string,
-  ): Promise<string> {
+  ): Promise<string | undefined> {
     const ns = namespace || this.defaultNamespace;
     let claimObj: unknown;
     try {
@@ -699,7 +700,7 @@ export class SandboxClient {
         unknown
       >) ?? {};
     const warmPoolRef = (spec.warmPoolRef as Record<string, unknown>) ?? {};
-    return warmPoolRef.name as string;
+    return warmPoolRef.name as string | undefined;
   }
 
   /**

@@ -2160,6 +2160,16 @@ describe("SandboxClient (registry)", () => {
       expect(callArgs.name).toBe("my-claim");
     });
 
+    it("returns undefined for a claim without a warmPoolRef", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        spec: { sandboxTemplateRef: { name: "my-template" } },
+      });
+
+      const client = new SandboxClient();
+      const name = await client.getSandboxClaimWarmpoolName("cold-claim");
+      expect(name).toBeUndefined();
+    });
+
     it("uses provided namespace", async () => {
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         spec: { warmPoolRef: { name: "pool-in-ns" } },

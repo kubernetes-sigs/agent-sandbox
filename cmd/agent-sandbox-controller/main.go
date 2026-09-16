@@ -153,11 +153,12 @@ func main() {
 			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
 			"this flag is enabled.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
-		"Comma-separated list of namespaces to watch. When set, the controller's informer cache is restricted "+
+		"Comma-separated list of namespaces to watch. Falls back to the WATCH_NAMESPACE "+
+			"environment variable when empty. When set, the controller's informer cache is restricted "+
 			"to the specified namespaces via cache.Options.DefaultNamespaces. The Helm chart automatically "+
-			"switches from ClusterRole+ClusterRoleBinding to namespace-scoped Role+RoleBinding in each listed "+
-			"namespace when controller.watchNamespaces is configured. "+
-			"When empty (default), the controller watches all namespaces (cluster-wide, backwards compatible).")
+			"switches from ClusterRole+ClusterRoleBinding to namespace-scoped Role+RoleBinding when "+
+			"controller.watchNamespaces is configured. "+
+			"When empty (default), the controller watches all namespaces (cluster-wide).")
 	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large claim bursts. Default false (events enabled).")

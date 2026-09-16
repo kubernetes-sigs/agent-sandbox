@@ -27,6 +27,10 @@ import yaml
 WATCHED_NAMESPACE = "WATCHED_NAMESPACE"
 CONTROLLER_NAMESPACE = "CONTROLLER_NAMESPACE"
 
+# Resources whose rules belong in the leader-election Role (leases for the LE
+# lease itself; events for the LE library's event recording).
+_LE_RESOURCES = frozenset({"leases", "events"})
+
 # Maps (apiGroup, resource) to the namespace scope the permission belongs to.
 # Keep sorted by apiGroup then resource for readability.
 RESOURCE_SCOPES = {
@@ -109,4 +113,26 @@ def watched_namespace_rules(cluster_role_yaml):
                         "resources": sorted(rs),
                         "verbs": rule["verbs"],
                     })
+    return yaml.dump(kept, default_flow_style=False, sort_keys=False)
+
+
+def leader_election_rules(cluster_role_yaml):
+    """Extract the leader-election rules from a generated ClusterRole YAML.
+
+    Returns rules that reference any resource in ``_LE_RESOURCES`` (leases,
+    events) as a YAML string.  The verbs are taken verbatim from the
+    ClusterRole so they track controller-gen output.
+
+    Raises ValueError for unclassified resources or non-ClusterRole input.
+    """
+    doc = yaml.safe_load(cluster_role_yaml)
+    if doc is None or doc.get("kind") != "ClusterRole":
+        raise ValueError("input must be a ClusterRole YAML document")
+    rules = doc.get("rules") or []
+    kept = []
+    for rule in rules:
+        _classify_rule(rule)  # validate all resources are classified
+        resources = set(rule.get("resources", []))
+        if resources & _LE_RESOURCES:
+            kept.append(rule)
     return yaml.dump(kept, default_flow_style=False, sort_keys=False)

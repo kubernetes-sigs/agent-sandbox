@@ -84,6 +84,7 @@ The following table lists the configurable parameters and their defaults.
 | `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |
 | `controller.leaderElect` | Enable leader election | `true` |
 | `controller.leaderElectionNamespace` | Namespace for the leader election resource (auto-detected if empty) | `""` |
+| `controller.watchNamespaces` | Restrict the controller to the listed namespaces. When set, the chart creates namespace-scoped Roles instead of a ClusterRole and prints cross-namespace RBAC in NOTES. | unset (cluster-wide) |
 | `controller.clusterDomain` | Kubernetes cluster domain for service FQDN generation | `"cluster.local"` |
 | `controller.kubeApiQps` | Client-side QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |

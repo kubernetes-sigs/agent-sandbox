@@ -1,0 +1,126 @@
+{{- if .Values.controller.watchNamespaces }}
+{{- $labels := include "agent-sandbox.labels" . }}
+{{- $controllerNs := include "agent-sandbox.namespace" . }}
+{{- $extensions := .Values.controller.extensions }}
+{{- range .Values.controller.watchNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-controller
+  namespace: {{ . }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - pods
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - agents.x-k8s.io
+  resources:
+  - sandboxes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agents.x-k8s.io
+  resources:
+  - sandboxes/finalizers
+  - sandboxes/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+{{- if $extensions }}
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxclaims
+  - sandboxtemplates
+  - sandboxwarmpools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxclaims/finalizers
+  - sandboxclaims/status
+  - sandboxtemplates/finalizers
+  - sandboxwarmpools/finalizers
+  - sandboxwarmpools/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller
+  namespace: {{ . }}
+  labels:
+    {{- $labels | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: {{ $controllerNs }}
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}

@@ -7,6 +7,8 @@
 {{- end }}
 {{- if hasKey .Values.controller "leaderElectionNamespace" }}
 - --leader-election-namespace={{ .Values.controller.leaderElectionNamespace }}
+{{- else if .Values.controller.watchNamespaces }}
+- --leader-election-namespace={{ include "agent-sandbox.namespace" . }}
 {{- end }}
 {{- if hasKey .Values.controller "extensions" }}
 - --extensions={{ .Values.controller.extensions }}
@@ -55,6 +57,10 @@
 {{- end }}
 {{- if hasKey .Values.controller "enableWarmPoolEviction" }}
 - --enable-warm-pool-eviction={{ .Values.controller.enableWarmPoolEviction }}
+{{- end }}
+{{- if .Values.controller.watchNamespaces }}
+{{- include "agent-sandbox.validateWatchNamespaces" . }}
+- --watch-namespaces={{ join "," .Values.controller.watchNamespaces }}
 {{- end }}
 {{- range .Values.controller.extraArgs }}
 - {{ . | quote }}

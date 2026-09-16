@@ -55,9 +55,15 @@ export interface SandboxdOptions {
    * full on every reconnect. Default: 30000.
    */
   portForwardReadyTimeoutMs?: number;
-  /** Maximum bytes accepted from files.read(). Default: 256 MiB. */
+  /**
+   * Maximum bytes accepted from files.read() / files.readStream().
+   * Default: 256 MiB.
+   */
   maxDownloadSize?: number;
-  /** Maximum bytes sent by files.write(). Default: 256 MiB. */
+  /**
+   * Maximum bytes sent by files.write() / files.writeStream().
+   * Default: 256 MiB.
+   */
   maxUploadSize?: number;
   /**
    * Maximum bytes accepted for JSON response bodies (list, health, error

@@ -19,7 +19,11 @@ import {
   type SandboxdApiError,
   SandboxError,
 } from "../exceptions.js";
-import { resolveSandboxPath, SandboxdRestClient } from "../rest.js";
+import {
+  resolveSandboxPath,
+  SandboxdRestClient,
+  SourceFailure,
+} from "../rest.js";
 
 // ---------- test HTTP server harness ----------
 
@@ -270,6 +274,175 @@ describe("SandboxdRestClient.read", () => {
   });
 });
 
+// ---------- readStream ----------
+
+async function drain(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
+}
+
+describe("SandboxdRestClient.readStream", () => {
+  it("streams chunks that concatenate to the exact original content", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.from("hello "));
+      res.write(Buffer.from("world"));
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = await client.readStream(
+      "big.bin",
+      new AbortController().signal,
+    );
+    const result = await drain(stream);
+    expect(new TextDecoder().decode(result)).toBe("hello world");
+  });
+
+  it("resolves an already-closed stream for an empty file", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = await client.readStream(
+      "empty.bin",
+      new AbortController().signal,
+    );
+    const reader = stream.getReader();
+    const { done, value } = await reader.read();
+    expect(done).toBe(true);
+    expect(value).toBeUndefined();
+  });
+
+  it("rejects before resolving when the response is a directory listing", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ path: "/dir", entries: [] }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.readStream("dir", new AbortController().signal),
+    ).rejects.toThrow(SandboxError);
+  });
+
+  it("rejects before resolving on a 404", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "NOT_FOUND", message: "nope" }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.readStream("missing.txt", new AbortController().signal),
+    ).rejects.toMatchObject({
+      status: 404,
+    } satisfies Partial<SandboxdApiError>);
+  });
+
+  it("errors the stream once downloaded bytes exceed maxDownloadSize, without buffering past the limit", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.alloc(10));
+      setTimeout(() => {
+        try {
+          res.end(Buffer.alloc(10));
+        } catch {
+          // client already aborted the underlying socket
+        }
+      }, 20);
+    });
+    const client = makeClient(activeServer.baseUrl, { maxDownloadSize: 5 });
+    const stream = await client.readStream(
+      "big.bin",
+      new AbortController().signal,
+    );
+    const reader = stream.getReader();
+    await expect(reader.read()).rejects.toThrow(SandboxError);
+  });
+
+  it("ends cleanly, without error, when the consumer cancels", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.from("partial"));
+      // Never call res.end(): the stream only ends because the consumer
+      // cancels it.
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = await client.readStream(
+      "a.txt",
+      new AbortController().signal,
+    );
+    const reader = stream.getReader();
+    await reader.read();
+    await expect(reader.cancel()).resolves.toBeUndefined();
+  });
+
+  it("errors with the caller's own signal reason once it fires mid-stream", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.from("partial"));
+      // Never call res.end(): the read hangs until the caller's signal fires.
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const controller = new AbortController();
+    const stream = await client.readStream("a.txt", controller.signal);
+    const reader = stream.getReader();
+    await reader.read();
+    const reason = new Error("caller timeout");
+    setTimeout(() => controller.abort(reason), 30);
+    await expect(reader.read()).rejects.toBe(reason);
+  });
+
+  it("errors even when the consumer never reads again after the abort (queue-full/stalled case)", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.from("first-chunk"));
+      // Never call res.end().
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const controller = new AbortController();
+    const stream = await client.readStream("a.txt", controller.signal);
+    const reader = stream.getReader();
+    const reason = new Error("caller timeout");
+    controller.abort(reason);
+    // No further read() is issued before the abort; the stream must still
+    // observe it via the underlying reader's `closed` rejection.
+    await expect(reader.closed).rejects.toBe(reason);
+  });
+
+  it("wraps a mid-body disconnect as SandboxConnectionError", async () => {
+    activeServer = await startServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.from("partial"));
+      // Delay the reset so headers + the first chunk are reliably delivered
+      // before the socket dies — otherwise this can race the initial
+      // request() and fail there instead of exercising the mid-stream path.
+      setTimeout(() => req.socket.destroy(), 20);
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = await client.readStream(
+      "a.txt",
+      new AbortController().signal,
+    );
+    const reader = stream.getReader();
+    await reader.read();
+    await expect(reader.read()).rejects.toBeInstanceOf(SandboxConnectionError);
+  });
+});
+
 // ---------- write ----------
 
 describe("SandboxdRestClient.write", () => {
@@ -351,6 +524,336 @@ describe("SandboxdRestClient.write", () => {
       new AbortController().signal,
     );
     expect(activeServer.requests[0].url).toBe("/v1/files/a.txt?mode=0755");
+  });
+});
+
+// ---------- writeStream ----------
+
+function toReadableStream(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+  let i = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i >= chunks.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(chunks[i++]);
+    },
+  });
+}
+
+function textChunks(...parts: string[]): Uint8Array[] {
+  return parts.map((p) => new TextEncoder().encode(p));
+}
+
+/** Like startServer(), but also reports live (pre-`end`) received bytes so
+ * an aborted/cancelled upload's partial delivery is observable — the
+ * request-recording `end` handler never fires for those. */
+async function startServerWithLiveByteCount(
+  handler: (req: http.IncomingMessage, res: http.ServerResponse) => void,
+): Promise<{
+  baseUrl: string;
+  liveBytes(): number;
+  ended(): boolean;
+  close(): Promise<void>;
+}> {
+  let liveBytes = 0;
+  let didEnd = false;
+  const server = http.createServer((req, res) => {
+    req.on("data", (c: Buffer) => {
+      liveBytes += c.length;
+    });
+    req.on("end", () => {
+      didEnd = true;
+    });
+    handler(req, res);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("failed to bind");
+  return {
+    baseUrl: `http://127.0.0.1:${addr.port}`,
+    liveBytes: () => liveBytes,
+    ended: () => didEnd,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+describe("SandboxdRestClient.writeStream", () => {
+  it("PUTs chunked content that concatenates to exactly the source and returns the byte count", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const bytesSent = await client.writeStream(
+      "a.txt",
+      toReadableStream(textChunks("hello ", "world")),
+      {},
+      new AbortController().signal,
+    );
+    expect(bytesSent).toBe(11);
+    expect(activeServer.requests[0].method).toBe("PUT");
+    expect(activeServer.requests[0].headers["content-type"]).toBe(
+      "application/octet-stream",
+    );
+    expect(activeServer.requests[0].body.toString()).toBe("hello world");
+  });
+
+  it("sends the mode as a query parameter", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await client.writeStream(
+      "a.txt",
+      toReadableStream([]),
+      { mode: "0755" },
+      new AbortController().signal,
+    );
+    expect(activeServer.requests[0].url).toBe("/v1/files/a.txt?mode=0755");
+  });
+
+  it("rejects an invalid mode before ever touching the source stream", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = toReadableStream(textChunks("x"));
+    await expect(
+      client.writeStream(
+        "a.txt",
+        stream,
+        { mode: "777" },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+    expect(stream.locked).toBe(false);
+  });
+
+  it("rejects an already-locked stream before sending any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    const stream = toReadableStream(textChunks("x"));
+    stream.getReader();
+    await expect(
+      client.writeStream("a.txt", stream, {}, new AbortController().signal),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+  });
+
+  it("rejects writing to the sandbox root before sending any request", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.writeStream(
+        "",
+        toReadableStream([]),
+        {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(SandboxError);
+    expect(activeServer.requests).toHaveLength(0);
+  });
+
+  it("maps a non-204 response to SandboxdApiError and cancels the source", async () => {
+    // startServer() only invokes its handler once the request body has
+    // ended, which would deadlock here since the source below never
+    // completes on its own — use the immediate-handler helper instead, and
+    // force the connection closed so afterEach()/this test's own cleanup
+    // never waits on a lingering keep-alive socket.
+    const server = await startServerWithLiveByteCount((_req, res) => {
+      res.writeHead(400, {
+        "Content-Type": "application/json",
+        Connection: "close",
+      });
+      res.end(JSON.stringify({ code: "INVALID_ARGUMENT", message: "bad" }));
+    });
+    const client = makeClient(server.baseUrl);
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((r) => setTimeout(r, 10));
+        controller.enqueue(new Uint8Array(4));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    try {
+      await expect(
+        client.writeStream("a.txt", stream, {}, new AbortController().signal),
+      ).rejects.toMatchObject({
+        status: 400,
+      } satisfies Partial<SandboxdApiError>);
+      expect(cancelled).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("treats an early 204 (before the source reaches EOF) as invalid_response and cancels the source", async () => {
+    const server = await startServerWithLiveByteCount((_req, res) => {
+      // Reply before consuming the body at all.
+      res.writeHead(204, { Connection: "close" });
+      res.end();
+    });
+    const client = makeClient(server.baseUrl);
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((r) => setTimeout(r, 20));
+        controller.enqueue(new Uint8Array(4));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    try {
+      await expect(
+        client.writeStream("a.txt", stream, {}, new AbortController().signal),
+      ).rejects.toThrow(SandboxError);
+      expect(cancelled).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("succeeds when content is exactly maxUploadSize bytes", async () => {
+    const server = await startServerWithLiveByteCount((req, res) => {
+      // Only respond once the full body has arrived — an early response
+      // would (correctly) be rejected as invalid_response instead.
+      req.on("end", () => {
+        res.writeHead(204, { Connection: "close" });
+        res.end();
+      });
+    });
+    const client = makeClient(server.baseUrl, { maxUploadSize: 10 });
+    try {
+      const bytesSent = await client.writeStream(
+        "a.txt",
+        toReadableStream([new Uint8Array(10)]),
+        {},
+        new AbortController().signal,
+      );
+      expect(bytesSent).toBe(10);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects content over maxUploadSize without the server ever receiving more than the limit", async () => {
+    const server = await startServerWithLiveByteCount((req, res) => {
+      req.on("end", () => {
+        res.writeHead(204);
+        res.end();
+      });
+    });
+    const client = makeClient(server.baseUrl, { maxUploadSize: 10 });
+    try {
+      await expect(
+        client.writeStream(
+          "a.txt",
+          toReadableStream([
+            new Uint8Array(6),
+            new Uint8Array(6),
+            new Uint8Array(6),
+          ]),
+          {},
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ telemetryCode: "request_too_large" });
+      // Give the abort a moment to propagate; the server must never see the
+      // full 18-byte payload, nor a completed request.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(server.liveBytes()).toBeLessThanOrEqual(10);
+      expect(server.ended()).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects when the very first chunk already exceeds maxUploadSize", async () => {
+    const server = await startServerWithLiveByteCount((req, res) => {
+      req.on("end", () => {
+        res.writeHead(204);
+        res.end();
+      });
+    });
+    const client = makeClient(server.baseUrl, { maxUploadSize: 4 });
+    try {
+      await expect(
+        client.writeStream(
+          "a.txt",
+          toReadableStream([new Uint8Array(10)]),
+          {},
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ telemetryCode: "request_too_large" });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("tags a source stream failure as SourceFailure, preserving the original thrown value (including undefined)", async () => {
+    activeServer = await startServer((req, res) => {
+      req.on("data", () => {});
+      res.writeHead(204);
+      res.end();
+    });
+    const client = makeClient(activeServer.baseUrl);
+
+    const boom = new Error("source blew up");
+    const throwingStream = (value: unknown): ReadableStream<Uint8Array> =>
+      new ReadableStream<Uint8Array>({
+        pull() {
+          throw value;
+        },
+      });
+
+    const p1 = client.writeStream(
+      "a.txt",
+      throwingStream(boom),
+      {},
+      new AbortController().signal,
+    );
+    await expect(p1).rejects.toBeInstanceOf(SourceFailure);
+    await p1.catch((err: unknown) => {
+      expect((err as SourceFailure).value).toBe(boom);
+    });
+
+    const p2 = client.writeStream(
+      "a.txt",
+      // eslint-disable-next-line no-throw-literal
+      throwingStream(undefined),
+      {},
+      new AbortController().signal,
+    );
+    await expect(p2).rejects.toBeInstanceOf(SourceFailure);
+    await p2.catch((err: unknown) => {
+      expect((err as SourceFailure).value).toBeUndefined();
+    });
+
+    const connErr = new SandboxConnectionError("boom", "socket");
+    const p3 = client.writeStream(
+      "a.txt",
+      throwingStream(connErr),
+      {},
+      new AbortController().signal,
+    );
+    await expect(p3).rejects.toBeInstanceOf(SourceFailure);
+    await p3.catch((err: unknown) => {
+      expect((err as SourceFailure).value).toBe(connErr);
+    });
   });
 });
 

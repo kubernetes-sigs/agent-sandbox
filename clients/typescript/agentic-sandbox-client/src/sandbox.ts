@@ -39,7 +39,11 @@ import {
 import { SandboxFiles } from "./files.js";
 import { noopLogger } from "./logger.js";
 import { ProcessClient } from "./process.js";
-import { resolveSandboxPath, SandboxdRestClient } from "./rest.js";
+import {
+  resolveSandboxPath,
+  SandboxdRestClient,
+  SourceFailure,
+} from "./rest.js";
 import type { Span, TracerManager } from "./trace-manager.js";
 import { spanErrorStatusCode, withSpan } from "./trace-manager.js";
 import { PodTunnel } from "./tunnel.js";
@@ -309,6 +313,9 @@ export class Sandbox {
       this._files = new SandboxFiles({
         read: (path, opts) => this.readFileImpl(path, opts),
         write: (path, content, opts) => this.writeFileImpl(path, content, opts),
+        readStream: (path, opts) => this.readStreamImpl(path, opts),
+        writeStream: (path, content, opts) =>
+          this.writeStreamImpl(path, content, opts),
         exists: (path, opts) => this.existsImpl(path, opts),
         list: (path, opts) => this.listImpl(path, opts),
         delete: (path, opts) => this.deleteFileImpl(path, opts),
@@ -744,6 +751,13 @@ export class Sandbox {
         { cause: err },
       );
     }
+    // A writeStream() source failure is never a sandboxd connection problem
+    // — keep it out of generation invalidation even if its wrapped value
+    // happens to be a SandboxConnectionError, and let it pass through
+    // untouched for writeStreamImpl() to unwrap.
+    if (err instanceof SourceFailure) {
+      return err;
+    }
     if (err instanceof SandboxConnectionError) {
       this.invalidateGeneration(gen, err);
     }
@@ -872,6 +886,269 @@ export class Sandbox {
       (gen, signal) =>
         gen.rest.write(path, bytes, { mode: opts?.mode }, signal),
     );
+  }
+
+  /**
+   * Drives one readStream() call: unlike runOperation()/operate(), the
+   * public promise (readStreamImpl's return value) resolves once headers are
+   * validated — well before the operation itself is done. This method keeps
+   * the operation (in-flight accounting, timeout, generation classification,
+   * tracing span) alive until the returned stream reaches a terminal state,
+   * by calling `onReady`/`onReadyFailed` as soon as that's known and
+   * resolving/rejecting its own returned promise only once the stream
+   * finishes — see readStreamImpl()'s use of withSpan() for how the two are
+   * stitched together.
+   */
+  private async runReadStreamOperation(
+    timeoutMs: number,
+    userSignal: AbortSignal | undefined,
+    path: string,
+    onReady: (stream: ReadableStream<Uint8Array>) => void,
+    onReadyFailed: (err: unknown) => void,
+  ): Promise<
+    { outcome: "completed"; totalBytes: number } | { outcome: "cancelled" }
+  > {
+    if (!this.isActive) {
+      const err = new SandboxClosedError("Sandbox handle is closed");
+      onReadyFailed(err);
+      throw err;
+    }
+    if (userSignal?.aborted) {
+      onReadyFailed(userSignal.reason);
+      throw userSignal.reason;
+    }
+
+    const timeoutController = new AbortController();
+    const timer = setTimeout(() => {
+      timeoutController.abort(
+        new SandboxTimeoutError(`operation timed out after ${timeoutMs}ms`),
+      );
+    }, timeoutMs);
+    const signals: AbortSignal[] = [
+      timeoutController.signal,
+      this.lifecycleAbortController.signal,
+    ];
+    if (userSignal) signals.push(userSignal);
+    const totalSignal = AbortSignal.any(signals);
+
+    let gen: ConnectionGeneration;
+    try {
+      gen = await this.ensureConnected(totalSignal);
+    } catch (err) {
+      clearTimeout(timer);
+      onReadyFailed(err);
+      throw err;
+    }
+    // Mirrors runOperation()'s re-check: no await between here and the
+    // in-flight increment below.
+    if (!this.isActive || this.currentGeneration !== gen) {
+      clearTimeout(timer);
+      const err = new SandboxClosedError("Sandbox handle is closed");
+      onReadyFailed(err);
+      throw err;
+    }
+
+    this._inflightCount++;
+    const requestSignal = AbortSignal.any([
+      totalSignal,
+      gen.abortController.signal,
+    ]);
+    const classify = (err: unknown): unknown =>
+      this.classifyOperationFailure(err, gen, timeoutController, userSignal);
+
+    let finished = false;
+    const finishDrain = (): void => {
+      if (finished) return;
+      finished = true;
+      this._inflightCount--;
+      if (this._inflightCount === 0) {
+        const resolvers = this._drainResolvers;
+        this._drainResolvers = [];
+        for (const resolve of resolvers) resolve();
+      }
+      clearTimeout(timer);
+    };
+
+    let restStream: ReadableStream<Uint8Array>;
+    try {
+      restStream = await gen.rest.readStream(path, requestSignal);
+    } catch (err) {
+      const classified = classify(err);
+      finishDrain();
+      onReadyFailed(classified);
+      throw classified;
+    }
+
+    // The REST-layer stream (wrapDownloadStream() in rest.ts) already errors
+    // itself the instant `requestSignal` aborts — via its own listener, and
+    // via `reader.closed` rejecting even while its single-slot queue is full
+    // and no read() is pending — so re-reading from it here via
+    // `restReader.read()`/`restReader.closed` is enough to observe every
+    // termination without this method needing its own abort listener.
+    return new Promise<
+      { outcome: "completed"; totalBytes: number } | { outcome: "cancelled" }
+    >((resolveCompletion, rejectCompletion) => {
+      let terminal = false;
+      const restReader = restStream.getReader();
+      let totalBytes = 0;
+
+      const terminate = (
+        result:
+          | { outcome: "completed"; totalBytes: number }
+          | { outcome: "cancelled" }
+          | { outcome: "failed"; error: unknown },
+      ): void => {
+        if (terminal) return;
+        terminal = true;
+        finishDrain();
+        if (result.outcome === "failed") {
+          rejectCompletion(result.error);
+        } else {
+          resolveCompletion(result);
+        }
+      };
+
+      const publicStream = new ReadableStream<Uint8Array>(
+        {
+          start: (controller) => {
+            restReader.closed.catch((err: unknown) => {
+              if (terminal) return;
+              const classified = classify(err);
+              terminate({ outcome: "failed", error: classified });
+              controller.error(classified);
+            });
+          },
+          pull: async (controller) => {
+            if (terminal) return;
+            let result: ReadableStreamReadResult<Uint8Array>;
+            try {
+              result = await restReader.read();
+            } catch (err) {
+              if (terminal) return;
+              const classified = classify(err);
+              terminate({ outcome: "failed", error: classified });
+              controller.error(classified);
+              return;
+            }
+            if (terminal) return;
+            if (result.done) {
+              const finalBytes = totalBytes;
+              terminate({ outcome: "completed", totalBytes: finalBytes });
+              controller.close();
+              return;
+            }
+            totalBytes += result.value.byteLength;
+            controller.enqueue(result.value);
+          },
+          cancel: (reason) => {
+            // A consumer-initiated cancel is a normal termination, never an
+            // error — see the state-machine invariant in wrapDownloadStream().
+            terminate({ outcome: "cancelled" });
+            restReader.cancel(reason).catch(() => {});
+          },
+        },
+        { highWaterMark: 1 },
+      );
+
+      onReady(publicStream);
+    });
+  }
+
+  private async readStreamImpl(
+    path: string,
+    opts?: FileCallOptions,
+  ): Promise<ReadableStream<Uint8Array>> {
+    resolveSandboxPath(path, "read");
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    const userSignal = opts?.signal;
+
+    let readyResolve!: (stream: ReadableStream<Uint8Array>) => void;
+    let readyReject!: (err: unknown) => void;
+    const ready = new Promise<ReadableStream<Uint8Array>>((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
+    });
+
+    const tracingPromise = withSpan(
+      this.tracingManager?.tracer ?? null,
+      this.traceServiceName,
+      "files.read_stream",
+      async (span) => {
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.file.operation", "read_stream");
+        }
+        const result = await this.runReadStreamOperation(
+          timeoutMs,
+          userSignal,
+          path,
+          readyResolve,
+          readyReject,
+        );
+        if (result.outcome === "completed" && span.isRecording()) {
+          span.setAttribute("sandbox.file.size", result.totalBytes);
+        }
+      },
+      this.tracingManager?.parentContext,
+      (span, err) => {
+        const { code, message } = classifyForTelemetry(err, userSignal);
+        if (span.isRecording()) {
+          span.setAttribute("sandbox.error.code", code);
+        }
+        span.setStatus({ code: spanErrorStatusCode(), message });
+      },
+    );
+    // Failures already reach the caller via `ready` (pre-header failures) or
+    // the returned stream's error (post-ready failures) — this promise's
+    // rejection is purely for span lifetime/telemetry and must not also
+    // surface as an unhandled rejection.
+    tracingPromise.catch(() => {});
+
+    return ready;
+  }
+
+  private async writeStreamImpl(
+    path: string,
+    content: ReadableStream<Uint8Array>,
+    opts?: WriteOptions,
+  ): Promise<void> {
+    resolveSandboxPath(path, "write");
+    if (opts?.mode !== undefined && !/^0[0-7]{3}$/.test(opts.mode)) {
+      throw new SandboxError(
+        `invalid mode '${opts.mode}': must match ^0[0-7]{3}$`,
+        { telemetryCode: "invalid_argument" },
+      );
+    }
+    if (content.locked) {
+      throw new SandboxError(
+        "writeStream content is already locked by another reader",
+        { telemetryCode: "invalid_argument" },
+      );
+    }
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    try {
+      await this.operate<number>(
+        "files.write_stream",
+        timeoutMs,
+        opts?.signal,
+        (span) => {
+          if (span.isRecording()) {
+            span.setAttribute("sandbox.file.operation", "write_stream");
+          }
+        },
+        (span, bytesSent) => {
+          if (span.isRecording()) {
+            span.setAttribute("sandbox.file.size", bytesSent);
+          }
+        },
+        (gen, signal) =>
+          gen.rest.writeStream(path, content, { mode: opts?.mode }, signal),
+      );
+    } catch (err) {
+      if (err instanceof SourceFailure) {
+        throw err.value;
+      }
+      throw err;
+    }
   }
 
   private async existsImpl(

@@ -53,6 +53,20 @@ function invalidResponse(message: string, cause?: unknown): SandboxError {
   });
 }
 
+/**
+ * Tags an error thrown by a writeStream() caller-supplied source
+ * ReadableStream, so Sandbox.classifyOperationFailure() can recognize it and
+ * keep it out of connection-generation invalidation regardless of what kind
+ * of value it wraps (including `undefined` — hence a class + `instanceof`
+ * check rather than an `!== undefined` test), and so the outermost caller
+ * (Sandbox.writeStreamImpl) can unwrap it back to the original value before
+ * rejecting the public promise. Never exposed to SDK consumers.
+ * @internal
+ */
+export class SourceFailure {
+  constructor(readonly value: unknown) {}
+}
+
 function hasInvalidChars(p: string): boolean {
   if (p.includes("\0")) return true;
   for (let i = 0; i < p.length; i++) {
@@ -142,6 +156,31 @@ function truncateUtf8(s: string, maxBytes: number): string {
 }
 
 /**
+ * Converts a body-stream failure (from a Response body reader, or a
+ * readStream()/writeStream() wrapper's underlying reader) into the value it
+ * should surface as. Shared by readBoundedBody() and the streaming wrappers
+ * so both apply the same precedence: a SandboxError we raised ourselves
+ * passes through; the caller's own signal (timeout/user-cancel/
+ * generation-invalidation) firing mid-stream takes priority over a generic
+ * transport failure; anything else is a real transport failure (e.g. the
+ * peer reset the connection after sending headers), converted to
+ * SandboxConnectionError so Sandbox.classifyOperationFailure() invalidates
+ * the shared connection generation instead of leaking a raw TypeError that
+ * leaves the generation looking healthy.
+ */
+function mapBodyStreamError(err: unknown, signal: AbortSignal): unknown {
+  if (err instanceof SandboxError) return err;
+  if (signal.aborted && signal.reason !== undefined) {
+    return signal.reason;
+  }
+  return new SandboxConnectionError(
+    "sandboxd REST response body ended unexpectedly",
+    "socket",
+    { cause: err, detail: truncateUtf8(String(err), ERROR_DETAIL_MAX_BYTES) },
+  );
+}
+
+/**
  * Reads a Response body up to maxBytes, cancelling the stream and aborting
  * `controller` on overflow so the underlying socket does not keep streaming
  * data nobody wants. Returns an empty buffer for a null body (HEAD).
@@ -174,25 +213,7 @@ async function readBoundedBody(
       chunks.push(value);
     }
   } catch (err) {
-    if (err instanceof SandboxError) throw err;
-    // The caller's own signal (timeout/user-cancel/generation-invalidation)
-    // firing mid-stream must surface as that same reason, not a generic
-    // connection error — `signal` is untouched by our own overflow-abort
-    // above, which only aborts `controller`.
-    if (signal.aborted && signal.reason !== undefined) {
-      throw signal.reason;
-    }
-    // Anything else here is the body stream itself failing (e.g. the peer
-    // reset the connection after sending headers): convert it to
-    // SandboxConnectionError so Sandbox.classifyOperationFailure() sees a
-    // transport failure and invalidates the shared connection generation,
-    // instead of leaking a raw TypeError that leaves the generation (and any
-    // concurrent operation on it) looking healthy.
-    throw new SandboxConnectionError(
-      "sandboxd REST response body ended unexpectedly",
-      "socket",
-      { cause: err, detail: truncateUtf8(String(err), ERROR_DETAIL_MAX_BYTES) },
-    );
+    throw mapBodyStreamError(err, signal);
   }
   const out = new Uint8Array(total);
   let offset = 0;
@@ -201,6 +222,183 @@ async function readBoundedBody(
     offset += chunk.byteLength;
   }
   return out;
+}
+
+/**
+ * Wraps a sandboxd response body reader as a pull-based ReadableStream for
+ * SandboxdRestClient.readStream(), bounding total bytes by maxDownloadSize
+ * and terminating (exactly once — completed/cancelled/failed are mutually
+ * exclusive and final) on: normal EOF, consumer cancel() (a normal
+ * termination, never converted to an error), overflow, a body error observed
+ * either from a pending read() or from `reader.closed` rejecting while the
+ * wrapper's single-slot queue is full and no read() is in flight, or `signal`
+ * aborting (timeout/user-cancel/lifecycle/generation-invalidation) — checked
+ * eagerly, including the case where `signal` is already aborted before this
+ * runs, so a caller that never reads and a stalled consumer both still
+ * terminate instead of leaking the operation.
+ */
+function wrapDownloadStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  maxBytes: number,
+  controller: AbortController,
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  let total = 0;
+  let terminal = false;
+  let onAbort: (() => void) | undefined;
+
+  const detach = (): void => {
+    if (onAbort) {
+      signal.removeEventListener("abort", onAbort);
+      onAbort = undefined;
+    }
+  };
+
+  return new ReadableStream<Uint8Array>(
+    {
+      start: (rsController) => {
+        reader.closed.catch((err: unknown) => {
+          if (terminal) return;
+          terminal = true;
+          detach();
+          rsController.error(mapBodyStreamError(err, signal));
+        });
+        const handleAbort = (): void => {
+          if (terminal) return;
+          terminal = true;
+          detach();
+          reader.cancel().catch(() => {});
+          rsController.error(signal.reason);
+        };
+        if (signal.aborted) {
+          handleAbort();
+          return;
+        }
+        onAbort = handleAbort;
+        signal.addEventListener("abort", onAbort, { once: true });
+      },
+      pull: async (rsController) => {
+        if (terminal) return;
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await reader.read();
+        } catch (err) {
+          if (terminal) return;
+          terminal = true;
+          detach();
+          rsController.error(mapBodyStreamError(err, signal));
+          return;
+        }
+        if (terminal) return;
+        if (result.done) {
+          terminal = true;
+          detach();
+          rsController.close();
+          return;
+        }
+        total += result.value.byteLength;
+        if (total > maxBytes) {
+          terminal = true;
+          detach();
+          const err = new SandboxError(
+            "sandboxd response body exceeded the configured size limit",
+            { telemetryCode: "response_too_large" },
+          );
+          controller.abort(err);
+          reader.cancel().catch(() => {});
+          rsController.error(err);
+          return;
+        }
+        rsController.enqueue(result.value);
+      },
+      cancel: (reason) => {
+        if (terminal) return;
+        terminal = true;
+        detach();
+        controller.abort(reason);
+        reader.cancel(reason).catch(() => {});
+      },
+    },
+    { highWaterMark: 1 },
+  );
+}
+
+/**
+ * Wraps a caller-supplied writeStream() source reader as a pull-based
+ * ReadableStream to hand to fetch() as the PUT body, bounding total bytes by
+ * maxUploadSize (aborting `controller` before an over-limit chunk is ever
+ * enqueued — the server never receives more than the limit) and tagging any
+ * error the source itself throws (from a pending read() or from
+ * `sourceReader.closed` rejecting) as SourceFailure so it survives
+ * classifyOperationFailure() untouched. Does not cancel `sourceReader` on its
+ * own cancel() — SandboxdRestClient.writeStream() owns that centrally so
+ * every termination path (overflow, source failure, external abort, early
+ * HTTP response) cancels the source exactly once, in one place.
+ */
+function wrapUploadStream(
+  sourceReader: ReadableStreamDefaultReader<Uint8Array>,
+  maxBytes: number,
+  controller: AbortController,
+): {
+  stream: ReadableStream<Uint8Array>;
+  bytesSent: () => number;
+  isSourceDone: () => boolean;
+} {
+  let total = 0;
+  let done = false;
+  let terminal = false;
+
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      start: (rsController) => {
+        sourceReader.closed.catch((err: unknown) => {
+          if (terminal) return;
+          terminal = true;
+          const tagged = new SourceFailure(err);
+          controller.abort(tagged);
+          rsController.error(tagged);
+        });
+      },
+      pull: async (rsController) => {
+        if (terminal) return;
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await sourceReader.read();
+        } catch (err) {
+          if (terminal) return;
+          terminal = true;
+          const tagged = new SourceFailure(err);
+          controller.abort(tagged);
+          rsController.error(tagged);
+          return;
+        }
+        if (terminal) return;
+        if (result.done) {
+          terminal = true;
+          done = true;
+          rsController.close();
+          return;
+        }
+        total += result.value.byteLength;
+        if (total > maxBytes) {
+          terminal = true;
+          const err = new SandboxError(
+            `content exceeds the configured upload limit of ${maxBytes} bytes`,
+            { telemetryCode: "request_too_large" },
+          );
+          controller.abort(err);
+          rsController.error(err);
+          return;
+        }
+        rsController.enqueue(result.value);
+      },
+      cancel: () => {
+        terminal = true;
+      },
+    },
+    { highWaterMark: 1 },
+  );
+  return { stream, bytesSent: () => total, isSourceDone: () => done };
 }
 
 const KNOWN_API_CODES: ReadonlySet<string> = new Set([
@@ -252,26 +450,42 @@ export class SandboxdRestClient {
       body?: BodyInit;
       headers?: Record<string, string>;
       signal: AbortSignal;
+      /**
+       * Caller-owned controller to abort mid-body-read/write (overflow,
+       * source failure). Defaults to a fresh one. writeStream() passes its
+       * own so it can abort the request from inside the upload wrapper's
+       * pull(), before any response has arrived.
+       */
+      controller?: AbortController;
+      /** Required by fetch() when `body` is a ReadableStream. */
+      duplex?: "half";
     },
   ): Promise<{ response: Response; controller: AbortController }> {
-    // `controller` exists only so readBoundedBody() can abort on overflow;
-    // `combined` is what actually goes to fetch(), and it stays linked to
-    // `init.signal` for the request's whole lifetime — including body
-    // streaming, which happens well after this method returns. Detaching
-    // from init.signal once headers arrive (as an addEventListener-based
-    // bridge into `controller` alone would) would let a timeout/user-abort
-    // during body streaming go unnoticed: reader.read() would just hang.
-    const controller = new AbortController();
+    // `controller` exists only so readBoundedBody()/the streaming wrappers
+    // can abort on overflow or source failure; `combined` is what actually
+    // goes to fetch(), and it stays linked to `init.signal` for the
+    // request's whole lifetime — including body streaming, which happens
+    // well after this method returns. Detaching from init.signal once
+    // headers arrive (as an addEventListener-based bridge into `controller`
+    // alone would) would let a timeout/user-abort during body streaming go
+    // unnoticed: reader.read() would just hang.
+    const controller = init.controller ?? new AbortController();
     const combined = AbortSignal.any([init.signal, controller.signal]);
+    // `duplex` isn't in lib.dom's RequestInit yet, though it's required by
+    // the Fetch spec (and undici) whenever `body` is a ReadableStream.
+    const fetchInit: RequestInit & { duplex?: "half" } = {
+      method,
+      body: init.body,
+      headers: init.headers,
+      redirect: "error",
+      signal: combined,
+    };
+    if (init.duplex) {
+      fetchInit.duplex = init.duplex;
+    }
     let response: Response;
     try {
-      response = await fetch(this.url(path, init.query), {
-        method,
-        body: init.body,
-        headers: init.headers,
-        redirect: "error",
-        signal: combined,
-      });
+      response = await fetch(this.url(path, init.query), fetchInit);
     } catch (err) {
       if (combined.aborted && combined.reason !== undefined) {
         throw combined.reason;
@@ -412,6 +626,54 @@ export class SandboxdRestClient {
     );
   }
 
+  /**
+   * Like read(), but resolves once headers are validated (200, non-JSON)
+   * instead of buffering the whole body — see wrapDownloadStream() for the
+   * streaming/termination contract.
+   */
+  async readStream(
+    path: string,
+    signal: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const encoded = resolveSandboxPath(path, "read");
+    const reqPath = `/v1/files/${encoded}`;
+    const { response, controller } = await this.request("GET", reqPath, {
+      signal,
+    });
+    if (response.status !== 200) {
+      throw await this.buildApiError(
+        response,
+        controller,
+        "GET",
+        reqPath,
+        signal,
+      );
+    }
+    if (
+      mediaType(response.headers.get("content-type")) === "application/json"
+    ) {
+      await readBoundedBody(
+        response,
+        this.opts.maxMetadataResponseSize,
+        controller,
+        signal,
+      ).catch(() => {});
+      throw invalidArgument(`cannot read '${path}': it is a directory`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return new ReadableStream<Uint8Array>({
+        start: (rsController) => rsController.close(),
+      });
+    }
+    return wrapDownloadStream(
+      reader,
+      this.opts.maxDownloadSize,
+      controller,
+      signal,
+    );
+  }
+
   async write(
     path: string,
     content: Uint8Array,
@@ -451,6 +713,104 @@ export class SandboxdRestClient {
       controller,
       signal,
     ).catch(() => {});
+  }
+
+  /**
+   * Like write(), but streams `content` in a single chunked request instead
+   * of buffering it, bounded by maxUploadSize enforced per-chunk (see
+   * wrapUploadStream()). Returns the number of bytes actually sent, for the
+   * caller's tracing span. `content` is consumed at most once; a source
+   * error surfaces tagged as SourceFailure (see that class's doc) rather
+   * than thrown directly, so Sandbox can keep it out of connection-
+   * generation invalidation and unwrap it for the caller.
+   *
+   * Every termination path (overflow, source failure, external `signal`
+   * abort, a non-204 response, or an acknowledgement before the source
+   * reached EOF) cancels `content`'s reader exactly once, centrally, here —
+   * fetch()'s own cancellation of the request body on an early response is
+   * asynchronous and unreliable (observed: it can lag the resolved Response
+   * by tens of milliseconds, or never fire on an external abort at all), so
+   * this method never relies on it.
+   */
+  async writeStream(
+    path: string,
+    content: ReadableStream<Uint8Array>,
+    opts: { mode?: string },
+    signal: AbortSignal,
+  ): Promise<number> {
+    if (opts.mode !== undefined && !/^0[0-7]{3}$/.test(opts.mode)) {
+      throw invalidArgument(
+        `invalid mode '${opts.mode}': must match ^0[0-7]{3}$`,
+      );
+    }
+    if (content.locked) {
+      throw invalidArgument(
+        "writeStream content is already locked by another reader",
+      );
+    }
+    const encoded = resolveSandboxPath(path, "write");
+    const reqPath = `/v1/files/${encoded}`;
+
+    let sourceReader: ReadableStreamDefaultReader<Uint8Array>;
+    try {
+      sourceReader = content.getReader();
+    } catch {
+      throw invalidArgument(
+        "writeStream content is already locked by another reader",
+      );
+    }
+
+    const controller = new AbortController();
+    const {
+      stream: body,
+      bytesSent,
+      isSourceDone,
+    } = wrapUploadStream(sourceReader, this.opts.maxUploadSize, controller);
+
+    let response: Response;
+    try {
+      ({ response } = await this.request("PUT", reqPath, {
+        signal,
+        controller,
+        duplex: "half",
+        query: opts.mode ? { mode: opts.mode } : undefined,
+        headers: { "Content-Type": "application/octet-stream" },
+        body: body as BodyInit,
+      }));
+    } catch (err) {
+      sourceReader.cancel(err).catch(() => {});
+      throw err;
+    }
+
+    if (response.status !== 204) {
+      sourceReader.cancel().catch(() => {});
+      throw await this.buildApiError(
+        response,
+        controller,
+        "PUT",
+        reqPath,
+        signal,
+      );
+    }
+    if (!isSourceDone()) {
+      sourceReader.cancel().catch(() => {});
+      await readBoundedBody(
+        response,
+        this.opts.maxMetadataResponseSize,
+        controller,
+        signal,
+      ).catch(() => {});
+      throw invalidResponse(
+        "sandboxd acknowledged the write before the input stream reached EOF",
+      );
+    }
+    await readBoundedBody(
+      response,
+      this.opts.maxMetadataResponseSize,
+      controller,
+      signal,
+    ).catch(() => {});
+    return bytesSent();
   }
 
   async exists(path: string, signal: AbortSignal): Promise<boolean> {

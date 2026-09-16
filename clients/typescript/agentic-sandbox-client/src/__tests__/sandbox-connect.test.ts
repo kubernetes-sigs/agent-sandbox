@@ -26,6 +26,12 @@ import {
   ExecuteResponseSchema,
   ProcessService,
 } from "../_proto/process/v1/process_pb.js";
+import {
+  SandboxClosedError,
+  SandboxConnectionError,
+  SandboxError,
+  SandboxTimeoutError,
+} from "../exceptions.js";
 import { noopLogger } from "../logger.js";
 import type { SandboxInit } from "../sandbox.js";
 import { normalizeSandboxdOptions, Sandbox } from "../sandbox.js";
@@ -133,9 +139,11 @@ function makeTestKubeConfig(apiServerPort: number): k8s.KubeConfig {
 async function startRestBackend(): Promise<{
   port: number;
   healthHits: number;
+  putBodies: Buffer[];
   close(): Promise<void>;
 }> {
   const counter = { healthHits: 0 };
+  const putBodies: Buffer[] = [];
   const server = http.createServer((req, res) => {
     if (req.url === "/v1/health") {
       counter.healthHits++;
@@ -149,9 +157,35 @@ async function startRestBackend(): Promise<{
       req.socket.destroy();
       return;
     }
+    if (req.url?.endsWith("stream-slow.txt")) {
+      // Sends one chunk of a streaming download, then hangs — left open so
+      // a test can exercise timeout/cancel/in-flight behavior mid-stream,
+      // whether or not the consumer keeps reading.
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.from("first-chunk"));
+      return;
+    }
     if (req.url?.endsWith("slow.txt")) {
       // Never responds — left open so a test can abort the caller-side
       // signal while the request is still in flight.
+      return;
+    }
+    if (req.url?.endsWith("reset-mid-stream.txt")) {
+      // Sends headers plus a first chunk, then resets the connection —
+      // simulates a transport-level failure partway through a download.
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      res.write(Buffer.from("partial"));
+      setTimeout(() => req.socket.destroy(), 20);
+      return;
+    }
+    if (req.method === "PUT" && req.url?.startsWith("/v1/files/")) {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        putBodies.push(Buffer.concat(chunks));
+        res.writeHead(204);
+        res.end();
+      });
       return;
     }
     if (req.url?.startsWith("/v1/files/")) {
@@ -171,6 +205,7 @@ async function startRestBackend(): Promise<{
     get healthHits() {
       return counter.healthHits;
     },
+    putBodies,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
@@ -460,5 +495,353 @@ describe("Sandbox connectivity integration", () => {
     // The configured portForwardReadyTimeoutMs is 5000ms; a fail-fast
     // classification must reject well before that, not after exhausting it.
     expect(Date.now() - startedAt).toBeLessThan(2000);
+  });
+});
+
+describe("Sandbox streaming integration", () => {
+  it("readStream errors via the per-call timeout without waiting for another read, and releases in-flight promptly", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const stream = await sandbox.files.readStream("stream-slow.txt", {
+      timeoutMs: 150,
+    });
+    // Never read from it — the timeout must still surface via `closed`
+    // without this test issuing another read() first.
+    const reader = stream.getReader();
+    await expect(reader.closed).rejects.toBeInstanceOf(SandboxTimeoutError);
+
+    // In-flight was released by the timeout itself, not by close()'s much
+    // longer cleanup window — the next call proceeds immediately.
+    const startedAt = Date.now();
+    await sandbox.files.exists("a.txt");
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+  });
+
+  it("closeLocal() immediately fails a never-read readStream via lifecycle abort and releases in-flight", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const stream = await sandbox.files.readStream("stream-slow.txt");
+    const reader = stream.getReader();
+
+    const startedAt = Date.now();
+    await sandbox.closeLocal();
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    await expect(reader.closed).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+
+  it("invalidates the generation on a transport failure mid-readStream and reconnects on the next call", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const stream = await sandbox.files.readStream("reset-mid-stream.txt");
+    expect(restBackend.healthHits).toBe(1);
+    const reader = stream.getReader();
+    await reader.read();
+    await expect(reader.read()).rejects.toBeInstanceOf(SandboxConnectionError);
+
+    const content = await sandbox.files.read("a.txt");
+    expect(new TextDecoder().decode(content)).toBe("file contents");
+    expect(restBackend.healthHits).toBe(2);
+  });
+
+  it("treats a consumer cancel of readStream as a normal termination: no error code, no size, generation stays valid", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    const stream = await sandbox.files.readStream("stream-slow.txt");
+    expect(restBackend.healthHits).toBe(1);
+    const reader = stream.getReader();
+    await reader.read();
+    await reader.cancel();
+
+    expect(events.some((e) => e.startsWith("attr:sandbox.error.code"))).toBe(
+      false,
+    );
+    expect(events.some((e) => e.startsWith("attr:sandbox.file.size"))).toBe(
+      false,
+    );
+    expect(events.some((e) => e.startsWith("status:"))).toBe(false);
+
+    // Generation stays valid: the next call reuses it, no new health check.
+    const content = await sandbox.files.read("a.txt");
+    expect(new TextDecoder().decode(content)).toBe("file contents");
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("records sandbox.file.size once a readStream is fully consumed", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    const stream = await sandbox.files.readStream("a.txt");
+    const reader = stream.getReader();
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+    }
+    expect(total).toBe("file contents".length);
+    // Setting the span attribute happens on a separate promise chain from
+    // the stream closing (see readStreamImpl()'s withSpan fn vs. the public
+    // wrapper's pull()) — both stem from the same terminate() call, but
+    // aren't ordered relative to each other, so poll briefly rather than
+    // assume the event is visible the instant the stream reports done.
+    await vi.waitFor(() => {
+      expect(events).toContain(`attr:sandbox.file.size=${total}`);
+    });
+  });
+
+  it("never records a secret sentinel for a failed readStream", async () => {
+    const SENTINEL = "sekrit-sentinel-readstream-9f3c";
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    await expect(
+      sandbox.files.readStream(`${SENTINEL}/kill-me.txt`),
+    ).rejects.toBeTruthy();
+
+    expect(events.length).toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event).not.toContain(SENTINEL);
+    }
+  });
+
+  it("writeStream sends the exact content and reuses the generation for the next call", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { tracingManager, events } = makeRecordingTracerManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      tracingManager,
+    });
+
+    const encoder = new TextEncoder();
+    const chunks = [encoder.encode("hello "), encoder.encode("world")];
+    let i = 0;
+    const content = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (i >= chunks.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunks[i++]);
+      },
+    });
+
+    await sandbox.files.writeStream("out.txt", content);
+    expect(restBackend.putBodies).toHaveLength(1);
+    expect(restBackend.putBodies[0].toString()).toBe("hello world");
+    expect(events).toContain("attr:sandbox.file.size=11");
+    expect(restBackend.healthHits).toBe(1);
+
+    // Generation stays valid: the next call reuses it, no new health check.
+    await sandbox.files.exists("a.txt");
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("writeStream rejects with the source's own thrown value and keeps the generation valid", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const boom = new Error("source blew up");
+    const content = new ReadableStream<Uint8Array>({
+      pull() {
+        throw boom;
+      },
+    });
+
+    await expect(sandbox.files.writeStream("out.txt", content)).rejects.toBe(
+      boom,
+    );
+    expect(restBackend.healthHits).toBe(1);
+
+    // Generation stays valid: the next call reuses it, no new health check.
+    await sandbox.files.exists("a.txt");
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("writeStream rejects with a SandboxConnectionError thrown by the source without invalidating the generation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    // A SandboxConnectionError is normally what invalidates a generation —
+    // this one originates in the caller's *source* stream, not the
+    // sandboxd connection, so SourceFailure must keep it from doing so
+    // (D5): classifyOperationFailure() checks `instanceof SourceFailure`
+    // before it ever looks at the wrapped value's type.
+    const sourceErr = new SandboxConnectionError(
+      "source-side connection error",
+      "socket",
+    );
+    const content = new ReadableStream<Uint8Array>({
+      pull() {
+        throw sourceErr;
+      },
+    });
+
+    await expect(sandbox.files.writeStream("out.txt", content)).rejects.toBe(
+      sourceErr,
+    );
+    expect(restBackend.healthHits).toBe(1);
+
+    // Generation stays valid: the next call reuses it, no new health check.
+    await sandbox.files.exists("a.txt");
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("writeStream terminates via the per-call timeout even when the source's pull() never resolves", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const stalledContent = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => {
+          // never resolves
+        });
+      },
+    });
+
+    const startedAt = Date.now();
+    await expect(
+      sandbox.files.writeStream("out.txt", stalledContent, {
+        timeoutMs: 150,
+      }),
+    ).rejects.toBeInstanceOf(SandboxTimeoutError);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+
+    // In-flight was released by the timeout, not left hanging on the stuck
+    // source — the next call proceeds on the same generation.
+    await sandbox.files.exists("a.txt");
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("writeStream terminates via the caller's own AbortSignal even when the source's pull() never resolves", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const stalledContent = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => {
+          // never resolves
+        });
+      },
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller cancel");
+    setTimeout(() => controller.abort(reason), 50);
+
+    const startedAt = Date.now();
+    await expect(
+      sandbox.files.writeStream("out.txt", stalledContent, {
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(reason);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+
+    await sandbox.files.exists("a.txt");
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("a concurrent transport failure on another call invalidates the generation for an in-flight readStream too", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const stream = await sandbox.files.readStream("stream-slow.txt");
+    expect(restBackend.healthHits).toBe(1);
+    const reader = stream.getReader();
+    await reader.read(); // consumes the one available chunk; stream now stalled
+
+    // A concurrent operation's transport failure invalidates the whole
+    // generation — including this still-open readStream.
+    await expect(sandbox.files.read("kill-me.txt")).rejects.toBeTruthy();
+    await expect(reader.closed).rejects.toMatchObject({ kind: "protocol" });
+
+    // The next call reconnects from scratch.
+    const content = await sandbox.files.read("a.txt");
+    expect(new TextDecoder().decode(content)).toBe("file contents");
+    expect(restBackend.healthHits).toBe(2);
+  });
+
+  it("writeStream rejects an already-locked content stream before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    const content = new ReadableStream<Uint8Array>({ pull() {} });
+    content.getReader();
+
+    await expect(sandbox.files.writeStream("out.txt", content)).rejects.toThrow(
+      SandboxError,
+    );
+    expect(restBackend.healthHits).toBe(0);
   });
 });

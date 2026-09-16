@@ -3,11 +3,19 @@
 # during `make bundle` does not fight verify-olm.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# [Optional] Controller NetworkPolicy: uncomment ../network-policy to deploy
+# ingress/egress restrictions for the controller pod. Required by compliance
+# frameworks (SOC 2, FedRAMP, PCI-DSS, CIS Kubernetes benchmarks) that mandate
+# network segmentation for control-plane components. Commented out by default
+# because egress-deny semantics can break clusters with non-standard API server
+# endpoints, private proxies, or CNI/DNS configurations. See
+# k8s/networkpolicy.yaml for the full policy and tuning guidance.
 resources:
 - ../crd
 - ../rbac
 - ../manager
 - ../sandbox-router
+# - ../network-policy
 images:
 - name: registry.k8s.io/agent-sandbox/sandbox-router-go
   newName: registry.k8s.io/agent-sandbox/sandbox-router-go

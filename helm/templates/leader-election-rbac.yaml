@@ -11,25 +11,10 @@ metadata:
   labels:
     {{- include "agent-sandbox.labels" . | nindent 4 }}
 rules:
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
+{{ .Files.Get "files/rbac.le.generated.yaml" | indent 0 }}
+{{- if .Values.controller.extensions }}
+{{ .Files.Get "files/extensions-rbac.le.generated.yaml" | indent 0 }}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

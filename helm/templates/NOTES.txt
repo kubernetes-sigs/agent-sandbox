@@ -66,25 +66,10 @@ metadata:
   name: agent-sandbox-controller-leader-election
   namespace: {{ $leNs }}
 rules:
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
+{{ $.Files.Get "files/rbac.le.generated.yaml" }}
+{{- if $.Values.controller.extensions }}
+{{ $.Files.Get "files/extensions-rbac.le.generated.yaml" }}
+{{- end -}}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

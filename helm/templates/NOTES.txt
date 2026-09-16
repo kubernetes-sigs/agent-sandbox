@@ -1,0 +1,104 @@
+{{- $controllerNs := include "agent-sandbox.namespace" . }}
+Agent Sandbox controller installed in namespace {{ $controllerNs }}.
+{{- if .Values.controller.watchNamespaces }}
+
+Namespace-scoped mode: watching {{ join ", " .Values.controller.watchNamespaces }}.
+{{- $crossNs := list }}
+{{- range .Values.controller.watchNamespaces }}
+{{- if ne . $controllerNs }}
+{{- $crossNs = append $crossNs . }}
+{{- end }}
+{{- end }}
+{{- if $crossNs }}
+
+================================================================================
+  ACTION REQUIRED: Cross-namespace RBAC
+================================================================================
+
+Helm only manages resources in the release namespace ({{ $controllerNs }}).
+Apply the following RBAC for the remaining watched namespaces:
+
+  kubectl apply -f - <<'EOF'
+{{- range $crossNs }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-controller
+  namespace: {{ . }}
+rules:
+{{ $.Files.Get "files/rbac.namespaced.generated.yaml" }}
+{{- if $.Values.controller.extensions }}
+{{ $.Files.Get "files/extensions-rbac.namespaced.generated.yaml" }}
+{{- end -}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller
+  namespace: {{ . }}
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: {{ $controllerNs }}
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+  EOF
+{{- end }}
+{{- $leNs := include "agent-sandbox.leaderElectionNamespace" . }}
+{{- if ne $leNs $controllerNs }}
+
+================================================================================
+  ACTION REQUIRED: Leader election RBAC
+================================================================================
+
+Leader election is configured in namespace {{ $leNs }}, which is outside the
+release namespace. Apply the following:
+
+  kubectl apply -f - <<'EOF'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-controller-leader-election
+  namespace: {{ $leNs }}
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller-leader-election
+  namespace: {{ $leNs }}
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: {{ $controllerNs }}
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller-leader-election
+  apiGroup: rbac.authorization.k8s.io
+  EOF
+{{- end }}
+{{- end }}

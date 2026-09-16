@@ -168,6 +168,52 @@ func TestParseWatchNamespaces(t *testing.T) {
 	}
 }
 
+func TestParseWatchNamespacesEnvFallback(t *testing.T) {
+	t.Run("empty flag uses env var", func(t *testing.T) {
+		t.Setenv("WATCH_NAMESPACE", "env-a,env-b")
+		got, err := parseWatchNamespaces("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"env-a", "env-b"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+	t.Run("flag takes precedence over env", func(t *testing.T) {
+		t.Setenv("WATCH_NAMESPACE", "env-ns")
+		got, err := parseWatchNamespaces("flag-ns")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 1 || got[0] != "flag-ns" {
+			t.Fatalf("got %v, want [flag-ns]", got)
+		}
+	})
+	t.Run("env whitespace only is error", func(t *testing.T) {
+		t.Setenv("WATCH_NAMESPACE", "  ")
+		_, err := parseWatchNamespaces("")
+		if err == nil {
+			t.Fatal("expected error for whitespace-only env var")
+		}
+	})
+	t.Run("neither flag nor env returns nil", func(t *testing.T) {
+		t.Setenv("WATCH_NAMESPACE", "")
+		got, err := parseWatchNamespaces("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("got %v, want nil", got)
+		}
+	})
+}
+
 func TestBuildCacheOptionsCombinedWatchNamespacesAndLabelSelector(t *testing.T) {
 	namespaces := []string{"team-a", "team-b"}
 	opts, err := buildCacheOptions(true, namespaces)

@@ -280,7 +280,13 @@ class AsyncK8sHelper:
                     rv = "0"
                     continue
                 raise
-            except (aiohttp.ClientError, ConnectionError) as e:
+            except aiohttp.ClientSSLError:
+                raise
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                ConnectionError,
+            ) as e:
                 logger.warning(
                     f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
                     "reconnecting..."
@@ -331,7 +337,13 @@ class AsyncK8sHelper:
                         raise SandboxNotFoundError(
                             f"Sandbox {name} was deleted before becoming ready."
                         )
-            except (aiohttp.ClientError, ConnectionError) as e:
+            except aiohttp.ClientSSLError:
+                raise
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                ConnectionError,
+            ) as e:
                 logger.warning(
                     f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
                     "reconnecting..."

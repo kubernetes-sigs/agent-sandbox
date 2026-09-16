@@ -362,6 +362,22 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(name, "warm-sandbox-1")
         self.assertEqual(stream_rvs, ["12345", "5555"])
 
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_watch_non_transient_network_exception_reraises(self, mock_watch_class):
+        """Non-transient exceptions (such as ClientSSLError) must not be caught and retried."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+
+        async def mock_stream(*args, **kwargs):
+            raise aiohttp.ClientSSLError(MagicMock(), OSError("certificate verify failed"))
+            yield  # make this an async generator
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        with self.assertRaises(aiohttp.ClientSSLError):
+            await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+
 
 class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 

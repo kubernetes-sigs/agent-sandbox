@@ -2,7 +2,7 @@
 
 This TypeScript client provides a high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller, mirroring the [Go client](../../go/README.md) and [Python client](../../python/agentic-sandbox-client/README.md).
 
-The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.run()` and `sandbox.files.{read,write,exists,list,delete}()`). `Start`/PTY/interactive process support is not part of this surface yet.
+The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.run()` and `sandbox.files.{read,write,readStream,writeStream,exists,list,delete}()`). `Start`/PTY/interactive process support is not part of this surface yet.
 
 ## Usage
 
@@ -36,6 +36,35 @@ try {
 - Every `sandbox.files.*` / `sandbox.commands.run()` call takes a per-call `timeoutMs` (default 60000). This is a total budget for the call, including any time spent waiting on the shared connection above — a cold first call can spend most of its budget just connecting.
 - `sandboxd.maxCommandOutputSize` bounds the fully-decoded `ExecuteResponse` (stdout + stderr + protobuf framing combined, not stdout alone) that `sandbox.commands.run()` will accept.
 
+### Streaming
+
+`sandbox.files.readStream()` / `writeStream()` transfer a file without buffering the whole payload in memory, unlike `read()`/`write()`:
+
+```ts
+import { createReadStream, createWriteStream } from "node:fs";
+import { Readable, Writable } from "node:stream";
+
+// Upload a large local file without buffering it.
+await sandbox.files.writeStream(
+  "data/input.bin",
+  Readable.toWeb(createReadStream("./input.bin")) as ReadableStream<Uint8Array>,
+  { timeoutMs: 10 * 60_000 },
+);
+
+// Download and stream straight to disk.
+const stream = await sandbox.files.readStream("data/output.bin", {
+  timeoutMs: 10 * 60_000,
+});
+await stream.pipeTo(Writable.toWeb(createWriteStream("./output.bin")));
+```
+
+A few things differ from the buffered methods:
+
+- **Ownership**: `readStream()` resolves once the response headers are validated, before the file is fully downloaded — you must read the returned `ReadableStream` to completion or cancel it (e.g. `reader.cancel()`). An abandoned, unread stream keeps its operation in flight until `opts.timeoutMs` elapses or the sandbox is closed. `writeStream()` consumes its input stream at most once; the SDK cancels it on any termination after consumption starts (timeout, abort, an oversized upload, a non-204 response), but a validation failure that happens *before* the stream is touched (an invalid mode, or content that's already locked by another reader) leaves the stream with you.
+- **Timeouts**: `opts.timeoutMs` (same option as the buffered methods, default 60000) is a total budget from the call through full consumption. For `readStream()` it keeps running even while you're not reading; for `writeStream()` it includes time spent waiting on your input stream. A timeout errors the stream/promise and releases the operation without waiting for another read or write.
+- **Size limits**: `sandboxd.maxDownloadSize` / `sandboxd.maxUploadSize` are enforced incrementally as bytes arrive or are sent, not against a `Content-Length` header — an oversized transfer is aborted mid-stream rather than buffered in full and then rejected. On an oversized upload, sandboxd may already have received a prefix within the limit before the abort; its atomic rename (see "No automatic retry" below) still keeps that prefix from ever becoming the target file's visible content.
+- **`close()`**: an unconsumed `readStream()` or an in-flight `writeStream()` counts toward `close()`'s in-flight drain, bounded by the same cleanup timeout as every other operation.
+
 ### Execution target and path rules
 
 `sandbox.commands.run(command)` always executes `/bin/sh -c <command>` inside the container running sandboxd. If your Pod spec's sandboxd container has a different root filesystem than a "workload" sidecar container, `run()` only ever executes in the sandboxd container — a shared volume does not make binaries from another container available to it.
@@ -50,7 +79,19 @@ This path confinement covers the files API and the working directory sandboxd ru
 
 ### No automatic retry
 
-A failed `files.*` or `commands.run()` call is never retried automatically by the SDK. In particular, a failed `run()` call may or may not have executed to completion server-side before the failure was observed — retrying blindly could re-run a command that already had side effects. If the underlying connection was invalidated by a transport failure, the *next* call you make reconnects from scratch; other calls already in flight on the same connection fail together with it.
+A failed `files.*` or `commands.run()` call is never retried automatically by the SDK. If the underlying connection was invalidated by a transport failure, the *next* call you make reconnects from scratch; other calls already in flight on the same connection fail together with it.
+
+What "retrying" safely means differs per method:
+
+| Method | Automatic retry | Retrying from scratch | Constraints |
+| --- | --- | --- | --- |
+| `run()` | No | Re-run the command | A failed call may or may not have executed to completion server-side before the failure was observed — retrying blindly could re-run a command that already had side effects. |
+| `read()` | No | Call it again | The file may have changed between attempts. |
+| `write()` | No | Resend the same `content` | sandboxd replaces the target atomically via a temporary file and rename, so a failed call never leaves the target partially written. But if the acknowledgement was lost, the write may already have committed server-side, and a retry can overwrite a concurrent update from someone else. |
+| `readStream()` | No | Call it again from the beginning | Discard any partial output and reset your destination first — a partial download is never resumed. The file may have changed between attempts. |
+| `writeStream()` | No | Provide a fresh stream producing the same content | The input stream is consumed at most once, so retrying needs a new stream instance, not the same one rewound. Same atomicity/acknowledgement/concurrent-update caveats as `write()`. |
+
+The atomicity guarantee — the target path never briefly shows partial content — is independent of whether *you* can tell a given call actually completed server-side, and of whether a retry might overwrite someone else's concurrent write.
 
 ### Trust boundary
 

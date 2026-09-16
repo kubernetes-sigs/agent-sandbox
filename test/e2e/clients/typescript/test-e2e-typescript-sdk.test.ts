@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -162,6 +163,55 @@ async function waitForClaimDeleted(
   throw new Error(
     `SandboxClaim '${claimName}' was not deleted within ${timeoutMs}ms`,
   );
+}
+
+/**
+ * Splits `data` into fixed-size chunks delivered one at a time via pull(),
+ * so a writeStream() test actually exercises multi-chunk streaming instead
+ * of handing fetch a single already-complete blob.
+ */
+function toReadableStream(
+  data: Uint8Array,
+  chunkSize = 64 * 1024,
+): ReadableStream<Uint8Array> {
+  let offset = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (offset >= data.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(offset + chunkSize, data.byteLength);
+      controller.enqueue(data.subarray(offset, end));
+      offset = end;
+    },
+  });
+}
+
+/** Reads a ReadableStream to completion and concatenates it into one buffer. */
+async function readAll(
+  stream: ReadableStream<Uint8Array>,
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function sha256Hex(data: Uint8Array): string {
+  return crypto.createHash("sha256").update(data).digest("hex");
 }
 
 /**
@@ -358,6 +408,112 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
       await reattached.close();
     }
   });
+
+  test("writeStream/readStream round-trip a multi-megabyte payload through the real PodTunnel", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const data = crypto.randomBytes(4 * 1024 * 1024);
+      const expectedHash = sha256Hex(data);
+
+      await sandbox.files.writeStream(
+        "stream-roundtrip.bin",
+        toReadableStream(data),
+        { timeoutMs: 120_000 },
+      );
+
+      const stream = await sandbox.files.readStream("stream-roundtrip.bin", {
+        timeoutMs: 120_000,
+      });
+      const readBack = await readAll(stream);
+      // Correctness is judged by content hash and the server's own size
+      // accounting, never by elapsed time or a fixed sleep.
+      expect(sha256Hex(readBack)).toBe(expectedHash);
+
+      const listing = await sandbox.files.list(".");
+      const entry = listing.entries.find(
+        (e) => e.name === "stream-roundtrip.bin",
+      );
+      expect(entry?.size).toBe(data.byteLength);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("cancelling readStream after one chunk still leaves the sandbox usable for later calls", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const data = crypto.randomBytes(2 * 1024 * 1024);
+      await sandbox.files.writeStream("cancel-me.bin", toReadableStream(data), {
+        timeoutMs: 120_000,
+      });
+
+      const stream = await sandbox.files.readStream("cancel-me.bin", {
+        timeoutMs: 120_000,
+      });
+      const reader = stream.getReader();
+      await reader.read();
+      await reader.cancel();
+
+      // The same connection generation must still serve subsequent
+      // operations — both the REST files API and the gRPC process API.
+      await sandbox.files.write("after-cancel.txt", "still alive\n");
+      const readBack = await sandbox.files.read("after-cancel.txt");
+      expect(new TextDecoder().decode(readBack)).toBe("still alive\n");
+
+      const runResult = await sandbox.commands.run("echo after cancel ok");
+      expect(runResult.exitCode).toBe(0);
+      expect(runResult.stdout).toBe("after cancel ok\n");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("writeStream enforces maxUploadSize without creating a new file or corrupting an existing one", async () => {
+    const client = new SandboxClient({
+      namespace,
+      // Well below the SDK default (256 MiB) so the overflow path triggers
+      // on a small, fast payload instead of a multi-hundred-MiB one.
+      sandboxd: { maxUploadSize: 1024 * 1024 },
+    });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const oversized = crypto.randomBytes(2 * 1024 * 1024);
+
+      await expect(
+        sandbox.files.writeStream(
+          "new-oversized.bin",
+          toReadableStream(oversized),
+        ),
+      ).rejects.toMatchObject({ telemetryCode: "request_too_large" });
+      await expect(sandbox.files.exists("new-oversized.bin")).resolves.toBe(
+        false,
+      );
+
+      const original = crypto.randomBytes(4096);
+      const originalHash = sha256Hex(original);
+      await sandbox.files.write("existing.bin", original);
+
+      await expect(
+        sandbox.files.writeStream("existing.bin", toReadableStream(oversized)),
+      ).rejects.toMatchObject({ telemetryCode: "request_too_large" });
+
+      const stillThere = await sandbox.files.read("existing.bin");
+      expect(sha256Hex(stillThere)).toBe(originalHash);
+    } finally {
+      await sandbox.close();
+    }
+  });
 });
 
 describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd, cold pool)", () => {
@@ -387,6 +543,42 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd, cold pool
       const result = await sandbox.commands.run("echo cold start ok");
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("cold start ok\n");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("writeStream/readStream round-trip a multi-megabyte payload against a cold-provisioned sandbox", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_COLDPOOL_NAME,
+      namespace,
+    );
+    try {
+      // Smaller than the warm-pool round-trip test: this test's point is
+      // that the streaming path works through cold connection
+      // initialization too, not to re-verify large-payload throughput.
+      const data = crypto.randomBytes(2 * 1024 * 1024);
+      const expectedHash = sha256Hex(data);
+
+      await sandbox.files.writeStream(
+        "cold-stream-roundtrip.bin",
+        toReadableStream(data),
+        { timeoutMs: 120_000 },
+      );
+
+      const stream = await sandbox.files.readStream(
+        "cold-stream-roundtrip.bin",
+        { timeoutMs: 120_000 },
+      );
+      const readBack = await readAll(stream);
+      expect(sha256Hex(readBack)).toBe(expectedHash);
+
+      const listing = await sandbox.files.list(".");
+      const entry = listing.entries.find(
+        (e) => e.name === "cold-stream-roundtrip.bin",
+      );
+      expect(entry?.size).toBe(data.byteLength);
     } finally {
       await sandbox.close();
     }

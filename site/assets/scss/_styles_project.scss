@@ -62,8 +62,16 @@ footer {
     margin: 0 1rem;
     padding: 0;
 
-    .text-uppercase {
-      display: none;
+    // Docsy prints the site title next to the logo. The logo already carries
+    // the brand, so hide the text visually but keep it for screen readers,
+    // which would otherwise find an unlabelled link.
+    .navbar-brand__name {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
 
     svg {
@@ -92,7 +100,7 @@ footer {
   background-attachment: fixed;
   color: $white;
 
-  .navbar {
+  .td-navbar {
     background-color: transparent;
   }
 

@@ -1,0 +1,29 @@
+# Deny all egress from every sandbox pod in the cluster.
+#
+# Admin tier: evaluated before any Kubernetes NetworkPolicy, so a template's
+# networkPolicy or Unmanaged mode cannot override it.
+# Priority 100: lower values are evaluated first, so the Accept/Pass policies
+# at 5/10/20/30 are checked before this catch-all.
+# Subject: every pod with the agent-sandbox tracking label, in any namespace.
+# Egress only; ingress stays governed by the template-managed NetworkPolicy.
+apiVersion: policy.networking.k8s.io/v1alpha2
+kind: ClusterNetworkPolicy
+metadata:
+  name: sandbox-egress-default-deny
+spec:
+  tier: Admin
+  priority: 100
+  subject:
+    pods:
+      namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+          - key: agents.x-k8s.io/sandbox-name-hash
+            operator: Exists
+  egress:
+    - name: deny-everything-else
+      action: Deny
+      to:
+        - networks:
+            - 0.0.0.0/0
+            - "::/0"

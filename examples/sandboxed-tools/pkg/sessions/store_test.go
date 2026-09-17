@@ -16,6 +16,7 @@ package sessions
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -37,8 +38,8 @@ func TestFileStore(t *testing.T) {
 
 	// 1. Load non-existent session
 	msgs, err := store.LoadSession(ctx, sessionID)
-	if err != nil {
-		t.Fatalf("LoadSession failed for non-existent session: %v", err)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LoadSession for non-existent session: got err %v, want ErrNotFound", err)
 	}
 	if len(msgs) != 0 {
 		t.Errorf("expected empty messages, got %d", len(msgs))

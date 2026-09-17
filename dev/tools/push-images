@@ -220,6 +220,21 @@ def main(args):
             if root == sandboxd_dir:
                 context_dir = "."
 
+            # The geminicli-toolbox image also imports the shared Go module,
+            # so it too builds from the repo root.
+            if service_name == "geminicli-toolbox":
+                context_dir = "."
+
+            # The sandboxed-tools ACP server builds from the repo root (its
+            # module replaces the root module and the agentclientprotocol
+            # example), and takes a qualified name: "acp-server" alone says
+            # nothing about which example it belongs to, and the manifest
+            # and README refer to it as sandboxed-tools-acp-server.
+            acp_server_dir = os.path.join(".", "examples", "sandboxed-tools", "cmd", "acp-server")
+            if root == acp_server_dir:
+                context_dir = "."
+                service_name = "sandboxed-tools-acp-server"
+
             if args.controller_only and service_name != "agent-sandbox-controller":
                 continue
 

@@ -27,10 +27,7 @@ spec:
   # Metrics scrape — open to all namespaces by default.
   - ports:
     - protocol: TCP
-      port: 8080
-    # Uncomment when --metrics-secure-serving is enabled:
-    # - protocol: TCP
-    #   port: 8443
+      port: 8080   # Replace with 8443 when --metrics-secure-serving is enabled.
   # Kubelet health/readiness probes.
   - ports:
     - protocol: TCP

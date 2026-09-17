@@ -107,6 +107,9 @@ interface HandlerFacade {
 
 interface PairHandle {
   teardown(reason?: unknown): void;
+  teardownGraceful(): void;
+  /** True once either teardown method has begun (forceful or graceful). */
+  readonly settling: boolean;
 }
 
 /**
@@ -474,14 +477,49 @@ export class PodTunnel {
    * the readable side emitting "data", never the writable side.
    */
   private wireMessagePump(socket: net.Socket, real: WebSocket): PairHandle {
-    let torn = false;
+    // "graceful" covers the WS or the local socket closing cleanly on its
+    // own — draining flushes whatever is already queued instead of
+    // discarding it. Forceful teardown (errors, protocol violations,
+    // PodTunnel.close()) always wins and can cut in mid-drain, which is why
+    // it only guards on "closed", not "graceful": close() depends on being
+    // able to force every remaining pair so it doesn't hang waiting for a
+    // slow reader to finish draining.
+    let state: "open" | "graceful" | "closed" = "open";
+
+    const finalize = () => {
+      if (state === "closed") return;
+      state = "closed";
+      this.pairs.delete(pairHandle);
+    };
+
+    const forceTeardown = () => {
+      if (state === "closed") return;
+      finalize();
+      socket.destroy();
+      real.terminate();
+    };
+
+    const gracefulTeardown = () => {
+      if (state !== "open") return;
+      state = "graceful";
+      real.close();
+      if (socket.destroyed) {
+        finalize();
+      } else {
+        // end() flushes whatever the "message" handler below already wrote
+        // before closing, unlike destroy() which discards it. finalize()
+        // (and the this.pairs removal close() depends on) waits for the
+        // socket to actually finish closing.
+        socket.end();
+        socket.once("close", finalize);
+      }
+    };
+
     const pairHandle: PairHandle = {
-      teardown: () => {
-        if (torn) return;
-        torn = true;
-        this.pairs.delete(pairHandle);
-        socket.destroy();
-        real.terminate();
+      teardown: forceTeardown,
+      teardownGraceful: gracefulTeardown,
+      get settling() {
+        return state !== "open";
       },
     };
     this.pairs.add(pairHandle);
@@ -496,10 +534,10 @@ export class PodTunnel {
     // ever lifted by this "drain" listener.
     socket.on("drain", () => real.resume());
 
-    real.on("close", () => pairHandle.teardown());
+    real.on("close", () => pairHandle.teardownGraceful());
     real.on("error", () => pairHandle.teardown());
     real.on("message", (raw: Buffer, isBinary: boolean) => {
-      if (torn) return;
+      if (pairHandle.settling) return;
       if (!isBinary || !(raw instanceof Buffer) || raw.length === 0) {
         pairHandle.teardown(
           new SandboxConnectionError(
@@ -561,9 +599,15 @@ export class PodTunnel {
     real: WebSocket,
     pairHandle: PairHandle,
   ): void {
-    socket.on("close", () => pairHandle.teardown());
+    socket.on("close", () => pairHandle.teardownGraceful());
     socket.on("error", () => pairHandle.teardown());
     socket.on("data", (chunk: Buffer) => {
+      // A graceful teardown started by the other side (e.g. the WS already
+      // closed and `socket` is mid-flush via socket.end()) means there's
+      // nowhere left to send this: real.send() would error and escalate to
+      // a forceful teardown, destroying the socket mid-flush and reopening
+      // the exact data-loss bug this guard exists to prevent.
+      if (pairHandle.settling) return;
       const framed = Buffer.concat([
         Buffer.from([PORT_FORWARD_DATA_CHANNEL]),
         chunk,

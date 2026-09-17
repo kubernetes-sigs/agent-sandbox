@@ -29,6 +29,7 @@ interface FakeApiServerOptions {
   targetPort: number;
   handshakeDelayMs?: number;
   sendErrorPayload?: Buffer;
+  sendDataPayload?: Buffer;
 }
 
 async function startFakeApiServer(
@@ -48,6 +49,16 @@ async function startFakeApiServer(
 
     if (opts.sendErrorPayload) {
       ws.send(Buffer.concat([Buffer.from([1]), opts.sendErrorPayload]));
+      return;
+    }
+
+    if (opts.sendDataPayload) {
+      // Sent as a single WS message immediately followed by a clean close,
+      // so the close frame rides the same TCP read as the message tail —
+      // this is what reproduces the client's "message" + "close" landing in
+      // the same tick (see the regression test below).
+      ws.send(Buffer.concat([Buffer.from([0]), opts.sendDataPayload]));
+      ws.close();
       return;
     }
 
@@ -207,6 +218,46 @@ describe("PodTunnel", () => {
     await done;
     expect(Buffer.concat(chunks).subarray(0, payload.length)).toEqual(payload);
     client.destroy();
+  });
+
+  it("flushes data already queued for a slow local reader after the WS closes normally", async () => {
+    const payload = Buffer.alloc(8 * 1024 * 1024);
+    for (let i = 0; i < payload.length; i++) payload[i] = i % 256;
+
+    api = await startFakeApiServer({ targetPort: 1, sendDataPayload: payload });
+    tunnel = new PodTunnel({
+      kubeConfig: makeTestKubeConfig(api.port),
+      namespace: "ns1",
+      podName: "pod1",
+      restTargetPort: 8080,
+      grpcTargetPort: 9090,
+      handshakeTimeoutMs: 5000,
+      logger: noopLogger,
+    });
+    const endpoints = await tunnel.start();
+    const url = new URL(endpoints.restBaseUrl);
+    const client = await connectClient(Number(url.port));
+    // Slow reader: nothing drains the tunnel's local socket until we
+    // resume() below, well after the apiserver has sent the payload and
+    // closed normally.
+    client.pause();
+
+    let sawError = false;
+    client.once("error", () => {
+      sawError = true;
+    });
+    const chunks: Buffer[] = [];
+    client.on("data", (chunk: Buffer) => chunks.push(chunk));
+    const ended = new Promise<void>((resolve) => client.once("end", resolve));
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    client.resume();
+    await ended;
+
+    expect(sawError).toBe(false);
+    // vitest's deep-equality diffing is prohibitively slow on multi-MiB
+    // Buffers; Buffer#equals() does a native byte-for-byte compare instead.
+    expect(Buffer.concat(chunks).equals(payload)).toBe(true);
   });
 
   it("tears down the pair on a non-empty error-channel payload", async () => {

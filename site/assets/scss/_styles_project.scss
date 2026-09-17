@@ -624,6 +624,15 @@ h1.text-center {
   background: rgba($primary, 0.2);
 }
 
+.section-index .entry .title {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.section-index .entry .description {
+  font-size: 1rem;
+}
+
 @media (min-width: 768px) {
 
   .td-section .td-navbar,

@@ -15,6 +15,7 @@
 """Adapt the text-native SandboxEnv to finite spaces suitable for RLlib."""
 
 from dataclasses import dataclass
+import operator
 import re
 import shlex
 
@@ -109,12 +110,20 @@ def parse_file_task_state(observation: str) -> FileTaskState:
     return FileTaskState(*(value == "1" for value in match.groups()))
 
 
+def _action_id(action: int) -> int:
+    """Return a valid integer action without coercing other value types."""
+    try:
+        action_id = operator.index(action)
+    except TypeError as exc:
+        raise ValueError(f"Unsupported file-task action: {action!r}") from exc
+    if action_id not in _ACTION_COMMANDS:
+        raise ValueError(f"Unsupported file-task action: {action!r}")
+    return action_id
+
+
 def command_for_action(action: int) -> str:
     """Translate a finite policy action into a fixed shell command."""
-    try:
-        task_command = _ACTION_COMMANDS[int(action)]
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"Unsupported file-task action: {action!r}") from exc
+    task_command = _ACTION_COMMANDS[_action_id(action)]
     # The legacy Python runtime executes argv directly, so explicitly invoke a
     # shell for conditionals and redirection. shlex.quote keeps the script one
     # argument after the runtime parses the command string.
@@ -177,9 +186,7 @@ class DiscreteFileTaskWrapper(gym.Wrapper):
         return self._last_state.observation(1.0), info
 
     def step(self, action):
-        action_id = int(action)
-        if not self.action_space.contains(action_id):
-            raise ValueError(f"Unsupported file-task action: {action!r}")
+        action_id = _action_id(action)
 
         sandbox_observation, reward, terminated, truncated, info = self.env.step(
             command_for_action(action_id)
@@ -210,9 +217,14 @@ class DiscreteFileTaskWrapper(gym.Wrapper):
             }
         )
 
-        # A connection failure cannot produce a useful next action. Truncating
-        # forces RLlib to reset the episode and SandboxEnv to replace the claim.
-        truncated = bool(truncated or info.get("env_error"))
+        # A connection or state-decoding failure cannot produce a useful next
+        # action. Truncating forces RLlib to reset the episode and replace the
+        # SandboxClaim.
+        truncated = bool(
+            truncated
+            or info.get("env_error")
+            or info["state_parse_error"]
+        )
         return (
             state.observation(remaining_steps),
             reward,

@@ -97,6 +97,18 @@ def test_command_for_action_rejects_unknown_action():
         command_for_action(99)
 
 
+@pytest.mark.parametrize("action", [1.5, "1"])
+def test_command_for_action_rejects_non_integer_action(action):
+    with pytest.raises(ValueError, match="Unsupported file-task action"):
+        command_for_action(action)
+
+
+def test_command_for_action_accepts_numpy_integer():
+    command = command_for_action(np.int64(CREATE_DIRECTORY))
+
+    assert "mkdir -p /tmp/agent-sandbox-rllib/output" in command
+
+
 def test_wrapper_maps_actions_and_observations():
     base_env = FakeSandboxEnv()
     client = FakeClient()
@@ -152,6 +164,30 @@ def test_environment_error_truncates_episode_and_preserves_state():
         }
 
     base_env.step = failed_step
+    observation, reward, terminated, truncated, info = env.step(
+        CREATE_DIRECTORY
+    )
+
+    np.testing.assert_array_equal(observation, [0.0, 0.0, 0.0, 0.75])
+    assert reward == -1.0
+    assert not terminated
+    assert truncated
+    assert info["state_parse_error"]
+
+
+def test_state_parse_error_truncates_episode():
+    base_env = FakeSandboxEnv()
+    env = DiscreteFileTaskWrapper(base_env, max_episode_steps=4)
+    env.reset()
+
+    def malformed_step(command):
+        del command
+        return "unexpected output", -1.0, False, False, {
+            "step": 1,
+            "env_error": False,
+        }
+
+    base_env.step = malformed_step
     observation, reward, terminated, truncated, info = env.step(
         CREATE_DIRECTORY
     )

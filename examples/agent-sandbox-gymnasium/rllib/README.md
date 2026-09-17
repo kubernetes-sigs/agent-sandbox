@@ -17,7 +17,8 @@ replaced or the environment closes.
 ## Space adaptation
 
 `SandboxEnv` accepts shell-command strings and returns stdout/stderr strings.
-PPO instead receives a finite action space and a numeric observation:
+This example maps that interface to a `Discrete` action space and a numeric
+`Box` observation before passing it to PPO:
 
 | RLlib action | Command executed in the Sandbox |
 | --- | --- |
@@ -55,7 +56,7 @@ From the repository root, create an isolated environment and install the local
 SDK, local Gymnasium integration, and RLlib dependencies:
 
 ```bash
-python3.12 -m venv bin/python-venv-rllib
+python3 -m venv bin/python-venv-rllib
 bin/python-venv-rllib/bin/pip install \
   -e clients/python/agentic-sandbox-client \
   -e clients/integrations/gymnasium

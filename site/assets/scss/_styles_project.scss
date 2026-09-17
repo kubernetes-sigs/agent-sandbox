@@ -903,3 +903,9 @@ h1.text-center {
     }
   }
 }
+
+.link-card:focus-visible,
+.use-case-card:focus-visible {
+  outline: 3px solid $primary;
+  outline-offset: 4px;
+}

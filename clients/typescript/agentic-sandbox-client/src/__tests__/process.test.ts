@@ -13,23 +13,62 @@
 // limitations under the License.
 
 import * as http2 from "node:http2";
+import type * as net from "node:net";
 import { create } from "@bufbuild/protobuf";
-import type { ConnectRouter } from "@connectrpc/connect";
+import { Code, ConnectError, type ConnectRouter } from "@connectrpc/connect";
 import { connectNodeAdapter } from "@connectrpc/connect-node";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ExecuteResponseSchema,
   ProcessService,
 } from "../_proto/process/v1/process_pb.js";
-import { SandboxClosedError, type SandboxdRpcError } from "../exceptions.js";
+import {
+  SandboxClosedError,
+  SandboxConnectionError,
+  type SandboxdRpcError,
+} from "../exceptions.js";
 import { ProcessClient } from "../process.js";
 
 let lastReceivedCommand: string[] | undefined;
 
+/**
+ * `disruptFirstExecute` severs the transport on the first Execute request
+ * instead of letting `routes` handle it, before any response is sent — this
+ * is what a real mid-call disconnect looks like (server-side session
+ * teardown, or a raw socket reset), as opposed to an application-level gRPC
+ * error the router returns intentionally.
+ */
 async function startH2Server(
   routes: (router: ConnectRouter) => void,
+  opts?: { disruptFirstExecute?: "session" | "socket" },
 ): Promise<{ baseUrl: string; close(): Promise<void> }> {
-  const server = http2.createServer(connectNodeAdapter({ routes }));
+  const inner = connectNodeAdapter({ routes });
+  let triggered = false;
+  let lastRawSocket: net.Socket | undefined;
+  const server = http2.createServer((req, res) => {
+    if (
+      !triggered &&
+      opts?.disruptFirstExecute &&
+      req.url === "/process.v1.ProcessService/Execute"
+    ) {
+      triggered = true;
+      if (opts.disruptFirstExecute === "session") {
+        req.stream.session?.destroy();
+      } else {
+        // req.stream.session.socket is a Proxy that throws
+        // ERR_HTTP2_NO_SOCKET_MANIPULATION on destroy(); use the raw socket
+        // captured via the server's "connection" event instead, and
+        // resetAndDestroy() so the client observes an actual ECONNRESET
+        // rather than a clean FIN.
+        lastRawSocket?.resetAndDestroy();
+      }
+      return;
+    }
+    inner(req, res);
+  });
+  server.on("connection", (socket: net.Socket) => {
+    lastRawSocket = socket;
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("failed to bind");
@@ -162,13 +201,67 @@ describe("ProcessClient.run", () => {
     );
 
     cancelController.abort(new Error("caller cancelled"));
-    await expect(slowRun).rejects.toBeTruthy();
+    // Must reject with the caller's own abort reason, not get reclassified
+    // as a transport failure just because Connect reports it as Canceled.
+    await expect(slowRun).rejects.toThrow("caller cancelled");
     await expect(fastRun).resolves.toEqual({
       exitCode: 0,
       stdout: "fast",
       stderr: "",
     });
     releaseSlow?.();
+  });
+
+  it("classifies a server-side HTTP/2 session teardown as a connection error", async () => {
+    activeServer = await startH2Server(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () => create(ExecuteResponseSchema, {}),
+        });
+      },
+      { disruptFirstExecute: "session" },
+    );
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    // Asserts the actual Connect code that reached classifyError(), not just
+    // the outcome — this is what makes the test a genuine regression guard:
+    // Code.Canceled must be classified alongside Unavailable, not fall
+    // through to SandboxdRpcError.
+    await expect(
+      activeClient.run("echo hi", 30_000, new AbortController().signal),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxConnectionError &&
+        err.kind === "socket" &&
+        err.cause instanceof ConnectError &&
+        err.cause.code === Code.Canceled,
+    );
+  });
+
+  it("classifies a server-side raw socket reset (ECONNRESET) as a connection error", async () => {
+    activeServer = await startH2Server(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () => create(ExecuteResponseSchema, {}),
+        });
+      },
+      { disruptFirstExecute: "socket" },
+    );
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await expect(
+      activeClient.run("echo hi", 30_000, new AbortController().signal),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxConnectionError &&
+        err.kind === "socket" &&
+        err.cause instanceof ConnectError &&
+        err.cause.code === Code.Aborted,
+    );
   });
 
   it("throws SandboxClosedError for any call after abort()", async () => {

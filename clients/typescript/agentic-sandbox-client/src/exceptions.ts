@@ -157,10 +157,15 @@ export class SandboxdApiError extends SandboxError {
 }
 
 /**
- * Raised for a gRPC status other than OK/DEADLINE_EXCEEDED/UNAVAILABLE from
- * the sandboxd ProcessService. `code` is Connect's numeric status mapped to
- * its known snake_case name (e.g. "resource_exhausted"), or "unknown" for an
- * unrecognized code — never the raw rawMessage text, which goes in `detail`.
+ * Raised for a gRPC status other than OK/DEADLINE_EXCEEDED/UNAVAILABLE/
+ * CANCELED/ABORTED from the sandboxd ProcessService. CANCELED/ABORTED are
+ * classified as SandboxConnectionError instead: sandboxd's ProcessService
+ * never returns them as an application status, so @connectrpc/connect-node
+ * only produces them for a transport failure (a session the server tore
+ * down mid-call, or ECONNRESET/stream-destroyed). `code` is Connect's
+ * numeric status mapped to its known snake_case name (e.g.
+ * "resource_exhausted"), or "unknown" for an unrecognized code — never the
+ * raw rawMessage text, which goes in `detail`.
  */
 export class SandboxdRpcError extends SandboxError {
   readonly code: string;

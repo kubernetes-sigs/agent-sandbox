@@ -212,8 +212,36 @@ async function startRestBackend(): Promise<{
 
 async function startGrpcBackend(
   routes: (router: ConnectRouter) => void,
+  opts?: { disruptFirstExecute?: "session" | "socket" },
 ): Promise<{ port: number; close(): Promise<void> }> {
-  const server = http2.createServer(connectNodeAdapter({ routes }));
+  const inner = connectNodeAdapter({ routes });
+  let triggered = false;
+  let lastRawSocket: net.Socket | undefined;
+  const server = http2.createServer((req, res) => {
+    if (
+      !triggered &&
+      opts?.disruptFirstExecute &&
+      req.url === "/process.v1.ProcessService/Execute"
+    ) {
+      triggered = true;
+      if (opts.disruptFirstExecute === "session") {
+        // Simulates the server tearing down the HTTP/2 session mid-call
+        // (e.g. sandboxd shutting down while Execute is in flight).
+        req.stream.session?.destroy();
+      } else {
+        // req.stream.session.socket is a Proxy that throws
+        // ERR_HTTP2_NO_SOCKET_MANIPULATION on destroy(); use the raw socket
+        // captured via the server's "connection" event, and
+        // resetAndDestroy() so the client sees an actual ECONNRESET.
+        lastRawSocket?.resetAndDestroy();
+      }
+      return;
+    }
+    inner(req, res);
+  });
+  server.on("connection", (socket: net.Socket) => {
+    lastRawSocket = socket;
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   if (!addr || typeof addr === "string")
@@ -431,6 +459,63 @@ describe("Sandbox connectivity integration", () => {
     expect(api.connectionsByRequestedPort[18080]).toBeGreaterThan(
       firstGenerationConnections,
     );
+  });
+
+  it("invalidates the generation on a gRPC session teardown, aborts a concurrent REST call, and reconnects on the next call", async () => {
+    restBackend = await startRestBackend();
+    grpcBackend = await startGrpcBackend(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () =>
+            create(ExecuteResponseSchema, {
+              exitCode: 0,
+              stdout: new Uint8Array(),
+              stderr: new Uint8Array(),
+            }),
+        });
+      },
+      { disruptFirstExecute: "session" },
+    );
+    api = await startFakeApiServer({
+      18080: restBackend.port,
+      19090: grpcBackend.port,
+    });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    // Establishes the first generation.
+    await sandbox.files.read("a.txt");
+    expect(restBackend.healthHits).toBe(1);
+    const firstGenerationConnections = api.connectionsByRequestedPort[18080];
+
+    // A concurrent REST call sharing the same generation, left pending.
+    const concurrentRead = sandbox.files.read("slow.txt");
+
+    // Mid-call gRPC session teardown: must surface as a connection error and
+    // invalidate the generation, not hang or get reported as an RPC
+    // application error.
+    await expect(sandbox.commands.run("echo hi")).rejects.toBeInstanceOf(
+      SandboxConnectionError,
+    );
+
+    // The concurrent REST call sharing the invalidated generation is aborted
+    // as a bystander of that failure, not left hanging.
+    await expect(concurrentRead).rejects.toMatchObject({
+      kind: "protocol",
+    } satisfies Partial<SandboxConnectionError>);
+
+    // The next call reconnects from scratch: a fresh health check, a new
+    // port-forward connection, and a new gRPC session.
+    const result = await sandbox.commands.run("echo ok");
+    expect(result.exitCode).toBe(0);
+    expect(restBackend.healthHits).toBe(2);
+    expect(api.connectionsByRequestedPort[18080]).toBeGreaterThan(
+      firstGenerationConnections,
+    );
+    expect(api.connectionsByRequestedPort[19090]).toBe(2);
   });
 
   it("never records a secret sentinel in tracing attributes, status, or exceptions", async () => {

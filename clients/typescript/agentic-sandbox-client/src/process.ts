@@ -214,6 +214,11 @@ export class ProcessClient {
         stderr: decoder.decode(resp.stderr),
       };
     } catch (err) {
+      // A caller-driven abort (our own signal firing) must surface as the
+      // caller's own reason, never as a connection error — checked before
+      // classifyError() so it can safely treat Canceled/Aborted as transport
+      // failures below.
+      if (signal.aborted) throw signal.reason;
       throw this.classifyError(err, deps);
     }
   }
@@ -233,6 +238,20 @@ export class ProcessClient {
         return new SandboxConnectionError(
           "sandboxd gRPC endpoint is unavailable",
           "unavailable",
+          { cause: err, detail },
+        );
+      }
+      // Canceled and Aborted are what @connectrpc/connect-node reports for a
+      // session the server tore down mid-call and for ECONNRESET/
+      // stream-destroyed errors, respectively (see node-error.js's
+      // connectErrorFromNodeReason and http2-session-manager.js). sandboxd's
+      // ProcessService never returns either as an application status, so
+      // both mean the transport dropped out from under this call, same as a
+      // socket-level failure.
+      if (err.code === deps.Code.Canceled || err.code === deps.Code.Aborted) {
+        return new SandboxConnectionError(
+          "sandboxd gRPC session was disconnected mid-call",
+          "socket",
           { cause: err, detail },
         );
       }

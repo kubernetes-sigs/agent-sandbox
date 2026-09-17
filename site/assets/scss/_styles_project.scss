@@ -322,6 +322,12 @@ div.feature-state-notice {
   padding-top: 8rem;
 }
 
+.td-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .mx-auto>.container {
   display: flex;
   flex-direction: row;

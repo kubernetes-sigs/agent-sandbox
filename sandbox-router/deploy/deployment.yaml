@@ -60,8 +60,8 @@ spec:
         - --http-bind-address=:8080
         # Uncomment to enable TLS:
         # - --https-bind-address=:8443
-        # - --tls-cert-file=/etc/tls/tls.crt
-        # - --tls-key-file=/etc/tls/tls.key
+        # - --tls-cert-file=/tls/tls.crt
+        # - --tls-key-file=/tls/tls.key
         - --metrics-bind-address=:9090
         - --health-probe-bind-address=:8081
         - --cluster-domain=cluster.local
@@ -91,7 +91,7 @@ spec:
         # Uncomment to enable TLS mounts:
         # volumeMounts:
         # - name: tls-certs
-        #   mountPath: /etc/tls
+        #   mountPath: /tls
         #   readOnly: true
         livenessProbe:
           httpGet:

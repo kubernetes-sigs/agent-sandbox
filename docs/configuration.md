@@ -183,19 +183,25 @@ The controller's metrics server can optionally serve over HTTPS with configurabl
 * `--tls-min-version` (default: Go default, currently TLS 1.2): Minimum TLS version for the metrics server. Accepted values: `VersionTLS10`, `VersionTLS11`, `VersionTLS12`, `VersionTLS13`.
 * `--tls-cipher-suites` (default: Go defaults): Comma-separated list of cipher suites using Go cipher-suite names (e.g. `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`). TLS 1.3 cipher suites are not configurable in Go and are ignored when `--tls-min-version=VersionTLS13`.
 
-**Example: HTTPS metrics with explicit TLS profile**
+### Enabling secure metrics end-to-end
 
-```yaml
-      containers:
-      - name: agent-sandbox-controller
-        args:
-        - --leader-elect=true
-        - --metrics-secure-serving
-        - --metrics-bind-address=:8443
-        - --metrics-cert-dir=/etc/metrics-certs
-        - --tls-min-version=VersionTLS12
-        - --tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-```
+Enabling `--metrics-secure-serving` changes the listen port from 8080 to 8443. Several manifests reference the metrics port and must be updated together. The full checklist:
+
+1. **Deployment args** — uncomment the TLS flags in `k8s/controller.yaml` (or `k8s/extensions.controller.yaml`):
+   ```yaml
+   - --metrics-secure-serving
+   - --metrics-bind-address=:8443
+   - --metrics-cert-dir=/etc/metrics-certs
+   - --tls-min-version=VersionTLS12
+   - --tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,...
+   ```
+2. **Deployment containerPort** — change `containerPort` from `8080` to `8443`.
+3. **Deployment volumes** — uncomment the `metrics-certs` volumeMount and volume in the same file.
+4. **Service port** — change `port` from `8080` to `8443` in the Service section of `k8s/controller.yaml`.
+5. **Helm chart** — if using the Helm chart, change `port` from `8080` to `8443` in `helm/templates/service.yaml`.
+6. **NetworkPolicy** — if deploying the controller NetworkPolicy (`k8s/networkpolicy.yaml`), replace the `8080` ingress port with `8443`.
+7. **OLM / kustomize** — `make bundle` regenerates `olm/` from `k8s/` and `olm/config/`, so the above changes propagate automatically. If you also enable the ServiceMonitor, update `scheme` from `http` to `https` in `olm/config/prometheus/monitor.yaml`.
+8. **TLS certificate** — create a Kubernetes Secret named `agent-sandbox-metrics-tls` containing `tls.crt` and `tls.key` in the controller namespace. How you provision this depends on your environment (cert-manager, service-serving-cert-signer on OpenShift, manual, etc.).
 
 A downstream operator can inject the cluster TLS profile by translating it into these flags and patching the controller Deployment.
 

@@ -1,0 +1,45 @@
+# Local development for Agent Sandbox with Tilt.
+#
+#   1. Create a kind cluster that Tilt can drive, e.g.:
+#        kind create cluster --name agent-sandbox
+#   2. Run `tilt up` from this directory. Tilt will:
+#        - build the controller image and load it into kind,
+#        - install the Sandbox CRD, namespace, RBAC, and the controller,
+#        - create the demo Sandbox and watch its pod come up.
+#      Tear everything down with `tilt down`.
+#
+# `kind_cluster` connects Tilt to the named kind cluster and auto-loads any
+# image tagged kind.local/ into it.
+kind_cluster('agent-sandbox')
+
+# Build the controller image locally and tag it under kind.local/ so Tilt can
+# load it into the kind cluster.
+controller_img = docker_build(
+    'kind.local/agent-sandbox-controller',
+    context='..',
+    dockerfile='Dockerfile',
+)
+
+# Install the Sandbox CRD, then the namespace, RBAC, and controller Deployment.
+# `img=` swaps the ko:// placeholder in controller.yaml for the local image.
+k8s('../k8s/crds/agents.x-k8s.io_sandboxes.yaml')
+k8s('../k8s/controller.yaml', img=controller_img)
+
+# Build the tiny demo application image referenced by the demo Sandbox.
+demo_img = docker_build(
+    'kind.local/agent-sandbox-demo-app',
+    context='./demo',
+    dockerfile='Dockerfile',
+)
+
+# The demo Sandbox: created automatically on `tilt up`, removed on `tilt down`.
+# The controller terminates the backing pod when the Sandbox is deleted.
+k8s('./sandbox.yaml', img=demo_img)
+k8s_resource(
+    'Sandbox/demo',
+    health_check=k8s_health_cmd(
+        ['kubectl', 'get', 'sandbox', 'demo', '-o',
+         'jsonpath={.status.conditions[?(@.type=="Ready")].status}'],
+        match='True'),
+    target_dependencies=['./sandbox.yaml', './demo'],
+)

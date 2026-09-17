@@ -50,6 +50,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**quickstart**](./quickstart): An end-to-end getting-started walkthrough — controller install, warm pool, router, and SDK test client — plus gVisor and Kata isolation variants.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
+- [**sandbox-tilt-demo**](./sandbox-tilt-demo): A Tilt configuration that builds the controller from source, installs the Sandbox CRD and controller on a kind cluster, and runs a demo Sandbox to watch a pod be created and torn down.
 - [**sandboxd-sandbox**](./sandboxd-sandbox): An example of running the sandboxd runtime daemon inside a sandbox for command execution and file I/O.
 - [**sandboxed-tools**](./sandboxed-tools): An example of an agent executing its tools inside a sandbox via the Go SDK.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.

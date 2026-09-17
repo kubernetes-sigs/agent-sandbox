@@ -510,6 +510,11 @@ h1.text-center {
   margin: 0 auto;
   text-align: left;
 
+  pre,
+  code {
+    font-size: 0.9rem;
+  }
+
   // Tab bar sits flush on top of the code block.
   .nav-tabs .nav-item .nav-link.active {
     background: #0d1117;

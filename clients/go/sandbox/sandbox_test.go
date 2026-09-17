@@ -2698,9 +2698,16 @@ func TestValidation_InvalidGatewayScheme(t *testing.T) {
 func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 	requestReceived := make(chan struct{})
 	unblock := make(chan struct{})
+	// responseSent is closed before the handler writes the response, so it is
+	// ordered before the client finishes the request and before the deferred
+	// trackOp release. It is the drain-safe signal for the delete reactor:
+	// opDone closes in the test goroutine strictly after the tracked region
+	// ends, so checking opDone there raced with Close's post-drain delete.
+	responseSent := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(requestReceived)
 		<-unblock
+		close(responseSent)
 		_, _ = w.Write([]byte(`{"exists":true}`))
 	}))
 	defer server.Close()
@@ -2720,7 +2727,7 @@ func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 	opDone := make(chan struct{})
 	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		select {
-		case <-opDone:
+		case <-responseSent:
 		default:
 			t.Error("claim deleted while in-flight operation still running")
 		}
@@ -2739,9 +2746,12 @@ func TestClose_DrainsInflightBeforeDelete(t *testing.T) {
 		t.Fatalf("Close error: %v", err)
 	}
 
+	// Close returning means the drain completed, so Exists has finished its
+	// HTTP call; the goroutine only needs to be scheduled to close opDone.
+	// A bounded wait avoids racing that scheduling.
 	select {
 	case <-opDone:
-	default:
+	case <-time.After(5 * time.Second):
 		t.Error("operation did not complete")
 	}
 }

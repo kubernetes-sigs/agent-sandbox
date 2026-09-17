@@ -61,6 +61,12 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("examples", "demo-cilium-egress", "exec-sandbox"),
     },
     {
+        "name": "policy-command-governance",
+        # governed_run.py is stdlib-only (os, re, shlex); the test exercises
+        # the classifier directly, no sandbox/cluster needed.
+        "dir": os.path.join("examples", "policy", "command-governance"),
+    },
+    {
         "name": "hpa-swp-scaling",
         "dir": os.path.join("examples", "hpa-swp-scaling"),
         "requirements": "requirements.txt",

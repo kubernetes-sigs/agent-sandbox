@@ -16,6 +16,11 @@ footer {
   overflow-wrap: break-word;
 }
 
+.td-sidebar-nav__section .td-sidebar-link {
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
 .td-overlay--dark::after {
   background-color: #000000;
   background-image: radial-gradient(circle at 25% -50px,

@@ -18,6 +18,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import aiohttp
 from kubernetes_asyncio import client, config, watch
 from .constants import (
     CLAIM_API_GROUP,
@@ -281,6 +282,19 @@ class AsyncK8sHelper:
                     rv = "0"
                     continue
                 raise
+            except aiohttp.ClientSSLError:
+                raise
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                ConnectionError,
+            ) as e:
+                logger.warning(
+                    f"Watch on claim '{claim_name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
             finally:
                 await w.close()
 
@@ -334,6 +348,19 @@ class AsyncK8sHelper:
                         raise SandboxNotFoundError(
                             f"Sandbox {name} was deleted before becoming ready."
                         )
+            except aiohttp.ClientSSLError:
+                raise
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                ConnectionError,
+            ) as e:
+                logger.warning(
+                    f"Watch for Sandbox '{name}' disconnected ({type(e).__name__}: {e}); "
+                    "reconnecting..."
+                )
+                await asyncio.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                continue
             finally:
                 await w.close()
 

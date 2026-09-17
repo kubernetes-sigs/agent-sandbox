@@ -437,6 +437,9 @@ class SandboxWithSnapshotSupport(Sandbox):
             )
 
         try:
+            claim_name = self.claim_name
+            if claim_name is None:
+                raise RuntimeError("SandboxClaim is no longer available.")
             body = {
                 "spec": {
                     "additionalPodMetadata": {
@@ -444,7 +447,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                     }
                 }
             }
-            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+            self.k8s_helper.patch_sandbox_claim(claim_name, self.namespace, body)
         except Exception as e:
             logger.error(f"Failed to clean up restore annotation before resuming: {e}")
             return ResumeResponse(
@@ -515,7 +518,10 @@ class SandboxWithSnapshotSupport(Sandbox):
                     }
                 }
             }
-            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+            claim_name = self.claim_name
+            if claim_name is None:
+                raise RuntimeError("SandboxClaim is no longer available.")
+            self.k8s_helper.patch_sandbox_claim(claim_name, self.namespace, body)
 
             if not wait_for_sandbox_propagation(
                 self.k8s_helper, self.namespace, self.sandbox_id, snapshot_uid

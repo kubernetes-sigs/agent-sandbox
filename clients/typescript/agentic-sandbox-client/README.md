@@ -32,9 +32,32 @@ try {
 ### Timeouts
 
 - `sandboxReadyTimeout` (constructor / `createSandbox()` options) is in **seconds** and bounds waiting for the `SandboxClaim`/`Sandbox` to become `Ready`. Default: 180.
-- `sandboxd.portForwardReadyTimeoutMs` (constructor option, under `sandboxd`) is in **milliseconds** and bounds the shared connection to sandboxd — opening both local port-forward listeners through a successful health check. It applies in full to every (re)connect attempt, including reconnects after a transport failure. Default: 30000.
+- `sandboxd.portForwardReadyTimeoutMs` (constructor option, under `sandboxd`) is in **milliseconds** and bounds the shared connection to sandboxd, through a successful health check: for `port-forward` connectivity it starts when both local port-forward listeners are opened, and for the in-cluster modes it bounds health polling against the pod address (see [Connectivity](#connectivity)). It applies in full to every (re)connect attempt, including reconnects after a transport failure. Default: 30000.
 - Every `sandbox.files.*` / `sandbox.commands.run()` call takes a per-call `timeoutMs` (default 60000). This is a total budget for the call, including any time spent waiting on the shared connection above — a cold first call can spend most of its budget just connecting.
 - `sandboxd.maxCommandOutputSize` bounds the fully-decoded `ExecuteResponse` (stdout + stderr + protobuf framing combined, not stdout alone) that `sandbox.commands.run()` will accept.
+
+### Connectivity
+
+`sandboxd.connectivity` selects how the SDK reaches sandboxd. The values are the same as the Go client's `Connectivity`:
+
+| Value | Path | Requirements |
+| --- | --- | --- |
+| `"port-forward"` (default) | WebSocket port-forward brokered by the apiserver | A kubeconfig that allows `pods/portforward`. Works from anywhere, including a laptop or CI runner. |
+| `"in-cluster-service"` | Dials the Sandbox's headless Service by DNS name (`status.serviceFQDN`) | The process runs inside the cluster, and the template sets `spec.service: true`. |
+| `"in-cluster-pod-ip"` | Dials the pod IP (`status.podIPs`, IPv4 preferred) | The process runs inside the cluster. |
+
+```ts
+const client = new SandboxClient({
+  sandboxd: { connectivity: "in-cluster-service" },
+});
+```
+
+The in-cluster modes take the apiserver off the data path. Each uses exactly one address, and neither falls back to the other or to port-forwarding:
+
+- With `"in-cluster-service"`, `createSandbox()` / `getSandbox()` throw `SandboxNoServiceError` when the Sandbox has no Service, instead of falling back to the pod IP. Prefer this mode when sandboxes cross a trust boundary: the Service only selects its own Sandbox's pod, and deleting the Sandbox deletes the Service, so connections fail instead of reaching another pod that inherited the IP. DNS caching still leaves a TTL-bounded window.
+- With `"in-cluster-pod-ip"`, `createSandbox()` / `getSandbox()` throw `SandboxMetadataError` when the Sandbox reports no pod IP. This mode needs no template change, but nothing detects that the pod was rescheduled: a handle keeps dialing the address it saw when it was created, which Kubernetes may since have reassigned to an unrelated pod.
+
+The addresses are available on the handle as `sandbox.podIP` and `sandbox.serviceFQDN`. They are `""` when unknown.
 
 ### Streaming
 
@@ -95,7 +118,9 @@ The atomicity guarantee — the target path never briefly shows partial content 
 
 ### Trust boundary
 
-The local TCP listeners the SDK opens for its port-forward tunnel (`127.0.0.1`, random ports) have no authentication of their own. Any other process in the same network namespace can reach the sandbox's files/run API through them for as long as the connection is open. Treat other local processes as trusted, the same way you would for any other unauthenticated `localhost` service.
+With `port-forward` connectivity, the local TCP listeners the SDK opens for its port-forward tunnel (`127.0.0.1`, random ports) have no authentication of their own. Any other process in the same network namespace can reach the sandbox's files/run API through them for as long as the connection is open. Treat other local processes as trusted, the same way you would for any other unauthenticated `localhost` service.
+
+With the in-cluster modes, REST and gRPC travel in plaintext across the pod network, with no authentication. Anything that can reach the sandbox pod on those ports can use its files/run API. Restrict that access with a NetworkPolicy or a service mesh.
 
 ### Differences from the Go and Python clients
 

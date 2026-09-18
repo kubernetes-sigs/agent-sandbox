@@ -275,17 +275,21 @@ class AsyncSandboxConnector:
                 if self._pod_ip:
                     headers["X-Sandbox-Pod-IP"] = self._pod_ip
 
+        stream_auth = (
+            kwargs.pop("auth", httpx.USE_CLIENT_DEFAULT)
+            if stream
+            else httpx.USE_CLIENT_DEFAULT
+        )
         last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
                 if stream:
-                    auth = kwargs.pop("auth", httpx.USE_CLIENT_DEFAULT)
                     request = self.client.build_request(
                         method, url, headers=headers, **kwargs
                     )
                     response = await self.client.send(
                         request,
-                        auth=auth,
+                        auth=stream_auth,
                         follow_redirects=False,
                         stream=True,
                     )

@@ -1085,6 +1085,40 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
+    @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
+    async def test_streaming_retry_preserves_request_auth(self, mock_sleep):
+        connector = self._make_connector()
+        request = MagicMock()
+        retry_response = MagicMock()
+        retry_response.status_code = 503
+        retry_response.aclose = AsyncMock()
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.is_redirect = False
+        success_response.raise_for_status = MagicMock()
+        success_response.aclose = AsyncMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(
+            side_effect=[retry_response, success_response]
+        )
+
+        try:
+            result = await connector.send_request(
+                "GET", "download/file", stream=True, auth=auth
+            )
+
+            self.assertIs(result, success_response)
+            self.assertEqual(
+                connector.client.send.await_args_list[0].kwargs["auth"], auth
+            )
+            self.assertEqual(
+                connector.client.send.await_args_list[1].kwargs["auth"], auth
+            )
+            mock_sleep.assert_awaited_once()
+        finally:
+            await connector.close()
+
     async def test_streaming_error_closes_response(self):
         connector = self._make_connector()
         request = MagicMock()

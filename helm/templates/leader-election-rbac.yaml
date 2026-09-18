@@ -1,0 +1,35 @@
+{{- if and .Values.controller.watchNamespaces (hasKey .Values.controller "leaderElect") .Values.controller.leaderElect }}
+{{- $leNs := include "agent-sandbox.leaderElectionNamespace" . }}
+{{- $controllerNs := include "agent-sandbox.namespace" . }}
+{{- if eq $leNs $controllerNs }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-sandbox-controller-leader-election
+  namespace: {{ $leNs }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+rules:
+{{ .Files.Get "files/rbac.le.generated.yaml" | indent 0 }}
+{{- if .Values.controller.extensions }}
+{{ .Files.Get "files/extensions-rbac.le.generated.yaml" | indent 0 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-controller-leader-election
+  namespace: {{ $leNs }}
+  labels:
+    {{- include "agent-sandbox.labels" . | nindent 4 }}
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: {{ $controllerNs }}
+roleRef:
+  kind: Role
+  name: agent-sandbox-controller-leader-election
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}

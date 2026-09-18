@@ -104,6 +104,7 @@ class AsyncFilesystem:
                     content=_iter_binary_chunks(content),
                     headers={"Content-Type": "application/octet-stream"},
                     timeout=timeout,
+                    _disable_retries=True,
                 )
         elif isinstance(content, bytes):
             files_payload = {"file": (path, content)}

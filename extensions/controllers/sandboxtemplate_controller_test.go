@@ -21,6 +21,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
@@ -388,4 +389,41 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 			t.Errorf("VULNERABILITY: Unowned NetworkPolicy was updated/overwritten!")
 		}
 	})
+}
+
+func TestSandboxTemplateReconcile_RecordsOwnershipConflictMetric(t *testing.T) {
+	asmetrics.TemplateReconcileErrors.Reset()
+	scheme := newScheme(t)
+
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "victim", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{
+			NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementManaged,
+		},
+	}
+	unownedNP := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "victim-network-policy",
+			Namespace: "default",
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, unownedNP).Build()
+	reconciler := &SandboxTemplateReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "victim", Namespace: "default"},
+	})
+	if err == nil {
+		t.Fatal("expected ownership conflict error")
+	}
+	got := testutil.ToFloat64(asmetrics.TemplateReconcileErrors.WithLabelValues("default", asmetrics.ReasonOwnershipConflict))
+	if got != 1 {
+		t.Fatalf("expected 1 template reconcile error metric, got %v", got)
+	}
 }

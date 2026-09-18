@@ -34,11 +34,11 @@ For the benchmark data and sizing rationale behind these settings — including 
 * `--cache-label-selectors` (default: `false`): Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label (`agents.x-k8s.io/sandbox-name-hash`). The controller only ever creates/looks up Pods and Services it labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources that rely on the `agents.x-k8s.io/adoptable=true` adoption path MUST also carry the tracking label (value = the owning sandbox's name hash) to remain visible to the controller when this flag is enabled.
 * `--sandbox-write-behind-window` (default: `0`): Coalescing window for the Sandbox controller's recoverable metadata-only writes. `0` disables coalescing.
 
-## Cluster Settings
+## Manager Settings
 
-* `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to
-  construct service FQDNs. Only change this if your cluster is configured with a non-default
-  domain (e.g. `my-company.local`).
+These flags govern the controller manager process itself — the endpoints it serves, its leader
+election, and which controllers it registers — rather than cluster-wide behavior.
+
 * `--metrics-bind-address` (default: `:8080`): Address the metrics endpoint binds to. When
   `--metrics-secure-serving` is enabled the conventional port is `:8443`; see [TLS Settings](#tls-settings).
 * `--health-probe-bind-address` (default: `:8081`): Address the health probe endpoints
@@ -53,19 +53,30 @@ For the benchmark data and sizing rationale behind these settings — including 
   `SandboxWarmPool`, `SandboxClaim`).
 * `--version`: Print version information and exit.
 
+## Cluster Settings
+
+* `--cluster-domain` (default: `cluster.local`): The Kubernetes cluster domain used to
+  construct service FQDNs. Only change this if your cluster is configured with a non-default
+  domain (e.g. `my-company.local`).
+
 ## Observability & Profiling
 
 Tracing and profiling are opt-in. The profile endpoints are served by the metrics server, so
 they share its address and TLS settings — keep that port cluster-internal before enabling the
 debug endpoints.
 
-* `--enable-tracing` (default: `false`): Enable OpenTelemetry tracing over OTLP.
+* `--enable-tracing` (default: `false`): Enable OpenTelemetry tracing over OTLP. There is no flag
+  for the collector endpoint or transport: the exporter reads the standard OpenTelemetry
+  environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_INSECURE`). If the
+  exporter cannot be initialized, the controller logs the error and exits at startup.
 * `--enable-pprof` (default: `false`): Enable the CPU profile endpoint (`/debug/pprof/profile`)
   on the metrics server.
 * `--enable-pprof-debug` (default: `false`): Enable the remaining pprof endpoints — `/debug/pprof/`
   (index), `cmdline`, `symbol`, `heap`, `goroutine`, `allocs`, `block`, `mutex`, `trace` — plus
-  `/debug/fgprof`. Implies `--enable-pprof`. Concurrent profiling requests are rejected instead
-  of queued.
+  `/debug/fgprof`. Implies `--enable-pprof`. The duration-based profilers — the CPU profile
+  (`/debug/pprof/profile`), the execution trace (`/debug/pprof/trace`) and `/debug/fgprof` —
+  reject a request while another run is in flight instead of queuing it; the point-in-time
+  endpoints above return their snapshot immediately.
   **WARNING:** these endpoints expose process internals (heap contents, command line, goroutine
   stacks) and the sampling they enable adds runtime overhead. Leave this disabled in production,
   or expose the metrics port only to trusted scrapers.
@@ -84,9 +95,10 @@ The Helm chart exposes the same settings as `controller.enableTracing`, `control
 
 The controller also binds controller-runtime's standard zap logging flags — `--zap-devel`,
 `--zap-encoder`, `--zap-log-level`, `--zap-stacktrace-level` and `--zap-time-encoding`. Their
-semantics are documented in
-[controller-runtime](https://github.com/kubernetes-sigs/controller-runtime/blob/main/pkg/log/zap/zap.go)
+semantics are documented in [`zap.Options.BindFlags`][zap-bind-flags]
 and are not repeated here.
+
+[zap-bind-flags]: https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/log/zap#Options.BindFlags
 
 ## Deployment Example
 

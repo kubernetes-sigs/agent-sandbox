@@ -1008,6 +1008,29 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
+    async def test_non_streaming_request_forwards_request_auth(self):
+        connector = self._make_connector()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.request = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request("GET", "health", auth=auth)
+
+            self.assertIs(result, response)
+            connector.client.request.assert_awaited_once_with(
+                "GET",
+                ANY,
+                headers=ANY,
+                follow_redirects=False,
+                auth=auth,
+            )
+        finally:
+            await connector.close()
+
     async def test_streaming_request_returns_unbuffered_response(self):
         connector = self._make_connector()
         request = MagicMock()
@@ -1025,7 +1048,10 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             self.assertIs(result, response)
             connector.client.build_request.assert_called_once()
             connector.client.send.assert_awaited_once_with(
-                request, follow_redirects=False, stream=True
+                request,
+                auth=httpx.USE_CLIENT_DEFAULT,
+                follow_redirects=False,
+                stream=True,
             )
             response.aclose.assert_not_awaited()
         finally:

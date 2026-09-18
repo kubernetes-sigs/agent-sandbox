@@ -14,6 +14,7 @@
 
 """Unit tests for synchronous sandbox connectivity."""
 
+import io
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -419,6 +420,22 @@ class TestSandboxConnectorErrorHandling(unittest.TestCase):
 
         response.close.assert_called_once_with()
         connector.session.close.assert_not_called()
+
+    def test_streaming_client_error_preserves_response_body(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+
+        connector = self._make_connector()
+        response = requests.Response()
+        response.status_code = 404
+        response.url = "http://sandbox/download/missing.txt"
+        response.request = requests.Request("GET", response.url).prepare()
+        response.raw = io.BytesIO(b"missing file")
+        connector.session.request.return_value = response
+
+        with self.assertRaises(SandboxRequestError) as ctx:
+            connector.send_request("GET", "download/missing.txt", stream=True)
+
+        self.assertEqual(ctx.exception.response.text, "missing file")
 
     def test_server_error_clears_pod_ip_but_keeps_tunnel(self):
         from k8s_agent_sandbox.connector import SandboxRequestError

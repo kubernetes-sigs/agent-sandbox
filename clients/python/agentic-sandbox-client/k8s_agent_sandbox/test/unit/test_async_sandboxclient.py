@@ -1140,6 +1140,24 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
+    async def test_streaming_error_preserves_response_body(self):
+        connector = self._make_connector()
+        request = httpx.Request("GET", "http://sandbox/missing")
+        response = httpx.Response(
+            404, content=b"missing file", request=request
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(SandboxRequestError) as ctx:
+                await connector.send_request("GET", "missing", stream=True)
+
+            self.assertEqual(ctx.exception.response.content, b"missing file")
+            self.assertEqual(ctx.exception.response.text, "missing file")
+        finally:
+            await connector.close()
+
     @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
     async def test_streaming_retry_closes_discarded_response(self, mock_sleep):
         connector = self._make_connector()

@@ -49,6 +49,31 @@ RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 RETRYABLE_METHODS = {"GET", "PUT", "DELETE"}
 MAX_RETRIES = 5
 BACKOFF_FACTOR = 0.5
+_ERROR_BODY_LIMIT = 64 * 1024
+
+
+async def _capture_streamed_error_body(response: httpx.Response) -> None:
+    """Preserve a bounded error body before closing a streamed response."""
+    chunks: list[bytes] = []
+    captured = 0
+    try:
+        async for chunk in response.aiter_bytes(chunk_size=8192):
+            if not chunk:
+                continue
+            remaining = _ERROR_BODY_LIMIT - captured
+            if remaining <= 0:
+                break
+            chunk = chunk[:remaining]
+            chunks.append(chunk)
+            captured += len(chunk)
+            if captured >= _ERROR_BODY_LIMIT:
+                break
+        # httpx exposes content and text only after the response has been read.
+        # Cache the bounded body so diagnostics remain available after close().
+        response._content = b"".join(chunks)
+    except Exception:
+        # Error reporting must not hide the original request failure.
+        logger.debug("Unable to capture streamed error response body", exc_info=True)
 
 
 def _router_timeout_header_value(timeout) -> str | None:
@@ -324,6 +349,7 @@ class AsyncSandboxConnector:
                 return response
             except httpx.HTTPStatusError as e:
                 if stream:
+                    await _capture_streamed_error_body(e.response)
                     await e.response.aclose()
                 logger.error(f"Request to sandbox failed: {e}")
                 # 5xx: often a stale Pod IP after a pod swap, clear the cached

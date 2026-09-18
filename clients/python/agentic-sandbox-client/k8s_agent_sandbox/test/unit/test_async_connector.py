@@ -76,6 +76,20 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         channel.close.assert_awaited_once()
         self.assertIsNone(connector._grpc_channel)
 
+    async def test_close_reaps_resources_when_http_client_close_fails(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock()
+        channel = MagicMock()
+        channel.close = AsyncMock()
+        connector._grpc_channel = channel
+
+        with self.assertRaisesRegex(RuntimeError, "http close failed"):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        channel.close.assert_awaited_once()
+
     async def test_concurrent_grpc_channel_creates_one_channel(self):
         connector = self._build()
         connector._sandboxd_strategy.connect = AsyncMock(

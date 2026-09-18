@@ -422,22 +422,24 @@ class AsyncSandboxConnector:
             if self._closed:
                 return
             self._closed = True
-            await self.client.aclose()
-            async with self._grpc_lock:
-                if self._grpc_channel is not None:
-                    result = self._grpc_channel.close()
-                    if inspect.isawaitable(result):
-                        await result
-                    self._grpc_channel = None
-                    self._grpc_channel_target = None
-            if self._sandboxd_strategy is not None:
-                await self._sandboxd_strategy.close()
-                self.grpc_target = None
-            if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
-                self._base_url = None
-            self._pod_ip_resolved = False
-            self._cached_pod_ip_url = None
-            self._pod_ip = None
+            try:
+                await self.client.aclose()
+            finally:
+                async with self._grpc_lock:
+                    if self._grpc_channel is not None:
+                        result = self._grpc_channel.close()
+                        if inspect.isawaitable(result):
+                            await result
+                        self._grpc_channel = None
+                        self._grpc_channel_target = None
+                if self._sandboxd_strategy is not None:
+                    await self._sandboxd_strategy.close()
+                    self.grpc_target = None
+                if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
+                    self._base_url = None
+                self._pod_ip_resolved = False
+                self._cached_pod_ip_url = None
+                self._pod_ip = None
 
 
 class AsyncSandboxdPodTunnelStrategy:

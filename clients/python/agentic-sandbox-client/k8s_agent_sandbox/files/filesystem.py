@@ -19,6 +19,7 @@ import urllib.parse
 from typing import Any, List, Protocol
 
 from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import FileEntry
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
@@ -216,6 +217,12 @@ class Filesystem:
         )
         total = 0
         try:
+            if not 200 <= response.status_code < 300:
+                raise SandboxRequestError(
+                    f"Unexpected status downloading sandbox file: {response.status_code}",
+                    status_code=response.status_code,
+                    response=response,
+                )
             content_length = response.headers.get("Content-Length")
             if max_bytes is not None and content_length is not None:
                 try:

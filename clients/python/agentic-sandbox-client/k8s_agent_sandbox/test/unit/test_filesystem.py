@@ -67,6 +67,7 @@ class AsyncFailingWriter:
 
 def streaming_response(chunks: list[bytes], content_length: int | None = None):
     response = MagicMock()
+    response.status_code = 200
     response.headers = {}
     if content_length is not None:
         response.headers["Content-Length"] = str(content_length)
@@ -374,6 +375,19 @@ class TestFilesystemStreamingRead(unittest.TestCase):
         self.connector.send_request.assert_called_once_with(
             "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
         )
+
+    def test_read_to_rejects_non_success_status(self):
+        response = streaming_response([b"error"])
+        response.status_code = 300
+        self.connector.send_request.return_value = response
+        destination = io.BytesIO()
+
+        with self.assertRaises(SandboxRequestError) as ctx:
+            self.filesystem.read_to("file.bin", destination)
+
+        self.assertEqual(ctx.exception.status_code, 300)
+        self.assertEqual(destination.getvalue(), b"")
+        response.close.assert_called_once_with()
 
     def test_read_to_enforces_unknown_length_limit_while_streaming(self):
         response = streaming_response([b"abc", b"def"])

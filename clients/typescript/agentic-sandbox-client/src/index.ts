@@ -23,6 +23,7 @@ export {
   SandboxdRpcError,
   SandboxError,
   SandboxMetadataError,
+  SandboxNoServiceError,
   SandboxNotFoundError,
   SandboxTemplateNotFoundError,
   SandboxTimeoutError,
@@ -41,6 +42,7 @@ export type {
   Logger,
   RunOptions,
   SandboxClientOptions,
+  SandboxdConnectivity,
   SandboxdOptions,
   WriteOptions,
 } from "./types.js";

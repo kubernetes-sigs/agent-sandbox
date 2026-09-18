@@ -15,6 +15,11 @@
 import type * as k8s from "@kubernetes/client-node";
 import { SandboxCommands } from "./commands.js";
 import {
+  createConnectionStrategy,
+  type SandboxdConnectionStrategy,
+  type SandboxdTransport,
+} from "./connection.js";
+import {
   CLAIM_API_GROUP,
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
@@ -46,7 +51,6 @@ import {
 } from "./rest.js";
 import type { Span, TracerManager } from "./trace-manager.js";
 import { spanErrorStatusCode, withSpan } from "./trace-manager.js";
-import { PodTunnel } from "./tunnel.js";
 import type {
   DeleteOptions,
   DirectoryListing,
@@ -54,6 +58,7 @@ import type {
   FileCallOptions,
   Logger,
   RunOptions,
+  SandboxdConnectivity,
   SandboxdOptions,
   WriteOptions,
 } from "./types.js";
@@ -91,6 +96,7 @@ export async function raceWithTimeout<T>(
 
 /** @internal — fully validated/defaulted form of SandboxdOptions. */
 export interface ResolvedSandboxdOptions {
+  connectivity: SandboxdConnectivity;
   restPort: number;
   grpcPort: number;
   portForwardReadyTimeoutMs: number;
@@ -124,7 +130,8 @@ function validateBoundedInt(
 export function normalizeSandboxdOptions(
   opts?: SandboxdOptions,
 ): ResolvedSandboxdOptions {
-  return {
+  const resolved: ResolvedSandboxdOptions = {
+    connectivity: validateConnectivity(opts?.connectivity),
     restPort:
       validateBoundedInt("sandboxd.restPort", opts?.restPort, 65535) ??
       DEFAULT_SANDBOXD_REST_PORT,
@@ -163,25 +170,40 @@ export function normalizeSandboxdOptions(
         0xffffffff,
       ) ?? DEFAULT_MAX_COMMAND_OUTPUT_SIZE,
   };
+  // With in-cluster connectivity both would dial the same pod address, so
+  // REST and gRPC must be on distinct ports; the Go client rejects this too.
+  if (resolved.restPort === resolved.grpcPort) {
+    throw new SandboxError(
+      `sandboxd.restPort and sandboxd.grpcPort must differ (both ${resolved.restPort})`,
+      { telemetryCode: "invalid_argument" },
+    );
+  }
+  return resolved;
+}
+
+const CONNECTIVITY_VALUES: readonly SandboxdConnectivity[] = [
+  "port-forward",
+  "in-cluster-service",
+  "in-cluster-pod-ip",
+];
+
+function validateConnectivity(
+  value: SandboxdConnectivity | undefined,
+): SandboxdConnectivity {
+  if (value === undefined) return "port-forward";
+  if (!CONNECTIVITY_VALUES.includes(value)) {
+    throw new SandboxError(
+      `sandboxd.connectivity must be one of ${CONNECTIVITY_VALUES.map((v) => `"${v}"`).join(", ")}, got: ${String(value)}`,
+      { telemetryCode: "invalid_argument" },
+    );
+  }
+  return value;
 }
 
 function validateTimeoutMs(name: string, value: number | undefined): number {
   return (
     validateBoundedInt(name, value, 2147483647) ?? DEFAULT_OPERATION_TIMEOUT_MS
   );
-}
-
-// `ws` reports a rejected HTTP upgrade (the apiserver denying auth, or the
-// Pod not existing) as an Error whose message is exactly
-// `Unexpected server response: <status>` — see PodTunnel.lastHandshakeError.
-// 401/403 (auth) and 404 (Pod gone) cannot be fixed by retrying; 5xx from the
-// apiserver itself is left to the ordinary retry path since it may recover.
-const TERMINAL_HANDSHAKE_STATUS_RE =
-  /Unexpected server response: (401|403|404)\b/;
-
-function isTerminalPortForwardFailure(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  return TERMINAL_HANDSHAKE_STATUS_RE.test(err.message);
 }
 
 function classifyForTelemetry(
@@ -201,8 +223,9 @@ function classifyForTelemetry(
 }
 
 /**
- * One lazily-established connection to sandboxd inside the Pod: the local
- * port-forward tunnel plus the REST and gRPC clients scoped to it. REST and
+ * One lazily-established connection to sandboxd inside the Pod: the
+ * transport (a port-forward tunnel, or a pod-network address) plus the REST
+ * and gRPC clients scoped to it. REST and
  * gRPC always come from the same generation; a transport failure discards
  * the whole thing rather than one leg of it. Never exposed as a public
  * field/getter type — only used inside this module's private methods, and
@@ -211,7 +234,7 @@ function classifyForTelemetry(
  */
 interface ConnectionGeneration {
   id: number;
-  tunnel: PodTunnel;
+  transport: SandboxdTransport;
   rest: SandboxdRestClient;
   process: ProcessClient;
   /** Aborted to invalidate every in-flight operation sharing this generation. */
@@ -226,6 +249,10 @@ export interface SandboxInit {
   claimName: string;
   sandboxName: string;
   podName: string;
+  /** Pod IP chosen from status.podIPs; "" when unknown. */
+  podIP?: string;
+  /** status.serviceFQDN; "" when the Sandbox has no headless Service. */
+  serviceFQDN?: string;
   namespace: string;
   customObjectsApi: k8s.CustomObjectsApi;
   kubeConfig: k8s.KubeConfig;
@@ -251,13 +278,23 @@ export class Sandbox {
   readonly claimName: string;
   readonly sandboxName: string;
   readonly podName: string;
+  /**
+   * The pod IP (IPv4 preferred) observed when the handle was created, or ""
+   * when unknown. Not refreshed if the pod is later rescheduled.
+   */
+  readonly podIP: string;
+  /**
+   * In-cluster DNS name of the Sandbox's headless Service, or "" when it has
+   * none (spec.service unset or false).
+   */
+  readonly serviceFQDN: string;
   readonly namespace: string;
 
   protected readonly tracingManager: TracerManager | null;
   protected readonly customObjectsApi: k8s.CustomObjectsApi;
   protected readonly logger: Logger;
 
-  private readonly kubeConfig: k8s.KubeConfig;
+  private readonly connectionStrategy: SandboxdConnectionStrategy;
   private readonly sandboxdOptions: ResolvedSandboxdOptions;
   private readonly traceServiceName: string;
 
@@ -281,13 +318,28 @@ export class Sandbox {
     this.claimName = init.claimName;
     this.sandboxName = init.sandboxName;
     this.podName = init.podName;
+    this.podIP = init.podIP ?? "";
+    this.serviceFQDN = init.serviceFQDN ?? "";
     this.namespace = init.namespace;
     this.customObjectsApi = init.customObjectsApi;
-    this.kubeConfig = init.kubeConfig;
     this.sandboxdOptions = init.sandboxdOptions;
     this.tracingManager = init.tracingManager;
     this.traceServiceName = init.traceServiceName;
     this.logger = init.logger ?? noopLogger;
+    this.connectionStrategy = createConnectionStrategy(
+      init.sandboxdOptions.connectivity,
+      {
+        kubeConfig: init.kubeConfig,
+        namespace: this.namespace,
+        podName: this.podName,
+        podIP: this.podIP,
+        serviceFQDN: this.serviceFQDN,
+        restPort: init.sandboxdOptions.restPort,
+        grpcPort: init.sandboxdOptions.grpcPort,
+        handshakeTimeoutMs: init.sandboxdOptions.portForwardReadyTimeoutMs,
+        logger: this.logger,
+      },
+    );
   }
 
   /**
@@ -465,7 +517,7 @@ export class Sandbox {
       new SandboxClosedError("Sandbox handle is closed"),
     );
     gen.process.abort();
-    await gen.tunnel.close().catch(() => {});
+    await gen.transport.close().catch(() => {});
   }
 
   private rejectOnAbort(signal: AbortSignal): Promise<never> {
@@ -564,41 +616,35 @@ export class Sandbox {
       deadlineController.signal,
     ]);
 
-    let tunnel: PodTunnel | undefined;
+    let transport: SandboxdTransport | undefined;
     try {
-      tunnel = new PodTunnel({
-        kubeConfig: this.kubeConfig,
-        namespace: this.namespace,
-        podName: this.podName,
-        restTargetPort: this.sandboxdOptions.restPort,
-        grpcTargetPort: this.sandboxdOptions.grpcPort,
-        handshakeTimeoutMs: deadlineMs,
-        logger: this.logger,
-      });
-      const endpoints = await tunnel.start();
+      transport = await this.connectionStrategy.open();
+      this.logger.debug(
+        `sandboxd transport opened (connectivity: ${this.connectionStrategy.connectivity})`,
+      );
 
       const rest = new SandboxdRestClient({
-        baseUrl: endpoints.restBaseUrl,
+        baseUrl: transport.restBaseUrl,
         maxDownloadSize: this.sandboxdOptions.maxDownloadSize,
         maxUploadSize: this.sandboxdOptions.maxUploadSize,
         maxMetadataResponseSize: this.sandboxdOptions.maxMetadataResponseSize,
       });
-      await this.waitForHealthy(rest, tunnel, signal);
+      await this.waitForHealthy(rest, transport, signal);
 
       const process = new ProcessClient({
-        grpcBaseUrl: endpoints.grpcBaseUrl,
+        grpcBaseUrl: transport.grpcBaseUrl,
         maxCommandOutputSize: this.sandboxdOptions.maxCommandOutputSize,
       });
 
       return {
         id,
-        tunnel,
+        transport,
         rest,
         process,
         abortController: new AbortController(),
       };
     } catch (err) {
-      await tunnel?.close().catch(() => {});
+      await transport?.close().catch(() => {});
       throw err;
     } finally {
       clearTimeout(timer);
@@ -607,7 +653,7 @@ export class Sandbox {
 
   private async waitForHealthy(
     rest: SandboxdRestClient,
-    tunnel: PodTunnel,
+    transport: SandboxdTransport,
     signal: AbortSignal,
   ): Promise<void> {
     while (true) {
@@ -620,17 +666,8 @@ export class Sandbox {
           (err instanceof SandboxdApiError && err.status === 503) ||
           err instanceof SandboxConnectionError;
         if (!retryable) throw err;
-        // A connection-level failure could just mean the port-forward
-        // hasn't finished establishing yet — but if the apiserver has
-        // already rejected the WS upgrade outright (auth denied, Pod not
-        // found), retrying for the rest of the connect budget cannot help.
-        if (isTerminalPortForwardFailure(tunnel.lastHandshakeError)) {
-          throw new SandboxConnectionError(
-            "sandboxd port-forward was rejected by the apiserver",
-            "port_forward",
-            { cause: tunnel.lastHandshakeError },
-          );
-        }
+        const terminal = transport.terminalError();
+        if (terminal) throw terminal;
         await this.sleep(200, signal);
       }
     }

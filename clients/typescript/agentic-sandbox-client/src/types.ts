@@ -39,20 +39,27 @@ export interface SandboxClientOptions {
  * Configures the lazily-established connection each Sandbox handle uses to
  * reach sandboxd (REST files API + gRPC process API) inside its Pod.
  *
- * Every numeric field defaults only when `undefined`; explicit 0, NaN,
+ * Every field defaults only when `undefined`; explicit 0, NaN,
  * Infinity, or a negative value is rejected at construction time. Ports must
  * be integers in [1, 65535]; size limits must be positive safe integers;
  * `*TimeoutMs` fields must be integers in [1, 2147483647].
  */
 export interface SandboxdOptions {
+  /**
+   * How the SDK reaches sandboxd. Default: "port-forward". See
+   * {@link SandboxdConnectivity}.
+   */
+  connectivity?: SandboxdConnectivity;
   /** sandboxd's REST files/health port inside the Pod. Default: 8080. */
   restPort?: number;
   /** sandboxd's gRPC process port inside the Pod. Default: 9090. */
   grpcPort?: number;
   /**
-   * Budget (ms), from opening both port-forward listeners through a
-   * successful /v1/health check, for the shared connection. Re-applied in
-   * full on every reconnect. Default: 30000.
+   * Budget (ms) for establishing the shared connection, through a
+   * successful /v1/health check: for "port-forward" it starts when both
+   * local listeners are opened; for the in-cluster modes it bounds the
+   * health polling against the pod address. Re-applied in full on every
+   * reconnect. Default: 30000.
    */
   portForwardReadyTimeoutMs?: number;
   /**
@@ -77,6 +84,34 @@ export interface SandboxdOptions {
    */
   maxCommandOutputSize?: number;
 }
+
+/**
+ * Transport used to reach sandboxd. Same values as the Go client's
+ * Connectivity.
+ *
+ * - `"port-forward"`: a WebSocket port-forward brokered by the apiserver.
+ *   Works from anywhere a kubeconfig does, including a laptop or CI runner.
+ * - `"in-cluster-service"`: dials the Sandbox's headless Service by its
+ *   in-cluster DNS name (status.serviceFQDN), taking the apiserver off the
+ *   data path. The Service only ever selects its own Sandbox's pod, and a
+ *   deleted Sandbox takes its Service with it, so connections fail rather
+ *   than land on another pod that inherited the IP (DNS caching still leaves
+ *   a TTL-bounded window). Requires `spec.service: true` on the template;
+ *   createSandbox()/getSandbox() throw SandboxNoServiceError when the Sandbox
+ *   has no Service instead of falling back to the pod IP.
+ * - `"in-cluster-pod-ip"`: dials status.podIPs (IPv4 preferred). Needs no
+ *   Service, but nothing detects that the pod was rescheduled: requests can
+ *   continue to a stale address Kubernetes may have reassigned to an
+ *   unrelated pod.
+ *
+ * Both in-cluster modes require this process to run inside the same cluster
+ * as the sandbox pods, and send REST and gRPC in plaintext across the pod
+ * network.
+ */
+export type SandboxdConnectivity =
+  | "port-forward"
+  | "in-cluster-service"
+  | "in-cluster-pod-ip";
 
 /** Options accepted by every sandbox.files.* method. */
 export interface FileCallOptions {

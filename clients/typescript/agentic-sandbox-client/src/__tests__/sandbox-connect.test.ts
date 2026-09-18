@@ -36,6 +36,7 @@ import { noopLogger } from "../logger.js";
 import type { SandboxInit } from "../sandbox.js";
 import { normalizeSandboxdOptions, Sandbox } from "../sandbox.js";
 import type { Span, Tracer, TracerManager } from "../trace-manager.js";
+import type { SandboxdConnectivity } from "../types.js";
 
 // ---------- fake apiserver: routes by the requested target port to one of
 // two real backends (REST / gRPC), mirroring how sandboxd exposes both ports
@@ -136,7 +137,7 @@ function makeTestKubeConfig(apiServerPort: number): k8s.KubeConfig {
   return kc;
 }
 
-async function startRestBackend(): Promise<{
+async function startRestBackend(listenPort = 0): Promise<{
   port: number;
   healthHits: number;
   putBodies: Buffer[];
@@ -196,7 +197,9 @@ async function startRestBackend(): Promise<{
     res.writeHead(404);
     res.end();
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) =>
+    server.listen(listenPort, "127.0.0.1", resolve),
+  );
   const addr = server.address();
   if (!addr || typeof addr === "string")
     throw new Error("failed to bind REST backend");
@@ -258,11 +261,16 @@ function makeSandbox(overrides: {
   grpcPort: number;
   deleteNamespacedCustomObject?: ReturnType<typeof vi.fn>;
   tracingManager?: TracerManager | null;
+  connectivity?: SandboxdConnectivity;
+  podIP?: string;
+  serviceFQDN?: string;
 }): Sandbox {
   const init: SandboxInit = {
     claimName: "test-claim",
     sandboxName: "test-sandbox",
     podName: "test-pod",
+    podIP: overrides.podIP,
+    serviceFQDN: overrides.serviceFQDN,
     namespace: "default",
     customObjectsApi: {
       deleteNamespacedCustomObject:
@@ -270,6 +278,7 @@ function makeSandbox(overrides: {
     } as unknown as k8s.CustomObjectsApi,
     kubeConfig: makeTestKubeConfig(overrides.apiServerPort),
     sandboxdOptions: normalizeSandboxdOptions({
+      connectivity: overrides.connectivity,
       restPort: overrides.restPort,
       grpcPort: overrides.grpcPort,
       portForwardReadyTimeoutMs: 5000,
@@ -580,6 +589,107 @@ describe("Sandbox connectivity integration", () => {
     // The configured portForwardReadyTimeoutMs is 5000ms; a fail-fast
     // classification must reject well before that, not after exhausting it.
     expect(Date.now() - startedAt).toBeLessThan(2000);
+  });
+});
+
+// An apiserver port nothing listens on: in-cluster connectivity must never
+// dial it, so any accidental port-forward attempt fails the test.
+const UNUSED_API_SERVER_PORT = 1;
+
+async function reserveFreePort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("failed to bind");
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return addr.port;
+}
+
+describe("Sandbox in-cluster connectivity", () => {
+  it.each([
+    ["in-cluster-pod-ip", { podIP: "127.0.0.1" }],
+    ["in-cluster-service", { serviceFQDN: "localhost" }],
+  ] as const)("%s dials sandboxd directly for files and commands", async (connectivity, addr) => {
+    restBackend = await startRestBackend();
+    grpcBackend = await startGrpcBackend((router) => {
+      router.service(ProcessService, {
+        execute: () =>
+          create(ExecuteResponseSchema, {
+            exitCode: 0,
+            stdout: new TextEncoder().encode("direct\n"),
+            stderr: new Uint8Array(),
+          }),
+      });
+    });
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort: restBackend.port,
+      grpcPort: grpcBackend.port,
+      connectivity,
+      ...addr,
+    });
+
+    const content = await sandbox.files.read("a.txt");
+    expect(new TextDecoder().decode(content)).toBe("file contents");
+    const result = await sandbox.commands.run("echo direct");
+    expect(result).toEqual({ exitCode: 0, stdout: "direct\n", stderr: "" });
+    expect(restBackend.healthHits).toBe(1);
+  });
+
+  it("keeps polling health while sandboxd is not listening yet, within the connect budget", async () => {
+    const restPort = await reserveFreePort();
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort,
+      grpcPort: 1,
+      connectivity: "in-cluster-pod-ip",
+      podIP: "127.0.0.1",
+    });
+
+    const pending = sandbox.files.read("a.txt");
+    // First health probes hit ECONNREFUSED; sandboxd comes up afterwards.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    restBackend = await startRestBackend(restPort);
+
+    const content = await pending;
+    expect(new TextDecoder().decode(content)).toBe("file contents");
+  });
+
+  it("gives up with a timeout, not a fail-fast error, when sandboxd never comes up", async () => {
+    const restPort = await reserveFreePort();
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort,
+      grpcPort: 1,
+      connectivity: "in-cluster-pod-ip",
+      podIP: "127.0.0.1",
+    });
+
+    await expect(
+      sandbox.files.read("a.txt", { timeoutMs: 800 }),
+    ).rejects.toBeInstanceOf(SandboxTimeoutError);
+  });
+
+  it("invalidates the generation on a transport failure and reconnects on the next call", async () => {
+    restBackend = await startRestBackend();
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort: restBackend.port,
+      grpcPort: 1,
+      connectivity: "in-cluster-pod-ip",
+      podIP: "127.0.0.1",
+    });
+
+    await sandbox.files.read("a.txt");
+    expect(restBackend.healthHits).toBe(1);
+
+    await expect(sandbox.files.read("kill-me.txt")).rejects.toBeInstanceOf(
+      SandboxConnectionError,
+    );
+
+    const content = await sandbox.files.read("a.txt");
+    expect(new TextDecoder().decode(content)).toBe("file contents");
+    expect(restBackend.healthHits).toBe(2);
   });
 });
 

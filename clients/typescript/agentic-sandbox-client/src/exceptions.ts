@@ -47,6 +47,17 @@ export class SandboxNotFoundError extends SandboxError {}
 export class SandboxMetadataError extends SandboxError {}
 
 /**
+ * Raised when "in-cluster-service" connectivity is selected but the Sandbox
+ * has no headless Service (status.serviceFQDN is empty). Deliberately never
+ * falls back to the pod IP: see SandboxdOptions.connectivity.
+ */
+export class SandboxNoServiceError extends SandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, { ...options, telemetryCode: "no_service" });
+  }
+}
+
+/**
  * Raised when an operation times out waiting for a sandbox resource, a
  * shared sandboxd connect, or an individual files/run call.
  */

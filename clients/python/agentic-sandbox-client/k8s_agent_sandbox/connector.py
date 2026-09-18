@@ -46,6 +46,32 @@ ROUTER_SERVICE_NAME = "svc/sandbox-router-svc"
 # POST endpoints include command execution, so replaying them can duplicate
 # side effects after the server handled a request but returned a 5xx response.
 RETRYABLE_METHODS = frozenset({"GET", "PUT", "DELETE"})
+_ERROR_BODY_LIMIT = 64 * 1024
+
+
+def _capture_streamed_error_body(response: requests.Response) -> None:
+    """Preserve a bounded error body before closing a streamed response."""
+    chunks: list[bytes] = []
+    captured = 0
+    try:
+        for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
+            remaining = _ERROR_BODY_LIMIT - captured
+            if remaining <= 0:
+                break
+            chunk = chunk[:remaining]
+            chunks.append(chunk)
+            captured += len(chunk)
+            if captured >= _ERROR_BODY_LIMIT:
+                break
+        # requests uses these private fields when serving ``response.text``.
+        # Populate them so callers retain the diagnostic body after close().
+        response._content = b"".join(chunks)
+        response._content_consumed = True
+    except Exception:
+        # Error reporting must not hide the original request failure.
+        logging.debug("Unable to capture streamed error response body", exc_info=True)
 
 
 def _router_timeout_header_value(timeout) -> str | None:
@@ -645,6 +671,7 @@ class SandboxConnector:
             # returns successfully. Close failures here so an unread error
             # body cannot leak a connection from the session pool.
             if stream_response and resp is not None:
+                _capture_streamed_error_body(resp)
                 resp.close()
 
             # No response: transport may be dead, reset the Pod IP and close.

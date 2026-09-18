@@ -422,7 +422,9 @@ class TestFilesystemStreamingRead(unittest.TestCase):
 
 class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.connector = AsyncMock()
+        self.connector = MagicMock()
+        self.connector.send_request = AsyncMock()
+        self.connector.is_sandboxd.return_value = False
         self.filesystem = AsyncFilesystem(
             self.connector, MagicMock(), trace_service_name="test"
         )
@@ -441,6 +443,20 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
         response.aclose.assert_awaited_once_with()
         self.connector.send_request.assert_awaited_once_with(
             "GET", "download/dir%2Ffile.bin", timeout=60, stream=True
+        )
+
+    async def test_read_to_supports_sandboxd(self):
+        self.connector.is_sandboxd.return_value = True
+        response = async_streaming_response([b"sandboxd"])
+        self.connector.send_request.return_value = response
+        destination = AsyncPartialWriter(max_write=10)
+
+        written = await self.filesystem.read_to("dir/file.bin", destination)
+
+        self.assertEqual(written, 8)
+        self.assertEqual(destination.content, b"sandboxd")
+        self.connector.send_request.assert_awaited_once_with(
+            "GET", "v1/files/dir%2Ffile.bin", timeout=60, stream=True
         )
 
     async def test_read_to_enforces_unknown_length_limit_while_streaming(self):

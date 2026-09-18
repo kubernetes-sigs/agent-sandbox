@@ -1,82 +1,116 @@
 # Agent Sandbox Tilt Demo
 
-A minimal [Tilt](https://tilt.dev) configuration for developing against Agent
-Sandbox locally. It builds the controller from source, loads it into a `kind`
-cluster, installs the `Sandbox` CRD and controller, and runs a demo `Sandbox`
-so you can watch a backing pod get created — then torn down with `tilt down`.
+A [Tilt](https://tilt.dev) local development setup for building applications that use Agent
+Sandbox. Deploys the controller on a Kind cluster along with a simple web
+app running, so you can edit application code and have it redeployed
+in seconds while a real controller reconciles the `Sandbox` resources it creates.
 
-This covers the core `Sandbox` API only. The extension CRDs
-(`SandboxTemplate`, `SandboxClaim`, `SandboxWarmPool`) are out of scope by
-design; see [`../warmpool-quickstart/`](../warmpool-quickstart/) for those.
+The app is a FastAPI service that has a `POST /create` route that creates a `Sandbox` 
+and waits for it to go Ready, and a `POST /delete`  that removes it. Swap it for 
+whatever you are actually building.
+
+This covers the core `Sandbox` API only. The extension CRDs (`SandboxTemplate`, 
+`SandboxClaim`, `SandboxWarmPool`) have examples available at 
+[`../warmpool-quickstart/`](../warmpool-quickstart/).
 
 ## Files
 
 | Path | Purpose |
 | --- | --- |
-| `Tiltfile` | Builds the controller + demo images, deploys the controller, runs the demo Sandbox. |
-| `sandbox.yaml` | The demo `Sandbox` custom resource. |
-| `demo/Dockerfile` | A tiny image that echoes a message and sleeps, so the pod stays up for inspection. |
+| `demo/app.py` | A simple FastAPI app. `POST /create` creates the `Sandbox`, `POST /delete` removes it. |
+| `manifests/app.yaml` | Deployment + ServiceAccount + Role + RoleBinding for the app. The `Role` is the RBAC an app needs to manage sandboxes. |
+| `demo/Dockerfile` | Builds the app image. |
+| `Tiltfile` | Installs the controller, builds and deploys the app, forwards it to `localhost:8080`. |
+
+The `Sandbox` the app creates runs `alpine:latest` executing
+`echo 'Hello Sandbox!' && sleep 86400`. It stays up until deleted, so the
+`Sandbox` holds `Ready`. The image and sleep come from the `SANDBOX_IMAGE` and
+`SANDBOX_DURATION` env vars, which default in `demo/app.py`. They can be 
+updated in `manifests/app.yaml` to override.
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) (or another container engine) running
 - [Tilt](https://tilt.dev/install)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [kind](https://kind.sigs.k8s.io/docs/user/quick#installing-with-go) — Tilt connects to an existing `kind` cluster; it does not create one
+- [kind](https://kind.sigs.k8s.io/docs/user/quick#installing-with-go) — Tilt connects to an existing Kind cluster; it does not create one
 
-The demo image pulls `alpine` from the registry on first start, so the cluster
-nodes need registry access.
+The Sandbox workload pulls `alpine` from the registry on first start, so the
+cluster nodes need registry access (set `SANDBOX_IMAGE` to a locally available
+image to avoid this).
 
 ## Usage
 
-**1. Create a `kind` cluster.** Tilt drives a cluster named `agent-sandbox`
-(the same name `make deploy-kind` uses); create it first:
+1. Create a Kind cluster:
 
 ```bash
 kind create cluster --name agent-sandbox
 ```
 
-**2. Start the demo:**
+2. Start the cluster:
 
 ```bash
 tilt up
 ```
 
-Tilt builds the controller image, loads it into `kind`, installs the CRD and
-controller, and creates the demo `Sandbox`. Watch a pod come up in the Tilt UI
-or the log:
+Tilt installs the CRD and controller, then builds and runs the app.
+
+3. Create a Sandbox:
+
+Tilt forwards the app to `localhost:8080`, so it is reachable as soon as the
+`agent-sandbox-demo-app` resource is green (no `kubectl port-forward` needed):
 
 ```bash
-kubectl get pods -w
+curl -s -X POST http://localhost:8080/create
 ```
 
-The demo `Sandbox` becomes `Ready` once its pod is Running and Ready.
-
-**3. Inspect the Sandbox and its pod:**
+The call returns once the `Sandbox` reports `Ready`, which happens when the
+controller's backing pod is Running and Ready. The pod shares the Sandbox name:
 
 ```bash
 kubectl get sandbox demo
-kubectl describe sandbox demo
-# The backing pod shares the Sandbox name:
-kubectl logs demo -c my-container
+kubectl logs demo  # should print: Hello Sandbox!
 ```
 
-**4. Tear it down:**
+Delete it again with:
+
+```bash
+curl -s -X POST http://localhost:8080/delete
+```
+
+4. Tear it down:
 
 ```bash
 tilt down
 ```
 
-`tilt down` deletes the controller, CRD, and the demo `Sandbox`; the controller
-terminates the backing pod as part of that cleanup. The `kind` cluster itself is
-left in place — delete it separately when done:
+`tilt down` deletes the controller, CRD and app. Removing the CRD takes any
+`Sandbox` still present with it. When finished, delete the Kind cluster when done:
 
 ```bash
 kind delete cluster --name agent-sandbox
 ```
 
-## Live update
+## The app development loop
 
-Editing the controller source rebuilds and reloads the controller automatically
-(Tilt tracks the Dockerfile's `COPY` layers). Editing `sandbox.yaml` or the
-demo image triggers a reload of just the demo `Sandbox`.
+Edit `demo/app.py` or `manifests/app.yaml` and Tilt rebuilds/ redeploys 
+the app, typically in seconds. This enables rapid development of
+applications that use Agent Sandbox in a way that allows the controller
+to be part of the local development loop. No need to deploy to a remote
+cluster to see how the application changes behave. 
+
+Because this example lives in the agent-sandbox repository, the Tiltfile also
+builds the controller from local source, so editing `api/`, `cmd/`,
+`controllers/`, `extensions/` or `internal/` triggers a controller rebuild. In
+your own project you would drop that `docker_build` and apply a released
+controller instead (see [Installation](../../README.md#installation)).
+
+## Adapting it to your app
+
+- **Replace `demo/app.py`.** The only part that has to survive is the `Sandbox`
+  body in `build_sandbox_body()`, which is the API surface apps integrate
+  with.
+- **Keep the `Role` in `manifests/app.yaml` in step with what your app calls.**
+  It currently grants `create`, `get` and `delete` on `sandboxes`.
+- **Keep `resource_deps=['agent-sandbox-controller']`** on your app's
+  `k8s_resource` so it never starts before the `Sandbox` CRD is served.

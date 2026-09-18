@@ -288,6 +288,16 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["content"], b"print(1)")
         self.assertNotIn("data", kwargs)
 
+    async def test_stream_write_disables_retries(self):
+        await self.fs.write("dir/data.bin", BoundedReader(b"payload"))
+        args, kwargs = self.connector.send_request.call_args
+
+        self.assertEqual(args[:2], ("PUT", "v1/files/dir%2Fdata.bin"))
+        self.assertTrue(kwargs["_disable_retries"])
+        self.assertEqual(
+            b"".join([chunk async for chunk in kwargs["content"]]), b"payload"
+        )
+
     async def test_read_uses_sandboxd_get(self):
         response = MagicMock(content=b"hello")
         self.connector.send_request.return_value = response

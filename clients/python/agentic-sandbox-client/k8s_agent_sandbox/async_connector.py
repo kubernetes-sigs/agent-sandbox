@@ -262,6 +262,7 @@ class AsyncSandboxConnector:
         url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
 
         allowed_statuses = kwargs.pop("allowed_statuses", None)
+        disable_retries = kwargs.pop("_disable_retries", False)
         headers = kwargs.pop("headers", {}).copy()
         # For security and SSRF mitigation, the SDK explicitly mandates blocking all HTTP redirects
         # to the internal sandbox endpoints. Any user-provided redirect settings are overridden and
@@ -306,7 +307,8 @@ class AsyncSandboxConnector:
             else httpx.USE_CLIENT_DEFAULT
         )
         last_response: httpx.Response | None = None
-        for attempt in range(MAX_RETRIES + 1):
+        max_retries = 0 if disable_retries else MAX_RETRIES
+        for attempt in range(max_retries + 1):
             try:
                 if stream:
                     request = self.client.build_request(
@@ -325,7 +327,7 @@ class AsyncSandboxConnector:
                 if (
                     method.upper() in RETRYABLE_METHODS
                     and response.status_code in RETRYABLE_STATUS_CODES
-                    and attempt < MAX_RETRIES
+                    and attempt < max_retries
                 ):
                     if stream:
                         await response.aclose()

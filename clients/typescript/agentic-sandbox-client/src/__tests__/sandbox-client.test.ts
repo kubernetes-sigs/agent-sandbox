@@ -633,7 +633,7 @@ describe("SandboxClient (registry)", () => {
       const names = await client.listAllSandboxes("default");
 
       expect(names).toEqual(["sandbox-claim-aaa", "sandbox-claim-bbb"]);
-      expect(mockListNamespacedCustomObject).toHaveBeenCalledWith({
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
         namespace: "default",
@@ -645,6 +645,111 @@ describe("SandboxClient (registry)", () => {
       mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
       const client = new SandboxClient();
       expect(await client.listAllSandboxes()).toEqual([]);
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "default",
+        plural: CLAIM_PLURAL_NAME,
+      });
+    });
+
+    it.each([
+      "app=my-agent",
+      "env in (dev,test),!disabled",
+      "team",
+      "",
+    ])("passes label selector %j to Kubernetes unchanged", async (labelSelector) => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({
+        items: [{ metadata: { name: "sandbox-claim-aaa" } }],
+      });
+      const client = new SandboxClient({ namespace: "team-a" });
+
+      expect(await client.listAllSandboxes("team-b", labelSelector)).toEqual([
+        "sandbox-claim-aaa",
+      ]);
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "team-b",
+        plural: CLAIM_PLURAL_NAME,
+        labelSelector,
+      });
+    });
+
+    it("omits an undefined label selector", async () => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
+      const client = new SandboxClient();
+
+      await client.listAllSandboxes("team-a", undefined);
+
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "team-a",
+        plural: CLAIM_PLURAL_NAME,
+      });
+    });
+
+    it.each([
+      undefined,
+      "",
+    ])("uses the configured default namespace when namespace is %j", async (namespace) => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
+      const client = new SandboxClient({ namespace: "team-a" });
+
+      await client.listAllSandboxes(namespace, "app=my-agent");
+
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "team-a",
+        plural: CLAIM_PLURAL_NAME,
+        labelSelector: "app=my-agent",
+      });
+    });
+
+    it.each([
+      { response: { items: [] }, expected: [] },
+      { response: {}, expected: [] },
+      {
+        response: {
+          items: [
+            { metadata: { name: "sandbox-claim-bbb" } },
+            {},
+            { metadata: {} },
+            { metadata: { name: "" } },
+            { metadata: { name: "sandbox-claim-aaa" } },
+          ],
+        },
+        expected: ["sandbox-claim-bbb", "sandbox-claim-aaa"],
+      },
+    ])("extracts claim names from $response with a selector", async ({
+      response,
+      expected,
+    }) => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce(response);
+      const client = new SandboxClient();
+
+      expect(await client.listAllSandboxes("default", "app=my-agent")).toEqual(
+        expected,
+      );
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toHaveProperty(
+        "labelSelector",
+        "app=my-agent",
+      );
+    });
+
+    it("propagates the original Kubernetes error with a selector", async () => {
+      const error = new Error("Forbidden");
+      mockListNamespacedCustomObject.mockRejectedValueOnce(error);
+      const client = new SandboxClient();
+
+      await expect(
+        client.listAllSandboxes("default", "app=my-agent"),
+      ).rejects.toBe(error);
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
     });
   });
 

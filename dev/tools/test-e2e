@@ -218,10 +218,12 @@ def ensure_extensions_enabled(env):
 
     # This call mutates the controller Deployment, so it must hit the same
     # cluster the SDK test frameworks talk to, not kubectl's ambient
-    # current-context. main() has pinned the resolved kubeconfig in the env every
-    # subprocess inherits; pass it explicitly here too so the target is
-    # unambiguous.
-    kubectl = ["kubectl", "--kubeconfig", env["KUBECONFIG"]]
+    # current-context. main() has pinned the resolved kubeconfig in `env`, and
+    # we pass env=env to every subprocess.run call below so kubectl picks it
+    # up via $KUBECONFIG. Do NOT use --kubeconfig here: it treats the whole
+    # value as a single filename, so it breaks the colon-separated multi-file
+    # KUBECONFIG merging that kubectl's native env handling supports.
+    kubectl = ["kubectl"]
 
     # Check current args
     result = subprocess.run(
@@ -230,7 +232,7 @@ def ensure_extensions_enabled(env):
             "-n", "agent-sandbox-system",
             "-o", "json",
         ],
-        capture_output=True, text=True, check=False,
+        env=env, capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         print(f"Warning: could not read controller deployment args: {result.stderr.strip()}")
@@ -265,7 +267,7 @@ def ensure_extensions_enabled(env):
             "-n", "agent-sandbox-system",
             "-p", patch,
         ],
-        capture_output=True, text=True, check=False,
+        env=env, capture_output=True, text=True, check=False,
     )
     if patch_result.returncode != 0:
         print(f"Error patching deployment: {patch_result.stderr.strip()}")
@@ -278,7 +280,7 @@ def ensure_extensions_enabled(env):
             "-n", "agent-sandbox-system",
             "--timeout=120s",
         ],
-        check=False,
+        env=env, check=False,
     )
     if rollout_result.returncode != 0:
         print("Error: controller rollout did not complete within 120s.")

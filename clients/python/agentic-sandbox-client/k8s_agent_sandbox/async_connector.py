@@ -108,6 +108,7 @@ class AsyncSandboxConnector:
         # a new tunnel or gRPC channel being published.
         self._lifecycle_lock = asyncio.Lock()
         self._closed = False
+        self._close_complete = False
         self.grpc_target: str | None = None
         self._sandboxd_strategy = None
         if isinstance(connection_config, SandboxdPodTunnelConnectionConfig):
@@ -419,27 +420,46 @@ class AsyncSandboxConnector:
     async def close(self) -> None:
         """Close HTTP, gRPC, and port-forward resources owned by the connector."""
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._close_complete:
                 return
             self._closed = True
+            errors: list[BaseException] = []
             try:
                 await self.client.aclose()
+            except BaseException as exc:
+                errors.append(exc)
             finally:
                 async with self._grpc_lock:
                     if self._grpc_channel is not None:
-                        result = self._grpc_channel.close()
-                        if inspect.isawaitable(result):
-                            await result
-                        self._grpc_channel = None
-                        self._grpc_channel_target = None
+                        try:
+                            result = self._grpc_channel.close()
+                            if inspect.isawaitable(result):
+                                await result
+                        except BaseException as exc:
+                            errors.append(exc)
+                        else:
+                            self._grpc_channel = None
+                            self._grpc_channel_target = None
                 if self._sandboxd_strategy is not None:
-                    await self._sandboxd_strategy.close()
-                    self.grpc_target = None
-                if isinstance(self.connection_config, SandboxGatewayConnectionConfig):
-                    self._base_url = None
-                self._pod_ip_resolved = False
-                self._cached_pod_ip_url = None
-                self._pod_ip = None
+                    try:
+                        await self._sandboxd_strategy.close()
+                    except BaseException as exc:
+                        errors.append(exc)
+                    else:
+                        self.grpc_target = None
+                try:
+                    if isinstance(
+                        self.connection_config, SandboxGatewayConnectionConfig
+                    ):
+                        self._base_url = None
+                    self._pod_ip_resolved = False
+                    self._cached_pod_ip_url = None
+                    self._pod_ip = None
+                except BaseException as exc:
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
+            self._close_complete = True
 
 
 class AsyncSandboxdPodTunnelStrategy:
@@ -570,10 +590,10 @@ class AsyncSandboxdPodTunnelStrategy:
     async def close(self) -> None:
         """Stop the port-forward and clear its published endpoints."""
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._closed and self.port_forward_process is None:
                 return
-            self._closed = True
             await self._close_locked()
+            self._closed = True
 
     def _close_for_atexit(self) -> None:
         """Terminate the port-forward without awaiting loop-bound state."""
@@ -602,10 +622,9 @@ class AsyncSandboxdPodTunnelStrategy:
     async def _close_locked(self) -> None:
         """Tear down subprocess state while holding ``_lifecycle_lock``."""
         process = self.port_forward_process
-        self.port_forward_process = None
-        self.base_url = None
-        self.grpc_target = None
         if process is None:
+            self.base_url = None
+            self.grpc_target = None
             return
         if process.returncode is None:
             process.terminate()
@@ -614,3 +633,6 @@ class AsyncSandboxdPodTunnelStrategy:
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
+        self.port_forward_process = None
+        self.base_url = None
+        self.grpc_target = None

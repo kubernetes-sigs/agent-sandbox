@@ -1,0 +1,27 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Generates the TypeScript ProcessService stubs vendored into the TS SDK.
+# Output lands under src/_proto/. Depends on @bufbuild/protobuf, which the
+# SDK declares only as an optional peer dependency; callers import the
+# stubs directly from src/_proto/process/v1/process_pb (see the README
+# committed alongside the generated output for details).
+# Run via: buf generate --template buf.gen.typescript.yaml
+version: v2
+managed:
+  enabled: true
+plugins:
+  - remote: buf.build/bufbuild/es:v2.14.1
+    out: ../../../clients/typescript/agentic-sandbox-client/src/_proto
+    opt: target=ts

@@ -8,6 +8,9 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
+    "@bufbuild/protobuf": "^2.14.1",
+    "@connectrpc/connect": "^2.1.2",
+    "@connectrpc/connect-node": "^2.1.2",
     "@kubernetes/client-node": "^2.0.0",
     "@types/node": "^22.0.0",
     "typescript": "^7.0.2",

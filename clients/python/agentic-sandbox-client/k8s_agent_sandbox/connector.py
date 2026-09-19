@@ -17,6 +17,7 @@ import logging
 import math
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 import requests
@@ -158,6 +159,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
         self.config = config
         self.port_forward_process: subprocess.Popen[bytes] | None = None
         self.base_url: str | None = None
+        self._lock = threading.RLock()  # Reentrant: connect() calls close().
 
     def _get_free_port(self) -> int:
         """Finds a free port on localhost."""
@@ -174,6 +176,10 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             return False
 
     def connect(self) -> str:
+        with self._lock:
+            return self._connect()
+
+    def _connect(self) -> str:
         if self.base_url and self.port_forward_process and self.port_forward_process.poll() is None:
              return self.base_url
 
@@ -227,6 +233,10 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
             sandbox_client_discovery_latency_ms.labels(mode="port_forward", status=status).observe(latency)
 
     def close(self) -> None:
+        with self._lock:
+            self._close()
+
+    def _close(self) -> None:
         if self.port_forward_process:
             try:
                 logging.info(f"Stopping port-forwarding for Sandbox {self.sandbox_id}...")
@@ -276,6 +286,7 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
         self.port_forward_process: subprocess.Popen | None = None
         self.base_url: str | None = None
         self.grpc_target: str | None = None
+        self._lock = threading.RLock()  # Reentrant: connect() calls close().
 
     def _get_free_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -290,6 +301,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
             return False
 
     def connect(self) -> str:
+        with self._lock:
+            return self._connect()
+
+    def _connect(self) -> str:
         if (
             self.base_url
             and self.port_forward_process
@@ -345,6 +360,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                 mode="sandboxd_pod_tunnel", status=status).observe(latency)
 
     def close(self):
+        with self._lock:
+            self._close()
+
+    def _close(self):
         if self.port_forward_process:
             try:
                 self.port_forward_process.terminate()

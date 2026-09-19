@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import MagicMock, patch
 
@@ -25,8 +27,10 @@ from k8s_agent_sandbox.connector import (
     LocalTunnelConnectionStrategy,
     InClusterConnectionStrategy,
     SandboxConnector,
+    SandboxdPodTunnelStrategy,
 )
 from k8s_agent_sandbox.models import (
+    SandboxdPodTunnelConnectionConfig,
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
@@ -502,6 +506,56 @@ class TestSandboxConnectorRetryExhaustion(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 503)
         self.assertFalse(connector.strategy._resolved)
         self.assertEqual(connector.connect(), f"http://10.0.0.99:{port}")
+
+
+class TestTunnelConcurrency(unittest.TestCase):
+    """Concurrent use of one Sandbox must not leak port-forward processes."""
+
+    def _slow_popen(self, *args, **kwargs):
+        # Widen the check-then-spawn window so concurrent connects overlap.
+        time.sleep(0.05)
+        process = MagicMock()
+        process.poll.return_value = None
+        return process
+
+    def _connect_concurrently(self, strategy):
+        barrier = threading.Barrier(8)
+
+        def worker():
+            barrier.wait()
+            return strategy.connect()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(worker) for _ in range(8)]
+            for future in futures:
+                future.result()
+
+    @patch.object(LocalTunnelConnectionStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_local_tunnel_concurrent_connect_spawns_one_process(self, mock_popen, _):
+        mock_popen.side_effect = self._slow_popen
+        strategy = LocalTunnelConnectionStrategy(
+            sandbox_id="sb", namespace="ns",
+            config=SandboxLocalTunnelConnectionConfig(),
+        )
+
+        self._connect_concurrently(strategy)
+
+        self.assertEqual(mock_popen.call_count, 1)
+
+    @patch.object(SandboxdPodTunnelStrategy, "_is_port_open", return_value=True)
+    @patch("subprocess.Popen")
+    def test_sandboxd_tunnel_concurrent_connect_spawns_one_process(self, mock_popen, _):
+        mock_popen.side_effect = self._slow_popen
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sb", namespace="ns",
+            config=SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sb-pod",
+        )
+
+        self._connect_concurrently(strategy)
+
+        self.assertEqual(mock_popen.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -75,3 +75,23 @@ class SandboxClaimFailedError(SandboxError):
     ready without user action, so ready-waits raise instead of waiting
     out the timeout.
     """
+
+
+class BatchError(SandboxError):
+    """Base class for batch-claim errors."""
+
+
+class BatchNotFoundError(BatchError, SandboxNotFoundError):
+    """Raised when ``get_batch`` finds neither a Lease nor labeled claims."""
+
+
+class BatchLeaseExpiredError(BatchError):
+    """The batch's Lease is stale or missing while its claims exist.
+
+    Also returned by a batch handle's ``err()`` once no renewal has
+    succeeded for the Lease's ``lease_duration``.
+    """
+
+
+class BatchInUseError(BatchError):
+    """``get_batch`` found a live Lease held by a different holder."""

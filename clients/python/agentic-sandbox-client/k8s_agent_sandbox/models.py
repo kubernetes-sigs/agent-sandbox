@@ -14,8 +14,8 @@
 
 import re
 from datetime import datetime, timezone
-from typing import Literal, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from typing import Any, Literal, Optional, Union
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _ENV_VAR_NAME_RE = re.compile(r"^[-._a-zA-Z][-._a-zA-Z0-9]*$")
 
@@ -144,3 +144,48 @@ class SandboxTracerConfig(BaseModel):
     """Configuration for tracer level information"""
     enable_tracing: bool = False  # Whether to enable OpenTelemetry tracing.
     trace_service_name: str = "sandbox-client"  # Service name used for traces.
+
+
+class BatchGroup(BaseModel):
+    """Represents one warmpool in a batch for multi-pool batch claiming."""
+    # frozen=True so callers can't mutate a group returned from SandboxBatch.groups() and corrupt later snapshots
+    model_config = ConfigDict(frozen=True)
+
+    warmpool: str
+    size: int = Field(ge=0)
+    min_ready: int | None = None  # Defaults to ``size``.
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_min_ready_default(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("min_ready") is None:
+            data = {**data, "min_ready": data.get("size")}
+        return data
+
+    @model_validator(mode="after")
+    def _validate_min_ready(self) -> "BatchGroup":
+        min_ready = self.min_ready
+        if min_ready is None or not (0 <= min_ready <= self.size):
+            raise ValueError(
+                f"min_ready ({self.min_ready}) must be between 0 and size ({self.size})"
+            )
+        return self
+
+
+class Member(BaseModel):
+    """Represents the identity of a single claim in a batch."""
+    # frozen=True blocks field reassignment; pod_ips is declared as a tuple instead of a list
+    # so it can't be mutated in place either, making Member fully immutable and hashable.
+    model_config = ConfigDict(frozen=True)
+
+    claim_name: str
+    sandbox_name: str | None = None
+    warmpool: str  # The group this member belongs to.
+    pod_ips: tuple[str, ...] = ()
+    service_fqdn: str | None = None
+    ready: bool = False
+    terminal: bool = False
+    lost: bool = False
+    reason: str | None = None
+    message: str | None = None
+

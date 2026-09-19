@@ -972,5 +972,170 @@ class TestK8sHelperWatchResourceVersion(unittest.TestCase):
         self.assertEqual(mock_watch.stream.call_count, 2)
 
 
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CoordinationV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperBatchMethods(unittest.TestCase):
+
+    def test_list_sandbox_claim_objects_returns_items_and_resource_version(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        mock_api.list_namespaced_custom_object.return_value = {
+            "items": [{"metadata": {"name": "b1-0"}}],
+            "metadata": {"resourceVersion": "42"},
+        }
+
+        helper = K8sHelper()
+        items, rv = helper.list_sandbox_claim_objects("default", "agents.x-k8s.io/batch-id=b1")
+
+        self.assertEqual(items, [{"metadata": {"name": "b1-0"}}])
+        self.assertEqual(rv, "42")
+        self.assertEqual(
+            mock_api.list_namespaced_custom_object.call_args.kwargs["label_selector"],
+            "agents.x-k8s.io/batch-id=b1",
+        )
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_watch_sandbox_claims_yields_events(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_watch = MagicMock()
+        event = {"type": "MODIFIED", "object": {"metadata": {"name": "b1-0"}}}
+        mock_watch.stream.return_value = [event]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        events = list(
+            helper.watch_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1", "5", 30)
+        )
+
+        self.assertEqual(events, [event])
+        self.assertEqual(mock_watch.stream.call_args.kwargs["resource_version"], "5")
+        self.assertEqual(mock_watch.stream.call_args.kwargs["label_selector"], "agents.x-k8s.io/batch-id=b1")
+        self.assertIs(mock_watch.stream.call_args.kwargs["allow_watch_bookmarks"], True)
+        mock_watch.stop.assert_called_once()
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_watch_sandbox_claims_skips_none_events(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_watch = MagicMock()
+        event = {"type": "MODIFIED", "object": {"metadata": {"name": "b1-0"}}}
+        mock_watch.stream.return_value = [None, event, None]
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        events = list(
+            helper.watch_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1", "5", 30)
+        )
+
+        self.assertEqual(events, [event])
+
+    @patch("k8s_agent_sandbox.k8s_helper.watch.Watch")
+    def test_watch_sandbox_claims_stops_watch_on_error(
+        self, mock_watch_class, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_watch = MagicMock()
+
+        def _stream(*args, **kwargs):
+            raise client.ApiException(status=410)
+            yield  # unreachable; used to make this a generator function
+
+        mock_watch.stream = _stream
+        mock_watch_class.return_value = mock_watch
+
+        helper = K8sHelper()
+        with self.assertRaises(client.ApiException):
+            list(helper.watch_sandbox_claims("default", "agents.x-k8s.io/batch-id=b1", "5", 30))
+
+        mock_watch.stop.assert_called_once()
+
+    def test_read_batch_lease_returns_lease_on_success(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        lease = client.V1Lease(metadata=client.V1ObjectMeta(name="batch-b1"))
+        mock_coord.read_namespaced_lease.return_value = lease
+
+        helper = K8sHelper()
+        result = helper.read_batch_lease("batch-b1", "default")
+
+        self.assertIs(result, lease)
+        mock_coord.read_namespaced_lease.assert_called_once_with(
+            "batch-b1", "default", _request_timeout=None
+        )
+
+    def test_read_batch_lease_forwards_request_timeout(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+
+        helper = K8sHelper()
+        helper.read_batch_lease("batch-b1", "default", _request_timeout=20)
+
+        mock_coord.read_namespaced_lease.assert_called_once_with(
+            "batch-b1", "default", _request_timeout=20
+        )
+
+    def test_read_batch_lease_returns_none_on_404(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        mock_coord.read_namespaced_lease.side_effect = client.ApiException(status=404)
+
+        helper = K8sHelper()
+        self.assertIsNone(helper.read_batch_lease("batch-b1", "default"))
+
+    def test_read_batch_lease_reraises_non_404(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        mock_coord.read_namespaced_lease.side_effect = client.ApiException(status=403)
+
+        helper = K8sHelper()
+        with self.assertRaises(client.ApiException):
+            helper.read_batch_lease("batch-b1", "default")
+
+    def test_replace_batch_lease_forwards_body(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        lease = client.V1Lease(metadata=client.V1ObjectMeta(name="batch-b1"))
+        updated_lease = client.V1Lease(
+            metadata=client.V1ObjectMeta(name="batch-b1", resource_version="7")
+        )
+        mock_coord.replace_namespaced_lease.return_value = updated_lease
+
+        helper = K8sHelper()
+        result = helper.replace_batch_lease("batch-b1", "default", lease)
+
+        mock_coord.replace_namespaced_lease.assert_called_once_with(
+            "batch-b1", "default", lease, _request_timeout=None
+        )
+        self.assertIs(result, updated_lease)
+
+    def test_replace_batch_lease_forwards_request_timeout(
+        self, mock_config, mock_api_cls, mock_coord_cls, mock_core_cls
+    ):
+        mock_coord = MagicMock()
+        mock_coord_cls.return_value = mock_coord
+        lease = client.V1Lease(metadata=client.V1ObjectMeta(name="batch-b1"))
+
+        helper = K8sHelper()
+        helper.replace_batch_lease("batch-b1", "default", lease, _request_timeout=20)
+
+        mock_coord.replace_namespaced_lease.assert_called_once_with(
+            "batch-b1", "default", lease, _request_timeout=20
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -306,8 +306,7 @@ div.feature-state-notice {
   }
 }
 
-.td-cover-block,
-.td-content {
+.td-cover-block {
   .display-1 {
     font-size: clamp(1.6rem, 4vw, 3.6rem);
   }
@@ -901,4 +900,8 @@ h1.text-center {
       }
     }
   }
+}
+
+.td-content > h1 {
+  font-size: clamp(2rem, 3vw, 2.75rem);
 }

@@ -107,7 +107,8 @@ class AsyncSandboxClient(Generic[T]):
                 "connection_config is required for AsyncSandboxClient. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig. "
-                "For local development with kubectl port-forward, use the synchronous SandboxClient."
+                "For local development with the router's port-forward, use the synchronous SandboxClient; "
+                "SandboxdPodTunnelConnectionConfig supports async pod port-forwarding."
             )
 
         self.connection_config = connection_config

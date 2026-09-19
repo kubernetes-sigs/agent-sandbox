@@ -33,23 +33,29 @@ const DEFAULT_TIMEOUT_SECONDS = 120;
  * merge rules, so the in-process client and the kubectl subprocesses resolve the
  * same cluster: for a cluster/user/context name defined in several files the
  * first definition wins, and current-context comes from the first file that
- * sets one. KubeConfig.mergeConfig cannot be used: it lets later files
- * overwrite current-context and throws on duplicate names.
+ * sets one. Like kubectl, entries that do not exist are skipped, while
+ * unreadable or invalid files are still errors. KubeConfig.loadFromDefault and
+ * KubeConfig.mergeConfig cannot be used: they throw on missing entries and on
+ * duplicate names, and let later files overwrite current-context.
  */
 function loadMergedKubeConfig(kubeconfig: string): k8s.KubeConfig {
   const files = kubeconfig.split(path.delimiter).filter(Boolean);
-  if (files.length === 0) {
-    throw new Error(`No kubeconfig file found in ${JSON.stringify(kubeconfig)}`);
-  }
 
   const clusters = new Map<string, k8s.Cluster>();
   const users = new Map<string, k8s.User>();
   const contexts = new Map<string, k8s.Context>();
   let currentContext = "";
+  let loadedAny = false;
 
   for (const file of files) {
     const kc = new k8s.KubeConfig();
-    kc.loadFromFile(file);
+    try {
+      kc.loadFromFile(file);
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    loadedAny = true;
     for (const c of kc.getClusters()) {
       if (!clusters.has(c.name)) clusters.set(c.name, c);
     }
@@ -60,6 +66,9 @@ function loadMergedKubeConfig(kubeconfig: string): k8s.KubeConfig {
       if (!contexts.has(c.name)) contexts.set(c.name, c);
     }
     currentContext ||= kc.getCurrentContext() ?? "";
+  }
+  if (!loadedAny) {
+    throw new Error(`No kubeconfig file found in ${JSON.stringify(kubeconfig)}`);
   }
 
   const merged = new k8s.KubeConfig();

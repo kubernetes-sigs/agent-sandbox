@@ -1,0 +1,34 @@
+{
+  "name": "@agent-sandbox/headlamp-plugin",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A read-only Headlamp prototype for Agent Sandbox resources.",
+  "scripts": {
+    "start": "headlamp-plugin start",
+    "build": "headlamp-plugin build",
+    "format": "headlamp-plugin format",
+    "lint": "headlamp-plugin lint",
+    "tsc": "headlamp-plugin tsc",
+    "package": "headlamp-plugin package"
+  },
+  "keywords": [
+    "headlamp",
+    "headlamp-plugin",
+    "kubernetes",
+    "agent-sandbox"
+  ],
+  "prettier": "@headlamp-k8s/eslint-config/prettier-config",
+  "eslintConfig": {
+    "extends": [
+      "@headlamp-k8s",
+      "prettier",
+      "plugin:jsx-a11y/recommended"
+    ]
+  },
+  "devDependencies": {
+    "@kinvolk/headlamp-plugin": "^0.14.0"
+  },
+  "overrides": {
+    "typescript": "5.6.2"
+  }
+}

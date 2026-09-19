@@ -49,6 +49,31 @@ RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
 RETRYABLE_METHODS = {"GET", "PUT", "DELETE"}
 MAX_RETRIES = 5
 BACKOFF_FACTOR = 0.5
+_ERROR_BODY_LIMIT = 64 * 1024
+
+
+async def _capture_streamed_error_body(response: httpx.Response) -> None:
+    """Preserve a bounded error body before closing a streamed response."""
+    chunks: list[bytes] = []
+    captured = 0
+    try:
+        async for chunk in response.aiter_bytes(chunk_size=8192):
+            if not chunk:
+                continue
+            remaining = _ERROR_BODY_LIMIT - captured
+            if remaining <= 0:
+                break
+            chunk = chunk[:remaining]
+            chunks.append(chunk)
+            captured += len(chunk)
+            if captured >= _ERROR_BODY_LIMIT:
+                break
+        # httpx exposes content and text only after the response has been read.
+        # Cache the bounded body so diagnostics remain available after close().
+        response._content = b"".join(chunks)
+    except Exception:
+        # Error reporting must not hide the original request failure.
+        logger.debug("Unable to capture streamed error response body", exc_info=True)
 
 
 def _router_timeout_header_value(timeout) -> str | None:
@@ -195,7 +220,7 @@ class AsyncSandboxConnector:
         return self._base_url
 
     async def send_request(
-        self, method: str, endpoint: str, **kwargs: Any
+        self, method: str, endpoint: str, *, stream: bool = False, **kwargs: Any
     ) -> httpx.Response:
         """Sends an HTTP request asynchronously to the sandbox with standard parameters.
 
@@ -206,6 +231,8 @@ class AsyncSandboxConnector:
         Args:
             method: The HTTP method (e.g., "GET", "POST").
             endpoint: The API endpoint path.
+            stream: Return the response without buffering its body. The caller
+                must close streaming responses with ``aclose()``.
             **kwargs: Extra keyword arguments passed directly to the underlying
                 `httpx.AsyncClient.request` invocation. Note that 'follow_redirects'
                 is explicitly popped and overridden. `allowed_statuses` may be
@@ -273,17 +300,35 @@ class AsyncSandboxConnector:
                 if self._pod_ip:
                     headers["X-Sandbox-Pod-IP"] = self._pod_ip
 
+        stream_auth = (
+            kwargs.pop("auth", httpx.USE_CLIENT_DEFAULT)
+            if stream
+            else httpx.USE_CLIENT_DEFAULT
+        )
         last_response: httpx.Response | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                response = await self.client.request(
-                    method, url, headers=headers, follow_redirects=False, **kwargs
-                )
+                if stream:
+                    request = self.client.build_request(
+                        method, url, headers=headers, **kwargs
+                    )
+                    response = await self.client.send(
+                        request,
+                        auth=stream_auth,
+                        follow_redirects=False,
+                        stream=True,
+                    )
+                else:
+                    response = await self.client.request(
+                        method, url, headers=headers, follow_redirects=False, **kwargs
+                    )
                 if (
                     method.upper() in RETRYABLE_METHODS
                     and response.status_code in RETRYABLE_STATUS_CODES
                     and attempt < MAX_RETRIES
                 ):
+                    if stream:
+                        await response.aclose()
                     delay = BACKOFF_FACTOR * (2 ** attempt)
                     logger.warning(
                         f"Retryable status {response.status_code} from {url}, "
@@ -303,6 +348,11 @@ class AsyncSandboxConnector:
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:
+                if stream:
+                    try:
+                        await _capture_streamed_error_body(e.response)
+                    finally:
+                        await e.response.aclose()
                 logger.error(f"Request to sandbox failed: {e}")
                 # 5xx: often a stale Pod IP after a pod swap, clear the cached
                 # routing state so the next request re-resolves.

@@ -184,7 +184,7 @@ type Options struct {
 	// Default: 60s.
 	PerAttemptTimeout time.Duration
 
-	// MaxDownloadSize is the maximum response body size for Read().
+	// MaxDownloadSize is the maximum response body size for Read() and ReadTo().
 	// Run() uses a fixed 16 MB decode limit; List() and Exists() use a
 	// fixed 8 MB internal limit. Default: 256 MB.
 	MaxDownloadSize int64

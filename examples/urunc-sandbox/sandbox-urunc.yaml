@@ -1,0 +1,49 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Bare Sandbox CR using the urunc RuntimeClass.
+# Useful for deploying a single, hand-crafted sandbox pod.
+#
+# ${IMAGE} must be a urunc-bootable image, built as described in the README.
+# A stock OCI image will not boot under urunc.
+#
+# ${IMAGE} and ${RUNTIME_CLASS_NAME} must both be substituted before this manifest is
+# applied. `kubectl apply -f` on the raw file leaves the literal strings in place and the
+# kubelet rejects the pod with InvalidImageName. An unset RUNTIME_CLASS_NAME fails more
+# quietly: envsubst empties the field and the pod runs on the node's default runtime,
+# outside any sandbox. Apply it as:
+#   export IMAGE=<registry>/python-runtime-sandbox-urunc:latest
+#   export RUNTIME_CLASS_NAME=urunc   # match --runtime-class-name if it was changed
+#   envsubst < sandbox-urunc.yaml | kubectl apply -f -
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: urunc-example
+spec:
+  # Ask the controller for the headless Service that gives the sandbox its stable
+  # in-cluster hostname (urunc-example). Without this no Service is created.
+  service: true
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: urunc
+    spec:
+      runtimeClassName: ${RUNTIME_CLASS_NAME}
+      containers:
+      - name: python-runtime
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8888
+          name: http

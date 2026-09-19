@@ -188,22 +188,25 @@ If you are using gVisor or Kata Containers, direct pod port-forwarding isn't com
 
 1.  **Deploy the Router (Required for All Modes):**
     ```bash
-    # Deploys the Deployment, Service, ServiceAccount, and RBAC
-    kubectl apply -f ../../sandbox-router/deploy/serviceaccount.yaml \
-      -f ../../sandbox-router/deploy/rbac.yaml \
-      -f ../../sandbox-router/deploy/deployment.yaml \
-      -f ../../sandbox-router/deploy/service.yaml
+    # Remote install (no clone needed):
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/sandbox-router.yaml
+
+    # Or from a local clone:
+    kubectl apply -f ../../sandbox-router/deploy/sandbox-router.yaml
     ```
 
 2.  **Deploy the Gateway (Production Only):**
     If you need external access via a public IP, apply the Gateway configuration.
     This requires the Gateway API CRDs and a Gateway API controller
     (e.g. Istio, GKE built-in, Envoy Gateway) — see the
-    [sandbox-router README](../../clients/python/agentic-sandbox-client/sandbox-router/README.md) for prerequisites.
+    [sandbox-router README](../../sandbox-router/README.md) for prerequisites.
     Edit `spec.gatewayClassName` in the YAML to match your environment — see the
     comments in `gateway.yaml` for options.
     ```bash
-    # (GKE-only) Deploys Gateway, HTTPRoute, and HealthCheckPolicy
+    # (GKE-only) Remote install (no clone needed):
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/examples/gateway-gke.yaml
+
+    # Or from a local clone:
     kubectl apply -f ../../sandbox-router/deploy/examples/gateway-gke.yaml
     ```
 

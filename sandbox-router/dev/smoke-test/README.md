@@ -5,7 +5,7 @@ End-to-end smoke test for the Go sandbox-router on a kind cluster. The script ve
 ## What it does
 
 1. Builds the router image from `sandbox-router/Dockerfile` against the repo root.
-2. Creates (or reuses) a kind cluster, loads the image, applies the example deploy manifests (`serviceaccount.yaml`, `rbac.yaml`, `service.yaml`, `deployment.yaml`).
+2. Creates (or reuses) a kind cluster, loads the image, applies the core deploy manifest (`sandbox-router.yaml`).
 3. Creates a fake "sandbox" Pod: the controller-stamped label `agents.x-k8s.io/sandbox-name-hash` plus an OwnerReference of `kind: Sandbox, apiVersion: agents.x-k8s.io/v1beta1` (so the cache sees and indexes it). The Pod runs `hashicorp/http-echo` so we can match on a known response body.
 4. Sends an in-cluster `curl` through `sandbox-router-svc:8080`:
    - DNS-form routing (no `X-Sandbox-Uid`) → expects 200 with `smoke-ok`.

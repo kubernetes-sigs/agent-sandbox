@@ -73,11 +73,10 @@ The output should show `sandbox-example: kata-qemu`.
 With Kata runtimes, direct pod port-forwarding is not compatible. Use the [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) — a lightweight reverse proxy that acts as a single entry point for all sandbox traffic and routes requests to the correct sandbox pod based on an `X-Sandbox-ID` header:
 
 ```bash
-# Deploy the router
-kubectl apply -f sandbox-router/deploy/serviceaccount.yaml \
-  -f sandbox-router/deploy/rbac.yaml \
-  -f sandbox-router/deploy/deployment.yaml \
-  -f sandbox-router/deploy/service.yaml
+# Deploy the router (remote install, or from a local clone):
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/sandbox-router.yaml
+# Or: kubectl apply -f sandbox-router/deploy/sandbox-router.yaml
+```
 
 # Port-forward to the router service
 kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system
@@ -90,7 +89,9 @@ For production external access on GKE, deploy the Gateway configuration (require
 Gateway API controller — edit `spec.gatewayClassName` to match your environment):
 
 ```bash
-kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
+# Remote install, or from a local clone:
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/sandbox-router/deploy/examples/gateway-gke.yaml
+# Or: kubectl apply -f sandbox-router/deploy/examples/gateway-gke.yaml
 ```
 
 ## When to Use Kata Containers

@@ -74,7 +74,7 @@ you want to deploy into.
    cluster:
 
    ```bash
-   # One-time per cluster: register the preview feature (if not already).
+   # One-time per subscription: register the preview feature (if not already).
    az feature register --namespace Microsoft.ContainerService --name KataVMIsolationPreview
    az provider register --namespace Microsoft.ContainerService
 

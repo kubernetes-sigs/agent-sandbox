@@ -64,22 +64,22 @@ export function SandboxList() {
         'namespace',
         {
           id: 'ready',
-          label: t('Ready'),
+          label: 'Ready',
           getValue: item => item.readyStatus,
         },
         {
           id: 'launch-type',
-          label: t('Launch type'),
+          label: 'Launch type',
           getValue: item => item.launchType,
         },
         {
           id: 'pod-ip',
-          label: t('Pod IP'),
+          label: 'Pod IP',
           getValue: item => item.podIP,
         },
         {
           id: 'node',
-          label: t('Node'),
+          label: 'Node',
           getValue: item => item.status.nodeName || '-',
         },
         'age',
@@ -166,17 +166,17 @@ export function SandboxClaimList() {
         'namespace',
         {
           id: 'ready',
-          label: t('Ready'),
+          label: 'Ready',
           getValue: item => conditionValue(item.jsonData),
         },
         {
           id: 'warm-pool',
-          label: t('WarmPool'),
+          label: 'WarmPool',
           getValue: item => item.spec.warmPoolRef?.name || '-',
         },
         {
           id: 'sandbox',
-          label: t('Sandbox'),
+          label: 'Sandbox',
           getValue: item => item.assignedSandboxName,
           render: item => (
             <LinkValue
@@ -258,17 +258,17 @@ export function SandboxWarmPoolList() {
         'namespace',
         {
           id: 'ready',
-          label: t('Ready'),
+          label: 'Ready replicas',
           getValue: item => `${item.readyReplicas} / ${item.desiredReplicas}`,
         },
         {
           id: 'template',
-          label: t('Template'),
+          label: 'Template',
           getValue: item => item.spec.sandboxTemplateRef?.name || '-',
         },
         {
           id: 'update-strategy',
-          label: t('Update strategy'),
+          label: 'Update strategy',
           getValue: item => item.spec.updateStrategy?.type || 'OnReplenish',
         },
         'age',

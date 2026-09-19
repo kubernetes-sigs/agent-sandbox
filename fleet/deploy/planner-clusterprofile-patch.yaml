@@ -1,0 +1,96 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# Opt-in overlay: make the planner derive its cluster registry from
+# ClusterProfile CRs on the hub instead of from per-member capacity reports in
+# GCS. The write half is deploy/fleet-member-clusterprofile-patch.yaml.
+#
+# WHAT STILL GOES THROUGH GCS: the FleetSpec in and the assignments out. Only
+# the *inventory* moves to the hub. That is the seam the integration was built
+# around -- `planner.load_registry()` -- so nothing downstream of the
+# PlannerCluster dataclass changes, and placement/budget/sizing are untouched.
+#
+# ORDER OF OPERATIONS MATTERS. Apply this only once every member is publishing
+# and you have confirmed the profiles carry agents.x-k8s.io properties. Flip
+# the planner first and it reads an inventory nobody has written yet: every
+# cluster looks capacity-less, and depending on the policy that is either an
+# empty plan or the whole fleet crammed onto whichever cluster does have data.
+#
+#   kubectl --context hub get clusterprofile -n fleet-system \
+#     -o custom-columns=NAME:.metadata.name,\
+# CAP:'.status.properties[?(@.name=="agents.x-k8s.io/sandbox-capacity")].value'
+#
+# Every row must show a capacity before you apply this.
+#
+# APPLY (render.sh, not envsubst — see planner-deployment.yaml's header for
+# why; an unset ${CLUSTER_MANAGER} here is the quiet version of that bug: the
+# empty string is falsy, so the planner drops its label selector and
+# inventories every ClusterProfile on the hub, other fleets' included):
+#   ./deploy/gen-hub-kubeconfig.sh --hub-cluster fleet-hub \
+#       --hub-location us-central1 | kubectl apply -f -
+#   kubectl patch deployment fleet-planner -n multi-cluster-fleet \
+#     --patch "$(./deploy/render.sh deploy/planner-clusterprofile-patch.yaml)"
+#
+# ROLLBACK is re-applying planner-deployment.yaml. The GCS capacity reports
+# never stopped being written, so the fallback path is always current -- that
+# is the reason publishing was made additive rather than a replacement.
+#
+# RBAC: the planner needs no *local* RBAC (the base manifest's comment saying
+# it "only touches GCS" is no longer true, but it still touches no API in ITS
+# OWN cluster). On the HUB it needs namespace-wide read, which is the
+# `fleet-planner` Role emitted by deploy/gen-hub-rbac.py. Its GSA must be bound
+# to this KSA via Workload Identity, same as the members.
+spec:
+  template:
+    spec:
+      containers:
+        - name: planner
+          args:
+            # Replaces the list wholesale; see the note in the member patch.
+            # Hub flags come from the `common` parent parser, so they must
+            # appear AFTER the `apply` subcommand, not before it.
+            - --bucket=${FLEET_BUCKET}
+            - apply
+            - -f
+            - /etc/fleet/fleet-spec.yaml
+            - --loop
+            - --loop-interval=${LOOP_INTERVAL}
+            - --inventory=clusterprofile
+            - --hub-kubeconfig=/etc/fleet-hub/kubeconfig
+            # Must match setup-hub.sh's --hub-namespace (HUB_NS), and the
+            # members'. A mismatch does not error: the planner finds an empty
+            # namespace, reads an inventory of zero clusters, and plans
+            # accordingly -- the same "capacity-less fleet" outcome as flipping
+            # this on too early, arrived at by a different route.
+            - --hub-namespace=${HUB_NAMESPACE}
+            - --hub-token-source=gke-metadata
+            # Must match the members' --hub-api-version. render.sh defaults
+            # both to v1alpha1; override HUB_API_VERSION on BOTH sides
+            # together or ownership splits across two managedFields
+            # entries under one manager name.
+            - --hub-api-version=${HUB_API_VERSION}
+            # Only read profiles this fleet's cluster manager owns, so a hub
+            # shared with another fleet does not leak clusters into placement.
+            - --cluster-manager=${CLUSTER_MANAGER}
+            # Trust agents.x-k8s.io/heartbeat over ControlPlaneHealthy for
+            # liveness. The condition only moves on TRANSITION, so a member
+            # that went True an hour ago and then died silently still reads
+            # healthy -- the planner would keep placing work on a dead
+            # cluster. Safe to enable only because our members publish a
+            # heartbeat; drop it if any profile comes from a manager that
+            # does not.
+            - --require-heartbeat
+          volumeMounts:
+            - name: spec
+              mountPath: /etc/fleet
+              readOnly: true
+            - name: hub-kubeconfig
+              mountPath: /etc/fleet-hub
+              readOnly: true
+      volumes:
+        - name: spec
+          configMap:
+            name: fleet-spec
+        - name: hub-kubeconfig
+          configMap:
+            name: hub-kubeconfig

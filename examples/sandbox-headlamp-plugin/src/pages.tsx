@@ -59,6 +59,9 @@ export function SandboxList() {
     <ResourceListView
       title={t('Sandboxes')}
       resourceClass={Sandbox}
+      headerProps={{ titleSideActions: [] }}
+      enableRowActions={false}
+      enableRowSelection={false}
       columns={[
         'name',
         'namespace',
@@ -98,6 +101,7 @@ export function SandboxDetail() {
       name={name}
       namespace={namespace}
       withEvents
+      noDefaultActions
       extraInfo={item =>
         item && [
           { name: t('API version'), value: Sandbox.apiVersion },
@@ -161,6 +165,9 @@ export function SandboxClaimList() {
     <ResourceListView
       title={t('Sandbox Claims')}
       resourceClass={SandboxClaim}
+      headerProps={{ titleSideActions: [] }}
+      enableRowActions={false}
+      enableRowSelection={false}
       columns={[
         'name',
         'namespace',
@@ -202,6 +209,7 @@ export function SandboxClaimDetail() {
       name={name}
       namespace={namespace}
       withEvents
+      noDefaultActions
       extraInfo={item =>
         item && [
           { name: t('API version'), value: SandboxClaim.apiVersion },
@@ -253,6 +261,9 @@ export function SandboxWarmPoolList() {
     <ResourceListView
       title={t('Sandbox WarmPools')}
       resourceClass={SandboxWarmPool}
+      headerProps={{ titleSideActions: [] }}
+      enableRowActions={false}
+      enableRowSelection={false}
       columns={[
         'name',
         'namespace',
@@ -287,6 +298,7 @@ export function SandboxWarmPoolDetail() {
       name={name}
       namespace={namespace}
       withEvents
+      noDefaultActions
       extraInfo={item =>
         item && [
           { name: t('API version'), value: SandboxWarmPool.apiVersion },

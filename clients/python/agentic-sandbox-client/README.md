@@ -313,7 +313,32 @@ async def main():
 asyncio.run(main())
 ```
 
-### 7. Labels and Pod Metadata
+### 7. Streaming File Uploads
+
+`write` accepts strings, bytes, and binary file objects. Passing a file object
+streams it from its current position instead of loading the entire file into
+client memory:
+
+```python
+with open("dataset.tar", "rb") as source:
+    sandbox.files.write("data/dataset.tar", source)
+```
+
+The async client accepts the same binary file objects. File reads run outside
+the event loop while each chunk is uploaded:
+
+```python
+with open("dataset.tar", "rb") as source:
+    await sandbox.files.write("data/dataset.tar", source)
+```
+
+The caller owns the file object and must close it. A streaming upload is sent
+once because an arbitrary stream cannot be replayed safely after a partial
+request. If the upload fails, its file position may have advanced. File-object
+uploads use HTTP chunked transfer encoding, so the runtime and any intermediary
+must accept request bodies without a `Content-Length` header.
+
+### 8. Labels and Pod Metadata
 
 `create_sandbox` lets you attach metadata at two different levels:
 
@@ -348,7 +373,7 @@ Behavioral notes:
   domain allow-list and system-label restrictions are enforced server-side and
   are not replicated client-side.
 
-### 8. Custom Volume Claim Templates
+### 9. Custom Volume Claim Templates
 
 You can dynamically request persistent volumes to be attached to your Sandbox Pod by specifying `volume_claim_templates`. This allows the sandbox to mount custom PersistentVolumeClaims (PVCs).
 
@@ -376,7 +401,7 @@ sandbox = client.create_sandbox(
 
 The volume claim templates are validated against the warmpool template's policy and rules (e.g., whether custom volume claims are allowed or if overrides are permitted).
 
-### 9. Startup Latency: How the SDK Waits for Readiness
+### 10. Startup Latency: How the SDK Waits for Readiness
 
 `create_sandbox()` is fully **watch-based** — it never polls the Kubernetes
 API on an interval, so there is no poll-interval latency added on top of the

@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+"""Connection strategies and HTTP transport for the synchronous SDK."""
+
 import logging
 import math
 import socket
 import subprocess
 import time
 from collections.abc import Callable
+from typing import Any
+
 import requests
 from abc import ABC, abstractmethod
 from requests.adapters import HTTPAdapter
@@ -572,6 +575,7 @@ class SandboxConnector:
         # returned as-is instead of raising — which is important because the
         # raise path also calls self.close() and tears down the connection.
         allowed_statuses = kwargs.pop("allowed_statuses", None)
+        disable_retries = kwargs.pop("_disable_retries", False)
         try:
             # Establish connection (re-establishes if closed/dead)
             base_url = self.connect()
@@ -617,8 +621,13 @@ class SandboxConnector:
             # arguments when calling requests.Session.request.
             kwargs.pop("allow_redirects", None)
 
-            # Send the request with redirections blocked
-            response = self.session.request(method, url, allow_redirects=False, **kwargs)
+            # A streamed body cannot be replayed by the Session's Retry
+            # adapter: a retry would send the consumed generator as an empty
+            # body. Bypassing the Session also means that a streamed PUT gets
+            # only one connection attempt, so callers see transient connect
+            # failures directly.
+            request = requests.request if disable_retries else self.session.request
+            response = request(method, url, allow_redirects=False, **kwargs)
             if response.is_redirect:
                 raise requests.exceptions.HTTPError(
                     f"Redirection is not allowed (status code {response.status_code}).",

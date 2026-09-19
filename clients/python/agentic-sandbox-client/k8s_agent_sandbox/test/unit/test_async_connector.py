@@ -20,11 +20,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from k8s_agent_sandbox.async_connector import (
     AsyncSandboxConnector,
     AsyncSandboxdPodTunnelStrategy,
 )
-from k8s_agent_sandbox.exceptions import SandboxPortForwardError
+from k8s_agent_sandbox.exceptions import SandboxPortForwardError, SandboxRequestError
 from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
 
 
@@ -49,6 +51,29 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(connector.is_sandboxd())
         self.assertFalse(connector.should_inject_router_headers())
         await connector.close()
+
+    async def test_disable_retries_for_non_replayable_request_body(self):
+        connector = self._build()
+        connector._resolve_base_url = AsyncMock(return_value="http://127.0.0.1:18080")
+        request = httpx.Request("PUT", "http://127.0.0.1:18080/v1/files/data")
+        connector.client.request = AsyncMock(
+            return_value=httpx.Response(503, request=request)
+        )
+
+        async def body():
+            yield b"payload"
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request(
+                    "PUT",
+                    "v1/files/data",
+                    content=body(),
+                    _disable_retries=True,
+                )
+            connector.client.request.assert_awaited_once()
+        finally:
+            await connector.close()
 
     async def test_connect_exposes_rest_and_grpc_endpoints(self):
         connector = self._build()

@@ -12,16 +12,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for filesystem path safety and runtime-specific operations."""
+"""Unit tests for synchronous and asynchronous filesystem operations."""
 
 import asyncio
+import io
 import unittest
 import urllib.parse
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import requests
+
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.async_filesystem import AsyncFilesystem
 from k8s_agent_sandbox.files.filesystem import Filesystem, _sandboxd_files_endpoint
+
+
+class BoundedReader(io.BytesIO):
+    """A binary stream that rejects unbounded reads and records read sizes."""
+
+    def __init__(self, content: bytes, max_return_size: int = 3):
+        super().__init__(content)
+        self.max_return_size = max_return_size
+        self.read_sizes: list[int] = []
+
+    def read(self, size: int | None = -1) -> bytes:
+        if size is None or size < 0:
+            raise AssertionError("streaming uploads must use bounded reads")
+        self.read_sizes.append(size)
+        return super().read(min(size, self.max_return_size))
+
+
+class NonSeekableReader(BoundedReader):
+    def seekable(self) -> bool:
+        return False
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        raise io.UnsupportedOperation("not seekable")
+
+    def tell(self) -> int:
+        raise io.UnsupportedOperation("not seekable")
+
+
+def multipart_payload(body: bytes, content_type: str) -> tuple[bytes, bytes]:
+    boundary = content_type.removeprefix("multipart/form-data; boundary=")
+    headers, remainder = body.split(b"\r\n\r\n", 1)
+    payload, trailer = remainder.rsplit(
+        f"\r\n--{boundary}--\r\n".encode(), 1
+    )
+    if trailer:
+        raise AssertionError(f"unexpected multipart trailer: {trailer!r}")
+    return headers, payload
 
 
 class TestFilesystemSafeUploadPath(unittest.TestCase):
@@ -180,6 +220,16 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["content"], b"print(1)")
         self.assertNotIn("data", kwargs)
 
+    async def test_stream_write_disables_retries(self):
+        await self.fs.write("dir/data.bin", BoundedReader(b"payload"))
+        args, kwargs = self.connector.send_request.call_args
+
+        self.assertEqual(args[:2], ("PUT", "v1/files/dir%2Fdata.bin"))
+        self.assertTrue(kwargs["_disable_retries"])
+        self.assertEqual(
+            b"".join([chunk async for chunk in kwargs["content"]]), b"payload"
+        )
+
     async def test_read_uses_sandboxd_get(self):
         response = MagicMock(content=b"hello")
         self.connector.send_request.return_value = response
@@ -268,6 +318,165 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
         await self.fs.delete("dir")
 
         span.set_attribute.assert_called_once_with("sandbox.file.path", "dir")
+class TestFilesystemStreamingWrite(unittest.TestCase):
+    def setUp(self):
+        self.connector = MagicMock()
+        self.connector.is_sandboxd.return_value = False
+        self.filesystem = Filesystem(
+            self.connector, MagicMock(), trace_service_name="test"
+        )
+
+    def test_legacy_streams_from_current_position_with_bounded_reads(self):
+        source = BoundedReader(b"skip-streamed-payload")
+        source.seek(5)
+
+        self.filesystem.write("data/file.bin", source)
+
+        kwargs = self.connector.send_request.call_args.kwargs
+        self.assertNotIn("files", kwargs)
+
+        prepared = requests.Request(
+            "POST",
+            "http://sandbox/upload",
+            data=kwargs["data"],
+            headers=kwargs["headers"],
+        ).prepare()
+        self.assertEqual(source.read_sizes, [])
+        self.assertEqual(prepared.headers["Transfer-Encoding"], "chunked")
+        wire_body = b"".join(prepared.body)
+        headers, payload = multipart_payload(
+            wire_body, kwargs["headers"]["Content-Type"]
+        )
+
+        self.assertIn(b'name="file"', headers)
+        self.assertIn(b'filename="data/file.bin"', headers)
+        self.assertEqual(payload, b"streamed-payload")
+        self.assertTrue(source.read_sizes)
+        self.assertTrue(all(0 < size <= 64 * 1024 for size in source.read_sizes))
+        self.assertFalse(source.closed)
+
+    def test_legacy_accepts_non_seekable_stream(self):
+        source = NonSeekableReader(b"streamed-payload")
+
+        self.filesystem.write("file.bin", source)
+
+        kwargs = self.connector.send_request.call_args.kwargs
+        body = b"".join(kwargs["data"])
+        _, payload = multipart_payload(body, kwargs["headers"]["Content-Type"])
+        self.assertEqual(payload, b"streamed-payload")
+
+    def test_legacy_streams_empty_file(self):
+        source = BoundedReader(b"")
+
+        self.filesystem.write("empty.bin", source)
+
+        kwargs = self.connector.send_request.call_args.kwargs
+        body = b"".join(kwargs["data"])
+        _, payload = multipart_payload(body, kwargs["headers"]["Content-Type"])
+        self.assertEqual(payload, b"")
+        self.assertFalse(source.closed)
+
+    def test_invalid_path_is_rejected_before_reading_stream(self):
+        source = BoundedReader(b"payload")
+
+        with self.assertRaisesRegex(ValueError, "escapes the sandbox root"):
+            self.filesystem.write("../escape", source)
+
+        self.assertEqual(source.read_sizes, [])
+        self.connector.send_request.assert_not_called()
+
+    def test_text_stream_is_rejected(self):
+        with self.assertRaisesRegex(TypeError, "binary mode"):
+            self.filesystem.write("file.txt", io.StringIO("content"))
+
+        self.connector.send_request.assert_not_called()
+
+    @patch("k8s_agent_sandbox.files.filesystem.trace.get_current_span")
+    def test_stream_tracing_omits_unknown_size(self, get_current_span):
+        span = get_current_span.return_value
+        span.is_recording.return_value = True
+        source = io.BytesIO(b"payload")
+
+        self.filesystem.write("file.bin", source)
+
+        span.set_attribute.assert_any_call("sandbox.file.path", "file.bin")
+        size_calls = [
+            call
+            for call in span.set_attribute.call_args_list
+            if call.args[0] == "sandbox.file.size"
+        ]
+        self.assertEqual(size_calls, [])
+        self.assertEqual(source.tell(), 0)
+
+    @patch("k8s_agent_sandbox.files.filesystem.trace.get_current_span")
+    def test_string_tracing_uses_utf8_byte_size(self, get_current_span):
+        span = get_current_span.return_value
+        span.is_recording.return_value = True
+
+        self.filesystem.write("unicode.txt", "你好")
+
+        span.set_attribute.assert_any_call("sandbox.file.size", 6)
+
+
+class TestAsyncFilesystemStreamingWrite(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.connector = MagicMock()
+        self.connector.send_request = AsyncMock()
+        self.connector.is_sandboxd.return_value = False
+        self.filesystem = AsyncFilesystem(
+            self.connector, MagicMock(), trace_service_name="test"
+        )
+
+    async def test_legacy_streams_from_current_position_with_bounded_reads(self):
+        source = BoundedReader(b"skip-async-payload")
+        source.seek(5)
+
+        await self.filesystem.write("data/file.bin", source)
+
+        kwargs = self.connector.send_request.call_args.kwargs
+        self.assertNotIn("files", kwargs)
+        wire_body = b"".join([chunk async for chunk in kwargs["content"]])
+        headers, payload = multipart_payload(
+            wire_body, kwargs["headers"]["Content-Type"]
+        )
+
+        self.assertIn(b'filename="data/file.bin"', headers)
+        self.assertEqual(payload, b"async-payload")
+        self.assertTrue(source.read_sizes)
+        self.assertTrue(all(0 < size <= 64 * 1024 for size in source.read_sizes))
+        self.assertFalse(source.closed)
+
+    async def test_text_stream_is_rejected(self):
+        with self.assertRaisesRegex(TypeError, "binary mode"):
+            await self.filesystem.write("file.txt", io.StringIO("content"))
+
+        self.connector.send_request.assert_not_awaited()
+
+    @patch("k8s_agent_sandbox.files.async_filesystem.trace.get_current_span")
+    async def test_stream_tracing_omits_unknown_size(self, get_current_span):
+        span = get_current_span.return_value
+        span.is_recording.return_value = True
+        source = io.BytesIO(b"payload")
+
+        await self.filesystem.write("file.bin", source)
+
+        span.set_attribute.assert_any_call("sandbox.file.path", "file.bin")
+        size_calls = [
+            call
+            for call in span.set_attribute.call_args_list
+            if call.args[0] == "sandbox.file.size"
+        ]
+        self.assertEqual(size_calls, [])
+        self.assertEqual(source.tell(), 0)
+
+    @patch("k8s_agent_sandbox.files.async_filesystem.trace.get_current_span")
+    async def test_string_tracing_uses_utf8_byte_size(self, get_current_span):
+        span = get_current_span.return_value
+        span.is_recording.return_value = True
+
+        await self.filesystem.write("unicode.txt", "你好")
+
+        span.set_attribute.assert_any_call("sandbox.file.size", 6)
 
 if __name__ == '__main__':
     unittest.main()

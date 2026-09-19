@@ -14,7 +14,9 @@
 
 from .sandbox_client import SandboxClient
 from .models import SandboxdInClusterConnectionConfig
+from .sandbox_batch import SandboxBatch
 from .metrics_utils import get_metrics, print_metrics
+from .models import BatchGroup, Member, MemberState
 from .exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -25,6 +27,10 @@ from .exceptions import (
     SandboxClaimFailedError,
     SandboxPortForwardError,
     SandboxRequestError,
+    BatchError,
+    BatchNotFoundError,
+    BatchLeaseExpiredError,
+    BatchInUseError,
 )
 
 
@@ -36,5 +42,17 @@ except ImportError:
         def __init__(self, *args: object, **kwargs: object) -> None:
             raise ImportError(
                 "AsyncSandboxClient requires the 'async' extras. "
+                "Install with: pip install k8s-agent-sandbox[async]"
+            )
+
+
+try:
+    from .async_sandbox_batch import AsyncSandboxBatch
+except ImportError:
+    class AsyncSandboxBatch:  # type: ignore[no-redef]
+        """Placeholder that raises ImportError when async extras are missing."""
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise ImportError(
+                "AsyncSandboxBatch requires the 'async' extras. "
                 "Install with: pip install k8s-agent-sandbox[async]"
             )

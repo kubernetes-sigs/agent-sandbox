@@ -124,8 +124,28 @@ export interface FileCallOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Process settings that map 1:1 onto sandboxd's ProcessConfig (besides the
+ * argv itself).
+ */
+export interface ProcessOptions {
+  /**
+   * Environment variables merged over sandboxd's own environment (not a
+   * replacement for it); a key given here overrides sandboxd's value. Note
+   * that `PATH` set here does not affect how the executable itself is looked
+   * up — sandboxd resolves it against its own `PATH`.
+   */
+  env?: Readonly<Record<string, string>>;
+  /**
+   * Working directory, relative to the sandbox root. Default: the sandbox
+   * root. sandboxd rejects a directory that resolves outside the sandbox
+   * root (PERMISSION_DENIED).
+   */
+  cwd?: string;
+}
+
 /** Options accepted by sandbox.commands.run(). */
-export interface RunOptions {
+export interface RunOptions extends ProcessOptions {
   /** See {@link FileCallOptions.timeoutMs}. Default: 60000. */
   timeoutMs?: number;
   signal?: AbortSignal;

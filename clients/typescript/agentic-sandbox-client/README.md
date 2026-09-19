@@ -15,8 +15,14 @@ const sandbox = await client.createSandbox("my-warmpool");
 try {
   // Connects to sandboxd lazily on first use; both facades share one
   // connection once established.
-  const result = await sandbox.commands.run("echo hello");
+  const result = await sandbox.commands.run("echo", ["hello"]);
   console.log(result.stdout, result.exitCode);
+
+  // No shell is involved; invoke one explicitly for pipes, redirects, etc.
+  await sandbox.commands.run("sh", ["-c", "ls | wc -l"], {
+    env: { LC_ALL: "C" },
+    cwd: "work",
+  });
 
   await sandbox.files.write("greeting.txt", "hello from the SDK\n");
   const contents = await sandbox.files.read("greeting.txt");
@@ -90,7 +96,12 @@ A few things differ from the buffered methods:
 
 ### Execution target and path rules
 
-`sandbox.commands.run(command)` always executes `/bin/sh -c <command>` inside the container running sandboxd. If your Pod spec's sandboxd container has a different root filesystem than a "workload" sidecar container, `run()` only ever executes in the sandboxd container — a shared volume does not make binaries from another container available to it.
+`sandbox.commands.run(command, args?, options?)` (or `run(command, options?)`) passes `[command, ...args]` to sandboxd as the process's argv, exactly like `ProcessConfig.command` — it is never wrapped in a shell, so there is no word splitting, globbing, or variable expansion. Use `run("sh", ["-c", "..."])` when you need shell syntax. Because there is no shell in between, an executable that cannot be found is reported by sandboxd as a `SandboxdRpcError` with code `not_found`, not as a result with exit code 127.
+
+- `options.env` is merged over sandboxd's own environment (it does not replace it). `PATH` set here does not change how `command` itself is looked up — sandboxd resolves it against its own `PATH` — so pass an absolute path if you need a specific executable.
+- `options.cwd` is resolved relative to the sandbox root (default: the sandbox root) by sandboxd, with the same symlink-aware confinement as the files API; a directory outside the sandbox root is rejected with a `SandboxdRpcError` (code `permission_denied`).
+
+`run()` executes inside the container running sandboxd. If your Pod spec's sandboxd container has a different root filesystem than a "workload" sidecar container, `run()` only ever executes in the sandboxd container — a shared volume does not make binaries from another container available to it.
 
 All file paths are sandbox-root-relative POSIX paths and are validated **before any network request**, without being decoded or normalized first:
 
@@ -124,7 +135,7 @@ With the in-cluster modes, REST and gRPC travel in plaintext across the pod netw
 
 ### Differences from the Go and Python clients
 
-- `run()` always executes via `/bin/sh -c` — there is no way to set the executable directly, unlike the Go/Python clients' argv-style APIs.
+- `run()` takes an argv (`command`, `args`) mirroring sandboxd's `ProcessConfig`, plus `env` and `cwd`; the Go/Python clients take a single shell string that they wrap in `/bin/sh -c`.
 - File paths are never recorded in tracing spans or logs (only counts/sizes/booleans are), and absolute paths / `..` segments are rejected by the client itself before any request is sent.
 - RuntimeClass (gVisor/Kata) is not observed or branched on anywhere in this layer; conformance on non-default runtimes is tracked separately and is not implied by this SDK's tests passing on a standard cluster.
 

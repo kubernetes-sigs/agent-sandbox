@@ -18,7 +18,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SandboxClient } from "agentic-sandbox-client";
+import { SandboxClient, SandboxdRpcError } from "agentic-sandbox-client";
 import {
   afterEach,
   beforeAll,
@@ -303,18 +303,56 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
       namespace,
     );
     try {
-      const ok = await sandbox.commands.run("echo hello from e2e");
+      // Each argv element reaches the process verbatim — no shell word
+      // splitting or expansion.
+      const ok = await sandbox.commands.run("echo", ["hello from", "$HOME"]);
       expect(ok.exitCode).toBe(0);
-      expect(ok.stdout).toBe("hello from e2e\n");
+      expect(ok.stdout).toBe("hello from $HOME\n");
 
-      const nonZero = await sandbox.commands.run("exit 3");
+      const nonZero = await sandbox.commands.run("sh", ["-c", "exit 3"]);
       expect(nonZero.exitCode).toBe(3);
 
-      const missingCommand = await sandbox.commands.run(
-        "definitely-not-a-real-command-e2e",
+      // With no shell in between, a missing executable is sandboxd's
+      // NOT_FOUND, not a shell's exit 127.
+      await expect(
+        sandbox.commands.run("definitely-not-a-real-command-e2e"),
+      ).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof SandboxdRpcError && err.code === "not_found",
       );
-      expect(missingCommand.exitCode).not.toBe(0);
-      expect(missingCommand.exitCode).not.toBe(3);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("runs commands with env and cwd", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const withEnv = await sandbox.commands.run(
+        "sh",
+        ["-c", 'printf %s "$E2E_GREETING"'],
+        { env: { E2E_GREETING: "hello env" } },
+      );
+      expect(withEnv.exitCode).toBe(0);
+      expect(withEnv.stdout).toBe("hello env");
+
+      await sandbox.files.write("cwd-dir/in-cwd.txt", "found via cwd\n");
+      const withCwd = await sandbox.commands.run("cat", ["in-cwd.txt"], {
+        cwd: "cwd-dir",
+      });
+      expect(withCwd.exitCode).toBe(0);
+      expect(withCwd.stdout).toBe("found via cwd\n");
+
+      await expect(
+        sandbox.commands.run("pwd", { cwd: "../.." }),
+      ).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof SandboxdRpcError && err.code === "permission_denied",
+      );
     } finally {
       await sandbox.close();
     }
@@ -358,14 +396,15 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
     try {
       // Written via the REST files API, read back via the gRPC process API.
       await sandbox.files.write("via-rest.txt", "written via REST\n");
-      const catResult = await sandbox.commands.run("cat via-rest.txt");
+      const catResult = await sandbox.commands.run("cat", ["via-rest.txt"]);
       expect(catResult.exitCode).toBe(0);
       expect(catResult.stdout).toBe("written via REST\n");
 
       // Written via the gRPC process API, read back via the REST files API.
-      const echoResult = await sandbox.commands.run(
+      const echoResult = await sandbox.commands.run("sh", [
+        "-c",
         "printf 'written via gRPC' > via-grpc.txt",
-      );
+      ]);
       expect(echoResult.exitCode).toBe(0);
       const content = await sandbox.files.read("via-grpc.txt");
       expect(new TextDecoder().decode(content)).toBe("written via gRPC");
@@ -401,7 +440,7 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
         "written before re-attach\n",
       );
 
-      const result = await reattached.commands.run("echo reattached ok");
+      const result = await reattached.commands.run("echo", ["reattached ok"]);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("reattached ok\n");
     } finally {
@@ -468,7 +507,7 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
       const readBack = await sandbox.files.read("after-cancel.txt");
       expect(new TextDecoder().decode(readBack)).toBe("still alive\n");
 
-      const runResult = await sandbox.commands.run("echo after cancel ok");
+      const runResult = await sandbox.commands.run("echo", ["after cancel ok"]);
       expect(runResult.exitCode).toBe(0);
       expect(runResult.stdout).toBe("after cancel ok\n");
     } finally {
@@ -540,7 +579,7 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd, cold pool
       namespace,
     );
     try {
-      const result = await sandbox.commands.run("echo cold start ok");
+      const result = await sandbox.commands.run("echo", ["cold start ok"]);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("cold start ok\n");
     } finally {

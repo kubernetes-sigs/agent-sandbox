@@ -41,12 +41,20 @@ describe("ProcessClient missing optional dependency", () => {
       maxCommandOutputSize: 1024,
     });
     await expect(
-      client.run("echo hi", 1000, new AbortController().signal),
+      client.run(
+        { command: ["echo", "hi"] },
+        1000,
+        new AbortController().signal,
+      ),
     ).rejects.toMatchObject({
       telemetryCode: "missing_dependency",
     } satisfies Partial<SandboxError>);
     await expect(
-      client.run("echo hi", 1000, new AbortController().signal),
+      client.run(
+        { command: ["echo", "hi"] },
+        1000,
+        new AbortController().signal,
+      ),
     ).rejects.toThrow(/npm install @bufbuild\/protobuf/);
   });
 });

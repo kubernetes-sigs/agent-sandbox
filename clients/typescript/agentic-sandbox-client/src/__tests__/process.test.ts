@@ -20,16 +20,15 @@ import { connectNodeAdapter } from "@connectrpc/connect-node";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ExecuteResponseSchema,
+  type ProcessConfig,
   ProcessService,
 } from "../_proto/process/v1/process_pb.js";
 import {
   SandboxClosedError,
   SandboxConnectionError,
-  type SandboxdRpcError,
+  SandboxdRpcError,
 } from "../exceptions.js";
 import { ProcessClient } from "../process.js";
-
-let lastReceivedCommand: string[] | undefined;
 
 /**
  * `disruptFirstExecute` severs the transport on the first Execute request
@@ -89,11 +88,12 @@ afterEach(async () => {
 });
 
 describe("ProcessClient.run", () => {
-  it("runs a command via /bin/sh -c and returns stdout/stderr/exitCode", async () => {
+  it("sends the argv as-is (no shell wrapping) and returns stdout/stderr/exitCode", async () => {
+    let received: ProcessConfig | undefined;
     activeServer = await startH2Server((router) => {
       router.service(ProcessService, {
         execute: (req) => {
-          lastReceivedCommand = req.config?.command;
+          received = req.config;
           return create(ExecuteResponseSchema, {
             exitCode: 0,
             stdout: new TextEncoder().encode("hello world\n"),
@@ -107,7 +107,7 @@ describe("ProcessClient.run", () => {
       maxCommandOutputSize: 1024 * 1024,
     });
     const result = await activeClient.run(
-      "echo hello world",
+      { command: ["echo", "hello world"] },
       30_000,
       new AbortController().signal,
     );
@@ -116,7 +116,33 @@ describe("ProcessClient.run", () => {
       stdout: "hello world\n",
       stderr: "",
     });
-    expect(lastReceivedCommand).toEqual(["/bin/sh", "-c", "echo hello world"]);
+    expect(received?.command).toEqual(["echo", "hello world"]);
+    expect(received?.envVars).toEqual({});
+    expect(received?.cwd).toBeUndefined();
+  });
+
+  it("passes env and cwd through to ProcessConfig", async () => {
+    let received: ProcessConfig | undefined;
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (req) => {
+          received = req.config;
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await activeClient.run(
+      { command: ["env"], env: { FOO: "bar", EMPTY: "" }, cwd: "work/dir" },
+      30_000,
+      new AbortController().signal,
+    );
+    expect(received?.command).toEqual(["env"]);
+    expect(received?.envVars).toEqual({ FOO: "bar", EMPTY: "" });
+    expect(received?.cwd).toBe("work/dir");
   });
 
   it("returns a non-zero exit code as a normal result, not a thrown error", async () => {
@@ -124,9 +150,9 @@ describe("ProcessClient.run", () => {
       router.service(ProcessService, {
         execute: () =>
           create(ExecuteResponseSchema, {
-            exitCode: 127,
+            exitCode: 3,
             stdout: new Uint8Array(),
-            stderr: new TextEncoder().encode("sh: nope: not found\n"),
+            stderr: new TextEncoder().encode("failed\n"),
           }),
       });
     });
@@ -135,12 +161,39 @@ describe("ProcessClient.run", () => {
       maxCommandOutputSize: 1024 * 1024,
     });
     const result = await activeClient.run(
-      "nope",
+      { command: ["false"] },
       30_000,
       new AbortController().signal,
     );
-    expect(result.exitCode).toBe(127);
-    expect(result.stderr).toBe("sh: nope: not found\n");
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toBe("failed\n");
+  });
+
+  it("maps sandboxd's NOT_FOUND for a missing executable to SandboxdRpcError", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: () => {
+          throw new ConnectError(
+            "failed to execute command: command or path not found",
+            Code.NotFound,
+          );
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await expect(
+      activeClient.run(
+        { command: ["definitely-not-a-real-command"] },
+        30_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxdRpcError && err.code === "not_found",
+    );
   });
 
   it("maps a response exceeding readMaxBytes to resource_exhausted", async () => {
@@ -162,7 +215,11 @@ describe("ProcessClient.run", () => {
       maxCommandOutputSize: 16,
     });
     await expect(
-      activeClient.run("big", 30_000, new AbortController().signal),
+      activeClient.run(
+        { command: ["big"] },
+        30_000,
+        new AbortController().signal,
+      ),
     ).rejects.toMatchObject({
       code: "resource_exhausted",
     } satisfies Partial<SandboxdRpcError>);
@@ -176,12 +233,12 @@ describe("ProcessClient.run", () => {
     activeServer = await startH2Server((router) => {
       router.service(ProcessService, {
         execute: async (req) => {
-          if (req.config?.command?.[2] === "slow") {
+          if (req.config?.command?.[0] === "slow") {
             await slowGate;
           }
           return create(ExecuteResponseSchema, {
             exitCode: 0,
-            stdout: new TextEncoder().encode(req.config?.command?.[2] ?? ""),
+            stdout: new TextEncoder().encode(req.config?.command?.[0] ?? ""),
             stderr: new Uint8Array(),
           });
         },
@@ -193,9 +250,13 @@ describe("ProcessClient.run", () => {
     });
 
     const cancelController = new AbortController();
-    const slowRun = activeClient.run("slow", 30_000, cancelController.signal);
+    const slowRun = activeClient.run(
+      { command: ["slow"] },
+      30_000,
+      cancelController.signal,
+    );
     const fastRun = activeClient.run(
-      "fast",
+      { command: ["fast"] },
       30_000,
       new AbortController().signal,
     );
@@ -230,7 +291,11 @@ describe("ProcessClient.run", () => {
     // Code.Canceled must be classified alongside Unavailable, not fall
     // through to SandboxdRpcError.
     await expect(
-      activeClient.run("echo hi", 30_000, new AbortController().signal),
+      activeClient.run(
+        { command: ["echo", "hi"] },
+        30_000,
+        new AbortController().signal,
+      ),
     ).rejects.toSatisfy(
       (err: unknown) =>
         err instanceof SandboxConnectionError &&
@@ -254,7 +319,11 @@ describe("ProcessClient.run", () => {
       maxCommandOutputSize: 1024 * 1024,
     });
     await expect(
-      activeClient.run("echo hi", 30_000, new AbortController().signal),
+      activeClient.run(
+        { command: ["echo", "hi"] },
+        30_000,
+        new AbortController().signal,
+      ),
     ).rejects.toSatisfy(
       (err: unknown) =>
         err instanceof SandboxConnectionError &&
@@ -281,7 +350,11 @@ describe("ProcessClient.run", () => {
     });
     client.abort();
     await expect(
-      client.run("echo hi", 30_000, new AbortController().signal),
+      client.run(
+        { command: ["echo", "hi"] },
+        30_000,
+        new AbortController().signal,
+      ),
     ).rejects.toBeInstanceOf(SandboxClosedError);
   });
 });

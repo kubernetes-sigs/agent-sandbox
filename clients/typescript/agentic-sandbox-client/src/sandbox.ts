@@ -43,7 +43,7 @@ import {
 } from "./exceptions.js";
 import { SandboxFiles } from "./files.js";
 import { noopLogger } from "./logger.js";
-import { ProcessClient } from "./process.js";
+import { ProcessClient, type ProcessSpec } from "./process.js";
 import {
   resolveSandboxPath,
   SandboxdRestClient,
@@ -57,6 +57,7 @@ import type {
   ExecutionResult,
   FileCallOptions,
   Logger,
+  ProcessOptions,
   RunOptions,
   SandboxdConnectivity,
   SandboxdOptions,
@@ -206,6 +207,60 @@ function validateTimeoutMs(name: string, value: number | undefined): number {
   );
 }
 
+/**
+ * Validates run()'s argv/env/cwd shape before any connection is made, so a
+ * malformed call fails fast with invalid_argument instead of surfacing as a
+ * sandboxd RPC error (or, for a non-string, being silently coerced by
+ * protobuf-es). Path semantics of `cwd` are left to sandboxd, which confines
+ * it to the sandbox root.
+ */
+function validateProcessSpec(
+  command: string,
+  args: readonly string[],
+  opts: ProcessOptions | undefined,
+): ProcessSpec {
+  if (typeof command !== "string" || command === "") {
+    throw invalidArgumentError("command must be a non-empty string");
+  }
+  if (!Array.isArray(args) || args.some((a) => typeof a !== "string")) {
+    throw invalidArgumentError("args must be an array of strings");
+  }
+  const env = opts?.env;
+  if (env !== undefined) {
+    if (typeof env !== "object" || env === null) {
+      throw invalidArgumentError("env must be an object of string values");
+    }
+    for (const [key, value] of Object.entries(env)) {
+      if (key === "" || key.includes("=") || typeof value !== "string") {
+        throw invalidArgumentError(
+          "env keys must be non-empty and contain no '=', and values must be strings",
+        );
+      }
+    }
+  }
+  const cwd = opts?.cwd;
+  if (cwd !== undefined && typeof cwd !== "string") {
+    throw invalidArgumentError("cwd must be a string");
+  }
+  return {
+    command: [command, ...args],
+    ...(env !== undefined && { env }),
+    ...(cwd !== undefined && cwd !== "" && { cwd }),
+  };
+}
+
+function invalidArgumentError(message: string): SandboxError {
+  return new SandboxError(message, { telemetryCode: "invalid_argument" });
+}
+
+/**
+ * The executable's base name only, so a span never carries a full path
+ * (paths are kept out of telemetry, as for the files API).
+ */
+function executableName(command: string): string {
+  return command.slice(command.lastIndexOf("/") + 1);
+}
+
 function classifyForTelemetry(
   err: unknown,
   userSignal: AbortSignal | undefined,
@@ -349,11 +404,11 @@ export class Sandbox {
     return !this._isClosed;
   }
 
-  /** Runs shell commands inside the sandbox. Connects to sandboxd lazily. */
+  /** Runs commands inside the sandbox. Connects to sandboxd lazily. */
   get commands(): SandboxCommands {
     if (!this._commands) {
       this._commands = new SandboxCommands({
-        run: (command, opts) => this.runCommandImpl(command, opts),
+        run: (command, args, opts) => this.runCommandImpl(command, args, opts),
       });
     }
     return this._commands;
@@ -837,8 +892,10 @@ export class Sandbox {
 
   private async runCommandImpl(
     command: string,
+    args: readonly string[],
     opts?: RunOptions,
   ): Promise<ExecutionResult> {
+    const spec = validateProcessSpec(command, args, opts);
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     const startedAt = Date.now();
     return this.operate<ExecutionResult>(
@@ -847,7 +904,10 @@ export class Sandbox {
       opts?.signal,
       (span) => {
         if (span.isRecording()) {
-          span.setAttribute("sandbox.command.executable", "sh");
+          span.setAttribute(
+            "sandbox.command.executable",
+            executableName(command),
+          );
         }
       },
       (span, result) => {
@@ -861,7 +921,7 @@ export class Sandbox {
         // deadline should reflect — the connect wait may have consumed a
         // large fraction of it on a cold connection.
         const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
-        return gen.process.run(command, remainingMs, signal);
+        return gen.process.run(spec, remainingMs, signal);
       },
     );
   }

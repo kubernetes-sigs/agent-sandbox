@@ -21,7 +21,11 @@ import type { ExecutionResult, RunOptions } from "./types.js";
  * @internal
  */
 export interface CommandsOperations {
-  run(command: string, opts?: RunOptions): Promise<ExecutionResult>;
+  run(
+    command: string,
+    args: readonly string[],
+    opts?: RunOptions,
+  ): Promise<ExecutionResult>;
 }
 
 /**
@@ -33,17 +37,39 @@ export class SandboxCommands {
   constructor(private readonly ops: CommandsOperations) {}
 
   /**
-   * Runs `command` to completion via `/bin/sh -c` inside the sandboxd
-   * container and returns its stdout, stderr, and exit code. A non-zero
-   * exit code is a normal result, not a thrown error. Requires the optional
-   * `@bufbuild/protobuf`, `@connectrpc/connect`, and `@connectrpc/connect-node`
-   * dependencies to be installed.
+   * Executes `command` with `args` as its argv (no shell involved) inside
+   * the sandboxd container, runs it to completion, and returns its stdout,
+   * stderr, and exit code. A non-zero exit code is a normal result, not a
+   * thrown error; an executable that cannot be found is rejected by
+   * sandboxd with a SandboxdRpcError (code "not_found"). For shell syntax
+   * (pipes, redirects, `&&`, globbing), invoke a shell explicitly:
+   * `run("sh", ["-c", "..."])`. Requires the optional `@bufbuild/protobuf`,
+   * `@connectrpc/connect`, and `@connectrpc/connect-node` dependencies to be
+   * installed.
    *
    * A failed call's underlying process may or may not have run to
    * completion — run() never retries automatically, since doing so could
    * re-execute a command that already had side effects.
    */
-  run(command: string, opts?: RunOptions): Promise<ExecutionResult> {
-    return this.ops.run(command, opts);
+  run(
+    command: string,
+    args?: readonly string[],
+    opts?: RunOptions,
+  ): Promise<ExecutionResult>;
+  run(command: string, opts?: RunOptions): Promise<ExecutionResult>;
+  run(
+    command: string,
+    argsOrOpts?: readonly string[] | RunOptions,
+    opts?: RunOptions,
+  ): Promise<ExecutionResult> {
+    if (Array.isArray(argsOrOpts)) {
+      return this.ops.run(command, argsOrOpts, opts);
+    }
+    // `run(cmd, undefined, opts)` is valid under the (command, args, opts)
+    // overload, so an omitted args must not drop the third argument.
+    if (argsOrOpts === undefined) {
+      return this.ops.run(command, [], opts);
+    }
+    return this.ops.run(command, [], argsOrOpts as RunOptions);
   }
 }

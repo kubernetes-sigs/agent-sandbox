@@ -34,6 +34,17 @@ export interface ProcessClientOptions {
   maxCommandOutputSize: number;
 }
 
+/**
+ * A validated sandboxd ProcessConfig: `command` is the full argv (executable
+ * first) and is never wrapped in a shell.
+ * @internal
+ */
+export interface ProcessSpec {
+  command: readonly string[];
+  env?: Readonly<Record<string, string>>;
+  cwd?: string;
+}
+
 type GrpcDeps = {
   create: typeof import("@bufbuild/protobuf")["create"];
   createClient: typeof import("@connectrpc/connect")["createClient"];
@@ -187,11 +198,11 @@ export class ProcessClient {
   }
 
   /**
-   * Runs `/bin/sh -c <command>` to completion via sandboxd's Execute RPC.
-   * A non-zero exit code is a normal ExecutionResult, not a thrown error.
+   * Runs `spec` to completion via sandboxd's Execute RPC. A non-zero exit
+   * code is a normal ExecutionResult, not a thrown error.
    */
   async run(
-    command: string,
+    spec: ProcessSpec,
     timeoutMs: number,
     signal: AbortSignal,
   ): Promise<ExecutionResult> {
@@ -201,7 +212,9 @@ export class ProcessClient {
 
     const req = deps.create(deps.ExecuteRequestSchema, {
       config: deps.create(deps.ProcessConfigSchema, {
-        command: ["/bin/sh", "-c", command],
+        command: [...spec.command],
+        envVars: { ...spec.env },
+        cwd: spec.cwd,
       }),
     });
 

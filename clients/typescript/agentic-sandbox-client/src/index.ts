@@ -40,6 +40,7 @@ export type {
   FileCallOptions,
   FileEntry,
   Logger,
+  ProcessOptions,
   RunOptions,
   SandboxClientOptions,
   SandboxdConnectivity,

@@ -24,6 +24,7 @@ import type { WebSocket as WSType } from "ws";
 import { WebSocketServer } from "ws";
 import {
   ExecuteResponseSchema,
+  type ProcessConfig,
   ProcessService,
 } from "../_proto/process/v1/process_pb.js";
 import {
@@ -375,7 +376,7 @@ describe("Sandbox connectivity integration", () => {
     // the same origin, independent of the connection-generation logic.
     expect(restBackend.healthHits).toBe(1);
 
-    const result = await sandbox.commands.run("echo ok");
+    const result = await sandbox.commands.run("echo", ["ok"]);
     expect(result).toEqual({ exitCode: 0, stdout: "ok\n", stderr: "" });
     // gRPC uses a single HTTP/2 session per generation (no connection
     // pooling ambiguity), so the second call must not open a second one.
@@ -506,7 +507,7 @@ describe("Sandbox connectivity integration", () => {
     // Mid-call gRPC session teardown: must surface as a connection error and
     // invalidate the generation, not hang or get reported as an RPC
     // application error.
-    await expect(sandbox.commands.run("echo hi")).rejects.toBeInstanceOf(
+    await expect(sandbox.commands.run("echo", ["hi"])).rejects.toBeInstanceOf(
       SandboxConnectionError,
     );
 
@@ -518,7 +519,7 @@ describe("Sandbox connectivity integration", () => {
 
     // The next call reconnects from scratch: a fresh health check, a new
     // port-forward connection, and a new gRPC session.
-    const result = await sandbox.commands.run("echo ok");
+    const result = await sandbox.commands.run("echo", ["ok"]);
     expect(result.exitCode).toBe(0);
     expect(restBackend.healthHits).toBe(2);
     expect(api.connectionsByRequestedPort[18080]).toBeGreaterThan(
@@ -592,6 +593,138 @@ describe("Sandbox connectivity integration", () => {
   });
 });
 
+describe("Sandbox commands.run() arguments", () => {
+  async function startRecordingSandbox(
+    tracingManager?: TracerManager,
+  ): Promise<ProcessConfig[]> {
+    const received: ProcessConfig[] = [];
+    restBackend = await startRestBackend();
+    grpcBackend = await startGrpcBackend((router) => {
+      router.service(ProcessService, {
+        execute: (req) => {
+          if (req.config) received.push(req.config);
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort: restBackend.port,
+      grpcPort: grpcBackend.port,
+      connectivity: "in-cluster-pod-ip",
+      podIP: "127.0.0.1",
+      tracingManager,
+    });
+    return received;
+  }
+
+  it("accepts (command), (command, args, opts), and (command, opts)", async () => {
+    const received = await startRecordingSandbox();
+    const s = sandbox as Sandbox;
+
+    await s.commands.run("pwd");
+    await s.commands.run("echo", ["a b", "c"], { env: { FOO: "bar" } });
+    await s.commands.run("ls", { cwd: "work" });
+
+    expect(received.map((c) => c.command)).toEqual([
+      ["pwd"],
+      ["echo", "a b", "c"],
+      ["ls"],
+    ]);
+    expect(received.map((c) => c.envVars)).toEqual([{}, { FOO: "bar" }, {}]);
+    expect(received.map((c) => c.cwd)).toEqual([undefined, undefined, "work"]);
+  });
+
+  it("keeps the options of (command, undefined, opts)", async () => {
+    const received = await startRecordingSandbox();
+
+    await (sandbox as Sandbox).commands.run("pwd", undefined, {
+      cwd: "work",
+      env: { FOO: "bar" },
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.command).toEqual(["pwd"]);
+    expect(received[0]?.cwd).toBe("work");
+    expect(received[0]?.envVars).toEqual({ FOO: "bar" });
+  });
+
+  it("honors timeoutMs and signal passed as (command, undefined, opts)", async () => {
+    restBackend = await startRestBackend();
+    grpcBackend = await startGrpcBackend((router) => {
+      router.service(ProcessService, {
+        // Never completes on its own, so only the caller's timeout or
+        // signal can end the call.
+        execute: (_req, ctx) =>
+          new Promise((_, reject) => {
+            ctx.signal.addEventListener("abort", () =>
+              reject(ctx.signal.reason),
+            );
+          }),
+      });
+    });
+    sandbox = makeSandbox({
+      apiServerPort: UNUSED_API_SERVER_PORT,
+      restPort: restBackend.port,
+      grpcPort: grpcBackend.port,
+      connectivity: "in-cluster-pod-ip",
+      podIP: "127.0.0.1",
+    });
+    const s = sandbox as Sandbox;
+
+    await expect(
+      s.commands.run("sleep", undefined, { timeoutMs: 300 }),
+    ).rejects.toBeInstanceOf(SandboxTimeoutError);
+
+    const controller = new AbortController();
+    const reason = new Error("caller-supplied cancellation");
+    setTimeout(() => controller.abort(reason), 50);
+    await expect(
+      s.commands.run("sleep", undefined, {
+        timeoutMs: 30_000,
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(reason);
+  });
+
+  it.each([
+    ["an empty command", () => (sandbox as Sandbox).commands.run("")],
+    [
+      "a non-string arg",
+      () => (sandbox as Sandbox).commands.run("echo", [1 as unknown as string]),
+    ],
+    [
+      "an env key containing '='",
+      () => (sandbox as Sandbox).commands.run("env", { env: { "A=B": "c" } }),
+    ],
+    [
+      "a non-string env value",
+      () =>
+        (sandbox as Sandbox).commands.run("env", {
+          env: { A: 1 as unknown as string },
+        }),
+    ],
+  ])("rejects %s with invalid_argument before sending anything", async (_, call) => {
+    const received = await startRecordingSandbox();
+    await expect(call()).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxError && err.telemetryCode === "invalid_argument",
+    );
+    expect(received).toEqual([]);
+    expect(restBackend?.healthHits).toBe(0);
+  });
+
+  it("records only the executable's base name on the span", async () => {
+    const { tracingManager, events } = makeRecordingTracerManager();
+    await startRecordingSandbox(tracingManager);
+    await (sandbox as Sandbox).commands.run("/usr/bin/env", ["true"]);
+    expect(events).toContain("attr:sandbox.command.executable=env");
+    for (const event of events) {
+      expect(event).not.toContain("/usr/bin");
+    }
+  });
+});
+
 // An apiserver port nothing listens on: in-cluster connectivity must never
 // dial it, so any accidental port-forward attempt fails the test.
 const UNUSED_API_SERVER_PORT = 1;
@@ -631,7 +764,7 @@ describe("Sandbox in-cluster connectivity", () => {
 
     const content = await sandbox.files.read("a.txt");
     expect(new TextDecoder().decode(content)).toBe("file contents");
-    const result = await sandbox.commands.run("echo direct");
+    const result = await sandbox.commands.run("echo", ["direct"]);
     expect(result).toEqual({ exitCode: 0, stdout: "direct\n", stderr: "" });
     expect(restBackend.healthHits).toBe(1);
   });

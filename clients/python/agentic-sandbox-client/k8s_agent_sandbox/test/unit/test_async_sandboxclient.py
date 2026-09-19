@@ -1143,8 +1143,13 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
     async def test_streaming_error_preserves_response_body(self):
         connector = self._make_connector()
         request = httpx.Request("GET", "http://sandbox/missing")
+
+        class SingleChunkStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"missing file"
+
         response = httpx.Response(
-            404, content=b"missing file", request=request
+            404, stream=SingleChunkStream(), request=request
         )
         connector.client.build_request = MagicMock(return_value=request)
         connector.client.send = AsyncMock(return_value=response)
@@ -1155,6 +1160,34 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(ctx.exception.response.content, b"missing file")
             self.assertEqual(ctx.exception.response.text, "missing file")
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_closes_response_when_capture_is_cancelled(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 404
+        response.is_redirect = False
+        response.aclose = AsyncMock()
+
+        async def cancelled_body(*, chunk_size):
+            del chunk_size
+            raise asyncio.CancelledError
+            yield b"unreachable"
+
+        response.aiter_bytes = cancelled_body
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=request, response=response
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await connector.send_request("GET", "missing", stream=True)
+
+            response.aclose.assert_awaited_once_with()
         finally:
             await connector.close()
 

@@ -33,6 +33,7 @@ from .trace_manager import (
     create_tracer_manager, initialize_tracer, trace_span, trace
 )
 from .sandbox import Sandbox
+from .sandbox_batch import SandboxBatch
 from .models import (
     SandboxConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
@@ -76,7 +77,8 @@ class SandboxClient(Generic[T]):
                 Defaults to an empty SandboxTracerConfig (tracing disabled).
             cleanup: If True, registers an atexit hook to automatically delete
                 tracked sandboxes when the program terminates, excluding claims
-                explicitly named through create_sandbox(). Defaults to False.
+                explicitly named through create_sandbox(), and to stop tracked
+                batches' Lease renewal. Defaults to False.
             api_client: Optional pre-configured Kubernetes ``ApiClient`` forwarded
                 to the underlying ``K8sHelper`` to target a specific cluster/context.
         """
@@ -95,6 +97,8 @@ class SandboxClient(Generic[T]):
         # Tracks all the active client side connections to the created sandbox claims
         self._active_connection_sandboxes: Dict[Tuple[str, str], T] = {}
         self._explicit_claims: set[tuple[str, str]] = set()
+        # Batch handles from get_batch() until they are detached
+        self._active_batches: Dict[Tuple[str, str], SandboxBatch] = {}
         
         # Optional automatic cleanup of sandboxes on program termination
         if cleanup:
@@ -340,6 +344,35 @@ class SandboxClient(Generic[T]):
         """
         return self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
 
+    def get_batch(self, batch_id: str, namespace: str = "default") -> SandboxBatch:
+        """Attaches to an existing batch, taking over its Lease.
+
+        Resumes batch lease renewal and starts a label-scoped watch that keeps
+        ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
+        within its grace window.
+
+        Raises:
+            ValueError: If ``batch_id`` is not a valid batch id.
+            BatchNotFoundError: If neither the batch's Lease nor any of its claims exist.
+            BatchLeaseExpiredError: If the Lease is missing while claims exist, or is stale,
+                including after the previous holder crashed.
+            BatchInUseError: If a live Lease is held by another handle, or another client
+                takes it over while attaching.
+            BatchError: If the Lease's or the claims' batch annotations are invalid.
+
+        Example:
+
+            >>> client = SandboxClient()
+            >>> batch = client.get_batch("b1234abcd12")
+            >>> ready = [m for m in batch.members() if m.ready]
+        """
+        batch = SandboxBatch._attach(self, batch_id, namespace)
+        self._active_batches[(namespace, batch_id)] = batch
+        return batch
+
+    def _unregister_batch(self, namespace: str, batch_id: str) -> None:
+        self._active_batches.pop((namespace, batch_id), None)
+
     def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources.
         
@@ -362,7 +395,8 @@ class SandboxClient(Generic[T]):
             
     def delete_all(self) -> None:
         """
-        Cleanup all tracked sandboxes managed by this client.
+        Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
+        background watch and Lease renewal.
         
         Example:
         
@@ -378,6 +412,7 @@ class SandboxClient(Generic[T]):
                 logging.error(
                     f"Cleanup failed for {claim_name} in namespace {ns}: {e}"
                 )
+        self._stop_batches()
 
     def _delete_automatic_sandboxes(self) -> None:
         for key, sandbox in list(self._active_connection_sandboxes.items()):
@@ -389,6 +424,18 @@ class SandboxClient(Generic[T]):
                     self.delete_sandbox(claim_name, namespace)
             except Exception as e:
                 logging.error(f"Cleanup failed for {claim_name} in namespace {namespace}: {e}")
+        self._stop_batches()
+
+    def _stop_batches(self) -> None:
+        # Without this, a dropped handle's daemon threads would keep renewing its Lease for the
+        # life of the process, so the batch would never go stale.
+        batches = list(self._active_batches.values())
+        self._active_batches.clear()
+        for batch in batches:
+            try:
+                batch._stop_background_threads()
+            except Exception as e:
+                logging.error(f"Failed to stop batch '{batch.batch_id}' threads: {e}")
 
     @trace_span("create_claim")
     def _create_claim(

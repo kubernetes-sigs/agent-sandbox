@@ -32,6 +32,7 @@ from .trace_manager import (
     create_tracer_manager, initialize_tracer, trace_span, trace
 )
 from .sandbox import Sandbox
+from .sandbox_batch import SandboxBatch
 from .models import (
     SandboxConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
@@ -337,6 +338,30 @@ class SandboxClient(Generic[T]):
             ['sandbox-claim-1234abcd', 'sandbox-claim-5678efgh']
         """
         return self.k8s_helper.list_sandbox_claims(namespace, label_selector=label_selector)
+
+    def get_batch(self, batch_id: str, namespace: str = "default") -> SandboxBatch:
+        """Attaches to an existing batch, taking over its Lease.
+
+        Resumes batch lease renewal and starts a label-scoped watch that keeps
+        ``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
+        within its grace window.
+
+        Raises:
+            ValueError: If ``batch_id`` is not a valid batch id.
+            BatchNotFoundError: If neither the batch's Lease nor any of its claims exist.
+            BatchLeaseExpiredError: If the Lease is missing while claims exist, or is stale,
+                including after the previous holder crashed.
+            BatchInUseError: If a live Lease is held by another handle, or another client
+                takes it over while attaching.
+            BatchError: If the Lease's or the claims' batch annotations are invalid.
+
+        Example:
+
+            >>> client = SandboxClient()
+            >>> batch = client.get_batch("b1234abcd12")
+            >>> ready = [m for m in batch.members() if m.ready]
+        """
+        return SandboxBatch._attach(self, batch_id, namespace)
 
     def delete_sandbox(self, claim_name: str, namespace: str = "default") -> None:
         """Stops the client side connection and deletes the Kubernetes resources.

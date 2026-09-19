@@ -1,10 +1,6 @@
 # Demo FastAPI app that creates a Sandbox on demand.
 #
-# The image below matches the ref built by `docker_build` in the Tiltfile; Tilt
-# matches builds to workloads by image ref and rewrites the tag at apply time.
-#
-# There is no Service: Tilt port-forwards straight to the pod, and nothing else
-# in the demo dials the app in-cluster.
+# Tilt port-forwards straight to the pod, so no service is needed.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -24,7 +20,7 @@ metadata:
 rules:
 - apiGroups: ["agents.x-k8s.io"]
   resources: ["sandboxes"]
-  # Exactly what the app calls: create, read back while polling, delete.
+  # Update if you update the app in a way that requires more permissions
   verbs: ["create", "get", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

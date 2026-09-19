@@ -6,8 +6,7 @@ app running, so you can edit application code and have it redeployed
 in seconds while a real controller reconciles the `Sandbox` resources it creates.
 
 The app is a FastAPI service that has a `POST /create` route that creates a `Sandbox` 
-and waits for it to go Ready, and a `POST /delete`  that removes it. Swap it for 
-whatever you are actually building.
+and waits for it to go Ready, and a `POST /delete`  that removes it. 
 
 This covers the core `Sandbox` API only. The extension CRDs (`SandboxTemplate`, 
 `SandboxClaim`, `SandboxWarmPool`) have examples available at 
@@ -33,7 +32,7 @@ updated in `manifests/app.yaml` to override.
 - [Docker](https://docs.docker.com/get-docker/) (or another container engine) running
 - [Tilt](https://tilt.dev/install)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [kind](https://kind.sigs.k8s.io/docs/user/quick#installing-with-go) — Tilt connects to an existing Kind cluster; it does not create one
+- [kind](https://kind.sigs.k8s.io/docs/user/quick#installing-with-go)
 
 The Sandbox workload pulls `alpine` from the registry on first start, so the
 cluster nodes need registry access (set `SANDBOX_IMAGE` to a locally available
@@ -46,6 +45,8 @@ image to avoid this).
 ```bash
 kind create cluster --name agent-sandbox
 ```
+
+The Tiltfile hardcodes a `kind-agent-sandbox` context to prevent it from installing on your current context, so make sure this name is exact, or update the Tiltfile to match the cluster name. 
 
 2. Start the cluster:
 

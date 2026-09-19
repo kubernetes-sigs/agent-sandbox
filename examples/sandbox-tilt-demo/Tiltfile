@@ -9,9 +9,7 @@
 #          startup (the controller provisions a pod that prints "Hello Sandbox!").
 #      Tear everything down with `tilt down`.
 
-# Tilt detects a local cluster from the kubecontext and, for kind, loads built
-# images into the nodes with `kind load` instead of pushing to a registry. Guard
-# against deploying into whatever cluster happens to be current instead.
+# Guard against deploying into whatever cluster happens to be current
 allow_k8s_contexts('kind-agent-sandbox')
 
 # Repo root, relative to this Tiltfile. The controller image builds from there
@@ -20,8 +18,7 @@ REPO_ROOT = '../..'
 CONTROLLER_IMAGE = 'kind.local/agent-sandbox-controller'
 
 # Build the controller from source. `only=` keeps the build context to the paths
-# the root Dockerfile actually COPYs -- without it every `tilt up` ships the
-# whole repo (site/, bin/, .git) to the daemon.
+# the root Dockerfile actually COPYs
 docker_build(
     CONTROLLER_IMAGE,
     context=REPO_ROOT,
@@ -37,27 +34,18 @@ docker_build(
     ],
 )
 
-# Install the Sandbox CRD and the controller's ClusterRole. controller.yaml
-# carries the Namespace, ServiceAccount, ClusterRoleBinding, Service and
-# Deployment, but the ClusterRole its binding refers to is generated separately
-# -- without rbac.generated.yaml the controller starts and then fails every
-# watch with a permissions error.
+# Install the Sandbox CRD and the controller's ClusterRole
 k8s_yaml(REPO_ROOT + '/k8s/crds/agents.x-k8s.io_sandboxes.yaml')
 k8s_yaml(REPO_ROOT + '/k8s/rbac.generated.yaml')
 
-# controller.yaml ships a `ko://` placeholder image that the release tooling
-# rewrites at publish time. Tilt matches builds to workloads by image ref, so
-# swap the placeholder for the ref we just built before handing over the YAML.
+# Swap the placeholder for the ref we just built before handing over the YAML
 controller_yaml = read_file(REPO_ROOT + '/k8s/controller.yaml')
 k8s_yaml(blob(str(controller_yaml).replace(
     'ko://sigs.k8s.io/agent-sandbox/cmd/agent-sandbox-controller',
     CONTROLLER_IMAGE,
 )))
 
-# Fold the CRD, namespace and RBAC into the controller resource. Left on their
-# own Tilt files them under "uncategorized", which has no ordering relationship
-# to anything -- grouping them here is what makes the demo app's resource_deps
-# below actually mean "the Sandbox CRD is served".
+# Fold the CRD, namespace and RBAC into the controller resource
 k8s_resource(
     'agent-sandbox-controller',
     objects=[
@@ -70,9 +58,7 @@ k8s_resource(
     labels=['controller'],
 )
 
-# Build the demo FastAPI app and deploy it (Deployment + Service + RBAC).
-# manifests/app.yaml already references this ref, so Tilt wires the two together
-# on its own.
+# Build the demo FastAPI app and deploy it (Deployment + Service + RBAC)
 docker_build(
     'kind.local/agent-sandbox-demo-app',
     context='./demo',
@@ -80,9 +66,6 @@ docker_build(
 )
 k8s_yaml('manifests/app.yaml')
 
-# The app creates nothing on startup -- the demo Sandbox appears only when you
-# call POST /create, and so is never a Tilt-managed object. Watch it separately
-# with `kubectl get sandbox demo -w`.
 k8s_resource(
     'agent-sandbox-demo-app',
     objects=[
@@ -90,8 +73,6 @@ k8s_resource(
         'agent-sandbox-demo-app:role',
         'agent-sandbox-demo-app:rolebinding',
     ],
-    # If 8080 is already published on the host, Tilt's loopback bind shadows it
-    # for as long as `tilt up` runs -- change the host side if that bites.
     port_forwards='8080:8080',
     resource_deps=['agent-sandbox-controller'],
     labels=['demo'],

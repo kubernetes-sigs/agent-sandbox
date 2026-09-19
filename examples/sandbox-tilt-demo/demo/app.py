@@ -15,9 +15,9 @@
 """Small FastAPI service used by the Agent Sandbox Tilt demo.
 
 ``POST /create`` creates a ``Sandbox`` custom resource and waits for it to go
-Ready; the agent-sandbox controller provisions the backing pod, which prints a
+Ready. The agent-sandbox controller provisions the backing pod, which prints a
 message and then stays up so the Sandbox holds Ready. ``POST /delete`` removes
-it again. Nothing is created until a route is called, so the demo shows the
+it. Nothing is created until a route is called, so the demo shows the 
 Sandbox being provisioned on request.
 
 The app always runs inside the cluster, so it authenticates with its

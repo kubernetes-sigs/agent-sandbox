@@ -349,8 +349,10 @@ class AsyncSandboxConnector:
                 return response
             except httpx.HTTPStatusError as e:
                 if stream:
-                    await _capture_streamed_error_body(e.response)
-                    await e.response.aclose()
+                    try:
+                        await _capture_streamed_error_body(e.response)
+                    finally:
+                        await e.response.aclose()
                 logger.error(f"Request to sandbox failed: {e}")
                 # 5xx: often a stale Pod IP after a pod swap, clear the cached
                 # routing state so the next request re-resolves.

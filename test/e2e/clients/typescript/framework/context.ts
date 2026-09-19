@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+import { execFileSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 import * as k8s from "@kubernetes/client-node";
 import { warmPoolReady } from "./predicates.js";
 
@@ -29,25 +29,76 @@ const DEFAULT_KUBECONFIG_PATH = path.join(PROJECT_ROOT, "bin/KUBECONFIG");
 const DEFAULT_TIMEOUT_SECONDS = 120;
 
 /**
+ * Loads a KUBECONFIG-style value (paths joined by path.delimiter) with kubectl's
+ * merge rules, so the in-process client and the kubectl subprocesses resolve the
+ * same cluster: for a cluster/user/context name defined in several files the
+ * first definition wins, and current-context comes from the first file that
+ * sets one. KubeConfig.mergeConfig cannot be used: it lets later files
+ * overwrite current-context and throws on duplicate names.
+ */
+function loadMergedKubeConfig(kubeconfig: string): k8s.KubeConfig {
+  const files = kubeconfig.split(path.delimiter).filter(Boolean);
+  if (files.length === 0) {
+    throw new Error(`No kubeconfig file found in ${JSON.stringify(kubeconfig)}`);
+  }
+
+  const clusters = new Map<string, k8s.Cluster>();
+  const users = new Map<string, k8s.User>();
+  const contexts = new Map<string, k8s.Context>();
+  let currentContext = "";
+
+  for (const file of files) {
+    const kc = new k8s.KubeConfig();
+    kc.loadFromFile(file);
+    for (const c of kc.getClusters()) {
+      if (!clusters.has(c.name)) clusters.set(c.name, c);
+    }
+    for (const u of kc.getUsers()) {
+      if (!users.has(u.name)) users.set(u.name, u);
+    }
+    for (const c of kc.getContexts()) {
+      if (!contexts.has(c.name)) contexts.set(c.name, c);
+    }
+    currentContext ||= kc.getCurrentContext() ?? "";
+  }
+
+  const merged = new k8s.KubeConfig();
+  merged.loadFromOptions({
+    clusters: [...clusters.values()],
+    users: [...users.values()],
+    contexts: [...contexts.values()],
+    currentContext,
+  });
+  return merged;
+}
+
+/**
  * Context for E2E tests, managing Kubernetes interactions.
  */
 export class TestContext {
-  private kubeconfigPath: string;
+  // A KUBECONFIG-style value: one path, or several joined by path.delimiter.
+  private kubeconfig: string;
   private _kubeConfig: k8s.KubeConfig | null = null;
   private _coreV1Api: k8s.CoreV1Api | null = null;
   namespace: string | null = null;
 
-  constructor(kubeconfigPath?: string) {
-    this.kubeconfigPath = kubeconfigPath ?? process.env["KUBECONFIG"] ??
-      DEFAULT_KUBECONFIG_PATH;
+  constructor(kubeconfig?: string) {
+    // `||` rather than `??`: kubectl treats an empty $KUBECONFIG as unset.
+    this.kubeconfig =
+      kubeconfig || process.env.KUBECONFIG || DEFAULT_KUBECONFIG_PATH;
   }
 
   get kubeConfig(): k8s.KubeConfig {
     if (!this._kubeConfig) {
-      this._kubeConfig = new k8s.KubeConfig();
-      this._kubeConfig.loadFromFile(this.kubeconfigPath);
+      this._kubeConfig = loadMergedKubeConfig(this.kubeconfig);
     }
     return this._kubeConfig;
+  }
+
+  // Pass the kubeconfig via $KUBECONFIG rather than --kubeconfig: the flag
+  // treats the whole value as one filename and breaks multi-file merging.
+  private kubectlEnv(): NodeJS.ProcessEnv {
+    return { ...process.env, KUBECONFIG: this.kubeconfig };
   }
 
   get coreV1Api(): k8s.CoreV1Api {
@@ -88,7 +139,8 @@ export class TestContext {
         this.namespace = null;
       }
     } catch (e: unknown) {
-      const status = (e as { code?: number; statusCode?: number }).code ??
+      const status =
+        (e as { code?: number; statusCode?: number }).code ??
         (e as { code?: number; statusCode?: number }).statusCode;
       if (status === 404) {
         console.log(`Namespace ${ns} not found, skipping deletion.`);
@@ -110,16 +162,13 @@ export class TestContext {
     }
 
     try {
-      const result = execFileSync(
-        "kubectl",
-        ["--kubeconfig", this.kubeconfigPath, "apply", "-f", "-", "-n", ns],
-        {
-          input: manifestText,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 30_000,
-        },
-      );
+      const result = execFileSync("kubectl", ["apply", "-f", "-", "-n", ns], {
+        input: manifestText,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 30_000,
+        env: this.kubectlEnv(),
+      });
       if (result) {
         console.log(result);
       }
@@ -193,28 +242,24 @@ export class TestContext {
         cleanup();
         try {
           const resourceType = watchPath.split("/").pop() ?? "object";
+          const dumpOpts = {
+            encoding: "utf-8" as const,
+            stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+            timeout: 5_000,
+            env: this.kubectlEnv(),
+          };
           const desc = execFileSync(
             "kubectl",
-            [
-              "--kubeconfig", this.kubeconfigPath,
-              "describe", resourceType, name, "-n", namespace,
-            ],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 },
+            ["describe", resourceType, name, "-n", namespace],
+            dumpOpts,
           );
           const pods = execFileSync(
             "kubectl",
-            [
-              "--kubeconfig", this.kubeconfigPath,
-              "get", "pods", "-n", namespace, "-o", "wide",
-            ],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 },
+            ["get", "pods", "-n", namespace, "-o", "wide"],
+            dumpOpts,
           );
-          console.error(
-            `[waitForObject timeout ${name}] describe:\n${desc}`,
-          );
-          console.error(
-            `[waitForObject timeout ${name}] pods:\n${pods}`,
-          );
+          console.error(`[waitForObject timeout ${name}] describe:\n${desc}`);
+          console.error(`[waitForObject timeout ${name}] pods:\n${pods}`);
         } catch (dumpErr) {
           console.error(
             `[waitForObject timeout ${name}] dump failed:`,

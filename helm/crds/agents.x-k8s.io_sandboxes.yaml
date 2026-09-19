@@ -3961,6 +3961,18 @@ spec:
                 required:
                 - spec
                 type: object
+              resourceResizePolicy:
+                default:
+                  type: Disabled
+                properties:
+                  type:
+                    enum:
+                    - Disabled
+                    - InPlace
+                    type: string
+                required:
+                - type
+                type: object
               service:
                 type: boolean
               shutdownPolicy:

@@ -21,6 +21,12 @@ import (
 	inttls "sigs.k8s.io/agent-sandbox/internal/tlsutil"
 )
 
+// alpnOpt adds an "http/1.1" ALPN fallback to controller-runtime's default
+// ["h2"] NextProtos so clients offering only HTTP/1.1 can negotiate.
+func alpnOpt(c *tls.Config) {
+	c.NextProtos = []string{"h2", "http/1.1"}
+}
+
 func buildMetricsTLSOpts(minVersion, cipherSuites string) ([]func(*tls.Config), error) {
 	var opts []func(*tls.Config)
 

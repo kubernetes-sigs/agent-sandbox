@@ -46,7 +46,8 @@ Initializes the SandboxClient.
   Defaults to an empty SandboxTracerConfig (tracing disabled).
 - `cleanup` - If True, registers an atexit hook to automatically delete
   tracked sandboxes when the program terminates, excluding claims
-  explicitly named through create_sandbox(). Defaults to False.
+  explicitly named through create_sandbox(), and to stop tracked
+  batches' Lease renewal. Defaults to False.
 - `api_client` - Optional pre-configured Kubernetes ``ApiClient`` forwarded
   to the underlying ``K8sHelper`` to target a specific cluster/context.
 
@@ -185,6 +186,38 @@ for the given namespace.
   >>> print(client.list_all_sandboxes(namespace="default"))
   ['sandbox-claim-1234abcd', 'sandbox-claim-5678efgh']
 
+<a id="k8s_agent_sandbox.sandbox_client.SandboxClient.get_batch"></a>
+
+##### get\_batch
+
+```python
+def get_batch(batch_id: str, namespace: str = "default") -> SandboxBatch
+```
+
+Attaches to an existing batch, taking over its Lease.
+
+Resumes batch lease renewal and starts a label-scoped watch that keeps
+``members()`` up to date. Only a batch released with ``detach()`` can be re-attached,
+within its grace window.
+
+**Raises**:
+
+- `ValueError` - If ``batch_id`` is not a valid batch id.
+- `BatchNotFoundError` - If neither the batch's Lease nor any of its claims exist.
+- `BatchLeaseExpiredError` - If the Lease is missing while claims exist, or is stale,
+  including after the previous holder crashed.
+- `BatchInUseError` - If a live Lease is held by another handle, or another client
+  takes it over while attaching.
+- `BatchError` - If the Lease's or the claims' batch annotations are invalid.
+  
+
+**Example**:
+
+  
+  >>> client = SandboxClient()
+  >>> batch = client.get_batch("b1234abcd12")
+  >>> ready = [m for m in batch.members() if m.state is MemberState.READY]
+
 <a id="k8s_agent_sandbox.sandbox_client.SandboxClient.delete_sandbox"></a>
 
 ##### delete\_sandbox
@@ -210,7 +243,8 @@ Stops the client side connection and deletes the Kubernetes resources.
 def delete_all() -> None
 ```
 
-Cleanup all tracked sandboxes managed by this client.
+Cleanup all tracked sandboxes managed by this client, and stop every tracked batch's
+background watch and Lease renewal.
 
 **Example**:
 
@@ -544,4 +578,159 @@ Whether to enable OpenTelemetry tracing.
 ##### trace\_service\_name
 
 Service name used for traces.
+
+<a id="k8s_agent_sandbox.models.BatchGroup"></a>
+
+### BatchGroup Objects
+
+```python
+class BatchGroup(BaseModel)
+```
+
+Represents one warmpool in a batch for multi-pool batch claiming.
+
+<a id="k8s_agent_sandbox.models.BatchGroup.min_ready"></a>
+
+##### min\_ready
+
+Defaults to ``size``.
+
+<a id="k8s_agent_sandbox.models.MemberState"></a>
+
+### MemberState Objects
+
+```python
+class MemberState(str, Enum)
+```
+
+Where a batch member's claim is in its lifecycle.
+
+``FAILED`` is terminal, so the claim will never become Ready. A member stays ``FAILED`` if its
+claim is deleted afterwards, so its state keeps saying why it can't become Ready. ``LOST``
+means the claim was deleted before it failed.
+
+<a id="k8s_agent_sandbox.models.Member"></a>
+
+### Member Objects
+
+```python
+class Member(BaseModel)
+```
+
+Represents the identity of a single claim in a batch.
+
+<a id="k8s_agent_sandbox.models.Member.warmpool"></a>
+
+##### warmpool
+
+The group this member belongs to.
+
+<a id="k8s_agent_sandbox.sandbox_batch"></a>
+
+## k8s\_agent\_sandbox.sandbox\_batch
+
+Sync handle for using a claimed or re-attached sandbox batch.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch"></a>
+
+### SandboxBatch Objects
+
+```python
+class SandboxBatch()
+```
+
+A handle to an existing batch's claims, obtained via ``SandboxClient.get_batch``.
+
+Keeps a live cache of the batch's claims through one label-scoped watch
+(a background daemon thread), renews the batch Lease on another daemon
+thread, and exposes methods for connecting to ready sandboxes and detaching from the batch.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.groups"></a>
+
+##### groups
+
+```python
+@property
+def groups() -> list[BatchGroup]
+```
+
+The batch's ``BatchGroup``\ s; one per warm pool.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.size"></a>
+
+##### size
+
+```python
+@property
+def size() -> int
+```
+
+The total number of claims across all groups.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.members"></a>
+
+##### members
+
+```python
+def members(warmpool: str | None = None) -> list[Member]
+```
+
+Returns a snapshot of the batch's members, optionally filtered to one warm pool.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.connect"></a>
+
+##### connect
+
+```python
+def connect(member: Member) -> "Sandbox"
+```
+
+Returns a connected ``Sandbox`` for a ready member. If this handle is already connected
+to the Sandbox, it reuses the existing connection, otherwise it creates a new one and caches it for future calls.
+
+Raises ``SandboxNotReadyError`` if the member isn't ready.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.err"></a>
+
+##### err
+
+```python
+def err() -> Exception | None
+```
+
+Returns the error that stopped the batch's watch or background
+Lease renewal (e.g., ``BatchLeaseExpiredError``), or ``None`` while healthy.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.lease_degraded"></a>
+
+##### lease\_degraded
+
+```python
+def lease_degraded() -> bool
+```
+
+Returns whether background Lease renewal is failing.
+
+``True`` from the first failed renewal until a renewal succeeds. It stays ``True`` once
+renewal stops on an error, such as the Lease expiring, so it can be polled at any time.
+
+<a id="k8s_agent_sandbox.sandbox_batch.SandboxBatch.detach"></a>
+
+##### detach
+
+```python
+def detach(grace: int | None = None) -> None
+```
+
+Stops the background watch and Lease renewal, closes cached sandbox connections, and
+releases this handle's hold on the Lease. ``grace`` is the number of seconds to keep the
+Lease valid after detaching, an int greater than ``CLOCK_SKEW_MARGIN`` (5); if ``None``, we
+use the batch's original Lease duration.
+
+If the Lease release fails, the error propagates and this handle stays in a detached state with
+the Lease still held. Call ``detach`` again to retry; steps that already completed are skipped.
+
+**Raises**:
+
+- `ValueError` - If ``grace`` is not a valid Lease duration.
 

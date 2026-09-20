@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-import { registerRoute, registerSidebarEntry } from '@kinvolk/headlamp-plugin/lib';
+import { registerRoute, registerSidebarEntry, useTranslation } from '@kinvolk/headlamp-plugin/lib';
+import { type ComponentType, useEffect } from 'react';
 import {
   SandboxClaimDetail,
   SandboxClaimList,
@@ -38,6 +39,7 @@ const resources = [
   {
     name: 'agent-sandbox-sandboxes',
     label: 'Sandboxes',
+    translationKey: 'Sandboxes',
     path: 'sandboxes',
     list: SandboxList,
     detail: SandboxDetail,
@@ -46,6 +48,7 @@ const resources = [
   {
     name: 'agent-sandbox-claims',
     label: 'Sandbox Claims',
+    translationKey: 'Sandbox Claims',
     path: 'claims',
     list: SandboxClaimList,
     detail: SandboxClaimDetail,
@@ -54,6 +57,7 @@ const resources = [
   {
     name: 'agent-sandbox-warmpools',
     label: 'Sandbox WarmPools',
+    translationKey: 'Sandbox WarmPools',
     path: 'warmpools',
     list: SandboxWarmPoolList,
     detail: SandboxWarmPoolDetail,
@@ -62,12 +66,44 @@ const resources = [
   {
     name: 'agent-sandbox-templates',
     label: 'Sandbox Templates',
+    translationKey: 'Sandbox Templates',
     path: 'templates',
     list: SandboxTemplateList,
     detail: SandboxTemplateDetail,
     detailName: 'agent-sandbox-template',
   },
 ];
+
+function registerLocalizedSidebarEntries(t: (key: string) => string) {
+  registerSidebarEntry({
+    name: 'agent-sandbox',
+    label: t('Agent Sandbox'),
+    url: '/agent-sandbox/sandboxes',
+    icon: 'mdi:robot-outline',
+    parent: '',
+  });
+
+  for (const resource of resources) {
+    registerSidebarEntry({
+      name: resource.name,
+      label: t(resource.translationKey),
+      url: `/agent-sandbox/${resource.path}`,
+      parent: 'agent-sandbox',
+    });
+  }
+}
+
+function withSidebarTranslations(Component: ComponentType<any>) {
+  return function LocalizedPage() {
+    const { t, i18n } = useTranslation();
+
+    useEffect(() => {
+      registerLocalizedSidebarEntries(t);
+    }, [t, i18n?.language]);
+
+    return <Component />;
+  };
+}
 
 for (const resource of resources) {
   registerSidebarEntry({
@@ -82,7 +118,7 @@ for (const resource of resources) {
     sidebar: resource.name,
     name: resource.name,
     exact: true,
-    component: resource.list,
+    component: withSidebarTranslations(resource.list),
   });
 
   registerRoute({
@@ -90,6 +126,6 @@ for (const resource of resources) {
     sidebar: resource.name,
     name: resource.detailName,
     exact: true,
-    component: resource.detail,
+    component: withSidebarTranslations(resource.detail),
   });
 }

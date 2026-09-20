@@ -18,7 +18,15 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { SandboxClient, SandboxdRpcError } from "agentic-sandbox-client";
+import {
+  type ProcessEvent,
+  type ProcessHandle,
+  type Sandbox,
+  SandboxClient,
+  SandboxClosedError,
+  SandboxdRpcError,
+  type StartOptions,
+} from "agentic-sandbox-client";
 import {
   afterEach,
   beforeAll,
@@ -212,6 +220,100 @@ async function readAll(
 
 function sha256Hex(data: Uint8Array): string {
   return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+/** A process started with output callbacks, exposing what it has printed so far. */
+interface CapturedProcess {
+  handle: ProcessHandle;
+  stdout(): string;
+  stderr(): string;
+  /** Resolves once the accumulated stdout matches `pattern`. */
+  waitForStdout(pattern: RegExp, timeoutMs?: number): Promise<void>;
+}
+
+async function startCaptured(
+  sandbox: Sandbox,
+  command: string,
+  args: readonly string[] = [],
+  opts: StartOptions = {},
+): Promise<CapturedProcess> {
+  const stdoutDecoder = new TextDecoder();
+  const stderrDecoder = new TextDecoder();
+  let stdout = "";
+  let stderr = "";
+  const handle = await sandbox.commands.start(command, args, {
+    ...opts,
+    onStdout: (chunk) => {
+      stdout += stdoutDecoder.decode(chunk, { stream: true });
+    },
+    onStderr: (chunk) => {
+      stderr += stderrDecoder.decode(chunk, { stream: true });
+    },
+  });
+  return {
+    handle,
+    stdout: () => stdout,
+    stderr: () => stderr,
+    waitForStdout: (pattern, timeoutMs = 30_000) =>
+      eventually(
+        () => pattern.test(stdout),
+        timeoutMs,
+        () => `stdout never matched ${pattern}; got: ${JSON.stringify(stdout)}`,
+      ),
+  };
+}
+
+/** Polls `check` until it returns true, or fails with `describeFailure()`. */
+async function eventually(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  describeFailure: () => string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(describeFailure());
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+function isRpcError(err: unknown, code: string): boolean {
+  return err instanceof SandboxdRpcError && err.code === code;
+}
+
+/**
+ * Waits until the process that wrote its pid to `pidFile` no longer exists.
+ * The pid is sh's own ($$), which sandboxd reaps itself after SIGKILL, so
+ * "gone" is observable with kill -0 rather than lingering as a zombie.
+ */
+async function waitForProcessGone(
+  sandbox: Sandbox,
+  pidFile: string,
+): Promise<void> {
+  await eventually(
+    async () => {
+      const probe = await sandbox.commands.run("sh", [
+        "-c",
+        `kill -0 "$(cat ${pidFile})" 2>/dev/null`,
+      ]);
+      return probe.exitCode !== 0;
+    },
+    30_000,
+    () => `process from ${pidFile} was still running after its stream ended`,
+  );
+}
+
+/** Waits until `pidFile` has been written with a non-empty pid. */
+async function waitForPidFile(
+  sandbox: Sandbox,
+  pidFile: string,
+): Promise<void> {
+  await eventually(
+    async () =>
+      (await sandbox.files.exists(pidFile)) &&
+      (await sandbox.files.read(pidFile)).byteLength > 0,
+    30_000,
+    () => `${pidFile} was never written`,
+  );
 }
 
 /**
@@ -585,6 +687,241 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
 
       const stillThere = await sandbox.files.read("existing.bin");
       expect(sha256Hex(stillThere)).toBe(originalHash);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("start() streams stdout and stderr separately and reports the exit code", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const script = "echo out; echo err >&2; exit 4";
+
+      // Consuming through the events iterator.
+      const proc = await sandbox.commands.start("sh", ["-c", script]);
+      expect(proc.pid).toBeGreaterThan(0);
+      const events: ProcessEvent[] = [];
+      for await (const event of proc.events) events.push(event);
+      const decoder = new TextDecoder();
+      const text = (type: "stdout" | "stderr") =>
+        events
+          .filter((e) => e.type === type)
+          .map((e) => (e.type === "exit" ? "" : decoder.decode(e.data)))
+          .join("");
+      expect(text("stdout")).toBe("out\n");
+      expect(text("stderr")).toBe("err\n");
+      expect(events.at(-1)).toEqual({ type: "exit", exitCode: 4 });
+      await expect(proc.wait()).resolves.toEqual({ exitCode: 4 });
+
+      // Consuming through callbacks.
+      const captured = await startCaptured(sandbox, "sh", ["-c", script]);
+      await expect(captured.handle.wait()).resolves.toEqual({ exitCode: 4 });
+      expect(captured.stdout()).toBe("out\n");
+      expect(captured.stderr()).toBe("err\n");
+
+      // A missing executable is sandboxd's NOT_FOUND before any process exists.
+      await expect(
+        sandbox.commands.start("definitely-not-a-real-command-e2e"),
+      ).rejects.toSatisfy((err: unknown) => isRpcError(err, "not_found"));
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("start() feeds stdin, supports an interactive shell, and rejects input after exit", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const cat = await startCaptured(sandbox, "cat");
+      await cat.handle.write("hello\n");
+      await cat.waitForStdout(/hello\n/);
+      await cat.handle.closeStdin();
+      await expect(cat.handle.wait()).resolves.toEqual({ exitCode: 0 });
+
+      // Without a PTY, sh reads its script from stdin one line at a time.
+      const shell = await startCaptured(sandbox, "sh");
+      await shell.handle.write("echo $((1+2))\n");
+      await shell.waitForStdout(/^3$/m);
+      await shell.handle.write("exit 7\n");
+      await expect(shell.handle.wait()).resolves.toEqual({ exitCode: 7 });
+
+      // Once sandboxd forgets the process, control calls get NOT_FOUND. Until
+      // then a write can briefly fail with a different, internal, status.
+      await eventually(
+        async () =>
+          shell.handle.write("late\n").then(
+            () => false,
+            (err: unknown) => isRpcError(err, "not_found"),
+          ),
+        10_000,
+        () => "write() after exit never reported not_found",
+      );
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("start() with a PTY: terminal size, resize, and PTY-only rules", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      // stty and tty only succeed on a real terminal.
+      const probe = await startCaptured(
+        sandbox,
+        "sh",
+        ["-c", "stty size; tty"],
+        { pty: { cols: 80, rows: 24 } },
+      );
+      await expect(probe.handle.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(probe.stdout()).toMatch(/24 80/);
+      expect(probe.stdout()).toMatch(/\/dev\/pts\/\d+/);
+      // A terminal has one output stream: stderr is merged into stdout.
+      expect(probe.stderr()).toBe("");
+
+      const term = await startCaptured(sandbox, "sh", [], {
+        pty: { cols: 80, rows: 24 },
+      });
+      await term.handle.write("stty size\n");
+      await term.waitForStdout(/24 80/);
+      await term.handle.resize({ cols: 120, rows: 40 });
+      await term.handle.write("stty size\n");
+      await term.waitForStdout(/40 120/);
+
+      // Closing stdin would close the terminal itself; the SDK refuses.
+      await expect(term.handle.closeStdin()).rejects.toMatchObject({
+        telemetryCode: "invalid_argument",
+      });
+      await term.handle.write("exit\n");
+      await expect(term.handle.wait()).resolves.toEqual({ exitCode: 0 });
+
+      // Resizing a process that has no terminal is sandboxd's precondition failure.
+      const plain = await startCaptured(sandbox, "cat");
+      await expect(
+        plain.handle.resize({ cols: 80, rows: 24 }),
+      ).rejects.toSatisfy((err: unknown) =>
+        isRpcError(err, "failed_precondition"),
+      );
+      await plain.handle.close();
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("start() delivers signals to the process", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const trapped = await startCaptured(sandbox, "sh", [
+        "-c",
+        'trap "echo got-int; exit 5" INT; echo ready; while :; do sleep 0.1; done',
+      ]);
+      await trapped.waitForStdout(/ready/);
+      await trapped.handle.signal("SIGINT");
+      await expect(trapped.handle.wait()).resolves.toEqual({ exitCode: 5 });
+      expect(trapped.stdout()).toContain("got-int");
+
+      // A process killed by a signal reports -1, not 128+N.
+      const terminated = await startCaptured(sandbox, "sleep", ["300"]);
+      await terminated.handle.signal("SIGTERM");
+      const termResult = await terminated.handle.wait();
+      expect(termResult.exitCode).not.toBe(0);
+
+      const killed = await startCaptured(sandbox, "sleep", ["300"]);
+      await killed.handle.kill();
+      const killResult = await killed.handle.wait();
+      expect(killResult.exitCode).not.toBe(0);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("ending a process's stream kills it: abort, handle.close(), and sandbox.close()", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      // Aborting the caller's signal surfaces the caller's own reason.
+      const controller = new AbortController();
+      const reason = new Error("test abort");
+      const aborted = await sandbox.commands.start(
+        "sh",
+        ["-c", "echo $$ > abort.pid; sleep 300"],
+        { signal: controller.signal },
+      );
+      const abortedWait = aborted.wait();
+      abortedWait.catch(() => {});
+      await waitForPidFile(sandbox, "abort.pid");
+      controller.abort(reason);
+      await expect(abortedWait).rejects.toBe(reason);
+      await waitForProcessGone(sandbox, "abort.pid");
+
+      // Closing one handle kills its process and leaves the connection, and
+      // every other operation on it, working.
+      const closed = await sandbox.commands.start("sh", [
+        "-c",
+        "echo $$ > closed.pid; sleep 300",
+      ]);
+      const closedWait = closed.wait();
+      closedWait.catch(() => {});
+      await waitForPidFile(sandbox, "closed.pid");
+      await closed.close();
+      await expect(closedWait).rejects.toBeInstanceOf(SandboxClosedError);
+      await waitForProcessGone(sandbox, "closed.pid");
+      await sandbox.files.write("after-close.txt", "still alive\n");
+      const run = await sandbox.commands.run("cat", ["after-close.txt"]);
+      expect(run.stdout).toBe("still alive\n");
+
+      // Closing the Sandbox handle ends every process still running.
+      const running = await sandbox.commands.start("sleep", ["300"]);
+      const runningWait = running.wait();
+      runningWait.catch(() => {});
+      await sandbox.close();
+      await expect(runningWait).rejects.toBeInstanceOf(SandboxClosedError);
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  test("a long-running process shares the connection with other operations", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const long = await startCaptured(sandbox, "sh", [
+        "-c",
+        "echo ready; sleep 300",
+      ]);
+      await long.waitForStdout(/ready/);
+
+      const second = await startCaptured(sandbox, "echo", ["second"]);
+      await expect(second.handle.wait()).resolves.toEqual({ exitCode: 0 });
+      expect(second.stdout()).toBe("second\n");
+      const run = await sandbox.commands.run("echo", ["run ok"]);
+      expect(run.stdout).toBe("run ok\n");
+      await sandbox.files.write("beside-long.txt", "written\n");
+
+      // The first process was undisturbed by all of that.
+      await long.handle.write("ignored\n");
+      await long.handle.kill();
+      const result = await long.handle.wait();
+      expect(result.exitCode).not.toBe(0);
     } finally {
       await sandbox.close();
     }

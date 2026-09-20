@@ -32,16 +32,16 @@ export function readyStatus(conditions?: Condition[]) {
   return readyCondition(conditions)?.status || '-';
 }
 
+type SandboxOperatingMode = 'Running' | 'Suspended';
+type SandboxWarmPoolUpdateStrategy = 'Recreate' | 'OnReplenish';
+type NetworkPolicyManagement = 'Managed' | 'Unmanaged';
+type EnvVarsInjectionPolicy = 'Allowed' | 'Overrides' | 'Disallowed';
+type VolumeClaimTemplatesPolicy = 'Allowed' | 'Overrides' | 'Disallowed';
+
+// These interfaces intentionally model only fields consumed by the read-only views.
+// They are projections of the CRDs, not replacements for the generated API types.
 interface SandboxSpec {
-  operatingMode?: 'Running' | 'Suspended';
-  shutdownTime?: string;
-  shutdownPolicy?: string;
-  podTemplate?: {
-    spec?: {
-      containers?: Array<{ name?: string; image?: string }>;
-    };
-  };
-  service?: boolean;
+  operatingMode?: SandboxOperatingMode;
 }
 
 export interface SandboxData extends KubeObjectInterface {
@@ -148,7 +148,7 @@ export interface SandboxWarmPoolData extends KubeObjectInterface {
   spec: {
     replicas?: number;
     sandboxTemplateRef: { name: string };
-    updateStrategy?: { type?: string };
+    updateStrategy?: { type?: SandboxWarmPoolUpdateStrategy };
   };
   status?: {
     replicas?: number;
@@ -160,11 +160,10 @@ export interface SandboxWarmPoolData extends KubeObjectInterface {
 
 export interface SandboxTemplateData extends KubeObjectInterface {
   spec: {
-    podTemplate?: SandboxSpec['podTemplate'];
     service?: boolean;
-    networkPolicyManagement?: string;
-    envVarsInjectionPolicy?: string;
-    volumeClaimTemplatesPolicy?: string;
+    networkPolicyManagement?: NetworkPolicyManagement;
+    envVarsInjectionPolicy?: EnvVarsInjectionPolicy;
+    volumeClaimTemplatesPolicy?: VolumeClaimTemplatesPolicy;
   };
 }
 

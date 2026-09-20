@@ -35,24 +35,24 @@ export function SandboxWarmPoolList() {
         'namespace',
         {
           id: 'ready',
-          label: 'Ready replicas',
+          label: t('Ready replicas'),
           getValue: item => `${item.readyReplicas} / ${item.desiredReplicas}`,
         },
         {
           id: 'template',
-          label: 'Template',
-          getValue: item => item.spec.sandboxTemplateRef?.name || '-',
+          label: t('Template'),
+          getValue: item => item.templateName,
           render: item => (
             <LinkValue
               routeName="agent-sandbox-template"
               namespace={item.metadata.namespace}
-              name={item.spec.sandboxTemplateRef?.name}
+              name={item.templateName}
             />
           ),
         },
         {
           id: 'update-strategy',
-          label: 'Update strategy',
+          label: t('Update strategy'),
           getValue: item => item.updateStrategy,
         },
         'age',
@@ -86,7 +86,7 @@ export function SandboxWarmPoolDetail() {
               <LinkValue
                 routeName="agent-sandbox-template"
                 namespace={item.metadata.namespace}
-                name={item.spec.sandboxTemplateRef?.name}
+                name={item.templateName}
               />
             ),
           },

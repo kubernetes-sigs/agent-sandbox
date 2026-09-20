@@ -39,12 +39,12 @@ export function SandboxClaimList() {
         'namespace',
         {
           id: 'ready',
-          label: 'Ready',
+          label: t('Ready'),
           getValue: item => item.readyStatus,
         },
         {
           id: 'warm-pool',
-          label: 'WarmPool',
+          label: t('WarmPool'),
           getValue: item => item.spec.warmPoolRef?.name || '-',
           render: item => (
             <LinkValue
@@ -56,7 +56,7 @@ export function SandboxClaimList() {
         },
         {
           id: 'sandbox',
-          label: 'Sandbox',
+          label: t('Sandbox'),
           getValue: item => item.assignedSandboxName,
           render: item => (
             <LinkValue

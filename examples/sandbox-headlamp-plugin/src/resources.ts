@@ -33,7 +33,7 @@ export function readyStatus(conditions?: Condition[]) {
 }
 
 interface SandboxSpec {
-  operatingMode?: string;
+  operatingMode?: 'Running' | 'Suspended';
   shutdownTime?: string;
   shutdownPolicy?: string;
   podTemplate?: {
@@ -79,6 +79,10 @@ export class Sandbox extends KubeObject<SandboxData> {
 
   get readyStatus() {
     return readyStatus(this.status.conditions);
+  }
+
+  get operatingMode() {
+    return this.spec.operatingMode ?? 'Running';
   }
 
   get podIP() {
@@ -193,6 +197,10 @@ export class SandboxWarmPool extends KubeObject<SandboxWarmPoolData> {
   get updateStrategy() {
     return this.spec.updateStrategy?.type ?? 'OnReplenish';
   }
+
+  get templateName() {
+    return this.spec.sandboxTemplateRef?.name || '-';
+  }
 }
 
 export class SandboxTemplate extends KubeObject<SandboxTemplateData> {
@@ -207,5 +215,24 @@ export class SandboxTemplate extends KubeObject<SandboxTemplateData> {
 
   get spec() {
     return this.jsonData.spec;
+  }
+
+  get networkPolicyManagement() {
+    return this.spec.networkPolicyManagement ?? 'Managed';
+  }
+
+  get envVarsInjectionPolicy() {
+    return this.spec.envVarsInjectionPolicy ?? 'Disallowed';
+  }
+
+  get volumeClaimTemplatesPolicy() {
+    return this.spec.volumeClaimTemplatesPolicy ?? 'Disallowed';
+  }
+
+  get serviceState() {
+    if (this.spec.service === undefined) {
+      return 'Unchanged';
+    }
+    return this.spec.service ? 'Enabled' : 'Disabled';
   }
 }

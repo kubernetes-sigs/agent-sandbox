@@ -51,24 +51,19 @@ export function SandboxTemplateDetail() {
           { name: t('Kind'), value: SandboxTemplate.kind },
           {
             name: t('Network policy management'),
-            value: item.spec.networkPolicyManagement || 'Managed',
+            value: item.networkPolicyManagement,
           },
           {
             name: t('Environment variable injection'),
-            value: item.spec.envVarsInjectionPolicy || 'Disallowed',
+            value: item.envVarsInjectionPolicy,
           },
           {
             name: t('Volume claim template injection'),
-            value: item.spec.volumeClaimTemplatesPolicy || 'Disallowed',
+            value: item.volumeClaimTemplatesPolicy,
           },
           {
             name: t('Service'),
-            value:
-              item.spec.service === undefined
-                ? 'Unchanged'
-                : item.spec.service
-                ? 'Enabled'
-                : 'Disabled',
+            value: item.serviceState,
           },
         ]
       }

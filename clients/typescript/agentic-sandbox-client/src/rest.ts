@@ -19,7 +19,12 @@ import {
   SandboxdApiError,
   SandboxError,
 } from "./exceptions.js";
-import type { DirectoryListing, FileEntry } from "./types.js";
+import type {
+  DirectoryListing,
+  FileEntry,
+  SandboxHealth,
+  SandboxMetadata,
+} from "./types.js";
 
 /**
  * REST wire client for sandboxd's Filesystem & Runtime API. Owns nothing
@@ -548,9 +553,7 @@ export class SandboxdRestClient {
     );
   }
 
-  async health(
-    signal: AbortSignal,
-  ): Promise<{ status: string; uptimeSeconds: number }> {
+  async health(signal: AbortSignal): Promise<SandboxHealth> {
     const { response, controller } = await this.request("GET", "/v1/health", {
       signal,
     });
@@ -590,6 +593,37 @@ export class SandboxdRestClient {
       );
     }
     return { status: obj.status, uptimeSeconds: obj.uptime_seconds };
+  }
+
+  async metadata(signal: AbortSignal): Promise<SandboxMetadata> {
+    const { response, controller } = await this.request("GET", "/v1/metadata", {
+      signal,
+    });
+    if (response.status !== 200) {
+      throw await this.buildApiError(
+        response,
+        controller,
+        "GET",
+        "/v1/metadata",
+        signal,
+      );
+    }
+    const bodyBytes = await readBoundedBody(
+      response,
+      this.opts.maxMetadataResponseSize,
+      controller,
+      signal,
+    );
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(bodyBytes));
+    } catch (err) {
+      throw invalidResponse(
+        "sandboxd /v1/metadata returned malformed JSON",
+        err,
+      );
+    }
+    return parseMetadata(parsed);
   }
 
   async read(path: string, signal: AbortSignal): Promise<Uint8Array> {
@@ -948,6 +982,38 @@ function isValidRfc3339(s: string): boolean {
 }
 
 const MODE_RE = /^0[0-7]{3,4}$/;
+
+function parseMetadata(raw: unknown): SandboxMetadata {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw invalidResponse("sandboxd /v1/metadata returned a non-object body");
+  }
+  const rawEnv = (raw as Record<string, unknown>).env;
+  if (rawEnv === undefined) {
+    return { env: {} };
+  }
+  if (typeof rawEnv !== "object" || rawEnv === null || Array.isArray(rawEnv)) {
+    throw invalidResponse("sandboxd /v1/metadata has a non-object 'env'");
+  }
+  // defineProperty below, not assignment: env names come from the server, and
+  // assigning a "__proto__" key on an ordinary object would rewrite its
+  // prototype instead of creating an entry.
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(rawEnv)) {
+    if (typeof value !== "string") {
+      // The name is left out of the message: it is server-controlled data.
+      throw invalidResponse(
+        "sandboxd /v1/metadata has a non-string 'env' value",
+      );
+    }
+    Object.defineProperty(env, name, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return { env };
+}
 
 function parseDirectoryListing(raw: unknown): DirectoryListing {
   if (typeof raw !== "object" || raw === null) {

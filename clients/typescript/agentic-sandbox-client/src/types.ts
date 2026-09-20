@@ -113,8 +113,12 @@ export type SandboxdConnectivity =
   | "in-cluster-service"
   | "in-cluster-pod-ip";
 
-/** Options accepted by every sandbox.files.* method. */
-export interface FileCallOptions {
+/**
+ * Options accepted by every call that reaches the sandbox runtime:
+ * sandbox.files.*, sandbox.commands.run(), sandbox.health() and
+ * sandbox.metadata().
+ */
+export interface RuntimeCallOptions {
   /**
    * Total budget (ms) for this call, from entry through response
    * processing — including any time spent waiting on the shared connect.
@@ -123,6 +127,12 @@ export interface FileCallOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
 }
+
+/**
+ * Options accepted by every sandbox.files.* method. Kept as an alias of
+ * {@link RuntimeCallOptions} so existing callers keep compiling.
+ */
+export type FileCallOptions = RuntimeCallOptions;
 
 /**
  * Process settings that map 1:1 onto sandboxd's ProcessConfig (besides the
@@ -145,18 +155,14 @@ export interface ProcessOptions {
 }
 
 /** Options accepted by sandbox.commands.run(). */
-export interface RunOptions extends ProcessOptions {
-  /** See {@link FileCallOptions.timeoutMs}. Default: 60000. */
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}
+export interface RunOptions extends ProcessOptions, RuntimeCallOptions {}
 
-export interface WriteOptions extends FileCallOptions {
+export interface WriteOptions extends RuntimeCallOptions {
   /** POSIX file mode, e.g. "0644". Must match `^0[0-7]{3}$`. */
   mode?: string;
 }
 
-export interface DeleteOptions extends FileCallOptions {
+export interface DeleteOptions extends RuntimeCallOptions {
   /** Delete non-empty directories recursively. Default: false. */
   recursive?: boolean;
 }
@@ -183,6 +189,27 @@ export interface FileEntry {
 export interface DirectoryListing {
   path: string;
   entries: FileEntry[];
+}
+
+/** Result of sandbox.health(). */
+export interface SandboxHealth {
+  status: "ok";
+  /** Seconds sandboxd has been running. */
+  uptimeSeconds: number;
+}
+
+/**
+ * Result of sandbox.metadata(): the non-sensitive, workload-scoped
+ * configuration sandboxd exposes.
+ */
+export interface SandboxMetadata {
+  /**
+   * Environment variables the orchestrator injected into sandboxd. sandboxd
+   * exposes only names matching its `--metadata-env-prefix` (default
+   * `SANDBOX_`) and withholds any name that looks like a credential, so this
+   * is not sandboxd's full environment. Empty when none apply.
+   */
+  env: Readonly<Record<string, string>>;
 }
 
 /**

@@ -387,6 +387,42 @@ describe("TypeScript SDK E2E — sandbox runtime operations (sandboxd)", () => {
     }
   });
 
+  test("reports sandboxd health and its prefix-filtered metadata env", async () => {
+    const client = new SandboxClient({ namespace });
+    const sandbox = await client.createSandbox(
+      SANDBOXD_WARMPOOL_NAME,
+      namespace,
+    );
+    try {
+      const health = await sandbox.health();
+      expect(health.status).toBe("ok");
+      expect(health.uptimeSeconds).toBeGreaterThanOrEqual(0);
+
+      const { env } = await sandbox.metadata();
+      // Not an exact match: Kubernetes injects <SERVICE>_SERVICE_HOST-style
+      // variables for Services in the namespace, and a Service named
+      // "sandbox-..." would also carry the SANDBOX_ prefix.
+      expect(env.SANDBOX_E2E_MARKER).toBe("ts-sdk");
+      expect(env).not.toHaveProperty("SANDBOX_E2E_API_TOKEN");
+      expect(env).not.toHaveProperty("E2E_UNPREFIXED");
+
+      // The withheld variables really are set in sandboxd's environment, so
+      // their absence above is the filter's doing and not a missing fixture.
+      const token = await sandbox.commands.run("sh", [
+        "-c",
+        'printf %s "$SANDBOX_E2E_API_TOKEN"',
+      ]);
+      expect(token.stdout).toBe("dummy-not-a-credential");
+      const unprefixed = await sandbox.commands.run("sh", [
+        "-c",
+        'printf %s "$E2E_UNPREFIXED"',
+      ]);
+      expect(unprefixed.stdout).toBe("not-exposed");
+    } finally {
+      await sandbox.close();
+    }
+  });
+
   test("files (REST) and commands (gRPC) share the same working directory", async () => {
     const client = new SandboxClient({ namespace });
     const sandbox = await client.createSandbox(

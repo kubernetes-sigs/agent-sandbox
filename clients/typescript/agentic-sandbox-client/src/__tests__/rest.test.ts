@@ -194,6 +194,119 @@ describe("SandboxdRestClient.health", () => {
       SandboxError,
     );
   });
+
+  it("rejects a status other than 'ok'", async () => {
+    activeServer = await startServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "degraded", uptime_seconds: 1 }));
+    });
+    const client = makeClient(activeServer.baseUrl);
+    await expect(client.health(new AbortController().signal)).rejects.toThrow(
+      SandboxError,
+    );
+  });
+});
+
+// ---------- metadata ----------
+
+describe("SandboxdRestClient.metadata", () => {
+  function serveJson(status: number, body: string) {
+    return startServer((_req, res) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(body);
+    });
+  }
+
+  it("GETs /v1/metadata and returns the env map", async () => {
+    activeServer = await serveJson(
+      200,
+      JSON.stringify({ env: { SANDBOX_ID: "abc", SANDBOX_REGION: "eu" } }),
+    );
+    const client = makeClient(activeServer.baseUrl);
+    const metadata = await client.metadata(new AbortController().signal);
+    expect(metadata).toEqual({
+      env: { SANDBOX_ID: "abc", SANDBOX_REGION: "eu" },
+    });
+    expect(activeServer.requests[0]).toMatchObject({
+      method: "GET",
+      url: "/v1/metadata",
+    });
+  });
+
+  it("returns an empty env when 'env' is absent or empty", async () => {
+    activeServer = await serveJson(200, "{}");
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.metadata(new AbortController().signal),
+    ).resolves.toEqual({ env: {} });
+    await activeServer.close();
+
+    activeServer = await serveJson(200, JSON.stringify({ env: {} }));
+    const client2 = makeClient(activeServer.baseUrl);
+    await expect(
+      client2.metadata(new AbortController().signal),
+    ).resolves.toEqual({ env: {} });
+  });
+
+  it("keeps a '__proto__' env name as an ordinary entry without touching the prototype", async () => {
+    activeServer = await serveJson(
+      200,
+      '{"env":{"__proto__":"polluted","SANDBOX_A":"1"}}',
+    );
+    const client = makeClient(activeServer.baseUrl);
+    const { env } = await client.metadata(new AbortController().signal);
+    expect(Object.keys(env).sort()).toEqual(["SANDBOX_A", "__proto__"]);
+    expect(Object.getOwnPropertyDescriptor(env, "__proto__")?.value).toBe(
+      "polluted",
+    );
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    // A plain object, not a null-prototype one: consumers may call
+    // hasOwnProperty on it, and toEqual would not notice the difference.
+    expect(Object.getPrototypeOf(env)).toBe(Object.prototype);
+  });
+
+  it.each([
+    ["a non-object body", "[]"],
+    ["a null body", "null"],
+    ["an array 'env'", '{"env":[]}'],
+    ["a null 'env'", '{"env":null}'],
+    ["a non-string env value", '{"env":{"SANDBOX_A":1}}'],
+    ["malformed JSON", "not json"],
+  ])("rejects %s as invalid_response", async (_name, body) => {
+    activeServer = await serveJson(200, body);
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.metadata(new AbortController().signal),
+    ).rejects.toMatchObject({
+      telemetryCode: "invalid_response",
+    } satisfies Partial<SandboxError>);
+  });
+
+  it("maps a non-200 to SandboxdApiError", async () => {
+    activeServer = await serveJson(
+      403,
+      JSON.stringify({ code: "PERMISSION_DENIED", message: "nope" }),
+    );
+    const client = makeClient(activeServer.baseUrl);
+    await expect(
+      client.metadata(new AbortController().signal),
+    ).rejects.toMatchObject({
+      status: 403,
+    } satisfies Partial<SandboxdApiError>);
+  });
+
+  it("rejects a body over maxMetadataResponseSize", async () => {
+    activeServer = await serveJson(
+      200,
+      JSON.stringify({ env: { SANDBOX_BIG: "x".repeat(200) } }),
+    );
+    const client = makeClient(activeServer.baseUrl, {
+      maxMetadataResponseSize: 64,
+    });
+    await expect(client.metadata(new AbortController().signal)).rejects.toThrow(
+      SandboxError,
+    );
+  });
 });
 
 // ---------- read ----------

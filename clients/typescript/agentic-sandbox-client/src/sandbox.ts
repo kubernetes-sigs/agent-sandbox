@@ -59,8 +59,11 @@ import type {
   Logger,
   ProcessOptions,
   RunOptions,
+  RuntimeCallOptions,
   SandboxdConnectivity,
   SandboxdOptions,
+  SandboxHealth,
+  SandboxMetadata,
   WriteOptions,
 } from "./types.js";
 
@@ -429,6 +432,30 @@ export class Sandbox {
       });
     }
     return this._files;
+  }
+
+  /**
+   * Probes sandboxd's `/v1/health`. Resolves with sandboxd's report when it
+   * is ready. Connects to sandboxd lazily, and that connect already waits
+   * for sandboxd to become healthy: a first call against a not-yet-ready
+   * sandboxd therefore fails with the connect's timeout or connection error,
+   * not a 503. Only on an already-established connection does an unready
+   * sandboxd (e.g. shutting down) reject with a `SandboxdApiError` (status
+   * 503). The SDK never retries automatically.
+   */
+  health(opts?: RuntimeCallOptions): Promise<SandboxHealth> {
+    return this.healthImpl(opts);
+  }
+
+  /**
+   * Reads sandboxd's `/v1/metadata`: the non-sensitive, workload-scoped
+   * environment the orchestrator injected. sandboxd serves only variables
+   * matching its `--metadata-env-prefix` (default `SANDBOX_`) and withholds
+   * credential-looking names, so this is never sandboxd's full environment.
+   * Connects to sandboxd lazily. The SDK never retries automatically.
+   */
+  metadata(opts?: RuntimeCallOptions): Promise<SandboxMetadata> {
+    return this.metadataImpl(opts);
   }
 
   /**
@@ -923,6 +950,40 @@ export class Sandbox {
         const remainingMs = Math.max(1, timeoutMs - (Date.now() - startedAt));
         return gen.process.run(spec, remainingMs, signal);
       },
+    );
+  }
+
+  private async healthImpl(opts?: RuntimeCallOptions): Promise<SandboxHealth> {
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    return this.operate<SandboxHealth>(
+      "runtime.health",
+      timeoutMs,
+      opts?.signal,
+      () => {},
+      undefined,
+      (gen, signal) => gen.rest.health(signal),
+    );
+  }
+
+  private async metadataImpl(
+    opts?: RuntimeCallOptions,
+  ): Promise<SandboxMetadata> {
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    return this.operate<SandboxMetadata>(
+      "runtime.metadata",
+      timeoutMs,
+      opts?.signal,
+      () => {},
+      (span, result) => {
+        // Only the count: names and values are server-controlled data and
+        // stay out of telemetry.
+        if (span.isRecording())
+          span.setAttribute(
+            "sandbox.metadata.env_count",
+            Object.keys(result.env).length,
+          );
+      },
+      (gen, signal) => gen.rest.metadata(signal),
     );
   }
 

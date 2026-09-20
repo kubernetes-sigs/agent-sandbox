@@ -153,6 +153,11 @@ async function startRestBackend(listenPort = 0): Promise<{
       res.end(JSON.stringify({ status: "ok", uptime_seconds: 1 }));
       return;
     }
+    if (req.url === "/v1/metadata") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ env: { SANDBOX_ID: "sb-1" } }));
+      return;
+    }
     if (req.url?.endsWith("kill-me.txt")) {
       // Simulates a transport-level failure mid-request (e.g. ECONNRESET):
       // destroy the raw socket without ever sending a response.
@@ -590,6 +595,58 @@ describe("Sandbox connectivity integration", () => {
     // The configured portForwardReadyTimeoutMs is 5000ms; a fail-fast
     // classification must reject well before that, not after exhausting it.
     expect(Date.now() - startedAt).toBeLessThan(2000);
+  });
+});
+
+describe("Sandbox health() and metadata()", () => {
+  it("lazily connects, then probes /v1/health once more and reads /v1/metadata on the same generation", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    await expect(sandbox.metadata()).resolves.toEqual({
+      env: { SANDBOX_ID: "sb-1" },
+    });
+    // The lazy connect's own health check.
+    expect(restBackend.healthHits).toBe(1);
+
+    await expect(sandbox.health()).resolves.toEqual({
+      status: "ok",
+      uptimeSeconds: 1,
+    });
+    // health() is a real probe, not a cached connect result.
+    expect(restBackend.healthHits).toBe(2);
+  });
+
+  it("rejects an invalid timeoutMs before connecting", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+
+    await expect(sandbox.metadata({ timeoutMs: 0 })).rejects.toThrow();
+    await expect(sandbox.health({ timeoutMs: -1 })).rejects.toThrow();
+    expect(restBackend.healthHits).toBe(0);
+  });
+
+  it("rejects once closing has started", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+    });
+    await sandbox.closeLocal();
+    await expect(sandbox.health()).rejects.toThrow();
+    await expect(sandbox.metadata()).rejects.toThrow();
   });
 });
 

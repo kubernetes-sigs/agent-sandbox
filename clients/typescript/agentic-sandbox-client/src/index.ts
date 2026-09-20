@@ -42,8 +42,11 @@ export type {
   Logger,
   ProcessOptions,
   RunOptions,
+  RuntimeCallOptions,
   SandboxClientOptions,
   SandboxdConnectivity,
   SandboxdOptions,
+  SandboxHealth,
+  SandboxMetadata,
   WriteOptions,
 } from "./types.js";

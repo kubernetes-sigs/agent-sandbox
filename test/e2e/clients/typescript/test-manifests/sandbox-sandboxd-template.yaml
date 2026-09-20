@@ -32,6 +32,16 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+        # Fixtures for sandbox.metadata(): sandboxd serves only names with its
+        # default "SANDBOX_" prefix and withholds credential-looking ones. The
+        # token value is a dummy, present only to prove it is filtered out.
+        env:
+        - name: SANDBOX_E2E_MARKER
+          value: ts-sdk
+        - name: SANDBOX_E2E_API_TOKEN
+          value: dummy-not-a-credential
+        - name: E2E_UNPREFIXED
+          value: not-exposed
         ports:
         - containerPort: 8080
         - containerPort: 9090

@@ -2,7 +2,7 @@
 
 This TypeScript client provides a high-level interface for creating and interacting with sandboxes managed by the Agent Sandbox controller, mirroring the [Go client](../../go/README.md) and [Python client](../../python/agentic-sandbox-client/README.md).
 
-The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.run()` and `sandbox.files.{read,write,readStream,writeStream,exists,list,delete}()`). `Start`/PTY/interactive process support is not part of this surface yet.
+The surface covers the Kubernetes resource layer (provisioning a `SandboxClaim`, watching it to readiness, and tearing it down via `SandboxClient` / `Sandbox`) and the sandboxd runtime layer (`sandbox.commands.run()`, `sandbox.files.{read,write,readStream,writeStream,exists,list,delete}()`, `sandbox.health()`, and `sandbox.metadata()`). `Start`/PTY/interactive process support is not part of this surface yet.
 
 ## Usage
 
@@ -39,7 +39,7 @@ try {
 
 - `sandboxReadyTimeout` (constructor / `createSandbox()` options) is in **seconds** and bounds waiting for the `SandboxClaim`/`Sandbox` to become `Ready`. Default: 180.
 - `sandboxd.portForwardReadyTimeoutMs` (constructor option, under `sandboxd`) is in **milliseconds** and bounds the shared connection to sandboxd, through a successful health check: for `port-forward` connectivity it starts when both local port-forward listeners are opened, and for the in-cluster modes it bounds health polling against the pod address (see [Connectivity](#connectivity)). It applies in full to every (re)connect attempt, including reconnects after a transport failure. Default: 30000.
-- Every `sandbox.files.*` / `sandbox.commands.run()` call takes a per-call `timeoutMs` (default 60000). This is a total budget for the call, including any time spent waiting on the shared connection above — a cold first call can spend most of its budget just connecting.
+- Every `sandbox.files.*` / `sandbox.commands.run()` / `sandbox.health()` / `sandbox.metadata()` call takes a per-call `timeoutMs` (default 60000). This is a total budget for the call, including any time spent waiting on the shared connection above — a cold first call can spend most of its budget just connecting.
 - `sandboxd.maxCommandOutputSize` bounds the fully-decoded `ExecuteResponse` (stdout + stderr + protobuf framing combined, not stdout alone) that `sandbox.commands.run()` will accept.
 
 ### Connectivity
@@ -94,6 +94,20 @@ A few things differ from the buffered methods:
 - **Size limits**: `sandboxd.maxDownloadSize` / `sandboxd.maxUploadSize` are enforced incrementally as bytes arrive or are sent, not against a `Content-Length` header — an oversized transfer is aborted mid-stream rather than buffered in full and then rejected. On an oversized upload, sandboxd may already have received a prefix within the limit before the abort; its atomic rename (see "No automatic retry" below) still keeps that prefix from ever becoming the target file's visible content.
 - **`close()`**: an unconsumed `readStream()` or an in-flight `writeStream()` counts toward `close()`'s in-flight drain, bounded by the same cleanup timeout as every other operation.
 
+### Health and metadata
+
+`sandbox.health()` and `sandbox.metadata()` take the same per-call options as the other runtime calls (`RuntimeCallOptions`: `timeoutMs` and `signal`). `FileCallOptions` is kept as an alias of it.
+
+```ts
+const { status, uptimeSeconds } = await sandbox.health();
+const { env } = await sandbox.metadata();
+console.log(env.SANDBOX_ID);
+```
+
+- `health()` probes sandboxd's `/v1/health` and resolves with `{ status: "ok", uptimeSeconds }`. The lazy connect already waits for sandboxd to become healthy, so a first call against a not-yet-ready sandboxd fails with the connect's timeout or connection error, not a 503; only on an already-established connection does an unready sandboxd (for example during shutdown) reject with a `SandboxdApiError` (status 503). A resolved `health()` means "reachable and ready now", not "just came up".
+- `metadata()` reads sandboxd's `/v1/metadata` and resolves with `{ env }`: the orchestrator-injected variables sandboxd chooses to expose. sandboxd serves only names starting with its `--metadata-env-prefix` (default `SANDBOX_`) and withholds any name that looks like a credential (containing `TOKEN`, `SECRET`, `KEY`, and similar). `env` is therefore not sandboxd's full environment, and is empty when nothing matches. Templates that need a value visible here must set it on the sandboxd container under the configured prefix; nothing in the controller injects one for you.
+- Neither call is retried automatically, and neither records any value in tracing spans (`metadata()` records only the number of variables).
+
 ### Execution target and path rules
 
 `sandbox.commands.run(command, args?, options?)` (or `run(command, options?)`) passes `[command, ...args]` to sandboxd as the process's argv, exactly like `ProcessConfig.command` — it is never wrapped in a shell, so there is no word splitting, globbing, or variable expansion. Use `run("sh", ["-c", "..."])` when you need shell syntax. Because there is no shell in between, an executable that cannot be found is reported by sandboxd as a `SandboxdRpcError` with code `not_found`, not as a result with exit code 127.
@@ -113,13 +127,14 @@ This path confinement covers the files API and the working directory sandboxd ru
 
 ### No automatic retry
 
-A failed `files.*` or `commands.run()` call is never retried automatically by the SDK. If the underlying connection was invalidated by a transport failure, the *next* call you make reconnects from scratch; other calls already in flight on the same connection fail together with it.
+A failed `files.*`, `commands.run()`, `health()` or `metadata()` call is never retried automatically by the SDK. If the underlying connection was invalidated by a transport failure, the *next* call you make reconnects from scratch; other calls already in flight on the same connection fail together with it.
 
 What "retrying" safely means differs per method:
 
 | Method | Automatic retry | Retrying from scratch | Constraints |
 | --- | --- | --- | --- |
 | `run()` | No | Re-run the command | A failed call may or may not have executed to completion server-side before the failure was observed — retrying blindly could re-run a command that already had side effects. |
+| `health()` / `metadata()` | No | Call it again | Read-only; the result reflects sandboxd at the time of the call. |
 | `read()` | No | Call it again | The file may have changed between attempts. |
 | `write()` | No | Resend the same `content` | sandboxd replaces the target atomically via a temporary file and rename, so a failed call never leaves the target partially written. But if the acknowledgement was lost, the write may already have committed server-side, and a retry can overwrite a concurrent update from someone else. |
 | `readStream()` | No | Call it again from the beginning | Discard any partial output and reset your destination first — a partial download is never resumed. The file may have changed between attempts. |

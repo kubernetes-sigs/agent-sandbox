@@ -38,6 +38,11 @@ This class models the response body for the `/execute` endpoint.
   mounted at `/workspace`) keeps the runtime's own code out of the working
   area and lets the container run with `readOnlyRootFilesystem: true`.
 
+### File paths
+
+URL-encode the relative path once for `/download`, `/list`, and `/exists`.
+A filename containing literal `%20` uses `%2520` in the request URL.
+
 ## Testing on a local kind cluster using agent-sandbox
 
 To test the sandbox on a local [kind](https://kind.sigs.k8s.io/) cluster, you can use the `run-test-kind.sh` script.

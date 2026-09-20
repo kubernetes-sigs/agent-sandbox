@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import os
 import shlex
 import signal
 import subprocess
+from http import HTTPStatus
+from pathlib import Path
+from urllib.parse import quote
 from unittest.mock import patch, MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -271,3 +276,73 @@ def test_exists_rejects_path_traversal():
         response = client.get("/exists/etc/passwd")
 
     assert response.status_code == 403
+
+
+async def _get_runtime_path(path: str) -> httpx.Response:
+    # TestClient unquotes an already-decoded path, hiding literal percent escapes.
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as runtime_client:
+        return await runtime_client.get(path)
+
+
+@pytest.mark.parametrize("name", ["file%20name.txt", "file%2Fname.txt", "file%25name.txt"])
+def test_download_preserves_literal_percent_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
+    (tmp_path / name).write_bytes(b"literal")
+
+    response: httpx.Response = asyncio.run(
+        _get_runtime_path(path=f"/download/{quote(name, safe='')}")
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.content == b"literal"
+    assert response.headers["content-disposition"] == f"attachment; filename*=utf-8''{quote(name)}"
+
+
+@pytest.mark.parametrize("name", ["dir%20name", "dir%2Fname", "dir%25name"])
+def test_list_preserves_literal_percent_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
+    directory: Path = tmp_path / name
+    directory.mkdir()
+    (directory / "literal.txt").write_text("literal")
+
+    response: httpx.Response = asyncio.run(
+        _get_runtime_path(path=f"/list/{quote(name, safe='')}")
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert [entry["name"] for entry in response.json()] == ["literal.txt"]
+
+
+@pytest.mark.parametrize("name", ["file%20name.txt", "file%2Fname.txt", "file%25name.txt"])
+def test_exists_preserves_literal_percent_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
+    (tmp_path / name).write_bytes(b"literal")
+
+    response: httpx.Response = asyncio.run(
+        _get_runtime_path(path=f"/exists/{quote(name, safe='')}")
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() == {"path": name, "exists": True}
+
+
+@pytest.mark.parametrize("endpoint", ["download", "list", "exists"])
+def test_encoded_paths_stay_within_base_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
+) -> None:
+    monkeypatch.setenv("SANDBOX_BASE_DIR", str(tmp_path))
+
+    response: httpx.Response = asyncio.run(
+        _get_runtime_path(path=f"/{endpoint}/{quote('../outside', safe='')}")
+    )
+
+    assert response.status_code == HTTPStatus.FORBIDDEN
+    assert response.json() == {"message": "Access denied"}

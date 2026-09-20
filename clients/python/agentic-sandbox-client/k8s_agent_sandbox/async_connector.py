@@ -353,7 +353,6 @@ class AsyncSandboxConnector:
                         await _capture_streamed_error_body(e.response)
                     finally:
                         await e.response.aclose()
-                logger.error(f"Request to sandbox failed: {e}")
                 # 5xx: often a stale Pod IP after a pod swap, clear the cached
                 # routing state so the next request re-resolves.
                 if e.response.status_code >= 500:

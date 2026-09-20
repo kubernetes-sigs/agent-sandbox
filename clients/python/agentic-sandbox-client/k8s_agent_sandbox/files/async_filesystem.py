@@ -149,6 +149,7 @@ class AsyncFilesystem:
                 content=_iter_multipart_body(prefix, content, suffix),
                 headers={"Content-Type": content_type},
                 timeout=timeout,
+                _disable_retries=True,
             )
         logging.info(f"File '{path}' uploaded successfully.")
 

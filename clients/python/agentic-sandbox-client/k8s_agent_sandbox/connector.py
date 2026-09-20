@@ -478,6 +478,7 @@ class SandboxConnector:
         
         # HTTP Session setup
         self.session = requests.Session()
+        self._no_retry_session = requests.Session()
         retries = Retry(
             total=5,
             backoff_factor=0.5,
@@ -490,6 +491,12 @@ class SandboxConnector:
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        self._no_retry_session.mount(
+            "http://", HTTPAdapter(max_retries=Retry(total=0))
+        )
+        self._no_retry_session.mount(
+            "https://", HTTPAdapter(max_retries=Retry(total=0))
+        )
         
 
     def _connection_strategy(self) -> ConnectionStrategy:
@@ -562,6 +569,8 @@ class SandboxConnector:
         self.strategy.close()
         if self.session:
             self.session.close()
+        if self._no_retry_session:
+            self._no_retry_session.close()
 
     def send_request(self, method: str, endpoint: str, **kwargs : Any) -> requests.Response:
         """Sends an HTTP request to the sandbox with standard parameters.
@@ -650,11 +659,14 @@ class SandboxConnector:
 
             # A streamed body cannot be replayed by the Session's Retry
             # adapter: a retry would send the consumed generator as an empty
-            # body. Bypassing the Session also means that a streamed PUT gets
-            # only one connection attempt, so callers see transient connect
-            # failures directly.
-            request = requests.request if disable_retries else self.session.request
-            response = request(method, url, allow_redirects=False, **kwargs)
+            # body. Use a pooled session with retries disabled so one-shot
+            # requests keep connection reuse without replaying the body.
+            request_session = (
+                self._no_retry_session if disable_retries else self.session
+            )
+            response = request_session.request(
+                method, url, allow_redirects=False, **kwargs
+            )
             if response.is_redirect:
                 raise requests.exceptions.HTTPError(
                     f"Redirection is not allowed (status code {response.status_code}).",

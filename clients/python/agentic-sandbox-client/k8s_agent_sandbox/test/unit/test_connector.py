@@ -164,10 +164,12 @@ class TestSandboxConnectorStrategySelection(unittest.TestCase):
             SandboxDirectConnectionConfig(api_url="http://router")
         )
         retry_policy = connector.session.get_adapter("http://").max_retries
+        no_retry_policy = connector._no_retry_session.get_adapter("http://").max_retries
 
         self.assertEqual(
             set(retry_policy.allowed_methods), {"GET", "PUT", "DELETE"}
         )
+        self.assertEqual(no_retry_policy.total, 0)
 
     def test_selects_in_cluster_strategy(self):
         config = SandboxInClusterConnectionConfig()
@@ -331,19 +333,20 @@ class TestSandboxConnectorHeaderInjection(unittest.TestCase):
         call_args, call_kwargs = mock_session.request.call_args
         self.assertFalse(call_kwargs.get("allow_redirects", True))
 
-    @patch("k8s_agent_sandbox.connector.requests.request")
-    def test_disable_retries_uses_one_shot_request(self, mock_request):
+    def test_disable_retries_uses_pooled_one_shot_session(self):
         config = SandboxDirectConnectionConfig(api_url="http://router")
         strategy = DirectConnectionStrategy(config)
         connector, mock_session = self._make_connector_with_strategy(strategy, config)
-        mock_request.return_value = self._mock_ok_response()
+        mock_no_retry_session = MagicMock()
+        connector._no_retry_session = mock_no_retry_session
+        mock_no_retry_session.request.return_value = self._mock_ok_response()
 
         connector.send_request(
             "PUT", "/upload", data=iter([b"payload"]), _disable_retries=True
         )
 
         mock_session.request.assert_not_called()
-        _, call_kwargs = mock_request.call_args
+        _, call_kwargs = mock_no_retry_session.request.call_args
         self.assertNotIn("_disable_retries", call_kwargs)
         self.assertFalse(call_kwargs["allow_redirects"])
 

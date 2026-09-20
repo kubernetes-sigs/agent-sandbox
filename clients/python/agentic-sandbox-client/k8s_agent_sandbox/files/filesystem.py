@@ -187,6 +187,7 @@ class Filesystem:
                 data=_iter_multipart_body(prefix, content, suffix),
                 headers={"Content-Type": content_type},
                 timeout=timeout,
+                _disable_retries=True,
             )
         else:
             files_payload = {'file': (path, content)}

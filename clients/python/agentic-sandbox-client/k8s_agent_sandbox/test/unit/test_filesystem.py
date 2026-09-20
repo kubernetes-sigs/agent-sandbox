@@ -409,6 +409,7 @@ class TestFilesystemStreamingWrite(unittest.TestCase):
 
         kwargs = self.connector.send_request.call_args.kwargs
         self.assertNotIn("files", kwargs)
+        self.assertTrue(kwargs["_disable_retries"])
 
         prepared = requests.Request(
             "POST",
@@ -510,6 +511,7 @@ class TestAsyncFilesystemStreamingWrite(unittest.IsolatedAsyncioTestCase):
 
         kwargs = self.connector.send_request.call_args.kwargs
         self.assertNotIn("files", kwargs)
+        self.assertTrue(kwargs["_disable_retries"])
         wire_body = b"".join([chunk async for chunk in kwargs["content"]])
         headers, payload = multipart_payload(
             wire_body, kwargs["headers"]["Content-Type"]

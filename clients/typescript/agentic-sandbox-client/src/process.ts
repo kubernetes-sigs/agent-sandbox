@@ -21,7 +21,12 @@ import {
   SandboxError,
   SandboxTimeoutError,
 } from "./exceptions.js";
-import type { ExecutionResult } from "./types.js";
+import type {
+  ExecutionResult,
+  ProcessEvent,
+  ProcessSignal,
+  PtySize,
+} from "./types.js";
 
 /**
  * gRPC process layer for sandboxd's ProcessService. Owns the optional
@@ -56,6 +61,12 @@ type GrpcDeps = {
   ExecuteRequestSchema: typeof import("./_proto/process/v1/process_pb.js")["ExecuteRequestSchema"];
   ProcessConfigSchema: typeof import("./_proto/process/v1/process_pb.js")["ProcessConfigSchema"];
   ProcessService: typeof import("./_proto/process/v1/process_pb.js")["ProcessService"];
+  StartRequestSchema: typeof import("./_proto/process/v1/process_pb.js")["StartRequestSchema"];
+  PTYSchema: typeof import("./_proto/process/v1/process_pb.js")["PTYSchema"];
+  WriteStdinRequestSchema: typeof import("./_proto/process/v1/process_pb.js")["WriteStdinRequestSchema"];
+  SendSignalRequestSchema: typeof import("./_proto/process/v1/process_pb.js")["SendSignalRequestSchema"];
+  ResizeTTYRequestSchema: typeof import("./_proto/process/v1/process_pb.js")["ResizeTTYRequestSchema"];
+  Signal: typeof import("./_proto/process/v1/process_pb.js")["Signal"];
 };
 
 type H2SessionManager = InstanceType<GrpcDeps["Http2SessionManager"]>;
@@ -102,12 +113,18 @@ async function loadGrpcDeps(): Promise<GrpcDeps> {
           ExecuteRequestSchema: processPb.ExecuteRequestSchema,
           ProcessConfigSchema: processPb.ProcessConfigSchema,
           ProcessService: processPb.ProcessService,
+          StartRequestSchema: processPb.StartRequestSchema,
+          PTYSchema: processPb.PTYSchema,
+          WriteStdinRequestSchema: processPb.WriteStdinRequestSchema,
+          SendSignalRequestSchema: processPb.SendSignalRequestSchema,
+          ResizeTTYRequestSchema: processPb.ResizeTTYRequestSchema,
+          Signal: processPb.Signal,
         };
       } catch (err) {
         depsPromise = null;
         if (isModuleNotFoundError(err)) {
           throw new SandboxError(
-            "sandbox.commands.run() requires optional dependencies that are not installed. " +
+            "sandbox.commands requires optional dependencies that are not installed. " +
               "Run: npm install @bufbuild/protobuf @connectrpc/connect @connectrpc/connect-node",
             { telemetryCode: "missing_dependency", cause: err },
           );
@@ -117,6 +134,10 @@ async function loadGrpcDeps(): Promise<GrpcDeps> {
     })();
   }
   return depsPromise;
+}
+
+function protocolError(message: string): SandboxConnectionError {
+  return new SandboxConnectionError(message, "protocol");
 }
 
 function truncateUtf8(s: string, maxBytes: number): string {
@@ -179,15 +200,47 @@ function createSessionManager(
   return new ClosedStreamSessionManager(baseUrl);
 }
 
+type UnaryCallOptions = { timeoutMs: number; signal: AbortSignal };
+
+/** The wire shape of one StartResponse, as far as this module reads it. */
+type StartResponseLike = {
+  event:
+    | { case: "init"; value: { processId: number } }
+    | { case: "stdout" | "stderr"; value: Uint8Array }
+    | { case: "exit"; value: { exitCode: number } }
+    | { case: undefined; value?: undefined };
+};
+
+/** Structural view of the generated ProcessService client. */
+interface ProcessRpcClient {
+  execute(
+    req: unknown,
+    opts: UnaryCallOptions,
+  ): Promise<{ exitCode: number; stdout: Uint8Array; stderr: Uint8Array }>;
+  start(
+    req: unknown,
+    opts: { signal: AbortSignal },
+  ): AsyncIterable<StartResponseLike>;
+  writeStdin(req: unknown, opts: UnaryCallOptions): Promise<unknown>;
+  sendSignal(req: unknown, opts: UnaryCallOptions): Promise<unknown>;
+  resizeTTY(req: unknown, opts: UnaryCallOptions): Promise<unknown>;
+}
+
+/**
+ * A running Start stream, positioned after its InitEvent. `events` ends
+ * (done) only after an "exit" event was yielded; a stream that ends any
+ * other way rejects instead.
+ * @internal
+ */
+export interface StartedProcess {
+  pid: number;
+  events: AsyncIterator<ProcessEvent>;
+}
+
 export class ProcessClient {
   private closed = false;
   private sessionManager: { abort(reason?: Error): void } | null = null;
-  private client: {
-    execute: (
-      req: unknown,
-      opts: { timeoutMs: number; signal: AbortSignal },
-    ) => Promise<{ exitCode: number; stdout: Uint8Array; stderr: Uint8Array }>;
-  } | null = null;
+  private client: ProcessRpcClient | null = null;
   private deps: GrpcDeps | null = null;
   private initPromise: Promise<void> | null = null;
 
@@ -219,7 +272,7 @@ export class ProcessClient {
         this.client = deps.createClient(
           deps.ProcessService,
           transport,
-        ) as unknown as typeof this.client;
+        ) as unknown as ProcessRpcClient;
       })().catch((err) => {
         // Clear the cache on failure so a later call (e.g. after installing
         // the optional dependencies, or once a transient error clears) gets
@@ -248,11 +301,7 @@ export class ProcessClient {
     const client = this.client as NonNullable<typeof this.client>;
 
     const req = deps.create(deps.ExecuteRequestSchema, {
-      config: deps.create(deps.ProcessConfigSchema, {
-        command: [...spec.command],
-        envVars: { ...spec.env },
-        cwd: spec.cwd,
-      }),
+      config: this.buildConfig(deps, spec),
     });
 
     try {
@@ -269,18 +318,182 @@ export class ProcessClient {
       // classifyError() so it can safely treat Canceled/Aborted as transport
       // failures below.
       if (signal.aborted) throw signal.reason;
-      throw this.classifyError(err, deps);
+      throw this.classifyError(err, deps, "Execute");
     }
   }
 
-  private classifyError(err: unknown, deps: GrpcDeps): Error {
+  private buildConfig(deps: GrpcDeps, spec: ProcessSpec) {
+    return deps.create(deps.ProcessConfigSchema, {
+      command: [...spec.command],
+      envVars: { ...spec.env },
+      cwd: spec.cwd,
+    });
+  }
+
+  /**
+   * Opens a Start stream and waits for its InitEvent. `signal` governs the
+   * stream's whole lifetime — aborting it tears the stream down, which makes
+   * sandboxd SIGKILL the process group. No gRPC deadline is set: Connect's
+   * `timeoutMs` would bound the entire stream, not just startup, so the
+   * caller enforces its own startup budget through `signal`.
+   */
+  async start(
+    spec: ProcessSpec,
+    pty: PtySize | undefined,
+    signal: AbortSignal,
+  ): Promise<StartedProcess> {
+    await this.ensureInit();
+    const deps = this.deps as GrpcDeps;
+    const client = this.client as NonNullable<typeof this.client>;
+
+    const req = deps.create(deps.StartRequestSchema, {
+      config: this.buildConfig(deps, spec),
+      ...(pty && { pty: deps.create(deps.PTYSchema, pty) }),
+    });
+
+    const source = client.start(req, { signal })[Symbol.asyncIterator]();
+    const fail = (err: unknown): Error => {
+      if (signal.aborted) return signal.reason;
+      return this.classifyError(err, deps, "Start");
+    };
+
+    let first: IteratorResult<StartResponseLike>;
+    try {
+      first = await source.next();
+    } catch (err) {
+      throw fail(err);
+    }
+    if (first.done || first.value.event.case !== "init") {
+      await source.return?.().catch(() => {});
+      throw protocolError(
+        "sandboxd Start stream did not begin with an InitEvent",
+      );
+    }
+    const pid = first.value.event.value.processId;
+
+    let exited = false;
+    const events: AsyncIterator<ProcessEvent> = {
+      next: async () => {
+        while (true) {
+          let step: IteratorResult<StartResponseLike>;
+          try {
+            step = await source.next();
+          } catch (err) {
+            throw fail(err);
+          }
+          if (step.done) {
+            if (exited) return { done: true, value: undefined };
+            throw protocolError(
+              "sandboxd Start stream ended without an ExitEvent",
+            );
+          }
+          const event = step.value.event;
+          switch (event.case) {
+            case "stdout":
+            case "stderr":
+              if (exited) {
+                throw protocolError("sandboxd sent output after ExitEvent");
+              }
+              return {
+                done: false,
+                value: { type: event.case, data: event.value },
+              };
+            case "exit":
+              if (exited) throw protocolError("sandboxd sent two ExitEvents");
+              exited = true;
+              return {
+                done: false,
+                value: { type: "exit", exitCode: event.value.exitCode },
+              };
+            default:
+              throw protocolError("sandboxd sent an unexpected Start event");
+          }
+        }
+      },
+      return: async () => {
+        await source.return?.().catch(() => {});
+        return { done: true, value: undefined };
+      },
+    };
+    return { pid, events };
+  }
+
+  /** Sends bytes to the process's stdin, or closes it when `input` is null. */
+  async writeStdin(
+    pid: number,
+    input: Uint8Array | null,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.unary("WriteStdin", signal, (deps, client) =>
+      client.writeStdin(
+        deps.create(deps.WriteStdinRequestSchema, {
+          processId: pid,
+          payload:
+            input === null
+              ? { case: "eof", value: {} }
+              : { case: "input", value: input },
+        }),
+        { timeoutMs, signal },
+      ),
+    );
+  }
+
+  async sendSignal(
+    pid: number,
+    sig: ProcessSignal,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.unary("SendSignal", signal, (deps, client) =>
+      client.sendSignal(
+        deps.create(deps.SendSignalRequestSchema, {
+          processId: pid,
+          signal: deps.Signal[sig],
+        }),
+        { timeoutMs, signal },
+      ),
+    );
+  }
+
+  async resizeTty(
+    pid: number,
+    size: PtySize,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.unary("ResizeTTY", signal, (deps, client) =>
+      client.resizeTTY(
+        deps.create(deps.ResizeTTYRequestSchema, { processId: pid, ...size }),
+        { timeoutMs, signal },
+      ),
+    );
+  }
+
+  private async unary(
+    rpc: string,
+    signal: AbortSignal,
+    call: (deps: GrpcDeps, client: ProcessRpcClient) => Promise<unknown>,
+  ): Promise<void> {
+    await this.ensureInit();
+    const deps = this.deps as GrpcDeps;
+    const client = this.client as NonNullable<typeof this.client>;
+    try {
+      await call(deps, client);
+    } catch (err) {
+      if (signal.aborted) throw signal.reason;
+      throw this.classifyError(err, deps, rpc);
+    }
+  }
+
+  private classifyError(err: unknown, deps: GrpcDeps, rpc: string): Error {
     if (err instanceof deps.ConnectError) {
       const detail = truncateUtf8(
         err.rawMessage || err.message,
         ERROR_DETAIL_MAX_BYTES,
       );
       if (err.code === deps.Code.DeadlineExceeded) {
-        return new SandboxTimeoutError("sandboxd Execute call timed out", {
+        return new SandboxTimeoutError(`sandboxd ${rpc} call timed out`, {
           cause: err,
         });
       }
@@ -305,8 +518,23 @@ export class ProcessClient {
           { cause: err, detail },
         );
       }
+      // @connectrpc/connect itself synthesizes Internal "protocol error: ..."
+      // (e.g. "missing status") when a response ends without gRPC trailers,
+      // which is what a server-streaming call sees when the HTTP/2 stream or
+      // session was cut off. sandboxd's own application errors always carry a
+      // real status, so this prefix means the transport failed.
+      if (
+        err.code === deps.Code.Internal &&
+        err.rawMessage.startsWith("protocol error:")
+      ) {
+        return new SandboxConnectionError(
+          "sandboxd gRPC response ended without a status",
+          "protocol",
+          { cause: err, detail },
+        );
+      }
       return new SandboxdRpcError(
-        `sandboxd Execute call failed: ${connectCodeName(err.code, deps.Code)}`,
+        `sandboxd ${rpc} call failed: ${connectCodeName(err.code, deps.Code)}`,
         connectCodeName(err.code, deps.Code),
         { cause: err, detail },
       );

@@ -20,8 +20,10 @@ import { connectNodeAdapter } from "@connectrpc/connect-node";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ExecuteResponseSchema,
+  InitEventSchema,
   type ProcessConfig,
   ProcessService,
+  StartResponseSchema,
 } from "../_proto/process/v1/process_pb.js";
 import {
   SandboxClosedError,
@@ -399,5 +401,124 @@ describe("ProcessClient.run", () => {
         new AbortController().signal,
       ),
     ).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+});
+
+describe("ProcessClient.start", () => {
+  const initMsg = () =>
+    create(StartResponseSchema, {
+      event: {
+        case: "init",
+        value: create(InitEventSchema, { processId: 42 }),
+      },
+    });
+  const exitMsg = (exitCode: number) =>
+    create(StartResponseSchema, {
+      event: { case: "exit", value: { exitCode } },
+    });
+
+  async function startClient(
+    start: (req: never, ctx: { signal: AbortSignal }) => AsyncIterable<never>,
+  ): Promise<ProcessClient> {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, { start: start as never });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    return activeClient;
+  }
+
+  it("returns the pid, then events ending with exit and a clean end", async () => {
+    const client = await startClient(async function* () {
+      yield initMsg() as never;
+      yield exitMsg(0) as never;
+    });
+
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      new AbortController().signal,
+    );
+
+    expect(started.pid).toBe(42);
+    expect(await started.events.next()).toEqual({
+      done: false,
+      value: { type: "exit", exitCode: 0 },
+    });
+    expect((await started.events.next()).done).toBe(true);
+  });
+
+  it("rejects a stream whose first message is not an InitEvent", async () => {
+    const client = await startClient(async function* () {
+      yield exitMsg(0) as never;
+    });
+
+    await expect(
+      client.start(
+        { command: ["true"] },
+        undefined,
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      name: "SandboxConnectionError",
+      kind: "protocol",
+    });
+  });
+
+  it("rejects output that arrives after the ExitEvent", async () => {
+    const client = await startClient(async function* () {
+      yield initMsg() as never;
+      yield exitMsg(0) as never;
+      yield create(StartResponseSchema, {
+        event: { case: "stdout", value: new Uint8Array([1]) },
+      }) as never;
+    });
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      new AbortController().signal,
+    );
+
+    await started.events.next();
+
+    await expect(started.events.next()).rejects.toMatchObject({
+      kind: "protocol",
+    });
+  });
+
+  it("throws the signal's own reason when the caller aborts the stream", async () => {
+    const client = await startClient(async function* (_req, ctx) {
+      yield initMsg() as never;
+      await new Promise<void>((resolve) =>
+        ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller gave up");
+    const started = await client.start(
+      { command: ["sleep"] },
+      undefined,
+      controller.signal,
+    );
+    const next = started.events.next();
+
+    controller.abort(reason);
+
+    await expect(next).rejects.toBe(reason);
+  });
+
+  it("surfaces an application error before Init as SandboxdRpcError", async () => {
+    const client = await startClient(() => {
+      throw new ConnectError("nope", Code.PermissionDenied);
+    });
+
+    await expect(
+      client.start({ command: ["x"] }, undefined, new AbortController().signal),
+    ).rejects.toMatchObject({
+      name: "SandboxdRpcError",
+      code: "permission_denied",
+    });
   });
 });

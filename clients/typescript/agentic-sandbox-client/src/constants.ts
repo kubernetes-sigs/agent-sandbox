@@ -48,6 +48,11 @@ export const DEFAULT_MAX_COMMAND_OUTPUT_SIZE = 4 * 1024 * 1024;
 // dependency import, connect wait, and response processing.
 export const DEFAULT_OPERATION_TIMEOUT_MS = 60_000;
 
+// A single WriteStdin RPC carries at most this many bytes; larger writes are
+// split into sequential chunks. sandboxd's gRPC server rejects messages over
+// grpc-go's 4 MiB default, so this stays well below it.
+export const STDIN_CHUNK_BYTES = 1024 * 1024;
+
 // Truncation limit applied to any server-controlled diagnostic text (REST
 // error bodies, gRPC rawMessage, port-forward error-channel payloads) before
 // it is attached to a public error's `detail`.

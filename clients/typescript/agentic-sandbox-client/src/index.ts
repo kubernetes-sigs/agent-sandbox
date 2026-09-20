@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-export { SandboxCommands } from "./commands.js";
+export { ProcessHandle, SandboxCommands } from "./commands.js";
 export {
   SandboxClaimFailedError,
   SandboxClosedError,
@@ -41,7 +41,11 @@ export type {
   FileEntry,
   Logger,
   PodMetadata,
+  ProcessCallOptions,
+  ProcessEvent,
   ProcessOptions,
+  ProcessSignal,
+  PtySize,
   RunOptions,
   RuntimeCallOptions,
   SandboxClientOptions,
@@ -49,5 +53,6 @@ export type {
   SandboxdOptions,
   SandboxHealth,
   SandboxMetadata,
+  StartOptions,
   WriteOptions,
 } from "./types.js";

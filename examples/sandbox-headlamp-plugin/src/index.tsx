@@ -20,6 +20,8 @@ import {
   SandboxClaimList,
   SandboxDetail,
   SandboxList,
+  SandboxTemplateDetail,
+  SandboxTemplateList,
   SandboxWarmPoolDetail,
   SandboxWarmPoolList,
 } from './pages';
@@ -56,6 +58,14 @@ const resources = [
     list: SandboxWarmPoolList,
     detail: SandboxWarmPoolDetail,
     detailName: 'agent-sandbox-warmpool',
+  },
+  {
+    name: 'agent-sandbox-templates',
+    label: 'Sandbox Templates',
+    path: 'templates',
+    list: SandboxTemplateList,
+    detail: SandboxTemplateDetail,
+    detailName: 'agent-sandbox-template',
   },
 ];
 

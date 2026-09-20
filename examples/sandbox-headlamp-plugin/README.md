@@ -9,6 +9,8 @@ The prototype currently provides:
 - a `SandboxClaim` list and detail view;
 - links from a Claim to its assigned Sandbox and WarmPool;
 - a `SandboxWarmPool` list and detail view with desired and ready replicas.
+- a `SandboxTemplate` list and detail view with policy settings;
+- links from WarmPools to their referenced SandboxTemplate.
 
 The plugin does not create, update, delete, suspend, or resume resources. It uses the current
 user's Kubernetes permissions through Headlamp and requires the Agent Sandbox CRDs to be

@@ -24,6 +24,14 @@ export interface Condition {
   lastTransitionTime?: string;
 }
 
+export function readyCondition(conditions?: Condition[]) {
+  return conditions?.find(condition => condition.type === 'Ready');
+}
+
+export function readyStatus(conditions?: Condition[]) {
+  return readyCondition(conditions)?.status || '-';
+}
+
 interface SandboxSpec {
   operatingMode?: string;
   shutdownTime?: string;
@@ -66,11 +74,11 @@ export class Sandbox extends KubeObject<SandboxData> {
   }
 
   get readyCondition() {
-    return this.status.conditions?.find(condition => condition.type === 'Ready');
+    return readyCondition(this.status.conditions);
   }
 
   get readyStatus() {
-    return this.readyCondition?.status || '-';
+    return readyStatus(this.status.conditions);
   }
 
   get podIP() {
@@ -126,6 +134,10 @@ export class SandboxClaim extends KubeObject<SandboxClaimData> {
   get assignedSandboxName() {
     return this.status.sandbox?.name || '-';
   }
+
+  get readyStatus() {
+    return readyStatus(this.status.conditions);
+  }
 }
 
 export interface SandboxWarmPoolData extends KubeObjectInterface {
@@ -139,6 +151,16 @@ export interface SandboxWarmPoolData extends KubeObjectInterface {
     readyReplicas?: number;
     selector?: string;
     observedGeneration?: number;
+  };
+}
+
+export interface SandboxTemplateData extends KubeObjectInterface {
+  spec: {
+    podTemplate?: SandboxSpec['podTemplate'];
+    service?: boolean;
+    networkPolicyManagement?: string;
+    envVarsInjectionPolicy?: string;
+    volumeClaimTemplatesPolicy?: string;
   };
 }
 
@@ -166,5 +188,24 @@ export class SandboxWarmPool extends KubeObject<SandboxWarmPoolData> {
 
   get readyReplicas() {
     return this.status.readyReplicas ?? 0;
+  }
+
+  get updateStrategy() {
+    return this.spec.updateStrategy?.type ?? 'OnReplenish';
+  }
+}
+
+export class SandboxTemplate extends KubeObject<SandboxTemplateData> {
+  static apiVersion = 'extensions.agents.x-k8s.io/v1beta1';
+  static kind = 'SandboxTemplate';
+  static apiName = 'sandboxtemplates';
+  static isNamespaced = true;
+
+  static get detailsRoute() {
+    return '/agent-sandbox/templates/:namespace/:name';
+  }
+
+  get spec() {
+    return this.jsonData.spec;
   }
 }

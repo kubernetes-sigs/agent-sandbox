@@ -248,10 +248,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.initializeLifecycleFromTTL(ctx, claim); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Initialize trace ID and observation time for active resources missing them.
 	if err := r.initializeAnnotations(ctx, claim); err != nil {
 		return ctrl.Result{}, err
@@ -427,28 +423,6 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return result, errs
 }
 
-// initializeLifecycleFromTTL derives a lifecycle shutdown time for age-based TTL claims.
-func (r *SandboxClaimReconciler) initializeLifecycleFromTTL(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) error {
-	if claim.Spec.TTLSecondsAfterCreated == nil || claim.CreationTimestamp.IsZero() ||
-		(claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownTime != nil) {
-		return nil
-	}
-
-	patch := client.MergeFrom(claim.DeepCopy())
-	shutdownTime := metav1.NewTime(claim.CreationTimestamp.Add(time.Duration(*claim.Spec.TTLSecondsAfterCreated) * time.Second))
-	if claim.Spec.Lifecycle == nil {
-		claim.Spec.Lifecycle = &extensionsv1beta1.Lifecycle{
-			ShutdownPolicy: extensionsv1beta1.ShutdownPolicyDelete,
-			ShutdownTime:   &shutdownTime,
-		}
-	} else {
-		claim.Spec.Lifecycle.ShutdownPolicy = extensionsv1beta1.ShutdownPolicyDelete
-		claim.Spec.Lifecycle.ShutdownTime = &shutdownTime
-	}
-
-	return r.Patch(ctx, claim, patch)
-}
-
 // initializeAnnotations initializes trace ID and observation time for active resources missing them.
 //
 // The persisted patch is built directly with rawpatch instead of the
@@ -494,13 +468,31 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 }
 
 // checkExpiration calculates if the claim is expired and how much time is left.
+//
+// The age-based deadline (creationTimestamp + ttlSecondsAfterCreated) is derived
+// here on every reconcile instead of being persisted into spec.lifecycle: spec is
+// user intent and the controller must not write to it. Whichever configured
+// deadline comes first wins.
 func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
+	now := time.Now()
+	ttlExpired, ttlTimeLeft := lifecycle.TimeLeftAfterCreated(now, claim.CreationTimestamp, claim.Spec.TTLSecondsAfterCreated)
 	if claim.Spec.Lifecycle == nil {
-		return false, 0
+		return ttlExpired, ttlTimeLeft
 	}
 
 	finishedCondition := lifecycle.FinishedCondition(claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
-	return lifecycle.TimeLeft(time.Now(), claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
+	lifecycleExpired, lifecycleTimeLeft := lifecycle.TimeLeft(now, claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
+	if ttlExpired || lifecycleExpired {
+		return true, 0
+	}
+	// A zero timeLeft with expired=false means that source has no deadline.
+	if lifecycleTimeLeft == 0 {
+		return false, ttlTimeLeft
+	}
+	if ttlTimeLeft == 0 {
+		return false, lifecycleTimeLeft
+	}
+	return false, min(ttlTimeLeft, lifecycleTimeLeft)
 }
 
 // reconcileActive handles the creation and updates of running sandboxes.

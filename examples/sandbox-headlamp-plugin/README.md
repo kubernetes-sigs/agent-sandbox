@@ -16,6 +16,11 @@ The plugin does not create, update, delete, suspend, or resume resources. It use
 user's Kubernetes permissions through Headlamp and requires the Agent Sandbox CRDs to be
 installed in the connected cluster.
 
+The TypeScript resource interfaces in `src/resources.ts` are temporary, hand-written projections
+of the CRDs. They describe only fields consumed by this read-only prototype and are not a
+replacement for the Go API types or generated CRD schemas. A future production version should
+consider generating TypeScript types from the CRD OpenAPI schemas.
+
 ## Local development
 
 From this directory:

@@ -89,6 +89,9 @@ if [ "${dirty}" = true ]; then
     echo "(Note: olm/config/ also has uncommitted changes — run 'make fix-olm-manifests' first.)"
   fi
   # Restore the working tree so the script leaves no mutations behind.
+  # WARNING: git clean -fd deletes untracked files under olm/config/ — if you
+  # have local experimental config that is not committed, stash or commit it
+  # before running this script.
   git checkout -- olm/bundle/ olm/config/ 2>/dev/null || true
   git clean -fd olm/bundle/ olm/config/ 2>/dev/null || true
   exit 1

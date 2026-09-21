@@ -8,7 +8,7 @@
 
 # Build go binary. The builder runs on the build host's native platform and
 # cross-compiles for the target, which is much faster than emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26.5 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.1 AS builder
 ARG TARGETARCH
 
 WORKDIR /workspace

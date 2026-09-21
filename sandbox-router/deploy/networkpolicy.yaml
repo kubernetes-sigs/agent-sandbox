@@ -3,9 +3,10 @@
 # Ingress is open to all namespaces on the proxy port because the router is the
 # entry point for sandbox traffic — clients, SDKs, and Gateway controllers can
 # live in any namespace. --authz-mode defaults to allow-all and the OLM
-# deployment does not override it, so the default install has no authz
-# boundary behind this open ingress. Set --authz-mode=tokenreview (or
-# scoped-token) and/or tighten from: to a known set of caller namespaces.
+# deployment does not override it, so the default install has no L4 or L7
+# authorization layer restricting access. To harden:
+#   1. Set --authz-mode=tokenreview (or scoped-token) for L7 authz, and/or
+#   2. Tighten the from: namespaceSelector to a known set of caller namespaces.
 #
 # Egress to sandbox pods is unrestricted on port because the upstream port is
 # caller-specified (X-Sandbox-Port header, default 8888). Destinations are

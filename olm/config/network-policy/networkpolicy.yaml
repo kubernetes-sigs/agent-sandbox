@@ -9,8 +9,15 @@
 #
 # The API server typically runs on host-network control plane nodes, not as
 # regular pods, so a namespaceSelector cannot target it. The port-only rule
-# allows egress on the standard API ports to any destination. Tighten with
-# an ipBlock for your API server ClusterIP if desired.
+# (no "to" restriction) allows egress on the standard API ports to any
+# destination. For strict egress compliance (SOC 2, FedRAMP, CIS benchmarks),
+# tighten with an ipBlock targeting your API server CIDR or cluster service IP:
+#   kubectl get svc kubernetes -n default -o jsonpath='{.spec.clusterIP}'
+#
+# The podSelector uses the legacy label "app: agent-sandbox-controller" to
+# match the existing controller Deployment. The sandbox-router uses the
+# recommended app.kubernetes.io/name and app.kubernetes.io/component labels;
+# a future release may align the controller labels with that convention.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

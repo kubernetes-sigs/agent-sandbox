@@ -71,6 +71,36 @@ PYTHON_TEST_SUITES = [
         "requirements": "requirements.txt",
     },
     {
+        "name": "firecracker-sandbox",
+        "dir": os.path.join("examples", "firecracker-sandbox"),
+        "requirements": "requirements.txt",
+        "extra_packages": ["httpx"],
+    },
+    {
+        "name": "gke-swap-python-density",
+        # parse_telemetry.py is stdlib-only (csv, json), so the test needs no
+        # requirements.txt -- just pytest, installed unconditionally below.
+        "dir": os.path.join("examples", "gke-swap", "python-density"),
+    },
+    {
+        "name": "hermes-agents-as-a-service",
+        "dir": os.path.join("examples", "hermes-agents-as-a-service", "gateway"),
+        "requirements": "requirements.txt",
+    },
+    {
+        "name": "kata-aks-agent",
+        "dir": os.path.join("examples", "kata-aks", "agent"),
+        "requirements": "requirements.txt",
+    },
+    {
+        "name": "n8n-mcp",
+        # server.py's deps are declared inline in its Dockerfile rather than a
+        # requirements.txt; httpx is additionally needed for FastAPI's
+        # TestClient, which the Dockerfile has no reason to install.
+        "dir": os.path.join("examples", "n8n-mcp", "source"),
+        "extra_packages": ["fastapi", "httpx"],
+    },
+    {
         "name": "agent-sandbox-rl",
         "dir": os.path.join("examples", "agent-sandbox-rl"),
         # Editable installs (in order): the in-repo SDK first (so we don't depend
@@ -102,11 +132,11 @@ PYTHON_TEST_SUITES = [
     # Keep this exact upper compatibility endpoint aligned with the latest
     # supported published Deep Agents and SDK releases; review it per release.
     {
-        "name": "integrations-deepagents-0.7.13-sdk-1.0.1",
+        "name": "integrations-deepagents-0.7.16-sdk-1.0.3",
         "dir": os.path.join("clients", "integrations", "deepagents"),
         "resolver_requirements": [
-            "deepagents==0.7.13",
-            "k8s-agent-sandbox==1.0.1",
+            "deepagents==0.7.16",
+            "k8s-agent-sandbox==1.0.3",
         ],
         "editable_installs": [
             (os.path.join("clients", "integrations", "deepagents"), "[test]"),
@@ -268,8 +298,26 @@ def run_python_tests(repo_root, artifact_dir):
             subprocess.check_call(
                 [venv_pip, "install", "--quiet", "--force-reinstall", "kubernetes_asyncio"], env=env)
 
+        # Packages the suite needs only for testing (e.g. httpx for FastAPI's
+        # TestClient) and that therefore don't belong in the example's own
+        # requirements.txt, which mirrors what its Dockerfile installs.
+        extra_packages = suite.get("extra_packages", [])
+        if extra_packages:
+            subprocess.check_call(
+                [venv_pip, "install", "--quiet", *extra_packages], env=env)
+
         subprocess.check_call(
             [venv_pip, "install", "--quiet", "pytest"], env=env)
+
+        if suite["name"] == "k8s-agent-sandbox":
+            print(f"\n=== Running mypy type checks: {suite['name']} ===")
+            package_dir = os.path.dirname(test_dir)
+            mypy_result = subprocess.run([
+                venv_python, "-m", "mypy",
+                "k8s_agent_sandbox",
+            ], cwd=package_dir)
+            if mypy_result.returncode != 0:
+                returncode = mypy_result.returncode
 
         print(f"\n=== Running Python unit tests: {suite['name']} ===")
         junit_file = os.path.join(

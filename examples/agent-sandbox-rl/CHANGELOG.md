@@ -5,6 +5,38 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Added (warm-pool adoption —
+[#1533](https://github.com/kubernetes-sigs/agent-sandbox/issues/1533))
+- **`FleetConfig.pool_name_format`** (default `pool-{template}`, unchanged
+  behaviour): the pool name is an interface, not an internal detail. `{template}`
+  and `{image_hash}` are the placeholders; `"{template}-pool"` lines up with the
+  multi-cluster fleet layer's convention. Validated to render a DNS-1123 name and
+  **rejected if it has no per-image part** — a constant name silently collapses
+  every image onto one pool. `FleetConfig.pool_name(image)` is the single place
+  the SDK names a pool; override it in a subclass for anything the format string
+  can't express.
+- **`FleetConfig.adopt_existing`** (default `False`): plan against the warm pools
+  already in the namespace instead of creating any. Discovery is **by image**
+  (`Resources.discover_pools` resolves each pool's `sandboxTemplateRef` to its
+  template's container image), so it does not depend on the provisioner and this
+  SDK agreeing on a naming scheme. In adopt mode nothing is written — no template
+  create or label reconcile, no pool create/scale/delete, and teardown skips both
+  while still releasing this run's claims. Readiness is ≥1 ready replica, not the
+  observed depth, which belongs to the provisioner.
+- **`PoolNotFoundError`**: raised by `plan()` for a task image no pool serves, and
+  by `acquire()` for an image added after planning. The message names the missing
+  images, the pool name this SDK looked for, and the pool count found per cluster
+  and namespace.
+
+### Fixed
+- **The on-demand fallthrough is no longer silent.** `acquire()` on an unplanned
+  image builds a size-1 pool, which is correct as a fallback and wrong as a
+  surprise: pointed at a cluster whose warm pools are named differently, a harness
+  found none of them and reported a healthy — but far slower — run over the top of
+  a warm fleet it never touched. It now warns once per (cluster, image), naming
+  the pool it created and pointing at `pool_name_format` / `adopt_existing`. The
+  provisioning behaviour itself is unchanged.
+
 ### Changed (docs / guidance)
 - **Warm-pool worker guidance updated for Agent Sandbox v0.5.4**: the #1215
   over-creation churn is fixed upstream by

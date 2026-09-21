@@ -30,7 +30,7 @@ type: ignore
 ```python
 def __init__(connection_config: SandboxConnectionConfig | None = None,
              tracer_config: SandboxTracerConfig | None = None,
-             cleanup: bool = False)
+             cleanup: bool = False) -> None
 ```
 
 Initializes the SandboxClient.
@@ -178,7 +178,7 @@ for the given namespace.
 ##### delete\_sandbox
 
 ```python
-def delete_sandbox(claim_name: str, namespace: str = "default")
+def delete_sandbox(claim_name: str, namespace: str = "default") -> None
 ```
 
 Stops the client side connection and deletes the Kubernetes resources.
@@ -195,7 +195,7 @@ Stops the client side connection and deletes the Kubernetes resources.
 ##### delete\_all
 
 ```python
-def delete_all()
+def delete_all() -> None
 ```
 
 Cleanup all tracked sandboxes managed by this client.

@@ -14,13 +14,9 @@
 
 import unittest
 from unittest.mock import MagicMock, patch
-import time
-import socket
-import subprocess
 import prometheus_client
 from k8s_agent_sandbox.connector import GatewayConnectionStrategy, LocalTunnelConnectionStrategy, DirectConnectionStrategy
 from k8s_agent_sandbox.models import SandboxGatewayConnectionConfig, SandboxLocalTunnelConnectionConfig, SandboxDirectConnectionConfig
-from k8s_agent_sandbox.metrics import sandbox_client_discovery_latency_ms
 
 class TestMetrics(unittest.TestCase):
     def setUp(self):

@@ -38,6 +38,9 @@ const (
 	EnvOTLPEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	EnvOTLPTracesEndpoint  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	EnvOTLPMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+
+	EnvTLSMinVersion   = "TLS_MIN_VERSION"
+	EnvTLSCipherSuites = "TLS_CIPHER_SUITES"
 )
 
 // LookupEnvFunc matches the signature of os.LookupEnv. Tests inject a fake.
@@ -73,6 +76,15 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"when --mtls-mode is optional or required.")
 	stringEnumVar(fs, (*string)(&c.MTLSMode), "mtls-mode", string(c.MTLSMode),
 		"Client-cert verification policy: off, optional, or required.")
+	fs.StringVar(&c.TLSMinVersion, "tls-min-version", c.TLSMinVersion,
+		"Minimum TLS version for the HTTPS proxy listener. "+
+			"Accepted values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13. "+
+			"Default: VersionTLS12 (applied when empty). "+
+			"Honors "+EnvTLSMinVersion+".")
+	stringSliceVar(fs, &c.TLSCipherSuites, "tls-cipher-suites",
+		"Comma-separated cipher suites for the HTTPS proxy listener, using Go "+
+			"cipher-suite names (e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256). "+
+			"Default: Go defaults. Honors "+EnvTLSCipherSuites+".")
 
 	fs.StringVar(&c.ClusterDomain, "cluster-domain", c.ClusterDomain,
 		"Kubernetes cluster DNS suffix used to build sandbox FQDNs. "+
@@ -148,8 +160,14 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"projected ServiceAccount tokens minted with --audience.")
 	fs.StringVar(&c.AuthzScopedTokenSecretFile, "authz-scoped-token-secret-file", c.AuthzScopedTokenSecretFile,
 		"Path to a file holding the shared HMAC-SHA256 secret used to verify "+
-			"scoped tokens (see authz.MintScopedToken). Required when "+
-			"--authz-mode=scoped-token; must match whatever mints the tokens.")
+			"legacy v1 scoped tokens (see authz.MintScopedToken). Required when "+
+			"--authz-mode=scoped-token unless v2 verification keys are configured.")
+	fs.StringVar(&c.AuthzScopedTokenVerificationKeysFile, "authz-scoped-token-verification-keys-file", c.AuthzScopedTokenVerificationKeysFile,
+		"Path to a JSON key set containing Ed25519 public keys for scoped-token "+
+			"v2 verification. Enables v2 and requires --cache-enabled.")
+	fs.StringVar(&c.AuthzScopedTokenV1AcceptUntil, "authz-scoped-token-v1-accept-until", c.AuthzScopedTokenV1AcceptUntil,
+		"Exclusive RFC3339 cutoff for legacy v1 HMAC verification during a v2 "+
+			"rollout. Required when v1 and v2 verification are both configured.")
 	fs.StringVar(&c.AuthzCookieName, "authz-cookie-name", c.AuthzCookieName,
 		"Name of a cookie the configured Authorizer additionally accepts a "+
 			"credential from — the only channel a browser attaches "+
@@ -306,6 +324,20 @@ func applyEnvDefaults(c *Config, lookup LookupEnvFunc) {
 	}
 	if v, ok := lookup(EnvKubeconfig); ok && v != "" {
 		c.Kubeconfig = v
+	}
+	if v, ok := lookup(EnvTLSMinVersion); ok && v != "" {
+		c.TLSMinVersion = v
+	}
+	if v, ok := lookup(EnvTLSCipherSuites); ok && v != "" {
+		parts := strings.Split(v, ",")
+		var out []string
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		c.TLSCipherSuites = out
 	}
 }
 

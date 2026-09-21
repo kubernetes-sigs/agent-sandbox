@@ -50,14 +50,56 @@ type Runtime string
 const (
 	// RuntimeLegacyPython is the python-runtime HTTP API (POST /upload,
 	// GET /download|list|exists/{path}, POST /execute on port 8888),
-	// reached through the sandbox-router. Default.
+	// reached through the sandbox-router unless Connectivity selects a
+	// direct pod dial. Default.
 	RuntimeLegacyPython Runtime = "legacy-python"
 	// RuntimeSandboxd is the sandboxd hybrid API defined by KEP-539.2:
 	// REST filesystem (/v1/files/...) on port 8080 plus gRPC
-	// ProcessService on port 9090. The SDK connects over a pod port-forward
-	// to the sandbox pod.
+	// ProcessService on port 9090. The SDK reaches the sandbox pod directly
+	// or over a port-forward (default), see Connectivity.
 	RuntimeSandboxd Runtime = "sandboxd"
 )
+
+// Connectivity selects the transport used to reach the in-sandbox runtime.
+type Connectivity string
+
+const (
+	// ConnectivityPortForward reaches the sandbox over a SPDY port-forward
+	// brokered by the apiserver. Works from anywhere a kubeconfig does,
+	// including a laptop or CI runner. Default.
+	ConnectivityPortForward Connectivity = "port-forward"
+	// ConnectivityInClusterService dials the Sandbox's headless Service by
+	// its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
+	// and, for RuntimeLegacyPython, the sandbox-router, off the data path.
+	//
+	// Prefer this over ConnectivityInClusterPodIP when sandboxes cross a trust
+	// boundary. The Service's selector only ever matches its own Sandbox's
+	// pod, so a pod IP that Kubernetes has since reassigned to another
+	// tenant would be caught when the TTL expires. A deleted Sandbox takes
+	// its Service with it: connections then fail rather than landing on a stranger.
+	// (DNS caching still leaves a TTL-bounded window)
+	//
+	// Requires the Sandbox to have a Service — set spec.service: true on
+	// the template. Open fails when Status.ServiceFQDN is empty rather than
+	// falling back to the pod IP, so the safety property cannot be lost
+	// silently.
+	ConnectivityInClusterService Connectivity = "in-cluster-service"
+
+	// ConnectivityInClusterPodIP dials Status.PodIP. It needs no Service, so
+	// it works against any Sandbox without template changes.
+	//
+	// It carries the pod IP's reuse hazard: nothing detects that the sandbox
+	// pod was rescheduled, so requests can continue to a stale address that
+	// Kubernetes may have since reassigned to an unrelated pod. Use
+	// ConnectivityInClusterService where that matters.
+	ConnectivityInClusterPodIP Connectivity = "in-cluster-pod-ip"
+)
+
+// isInCluster reports whether c dials the sandbox pod directly, by either
+// addressing mode.
+func (c Connectivity) isInCluster() bool {
+	return c == ConnectivityInClusterPodIP || c == ConnectivityInClusterService
+}
 
 // Options configures a Sandbox instance.
 type Options struct {
@@ -69,10 +111,17 @@ type Options struct {
 	WarmPoolName string
 
 	// Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-	// RuntimeSandboxd connects via a pod port-forward, so GatewayName is not
-	// supported with it. APIURL remains available as an advanced/testing
-	// escape hatch for the REST endpoint.
+	// RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
+	// so GatewayName is not supported with it. APIURL remains available as an
+	// advanced/testing escape hatch for the REST endpoint.
 	Runtime Runtime
+
+	// Connectivity selects the transport. Default: ConnectivityPortForward.
+	//
+	// The in-cluster values conflict with both GatewayName and APIURL, and
+	// require that this process runs inside the same cluster as the sandbox
+	// pods.
+	Connectivity Connectivity
 
 	// SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
 	// REST API. Only used with RuntimeSandboxd. Default: 8080.
@@ -199,6 +248,9 @@ func (o *Options) setDefaults() {
 	}
 	if o.Runtime == "" {
 		o.Runtime = RuntimeLegacyPython
+	}
+	if o.Connectivity == "" {
+		o.Connectivity = ConnectivityPortForward
 	}
 	if o.ServerPort == 0 {
 		o.ServerPort = defaultServerPort
@@ -338,9 +390,20 @@ func (o *Options) validateCommon() error {
 	if o.Runtime != RuntimeLegacyPython && o.Runtime != RuntimeSandboxd {
 		return fmt.Errorf("sandbox: Runtime must be %q or %q, got %q", RuntimeLegacyPython, RuntimeSandboxd, o.Runtime)
 	}
+	if o.Connectivity != ConnectivityPortForward && o.Connectivity != ConnectivityInClusterPodIP && o.Connectivity != ConnectivityInClusterService {
+		return fmt.Errorf("sandbox: Connectivity must be %q, %q or %q, got %q", ConnectivityPortForward, ConnectivityInClusterPodIP, ConnectivityInClusterService, o.Connectivity)
+	}
+	if o.Connectivity.isInCluster() {
+		if o.APIURL != "" {
+			return fmt.Errorf("sandbox: %s connectivity cannot be combined with APIURL: both select an endpoint, so set only one", o.Connectivity)
+		}
+		if o.GatewayName != "" {
+			return fmt.Errorf("sandbox: %s connectivity cannot be combined with GatewayName: the gateway routes through the sandbox-router, which in-cluster connectivity bypasses", o.Connectivity)
+		}
+	}
 	if o.Runtime == RuntimeSandboxd {
 		if o.GatewayName != "" {
-			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd uses pod port-forward connectivity")
+			return fmt.Errorf("sandbox: RuntimeSandboxd cannot be combined with GatewayName: sandboxd is reached on the sandbox pod, not through the sandbox-router")
 		}
 		if o.SandboxdRESTPort <= 0 || o.SandboxdRESTPort > 65535 {
 			return fmt.Errorf("sandbox: SandboxdRESTPort must be between 1 and 65535, got %d", o.SandboxdRESTPort)

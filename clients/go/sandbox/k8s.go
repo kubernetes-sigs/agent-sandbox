@@ -47,6 +47,7 @@ type sandboxState struct {
 	SandboxName string
 	PodName     string
 	PodIP       string
+	ServiceFQDN string
 	Annotations map[string]string
 }
 
@@ -449,6 +450,7 @@ func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 		state.PodName = sb.Name
 	}
 	state.PodIP = selectPodIP(sb.Status.PodIPs)
+	state.ServiceFQDN = sb.Status.ServiceFQDN
 	return state
 }
 

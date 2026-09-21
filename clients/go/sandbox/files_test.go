@@ -653,8 +653,8 @@ func TestOperations_NonOKStatus(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error for non-OK status")
 			}
-			var httpErr *HTTPError
-			if !errors.As(err, &httpErr) {
+			httpErr, ok := errors.AsType[*HTTPError](err)
+			if !ok {
 				t.Fatalf("expected HTTPError, got: %v", err)
 			}
 			if httpErr.StatusCode != tc.status {

@@ -42,8 +42,9 @@ const (
 	// pipe readers to reach EOF after cmd.Wait has reaped the child process
 	// (a grandchild may still hold the write end).
 	pipeDrainGrace = 5 * time.Second
-	// waitDelay bounds cmd.Wait on I/O drain in Execute and on unkillable
-	// children in Start.
+	// waitDelay bounds how long cmd.Wait blocks on I/O drain after the
+	// child exits. Without it, a grandchild holding the stdout/stderr
+	// write ends keeps Wait blocked indefinitely.
 	waitDelay = 10 * time.Second
 )
 
@@ -78,7 +79,7 @@ func New(opts Options) (*Server, error) {
 	registry := processmanager.NewProcessRegistry()
 	return &Server{
 		registry:      registry,
-		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize),
+		processServer: NewProcessServer(opts.RootDir, registry, opts.StreamChunkSize, opts.Log),
 		restServer:    NewRESTServer(opts.RootDir, opts.MetadataEnvPrefix, opts.Log),
 	}, nil
 }

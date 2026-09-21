@@ -18,10 +18,13 @@
 # need must be in this image; see deploy/README.md for the topology choice
 # (including topology B: injecting sandboxd into an existing tool-rich image).
 #
-# SDK access: sandboxd binds 0.0.0.0 by default, so it is reachable on the
-# pod network like any other in-pod service (via a Service or the
-# sandbox-router). The SDKs connect over a pod port-forward
+# SDK access: the example client reaches sandboxd over a pod port-forward
 # (Go: Runtime: RuntimeSandboxd; Python: SandboxdPodTunnelConnectionConfig).
+# This template does not enable a Service, and its default managed
+# NetworkPolicy allows ingress only from sandbox-router, which cannot proxy
+# the gRPC ProcessService. To use the Go SDK's direct in-cluster connectivity,
+# set spec.service: true for Service mode and configure spec.networkPolicy to
+# admit the calling workload on TCP ports 8080 and 9090; see USER_GUIDE.md.
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
@@ -32,6 +35,7 @@ spec:
     spec:
       # The sandbox runs untrusted agent code; it needs no API access.
       automountServiceAccountToken: false
+      restartPolicy: "OnFailure"
       securityContext:
         runAsNonRoot: true
         # Ensure the shared emptyDir is writable by the non-root runtime user.

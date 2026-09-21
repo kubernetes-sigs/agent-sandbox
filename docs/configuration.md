@@ -100,6 +100,63 @@ and are not repeated here.
 
 [zap-bind-flags]: https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/log/zap#Options.BindFlags
 
+## Namespace Scoping
+
+By default the controller watches all namespaces (cluster-wide). To restrict it
+to specific namespaces, use the `--watch-namespaces` flag or the
+`WATCH_NAMESPACE` environment variable.
+
+* `--watch-namespaces` (default: empty — all namespaces): Comma-separated list of namespaces
+  to watch. When set, the controller's informer cache is restricted to only the listed
+  namespaces via `cache.Options.DefaultNamespaces`.
+* `WATCH_NAMESPACE` (env var): Fallback when `--watch-namespaces` is not set. The flag
+  takes precedence when both are provided.
+
+### RBAC behaviour
+
+In cluster-wide mode the Helm chart creates a ClusterRole and ClusterRoleBinding.
+When `controller.watchNamespaces` is set:
+
+1. The ClusterRole and ClusterRoleBinding are suppressed.
+2. A namespace-scoped Role and RoleBinding are created in the release namespace
+   (when it is in the watched list) with only the permissions needed for watched
+   namespaces (pods, PVCs, services, events, sandboxes, and optionally extensions
+   CRDs). These rules are generated from the ClusterRole by
+   `dev/tools/generate-namespaced-rbac`, so they stay in sync automatically.
+3. A separate leader-election Role (leases, events) is created in the release
+   namespace.
+4. For watched namespaces **outside** the release namespace, `helm install`
+   prints the required Role and RoleBinding YAML in its NOTES output for the
+   operator to apply manually.
+
+### Leader election
+
+When `--watch-namespaces` is set and `--leader-election-namespace` is not
+provided, the Helm chart automatically injects
+`--leader-election-namespace=<release-namespace>`.
+
+### Helm example
+
+```bash
+helm install agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system --create-namespace \
+  --set image.tag=<version> \
+  --set 'controller.watchNamespaces={team-a,team-b}'
+```
+
+After install, apply the cross-namespace RBAC printed in the NOTES output.
+
+### Direct flag usage (non-Helm)
+
+```yaml
+containers:
+- name: agent-sandbox-controller
+  args:
+  - --leader-elect=true
+  - --watch-namespaces=team-a,team-b
+  - --leader-election-namespace=agent-sandbox-system
+```
+
 ## Deployment Example
 
 To deploy the controller with custom concurrency settings, modify the `args` of the `agent-sandbox-controller` container within the project's installation manifests. 

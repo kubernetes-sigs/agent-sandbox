@@ -27,3 +27,22 @@ go test ./test/e2e/... --parallel=1
 ```
 
 Note: the `--parallel=1` argument makes sure only a single test runs at a time.
+
+## Namespaced mode tests
+
+The namespaced mode tests validate that the controller only reconciles sandboxes
+in namespaces it is configured to watch.
+
+Deploy the controller with `--watch-namespaces`:
+
+```shell
+CONTROLLER_ARGS="--watch-namespaces=team-a" make deploy-kind
+```
+
+Then apply the namespace-scoped RBAC printed in the `helm install` NOTES output
+and run the tests:
+
+```shell
+NAMESPACED_MODE=true WATCHED_NAMESPACE=team-a \
+  go test ./test/e2e/... --parallel=1 -run TestNamespacedMode
+```

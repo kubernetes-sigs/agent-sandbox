@@ -407,8 +407,9 @@ Safe adoption happens only when the create request returns HTTP `409 Conflict`.
 The client reads that exact claim and validates its API identity, UID, name,
 namespace, generation, resource version, requested claim labels, warm pool,
 lifecycle, volume claim templates, additional Pod metadata, and environment
-variables before attaching. Extra labels added by admission or controllers are
-allowed; unknown or different spec behavior fails closed. A terminating claim
+variables before attaching. Extra labels added by admission or controllers and
+new spec fields added by newer CRDs are allowed; caller-controlled fields must
+still match the request. A terminating claim
 is never adopted. If the observed claim is already Ready for its current
 generation, the client returns it immediately. Otherwise, it starts the
 existing readiness watch from the observed resource version. Every watched
@@ -433,6 +434,12 @@ cannot delete a same-name replacement. The explicit `delete_sandbox` and
 preserves its existing behavior of deleting every tracked handle. Because
 `shutdown_after_seconds` produces a different absolute shutdown time on every
 retry, it cannot be combined with `adopt_existing=True`.
+
+If deletion of the same claim is already in progress in this client, creation
+and reattachment raise `RuntimeError` with a retry diagnostic instead of
+returning a handle to a claim being deleted. Retry after that deletion finishes;
+the failed attempt does not transfer cleanup ownership. Operations on other
+claim names remain independent while the Kubernetes request is in progress.
 
 ### 9. Custom Volume Claim Templates
 

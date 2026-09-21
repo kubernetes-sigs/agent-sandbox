@@ -113,7 +113,7 @@ def mismatched_claims():
         (("metadata", "resourceVersion"), "", "metadata.resourceVersion"),
         (("metadata", "uid"), "", "metadata.uid"),
         (("metadata", "generation"), 0, "metadata.generation"),
-        (("metadata", "labels"), [], "metadata.labels"),
+        (("metadata", "labels"), ["workflow"], "metadata.labels"),
         (
             ("metadata", "labels", CREATED_BY_LABEL),
             "other-client",

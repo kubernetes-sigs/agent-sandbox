@@ -19,8 +19,8 @@ from pydantic import BaseModel
 ClaimKey = tuple[str, str]
 
 
-class ClaimLookupOperation(BaseModel):
-    """Identity token invalidated when deliberate deletion wins a race."""
+class ClaimOperation(BaseModel):
+    """Creation or lookup token invalidated when deletion wins a race."""
 
     invalidated: bool = False
 
@@ -38,37 +38,63 @@ class ClaimOwnership:
     An explicitly supplied Claim name is caller-owned from the start of the
     operation, whether creation succeeds or fails. Only generated or reattached
     Claims with an observed UID are eligible for automatic cleanup.
+
+    Deletion reserves the name until the Kubernetes call finishes. New creation
+    or lookup must retry while reserved; earlier operations are invalidated. This
+    keeps same-UID adoption from racing a DELETE outside the registry lock.
     """
 
     def __init__(self) -> None:
         self.automatic_cleanup_claims: set[ClaimKey] = set()
         self.automatic_cleanup_claim_uids: dict[ClaimKey, str] = {}
         self.caller_owned_claims: set[ClaimKey] = set()
-        self._lookup_operations: dict[ClaimKey, list[ClaimLookupOperation]] = {}
+        self._operations: dict[ClaimKey, list[ClaimOperation]] = {}
+        self._deleting_claims: set[ClaimKey] = set()
 
-    def begin_lookup(self, key: ClaimKey) -> ClaimLookupOperation:
-        """Capture an identity token for an in-flight Claim lookup."""
-        operation = ClaimLookupOperation()
-        self._lookup_operations.setdefault(key, []).append(operation)
+    def ensure_not_deleting(self, key: ClaimKey) -> None:
+        """Reject a new operation while deletion owns this Claim name."""
+        if key in self._deleting_claims:
+            namespace, claim_name = key
+            raise RuntimeError(
+                f"SandboxClaim '{claim_name}' in namespace '{namespace}' "
+                "is being deleted concurrently; retry the operation."
+            )
+
+    def begin_deletion(self, key: ClaimKey) -> None:
+        """Reserve a name across deletion I/O without holding the client lock."""
+        self.ensure_not_deleting(key)
+        self._deleting_claims.add(key)
+        for operation in self._operations.get(key, []):
+            operation.invalidated = True
+
+    def finish_deletion(self, key: ClaimKey) -> None:
+        """Release the reservation after success, failure, or cancellation."""
+        self._deleting_claims.remove(key)
+
+    def begin_operation(self, key: ClaimKey) -> ClaimOperation:
+        """Capture an identity token for in-flight creation or lookup."""
+        self.ensure_not_deleting(key)
+        operation = ClaimOperation()
+        self._operations.setdefault(key, []).append(operation)
         return operation
 
-    def lookup_is_valid(
-        self, key: ClaimKey, operation: ClaimLookupOperation
+    def operation_is_valid(
+        self, key: ClaimKey, operation: ClaimOperation
     ) -> bool:
-        """Return whether deletion has not superseded a lookup."""
-        operations = self._lookup_operations.get(key, [])
+        """Return whether deletion has not superseded this operation."""
+        operations = self._operations.get(key, [])
         return operation in operations and not operation.invalidated
 
-    def finish_lookup(
-        self, key: ClaimKey, operation: ClaimLookupOperation
+    def finish_operation(
+        self, key: ClaimKey, operation: ClaimOperation
     ) -> None:
-        """Release an in-flight lookup token."""
-        operations = self._lookup_operations.get(key)
+        """Release an in-flight creation or lookup token."""
+        operations = self._operations.get(key)
         if operations is None or operation not in operations:
-            raise RuntimeError("Claim lookup operation changed unexpectedly.")
+            raise RuntimeError("Claim operation changed unexpectedly.")
         operations.remove(operation)
         if not operations:
-            self._lookup_operations.pop(key)
+            self._operations.pop(key)
 
     def mark_caller_owned(self, key: ClaimKey) -> None:
         """Make an explicitly named Claim ineligible for automatic cleanup."""
@@ -97,6 +123,7 @@ class ClaimOwnership:
             not has_registered_handle
             and bool(claim_uid)
             and key not in self.caller_owned_claims
+            and key not in self._deleting_claims
         )
 
     def automatic_cleanup_uid(self, key: ClaimKey) -> str | None:
@@ -115,6 +142,7 @@ class ClaimOwnership:
         return (
             key in self.automatic_cleanup_claims
             and key not in self.caller_owned_claims
+            and key not in self._deleting_claims
         )
 
     def take_automatic_cleanup(
@@ -123,6 +151,7 @@ class ClaimOwnership:
         """Reserve one automatic cleanup attempt and return its observed UID."""
         if not self.can_delete_automatic_claim(key):
             return False, None
+        self.begin_deletion(key)
         self.automatic_cleanup_claims.discard(key)
         return True, self.automatic_cleanup_claim_uids.pop(key, None)
 
@@ -140,5 +169,5 @@ class ClaimOwnership:
         self.automatic_cleanup_claims.discard(key)
         self.automatic_cleanup_claim_uids.pop(key, None)
         self.caller_owned_claims.discard(key)
-        for operation in self._lookup_operations.get(key, []):
+        for operation in self._operations.get(key, []):
             operation.invalidated = True

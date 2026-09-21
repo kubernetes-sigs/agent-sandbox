@@ -45,7 +45,7 @@ from .claim_adoption import (
     validate_claim_name,
 )
 from .claim_ownership import (
-    ClaimLookupOperation,
+    ClaimOperation,
     ClaimOwnership,
 )
 from .pod_metadata import build_pod_metadata, validate_labels
@@ -216,6 +216,7 @@ class SandboxClient(Generic[T]):
             )
         with self._lock:
             expected_handle = self._active_connection_sandboxes.get(key)
+            creation_operation = self._claim_ownership.begin_operation(key)
             if not generated_claim_name:
                 self._claim_ownership.mark_caller_owned(key)
         sandbox: T | None = None
@@ -302,6 +303,7 @@ class SandboxClient(Generic[T]):
                 generated_claim_name,
                 expected_handle,
                 claim_uid,
+                creation_operation,
             )
         except Exception:
             self._rollback_failed_creation(
@@ -312,6 +314,10 @@ class SandboxClient(Generic[T]):
             )
             raise
 
+        finally:
+            with self._lock:
+                self._claim_ownership.finish_operation(key, creation_operation)
+
     def _register_created_handle(
         self,
         key: Tuple[str, str],
@@ -319,12 +325,15 @@ class SandboxClient(Generic[T]):
         generated_claim_name: bool,
         expected_handle: T | None,
         claim_uid: str | None,
+        creation_operation: ClaimOperation,
     ) -> T:
         """Register one handle and close superseded handles outside the lock."""
         stale_handles: list[T] = []
         result: T | None = None
         concurrent_change = False
         with self._lock:
+            if not self._claim_ownership.operation_is_valid(key, creation_operation):
+                raise self._concurrent_claim_change(key)
             current_handle = self._active_connection_sandboxes.get(key)
             if current_handle is not expected_handle:
                 if expected_handle is not None:
@@ -389,15 +398,18 @@ class SandboxClient(Generic[T]):
             )
             if not should_delete:
                 return
+            self._claim_ownership.begin_deletion(key)
         namespace, claim_name = key
-        self._delete_claim_with_optional_uid(
-            claim_name, namespace, expected_uid
-        )
-        assert expected_uid
-        with self._lock:
-            self._claim_ownership.discard_automatic_if_uid(
-                key, expected_uid
+        try:
+            self._delete_claim_with_optional_uid(
+                claim_name, namespace, expected_uid
             )
+            assert expected_uid
+            with self._lock:
+                self._claim_ownership.discard_automatic_if_uid(key, expected_uid)
+        finally:
+            with self._lock:
+                self._claim_ownership.finish_deletion(key)
 
     def _rollback_failed_creation(
         self,
@@ -459,7 +471,7 @@ class SandboxClient(Generic[T]):
         key = (namespace, claim_name)
         with self._lock:
             existing = self._active_connection_sandboxes.get(key)
-            lookup_operation = self._claim_ownership.begin_lookup(key)
+            lookup_operation = self._claim_ownership.begin_operation(key)
 
         try:
             try:
@@ -509,7 +521,7 @@ class SandboxClient(Generic[T]):
             )
         finally:
             with self._lock:
-                self._claim_ownership.finish_lookup(key, lookup_operation)
+                self._claim_ownership.finish_operation(key, lookup_operation)
 
     def _detach_failed_lookup(
         self, key: Tuple[str, str], expected_handle: T | None
@@ -532,21 +544,28 @@ class SandboxClient(Generic[T]):
                 self._claim_ownership.take_automatic_cleanup(key)
             )
 
-        self._close_handle_best_effort(
-            expected_handle, retire=automatic_cleanup
-        )
-        if should_delete:
-            namespace, claim_name = key
-            try:
+        try:
+            self._close_handle_best_effort(
+                expected_handle, retire=automatic_cleanup
+            )
+            if should_delete:
+                namespace, claim_name = key
                 self._delete_claim_with_optional_uid(
                     claim_name, namespace, expected_uid
                 )
-            except Exception as error:
+        except BaseException as error:
+            if should_delete:
                 with self._lock:
                     self._claim_ownership.register_automatic(
                         key, expected_uid
                     )
-                logging.error(f"Failed to delete stale SandboxClaim: {error}")
+            if not isinstance(error, Exception):
+                raise
+            logging.error(f"Failed to delete stale SandboxClaim: {error}")
+        finally:
+            if should_delete:
+                with self._lock:
+                    self._claim_ownership.finish_deletion(key)
 
     def _close_handle_best_effort(
         self, sandbox: T, *, retire: bool
@@ -572,7 +591,7 @@ class SandboxClient(Generic[T]):
         self,
         key: Tuple[str, str],
         expected_handle: T | None,
-        lookup_operation: ClaimLookupOperation,
+        lookup_operation: ClaimOperation,
         claim_name: str,
         sandbox_id: str,
         namespace: str,
@@ -583,7 +602,7 @@ class SandboxClient(Generic[T]):
         result: T | None = None
         concurrent_change = False
         with self._lock:
-            if not self._claim_ownership.lookup_is_valid(
+            if not self._claim_ownership.operation_is_valid(
                 key, lookup_operation
             ):
                 raise self._concurrent_claim_change(key)
@@ -687,6 +706,7 @@ class SandboxClient(Generic[T]):
         """
         key = (namespace, claim_name)
         with self._lock:
+            self._claim_ownership.begin_deletion(key)
             sandbox = self._active_connection_sandboxes.pop(key, None)
             active_uid = self._active_claim_uids.pop(key, None)
             automatic_owned = key in self._automatic_cleanup_claims
@@ -719,6 +739,9 @@ class SandboxClient(Generic[T]):
                         key, automatic_uid
                     )
             logging.error(f"Failed to delete sandbox '{claim_name}' in namespace '{namespace}': {e}")
+        finally:
+            with self._lock:
+                self._claim_ownership.finish_deletion(key)
             
     def delete_all(self) -> None:
         """
@@ -765,16 +788,19 @@ class SandboxClient(Generic[T]):
             sandbox = self._active_connection_sandboxes.pop(key, None)
             self._active_claim_uids.pop(key, None)
 
-        if sandbox is not None:
-            self._close_handle_best_effort(sandbox, retire=True)
         try:
+            if sandbox is not None:
+                self._close_handle_best_effort(sandbox, retire=True)
             self._delete_claim_with_optional_uid(
                 claim_name, namespace, expected_uid
             )
-        except Exception:
+        except BaseException:
             with self._lock:
                 self._claim_ownership.register_automatic(key, expected_uid)
             raise
+        finally:
+            with self._lock:
+                self._claim_ownership.finish_deletion(key)
 
     @trace_span("create_claim")
     def _create_claim(

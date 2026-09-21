@@ -25,7 +25,7 @@ from k8s_agent_sandbox.claim_adoption import (
     validate_claim_name,
 )
 from k8s_agent_sandbox.claim_ownership import (
-    ClaimLookupOperation,
+    ClaimOperation,
     ClaimOwnership,
 )
 from k8s_agent_sandbox.test.unit.claim_adoption_test_support import (
@@ -127,13 +127,13 @@ class TestClaimModels(unittest.TestCase):
             identity.uid = "replacement-uid"
 
     def test_lookup_state_uses_a_pydantic_model(self):
-        lookup = ClaimLookupOperation()
+        lookup = ClaimOperation()
 
         self.assertIsInstance(lookup, BaseModel)
 
-    def test_lookup_operations_keep_identity_equality(self):
-        first = ClaimLookupOperation()
-        second = ClaimLookupOperation()
+    def test_operations_keep_identity_equality(self):
+        first = ClaimOperation()
+        second = ClaimOperation()
 
         self.assertNotEqual(first, second)
 

@@ -123,9 +123,11 @@ def check_install_manifest_drift(
     flat assets automatically yet be silently missing from
     sandbox-with-extensions.yaml.
     """
-    globbed = {os.path.relpath(f, k8s_dir) for f in all_yaml_files}
+    globbed = {
+        os.path.relpath(f, k8s_dir) for f in all_yaml_files
+        if not os.path.relpath(f, k8s_dir).startswith("hardening/")
+    }
     globbed.discard("extensions.controller.yaml")
-    globbed.discard("networkpolicy.yaml")
     listed = _kustomization_resource_paths(kustomization_path)
 
     missing = globbed - listed

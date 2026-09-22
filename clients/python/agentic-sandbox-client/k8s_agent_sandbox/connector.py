@@ -208,6 +208,10 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
 
         if self.port_forward_process:
             self.close()
+            if self.port_forward_process:
+                raise SandboxPortForwardError(
+                    "failed to clean up the existing port-forward before reconnecting"
+                )
 
         start_time = time.monotonic()
         status = "success"
@@ -264,9 +268,10 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     self.port_forward_process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.port_forward_process.kill()
+                    self.port_forward_process.wait(timeout=2)
             except Exception as e:
                 logging.error(f"Failed to stop port-forwarding: {e}")
-            finally:
+            else:
                 self.port_forward_process = None
                 self.base_url = None
 
@@ -327,6 +332,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
             return self.base_url
         if self.port_forward_process:
             self.close()
+            if self.port_forward_process:
+                raise SandboxPortForwardError(
+                    "failed to clean up the existing sandboxd port-forward before reconnecting"
+                )
 
         pod_name = self._get_pod_name() if self._get_pod_name else None
         if not pod_name:
@@ -381,9 +390,10 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     self.port_forward_process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.port_forward_process.kill()
+                    self.port_forward_process.wait(timeout=2)
             except Exception as e:
                 logging.error(f"Failed to stop sandboxd pod tunnel: {e}")
-            finally:
+            else:
                 self.port_forward_process = None
                 self.base_url = None
                 self.grpc_target = None

@@ -76,6 +76,64 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         channel.close.assert_awaited_once()
         self.assertIsNone(connector._grpc_channel)
 
+    async def test_close_reaps_resources_when_http_client_close_fails(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock()
+        channel = MagicMock()
+        channel.close = AsyncMock()
+        connector._grpc_channel = channel
+
+        with self.assertRaisesRegex(RuntimeError, "http close failed"):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        channel.close.assert_awaited_once()
+
+    async def test_close_reaps_tunnel_when_channel_close_fails_and_retries(self):
+        connector = self._build()
+        channel = MagicMock()
+        channel.close = AsyncMock(side_effect=[RuntimeError("channel close failed"), None])
+        connector._grpc_channel = channel
+        connector._sandboxd_strategy.close = AsyncMock(side_effect=[None, None])
+
+        with self.assertRaisesRegex(RuntimeError, "channel close failed"):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        self.assertIs(connector._grpc_channel, channel)
+
+        await connector.close()
+
+        self.assertIsNone(connector._grpc_channel)
+        self.assertEqual(connector._sandboxd_strategy.close.await_count, 2)
+
+    async def test_close_preserves_first_error_after_strategy_cleanup_fails(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock(
+            side_effect=RuntimeError("tunnel close failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "http close failed"):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        self.assertFalse(connector._close_complete)
+
+    async def test_close_prioritizes_cancellation_over_other_cleanup_errors(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        self.assertFalse(connector._close_complete)
+
     async def test_concurrent_grpc_channel_creates_one_channel(self):
         connector = self._build()
         connector._sandboxd_strategy.connect = AsyncMock(
@@ -268,6 +326,26 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(strategy.port_forward_process)
         self.assertIsNone(strategy.base_url)
         self.assertIsNone(strategy.grpc_target)
+
+    async def test_tunnel_close_retains_process_for_retry_after_wait_failure(self):
+        process = MagicMock(returncode=None)
+        process.terminate = MagicMock()
+        process.wait = AsyncMock(side_effect=[RuntimeError("wait failed"), None])
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+        )
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+        strategy.grpc_target = "127.0.0.1:19090"
+
+        with self.assertRaisesRegex(RuntimeError, "wait failed"):
+            await strategy.close()
+
+        self.assertIs(strategy.port_forward_process, process)
+        await strategy.close()
+        self.assertIsNone(strategy.port_forward_process)
 
 
 if __name__ == "__main__":

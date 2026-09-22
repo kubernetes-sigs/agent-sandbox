@@ -107,7 +107,8 @@ class AsyncSandboxClient(Generic[T]):
                 "connection_config is required for AsyncSandboxClient. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
                 "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig. "
-                "For local development with kubectl port-forward, use the synchronous SandboxClient."
+                "For local development with the router's port-forward, use the synchronous SandboxClient; "
+                "SandboxdPodTunnelConnectionConfig supports async pod port-forwarding."
             )
 
         self.connection_config = connection_config
@@ -140,14 +141,19 @@ class AsyncSandboxClient(Generic[T]):
             await self.close()
 
     async def close(self) -> None:
-        """Shuts down all tracked sandbox connections and the K8s API client."""
+        """Shuts down tracked sandbox connections and the K8s API client.
+
+        A connection that fails to close remains tracked so a later call can
+        retry its cleanup.
+        """
         async with self._lock:
-            for sandbox in self._active_connection_sandboxes.values():
+            for key, sandbox in list(self._active_connection_sandboxes.items()):
                 try:
                     await sandbox.close_connection()
                 except Exception as e:
                     logger.error(f"Failed to close sandbox connection: {e}")
-            self._active_connection_sandboxes.clear()
+                else:
+                    self._active_connection_sandboxes.pop(key, None)
         await self.k8s_helper.close()
 
     async def create_sandbox(

@@ -507,6 +507,11 @@ class AsyncSandboxConnector:
                 except BaseException as exc:
                     errors.append(exc)
             if errors:
+                # Cancellation must remain observable even when an earlier
+                # cleanup operation raised a regular exception.
+                for error in errors:
+                    if isinstance(error, asyncio.CancelledError):
+                        raise error
                 raise errors[0]
             self._close_complete = True
 

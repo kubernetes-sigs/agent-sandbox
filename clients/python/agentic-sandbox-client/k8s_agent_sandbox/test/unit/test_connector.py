@@ -31,6 +31,7 @@ from k8s_agent_sandbox.connector import (
     SandboxdPodTunnelStrategy,
     SandboxConnector,
 )
+from k8s_agent_sandbox.exceptions import SandboxPortForwardError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
@@ -202,6 +203,52 @@ class TestPortForwardCleanup(unittest.TestCase):
         self.assertIsNone(strategy.port_forward_process)
         self.assertIsNone(strategy.base_url)
         self.assertIsNone(strategy.grpc_target)
+
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    def test_local_tunnel_does_not_overwrite_process_after_failed_cleanup(
+        self, popen
+    ):
+        strategy = LocalTunnelConnectionStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxLocalTunnelConnectionConfig(),
+        )
+        process = MagicMock()
+        process.poll.return_value = 1
+        process.terminate.side_effect = RuntimeError("terminate failed")
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+
+        with self.assertRaisesRegex(SandboxPortForwardError, "existing port-forward"):
+            strategy.connect()
+
+        popen.assert_not_called()
+        self.assertIs(strategy.port_forward_process, process)
+
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    def test_sandboxd_tunnel_does_not_overwrite_process_after_failed_cleanup(
+        self, popen
+    ):
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sandbox-1",
+        )
+        process = MagicMock()
+        process.poll.return_value = 1
+        process.terminate.side_effect = RuntimeError("terminate failed")
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+        strategy.grpc_target = "127.0.0.1:19090"
+
+        with self.assertRaisesRegex(
+            SandboxPortForwardError, "existing sandboxd port-forward"
+        ):
+            strategy.connect()
+
+        popen.assert_not_called()
+        self.assertIs(strategy.port_forward_process, process)
 
 
 class TestSandboxConnectorStrategySelection(unittest.TestCase):

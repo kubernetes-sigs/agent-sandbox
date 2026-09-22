@@ -121,6 +121,19 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         connector._sandboxd_strategy.close.assert_awaited_once()
         self.assertFalse(connector._close_complete)
 
+    async def test_close_prioritizes_cancellation_over_other_cleanup_errors(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        self.assertFalse(connector._close_complete)
+
     async def test_concurrent_grpc_channel_creates_one_channel(self):
         connector = self._build()
         connector._sandboxd_strategy.connect = AsyncMock(

@@ -236,6 +236,25 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_sandbox.close_connection.assert_awaited_once()
         self.mock_k8s_helper.close.assert_awaited_once()
 
+    async def test_close_retains_failed_connection_for_retry(self):
+        """A failed connection close remains registered for a later retry."""
+        mock_sandbox = MagicMock()
+        mock_sandbox.close_connection = AsyncMock(
+            side_effect=[RuntimeError("close failed"), None]
+        )
+        self.client._active_connection_sandboxes[("ns", "claim")] = mock_sandbox
+        self.mock_k8s_helper.close = AsyncMock()
+
+        await self.client.close()
+
+        self.assertIn(("ns", "claim"), self.client._active_connection_sandboxes)
+        mock_sandbox.close_connection.assert_awaited_once()
+
+        await self.client.close()
+
+        self.assertNotIn(("ns", "claim"), self.client._active_connection_sandboxes)
+        self.assertEqual(mock_sandbox.close_connection.await_count, 2)
+
     async def test_context_manager(self):
         self.mock_k8s_helper.close = AsyncMock()
 

@@ -40,7 +40,7 @@ from kubernetes import client
 
 from . import constants, sizing
 from .cluster import Cluster, ClusterRegistry
-from .config import ClusterConfig, FleetConfig
+from .config import ClusterConfig, FleetConfig, run_namespace
 from .exceptions import (
     FleetError,
     FleetOvercommitError,
@@ -126,6 +126,12 @@ class SandboxFleet:
     # it flows into every create call's labels.
     self.run_id = uuid.uuid4().hex[:12]
     self.config.labels = {**self.config.labels, constants.RUN_ID_LABEL: self.run_id}
+    # Resolve the run-dependent parts of the config (`{run_id}` in names, the
+    # per-run namespace) before the registry is built, so every cluster, template
+    # and pool name sees the final values.
+    self.config.apply_run_isolation(self.run_id)
+    self._created_namespaces: set[tuple[str, str]] = set()  # (cluster, ns) this run made
+    self._namespaces_ensured = False
     self._prev_handlers: dict = {}           # signum -> previous handler (to restore)
     self._atexit_registered = False
     self._torndown = False
@@ -145,6 +151,19 @@ class SandboxFleet:
         _c.resources.labels.update(self.config.labels)
       except Exception:  # noqa: BLE001 — a non-standard registry may differ; best-effort
         pass
+    if self.config.run_isolation == "namespace":
+      # Likewise, a caller-supplied registry was built from the pre-isolation
+      # namespaces; point it at the per-run ones. `Cluster.namespace` and
+      # `Resources.namespace` are what every API call reads. The default registry
+      # already comes from the resolved config and is left alone.
+      for _c in self.registry:
+        if _c.namespace.endswith(f"-{self.run_id}"):
+          continue
+        _c.namespace = run_namespace(_c.namespace, self.run_id)
+        try:
+          _c.resources.namespace = _c.namespace
+        except Exception:  # noqa: BLE001 — best-effort, as above
+          pass
     self.placement = get_placement(self.config.placement)
     self.tasks: list[Task] = []
     self.plan_: FleetPlan | None = None
@@ -439,8 +458,56 @@ class SandboxFleet:
     with self._obs.phase("preflight"):
       return self._preflight()
 
+  def _ensure_run_namespaces(self) -> None:
+    """``run_isolation="namespace"``: create each cluster's per-run namespace on
+    first use (preflight or plan, whichever comes first). Idempotent. A namespace
+    that already existed is used but not owned, so teardown leaves it standing."""
+    if self.config.run_isolation != "namespace" or self._namespaces_ensured:
+      return
+    labels = {**self.config.labels, **self.config.run_namespace_labels}
+    for c in self.registry:
+      try:
+        created = c.resources.ensure_namespace(c.namespace, labels=labels)
+      except Exception as exc:  # noqa: BLE001 — turn the API error into an actionable one
+        raise FleetError(
+            f"run_isolation='namespace': cannot create namespace '{c.namespace}' "
+            f"on cluster '{c.name}': {exc}. Grant this identity namespace "
+            "create/delete, pre-create the namespace, or use "
+            "run_isolation='names'.") from exc
+      if created:
+        self._created_namespaces.add((c.name, c.namespace))
+        logger.info("run %s owns namespace '%s' on cluster %s",
+                    self.run_id, c.namespace, c.name)
+        if self.config.run_namespace_setup is not None:
+          self.config.run_namespace_setup(c, c.namespace)
+    self._namespaces_ensured = True
+
+  def _owns_pool(self, c, pool: str) -> bool:
+    """False if ``pool`` exists and carries another run's run-id label.
+
+    Pools keep their creator's label (a 409 on create only patches replicas), so
+    the label is a reliable tell that an image-derived name collided with a
+    concurrent run in the same namespace. Deleting or resizing that pool would be
+    a write to someone else's warm capacity. Missing or unlabelled pools count as
+    ours (deletes are 404-tolerant; pre-run-id leftovers)."""
+    try:
+      obj = c.resources.get_warmpool(pool)
+    except Exception:  # noqa: BLE001 — the guard must never break unwarm itself
+      return True
+    labels = ((obj or {}).get("metadata") or {}).get("labels") or {}
+    owner = labels.get(constants.RUN_ID_LABEL) if isinstance(labels, dict) else None
+    if isinstance(owner, str) and owner and owner != self.run_id:
+      logger.warning(
+          "pool '%s' on cluster '%s' belongs to run %s, not this run (%s); leaving "
+          "it alone. Concurrent runs sharing images in one namespace should use "
+          "run_isolation='names' (or a per-run namespace).",
+          pool, c.name, owner, self.run_id)
+      return False
+    return True
+
   def _preflight(self) -> dict:
     from . import preflight as _pf
+    self._ensure_run_namespaces()
     reports = {}
     failed = {}
     sample_image = next(iter(self.image_counts()), "busybox:latest")
@@ -470,6 +537,7 @@ class SandboxFleet:
       return self._plan()
 
   def _plan(self) -> FleetPlan:
+    self._ensure_run_namespaces()
     if self.config.adopt_existing:
       return self._plan_adopt()
     counts = self.image_counts()
@@ -869,6 +937,10 @@ class SandboxFleet:
         return                                 # already unwarmed — don't double-release
       reps = self._warmed.pop(entry.image)
     c = self.registry.get(entry.cluster)
+    if not self._owns_pool(c, entry.pool):
+      # Retire the image from this run's bookkeeping but leave the other run's
+      # pool and template standing; the reserved capacity reconciles at teardown.
+      return
     pool_deleted = False
     err = None
     try:
@@ -926,6 +998,8 @@ class SandboxFleet:
       return
     replicas = max(0, replicas)
     c = self.registry.get(entry.cluster)
+    if not self._owns_pool(c, entry.pool):
+      return
     c.resources.create_warmpool(entry.pool, entry.template, replicas, reconcile=True)
     with self._lock:
       prev = self._warmed.get(image, entry.replicas)
@@ -1170,7 +1244,15 @@ class SandboxFleet:
         self._torndown = True
     self.release_all()
     for c in self.registry:
-      sel = c.resources.managed_selector()
+      # Run-scoped on purpose. Every claim, pool and template this fleet created
+      # carries this run's id label; the namespace-wide managed label also matches
+      # every OTHER agent-sandbox-rl run in the namespace, and sweeping by it once
+      # deleted a concurrent tenant's whole warm fleet. Leftovers of a run that
+      # crashed without tearing down are the reaper's job (`reap(run_id=…)`, or
+      # the explicit `all_managed=True` sweep).
+      sel = self.run_selector()
+      logger.info("teardown: sweeping run %s on cluster %s (%s)",
+                  self.run_id, c.name, sel)
       # Sweep any stray claims first (defensive: untracked/leaked claims keep
       # their adopted sandbox alive even after the pool is gone).
       try:
@@ -1216,11 +1298,16 @@ class SandboxFleet:
               except Exception as exc:
                 logger.exception("Failed to delete pool/template during teardown: %s", exc)
       c.reset_counts()
-      if delete_namespace:
+      # A namespace this run created (run_isolation="namespace") goes with it;
+      # a pre-existing one is only removed when the caller asks explicitly.
+      if delete_namespace or (c.name, c.namespace) in self._created_namespaces:
         try:
-          c.core_api.delete_namespace(c.namespace)
-        except Exception:
-          pass
+          c.resources.delete_namespace(c.namespace)
+        except Exception as exc:  # noqa: BLE001 — best-effort, like the sweeps above
+          logger.warning("teardown: failed to delete namespace '%s' on cluster %s: %s",
+                         c.namespace, c.name, exc)
+    self._created_namespaces.clear()
+    self._namespaces_ensured = False
     self._obs.warm_reset()
     with self._lock:
       self._warmed.clear()

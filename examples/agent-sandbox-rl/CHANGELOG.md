@@ -5,6 +5,32 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 
 ## [0.1.0.dev0] — unreleased
 
+### Fixed (concurrent runs in one namespace —
+[#1736](https://github.com/kubernetes-sigs/agent-sandbox/issues/1736))
+- **`teardown()` is scoped to this run.** It listed claims, pools and templates by
+  the namespace-wide managed label (`app=agent-sandbox-rl`), which also matches
+  every other agent-sandbox-rl run in the namespace; one run finishing deleted a
+  concurrent tenant's entire warm fleet. Teardown now selects by this run's id
+  label (`run_selector()`), as the reaper and the breaker already did. Leftovers
+  of a run that crashed without tearing down are the reaper's job
+  (`reap(run_id=…)`; the namespace-wide sweep is only `reap(all_managed=True)`).
+- **`wait_for_pool_ready()` fails fast when the pool disappears.** A `DELETED`
+  watch event was read as `0/N ready` and the wait idled until `ready_timeout`
+  (900 s by default); a 404 on the dropped-watch re-check did the same. Both now
+  return `False` immediately, with an error log naming the pool.
+- **`unwarm_image()` / `set_pool_replicas()` refuse to delete or resize a pool
+  carrying another run's id label** (image-derived names collide across runs) and
+  log which run owns it.
+
+### Added (concurrent runs — #1736)
+- **`FleetConfig.run_isolation`** (`"none"` default, naming unchanged): `"names"`
+  bakes the run id into every template/pool name for runs sharing a namespace;
+  `"namespace"` gives each run `<namespace>-<run id>`, created on first use and
+  deleted at teardown if the fleet created it, with `run_namespace_labels` and a
+  `run_namespace_setup(cluster, namespace)` hook for a `LocalQueue`, quota or pull
+  secret. A `{run_id}` placeholder is accepted in `template_name_prefix` and
+  `pool_name_format` in any mode.
+
 ### Added (warm-pool adoption —
 [#1533](https://github.com/kubernetes-sigs/agent-sandbox/issues/1533))
 - **`FleetConfig.pool_name_format`** (default `pool-{template}`, unchanged

@@ -346,6 +346,17 @@ class Resources:
   def delete_warmpool(self, name: str) -> None:
     self._delete(constants.WARMPOOLS_PLURAL, name, "SandboxWarmPool")
 
+  def get_warmpool(self, name: str) -> dict | None:
+    """The live SandboxWarmPool object, or None if it does not exist."""
+    try:
+      return self.custom_api.get_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL, name=name)
+    except client.ApiException as e:
+      if e.status == 404:
+        return None
+      raise
+
   def pool_ready_replicas(self, name: str) -> int:
     obj = self.custom_api.get_namespaced_custom_object(
         group=constants.GROUP, version=constants.VERSION,
@@ -359,6 +370,15 @@ class Resources:
     except client.ApiException:
       return 0
 
+  def _pool_ready_or_gone(self, name: str) -> int | None:
+    """readyReplicas, 0 on a transient API error, or None if the pool is gone
+    (404) — the re-check used when the watch drops, so a pool deleted out from
+    under the wait is reported instead of polled until the timeout."""
+    try:
+      return self.pool_ready_replicas(name)
+    except client.ApiException as e:
+      return None if e.status == 404 else 0
+
   def wait_for_pool_ready(self, name: str, expected: int,
                           timeout: int = 600, poll_interval: float = 1.0) -> bool:
     """Block until the pool reports ``readyReplicas >= expected``.
@@ -366,7 +386,11 @@ class Resources:
     Uses a Kubernetes **watch** on the WarmPool so readiness is detected at the
     status-update event (near-exact timing — no fixed poll grid). Falls back to a
     short re-check + ``poll_interval`` backoff if the watch drops/reconnects, and
-    is bounded by ``timeout``. Returns False on timeout.
+    is bounded by ``timeout``. Returns False on timeout, and **immediately** if
+    the pool is deleted while waiting (a DELETED watch event, or a 404 on the
+    re-check): a pool that no longer exists cannot become ready, and waiting out
+    the timeout for it is how a concurrent run's teardown once cost a caller 15
+    minutes per pool.
     """
     deadline = time.monotonic() + timeout
     # Fast path: already ready (also covers the readiness that landed between
@@ -392,6 +416,10 @@ class Resources:
             if (obj.get("metadata") or {}).get("name") != name:
               continue                       # bookmarks / belt-and-suspenders
             ready = int((obj.get("status") or {}).get("readyReplicas", 0) or 0)
+            if event.get("type") == "DELETED":
+              logger.error("WarmPool '%s' was deleted while waiting for readiness "
+                           "(%d/%d ready); giving up", name, ready, expected)
+              return False
             logger.info("WarmPool '%s': %d/%d ready", name, ready, expected)
             if ready >= expected:
               return True
@@ -404,12 +432,20 @@ class Resources:
                          name, e.status, e)
             raise
           logger.debug("watch on '%s' interrupted (%s); re-checking", name, e)
-          if self.pool_ready_replicas_safe(name) >= expected:
+          ready = self._pool_ready_or_gone(name)
+          if ready is None:
+            logger.error("WarmPool '%s' no longer exists; giving up", name)
+            return False
+          if ready >= expected:
             return True
           time.sleep(poll_interval)
         except Exception as e:  # noqa: BLE001 — connection drop / stale RV
           logger.debug("watch on '%s' dropped (%s); re-checking", name, e)
-          if self.pool_ready_replicas_safe(name) >= expected:
+          ready = self._pool_ready_or_gone(name)
+          if ready is None:
+            logger.error("WarmPool '%s' no longer exists; giving up", name)
+            return False
+          if ready >= expected:
             return True
           time.sleep(poll_interval)
     finally:
@@ -475,7 +511,38 @@ class Resources:
                  group=constants.SANDBOX_GROUP, version=constants.SANDBOX_VERSION)
 
   def managed_selector(self) -> str:
+    """Selector for EVERY agent-sandbox-rl run's resources in the namespace. Not
+    what teardown uses (that is the fleet's run-scoped `run_selector()`); kept for
+    the reaper's explicit ``all_managed`` sweep and for listing/diagnostics."""
     return f"{constants.MANAGED_BY_LABEL}={constants.MANAGED_BY_VALUE}"
+
+  # --- namespaces (run_isolation="namespace") ---------------------------- #
+  def ensure_namespace(self, name: str, labels: dict | None = None) -> bool:
+    """Create namespace ``name`` if absent. Returns True if this call created it
+    (the caller owns it and deletes it at teardown), False if it already existed
+    (used, not owned). Other errors propagate — a 403 means this identity cannot
+    create namespaces: pre-create it or use ``run_isolation="names"``."""
+    body = client.V1Namespace(
+        metadata=client.V1ObjectMeta(name=name, labels=dict(labels or {})))
+    try:
+      self.core_api.create_namespace(body)
+      logger.info("Created namespace '%s'", name)
+      return True
+    except client.ApiException as e:
+      if e.status == 409:
+        logger.info("Namespace '%s' already exists; using it (not owned)", name)
+        return False
+      raise
+
+  def delete_namespace(self, name: str) -> None:
+    try:
+      self.core_api.delete_namespace(name)
+      logger.info("Deleted namespace '%s'", name)
+    except client.ApiException as e:
+      if e.status == 404:
+        logger.warning("Namespace '%s' not found (already deleted).", name)
+      else:
+        raise
 
   # --- adoption ---------------------------------------------------------- #
   def template_images(self, label_selector: str | None = None) -> "dict[str, str]":

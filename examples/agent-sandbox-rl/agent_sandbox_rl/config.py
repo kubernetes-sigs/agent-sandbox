@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -167,6 +168,19 @@ class FleetConfig(BaseModel):
   # template, so any naming scheme works) and raises `PoolNotFoundError` for an
   # image nothing serves, rather than quietly building a size-1 pool for it.
   adopt_existing: bool = False
+  # How concurrent runs are kept apart (constants.RUN_ISOLATION_MODES). "none"
+  # (default, historical): stable per-image names in `clusters[].namespace` —
+  # fine when nothing else runs there. "names": several runs share the namespace
+  # and the run id is baked into every template/pool name, so runs on the same
+  # image never share, resize, or delete each other's pools. "namespace": each run
+  # gets `<namespace>-<run id>`, created on first use (labelled with this run's
+  # labels + `run_namespace_labels`) and deleted at teardown if this fleet created
+  # it. Anything a fresh namespace needs beyond labels (a Kueue LocalQueue, quotas,
+  # a pull secret) is the caller's job — do it in `run_namespace_setup(cluster,
+  # namespace)`. Teardown only ever sweeps this run's resources, in every mode.
+  run_isolation: str = "none"
+  run_namespace_labels: dict[str, str] = Field(default_factory=dict)
+  run_namespace_setup: Callable[..., Any] | None = None
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))
   observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
   # Disk-aware window sizing (all optional; when avg_image_gb is None it's a no-op
@@ -208,6 +222,14 @@ class FleetConfig(BaseModel):
       raise ValueError("must be >= 1 or None")
     return v
 
+  @field_validator("run_isolation")
+  @classmethod
+  def _known_isolation(cls, v: str) -> str:
+    if v not in constants.RUN_ISOLATION_MODES:
+      raise ValueError(f"unknown run_isolation '{v}'; choose from "
+                       f"{list(constants.RUN_ISOLATION_MODES)}")
+    return v
+
   @field_validator("template_name_prefix")
   @classmethod
   def _valid_prefix(cls, v: str) -> str:
@@ -215,8 +237,9 @@ class FleetConfig(BaseModel):
     # prefix: a permissive prefix regex still allows names that aren't valid
     # DNS-1123 subdomains (e.g. consecutive dots "r2e..img-", or a segment
     # ending in '-' before a dot), which fail with a 422 only at create time.
-    # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in.
-    sample = f"{v}{'0' * 12}"
+    # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in — and
+    # so is the 12-char hex run id a `{run_id}` placeholder expands to.
+    sample = f"{v}{'0' * 12}".replace(constants.RUN_ID_PLACEHOLDER, "0" * 12)
     if len(sample) > 253 or not _DNS1123.match(sample):
       raise ValueError(
           "template_name_prefix must yield a DNS-1123 subdomain when combined "
@@ -228,16 +251,19 @@ class FleetConfig(BaseModel):
     # Validated here rather than as a field_validator because the rendered name
     # depends on template_name_prefix too.
     sample_hash = "0" * 12
-    sample_template = f"{self.template_name_prefix}{sample_hash}"
+    sample_template = (f"{self.template_name_prefix}{sample_hash}"
+                       .replace(constants.RUN_ID_PLACEHOLDER, sample_hash))
     try:
-      sample = self.pool_name_format.format(template=sample_template,
-                                            image_hash=sample_hash)
+      sample = (self.pool_name_format
+                .replace(constants.RUN_ID_PLACEHOLDER, sample_hash)
+                .format(template=sample_template, image_hash=sample_hash))
     except (KeyError, IndexError, ValueError) as e:
       # ValueError too: an unmatched brace ("pool-{template") raises it from
       # str.format, and it should get this actionable message, not escape raw.
       raise ValueError(
-          "pool_name_format may only reference {template} and {image_hash} "
-          f"(use {{{{ }}}} for a literal brace); got {self.pool_name_format!r}") from e
+          "pool_name_format may only reference {template}, {image_hash} and "
+          f"{{run_id}} (use {{{{ }}}} for a literal brace); got "
+          f"{self.pool_name_format!r}") from e
     if sample_hash not in sample:
       # Not pedantry: a format with no per-image part maps EVERY image onto one
       # pool name, so the second image silently upserts the first one's pool and
@@ -278,3 +304,40 @@ class FleetConfig(BaseModel):
     h = self.image_hash(image)
     return self.pool_name_format.format(
         template=self.template_name(image), image_hash=h)
+
+  def apply_run_isolation(self, run_id: str) -> None:
+    """Resolve the run-dependent parts of this config for ``run_id``. Called once
+    by `SandboxFleet.__init__` on its private copy, before the registry is built.
+
+    ``{run_id}`` placeholders in `template_name_prefix` / `pool_name_format` are
+    substituted in every mode. ``"names"`` additionally appends the run id to the
+    template prefix when neither field carries the placeholder, so every template
+    and pool name (pools derive from templates) is unique to this run.
+    ``"namespace"`` rewrites each cluster's namespace to `run_namespace()`."""
+    ph = constants.RUN_ID_PLACEHOLDER
+    if (self.run_isolation == "names" and ph not in self.template_name_prefix
+        and ph not in self.pool_name_format):
+      self.template_name_prefix = f"{self.template_name_prefix}{ph}-"
+    self.template_name_prefix = self.template_name_prefix.replace(ph, run_id)
+    self.pool_name_format = self.pool_name_format.replace(ph, run_id)
+    if self.run_isolation == "namespace":
+      for c in self.clusters:
+        c.namespace = run_namespace(c.namespace, run_id)
+
+
+_DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+
+
+def run_namespace(base: str, run_id: str) -> str:
+  """The per-run namespace for ``run_isolation="namespace"``: ``<base>-<run_id>``.
+
+  Namespace names are DNS-1123 *labels* (63 chars, lowercase alphanumerics and
+  '-'), stricter than the subdomain rule object names follow, so validate here
+  rather than discover it as a 422 at create time."""
+  ns = f"{base}-{run_id}"
+  if not _DNS1123_LABEL.match(ns):
+    raise ValueError(
+        f"run namespace {ns!r} is not a valid DNS-1123 label (lowercase "
+        f"alphanumerics and '-', 63 chars max); shorten the base namespace "
+        f"{base!r} or use run_isolation='names'")
+  return ns

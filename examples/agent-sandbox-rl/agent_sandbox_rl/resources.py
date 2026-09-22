@@ -387,10 +387,10 @@ class Resources:
     status-update event (near-exact timing — no fixed poll grid). Falls back to a
     short re-check + ``poll_interval`` backoff if the watch drops/reconnects, and
     is bounded by ``timeout``. Returns False on timeout, and **immediately** if
-    the pool is deleted while waiting (a DELETED watch event, or a 404 on the
-    re-check): a pool that no longer exists cannot become ready, and waiting out
-    the timeout for it is how a concurrent run's teardown once cost a caller 15
-    minutes per pool.
+    the pool does not exist or is deleted while waiting (a 404 on the initial
+    read, a DELETED watch event, or a 404 on the dropped-watch re-check): a pool
+    that no longer exists cannot become ready, and waiting out the timeout for it
+    is how a concurrent run's teardown once cost a caller 15 minutes per pool.
     """
     deadline = time.monotonic() + timeout
     # Fast path: already ready (also covers the readiness that landed between
@@ -525,8 +525,10 @@ class Resources:
   def ensure_namespace(self, name: str, labels: dict | None = None) -> bool:
     """Create namespace ``name`` if absent. Returns True if this call created it
     (the caller owns it and deletes it at teardown), False if it already existed
-    (used, not owned). Other errors propagate — a 403 means this identity cannot
-    create namespaces: pre-create it or use ``run_isolation="names"``."""
+    (used, not owned). A namespace that exists but is still Terminating raises
+    ``RuntimeError`` — nothing can be created in it. Other errors propagate — a
+    403 means this identity cannot create namespaces: pre-create it or use
+    ``run_isolation="names"``."""
     body = client.V1Namespace(
         metadata=client.V1ObjectMeta(name=name, labels=dict(labels or {})))
     try:
@@ -541,7 +543,8 @@ class Resources:
     # "using" it and failing on the first pool.
     phase = None
     try:
-      phase = (self.core_api.read_namespace(name).status or {}).phase
+      ns = self.core_api.read_namespace(name)
+      phase = getattr(getattr(ns, "status", None), "phase", None)
     except Exception:  # noqa: BLE001 — diagnostics only
       pass
     if phase == "Terminating":

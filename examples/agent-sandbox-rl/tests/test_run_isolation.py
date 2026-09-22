@@ -147,6 +147,27 @@ def test_namespace_mode_creates_owns_and_deletes_the_run_namespace(make_cluster)
   c.resources.delete_namespace.assert_called_once_with(ns)
 
 
+def test_namespace_mode_through_the_default_registry(monkeypatch):
+  # Real callers build the registry from config.clusters: the per-run namespace
+  # must already be in the ClusterConfig when the Cluster is constructed, and the
+  # explicit-registry re-pointing must leave those clusters alone.
+  import agent_sandbox_rl.cluster as cl
+  monkeypatch.setattr(cl, "build_api_client", lambda cfg: object())
+  f = SandboxFleet(FleetConfig(run_isolation="namespace",
+                               clusters=[ClusterConfig(name="c1", namespace="rl"),
+                                         ClusterConfig(name="c2", namespace="other")]))
+  for name, base in (("c1", "rl"), ("c2", "other")):
+    c = f.registry.get(name)
+    assert c.namespace == f"{base}-{f.run_id}"
+    assert c.resources.namespace == c.namespace
+
+
+def test_adopt_existing_cannot_be_combined_with_a_per_run_namespace():
+  with pytest.raises(ValueError, match="adopt_existing"):
+    FleetConfig(adopt_existing=True, run_isolation="namespace")
+  FleetConfig(adopt_existing=True, run_isolation="names")    # discovery is by image: fine
+
+
 def test_namespace_mode_leaves_a_preexisting_namespace_alone(make_cluster):
   c = make_cluster("solo", namespace="rl")
   c.resources.ensure_namespace.return_value = False        # 409: someone else's
@@ -322,15 +343,42 @@ def test_wait_for_pool_ready_gives_up_when_the_pool_is_already_gone(monkeypatch)
   r = _resources()
   r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
 
-  class NeverWatch:
+  # Record rather than raise: an exception from stream() would be swallowed by
+  # the dropped-watch handler and the re-check would still return False, which
+  # proves nothing about the fast path.
+  class RecordingWatch:
+    opened = False
+
     def stream(self, func, **kw):
-      raise AssertionError("watch must not be opened for a pool that is gone")
+      RecordingWatch.opened = True
+      return []
 
     def stop(self):
       pass
 
-  monkeypatch.setattr("agent_sandbox_rl.resources.watch.Watch", lambda: NeverWatch())
+  monkeypatch.setattr("agent_sandbox_rl.resources.watch.Watch", lambda: RecordingWatch())
   assert r.wait_for_pool_ready("pool-x", 2, timeout=30) is False
+  assert RecordingWatch.opened is False                    # decided on the initial read
+  assert r.custom_api.get_namespaced_custom_object.call_count == 1
+
+
+def test_wait_for_pool_ready_gives_up_when_the_pool_is_gone_after_an_api_error(monkeypatch):
+  # The ApiException branch (a transient 500 from the watch) re-checks too.
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      {"status": {"readyReplicas": 0}}, client.ApiException(status=404)]
+
+  class FlakyWatch:
+    def stream(self, func, **kw):
+      raise client.ApiException(status=500)
+
+    def stop(self):
+      pass
+
+  monkeypatch.setattr("agent_sandbox_rl.resources.watch.Watch", lambda: FlakyWatch())
+  t0 = time.monotonic()
+  assert r.wait_for_pool_ready("pool-x", 2, timeout=30, poll_interval=0.01) is False
+  assert time.monotonic() - t0 < 1.0
 
 
 def test_namespace_mode_rolls_back_namespaces_created_before_a_failure(make_cluster):

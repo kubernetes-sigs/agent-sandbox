@@ -132,6 +132,7 @@ class SandboxFleet:
     self.config.apply_run_isolation(self.run_id)
     self._created_namespaces: set[tuple[str, str]] = set()  # (cluster, ns) this run made
     self._namespaces_ensured = False
+    self._ns_lock = threading.Lock()         # create/rollback of run namespaces is atomic
     self._prev_handlers: dict = {}           # signum -> previous handler (to restore)
     self._atexit_registered = False
     self._torndown = False
@@ -464,6 +465,14 @@ class SandboxFleet:
     that already existed is used but not owned, so teardown leaves it standing."""
     if self.config.run_isolation != "namespace" or self._namespaces_ensured:
       return
+    # plan() is reachable from concurrent warm threads (`self.plan_ or self.plan()`),
+    # so two callers can race here; the create/rollback sequence must not interleave.
+    with self._ns_lock:
+      if self._namespaces_ensured:
+        return
+      self._ensure_run_namespaces_locked()
+
+  def _ensure_run_namespaces_locked(self) -> None:
     labels = {**self.config.labels, **self.config.run_namespace_labels}
     # All-or-nothing per attempt: `run()` calls `plan()` before it enters its
     # teardown scope, so a failure on the second cluster (or in the setup hook
@@ -504,28 +513,30 @@ class SandboxFleet:
       raise
     self._namespaces_ensured = True
 
-  def _owns_pool(self, c, pool: str) -> bool:
-    """False if ``pool`` exists and carries another run's run-id label.
+  def _owns_pool(self, c, pool: str, *, action: str = "leaving it alone") -> bool:
+    """False if ``pool`` exists and carries another run's run-id label, or if
+    ownership cannot be verified (fail closed).
 
     Pools keep their creator's label (a 409 on create only patches replicas), so
     the label is a reliable tell that an image-derived name collided with a
     concurrent run in the same namespace. Deleting or resizing that pool would be
     a write to someone else's warm capacity. Missing or unlabelled pools count as
-    ours (deletes are 404-tolerant; pre-run-id leftovers)."""
+    ours (deletes are 404-tolerant; pre-run-id leftovers); a pool we cannot read
+    does not. ``action`` names what the caller does instead, for the log line."""
     try:
       obj = c.resources.get_warmpool(pool)
     except Exception as exc:  # noqa: BLE001 — fail closed: unverifiable is not ours
-      logger.warning("cannot verify ownership of pool '%s' on cluster '%s'; leaving "
-                     "it alone: %s", pool, c.name, exc)
+      logger.warning("cannot verify ownership of pool '%s' on cluster '%s'; %s: %s",
+                     pool, c.name, action, exc)
       return False
     labels = ((obj or {}).get("metadata") or {}).get("labels") or {}
     owner = labels.get(constants.RUN_ID_LABEL) if isinstance(labels, dict) else None
     if isinstance(owner, str) and owner and owner != self.run_id:
       logger.warning(
-          "pool '%s' on cluster '%s' belongs to run %s, not this run (%s); leaving "
-          "it alone. Concurrent runs sharing images in one namespace should use "
+          "pool '%s' on cluster '%s' belongs to run %s, not this run (%s); %s. "
+          "Concurrent runs sharing images in one namespace should use "
           "run_isolation='names' (or a per-run namespace).",
-          pool, c.name, owner, self.run_id)
+          pool, c.name, owner, self.run_id, action)
       return False
     return True
 
@@ -751,14 +762,11 @@ class SandboxFleet:
     reps = replicas_override if replicas_override is not None else e.replicas
     c = self.registry.get(e.cluster)
     fam = repo_family(e.image)
-    if not self._owns_pool(c, e.pool):
+    if not self._owns_pool(c, e.pool, action="using it read-only"):
       # The image-derived name collided with a concurrent run's pool. Never
       # resize (the 409 reconcile) or relabel (ensure_template) what is theirs;
       # use the pool read-only the way adopt mode does — wait for one ready
       # replica, reserve and write nothing.
-      logger.warning("warm: using another run's pool '%s' on cluster '%s' read-only; "
-                     "set run_isolation='names' to give each run its own pools",
-                     e.pool, e.cluster)
       self._adopt_entry(e, wait)
       return
 

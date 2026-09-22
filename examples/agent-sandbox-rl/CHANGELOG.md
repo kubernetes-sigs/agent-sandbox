@@ -29,7 +29,10 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   `"namespace"` gives each run `<namespace>-<run id>`, created on first use and
   deleted at teardown if the fleet created it, with `run_namespace_labels` and a
   `run_namespace_setup(cluster, namespace)` hook for a `LocalQueue`, quota or pull
-  secret. A `{run_id}` placeholder is accepted in `template_name_prefix` and
+  secret. Namespace creation is all-or-nothing per attempt (a create or hook
+  failure rolls back what that attempt created, and a namespace still Terminating
+  is an error, not "existing"); `adopt_existing` is rejected with this mode. A
+  `{run_id}` placeholder is accepted in `template_name_prefix` and
   `pool_name_format` in any mode.
 
 ### Added (warm-pool adoption —

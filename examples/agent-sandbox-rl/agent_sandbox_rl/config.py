@@ -247,6 +247,17 @@ class FleetConfig(BaseModel):
     return v
 
   @model_validator(mode="after")
+  def _isolation_vs_adoption(self) -> "FleetConfig":
+    # A fresh per-run namespace has nothing in it to adopt: plan() would create the
+    # namespace and then raise PoolNotFoundError for every image. Say so up front.
+    if self.adopt_existing and self.run_isolation == "namespace":
+      raise ValueError(
+          "adopt_existing=True cannot be combined with run_isolation='namespace': "
+          "a per-run namespace holds no pools to adopt. Adopt from the shared "
+          "namespace (run_isolation='none' or 'names') instead.")
+    return self
+
+  @model_validator(mode="after")
   def _valid_pool_name_format(self) -> "FleetConfig":
     # Validated here rather than as a field_validator because the rendered name
     # depends on template_name_prefix too.

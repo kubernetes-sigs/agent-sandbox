@@ -33,6 +33,11 @@ from .config import TemplateSpec
 
 logger = logging.getLogger("agent_sandbox_rl.resources")
 
+# Read-check-write rounds `create_warmpool(reconcile=True)` makes before giving up.
+# A conflict is usually a status update from the controller, so one retry nearly
+# always suffices; the bound only stops a pathological fight.
+_RECONCILE_ATTEMPTS = 3
+
 
 @dataclass(frozen=True)
 class DiscoveredPool:
@@ -315,13 +320,15 @@ class Resources:
     so a hot, repeatedly-reused size-1 pool isn't patched on every claim.
     ``dry_run=True`` sends ``dryRun=All`` and never patches (validation only).
 
-    Returns True when the pool is ours (created, or reconciled). With
-    ``owner_run_id`` set, the 409 is where a name collision with a concurrent run
-    shows up: the existing pool is inspected and, if it carries another run's id
-    label, it is **not** resized and False is returned. The reconcile patch also
-    carries the inspected object's resourceVersion, so a pool replaced or
-    relabelled between the inspection and the patch is not written to (409 →
-    False) rather than raced."""
+    Returns True when the pool is ours (created, or reconciled), False only when
+    ``owner_run_id`` is set and the existing pool carries another run's id label:
+    the 409 is where a name collision with a concurrent run shows up, and that
+    pool is **not** resized. Every write after the 409 is conditional on what was
+    just inspected — the reconcile patch carries the inspected resourceVersion,
+    and a re-create after the pool vanished is itself a create — so a pool
+    replaced, relabelled or merely updated in between (the controller writes
+    status continuously) is re-inspected, owner check included, instead of being
+    written blind. Gives up with ``RuntimeError`` if the pool keeps changing."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
@@ -336,38 +343,47 @@ class Resources:
       if dry_run or not reconcile:
         logger.info("SandboxWarmPool '%s' already exists.", name)
         return True
-    existing = self.get_warmpool(name)
-    if existing is None:
-      # Deleted between the 409 and the read (a teardown elsewhere): create anew.
-      self.custom_api.create_namespaced_custom_object(
-          group=constants.GROUP, version=constants.VERSION,
-          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
-          body=self._warmpool_manifest(name, template_name, replicas))
-      logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
-      return True
-    meta = existing.get("metadata") or {}
-    owner = (meta.get("labels") or {}).get(constants.RUN_ID_LABEL)
-    if owner_run_id and isinstance(owner, str) and owner and owner != owner_run_id:
-      logger.warning("SandboxWarmPool '%s' belongs to run %s; not resizing it for run "
-                     "%s (use run_isolation='names' to stop sharing names)",
-                     name, owner, owner_run_id)
-      return False
-    logger.info("SandboxWarmPool '%s' exists; patching replicas=%d.", name, replicas)
-    body: dict = {"spec": {"replicas": replicas}}
-    rv = meta.get("resourceVersion")
-    if isinstance(rv, str) and rv:
-      body["metadata"] = {"resourceVersion": rv}   # optimistic lock on what we inspected
-    try:
-      self.custom_api.patch_namespaced_custom_object(
-          group=constants.GROUP, version=constants.VERSION,
-          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
-          name=name, body=body)
-    except client.ApiException as e:
-      if e.status == 409:
-        logger.warning("SandboxWarmPool '%s' changed concurrently; not resizing", name)
+    for _ in range(_RECONCILE_ATTEMPTS):
+      existing = self.get_warmpool(name)
+      if existing is None:
+        # Deleted between the 409 and the read (a teardown elsewhere): create anew.
+        try:
+          self.custom_api.create_namespaced_custom_object(
+              group=constants.GROUP, version=constants.VERSION,
+              namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+              body=self._warmpool_manifest(name, template_name, replicas))
+        except client.ApiException as e:
+          if e.status != 409:
+            raise
+          continue                        # re-created by someone else: inspect theirs
+        logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+        return True
+      meta = existing.get("metadata") or {}
+      owner = (meta.get("labels") or {}).get(constants.RUN_ID_LABEL)
+      if owner_run_id and isinstance(owner, str) and owner and owner != owner_run_id:
+        logger.warning("SandboxWarmPool '%s' belongs to run %s; not resizing it for "
+                       "run %s (use run_isolation='names' to stop sharing names)",
+                       name, owner, owner_run_id)
         return False
-      raise
-    return True
+      logger.info("SandboxWarmPool '%s' exists; patching replicas=%d.", name, replicas)
+      body: dict = {"spec": {"replicas": replicas}}
+      rv = meta.get("resourceVersion")
+      if isinstance(rv, str) and rv:
+        body["metadata"] = {"resourceVersion": rv}   # optimistic lock on what we inspected
+      try:
+        self.custom_api.patch_namespaced_custom_object(
+            group=constants.GROUP, version=constants.VERSION,
+            namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+            name=name, body=body)
+      except client.ApiException as e:
+        if e.status != 409:
+          raise
+        logger.info("SandboxWarmPool '%s' changed since it was read; re-inspecting", name)
+        continue
+      return True
+    raise RuntimeError(
+        f"SandboxWarmPool '{name}' kept changing under {_RECONCILE_ATTEMPTS} "
+        "reconcile attempts; not resizing it")
 
   def validate_manifests(self, sample_image: str, template: TemplateSpec,
                          *, name: str = "asrl-validate") -> None:

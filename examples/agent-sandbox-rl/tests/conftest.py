@@ -37,7 +37,9 @@ class FakeCluster:
     self.apps_api = MagicMock()
     self.resources = MagicMock()
     self.resources.managed_selector.return_value = "app=agent-sandbox-rl"
-    self.resources.get_warmpool.return_value = None      # no live pool -> owned
+    # A live, unlabelled pool: owned (pre-run-id semantics) and present, so unwarm
+    # issues its delete. Tests of the missing / foreign / unreadable cases override.
+    self.resources.get_warmpool.return_value = {"metadata": {}}
     self.resources.ensure_namespace.return_value = False  # namespace pre-existed
     self.resources.list_warmpools.return_value = []
     self.resources.list_templates.return_value = []

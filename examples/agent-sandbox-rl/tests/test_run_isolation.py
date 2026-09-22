@@ -217,10 +217,27 @@ def test_set_pool_replicas_refuses_to_resize_another_runs_pool(make_cluster):
   f.load_tasks([IMG])
   f.plan()
   f.warm_image(IMG, wait=False)
-  assert c.resources.create_warmpool.call_count == 1
-  c.resources.get_warmpool.return_value = _labelled("other-run-0001")
+  before = c.active_replicas
+  c.resources.create_warmpool.return_value = False      # 409 owner check: theirs
   f.set_pool_replicas(IMG, 5)
-  assert c.resources.create_warmpool.call_count == 1       # no reconcile patch issued
+  _, kw = c.resources.create_warmpool.call_args
+  assert kw["owner_run_id"] == f.run_id and kw["reconcile"] is True
+  assert c.active_replicas == before                    # nothing reserved for it
+  assert f._warmed[IMG] != 5
+
+
+def test_set_pool_replicas_does_not_drop_a_scale_change_on_a_read_error(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  f.warm_image(IMG, wait=False)
+  c.resources.get_warmpool.side_effect = RuntimeError("apiserver hiccup")
+  f.set_pool_replicas(IMG, 0)                           # no pre-read to fail on
+  assert f._warmed[IMG] == 0
+  c.resources.create_warmpool.side_effect = RuntimeError("apiserver hiccup")
+  with pytest.raises(RuntimeError):                     # surfaced, not swallowed
+    f.set_pool_replicas(IMG, 1)
 
 
 # --- wait_for_pool_ready fails fast when the pool disappears --------------- #
@@ -314,29 +331,55 @@ def test_names_mode_scopes_template_and_pool_independently(make_cluster):
   assert f.config.pool_name(IMG) == f"{f.config.template_name(IMG)}-pool"
 
 
-def test_owns_pool_fails_closed_when_the_pool_cannot_be_read(make_cluster):
+def test_unwarm_keeps_the_reservation_when_ownership_cannot_be_read(make_cluster):
   c = make_cluster("solo")
   f = _fleet(c)
   f.load_tasks([IMG])
   f.plan()
   f.warm_image(IMG, wait=False)
+  reserved = c.active_replicas
+  assert reserved > 0
   c.resources.get_warmpool.side_effect = RuntimeError("apiserver hiccup")
+  with pytest.raises(RuntimeError, match="hiccup"):
+    f.unwarm_image(IMG)
+  c.resources.delete_warmpool.assert_not_called()
+  assert IMG in f._warmed and c.active_replicas == reserved   # nothing leaked
+  c.resources.get_warmpool.side_effect = None                 # blip over: retry
   f.unwarm_image(IMG)
+  c.resources.delete_warmpool.assert_called_once()
+  assert IMG not in f._warmed and c.active_replicas == 0      # released exactly once
+
+
+def test_warm_refuses_a_pool_name_taken_by_another_run(make_cluster):
+  c = make_cluster("solo")
+  c.resources.create_warmpool.return_value = False       # 409 owner check: theirs
+  c.resources.get_warmpool.return_value = _labelled("other-run-0001")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  with pytest.raises(FleetError) as ei:
+    f.warm_image(IMG, wait=True)
+  msg = str(ei.value)
+  assert "other-run-0001" in msg and f.config.pool_name(IMG) in msg
+  assert "run_isolation='names'" in msg and "adopt_existing=True" in msg
+  assert "--run-id other-run-0001" in msg                # a runnable reap hint
+  _, kw = c.resources.ensure_template.call_args
+  assert kw["owner_run_id"] == f.run_id                  # no relabel of their template
+  c.resources.wait_for_pool_ready.assert_not_called()   # no borrowing, no stall
+  assert IMG not in f._warmed and c.active_replicas == 0
+  f.unwarm_image(IMG)                                    # nothing recorded: a no-op
   c.resources.delete_warmpool.assert_not_called()
 
 
-def test_warm_uses_another_runs_pool_read_only(make_cluster):
+def test_warm_reuse_does_not_read_the_pool(make_cluster):
   c = make_cluster("solo")
   f = _fleet(c)
   f.load_tasks([IMG])
   f.plan()
-  c.resources.get_warmpool.return_value = _labelled("other-run-0001")
-  f.warm_image(IMG, wait=True)
-  c.resources.ensure_template.assert_not_called()      # no relabel of their template
-  c.resources.create_warmpool.assert_not_called()      # no 409 resize of their pool
-  args, _ = c.resources.wait_for_pool_ready.call_args
-  assert args[0] == f.config.pool_name(IMG) and args[1] == 1   # adopt semantics
-  assert c.active_replicas == 0                        # reserved nothing
+  f.warm_image(IMG, wait=False)
+  f.warm_image(IMG, wait=False)                          # cross-epoch reuse
+  c.resources.get_warmpool.assert_not_called()
+  assert c.resources.create_warmpool.call_count == 1
 
 
 def test_wait_for_pool_ready_gives_up_when_the_pool_is_already_gone(monkeypatch):
@@ -471,9 +514,50 @@ def test_create_warmpool_reconciles_with_an_optimistic_lock():
   assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is True
   _, kw = r.custom_api.patch_namespaced_custom_object.call_args
   assert kw["body"] == {"spec": {"replicas": 3}, "metadata": {"resourceVersion": "7"}}
-  # a concurrent change between the read and the patch: back off, do not fight
-  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+
+
+def test_create_warmpool_reinspects_after_a_conflicting_update():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}, "resourceVersion": "7"}},
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}, "resourceVersion": "8"}}]
+  # a status write by the controller between the read and the patch
+  r.custom_api.patch_namespaced_custom_object.side_effect = [
+      client.ApiException(status=409), None]
+  assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is True
+  _, kw = r.custom_api.patch_namespaced_custom_object.call_args
+  assert kw["body"]["metadata"] == {"resourceVersion": "8"}
+  # relabelled by another run in between: the re-read's owner check stops it
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}, "resourceVersion": "7"}},
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "other"}, "resourceVersion": "9"}}]
+  r.custom_api.patch_namespaced_custom_object.reset_mock()
+  r.custom_api.patch_namespaced_custom_object.side_effect = [client.ApiException(status=409)]
   assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is False
+  assert r.custom_api.patch_namespaced_custom_object.call_count == 1
+
+
+def test_create_warmpool_gives_up_if_the_pool_keeps_changing():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}, "resourceVersion": "7"}}
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  with pytest.raises(RuntimeError, match="kept changing"):
+    r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine")
+
+
+def test_create_warmpool_owner_checks_a_pool_recreated_in_the_race():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      client.ApiException(status=404),                   # vanished after the 409 ...
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "other"}, "resourceVersion": "3"}}]
+  # ... and a concurrent run re-created it first: its pool, so False, not a raw 409
+  assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is False
+  assert r.custom_api.create_namespaced_custom_object.call_count == 2
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
 
 
 def test_create_warmpool_recreates_when_the_pool_vanished_after_the_409():
@@ -493,18 +577,6 @@ def test_ensure_template_does_not_relabel_another_runs_template():
       "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
   assert r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine") is False
   r.custom_api.patch_namespaced_custom_object.assert_not_called()
-
-
-def test_warm_falls_back_to_adopt_when_the_create_race_is_lost(make_cluster):
-  c = make_cluster("solo")
-  c.resources.create_warmpool.return_value = False       # 409 belonged to another run
-  f = _fleet(c)
-  f.load_tasks([IMG])
-  f.plan()
-  f.warm_image(IMG, wait=True)
-  args, _ = c.resources.wait_for_pool_ready.call_args
-  assert args[1] == 1                                    # adopt semantics
-  assert c.active_replicas == 0                          # nothing reserved
 
 
 def test_unwarm_deletes_exactly_the_inspected_pool(make_cluster):
@@ -534,3 +606,59 @@ def test_rollback_keeps_ownership_when_the_namespace_delete_fails(make_cluster):
   assert (c.name, c.namespace) in f._created_namespaces  # rollback failed: still ours
   f.teardown()                                           # ordinary teardown retries it
   assert c.resources.delete_namespace.call_count == 2
+
+
+# --- review round 3: tri-state ownership, no blind deletes, namespace state -- #
+def test_unwarm_of_a_pool_already_gone_issues_no_delete_by_name(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  f.warm_image(IMG, wait=False)
+  c.resources.get_warmpool.return_value = None           # deleted since it was warmed
+  f.unwarm_image(IMG)
+  c.resources.delete_warmpool.assert_not_called()        # could hit a re-created pool
+  c.resources.delete_template.assert_called_once_with(f.config.template_name(IMG))
+  assert IMG not in f._warmed and c.active_replicas == 0
+
+
+def test_teardown_keeps_namespace_ownership_when_its_delete_fails(make_cluster):
+  c = make_cluster("solo", namespace="rl")
+  c.resources.ensure_namespace.return_value = True
+  c.resources.delete_namespace.side_effect = [RuntimeError("apiserver"), None]
+  f = _fleet(c, run_isolation="namespace")
+  f.load_tasks([IMG])
+  f.plan()
+  f.teardown()
+  assert (c.name, c.namespace) in f._created_namespaces  # still ours: retry next cycle
+  f._torndown = False                                    # what setup() does per cycle
+  f.teardown()
+  assert c.resources.delete_namespace.call_count == 2
+  assert f._created_namespaces == set()
+
+
+def test_setup_hook_reruns_on_a_namespace_kept_after_a_failed_rollback(make_cluster):
+  c = make_cluster("solo", namespace="rl")
+  created = iter([True])                                    # then "already exists"
+  c.resources.ensure_namespace.side_effect = lambda *a, **k: next(created, False)
+  c.resources.delete_namespace.side_effect = RuntimeError("apiserver")
+  attempts = []
+
+  def hook(cluster, ns):
+    attempts.append(ns)
+    if len(attempts) == 1:
+      raise RuntimeError("LocalQueue create failed")
+
+  f = _fleet(c, run_isolation="namespace", run_namespace_setup=hook)
+  f.load_tasks([IMG])
+  with pytest.raises(FleetError, match="run_namespace_setup"):
+    f.plan()
+  assert (c.name, c.namespace) in f._created_namespaces  # rollback delete failed
+  f.plan()                                               # exists now, but not set up
+  assert attempts == [c.namespace, c.namespace]
+  assert f._namespaces_ensured is True
+  f.plan_ = None
+  f._namespaces_ensured = False
+  f.plan()                                               # set up once: not re-run
+  assert len(attempts) == 2
+

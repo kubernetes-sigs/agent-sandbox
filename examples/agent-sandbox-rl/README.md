@@ -475,17 +475,20 @@ namespace would otherwise share — and resize, and delete — one pool.
   it; names stay stable per image. Anything a fresh namespace needs beyond labels —
   a Kueue `LocalQueue`, a `ResourceQuota`, an image-pull secret — is yours to add in
   `run_namespace_setup=lambda cluster, ns: ...`; `run_namespace_labels` go on the
-  namespace object. The fleet's identity needs `namespaces` create/delete.
+  namespace object. The hook can run again on a namespace it partly set up (after
+  a failure whose rollback could not delete the namespace), so make it idempotent.
+  The fleet's identity needs `namespaces` create/delete.
 - **`run_isolation="none"`** (default) — today's naming; fine when nothing else runs
   in the namespace.
 
-In every mode a pool labelled with another run's id is never written to: warming
-it uses it read-only (as adoption does), and `unwarm_image()` /
-`set_pool_replicas()` leave it alone, each logging which run owns it. The writes
-are conditional on what was inspected (uid precondition on delete, resourceVersion
-on the resize patch, ownership re-checked at a 409 on create), so two runs racing
-on one name cannot delete or resize each other's pool. Sharing one warm fleet
-across consumers on purpose is the
+In every mode a pool labelled with another run's id is never written to. Warming
+it fails with a `FleetError` that names the owning run: pick `run_isolation`, set
+`adopt_existing=True` to share on purpose, or reap the other run if it is dead.
+`unwarm_image()` and `set_pool_replicas()` leave it alone, each logging which run
+owns it. The writes are conditional on what was inspected (uid precondition on
+delete, resourceVersion on the resize patch, ownership re-checked at a 409 on
+create), so two runs racing on one name cannot delete or resize each other's pool.
+Sharing one warm fleet across consumers on purpose is the
 [adoption](#adopting-warm-pools-someone-else-provisioned) model, not a name collision.
 
 ## Configuration reference

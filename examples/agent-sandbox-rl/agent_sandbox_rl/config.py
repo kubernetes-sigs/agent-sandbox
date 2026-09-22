@@ -177,7 +177,9 @@ class FleetConfig(BaseModel):
   # labels + `run_namespace_labels`) and deleted at teardown if this fleet created
   # it. Anything a fresh namespace needs beyond labels (a Kueue LocalQueue, quotas,
   # a pull secret) is the caller's job — do it in `run_namespace_setup(cluster,
-  # namespace)`. Teardown only ever sweeps this run's resources, in every mode.
+  # namespace)`, which must tolerate a re-run: a namespace kept after a failed
+  # rollback delete gets the hook again until it succeeds once. Teardown only
+  # ever sweeps this run's resources, in every mode.
   run_isolation: str = "none"
   run_namespace_labels: dict[str, str] = Field(default_factory=dict)
   run_namespace_setup: Callable[..., Any] | None = None

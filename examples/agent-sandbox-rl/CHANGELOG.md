@@ -19,13 +19,20 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   (900 s by default); a 404 on the dropped-watch re-check did the same. Both now
   return `False` immediately, with an error log naming the pool.
 - **A pool carrying another run's id label is never written to** (image-derived
-  names collide across runs): warming it uses it read-only with adopt semantics,
-  and `unwarm_image()` / `set_pool_replicas()` leave it alone; each logs which run
-  owns it, and an ownership check that cannot read the pool fails closed. The
-  writes themselves are conditional, not just pre-checked: deletes carry the
-  inspected pool's uid as a precondition, the reconcile patch carries its
-  resourceVersion, a 409 on create re-checks who owns the existing pool before
-  resizing it, and `ensure_template` does not relabel a template another run owns.
+  names collide across runs). Warming it raises a `FleetError` naming the owning
+  run and pointing at `run_isolation="names"` / `adopt_existing=True` / the
+  reaper, instead of quietly consuming a pool whose depth and lifetime belong to
+  someone else. `unwarm_image()` and `set_pool_replicas()` leave it alone with a
+  warning (erroring mid-cleanup would be worse). An unwarm that cannot read the
+  pool keeps the image and its reserved replicas and raises, so a retry releases
+  them exactly once. The writes are conditional on what was inspected: deletes
+  carry the pool's uid as a precondition (and a pool already gone gets no delete
+  by name), the reconcile patch carries its resourceVersion and re-inspects on a
+  conflict, a 409 on create re-checks who owns the existing pool before resizing
+  it, and `ensure_template` does not relabel a template another run owns.
+  **Behaviour change:** a run whose image-derived pool name is held by another
+  run (including a crashed run's leftover) now fails at warm instead of sharing
+  and resizing that pool.
 
 ### Added (concurrent runs — #1736)
 - **`FleetConfig.run_isolation`** (`"none"` default, naming unchanged): `"names"`
@@ -35,7 +42,10 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   `run_namespace_setup(cluster, namespace)` hook for a `LocalQueue`, quota or pull
   secret. Namespace creation is all-or-nothing per attempt (a create or hook
   failure rolls back what that attempt created, and a namespace still Terminating
-  is an error, not "existing"); `adopt_existing` is rejected with this mode. A
+  is an error, not "existing"). A namespace whose rollback or teardown delete
+  fails stays owned, so the next attempt re-runs a hook that has not yet
+  succeeded and the next teardown retries the delete; the hook must therefore
+  tolerate a re-run. `adopt_existing` is rejected with this mode. A
   `{run_id}` placeholder is accepted in `template_name_prefix` and
   `pool_name_format` in any mode.
 

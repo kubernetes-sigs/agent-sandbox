@@ -47,15 +47,7 @@ const (
 
 	// WebhookAnnotation is the annotation key for the time the webhook first saw the claim.
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
-
-	OwnedBySandboxClaim    = "SandboxClaim"    // Sandbox owned by a SandboxClaim
-	OwnedBySandboxWarmPool = "SandboxWarmPool" // Sandbox owned by a SandboxWarmPool
-	OwnedByNone            = "None"            // Sandbox not owned by any extension controller
 )
-
-// sandboxLatencyBuckets defines the shared histogram bucket boundaries (in milliseconds)
-// for sandbox-level latency metrics, covering 50ms to 10 minutes.
-var sandboxLatencyBuckets = []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000}
 
 var (
 	// ClaimStartupLatency measures the time from the webhook first observing the SandboxClaim to SandboxClaim Ready state.
@@ -120,25 +112,10 @@ var (
 	SandboxCreationLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "agent_sandbox_creation_latency_ms",
-			Help:    "Latency from Sandbox creation to the Sandbox Ready condition in milliseconds. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
-			Buckets: sandboxLatencyBuckets,
+			Help:    "Latency from Sandbox creation to the Sandbox Ready condition in milliseconds; source timestamps have second-level Kubernetes precision. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
+			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
 		},
 		[]string{"namespace", "launch_type", "sandbox_template"},
-	)
-
-	// SandboxReadyLatency measures the time from controller first observed timestamp to Sandbox Ready state.
-	// Labels:
-	// - namespace: the namespace of the sandbox
-	// - launch_type: "warm" | "cold" (defaults to cold when the launch-type label is absent)
-	// - sandbox_template: the SandboxTemplateRef, or "unknown" when the Sandbox carries no template annotation.
-	// - owned_by: "SandboxClaim", "SandboxWarmPool", "None".
-	SandboxReadyLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "agent_sandbox_ready_latency_ms",
-			Help:    "Controller-observed latency from first Sandbox observation to Ready in milliseconds; includes reconcile processing time and depends on controller wall-clock timestamps.",
-			Buckets: sandboxLatencyBuckets,
-		},
-		[]string{"namespace", "launch_type", "sandbox_template", "owned_by"},
 	)
 
 	// SandboxClaimCreationTotal counts the Sandboxes created or adopted for a SandboxClaim.
@@ -205,7 +182,6 @@ func init() {
 	metrics.Registry.MustRegister(ClaimControllerStartupLatency)
 	metrics.Registry.MustRegister(ClientClaimStartupLatency)
 	metrics.Registry.MustRegister(SandboxCreationLatency)
-	metrics.Registry.MustRegister(SandboxReadyLatency)
 	metrics.Registry.MustRegister(SandboxClaimCreationTotal)
 	metrics.Registry.MustRegister(BuildInfo)
 }
@@ -234,11 +210,6 @@ func RecordClientClaimStartupLatency(ctx context.Context, startTime time.Time, l
 // RecordSandboxCreationLatency records the measured latency duration for a sandbox creation.
 func RecordSandboxCreationLatency(duration time.Duration, namespace, launchType, templateName string) {
 	recordLatencyDuration(SandboxCreationLatency, duration, namespace, launchType, templateName)
-}
-
-// RecordSandboxReadyLatency records the measured latency from controller first observation to Ready.
-func RecordSandboxReadyLatency(duration time.Duration, namespace, launchType, templateName, ownedBy string) {
-	recordLatencyDuration(SandboxReadyLatency, duration, namespace, launchType, templateName, ownedBy)
 }
 
 func recordLatencyDuration(histogram *prometheus.HistogramVec, duration time.Duration, labelValues ...string) {

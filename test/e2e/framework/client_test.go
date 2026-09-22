@@ -17,7 +17,10 @@ package framework
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -79,5 +82,87 @@ func TestMustUpdateObjectRetriesOnConflict(t *testing.T) {
 	}
 	if updated.Labels["test-key"] != "test-value" {
 		t.Errorf("label not persisted after conflict retry, got labels: %v", updated.Labels)
+	}
+}
+
+func fakePortForwardCmd(t *testing.T, script string) *exec.Cmd {
+	t.Helper()
+	return exec.CommandContext(t.Context(), "sh", "-c", script)
+}
+
+func TestStartPortForwardWaitsForReadyMarker(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	// Chatter before the banner widens the concurrent write/read window on stdout.
+	cmd := fakePortForwardCmd(t, `for i in $(seq 1 40); do echo "warming up $i"; done
+echo "Forwarding from 127.0.0.1:8080 -> 8080"
+exec sleep 30`)
+
+	if err := cl.startPortForward(cmd, portForwardReadyTimeout); err != nil {
+		t.Fatalf("startPortForward failed on a child that printed the ready marker: %v", err)
+	}
+}
+
+func TestStartPortForwardReportsExitBeforeReady(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	cmd := fakePortForwardCmd(t, `echo "error: unable to listen on port 8080" >&2
+exit 1`)
+
+	err := cl.startPortForward(cmd, portForwardReadyTimeout)
+	if err == nil {
+		t.Fatal("startPortForward succeeded for a child that exited without the ready marker")
+	}
+	if !strings.Contains(err.Error(), "unable to listen on port 8080") {
+		t.Errorf("error does not carry the captured stderr: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Errorf("error does not carry the exit status: %v", err)
+	}
+}
+
+// Signalled children report Exited()=false, so ProcessState polling misses them.
+func TestStartPortForwardReportsSignalledChild(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	cmd := fakePortForwardCmd(t, `echo "warming up"
+kill -9 $$`)
+
+	const timeout = 10 * time.Second
+	start := time.Now()
+	err := cl.startPortForward(cmd, timeout)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("startPortForward succeeded for a signalled child")
+	}
+	if !strings.Contains(err.Error(), "signal: killed") {
+		t.Errorf("error does not identify the signal: %v", err)
+	}
+	if elapsed > timeout/5 {
+		t.Errorf("startPortForward took %s to observe a signalled child, close to the %s deadline", elapsed, timeout)
+	}
+}
+
+func TestStartPortForwardTimesOutWithoutReadyMarker(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	cmd := fakePortForwardCmd(t, `echo "warming up"
+exec sleep 30`)
+
+	const timeout = 200 * time.Millisecond
+	start := time.Now()
+	err := cl.startPortForward(cmd, timeout)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("startPortForward succeeded for a child that never reported readiness")
+	}
+	if !strings.Contains(err.Error(), "did not report") {
+		t.Errorf("error does not identify the timeout: %v", err)
+	}
+	if !strings.Contains(err.Error(), "warming up") {
+		t.Errorf("error does not carry the output captured so far: %v", err)
+	}
+	if elapsed < timeout {
+		t.Errorf("startPortForward returned after %s, before the %s deadline", elapsed, timeout)
 	}
 }

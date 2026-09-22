@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -548,59 +549,109 @@ func (cl *ClusterClient) validateAgentSandboxInstallation() error {
 	return nil
 }
 
+const (
+	// portForwardReadyMarker is kubectl's bind banner. It is what tells us this
+	// child owns the listener, not an orphan from an earlier attempt.
+	portForwardReadyMarker = "Forwarding from"
+
+	portForwardReadyTimeout = 60 * time.Second
+	portForwardPollInterval = 5 * time.Millisecond
+)
+
+// syncBuffer is a goroutine-safe bytes.Buffer for concurrent write/read of cmd output.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// PortForward starts a background `kubectl port-forward` and returns once kubectl
+// reports it has bound localPort, erroring if kubectl exits first or stays silent
+// past portForwardReadyTimeout. Cancelling ctx kills kubectl, so cancellation
+// surfaces as an exit. The forward is torn down when the owning test completes.
 func (cl *ClusterClient) PortForward(ctx context.Context, pod types.NamespacedName, localPort, remotePort int) error {
 	cl.Helper()
-	// Set up a port-forward to the Chrome Debug Port
 	portForward := exec.CommandContext(ctx, "kubectl", "-n", pod.Namespace,
 		"port-forward", "pod/"+pod.Name, fmt.Sprintf("%d:%d", localPort, remotePort))
 	cl.Logf("starting port-forward: %s", portForward.String())
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	portForward.Stdout = io.MultiWriter(os.Stdout, &stdout)
-	portForward.Stderr = io.MultiWriter(os.Stderr, &stderr)
-	if err := portForward.Start(); err != nil {
+	return cl.startPortForward(portForward, portForwardReadyTimeout)
+}
+
+// startPortForward supervises cmd until its stdout reports portForwardReadyMarker.
+// Split from PortForward so tests can supply their own command.
+func (cl *ClusterClient) startPortForward(cmd *exec.Cmd, timeout time.Duration) error {
+	cl.Helper()
+
+	var stdout, stderr syncBuffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start port-forward: %w", err)
 	}
 
-	stopProcess := func() {
-		if portForward.ProcessState != nil {
-			if portForward.ProcessState.Exited() {
-				return
-			}
-		}
-		cl.Log("killing port-forward")
-		if err := portForward.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			cl.Errorf("failed to kill port-forward: %s", err)
-		}
-	}
-	cl.Cleanup(stopProcess)
-
+	// ProcessState is racy with Wait, and Exited() is false for signalled
+	// children; a channel closed by Wait covers every exit reason.
+	var waitErr error
+	exited := make(chan struct{})
 	go func() {
-		cl.Helper()
-		if err := portForward.Wait(); err != nil {
-			cl.Logf("port-forward exited with error: %s", err)
-		} else {
-			cl.Log("port-forward exited")
-		}
+		waitErr = cmd.Wait()
+		close(exited)
 	}()
 
-	// There is a delay after starting the process before it starts listening.
-	// Wait for the "Forwarding from" message
+	cl.Cleanup(func() {
+		select {
+		case <-exited:
+			cl.Logf("port-forward already exited: %v", waitErr)
+			return
+		default:
+		}
+		cl.Log("killing port-forward")
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			cl.Errorf("failed to kill port-forward: %s", err)
+		}
+	})
+
+	readyTimer := time.NewTimer(timeout)
+	defer readyTimer.Stop()
+	pollTick := time.NewTicker(portForwardPollInterval)
+	defer pollTick.Stop()
+
 	for {
-		if portForward.ProcessState != nil {
-			if portForward.ProcessState.Exited() {
-				return fmt.Errorf("port-forward process exited unexpectedly: stdout=%q stderr=%q", stdout.String(), stderr.String())
-			}
+		if strings.Contains(stdout.String(), portForwardReadyMarker) {
+			cl.Logf("port-forward is ready\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
+			return nil
 		}
 
-		// Check stdout for the "Forwarding from" message
-		if strings.Contains(stdout.String(), "Forwarding from") {
-			cl.Logf("port-forward is ready\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
-			break
+		select {
+		case <-exited:
+			// Wait drains the output copiers, so the buffers are complete here.
+			reason := "before readiness was observed"
+			if strings.Contains(stdout.String(), portForwardReadyMarker) {
+				reason = "after binding the port"
+			}
+			if waitErr != nil {
+				return fmt.Errorf("port-forward exited %s: %w (stdout=%q stderr=%q)",
+					reason, waitErr, stdout.String(), stderr.String())
+			}
+			return fmt.Errorf("port-forward exited %s (stdout=%q stderr=%q)",
+				reason, stdout.String(), stderr.String())
+		case <-readyTimer.C:
+			return fmt.Errorf("port-forward did not report %q within %s (stdout=%q stderr=%q)",
+				portForwardReadyMarker, timeout, stdout.String(), stderr.String())
+		case <-pollTick.C:
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	return nil
 }
 
 var sandboxGVK = schema.GroupVersionKind{

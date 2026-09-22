@@ -1008,6 +1008,216 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             await connector.close()
 
+    async def test_non_streaming_request_forwards_request_auth(self):
+        connector = self._make_connector()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.request = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request("GET", "health", auth=auth)
+
+            self.assertIs(result, response)
+            connector.client.request.assert_awaited_once_with(
+                "GET",
+                ANY,
+                headers=ANY,
+                follow_redirects=False,
+                auth=auth,
+            )
+        finally:
+            await connector.close()
+
+    async def test_streaming_request_returns_unbuffered_response(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        response.aclose = AsyncMock()
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request("GET", "download/file", stream=True)
+
+            self.assertIs(result, response)
+            connector.client.build_request.assert_called_once()
+            connector.client.send.assert_awaited_once_with(
+                request,
+                auth=httpx.USE_CLIENT_DEFAULT,
+                follow_redirects=False,
+                stream=True,
+            )
+            response.aclose.assert_not_awaited()
+        finally:
+            await connector.close()
+
+    async def test_streaming_request_forwards_request_auth(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        response.aclose = AsyncMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request(
+                "GET", "download/file", stream=True, auth=auth
+            )
+
+            self.assertIs(result, response)
+            connector.client.build_request.assert_called_once()
+            self.assertNotIn(
+                "auth", connector.client.build_request.call_args.kwargs
+            )
+            connector.client.send.assert_awaited_once_with(
+                request, follow_redirects=False, stream=True, auth=auth
+            )
+        finally:
+            await connector.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
+    async def test_streaming_retry_preserves_request_auth(self, mock_sleep):
+        connector = self._make_connector()
+        request = MagicMock()
+        retry_response = MagicMock()
+        retry_response.status_code = 503
+        retry_response.aclose = AsyncMock()
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.is_redirect = False
+        success_response.raise_for_status = MagicMock()
+        success_response.aclose = AsyncMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(
+            side_effect=[retry_response, success_response]
+        )
+
+        try:
+            result = await connector.send_request(
+                "GET", "download/file", stream=True, auth=auth
+            )
+
+            self.assertIs(result, success_response)
+            self.assertEqual(
+                connector.client.send.await_args_list[0].kwargs["auth"], auth
+            )
+            self.assertEqual(
+                connector.client.send.await_args_list[1].kwargs["auth"], auth
+            )
+            mock_sleep.assert_awaited_once()
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_closes_response(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 404
+        response.is_redirect = False
+        response.aclose = AsyncMock()
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=request, response=response
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request("GET", "missing", stream=True)
+
+            response.aclose.assert_awaited_once_with()
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_preserves_response_body(self):
+        connector = self._make_connector()
+        request = httpx.Request("GET", "http://sandbox/missing")
+
+        class SingleChunkStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"missing file"
+
+        response = httpx.Response(
+            404, stream=SingleChunkStream(), request=request
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(SandboxRequestError) as ctx:
+                await connector.send_request("GET", "missing", stream=True)
+
+            self.assertEqual(ctx.exception.response.content, b"missing file")
+            self.assertEqual(ctx.exception.response.text, "missing file")
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_closes_response_when_capture_is_cancelled(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 404
+        response.is_redirect = False
+        response.aclose = AsyncMock()
+
+        async def cancelled_body(*, chunk_size):
+            del chunk_size
+            raise asyncio.CancelledError
+            yield b"unreachable"
+
+        response.aiter_bytes = cancelled_body
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=request, response=response
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await connector.send_request("GET", "missing", stream=True)
+
+            response.aclose.assert_awaited_once_with()
+        finally:
+            await connector.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
+    async def test_streaming_retry_closes_discarded_response(self, mock_sleep):
+        connector = self._make_connector()
+        request = MagicMock()
+        retry_response = MagicMock()
+        retry_response.status_code = 503
+        retry_response.aclose = AsyncMock()
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.is_redirect = False
+        success_response.raise_for_status = MagicMock()
+        success_response.aclose = AsyncMock()
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(
+            side_effect=[retry_response, success_response]
+        )
+
+        try:
+            result = await connector.send_request("GET", "download/file", stream=True)
+
+            self.assertIs(result, success_response)
+            retry_response.aclose.assert_awaited_once_with()
+            success_response.aclose.assert_not_awaited()
+            mock_sleep.assert_awaited_once()
+        finally:
+            await connector.close()
+
     async def test_follow_redirects_is_false(self):
         connector = self._make_connector()
         mock_response = MagicMock()

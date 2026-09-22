@@ -19,7 +19,7 @@ import subprocess
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import requests
 
@@ -194,6 +194,67 @@ class TestPortForwardCleanup(unittest.TestCase):
 
         strategy.close()
 
+        self.assertIs(strategy.port_forward_process, process)
+        self.assertEqual(strategy.base_url, "http://127.0.0.1:18080")
+        self.assertEqual(strategy.grpc_target, "127.0.0.1:19090")
+
+        strategy.close()
+
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy.base_url)
+        self.assertIsNone(strategy.grpc_target)
+
+    def test_local_tunnel_retains_process_when_kill_wait_times_out(self):
+        strategy = LocalTunnelConnectionStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxLocalTunnelConnectionConfig(),
+        )
+        process = MagicMock()
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="kubectl", timeout=2),
+            subprocess.TimeoutExpired(cmd="kubectl", timeout=2),
+            None,
+        ]
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+
+        strategy.close()
+
+        self.assertEqual(
+            process.wait.call_args_list,
+            [call(timeout=2), call(timeout=2)],
+        )
+        self.assertIs(strategy.port_forward_process, process)
+        self.assertEqual(strategy.base_url, "http://127.0.0.1:18080")
+
+        strategy.close()
+
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy.base_url)
+
+    def test_sandboxd_tunnel_retains_process_when_kill_wait_times_out(self):
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+        )
+        process = MagicMock()
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="kubectl", timeout=2),
+            subprocess.TimeoutExpired(cmd="kubectl", timeout=2),
+            None,
+        ]
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+        strategy.grpc_target = "127.0.0.1:19090"
+
+        strategy.close()
+
+        self.assertEqual(
+            process.wait.call_args_list,
+            [call(timeout=2), call(timeout=2)],
+        )
         self.assertIs(strategy.port_forward_process, process)
         self.assertEqual(strategy.base_url, "http://127.0.0.1:18080")
         self.assertEqual(strategy.grpc_target, "127.0.0.1:19090")

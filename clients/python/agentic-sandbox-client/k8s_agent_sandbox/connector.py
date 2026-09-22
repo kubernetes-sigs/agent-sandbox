@@ -268,6 +268,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     self.port_forward_process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.port_forward_process.kill()
+                    self.port_forward_process.wait(timeout=2)
             except Exception as e:
                 logging.error(f"Failed to stop port-forwarding: {e}")
             else:
@@ -389,6 +390,7 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     self.port_forward_process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.port_forward_process.kill()
+                    self.port_forward_process.wait(timeout=2)
             except Exception as e:
                 logging.error(f"Failed to stop sandboxd pod tunnel: {e}")
             else:

@@ -457,6 +457,40 @@ layer's scheme, `"warm-{image_hash}"` for a bare digest. Override
 `FleetConfig.pool_name(image)` in a subclass for anything the format string can't
 express; every pool name in the SDK goes through it.
 
+### Concurrent runs on one cluster
+
+Several fleets can run at once on the same cluster. Teardown only ever deletes
+**this run's** claims, pools and templates (everything carries the `fleet.run_id`
+label), and a pool deleted out from under a wait fails fast instead of running out
+`ready_timeout`. What you still choose is how runs stay out of each other's way:
+template and pool names derive from the image, so two runs on the same image in one
+namespace would otherwise share — and resize, and delete — one pool.
+
+- **`run_isolation="names"`** — everyone stays in one namespace; the run id is baked
+  into every template and pool name (`oh-img-<run id>-<md5>`). Cheapest to operate:
+  no extra namespaces, quotas or queues. Put `{run_id}` in `template_name_prefix` /
+  `pool_name_format` to place it yourself.
+- **`run_isolation="namespace"`** — each run gets `<namespace>-<run id>`, created on
+  first use (`preflight()` / `plan()`) and deleted at teardown if the fleet created
+  it; names stay stable per image. Anything a fresh namespace needs beyond labels —
+  a Kueue `LocalQueue`, a `ResourceQuota`, an image-pull secret — is yours to add in
+  `run_namespace_setup=lambda cluster, ns: ...`; `run_namespace_labels` go on the
+  namespace object. The hook can run again on a namespace it partly set up (after
+  a failure whose rollback could not delete the namespace), so make it idempotent.
+  The fleet's identity needs `namespaces` create/delete.
+- **`run_isolation="none"`** (default) — today's naming; fine when nothing else runs
+  in the namespace.
+
+In every mode a pool or template labelled with another run's id is never written
+to. Warming onto it fails with a `FleetError` that names the owning run: pick
+`run_isolation`, set `adopt_existing=True` to share on purpose, or reap the other
+run if it is dead. `unwarm_image()` and `set_pool_replicas()` leave it alone, each
+logging which run owns it. The writes are conditional on what was inspected (uid precondition on
+delete, resourceVersion on the resize patch, ownership re-checked at a 409 on
+create), so two runs racing on one name cannot delete or resize each other's pool.
+Sharing one warm fleet across consumers on purpose is the
+[adoption](#adopting-warm-pools-someone-else-provisioned) model, not a name collision.
+
 ## Configuration reference
 
 **FleetConfig:** `clusters`, `placement`, `max_concurrent` (1), `max_warmpool_size`
@@ -466,9 +500,11 @@ the warm fill in waves of ≤ N sandbox creates in flight to bound the controlle
 create burst; on controllers ≤ v0.5.3 also pair with a low
 `--sandbox-warm-pool-concurrent-workers` to dodge #1215; `0` = warm all at once), `template`
 (`TemplateSpec`), `template_name_prefix` (`r2e-img-`), `pool_name_format`
-(`pool-{template}`; `{image_hash}` also available), `adopt_existing` (False — use
-pools that already exist and fail loudly on a miss, see
-[above](#adopting-warm-pools-someone-else-provisioned)), `labels`. Disk-aware sizing (optional):
+(`pool-{template}`; `{image_hash}` and `{run_id}` also available), `adopt_existing`
+(False — use pools that already exist and fail loudly on a miss, see
+[above](#adopting-warm-pools-someone-else-provisioned)), `run_isolation` (`none` |
+`names` | `namespace`, see [above](#concurrent-runs-on-one-cluster)) with
+`run_namespace_labels` and `run_namespace_setup`, `labels`. Disk-aware sizing (optional):
 `avg_image_gb`, `node_ephemeral_gb`, `disk_headroom` (0.25), `cluster_nodes`
 (None) — when set, the auto window for `sliding`/`pipelined` is capped so resident
 images fit disk; `cluster_nodes` makes that the *whole pool's* disk (distinct images

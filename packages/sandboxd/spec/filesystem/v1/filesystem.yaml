@@ -21,16 +21,17 @@ info:
     High-performance raw file transfers (read/write) are served over HTTP REST, while interactive
     process execution is served over gRPC on a dedicated port.
     Compatibility & Migration Note: This specification replaces the unversioned python-runtime
-    endpoints (/upload, /download, /list, /exists) and FileEntry wire representation. Existing
-    SDK clients migrate to this versioned /v1/ surface using the dynamic endpoint discovery and
-    breaking change rollout strategy documented in KEP-539.2.
-    Security note: sandboxd listens strictly on localhost or Unix Domain Socket within the isolated
-    container network namespace and must never be exposed on public interfaces.
+    endpoints (/upload, /download, /list, /exists) and FileEntry wire representation. Supported
+    SDK clients select this versioned /v1/ surface explicitly; they do not auto-detect the runtime
+    from environment variables. See KEP-539.2 for the endpoint and wire-format differences.
+    Security note: sandboxd listens on the pod network by default. Protect both runtime ports with
+    pod isolation and NetworkPolicy, or bind to loopback for local-only access. Never expose the
+    runtime API directly to an untrusted public network.
   version: "v1"
 
 servers:
   - url: http://localhost:8080/v1
-    description: sandboxd REST server (default port 8080 or Unix Domain Socket)
+    description: sandboxd REST server (default port 8080; listen address is configurable)
 
 paths:
   /files/{path}:
@@ -41,10 +42,10 @@ paths:
         schema:
           type: string
         description: >
-          Sandbox-relative path (e.g. workspace/main.py or workspace/src/).
-          Path segments containing '/' must be URL-encoded (%2F) by clients
-          when constructing the request URL. The server decodes the full path
-          before resolving it against the sandbox root.
+          Sandbox-relative path (e.g. main.py or src/main.py).
+          Nested paths may use literal '/' separators or percent-encoded '%2F'.
+          The supported SDKs encode the complete path value. The server decodes
+          the request path before resolving it against the sandbox root.
 
     get:
       summary: Read a file or list a directory
@@ -66,6 +67,21 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    head:
+      summary: Check whether a file or directory exists
+      description: Returns the same status and metadata headers as GET without a response body.
+      responses:
+        "200":
+          description: Path exists
+        "403":
+          description: Path escapes sandbox root, or permission is denied during path lookup or file open
+        "404":
+          description: Path does not exist within the sandbox
+        "500":
+          description: Permission is denied while reading a directory, or another internal filesystem error
 
     put:
       summary: Write or overwrite a file (Idempotent)
@@ -104,6 +120,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
     delete:
       summary: Remove a file or directory
@@ -118,12 +136,16 @@ paths:
       responses:
         "204":
           description: Removed successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /health:
     get:
@@ -261,6 +283,12 @@ components:
             $ref: "#/components/schemas/Error"
     Conflict:
       description: Directory not empty when recursive=false
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalServerError:
+      description: Internal filesystem error
       content:
         application/json:
           schema:

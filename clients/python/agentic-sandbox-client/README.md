@@ -229,6 +229,39 @@ client = SandboxClient(
 sandbox = client.create_sandbox(warmpool="node-sandbox-warmpool", namespace="default")
 ```
 
+### File Operations
+
+`read()` remains convenient for small files and returns the complete contents as
+`bytes`. Use `read_to()` for large files so the response is copied incrementally
+into a caller-owned binary destination:
+
+```python
+with open("artifact-copy.tar", "wb") as destination:
+    written = sandbox.files.read_to(
+        "artifact.tar",
+        destination,
+        max_bytes=512 * 1024 * 1024,
+    )
+
+print(f"downloaded {written} bytes")
+```
+
+`read_to()` never closes the destination. It always closes the HTTP response,
+including after a size-limit violation or destination error. If an error occurs,
+data already written remains in the destination. Omitting `max_bytes` disables
+the optional per-call download limit.
+
+`AsyncFilesystem.read_to()` provides the same behavior for an asynchronous sink
+whose `write(bytes)` method is awaitable and returns the number of bytes accepted:
+
+```python
+written = await sandbox.files.read_to(
+    "artifact.tar",
+    async_destination,
+    max_bytes=512 * 1024 * 1024,
+)
+```
+
 ### 6. Async Client
 
 For async applications (FastAPI, aiohttp, async agent orchestrators), use the `AsyncSandboxClient`.
@@ -240,8 +273,10 @@ pip install k8s-agent-sandbox[async]
 
 The async client requires an explicit connection config — `SandboxLocalTunnelConnectionConfig`
 is not supported because it relies on a synchronous `kubectl port-forward` subprocess. Use
-`SandboxGatewayConnectionConfig`, `SandboxDirectConnectionConfig`, or
-`SandboxInClusterConnectionConfig` instead.
+`SandboxGatewayConnectionConfig`, `SandboxDirectConnectionConfig`,
+`SandboxInClusterConnectionConfig`, or `SandboxdPodTunnelConnectionConfig`. For the portable
+`sandboxd` runtime, install
+both optional extras: `pip install 'k8s-agent-sandbox[async,grpc]'`.
 
 **Direct connection (explicit URL, e.g. router service):**
 
@@ -283,6 +318,30 @@ async def main():
         )
         result = await sandbox.commands.run("echo 'Hello from async!'")
         print(result.stdout)
+
+asyncio.run(main())
+```
+
+**sandboxd runtime (direct pod tunnel):**
+
+`SandboxdPodTunnelConnectionConfig` forwards sandboxd's REST filesystem port and gRPC
+process port directly from the sandbox Pod. The async client establishes and tears down
+both forwards without blocking the event loop.
+
+```python
+import asyncio
+from k8s_agent_sandbox import AsyncSandboxClient
+from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+
+async def main():
+    config = SandboxdPodTunnelConnectionConfig()
+    async with AsyncSandboxClient(connection_config=config) as client:
+        sandbox = await client.create_sandbox(
+            warmpool="sandboxd-warmpool",
+            namespace="default",
+        )
+        result = await sandbox.commands.run("echo 'Hello from sandboxd'")
+        await sandbox.files.write("hello.txt", result.stdout)
 
 asyncio.run(main())
 ```

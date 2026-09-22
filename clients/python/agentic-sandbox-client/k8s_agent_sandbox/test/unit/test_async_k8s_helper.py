@@ -19,6 +19,7 @@ import pytest
 
 pytest.importorskip("kubernetes_asyncio")
 
+import aiohttp
 from kubernetes_asyncio import client
 
 from k8s_agent_sandbox.async_k8s_helper import AsyncK8sHelper
@@ -320,6 +321,63 @@ class TestAsyncK8sHelperResolveSandboxName(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(name, "warm-sandbox-1")
         self.assertEqual(stream_rvs, ["12345", "0"])
 
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_watch_transient_disconnect_resumes_from_tracked_resource_version(self, mock_watch_class):
+        """A transient network disconnect (aiohttp.ClientError) resumes from the tracked
+        resourceVersion instead of resetting to '0'."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+        first_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim", "resourceVersion": "5555"},
+                "status": {"conditions": []},
+            },
+        }
+        ready_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "test-claim", "resourceVersion": "7777"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "sandbox": {"name": "warm-sandbox-1"},
+                },
+            },
+        }
+
+        stream_rvs = []
+
+        async def mock_stream(*args, **kwargs):
+            stream_rvs.append(kwargs.get("resource_version"))
+            if len(stream_rvs) == 1:
+                yield first_event
+                raise aiohttp.ClientConnectionError("Connection reset by peer")
+            yield ready_event
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        name = await self.helper.wait_for_claim_ready(
+            "test-claim", "default", timeout=5, resource_version="12345")
+        self.assertEqual(name, "warm-sandbox-1")
+        self.assertEqual(stream_rvs, ["12345", "5555"])
+
+    @patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch")
+    async def test_async_watch_non_transient_network_exception_reraises(self, mock_watch_class):
+        """Non-transient exceptions (such as ClientSSLError) must not be caught and retried."""
+        mock_watch = MagicMock()
+        mock_watch.close = AsyncMock()
+
+        async def mock_stream(*args, **kwargs):
+            raise aiohttp.ClientSSLError(MagicMock(), OSError("certificate verify failed"))
+            yield  # make this an async generator
+
+        mock_watch.stream = mock_stream
+        mock_watch_class.return_value = mock_watch
+
+        with self.assertRaises(aiohttp.ClientSSLError):
+            await self.helper.wait_for_claim_ready("test-claim", "default", timeout=5)
+
 
 class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
 
@@ -370,6 +428,40 @@ class TestAsyncK8sHelperWaitForSandboxReady(unittest.IsolatedAsyncioTestCase):
             result = await self.helper.wait_for_sandbox_ready("my-sandbox", "default", timeout=10)
 
         self.assertIsNone(result)
+
+    async def test_wait_for_sandbox_ready_transient_disconnect_reconnects(self):
+        """wait_for_sandbox_ready reconnects upon transient aiohttp.ClientError."""
+        ready_event = {
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {"name": "my-sandbox"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "podIPs": ["10.244.0.5"],
+                },
+            },
+        }
+
+        call_count = 0
+
+        async def _async_gen(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise aiohttp.ClientConnectionError("Connection lost")
+            yield ready_event
+
+        with patch("k8s_agent_sandbox.async_k8s_helper.watch.Watch") as MockWatch:
+            mock_watch = MagicMock()
+            mock_watch.stream = _async_gen
+            mock_watch.close = AsyncMock()
+            MockWatch.return_value = mock_watch
+
+            result = await self.helper.wait_for_sandbox_ready("my-sandbox", "default", timeout=10)
+
+        self.assertEqual(result, "10.244.0.5")
+        self.assertEqual(call_count, 2)
+
 
 class TestAsyncK8sHelperDeleteSandboxClaim(unittest.IsolatedAsyncioTestCase):
 

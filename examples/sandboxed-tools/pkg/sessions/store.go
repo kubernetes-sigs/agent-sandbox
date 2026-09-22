@@ -28,10 +28,15 @@ import (
 	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
 )
 
+// ErrNotFound is returned (wrapped) by Store.LoadSession when no session
+// with the given ID has been persisted.
+var ErrNotFound = errors.New("session not found")
+
 // Store defines the interface for chat session persistence.
 type Store interface {
 	// LoadSession retrieves all messages for the given session ID.
-	// If the session does not exist, it returns a nil slice and no error.
+	// If the session does not exist, it returns an error wrapping
+	// ErrNotFound, so callers can tell "new session" from "typo" apart.
 	LoadSession(ctx context.Context, sessionID string) ([]llm.Message, error)
 
 	// AppendMessages appends a set of messages to the session's history.
@@ -73,7 +78,7 @@ func (s *FileStore) LoadSession(ctx context.Context, sessionID string) ([]llm.Me
 	file, err := os.Open(p)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, fmt.Errorf("session %q: %w", sessionID, ErrNotFound)
 		}
 		return nil, fmt.Errorf("failed to open session file %s: %w", p, err)
 	}

@@ -23,6 +23,12 @@ spec:
         args:
         - "--leader-elect=true"
         - "--extensions"
+        # Uncomment to serve metrics over HTTPS with a TLS profile:
+        # - "--metrics-secure-serving"
+        # - "--metrics-bind-address=:8443"
+        # - "--metrics-cert-dir=/etc/metrics-certs"
+        # - "--tls-min-version=VersionTLS12"
+        # - "--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
         ports:
         - name: metrics
           containerPort: 8080
@@ -34,10 +40,18 @@ spec:
         - name: config-volume
           mountPath: /etc/sandbox-config
           readOnly: true
+        # Uncomment when --metrics-secure-serving is enabled:
+        # - name: metrics-certs
+        #   mountPath: /etc/metrics-certs
+        #   readOnly: true
       volumes:
       - name: config-volume
         configMap:
           name: agent-sandbox-config
           optional: true
+      # Uncomment when --metrics-secure-serving is enabled:
+      # - name: metrics-certs
+      #   secret:
+      #     secretName: agent-sandbox-metrics-tls
 
 

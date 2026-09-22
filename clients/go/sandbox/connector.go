@@ -53,8 +53,9 @@ var retryableStatusCodes = map[int]bool{
 	http.StatusGatewayTimeout:      true,
 }
 
-// connector manages HTTP connectivity to the sandbox-router. It owns the
-// HTTP client, retry logic, and delegates URL discovery to a ConnectionStrategy.
+// connector manages HTTP connectivity to the sandbox runtime, either directly
+// or through the sandbox-router. It owns the HTTP client, retry logic, and
+// delegates endpoint discovery to a ConnectionStrategy.
 type connector struct {
 	strategy   ConnectionStrategy
 	httpClient *http.Client
@@ -206,9 +207,9 @@ func (c *connector) SetGRPCTarget(target string) {
 
 // GRPCConn returns a (lazily dialed) client connection to sandboxd's
 // ProcessService. The connection is plaintext, and what protects it depends on
-// the strategy that published the target: podTunnelStrategy only ever traverses
-// the port-forward tunnel to the pod's loopback listener. While inClusterStrategy
-// sends it across the pod network, where NetworkPolicy (or a mesh) confines it.
+// the strategy that published the target: podTunnelStrategy traverses an
+// apiserver-authorized port-forward to the pod, while inClusterStrategy sends it
+// across the pod network, where NetworkPolicy (or a mesh) must confine it.
 func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

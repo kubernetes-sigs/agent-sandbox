@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 
+	inttls "sigs.k8s.io/agent-sandbox/internal/tlsutil"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
 
@@ -37,10 +38,31 @@ func BuildServerTLS(cfg *config.Config, reloader *CertReloader) (*tls.Config, er
 		return nil, errors.New("reloader must not be nil")
 	}
 
+	minVersion := uint16(tls.VersionTLS12)
+	if cfg.TLSMinVersion != "" {
+		v, err := inttls.ParseTLSVersion(cfg.TLSMinVersion)
+		if err != nil {
+			return nil, fmt.Errorf("parse TLS min version: %w", err)
+		}
+		minVersion = v
+	}
+
 	tc := &tls.Config{
-		MinVersion:     tls.VersionTLS12,
+		MinVersion:     minVersion,
 		GetCertificate: reloader.GetCertificate,
 		NextProtos:     []string{"h2", "http/1.1"},
+	}
+
+	// Always parse so a typo fails at startup even when TLS 1.3 would
+	// ignore CipherSuites (Go does not let callers configure TLS 1.3 suites).
+	if len(cfg.TLSCipherSuites) > 0 {
+		ids, err := inttls.ParseCipherSuites(cfg.TLSCipherSuites)
+		if err != nil {
+			return nil, fmt.Errorf("parse TLS cipher suites: %w", err)
+		}
+		if minVersion < tls.VersionTLS13 {
+			tc.CipherSuites = ids
+		}
 	}
 
 	switch cfg.MTLSMode {

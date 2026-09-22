@@ -85,7 +85,7 @@ spec:
 
 // TestRunSandboxdSandbox runs sandboxd in a Pod and exercises both surfaces:
 // the REST filesystem (health + PUT/GET round-trip) and the gRPC
-// ProcessService (Execute), reaching the loopback-bound daemon via
+// ProcessService (Execute), reaching the pod-network listeners via a
 // port-forward directly to the pod.
 func TestRunSandboxdSandbox(testingT *testing.T) {
 	ctx := testingT.Context()

@@ -143,11 +143,21 @@ if err := sb.WriteReader(ctx, "model.bin", file); err != nil {
 // Read a file
 data, err := sb.Read(ctx, "script.py")
 
+// Stream a large download into a caller-owned destination. ReadTo never closes
+// the destination and writes at most MaxDownloadSize bytes.
+download, err := os.Create("model-copy.bin")
+if err != nil { log.Fatal(err) }
+defer download.Close()
+written, err := sb.ReadTo(ctx, "model.bin", download)
+if err != nil { log.Fatal(err) }
+fmt.Printf("downloaded %d bytes\n", written)
+
 // Check existence
 exists, err := sb.Exists(ctx, "script.py")
 ```
 
-`Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
+`Read()` and `ReadTo()` responses are capped by `MaxDownloadSize` (256 MB by
+default). `Run()` responses are capped at 16 MB; `List()`/`Exists()` at 8 MB.
 
 ### 5. Custom TLS / Transport
 
@@ -211,6 +221,12 @@ reader cannot generally be replayed safely after a partial upload. Passing
 `WithMaxAttempts(n)` with `n > 1` returns an error rather than silently reducing
 the operation to a single attempt.
 
+`ReadTo` can retry before a successful response begins. Once response bytes have
+been written to the destination, a body-read or destination-write failure is
+returned without retrying because the destination cannot generally be rewound.
+The caller owns the destination and should decide whether to keep or remove any
+partially written data.
+
 **Important:** `Run()` defaults to a single attempt (no retries) because command
 execution is not idempotent. Use `WithMaxAttempts` to opt in to retries for
 idempotent commands:
@@ -257,7 +273,7 @@ if err := client.Open(ctx); err != nil { ... }
 | `RequestTimeout` | 180 s | Total timeout per SDK method call (Run, Read, …) |
 | `PerAttemptTimeout` | 60 s | Time to receive response headers per attempt |
 | `MaxUploadSize` | 256 MB | Maximum content size for `Write()` and `WriteReader()` |
-| `MaxDownloadSize` | 256 MB | Maximum response body size for `Read()` |
+| `MaxDownloadSize` | 256 MB | Maximum response body size for `Read()` and `ReadTo()` |
 
 ## Port-Forward Recovery
 

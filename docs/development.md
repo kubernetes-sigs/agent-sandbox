@@ -48,6 +48,14 @@ Whenever any changes are made to the `api/` folder or the `extensions/`, you may
 make generate-api-docs
 ```
 
+### Regenerate controller metrics documentation
+
+[`docs/metrics.md`](metrics.md) is generated from the Prometheus metric definitions in [`internal/metrics/`](../internal/metrics/). Regenerate it whenever you add, rename, or relabel a controller metric.
+
+```sh
+make generate-metrics-docs
+```
+
 ## Deploying to cluster
 
 #### Deploying to local `kind` cluster

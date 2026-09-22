@@ -40,6 +40,7 @@ class FakeCluster:
     # A live, unlabelled pool: owned (pre-run-id semantics) and present, so unwarm
     # issues its delete. Tests of the missing / foreign / unreadable cases override.
     self.resources.get_warmpool.return_value = {"metadata": {}}
+    self.resources.get_template.return_value = {"metadata": {}}   # same, templates
     self.resources.ensure_namespace.return_value = False  # namespace pre-existed
     self.resources.list_warmpools.return_value = []
     self.resources.list_templates.return_value = []

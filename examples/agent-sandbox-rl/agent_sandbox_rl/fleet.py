@@ -44,6 +44,7 @@ from .config import ClusterConfig, FleetConfig, run_namespace
 from .exceptions import (
     FleetError,
     FleetOvercommitError,
+    OwnedByAnotherRunError,
     PoolNotFoundError,
     PreflightError,
 )
@@ -562,7 +563,7 @@ class SandboxFleet:
     run. Failing here, rather than quietly consuming that pool, keeps the cause
     next to the symptom: a borrowed pool has someone else's depth and lifetime,
     and would surface later as a stalled wait or a claim on a pool that vanished."""
-    owner_id = "<run id>"
+    owner_id = None
     try:
       live = c.resources.get_warmpool(e.pool) or {}
       found = ((live.get("metadata") or {}).get("labels") or {}).get(
@@ -571,14 +572,40 @@ class SandboxFleet:
         owner_id = found
     except Exception:  # noqa: BLE001 — diagnostics only
       pass
-    owner = "another run" if owner_id == "<run id>" else f"run {owner_id}"
+    return self._collision_error(e, "warm pool", e.pool, owner_id)
+
+  def _collision_error(self, e, kind: str, name: str,
+                       owner_id: str | None) -> FleetError:
+    owner = f"run {owner_id}" if owner_id else "another run"
     return FleetError(
-        f"warm pool '{e.pool}' on cluster '{e.cluster}' (image {e.image}) already "
+        f"{kind} '{name}' on cluster '{e.cluster}' (image {e.image}) already "
         f"exists and belongs to {owner}, not this run ({self.run_id}); refusing to "
-        "resize or share it. Concurrent runs on the same image in one namespace "
-        "need run_isolation='names' (or 'namespace'); to consume pools provisioned "
-        "elsewhere on purpose, set adopt_existing=True; if that run is dead, reap "
-        f"it with `python -m agent_sandbox_rl.reaper --run-id {owner_id}`.")
+        "build on, resize or share it. Concurrent runs on the same image in one "
+        "namespace need run_isolation='names' (or 'namespace'); to consume pools "
+        "provisioned elsewhere on purpose, set adopt_existing=True; if that run is "
+        "dead, reap it with `python -m agent_sandbox_rl.reaper --run-id "
+        f"{owner_id or '<run id>'}`.")
+
+  def _delete_template_if_owned(self, c, template: str) -> None:
+    """Delete a template by name only if it is this run's, and only the object
+    inspected. The template twin of the pool guard in `_unwarm_entry`: another
+    run's template (image-derived names collide) is left standing, a missing one
+    gets no delete by name, and the uid precondition stops a template re-created
+    under this name after the read from being removed. A read error propagates."""
+    live = c.resources.get_template(template)
+    if not isinstance(live, dict):
+      return
+    meta = live.get("metadata") or {}
+    owner = (meta.get("labels") or {}).get(constants.RUN_ID_LABEL)
+    if isinstance(owner, str) and owner and owner != self.run_id:
+      logger.warning("template '%s' on cluster '%s' belongs to run %s, not this run "
+                     "(%s); leaving it alone", template, c.name, owner, self.run_id)
+      return
+    uid = meta.get("uid")
+    if isinstance(uid, str) and uid:
+      c.resources.delete_template(template, uid=uid)
+    else:
+      c.resources.delete_template(template)
 
   def _preflight(self) -> dict:
     from . import preflight as _pf
@@ -818,15 +845,23 @@ class SandboxFleet:
         _await_ready()
       return
     with self._obs.phase("create_warmpool", cluster=e.cluster, family=fam):
-      c.resources.ensure_template(
-          e.image, e.template, c.template_spec(self.config.template),
-          owner_run_id=self.run_id)
+      try:
+        c.resources.ensure_template(
+            e.image, e.template, c.template_spec(self.config.template),
+            owner_run_id=self.run_id)
+      except OwnedByAnotherRunError as exc:
+        # Their pool may be gone while their template remains (their unwarm
+        # deleted the pool; the template delete failed or is still coming). A
+        # create would then succeed with no 409, and this run's pool would be
+        # built on — and later delete — their template. Same answer as a pool
+        # collision: fail, write nothing.
+        raise self._collision_error(e, "template", e.template, exc.owner) from exc
       ours = c.resources.create_warmpool(e.pool, e.template, reps, reconcile=True,
                                          owner_run_id=self.run_id)
     if ours is False:
       # The image-derived name is a concurrent run's pool (create_warmpool checks
-      # the owner at the 409, and ensure_template left their template unlabelled
-      # by us). Nothing of theirs was written; nothing is recorded or reserved.
+      # the owner at the 409). Nothing of theirs was written; nothing is recorded
+      # or reserved.
       raise self._pool_collision_error(c, e)
     # Reserve only the delta when scaling an already-warm pool (create_warmpool
     # upserts replicas on 409 under reconcile), so reuse never double-counts.
@@ -1059,7 +1094,7 @@ class SandboxFleet:
         self._warmed[entry.image] = reps
 
     try:
-      c.resources.delete_template(entry.template)
+      self._delete_template_if_owned(c, entry.template)
     except Exception as exc:
       if err is None:
         err = exc
@@ -1250,8 +1285,17 @@ class SandboxFleet:
       # trace. A reused pool is left for the next acquire.
       if created_pool:
         try:
-          cluster.resources.delete_warmpool(pool)
-          cluster.resources.delete_template(self.config.template_name(task.image))
+          # Guarded like `_unwarm_entry`: on a 409 the on-demand create reuses
+          # an existing pool, which may be another run's under the same name.
+          owned, live = self._pool_ownership(cluster, pool)
+          if owned and live is not None:
+            uid = (live.get("metadata") or {}).get("uid")
+            if isinstance(uid, str) and uid:
+              cluster.resources.delete_warmpool(pool, uid=uid)
+            else:
+              cluster.resources.delete_warmpool(pool)
+          self._delete_template_if_owned(
+              cluster, self.config.template_name(task.image))
         except Exception:  # noqa: BLE001
           logger.warning("failed to remove on-demand pool after acquire error",
                          exc_info=True)

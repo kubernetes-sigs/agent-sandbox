@@ -569,14 +569,35 @@ def test_create_warmpool_recreates_when_the_pool_vanished_after_the_409():
   assert r.custom_api.create_namespaced_custom_object.call_count == 2
 
 
-def test_ensure_template_does_not_relabel_another_runs_template():
+def test_ensure_template_refuses_another_runs_template():
   from agent_sandbox_rl import TemplateSpec
+  from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
   r = _resources()
   r.custom_api.get_namespaced_custom_object.return_value = {
       "metadata": {"labels": {constants.RUN_ID_LABEL: "other"}},
       "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
-  assert r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine") is False
-  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+  with pytest.raises(OwnedByAnotherRunError) as ei:
+    r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine")
+  assert ei.value.owner == "other"
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()   # no relabel
+  # Without owner_run_id (the bulk / on-demand callers) it is still "existed".
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}},
+      "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
+  assert r.ensure_template(IMG, "tmpl", TemplateSpec()) is False
+
+
+def test_ensure_template_owner_checks_a_template_created_in_the_race():
+  from agent_sandbox_rl import TemplateSpec
+  from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = [
+      client.ApiException(status=404),                 # absent at the get ...
+      {"metadata": {"labels": {constants.RUN_ID_LABEL: "other"}}}]
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(
+      status=409)                                      # ... another run won the create
+  with pytest.raises(OwnedByAnotherRunError):
+    r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine")
 
 
 def test_unwarm_deletes_exactly_the_inspected_pool(make_cluster):
@@ -661,4 +682,74 @@ def test_setup_hook_reruns_on_a_namespace_kept_after_a_failed_rollback(make_clus
   f._namespaces_ensured = False
   f.plan()                                               # set up once: not re-run
   assert len(attempts) == 2
+
+
+# --- review round 4: the template side of a collision ----------------------- #
+def test_warm_refuses_to_build_on_another_runs_template(make_cluster):
+  from agent_sandbox_rl.exceptions import OwnedByAnotherRunError
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  # Their pool is gone but their template remains: no 409 would ever fire.
+  c.resources.ensure_template.side_effect = OwnedByAnotherRunError(
+      "SandboxTemplate", f.config.template_name(IMG), "other-run-0001")
+  with pytest.raises(FleetError) as ei:
+    f.warm_image(IMG, wait=True)
+  msg = str(ei.value)
+  assert "template" in msg and "other-run-0001" in msg
+  assert "--run-id other-run-0001" in msg
+  c.resources.create_warmpool.assert_not_called()        # nothing built on theirs
+  assert IMG not in f._warmed and c.active_replicas == 0
+
+
+def test_unwarm_leaves_another_runs_template_and_deletes_ours_by_uid(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  tmpl = f.config.template_name(IMG)
+  f.warm_image(IMG, wait=False)
+  c.resources.get_template.return_value = _labelled("other-run-0001")
+  f.unwarm_image(IMG)
+  c.resources.delete_warmpool.assert_called_once()       # our pool still goes
+  c.resources.delete_template.assert_not_called()        # their template stays
+  f.warm_image(IMG, wait=False)
+  c.resources.get_template.return_value = {
+      "metadata": {"uid": "t-7", "labels": {constants.RUN_ID_LABEL: f.run_id}}}
+  f.unwarm_image(IMG)
+  c.resources.delete_template.assert_called_once_with(tmpl, uid="t-7")
+
+
+def test_unwarm_issues_no_template_delete_by_name_when_it_is_gone(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  f.warm_image(IMG, wait=False)
+  c.resources.get_template.return_value = None
+  f.unwarm_image(IMG)
+  c.resources.delete_template.assert_not_called()
+
+
+def test_on_demand_rollback_leaves_another_runs_pool_and_template(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.plan()                                               # empty plan: on-demand
+  c.resources.get_warmpool.return_value = _labelled("other-run-0001")
+  c.resources.get_template.return_value = _labelled("other-run-0001")
+  c.sandbox_client.create_sandbox.side_effect = RuntimeError("claim failed")
+  with pytest.raises(RuntimeError, match="claim failed"):
+    f.acquire(f.load_tasks([IMG])[0])
+  c.resources.delete_warmpool.assert_not_called()
+  c.resources.delete_template.assert_not_called()
+
+
+def test_template_helpers():
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  assert r.get_template("nope") is None
+  r.delete_template("tmpl", uid="u-1")
+  _, kw = r.custom_api.delete_namespaced_custom_object.call_args
+  assert kw["body"].preconditions.uid == "u-1"
 

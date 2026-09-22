@@ -481,11 +481,11 @@ namespace would otherwise share — and resize, and delete — one pool.
 - **`run_isolation="none"`** (default) — today's naming; fine when nothing else runs
   in the namespace.
 
-In every mode a pool labelled with another run's id is never written to. Warming
-it fails with a `FleetError` that names the owning run: pick `run_isolation`, set
-`adopt_existing=True` to share on purpose, or reap the other run if it is dead.
-`unwarm_image()` and `set_pool_replicas()` leave it alone, each logging which run
-owns it. The writes are conditional on what was inspected (uid precondition on
+In every mode a pool or template labelled with another run's id is never written
+to. Warming onto it fails with a `FleetError` that names the owning run: pick
+`run_isolation`, set `adopt_existing=True` to share on purpose, or reap the other
+run if it is dead. `unwarm_image()` and `set_pool_replicas()` leave it alone, each
+logging which run owns it. The writes are conditional on what was inspected (uid precondition on
 delete, resourceVersion on the resize patch, ownership re-checked at a 409 on
 create), so two runs racing on one name cannot delete or resize each other's pool.
 Sharing one warm fleet across consumers on purpose is the

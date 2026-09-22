@@ -29,7 +29,11 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   carry the pool's uid as a precondition (and a pool already gone gets no delete
   by name), the reconcile patch carries its resourceVersion and re-inspects on a
   conflict, a 409 on create re-checks who owns the existing pool before resizing
-  it, and `ensure_template` does not relabel a template another run owns.
+  it. Templates get the same treatment: warming onto a template labelled with
+  another run's id raises the same `FleetError` (even when that run's pool is
+  already gone, so no 409 would fire), and template deletes, on unwarm and on
+  an on-demand claim's rollback, skip another run's template and carry the
+  inspected uid as a precondition.
   **Behaviour change:** a run whose image-derived pool name is held by another
   run (including a crashed run's leftover) now fails at warm instead of sharing
   and resizing that pool.

@@ -30,6 +30,7 @@ from kubernetes import client, watch
 
 from . import constants
 from .config import TemplateSpec
+from .exceptions import OwnedByAnotherRunError
 
 logger = logging.getLogger("agent_sandbox_rl.resources")
 
@@ -106,6 +107,11 @@ class Resources:
     Returns True if it created the template, False if it already existed.
     ``dry_run=True`` sends a server-side dry run (``dryRun=All``) — validated
     against the CRD schema but not persisted.
+
+    With ``owner_run_id`` set, an existing template labelled with another run's
+    id raises `OwnedByAnotherRunError` — including one created concurrently and
+    found at the 409 — instead of returning False like an ordinary "already
+    existed": the caller must not build its pool on it, and nothing is written.
     """
     try:
       existing = self.custom_api.get_namespaced_custom_object(
@@ -125,10 +131,7 @@ class Resources:
           constants.RUN_ID_LABEL)
       if (owner_run_id and isinstance(cur_owner, str) and cur_owner
           and cur_owner != owner_run_id):
-        logger.warning("SandboxTemplate '%s' belongs to run %s; not relabelling it for "
-                       "run %s (use run_isolation='names' to stop sharing names)",
-                       template_name, cur_owner, owner_run_id)
-        return False
+        raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
       self._reconcile_template_labels(template_name, existing)
       return False
     except client.ApiException as e:
@@ -142,10 +145,18 @@ class Resources:
           body=self._template_manifest(image, template_name, template),
           dry_run="All" if dry_run else None)
     except client.ApiException as e:
-      if e.status == 409:        # created concurrently / between our get and create
-        logger.info("SandboxTemplate '%s' already exists (409).", template_name)
-        return False
-      raise
+      if e.status != 409:
+        raise
+      # Created concurrently, between our get and create: possibly by another
+      # run using the same name, so it gets the same owner check as the get.
+      logger.info("SandboxTemplate '%s' already exists (409).", template_name)
+      if owner_run_id and not dry_run:
+        winner = self.get_template(template_name) or {}
+        cur_owner = (((winner.get("metadata") or {}).get("labels")) or {}).get(
+            constants.RUN_ID_LABEL)
+        if isinstance(cur_owner, str) and cur_owner and cur_owner != owner_run_id:
+          raise OwnedByAnotherRunError("SandboxTemplate", template_name, cur_owner)
+      return False
     logger.info("Created SandboxTemplate '%s' for %s", template_name, image)
     return True
 
@@ -286,8 +297,23 @@ class Resources:
                      "circuit breaker/reaper may under-count this run's pods for "
                      "its image", template_name, exc_info=True)
 
-  def delete_template(self, template_name: str) -> None:
-    self._delete(constants.TEMPLATES_PLURAL, template_name, "SandboxTemplate")
+  def get_template(self, template_name: str) -> dict | None:
+    """The live SandboxTemplate object, or None if it does not exist."""
+    try:
+      return self.custom_api.get_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.TEMPLATES_PLURAL,
+          name=template_name)
+    except client.ApiException as e:
+      if e.status == 404:
+        return None
+      raise
+
+  def delete_template(self, template_name: str, *, uid: str | None = None) -> None:
+    """Delete the template. With ``uid`` (from a prior read) the delete is
+    conditional on that exact object, as for `delete_warmpool`."""
+    self._delete(constants.TEMPLATES_PLURAL, template_name, "SandboxTemplate",
+                 uid=uid)
 
   # --- warm pools -------------------------------------------------------- #
   def _warmpool_manifest(self, name: str, template_name: str,

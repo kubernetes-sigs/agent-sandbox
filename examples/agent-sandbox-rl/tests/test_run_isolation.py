@@ -426,3 +426,111 @@ def test_ensure_namespace_rejects_a_terminating_namespace():
   r.core_api.read_namespace.return_value = types.SimpleNamespace(
       status=types.SimpleNamespace(phase="Active"))
   assert r.ensure_namespace("rl-abc") is False
+
+
+# --- review round 2: atomic writes, length after injection, rollback ---------- #
+def test_names_mode_rejects_a_prefix_that_overflows_after_injection(make_cluster):
+  prefix = "a" * 235 + "-"          # template 236+12 = 248, pool "pool-"+248 = 253: valid alone
+  cfg = FleetConfig(template_name_prefix=prefix)
+  assert len(cfg.template_name(IMG)) == 248 and len(cfg.pool_name(IMG)) == 253
+  with pytest.raises(ValueError, match="after the run id"):
+    SandboxFleet(FleetConfig(run_isolation="names", template_name_prefix=prefix),
+                 registry=ClusterRegistry([make_cluster("a")]))
+  # and via the pool format alone
+  fmt = "p" * 235 + "-{image_hash}"                     # 236 + 12 = 248: valid alone
+  with pytest.raises(ValueError, match="after the run id"):
+    SandboxFleet(FleetConfig(run_isolation="names", pool_name_format=fmt),
+                 registry=ClusterRegistry([make_cluster("b")]))
+
+
+def test_delete_warmpool_uses_a_uid_precondition_and_tolerates_replacement():
+  r = _resources()
+  r.delete_warmpool("pool-x", uid="uid-1")
+  _, kw = r.custom_api.delete_namespaced_custom_object.call_args
+  assert kw["body"].preconditions.uid == "uid-1"
+  r.custom_api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.delete_warmpool("pool-x", uid="uid-1")               # replaced meanwhile: no raise
+  with pytest.raises(client.ApiException):
+    r.delete_warmpool("pool-x")                          # a 409 without a precondition is real
+
+
+def test_create_warmpool_refuses_to_resize_another_runs_pool_at_the_409():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": {constants.RUN_ID_LABEL: "other"}, "resourceVersion": "7"}}
+  assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_create_warmpool_reconciles_with_an_optimistic_lock():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": {constants.RUN_ID_LABEL: "mine"}, "resourceVersion": "7"}}
+  assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is True
+  _, kw = r.custom_api.patch_namespaced_custom_object.call_args
+  assert kw["body"] == {"spec": {"replicas": 3}, "metadata": {"resourceVersion": "7"}}
+  # a concurrent change between the read and the patch: back off, do not fight
+  r.custom_api.patch_namespaced_custom_object.side_effect = client.ApiException(status=409)
+  assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is False
+
+
+def test_create_warmpool_recreates_when_the_pool_vanished_after_the_409():
+  r = _resources()
+  r.custom_api.create_namespaced_custom_object.side_effect = [
+      client.ApiException(status=409), None]
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+  assert r.create_warmpool("pool-x", "tmpl", 3, reconcile=True, owner_run_id="mine") is True
+  assert r.custom_api.create_namespaced_custom_object.call_count == 2
+
+
+def test_ensure_template_does_not_relabel_another_runs_template():
+  from agent_sandbox_rl import TemplateSpec
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.return_value = {
+      "metadata": {"labels": {constants.RUN_ID_LABEL: "other"}},
+      "spec": {"podTemplate": {"metadata": {"labels": {}}}}}
+  assert r.ensure_template(IMG, "tmpl", TemplateSpec(), owner_run_id="mine") is False
+  r.custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_warm_falls_back_to_adopt_when_the_create_race_is_lost(make_cluster):
+  c = make_cluster("solo")
+  c.resources.create_warmpool.return_value = False       # 409 belonged to another run
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  f.warm_image(IMG, wait=True)
+  args, _ = c.resources.wait_for_pool_ready.call_args
+  assert args[1] == 1                                    # adopt semantics
+  assert c.active_replicas == 0                          # nothing reserved
+
+
+def test_unwarm_deletes_exactly_the_inspected_pool(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  f.warm_image(IMG, wait=False)
+  c.resources.get_warmpool.return_value = {
+      "metadata": {"uid": "uid-42", "labels": {constants.RUN_ID_LABEL: f.run_id}}}
+  f.unwarm_image(IMG)
+  c.resources.delete_warmpool.assert_called_once_with(f.config.pool_name(IMG), uid="uid-42")
+
+
+def test_rollback_keeps_ownership_when_the_namespace_delete_fails(make_cluster):
+  c = make_cluster("solo", namespace="rl")
+  c.resources.ensure_namespace.return_value = True
+  c.resources.delete_namespace.side_effect = [RuntimeError("apiserver"), None]
+
+  def hook(cluster, ns):
+    raise RuntimeError("queue create failed")
+
+  f = _fleet(c, run_isolation="namespace", run_namespace_setup=hook)
+  f.load_tasks([IMG])
+  with pytest.raises(FleetError):
+    f.plan()
+  assert (c.name, c.namespace) in f._created_namespaces  # rollback failed: still ours
+  f.teardown()                                           # ordinary teardown retries it
+  assert c.resources.delete_namespace.call_count == 2

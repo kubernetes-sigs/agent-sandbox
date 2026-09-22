@@ -507,29 +507,36 @@ class SandboxFleet:
         try:
           c.resources.delete_namespace(c.namespace)
         except Exception:  # noqa: BLE001 — best-effort rollback
+          # Still ours: keep the ownership record so a retry reuses it and an
+          # ordinary teardown still deletes it.
           logger.warning("could not roll back namespace '%s' on cluster %s",
                          c.namespace, c.name, exc_info=True)
+          continue
         self._created_namespaces.discard((c.name, c.namespace))
       raise
     self._namespaces_ensured = True
 
-  def _owns_pool(self, c, pool: str, *, action: str = "leaving it alone") -> bool:
-    """False if ``pool`` exists and carries another run's run-id label, or if
-    ownership cannot be verified (fail closed).
+  def _pool_ownership(self, c, pool: str, *,
+                      action: str = "leaving it alone") -> tuple[bool, dict | None]:
+    """``(owned, live_object)``. ``owned`` is False if ``pool`` exists and carries
+    another run's run-id label, or if ownership cannot be verified (fail closed).
 
     Pools keep their creator's label (a 409 on create only patches replicas), so
     the label is a reliable tell that an image-derived name collided with a
     concurrent run in the same namespace. Deleting or resizing that pool would be
     a write to someone else's warm capacity. Missing or unlabelled pools count as
     ours (deletes are 404-tolerant; pre-run-id leftovers); a pool we cannot read
-    does not. ``action`` names what the caller does instead, for the log line."""
+    does not. The live object is returned so the caller can make its write
+    conditional on exactly what was inspected (uid / resourceVersion) instead of
+    trusting this snapshot. ``action`` names what the caller does instead."""
     try:
       obj = c.resources.get_warmpool(pool)
     except Exception as exc:  # noqa: BLE001 — fail closed: unverifiable is not ours
       logger.warning("cannot verify ownership of pool '%s' on cluster '%s'; %s: %s",
                      pool, c.name, action, exc)
-      return False
-    labels = ((obj or {}).get("metadata") or {}).get("labels") or {}
+      return False, None
+    live = obj if isinstance(obj, dict) else None
+    labels = ((live or {}).get("metadata") or {}).get("labels") or {}
     owner = labels.get(constants.RUN_ID_LABEL) if isinstance(labels, dict) else None
     if isinstance(owner, str) and owner and owner != self.run_id:
       logger.warning(
@@ -537,8 +544,11 @@ class SandboxFleet:
           "Concurrent runs sharing images in one namespace should use "
           "run_isolation='names' (or a per-run namespace).",
           pool, c.name, owner, self.run_id, action)
-      return False
-    return True
+      return False, live
+    return True, live
+
+  def _owns_pool(self, c, pool: str, *, action: str = "leaving it alone") -> bool:
+    return self._pool_ownership(c, pool, action=action)[0]
 
   def _preflight(self) -> dict:
     from . import preflight as _pf
@@ -786,8 +796,15 @@ class SandboxFleet:
       return
     with self._obs.phase("create_warmpool", cluster=e.cluster, family=fam):
       c.resources.ensure_template(
-          e.image, e.template, c.template_spec(self.config.template))
-      c.resources.create_warmpool(e.pool, e.template, reps, reconcile=True)
+          e.image, e.template, c.template_spec(self.config.template),
+          owner_run_id=self.run_id)
+      ours = c.resources.create_warmpool(e.pool, e.template, reps, reconcile=True,
+                                         owner_run_id=self.run_id)
+    if ours is False:
+      # Lost the create race to a concurrent run using the same pool name: the
+      # 409 was their pool. Same answer as the pre-check above — use it read-only.
+      self._adopt_entry(e, wait)
+      return
     # Reserve only the delta when scaling an already-warm pool (create_warmpool
     # upserts replicas on 409 under reconcile), so reuse never double-counts.
     delta = reps - already
@@ -979,14 +996,22 @@ class SandboxFleet:
         return                                 # already unwarmed — don't double-release
       reps = self._warmed.pop(entry.image)
     c = self.registry.get(entry.cluster)
-    if not self._owns_pool(c, entry.pool):
+    owned, live = self._pool_ownership(c, entry.pool)
+    if not owned:
       # Retire the image from this run's bookkeeping but leave the other run's
       # pool and template standing; the reserved capacity reconciles at teardown.
       return
+    # Delete exactly the object we inspected: with its uid as a precondition, a
+    # pool another run re-creates under this name between the read and the delete
+    # is not ours to remove and survives (409, tolerated by delete_warmpool).
+    uid = ((live or {}).get("metadata") or {}).get("uid")
     pool_deleted = False
     err = None
     try:
-      c.resources.delete_warmpool(entry.pool)
+      if isinstance(uid, str) and uid:
+        c.resources.delete_warmpool(entry.pool, uid=uid)
+      else:
+        c.resources.delete_warmpool(entry.pool)
       pool_deleted = True
     except Exception as exc:
       err = exc
@@ -1042,7 +1067,11 @@ class SandboxFleet:
     c = self.registry.get(entry.cluster)
     if not self._owns_pool(c, entry.pool):
       return
-    c.resources.create_warmpool(entry.pool, entry.template, replicas, reconcile=True)
+    # The 409-time ownership check + resourceVersion'd patch inside create_warmpool
+    # make this safe even if the pool changed hands after the check above.
+    if c.resources.create_warmpool(entry.pool, entry.template, replicas,
+                                   reconcile=True, owner_run_id=self.run_id) is False:
+      return
     with self._lock:
       prev = self._warmed.get(image, entry.replicas)
       self._warmed[image] = replicas

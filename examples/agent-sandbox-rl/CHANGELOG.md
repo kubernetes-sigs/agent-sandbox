@@ -21,7 +21,11 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
 - **A pool carrying another run's id label is never written to** (image-derived
   names collide across runs): warming it uses it read-only with adopt semantics,
   and `unwarm_image()` / `set_pool_replicas()` leave it alone; each logs which run
-  owns it, and an ownership check that cannot read the pool fails closed.
+  owns it, and an ownership check that cannot read the pool fails closed. The
+  writes themselves are conditional, not just pre-checked: deletes carry the
+  inspected pool's uid as a precondition, the reconcile patch carries its
+  resourceVersion, a 409 on create re-checks who owns the existing pool before
+  resizing it, and `ensure_template` does not relabel a template another run owns.
 
 ### Added (concurrent runs — #1736)
 - **`FleetConfig.run_isolation`** (`"none"` default, naming unchanged): `"names"`

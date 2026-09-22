@@ -481,8 +481,11 @@ namespace would otherwise share — and resize, and delete — one pool.
 
 In every mode a pool labelled with another run's id is never written to: warming
 it uses it read-only (as adoption does), and `unwarm_image()` /
-`set_pool_replicas()` leave it alone, each logging which run owns it. Sharing one
-warm fleet across consumers on purpose is the
+`set_pool_replicas()` leave it alone, each logging which run owns it. The writes
+are conditional on what was inspected (uid precondition on delete, resourceVersion
+on the resize patch, ownership re-checked at a 409 on create), so two runs racing
+on one name cannot delete or resize each other's pool. Sharing one warm fleet
+across consumers on purpose is the
 [adoption](#adopting-warm-pools-someone-else-provisioned) model, not a name collision.
 
 ## Configuration reference

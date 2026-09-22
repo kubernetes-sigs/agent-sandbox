@@ -94,7 +94,8 @@ class Resources:
 
   # --- templates --------------------------------------------------------- #
   def ensure_template(self, image: str, template_name: str,
-                      template: TemplateSpec, *, dry_run: bool = False) -> bool:
+                      template: TemplateSpec, *, dry_run: bool = False,
+                      owner_run_id: str | None = None) -> bool:
     """Create the SandboxTemplate for ``image`` if absent. Idempotent.
 
     Returns True if it created the template, False if it already existed.
@@ -112,7 +113,17 @@ class Resources:
       # labels would carry the OLD run-id, making this run's pods invisible to the
       # circuit breaker and mis-targeted by the reaper (the #1215 safeguards).
       # Reconcile the run/managed labels so pods this run spawns are attributed to
-      # this run.
+      # this run — unless the template is labelled as another live run's, in
+      # which case relabelling would be a write to their resource set (names
+      # collided in a shared namespace); leave it and let the caller decide.
+      cur_owner = (((existing.get("metadata") or {}).get("labels")) or {}).get(
+          constants.RUN_ID_LABEL)
+      if (owner_run_id and isinstance(cur_owner, str) and cur_owner
+          and cur_owner != owner_run_id):
+        logger.warning("SandboxTemplate '%s' belongs to run %s; not relabelling it for "
+                       "run %s (use run_isolation='names' to stop sharing names)",
+                       template_name, cur_owner, owner_run_id)
+        return False
       self._reconcile_template_labels(template_name, existing)
       return False
     except client.ApiException as e:
@@ -292,7 +303,8 @@ class Resources:
 
   def create_warmpool(self, name: str, template_name: str,
                       replicas: int, *, dry_run: bool = False,
-                      reconcile: bool = False) -> None:
+                      reconcile: bool = False,
+                      owner_run_id: str | None = None) -> bool:
     """Create a SandboxWarmPool (v1beta1: ``replicas`` + ``sandboxTemplateRef``).
 
     Idempotent on 409 (already exists). With ``reconcile=True`` a 409 instead
@@ -301,7 +313,15 @@ class Resources:
     make ``wait_for_pool_ready(expected)`` hang and over-count active replicas).
     Only the warm path needs this; the on-demand claim path leaves it ``False``
     so a hot, repeatedly-reused size-1 pool isn't patched on every claim.
-    ``dry_run=True`` sends ``dryRun=All`` and never patches (validation only)."""
+    ``dry_run=True`` sends ``dryRun=All`` and never patches (validation only).
+
+    Returns True when the pool is ours (created, or reconciled). With
+    ``owner_run_id`` set, the 409 is where a name collision with a concurrent run
+    shows up: the existing pool is inspected and, if it carries another run's id
+    label, it is **not** resized and False is returned. The reconcile patch also
+    carries the inspected object's resourceVersion, so a pool replaced or
+    relabelled between the inspection and the patch is not written to (409 →
+    False) rather than raced."""
     try:
       self.custom_api.create_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
@@ -309,17 +329,45 @@ class Resources:
           body=self._warmpool_manifest(name, template_name, replicas),
           dry_run="All" if dry_run else None)
       logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+      return True
     except client.ApiException as e:
       if e.status != 409:
         raise
       if dry_run or not reconcile:
         logger.info("SandboxWarmPool '%s' already exists.", name)
-        return
-      logger.info("SandboxWarmPool '%s' exists; patching replicas=%d.", name, replicas)
+        return True
+    existing = self.get_warmpool(name)
+    if existing is None:
+      # Deleted between the 409 and the read (a teardown elsewhere): create anew.
+      self.custom_api.create_namespaced_custom_object(
+          group=constants.GROUP, version=constants.VERSION,
+          namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
+          body=self._warmpool_manifest(name, template_name, replicas))
+      logger.info("Created SandboxWarmPool '%s' (replicas=%d)", name, replicas)
+      return True
+    meta = existing.get("metadata") or {}
+    owner = (meta.get("labels") or {}).get(constants.RUN_ID_LABEL)
+    if owner_run_id and isinstance(owner, str) and owner and owner != owner_run_id:
+      logger.warning("SandboxWarmPool '%s' belongs to run %s; not resizing it for run "
+                     "%s (use run_isolation='names' to stop sharing names)",
+                     name, owner, owner_run_id)
+      return False
+    logger.info("SandboxWarmPool '%s' exists; patching replicas=%d.", name, replicas)
+    body: dict = {"spec": {"replicas": replicas}}
+    rv = meta.get("resourceVersion")
+    if isinstance(rv, str) and rv:
+      body["metadata"] = {"resourceVersion": rv}   # optimistic lock on what we inspected
+    try:
       self.custom_api.patch_namespaced_custom_object(
           group=constants.GROUP, version=constants.VERSION,
           namespace=self.namespace, plural=constants.WARMPOOLS_PLURAL,
-          name=name, body={"spec": {"replicas": replicas}})
+          name=name, body=body)
+    except client.ApiException as e:
+      if e.status == 409:
+        logger.warning("SandboxWarmPool '%s' changed concurrently; not resizing", name)
+        return False
+      raise
+    return True
 
   def validate_manifests(self, sample_image: str, template: TemplateSpec,
                          *, name: str = "asrl-validate") -> None:
@@ -343,8 +391,11 @@ class Resources:
         body=self._warmpool_manifest(name, name, 1),
         dry_run="All")
 
-  def delete_warmpool(self, name: str) -> None:
-    self._delete(constants.WARMPOOLS_PLURAL, name, "SandboxWarmPool")
+  def delete_warmpool(self, name: str, *, uid: str | None = None) -> None:
+    """Delete the pool. With ``uid`` (from a prior read) the delete is conditional
+    on that exact object: a pool re-created under the same name by another run in
+    the meantime fails the precondition (409) and is left standing."""
+    self._delete(constants.WARMPOOLS_PLURAL, name, "SandboxWarmPool", uid=uid)
 
   def get_warmpool(self, name: str) -> dict | None:
     """The live SandboxWarmPool object, or None if it does not exist."""
@@ -652,15 +703,21 @@ class Resources:
             self._list_objects(plural, label_selector, group=group, version=version)]
 
   def _delete(self, plural: str, name: str, kind: str, *,
-              group: str = constants.GROUP, version: str = constants.VERSION) -> None:
+              group: str = constants.GROUP, version: str = constants.VERSION,
+              uid: str | None = None) -> None:
+    opts = client.V1DeleteOptions(
+        grace_period_seconds=0,
+        preconditions=client.V1Preconditions(uid=uid) if uid else None)
     try:
       self.custom_api.delete_namespaced_custom_object(
           group=group, version=version,
-          namespace=self.namespace, plural=plural, name=name,
-          body=client.V1DeleteOptions(grace_period_seconds=0))
+          namespace=self.namespace, plural=plural, name=name, body=opts)
       logger.info("Deleted %s '%s'", kind, name)
     except client.ApiException as e:
       if e.status == 404:
         logger.warning("%s '%s' not found (already deleted).", kind, name)
+      elif e.status == 409 and uid:
+        logger.warning("%s '%s' was replaced since it was inspected (uid precondition "
+                       "failed); not deleting", kind, name)
       else:
         raise

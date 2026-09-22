@@ -340,9 +340,26 @@ class FleetConfig(BaseModel):
         self.pool_name_format = f"{self.pool_name_format}-{ph}"
     self.template_name_prefix = self.template_name_prefix.replace(ph, run_id)
     self.pool_name_format = self.pool_name_format.replace(ph, run_id)
+    self._check_resolved_names()
     if self.run_isolation == "namespace":
       for c in self.clusters:
         c.namespace = run_namespace(c.namespace, run_id)
+
+  def _check_resolved_names(self) -> None:
+    """Re-validate the rendered template and pool names once the run id is in.
+
+    The field validators saw the placeholder form; ``"names"`` mode may have added
+    13 characters to each name since, and a prefix that was valid at the 253-char
+    limit no longer is. Better a ValueError here than a 422 on the first create."""
+    sample_hash = "0" * 12
+    template = f"{self.template_name_prefix}{sample_hash}"
+    pool = self.pool_name_format.format(template=template, image_hash=sample_hash)
+    for kind, name in (("template", template), ("pool", pool)):
+      if len(name) > 253 or not _DNS1123.match(name):
+        raise ValueError(
+            f"resolved {kind} name {name!r} ({len(name)} chars) is not a valid "
+            "DNS-1123 subdomain after the run id was added; shorten "
+            "template_name_prefix / pool_name_format")
 
 
 _DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")

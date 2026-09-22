@@ -237,7 +237,7 @@ class LocalTunnelConnectionStrategy(ConnectionStrategy):
                     self.port_forward_process.kill()
             except Exception as e:
                 logging.error(f"Failed to stop port-forwarding: {e}")
-            finally:
+            else:
                 self.port_forward_process = None
                 self.base_url = None
 
@@ -354,7 +354,7 @@ class SandboxdPodTunnelStrategy(ConnectionStrategy):
                     self.port_forward_process.kill()
             except Exception as e:
                 logging.error(f"Failed to stop sandboxd pod tunnel: {e}")
-            finally:
+            else:
                 self.port_forward_process = None
                 self.base_url = None
                 self.grpc_target = None

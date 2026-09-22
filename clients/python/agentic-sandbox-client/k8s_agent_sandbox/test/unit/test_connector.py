@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -24,12 +25,14 @@ from k8s_agent_sandbox.connector import (
     GatewayConnectionStrategy,
     LocalTunnelConnectionStrategy,
     InClusterConnectionStrategy,
+    SandboxdPodTunnelStrategy,
     SandboxConnector,
 )
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxGatewayConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
     SandboxInClusterConnectionConfig,
 )
 
@@ -145,6 +148,57 @@ class TestExistingStrategiesDefaultHeaderInjection(unittest.TestCase):
             config=SandboxLocalTunnelConnectionConfig(),
         )
         self.assertTrue(s.should_inject_router_headers())
+
+
+class TestPortForwardCleanup(unittest.TestCase):
+    def test_local_tunnel_retains_process_when_terminate_fails(self):
+        strategy = LocalTunnelConnectionStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxLocalTunnelConnectionConfig(),
+        )
+        process = MagicMock()
+        process.terminate.side_effect = [RuntimeError("terminate failed"), None]
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+
+        strategy.close()
+
+        self.assertIs(strategy.port_forward_process, process)
+        self.assertEqual(strategy.base_url, "http://127.0.0.1:18080")
+
+        strategy.close()
+
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy.base_url)
+
+    def test_sandboxd_tunnel_retains_process_when_kill_fails(self):
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+        )
+        process = MagicMock()
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="kubectl", timeout=2),
+            None,
+        ]
+        process.kill.side_effect = RuntimeError("kill failed")
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+        strategy.grpc_target = "127.0.0.1:19090"
+
+        strategy.close()
+
+        self.assertIs(strategy.port_forward_process, process)
+        self.assertEqual(strategy.base_url, "http://127.0.0.1:18080")
+        self.assertEqual(strategy.grpc_target, "127.0.0.1:19090")
+
+        strategy.close()
+
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy.base_url)
+        self.assertIsNone(strategy.grpc_target)
 
 
 class TestSandboxConnectorStrategySelection(unittest.TestCase):

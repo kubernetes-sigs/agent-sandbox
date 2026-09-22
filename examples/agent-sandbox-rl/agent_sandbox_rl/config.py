@@ -237,9 +237,9 @@ class FleetConfig(BaseModel):
     # prefix: a permissive prefix regex still allows names that aren't valid
     # DNS-1123 subdomains (e.g. consecutive dots "r2e..img-", or a segment
     # ending in '-' before a dot), which fail with a 422 only at create time.
-    # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in — and
-    # so is the 12-char hex run id a `{run_id}` placeholder expands to.
-    sample = f"{v}{'0' * 12}".replace(constants.RUN_ID_PLACEHOLDER, "0" * 12)
+    # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in; the
+    # run id a `{run_id}` placeholder expands to is also 12 hex chars.
+    sample = f"{v}{'0' * 12}".replace(constants.RUN_ID_PLACEHOLDER, _SAMPLE_RUN_ID)
     if len(sample) > 253 or not _DNS1123.match(sample):
       raise ValueError(
           "template_name_prefix must yield a DNS-1123 subdomain when combined "
@@ -250,12 +250,15 @@ class FleetConfig(BaseModel):
   def _valid_pool_name_format(self) -> "FleetConfig":
     # Validated here rather than as a field_validator because the rendered name
     # depends on template_name_prefix too.
+    # Distinct stand-ins for the image hash and the run id: rendering both to the
+    # same string would let a format with no per-image part (`pool-{run_id}`)
+    # pass the uniqueness check below and map every image onto one pool.
     sample_hash = "0" * 12
     sample_template = (f"{self.template_name_prefix}{sample_hash}"
-                       .replace(constants.RUN_ID_PLACEHOLDER, sample_hash))
+                       .replace(constants.RUN_ID_PLACEHOLDER, _SAMPLE_RUN_ID))
     try:
       sample = (self.pool_name_format
-                .replace(constants.RUN_ID_PLACEHOLDER, sample_hash)
+                .replace(constants.RUN_ID_PLACEHOLDER, _SAMPLE_RUN_ID)
                 .format(template=sample_template, image_hash=sample_hash))
     except (KeyError, IndexError, ValueError) as e:
       # ValueError too: an unmatched brace ("pool-{template") raises it from
@@ -310,14 +313,20 @@ class FleetConfig(BaseModel):
     by `SandboxFleet.__init__` on its private copy, before the registry is built.
 
     ``{run_id}`` placeholders in `template_name_prefix` / `pool_name_format` are
-    substituted in every mode. ``"names"`` additionally appends the run id to the
-    template prefix when neither field carries the placeholder, so every template
-    and pool name (pools derive from templates) is unique to this run.
-    ``"namespace"`` rewrites each cluster's namespace to `run_namespace()`."""
+    substituted in every mode. ``"names"`` additionally makes BOTH names unique to
+    this run, independently: the template prefix gets the run id unless it already
+    carries the placeholder, and the pool format gets it unless it carries the
+    placeholder or `{template}` (which inherits the prefix's run id). Either name
+    left shared would be reachable by the provisioning path — `ensure_template`
+    reuses an existing template and `create_warmpool(reconcile=True)` resizes an
+    existing pool. ``"namespace"`` rewrites each cluster's namespace to
+    `run_namespace()`."""
     ph = constants.RUN_ID_PLACEHOLDER
-    if (self.run_isolation == "names" and ph not in self.template_name_prefix
-        and ph not in self.pool_name_format):
-      self.template_name_prefix = f"{self.template_name_prefix}{ph}-"
+    if self.run_isolation == "names":
+      if ph not in self.template_name_prefix:
+        self.template_name_prefix = f"{self.template_name_prefix}{ph}-"
+      if ph not in self.pool_name_format and "{template}" not in self.pool_name_format:
+        self.pool_name_format = f"{self.pool_name_format}-{ph}"
     self.template_name_prefix = self.template_name_prefix.replace(ph, run_id)
     self.pool_name_format = self.pool_name_format.replace(ph, run_id)
     if self.run_isolation == "namespace":
@@ -326,6 +335,9 @@ class FleetConfig(BaseModel):
 
 
 _DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+# Stand-in for a run id when validating name formats (12 hex chars, like the real
+# thing, and deliberately different from the "0"*12 image-hash stand-in).
+_SAMPLE_RUN_ID = "f" * 12
 
 
 def run_namespace(base: str, run_id: str) -> str:

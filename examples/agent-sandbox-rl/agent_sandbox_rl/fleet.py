@@ -465,21 +465,43 @@ class SandboxFleet:
     if self.config.run_isolation != "namespace" or self._namespaces_ensured:
       return
     labels = {**self.config.labels, **self.config.run_namespace_labels}
-    for c in self.registry:
-      try:
-        created = c.resources.ensure_namespace(c.namespace, labels=labels)
-      except Exception as exc:  # noqa: BLE001 — turn the API error into an actionable one
-        raise FleetError(
-            f"run_isolation='namespace': cannot create namespace '{c.namespace}' "
-            f"on cluster '{c.name}': {exc}. Grant this identity namespace "
-            "create/delete, pre-create the namespace, or use "
-            "run_isolation='names'.") from exc
-      if created:
+    # All-or-nothing per attempt: `run()` calls `plan()` before it enters its
+    # teardown scope, so a failure on the second cluster (or in the setup hook
+    # after a create) must not leave a namespace nobody will delete. Roll back
+    # what this attempt created and let the next attempt start clean.
+    created_now: list = []
+    try:
+      for c in self.registry:
+        try:
+          created = c.resources.ensure_namespace(c.namespace, labels=labels)
+        except Exception as exc:  # noqa: BLE001 — turn the API error into an actionable one
+          raise FleetError(
+              f"run_isolation='namespace': cannot create namespace '{c.namespace}' "
+              f"on cluster '{c.name}': {exc}. Grant this identity namespace "
+              "create/delete, pre-create the namespace, or use "
+              "run_isolation='names'.") from exc
+        if not created:
+          continue
+        created_now.append(c)
         self._created_namespaces.add((c.name, c.namespace))
         logger.info("run %s owns namespace '%s' on cluster %s",
                     self.run_id, c.namespace, c.name)
         if self.config.run_namespace_setup is not None:
-          self.config.run_namespace_setup(c, c.namespace)
+          try:
+            self.config.run_namespace_setup(c, c.namespace)
+          except Exception as exc:  # noqa: BLE001
+            raise FleetError(
+                f"run_isolation='namespace': run_namespace_setup failed for "
+                f"namespace '{c.namespace}' on cluster '{c.name}': {exc}") from exc
+    except BaseException:
+      for c in created_now:
+        try:
+          c.resources.delete_namespace(c.namespace)
+        except Exception:  # noqa: BLE001 — best-effort rollback
+          logger.warning("could not roll back namespace '%s' on cluster %s",
+                         c.namespace, c.name, exc_info=True)
+        self._created_namespaces.discard((c.name, c.namespace))
+      raise
     self._namespaces_ensured = True
 
   def _owns_pool(self, c, pool: str) -> bool:
@@ -492,8 +514,10 @@ class SandboxFleet:
     ours (deletes are 404-tolerant; pre-run-id leftovers)."""
     try:
       obj = c.resources.get_warmpool(pool)
-    except Exception:  # noqa: BLE001 — the guard must never break unwarm itself
-      return True
+    except Exception as exc:  # noqa: BLE001 — fail closed: unverifiable is not ours
+      logger.warning("cannot verify ownership of pool '%s' on cluster '%s'; leaving "
+                     "it alone: %s", pool, c.name, exc)
+      return False
     labels = ((obj or {}).get("metadata") or {}).get("labels") or {}
     owner = labels.get(constants.RUN_ID_LABEL) if isinstance(labels, dict) else None
     if isinstance(owner, str) and owner and owner != self.run_id:
@@ -727,6 +751,16 @@ class SandboxFleet:
     reps = replicas_override if replicas_override is not None else e.replicas
     c = self.registry.get(e.cluster)
     fam = repo_family(e.image)
+    if not self._owns_pool(c, e.pool):
+      # The image-derived name collided with a concurrent run's pool. Never
+      # resize (the 409 reconcile) or relabel (ensure_template) what is theirs;
+      # use the pool read-only the way adopt mode does — wait for one ready
+      # replica, reserve and write nothing.
+      logger.warning("warm: using another run's pool '%s' on cluster '%s' read-only; "
+                     "set run_isolation='names' to give each run its own pools",
+                     e.pool, e.cluster)
+      self._adopt_entry(e, wait)
+      return
 
     def _await_ready():
       with self._obs.phase("wait_pool_ready", cluster=e.cluster, family=fam):

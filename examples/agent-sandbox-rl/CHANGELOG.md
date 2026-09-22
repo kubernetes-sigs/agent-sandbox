@@ -18,9 +18,10 @@ All notable changes to `agent-sandbox-rl`. Format loosely follows
   watch event was read as `0/N ready` and the wait idled until `ready_timeout`
   (900 s by default); a 404 on the dropped-watch re-check did the same. Both now
   return `False` immediately, with an error log naming the pool.
-- **`unwarm_image()` / `set_pool_replicas()` refuse to delete or resize a pool
-  carrying another run's id label** (image-derived names collide across runs) and
-  log which run owns it.
+- **A pool carrying another run's id label is never written to** (image-derived
+  names collide across runs): warming it uses it read-only with adopt semantics,
+  and `unwarm_image()` / `set_pool_replicas()` leave it alone; each logs which run
+  owns it, and an ownership check that cannot read the pool fails closed.
 
 ### Added (concurrent runs — #1736)
 - **`FleetConfig.run_isolation`** (`"none"` default, naming unchanged): `"names"`

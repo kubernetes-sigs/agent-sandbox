@@ -394,12 +394,17 @@ class Resources:
     """
     deadline = time.monotonic() + timeout
     # Fast path: already ready (also covers the readiness that landed between
-    # pool creation and the watch starting).
+    # pool creation and the watch starting). A 404 here is terminal too: the
+    # watch below starts without a resourceVersion, so it would not replay a
+    # deletion that happened before it opened, and the wait would run out the
+    # timeout on a pool that is already gone.
     try:
       if self.pool_ready_replicas(name) >= expected:
         return True
-    except client.ApiException:
-      pass
+    except client.ApiException as e:
+      if e.status == 404:
+        logger.error("WarmPool '%s' does not exist; giving up", name)
+        return False
 
     w = watch.Watch()
     try:
@@ -529,10 +534,20 @@ class Resources:
       logger.info("Created namespace '%s'", name)
       return True
     except client.ApiException as e:
-      if e.status == 409:
-        logger.info("Namespace '%s' already exists; using it (not owned)", name)
-        return False
-      raise
+      if e.status != 409:
+        raise
+    # 409 also covers a namespace still Terminating (a previous run's teardown, or
+    # this run's rollback); nothing can be created in it, so say so instead of
+    # "using" it and failing on the first pool.
+    phase = None
+    try:
+      phase = (self.core_api.read_namespace(name).status or {}).phase
+    except Exception:  # noqa: BLE001 — diagnostics only
+      pass
+    if phase == "Terminating":
+      raise RuntimeError(f"namespace '{name}' is still terminating; retry once it is gone")
+    logger.info("Namespace '%s' already exists; using it (not owned)", name)
+    return False
 
   def delete_namespace(self, name: str) -> None:
     try:

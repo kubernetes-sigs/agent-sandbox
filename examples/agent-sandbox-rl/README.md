@@ -479,9 +479,10 @@ namespace would otherwise share — and resize, and delete — one pool.
 - **`run_isolation="none"`** (default) — today's naming; fine when nothing else runs
   in the namespace.
 
-In every mode `unwarm_image()` / `set_pool_replicas()` refuse to delete or resize a
-pool labelled with another run's id, and log which run owns it. Sharing one warm
-fleet across consumers on purpose is the
+In every mode a pool labelled with another run's id is never written to: warming
+it uses it read-only (as adoption does), and `unwarm_image()` /
+`set_pool_replicas()` leave it alone, each logging which run owns it. Sharing one
+warm fleet across consumers on purpose is the
 [adoption](#adopting-warm-pools-someone-else-provisioned) model, not a name collision.
 
 ## Configuration reference

@@ -265,3 +265,116 @@ def test_delete_namespace_tolerates_404():
   r = _resources()
   r.core_api.delete_namespace.side_effect = client.ApiException(status=404)
   r.delete_namespace("gone")                               # no raise
+
+
+# --- review follow-ups (#1737) --------------------------------------------- #
+def test_pool_name_format_with_only_a_run_id_part_is_rejected():
+  # `{run_id}` must not satisfy the per-image uniqueness check: such a format
+  # would map every image onto one pool.
+  with pytest.raises(ValueError, match="same pool name"):
+    FleetConfig(pool_name_format="pool-{run_id}")
+
+
+def test_names_mode_scopes_template_and_pool_independently(make_cluster):
+  # A placeholder in only the pool format must not leave templates shared.
+  cfg = FleetConfig(run_isolation="names", pool_name_format="p-{run_id}-{image_hash}")
+  f = SandboxFleet(cfg, registry=ClusterRegistry([make_cluster("a")]))
+  assert f.run_id in f.config.template_name(IMG)
+  assert f.run_id in f.config.pool_name(IMG)
+  # ...and a placeholder in only the prefix must not leave pools shared when the
+  # pool format carries neither {template} nor {run_id}.
+  cfg = FleetConfig(run_isolation="names", template_name_prefix="x-{run_id}-",
+                    pool_name_format="pool-{image_hash}")
+  f = SandboxFleet(cfg, registry=ClusterRegistry([make_cluster("b")]))
+  assert f.config.pool_name(IMG) == f"pool-{cfg.image_hash(IMG)}-{f.run_id}"
+  # {template} already inherits the prefix's run id: the format is left alone.
+  cfg = FleetConfig(run_isolation="names", pool_name_format="{template}-pool")
+  f = SandboxFleet(cfg, registry=ClusterRegistry([make_cluster("c")]))
+  assert f.config.pool_name(IMG) == f"{f.config.template_name(IMG)}-pool"
+
+
+def test_owns_pool_fails_closed_when_the_pool_cannot_be_read(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  f.warm_image(IMG, wait=False)
+  c.resources.get_warmpool.side_effect = RuntimeError("apiserver hiccup")
+  f.unwarm_image(IMG)
+  c.resources.delete_warmpool.assert_not_called()
+
+
+def test_warm_uses_another_runs_pool_read_only(make_cluster):
+  c = make_cluster("solo")
+  f = _fleet(c)
+  f.load_tasks([IMG])
+  f.plan()
+  c.resources.get_warmpool.return_value = _labelled("other-run-0001")
+  f.warm_image(IMG, wait=True)
+  c.resources.ensure_template.assert_not_called()      # no relabel of their template
+  c.resources.create_warmpool.assert_not_called()      # no 409 resize of their pool
+  args, _ = c.resources.wait_for_pool_ready.call_args
+  assert args[0] == f.config.pool_name(IMG) and args[1] == 1   # adopt semantics
+  assert c.active_replicas == 0                        # reserved nothing
+
+
+def test_wait_for_pool_ready_gives_up_when_the_pool_is_already_gone(monkeypatch):
+  r = _resources()
+  r.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(status=404)
+
+  class NeverWatch:
+    def stream(self, func, **kw):
+      raise AssertionError("watch must not be opened for a pool that is gone")
+
+    def stop(self):
+      pass
+
+  monkeypatch.setattr("agent_sandbox_rl.resources.watch.Watch", lambda: NeverWatch())
+  assert r.wait_for_pool_ready("pool-x", 2, timeout=30) is False
+
+
+def test_namespace_mode_rolls_back_namespaces_created_before_a_failure(make_cluster):
+  a, b = make_cluster("a", namespace="rl"), make_cluster("b", namespace="rl")
+  a.resources.ensure_namespace.return_value = True
+  b.resources.ensure_namespace.side_effect = client.ApiException(status=403)
+  f = SandboxFleet(FleetConfig(run_isolation="namespace"), registry=ClusterRegistry([a, b]))
+  f.load_tasks([IMG])
+  with pytest.raises(FleetError):
+    f.plan()
+  a.resources.delete_namespace.assert_called_once_with(a.namespace)   # rolled back
+  assert f._created_namespaces == set() and f._namespaces_ensured is False
+
+
+def test_namespace_mode_setup_hook_failure_rolls_back_and_retries(make_cluster):
+  c = make_cluster("solo", namespace="rl")
+  c.resources.ensure_namespace.return_value = True     # created (again) on each attempt
+  attempts = []
+
+  def hook(cluster, ns):
+    attempts.append(ns)
+    if len(attempts) == 1:
+      raise RuntimeError("LocalQueue create failed")
+
+  f = _fleet(c, run_isolation="namespace", run_namespace_setup=hook)
+  f.load_tasks([IMG])
+  with pytest.raises(FleetError, match="run_namespace_setup"):
+    f.plan()
+  c.resources.delete_namespace.assert_called_once_with(c.namespace)   # rolled back
+  assert f._namespaces_ensured is False
+  f.plan()                                             # retry re-creates and re-runs the hook
+  assert attempts == [c.namespace, c.namespace]
+  assert f._namespaces_ensured is True
+  assert (c.name, c.namespace) in f._created_namespaces
+
+
+def test_ensure_namespace_rejects_a_terminating_namespace():
+  import types
+  r = _resources()
+  r.core_api.create_namespace.side_effect = client.ApiException(status=409)
+  r.core_api.read_namespace.return_value = types.SimpleNamespace(
+      status=types.SimpleNamespace(phase="Terminating"))
+  with pytest.raises(RuntimeError, match="terminating"):
+    r.ensure_namespace("rl-abc")
+  r.core_api.read_namespace.return_value = types.SimpleNamespace(
+      status=types.SimpleNamespace(phase="Active"))
+  assert r.ensure_namespace("rl-abc") is False

@@ -649,7 +649,7 @@ class AsyncSandboxClient(Generic[T]):
             await self._close_handle_best_effort(
                 expected_handle, retire=automatic_cleanup
             )
-        except asyncio.CancelledError:
+        except BaseException:
             if should_delete:
                 async with self._lock:
                     self._claim_ownership.register_automatic(

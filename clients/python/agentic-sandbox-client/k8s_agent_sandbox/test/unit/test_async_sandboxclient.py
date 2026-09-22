@@ -2046,6 +2046,44 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_failed_lookup_cleanup_cancellation_releases_adoption_reservation(self):
         await self._assert_adoption_retries_after_cleanup(asyncio.CancelledError())
 
+    async def test_interrupted_lookup_cleanup_releases_claim_name(self):
+        await self._assert_interrupted_lookup_cleanup_releases_claim_name(
+            KeyboardInterrupt()
+        )
+
+    async def test_cancelled_lookup_cleanup_releases_claim_name(self):
+        await self._assert_interrupted_lookup_cleanup_releases_claim_name(
+            asyncio.CancelledError()
+        )
+
+    async def _assert_interrupted_lookup_cleanup_releases_claim_name(self, interruption):
+        self.client.sandbox_class = AsyncSandbox
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-id")
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        self.mock_k8s_helper.close = AsyncMock()
+        self.addAsyncCleanup(self.client.close)
+        handle = await self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        self.addAsyncCleanup(handle.close_connection)
+        self.mock_k8s_helper.resolve_sandbox_name.side_effect = RuntimeError("lost watch")
+
+        with patch.object(handle.connector.client, "aclose", side_effect=interruption):
+            with self.assertRaises(type(interruption)) as raised:
+                await self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        self.assertIs(raised.exception, interruption)
+
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(side_effect=ApiException(status=409))
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock(return_value="sandbox-id")
+        sandbox = await self.client.create_sandbox(
+            WARMPOOL, NAMESPACE, claim_name=CLAIM_NAME, adopt_existing=True
+        )
+
+        self.assertTrue(sandbox.is_active)
+        self.assertEqual(sandbox.claim_name, CLAIM_NAME)
+        self.assertEqual(await self.client.list_active_sandboxes(), [(NAMESPACE, CLAIM_NAME)])
+        await self.client.close()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
     async def _assert_adoption_retries_after_cleanup(self, deletion_error=None):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-id")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})

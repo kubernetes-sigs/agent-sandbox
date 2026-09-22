@@ -48,8 +48,9 @@ RUN mkdir -p /workspace && chown 1000:1000 /workspace
 WORKDIR /workspace
 USER 1000
 
-# Document the default localhost-only ports: REST (:8080) and gRPC (:9090).
-# Overridable via --rest-addr / --grpc-addr.
+# Document the default pod-network ports: REST (:8080) and gRPC (:9090).
+# The interface and ports are configurable with --listen-host, --rest-port,
+# and --grpc-port.
 EXPOSE 8080 9090
 
 ENTRYPOINT ["/usr/local/bin/sandboxd"]

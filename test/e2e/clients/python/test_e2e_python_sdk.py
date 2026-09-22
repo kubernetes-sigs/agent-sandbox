@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import tempfile
 from test.e2e.clients.python.framework.context import TestContext
 
 import pytest
@@ -174,6 +175,13 @@ def run_sdk_tests(sandbox):
     read_content = sandbox.files.read(file_path).decode("utf-8")
     print(f"Read content: '{read_content}'")
     assert read_content == file_content, f"File content mismatch: {read_content}"
+
+    with tempfile.TemporaryFile() as destination:
+        written = sandbox.files.read_to(file_path, destination)
+        destination.seek(0)
+        streamed_content = destination.read().decode("utf-8")
+    assert written == len(file_content.encode("utf-8"))
+    assert streamed_content == file_content
 
 
 def test_python_sdk_router_mode(tc, temp_namespace, sandbox_template, deploy_router, sandbox_coldpool):
@@ -390,4 +398,3 @@ def test_python_sdk_volume_claim_templates(
 
     finally:
         client.delete_all()
-

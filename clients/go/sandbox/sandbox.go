@@ -604,6 +604,13 @@ func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reade
 func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error) {
 	return s.files.Read(ctx, path, opts...)
 }
+
+// ReadTo streams a file into a caller-owned io.Writer without buffering the
+// complete response. The destination is never closed.
+func (s *Sandbox) ReadTo(ctx context.Context, path string, destination io.Writer, opts ...CallOption) (int64, error) {
+	return s.files.ReadTo(ctx, path, destination, opts...)
+}
+
 func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error) {
 	return s.files.List(ctx, path, opts...)
 }

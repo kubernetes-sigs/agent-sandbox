@@ -1,0 +1,224 @@
+# The UNIFIED fleet template: every warm-pool spare and every employee
+# sandbox is stamped from this one blueprint (the customer question "can a
+# single template serve diverse users?" — yes, precisely because nothing
+# per-employee appears below). Per-employee state arrives at claim time by
+# late-binding the employee's Filestore subdirectory into the pod's
+# emptyDir (see 10-storage.yaml), and OpenClaw reads its profile from that
+# mount at startup.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: openclaw-fleet-template
+  namespace: openclaw-fleet
+spec:
+  # Claims must not inject env or volumeClaimTemplates: either would force
+  # a cold start past the warm pool (defeating the sub-second claim). With
+  # Disallowed, such claims are REJECTED outright instead of silently
+  # taking the slow path.
+  envVarsInjectionPolicy: Disallowed
+  volumeClaimTemplatesPolicy: Disallowed
+
+  # Per-sandbox headless Service -> stable DNS (sandbox.status.serviceFQDN).
+  # The fleet portal aliases oc-<employee-id> to this name, giving each
+  # employee a fixed address that survives suspend/resume and rebuilds
+  # (test-checklist item 6).
+  service: true
+
+  # One shared NetworkPolicy for the whole fleet. Only the sandbox-router
+  # (data plane) and the fleet portal (health/wake checks) may reach a
+  # sandbox; egress is DNS + HTTPS for LLM provider APIs. Rule edits here
+  # propagate live to all existing sandboxes — no pod restarts.
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+    - from:
+      - podSelector:
+          matchLabels: {app: sandbox-router}
+      - podSelector:
+          matchLabels: {app: fleet-portal}
+      ports:
+      - {protocol: TCP, port: 18789}
+    egress:
+    - ports:
+      - {protocol: UDP, port: 53}
+      - {protocol: TCP, port: 53}
+    - ports:
+      - {protocol: TCP, port: 443}
+
+  podTemplate:
+    metadata:
+      labels:
+        # Selected by 60-snapshots/10-policy.yaml (PodSnapshotPolicy).
+        openclaw-fleet: sandbox
+      annotations:
+        # Allows the storage daemon's bind mount to propagate into the
+        # gVisor sandbox. 'workspace-volume' must match the emptyDir volume
+        # name below. Requires GKE >= 1.36.0-gke.3302001.
+        dev.gvisor.empty-dir.workspace-volume.force-shared: "true"
+    spec:
+      runtimeClassName: gvisor
+      restartPolicy: OnFailure
+      dnsPolicy: ClusterFirst
+      automountServiceAccountToken: false
+      nodeSelector: {sandbox.gke.io/runtime: gvisor}
+      tolerations:
+      - {key: "sandbox.gke.io/runtime", value: "gvisor", effect: "NoSchedule"}
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      initContainers:
+        - name: init-config
+          image: ghcr.io/openclaw/openclaw:2026.3.23
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - cp /etc/openclaw-readonly/openclaw.json /etc/openclaw/openclaw.json
+          volumeMounts:
+            - name: cm-volume
+              mountPath: /etc/openclaw-readonly
+            - name: openclaw-etc-writable
+              mountPath: /etc/openclaw
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:2026.3.23
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: OPENCLAW_GATEWAY_TOKEN
+              value: "dummy-token-for-sandbox"
+            - name: OPENCLAW_CONFIG_PATH
+              value: "/etc/openclaw/openclaw.json"
+            # HOME=/workspace puts OpenClaw's own state directory at
+            # /workspace/.openclaw — exactly where the storage daemon
+            # bind-mounts the employee's persistent Filestore subdirectory.
+            # Profile, settings, sessions and assets therefore follow the
+            # employee across claims, rebuilds and suspend/resume.
+            - name: HOME
+              value: "/workspace"
+          envFrom:
+            # Fleet-shared provider keys only — never per-employee secrets
+            # (pod env is stamped when the warm spare is created).
+            - secretRef:
+                name: openclaw-provider-keys
+                optional: true
+          command:
+            - sh
+            - -c
+            - |
+              # Warm spares idle here until an employee claims the sandbox
+              # and the storage daemon binds their workspace + writes the
+              # .ready signal into the emptyDir root (local disk, so the
+              # check is instant — no NFS cache delays).
+              echo "Waiting for workspace late-bind signal..."
+              while [ ! -f /workspace/.ready ]; do sleep 0.1; done
+              # Per-employee config injection (follow-up P0): if the portal
+              # seeded ~/.openclaw/openclaw.overrides.json before the bind,
+              # deep-merge it over the fleet base config. Doing the merge
+              # here — after the bind, before launch — makes the layering
+              # deterministic regardless of OpenClaw's own config-precedence
+              # rules, and the command stays IDENTICAL for every employee,
+              # so warm claims stay warm.
+              node -e '
+                const fs = require("fs");
+                const eff = "/etc/openclaw/openclaw.json";
+                const pristine = "/etc/openclaw/openclaw.base.json";
+                const ovr = "/workspace/.openclaw/openclaw.overrides.json";
+                // The writable /etc/openclaw emptyDir OUTLIVES container
+                // restarts (restartPolicy: OnFailure reruns this command
+                // but not the init container), so the effective config is
+                // ALWAYS rebuilt from a pristine snapshot of the fleet
+                // base taken on first launch — never from the previous
+                // merge output, which would let a removed or quarantined
+                // override linger forever.
+                if (!fs.existsSync(pristine)) fs.copyFileSync(eff, pristine);
+                let effective = JSON.parse(fs.readFileSync(pristine, "utf8"));
+                if (fs.existsSync(ovr)) {
+                  // The portal validates seeded overrides, but the file
+                  // lives in the employee-writable workspace, so it can be
+                  // corrupted later. Failing startup here would crash-loop
+                  // every future wake/rebuild with no self-service fix
+                  // (the employee needs the sandbox UP to repair the file)
+                  // — so a bad file is QUARANTINED loudly instead: renamed
+                  // aside and the gateway starts on the base config.
+                  try {
+                    const parsed = JSON.parse(fs.readFileSync(ovr, "utf8"));
+                    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+                      throw new Error("overrides must be a JSON object");
+                    }
+                    const merge = (a, b) => {
+                      for (const k of Object.keys(b)) {
+                        a[k] = (b[k] && typeof b[k] === "object" && !Array.isArray(b[k])
+                                && a[k] && typeof a[k] === "object" && !Array.isArray(a[k]))
+                          ? merge(a[k], b[k]) : b[k];
+                      }
+                      return a;
+                    };
+                    effective = merge(effective, parsed);
+                    console.log("Applied per-employee config overrides.");
+                  } catch (e) {
+                    fs.renameSync(ovr, ovr + ".invalid");
+                    console.error("WARNING: quarantined invalid openclaw.overrides.json " +
+                                  "(-> .invalid); starting on base config: " + e.message);
+                  }
+                }
+                fs.writeFileSync(eff, JSON.stringify(effective, null, 2));'
+              echo "Workspace bound; starting OpenClaw gateway."
+              node dist/index.js gateway --bind=lan --port 18789 --allow-unconfigured --verbose
+          ports:
+            - containerPort: 18789
+            - containerPort: 18790
+          # NOTE: deliberately NO readinessProbe on 18789. Warm spares hold
+          # at the spin-wait above with the port closed; a probe would (a)
+          # keep pool pods NotReady so the pool controller replaces them
+          # every ReadinessGracePeriod, and (b) gate adoption on app
+          # startup, destroying the sub-second claim. Application readiness
+          # is instead measured out-of-band by the fleet portal (its signup
+          # response reports claim-adopted / storage-bound / app-responding
+          # timings separately).
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - name: workspace-volume
+              mountPath: /workspace
+              # Required so the daemon's bind mount (performed on the host)
+              # appears inside the running container.
+              mountPropagation: HostToContainer
+            - name: openclaw-etc-writable
+              mountPath: /etc/openclaw
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
+      volumes:
+        - name: cm-volume
+          configMap:
+            name: openclaw-fleet-config
+        - name: openclaw-etc-writable
+          emptyDir: {}
+        # Warm-compatible metadata channel (KEP-174): claim-time
+        # additionalPodMetadata labels (e.g. sandbox.users.io/employee) are
+        # live-patched onto the adopted pod, and the kubelet refreshes
+        # downwardAPI VOLUME files in place — so the workload can read
+        # small, non-secret per-employee values here without any pod-spec
+        # difference between employees. Eventually consistent; not ordered
+        # against .ready — boot-critical config rides the workspace seed.
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: labels
+                fieldRef: {fieldPath: metadata.labels}
+        # Standard emptyDir used as the late-binding anchor; the employee's
+        # NFS subdirectory is bind-mounted at /workspace/.openclaw.
+        - name: workspace-volume
+          emptyDir: {}

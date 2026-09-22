@@ -460,6 +460,45 @@ def find_existing_issue(existing_issues, marker, test_name=None):
     return None
 
 
+def find_closed_issue(closed_issues, marker):
+    """Finds the most recently closed issue that tracked this marker, or None.
+
+    Only the HTML marker is matched (no title fallback): a closed issue may
+    only suppress re-filing for the exact finding it tracked.
+    """
+    matches = [i for i in closed_issues if marker in i.get("body", "")]
+    if not matches:
+        return None
+    return max(matches, key=lambda i: i.get("closedAt") or "")
+
+
+def should_skip_for_closed(closed_at, last_failure_ts):
+    """True when a finding has no failures newer than a prior issue's close.
+
+    A maintainer who closes a flake issue has judged the failures seen so
+    far (fixed, or a verified false positive). Those same failing columns
+    can sit in the TestGrid window for weeks, so re-filing on them would
+    just resurrect the closed issue. Only a failure strictly newer than
+    `closed_at` (ISO-8601, from GitHub) is evidence of a genuine recurrence.
+    An unparsable or missing close time files rather than suppresses.
+    """
+    if not closed_at:
+        return False
+    try:
+        closed_ms = datetime.fromisoformat(
+            closed_at.replace("Z", "+00:00")).timestamp() * 1000
+    except ValueError:
+        return False
+    return last_failure_ts <= closed_ms
+
+
+def lineage_note(prior):
+    return (
+        f"\nPreviously tracked in #{prior['number']} (closed); failures newer "
+        "than that close triggered this re-file.\n"
+    )
+
+
 def merge_flaky_by_test(flaky):
     """Merges findings for the same test across tabs into one entry.
 
@@ -512,6 +551,16 @@ def update_issues(repo, flaky, infra, dry_run):
             "--state", "open", "--limit", "200", "--json", "number,title,body",
         )
     )
+    # Closed issues participate in dedup too: a maintainer closing a
+    # verified false positive must not have it re-filed while the stale
+    # failing columns are still inside the TestGrid window.
+    closed = json.loads(
+        gh(
+            "issue", "list", "--repo", repo, "--label", "kind/flake",
+            "--state", "closed", "--limit", "200",
+            "--json", "number,body,closedAt",
+        )
+    )
     actions = []
     for f in flaky:
         marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
@@ -540,7 +589,16 @@ def update_issues(repo, flaky, infra, dry_run):
                    "--title", f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})",
                    "--body", body)
         else:
+            prior = find_closed_issue(closed, marker)
+            if prior and should_skip_for_closed(
+                    prior.get("closedAt"), f["last_failure_ts"]):
+                actions.append(
+                    f"skip (closed #{prior['number']}, no failures since "
+                    f"close): {f['short']}")
+                continue
             body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
+            if prior:
+                body += lineage_note(prior)
             actions.append(f"create: [FLAKE] {f['short']}")
             if not dry_run:
                 gh("issue", "create", "--repo", repo,
@@ -576,6 +634,15 @@ this count.
             if not dry_run:
                 gh("issue", "edit", str(issue["number"]), "--repo", repo, "--body", body)
         else:
+            prior = find_closed_issue(closed, marker)
+            if prior and should_skip_for_closed(
+                    prior.get("closedAt"), i["last_failure_ts"]):
+                actions.append(
+                    f"skip (closed #{prior['number']}, no failures since "
+                    f"close): infra {i['tab']}")
+                continue
+            if prior:
+                body += lineage_note(prior)
             actions.append(f"create: [FLAKE] {i['tab']}: infra failures before tests ran")
             if not dry_run:
                 gh("issue", "create", "--repo", repo,

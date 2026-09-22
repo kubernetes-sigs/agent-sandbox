@@ -15,6 +15,7 @@
 """Unit tests for flake-report — red-run classification and infra counting."""
 
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -350,6 +351,183 @@ class AnalyzeTabTest(unittest.TestCase):
         self.assertIn("pre-test PR breakage", report)
         self.assertIn("were aborted", report)
         self.assertIn("1 of 5 red runs", report)
+
+
+class ShouldSkipForClosedTest(unittest.TestCase):
+    # 2026-01-02T00:00:00Z in ms since epoch.
+    CLOSED_AT = "2026-01-02T00:00:00Z"
+    CLOSED_MS = 1767312000000
+
+    def test_skips_when_last_failure_predates_close(self):
+        self.assertTrue(flake_report.should_skip_for_closed(
+            self.CLOSED_AT, self.CLOSED_MS - 1))
+
+    def test_skips_when_last_failure_equals_close(self):
+        # A failure at the close instant was visible to the closer.
+        self.assertTrue(flake_report.should_skip_for_closed(
+            self.CLOSED_AT, self.CLOSED_MS))
+
+    def test_files_when_failure_is_newer_than_close(self):
+        self.assertFalse(flake_report.should_skip_for_closed(
+            self.CLOSED_AT, self.CLOSED_MS + 1))
+
+    def test_files_when_close_time_missing_or_unparsable(self):
+        # Without a provable close time the tool must not suppress.
+        self.assertFalse(flake_report.should_skip_for_closed(None, 100))
+        self.assertFalse(flake_report.should_skip_for_closed("", 100))
+        self.assertFalse(flake_report.should_skip_for_closed("garbage", 100))
+
+
+class FindClosedIssueTest(unittest.TestCase):
+    MARKER = "<!-- flake-report:test=pkg.TestA -->"
+
+    def test_matches_marker_only_not_title(self):
+        issues = [
+            {"number": 1, "title": "[FLAKE] TestA (tab)", "body": "no marker",
+             "closedAt": "2026-01-05T00:00:00Z"},
+            {"number": 2, "body": f"{self.MARKER}\nbody",
+             "closedAt": "2026-01-01T00:00:00Z"},
+        ]
+        self.assertEqual(
+            flake_report.find_closed_issue(issues, self.MARKER)["number"], 2)
+
+    def test_picks_most_recently_closed_match(self):
+        issues = [
+            {"number": 1, "body": f"{self.MARKER}",
+             "closedAt": "2026-01-01T00:00:00Z"},
+            {"number": 2, "body": f"{self.MARKER}",
+             "closedAt": "2026-02-01T00:00:00Z"},
+        ]
+        self.assertEqual(
+            flake_report.find_closed_issue(issues, self.MARKER)["number"], 2)
+
+    def test_none_when_no_match(self):
+        self.assertIsNone(flake_report.find_closed_issue([], self.MARKER))
+
+
+class UpdateIssuesClosedDedupTest(unittest.TestCase):
+    """update_issues with a stubbed gh: closed issues suppress re-filing
+    until a failure newer than the close appears."""
+
+    CLOSED_AT = "2026-01-02T00:00:00Z"
+    CLOSED_MS = 1767312000000
+
+    def gh_stub(self, closed_issues):
+        calls = []
+
+        def fake_gh(*args, input_text=None):
+            calls.append(args)
+            if args[:2] == ("issue", "list"):
+                state = args[args.index("--state") + 1]
+                return json.dumps(closed_issues if state == "closed" else [])
+            return ""
+
+        return fake_gh, calls
+
+    def flaky_finding(self, last_failure_ts):
+        return {
+            "test": "pkg.TestA", "short": "TestA", "tabs": ["tab"],
+            "fails": 3, "passes": 7, "retest_flips": 1, "flaky_cells": 0,
+            "distinct_changelists": 3, "last_failure_ts": last_failure_ts,
+            "job_histories": ["https://prow.k8s.io/job-history/x"],
+        }
+
+    def infra_finding(self, last_failure_ts):
+        return {
+            "tab": "tab", "red_runs": 4, "infra_runs": 2, "aborted_runs": 0,
+            "clone_failures": 0, "pretest_failures": 0, "total_runs": 9,
+            "last_failure_ts": last_failure_ts,
+            "job_history": "https://prow.k8s.io/job-history/x",
+        }
+
+    def closed_issue(self, marker):
+        return [{"number": 42, "body": f"{marker}\nold body",
+                 "closedAt": self.CLOSED_AT}]
+
+    def test_closed_issue_suppresses_refile_of_stale_failures(self):
+        marker = "<!-- flake-report:test=pkg.TestA -->"
+        fake_gh, calls = self.gh_stub(self.closed_issue(marker))
+        with mock.patch.object(flake_report, "gh", fake_gh):
+            actions = flake_report.update_issues(
+                "org/repo", [self.flaky_finding(self.CLOSED_MS - 1000)],
+                [], dry_run=False)
+        self.assertEqual(
+            actions,
+            ["skip (closed #42, no failures since close): TestA"])
+        self.assertNotIn("create", {c[1] for c in calls})
+
+    def test_newer_failure_refiles_and_links_prior_issue(self):
+        marker = "<!-- flake-report:test=pkg.TestA -->"
+        fake_gh, calls = self.gh_stub(self.closed_issue(marker))
+        with mock.patch.object(flake_report, "gh", fake_gh):
+            actions = flake_report.update_issues(
+                "org/repo", [self.flaky_finding(self.CLOSED_MS + 1000)],
+                [], dry_run=False)
+        self.assertEqual(actions, ["create: [FLAKE] TestA"])
+        (create,) = [c for c in calls if c[:2] == ("issue", "create")]
+        body = create[create.index("--body") + 1]
+        self.assertIn("Previously tracked in #42", body)
+        self.assertIn(marker, body)
+
+    def test_no_closed_match_files_as_before(self):
+        fake_gh, calls = self.gh_stub([])
+        with mock.patch.object(flake_report, "gh", fake_gh):
+            actions = flake_report.update_issues(
+                "org/repo", [self.flaky_finding(500)], [], dry_run=False)
+        self.assertEqual(actions, ["create: [FLAKE] TestA"])
+        (create,) = [c for c in calls if c[:2] == ("issue", "create")]
+        self.assertNotIn("Previously tracked", create[create.index("--body") + 1])
+
+    def test_infra_closed_issue_suppresses_refile(self):
+        marker = "<!-- flake-report:infra-tab=tab -->"
+        fake_gh, calls = self.gh_stub(self.closed_issue(marker))
+        with mock.patch.object(flake_report, "gh", fake_gh):
+            actions = flake_report.update_issues(
+                "org/repo", [], [self.infra_finding(self.CLOSED_MS - 1000)],
+                dry_run=False)
+        self.assertEqual(
+            actions,
+            ["skip (closed #42, no failures since close): infra tab"])
+        self.assertNotIn("create", {c[1] for c in calls})
+
+    def test_infra_newer_failure_refiles_with_lineage(self):
+        marker = "<!-- flake-report:infra-tab=tab -->"
+        fake_gh, calls = self.gh_stub(self.closed_issue(marker))
+        with mock.patch.object(flake_report, "gh", fake_gh):
+            actions = flake_report.update_issues(
+                "org/repo", [], [self.infra_finding(self.CLOSED_MS + 1000)],
+                dry_run=False)
+        self.assertEqual(
+            actions,
+            ["create: [FLAKE] tab: infra failures before tests ran"])
+        (create,) = [c for c in calls if c[:2] == ("issue", "create")]
+        self.assertIn("Previously tracked in #42",
+                      create[create.index("--body") + 1])
+
+    def test_open_issue_still_takes_precedence_over_closed(self):
+        # An open issue for the marker means the closed-issue logic never
+        # runs: the open issue is updated (or skipped) exactly as before.
+        marker = "<!-- flake-report:test=pkg.TestA -->"
+        open_issue = [{
+            "number": 7, "title": "[FLAKE] TestA (tab)",
+            "body": f"{marker}\n<!-- last-reported-failure=1 -->",
+        }]
+        calls = []
+
+        def fake_gh(*args, input_text=None):
+            calls.append(args)
+            if args[:2] == ("issue", "list"):
+                state = args[args.index("--state") + 1]
+                return json.dumps(
+                    self.closed_issue(marker) if state == "closed"
+                    else open_issue)
+            return ""
+
+        with mock.patch.object(flake_report, "gh", fake_gh):
+            actions = flake_report.update_issues(
+                "org/repo", [self.flaky_finding(self.CLOSED_MS - 1000)],
+                [], dry_run=False)
+        self.assertEqual(actions, ["update #7: TestA"])
 
 
 if __name__ == "__main__":

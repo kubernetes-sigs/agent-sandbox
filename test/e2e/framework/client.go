@@ -619,7 +619,10 @@ func (cl *ClusterClient) startPortForward(cmd *exec.Cmd, timeout time.Duration) 
 		cl.Log("killing port-forward")
 		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			cl.Errorf("failed to kill port-forward: %s", err)
+			return
 		}
+		// Callers reuse fixed local ports, which stay bound until kubectl exits.
+		<-exited
 	})
 
 	readyTimer := time.NewTimer(timeout)

@@ -23,12 +23,10 @@ SandboxClient, and K8sHelper are wired correctly end-to-end.
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from threading import RLock
 from unittest.mock import MagicMock, patch
 
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 from k8s_agent_sandbox.sandbox_client import SandboxClient
-from k8s_agent_sandbox.claim_ownership import ClaimOwnership
 
 
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
@@ -63,18 +61,6 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
-        sandbox_client._active_claim_uids = {}
-        sandbox_client._claim_ownership = ClaimOwnership()
-        sandbox_client._automatic_cleanup_claims = (
-            sandbox_client._claim_ownership.automatic_cleanup_claims
-        )
-        sandbox_client._automatic_cleanup_claim_uids = (
-            sandbox_client._claim_ownership.automatic_cleanup_claim_uids
-        )
-        sandbox_client._caller_owned_claims = (
-            sandbox_client._claim_ownership.caller_owned_claims
-        )
-        sandbox_client._lock = RLock()
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
@@ -122,18 +108,6 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
-        sandbox_client._active_claim_uids = {}
-        sandbox_client._claim_ownership = ClaimOwnership()
-        sandbox_client._automatic_cleanup_claims = (
-            sandbox_client._claim_ownership.automatic_cleanup_claims
-        )
-        sandbox_client._automatic_cleanup_claim_uids = (
-            sandbox_client._claim_ownership.automatic_cleanup_claim_uids
-        )
-        sandbox_client._caller_owned_claims = (
-            sandbox_client._claim_ownership.caller_owned_claims
-        )
-        sandbox_client._lock = RLock()
         sandbox_client.sandbox_class = MagicMock()
 
         real_helper.resolve_sandbox_name = MagicMock(return_value="sandbox-abc")
@@ -165,18 +139,6 @@ class TestLifecycleIntegration(unittest.TestCase):
         sandbox_client.tracer_config = MagicMock()
         sandbox_client.tracer_config.enable_tracing = False
         sandbox_client._active_connection_sandboxes = {}
-        sandbox_client._active_claim_uids = {}
-        sandbox_client._claim_ownership = ClaimOwnership()
-        sandbox_client._automatic_cleanup_claims = (
-            sandbox_client._claim_ownership.automatic_cleanup_claims
-        )
-        sandbox_client._automatic_cleanup_claim_uids = (
-            sandbox_client._claim_ownership.automatic_cleanup_claim_uids
-        )
-        sandbox_client._caller_owned_claims = (
-            sandbox_client._claim_ownership.caller_owned_claims
-        )
-        sandbox_client._lock = RLock()
         sandbox_client.sandbox_class = MagicMock()
 
         with self.assertRaises(ValueError):

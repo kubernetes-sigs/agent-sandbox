@@ -403,43 +403,31 @@ The same keyword arguments are available on
 Kubernetes DNS-1123 subdomain of at most 253 characters.
 `adopt_existing=True` requires an explicit `claim_name`.
 
-Safe adoption happens only when the create request returns HTTP `409 Conflict`.
-The client reads that exact claim and validates its API identity, UID, name,
-namespace, generation, resource version, requested claim labels, warm pool,
-lifecycle, volume claim templates, additional Pod metadata, and environment
-variables before attaching. Extra labels added by admission or controllers and
-new spec fields added by newer CRDs are allowed; caller-controlled fields must
-still match the request. A terminating claim
-is never adopted. If the observed claim is already Ready for its current
-generation, the client returns it immediately. Otherwise, it starts the
-existing readiness watch from the observed resource version. Every watched
-object is revalidated against the same UID and request contract, including
-after an expired watch restarts.
+Adoption happens only after HTTP `409 Conflict`. The client reads the existing
+Claim, checks that it references the requested warm pool and is not terminating,
+then evaluates readiness. An already-ready Claim needs no further watch event;
+otherwise the watch starts from the observed resource version. The UID observed
+during explicit creation or adoption is checked on watch events, including
+after an expired watch restarts. If the Claim disappears between the conflict
+and the read, `SandboxNotFoundError` tells the caller to retry.
 
-A successful create with an explicit name uses the same validation boundary.
-The canonical response returned by the apiserver must match the request, and
-its UID and resource version seed the readiness watch. This prevents an expired
-watch from silently attaching to a same-name Claim that was deleted and
-recreated with a different identity or contract.
+Creation options such as labels, Pod metadata, environment variables and volume
+templates are not reapplied or compared on adoption: the Claim spec is mutable.
+`shutdown_after_seconds` can be used with adoption; an existing Claim keeps its
+original `shutdownTime`, so retries do not extend its lifetime. Use a distinct
+Claim name when you need a new allocation with different settings.
 
-Explicit names also define a different cleanup ownership boundary. The client
-never automatically deletes an explicitly named claim, whether creation fails
-or succeeds; the caller owns that claim and may safely retry or inspect it.
-Context-manager and `atexit` cleanup select internally generated claims and
-handles returned by `get_sandbox()`, preserving the existing reattachment
-behavior. Each successful create or reattachment records the observed
-Kubernetes UID, and automatic deletion uses that UID as a precondition so it
-cannot delete a same-name replacement. The explicit `delete_sandbox` and
-`delete_all` methods remain available for deliberate deletion; `delete_all`
-preserves its existing behavior of deleting every tracked handle. Because
-`shutdown_after_seconds` produces a different absolute shutdown time on every
-retry, it cannot be combined with `adopt_existing=True`.
+Claims explicitly named through this client's `create_sandbox()` are
+caller-owned, including after a failed attempt. They are not deleted on a
+readiness failure, context-manager exit or `atexit`. Use `delete_sandbox()` or
+`delete_all()` for deliberate deletion. Reattachment through `get_sandbox()` on
+a new client retains its existing cleanup behavior.
 
-If deletion of the same claim is already in progress in this client, creation
-and reattachment raise `RuntimeError` with a retry diagnostic instead of
-returning a handle to a claim being deleted. Retry after that deletion finishes;
-the failed attempt does not transfer cleanup ownership. Operations on other
-claim names remain independent while the Kubernetes request is in progress.
+Random-name creation retains its existing cleanup behavior, including rollback
+when the create response is lost. Rollback uses a UID precondition when the
+response provided a UID; without one it retains the existing name-based delete.
+A `409` does not trigger rollback of the conflicting Claim. This feature does
+not add thread-safety guarantees or UID tracking to returned handles.
 
 ### 9. Custom Volume Claim Templates
 

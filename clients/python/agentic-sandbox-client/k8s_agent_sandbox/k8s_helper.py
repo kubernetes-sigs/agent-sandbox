@@ -14,13 +14,12 @@
 
 import logging
 import time
-from collections.abc import Callable
+from itertools import chain
 from datetime import UTC, datetime
 from typing import Any, List
 from kubernetes import client, config, watch
 import urllib3.exceptions
-from .claim_status import get_claim_sandbox_name
-from .exceptions import SandboxMetadataError, SandboxNotFoundError
+from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
     is_valid_gateway_hostname,
@@ -31,6 +30,7 @@ from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    TERMINAL_CLAIM_READY_REASONS,
     CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
     GATEWAY_API_VERSION,
@@ -118,14 +118,7 @@ class K8sHelper:
             body=manifest
         )
 
-    def resolve_sandbox_name(
-        self,
-        claim_name: str,
-        namespace: str,
-        timeout: int,
-        resource_version: str | None = None,
-        claim_validator: Callable[[dict], object] | None = None,
-    ) -> str:
+    def resolve_sandbox_name(self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
         name. This method watches the SandboxClaim until the sandbox name
@@ -136,23 +129,12 @@ class K8sHelper:
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
         """
-        return self._watch_claim(
-            claim_name,
-            namespace,
-            timeout,
-            require_ready=False,
-            require_current_generation=True,
-            resource_version=resource_version,
-            claim_validator=claim_validator,
-        )
+        return self._watch_claim(claim_name, namespace, timeout, require_ready=False,
+                                 resource_version=resource_version)
 
     def wait_for_claim_ready(
-        self,
-        claim_name: str,
-        namespace: str,
-        timeout: int,
-        resource_version: str | None = None,
-        claim_validator: Callable[[dict], object] | None = None,
+        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
+        *, expected_uid: str | None = None, initial_claim: dict | None = None,
     ) -> str:
         """Watches the SandboxClaim until it is bound to a sandbox AND its
         Ready condition is True, then returns the sandbox name.
@@ -168,27 +150,17 @@ class K8sHelper:
             resource_version: Optional resourceVersion to start the watch
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
+            expected_uid: If provided, reject events for a same-name replacement.
+            initial_claim: Optional create/GET response to evaluate before
+                waiting for future watch events.
         """
-        return self._watch_claim(
-            claim_name,
-            namespace,
-            timeout,
-            require_ready=True,
-            require_current_generation=True,
-            resource_version=resource_version,
-            claim_validator=claim_validator,
-        )
+        return self._watch_claim(claim_name, namespace, timeout, require_ready=True,
+                                 resource_version=resource_version,
+                                 expected_uid=expected_uid, initial_claim=initial_claim)
 
-    def _watch_claim(
-        self,
-        claim_name: str,
-        namespace: str,
-        timeout: int,
-        require_ready: bool,
-        require_current_generation: bool,
-        resource_version: str | None = None,
-        claim_validator: Callable[[dict], object] | None = None,
-    ) -> str:
+    def _watch_claim(self, claim_name: str, namespace: str, timeout: int, require_ready: bool,
+                     resource_version: str | None = None,
+                     *, expected_uid: str | None = None, initial_claim: dict | None = None) -> str:
         """Shared SandboxClaim watch loop.
 
         Returns the sandbox name once ``status.sandbox.name`` is populated;
@@ -230,30 +202,67 @@ class K8sHelper:
                     resource_version=rv,
                     timeout_seconds=remaining
                 )
-                for event in event_iter:
+                # An already-ready GET may never produce another watch event.
+                initial_events = [] if initial_claim is None else [
+                    {"type": "ADDED", "object": initial_claim}
+                ]
+                initial_claim = None
+                for event in chain(initial_events, event_iter):
                     if event is None:
                         continue
                     if event["type"] == "DELETED":
                         raise SandboxMetadataError(deleted_msg)
                     if event["type"] in ["ADDED", "MODIFIED"]:
                         claim_object = event['object']
-                        if claim_validator is not None:
-                            claim_validator(claim_object)
+                        metadata = claim_object.get("metadata") or {}
+                        if expected_uid is not None and metadata.get("uid") != expected_uid:
+                            raise SandboxNotFoundError(
+                                f"SandboxClaim '{claim_name}' was replaced while waiting for readiness."
+                            )
+                        if expected_uid is not None and metadata.get("deletionTimestamp"):
+                            raise SandboxNotFoundError(f"SandboxClaim '{claim_name}' is terminating.")
                         # Track the last-seen resourceVersion so a stream
                         # restart resumes instead of replaying history.
                         seen_rv = (claim_object.get('metadata') or {}).get('resourceVersion')
                         if seen_rv:
                             rv = seen_rv
-                        name = get_claim_sandbox_name(
-                            claim_object,
-                            claim_name,
-                            require_ready=require_ready,
-                            require_current_generation=require_current_generation,
-                        )
-                        if name:
+                        status = claim_object.get('status') or {}
+
+                        ready = False
+                        for cond in status.get('conditions', []):
+                            if (
+                                cond.get('type') == 'Ready'
+                                and cond.get('status') == 'False'
+                                and cond.get('reason') == 'TemplateNotFound'
+                            ):
+                                raise SandboxTemplateNotFoundError(
+                                    f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                                )
+                            elif cond.get('reason') == 'WarmPoolNotFound':
+                                raise SandboxWarmPoolNotFoundError(
+                                    f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                                )
+                            elif (
+                                cond.get('type') == 'Ready'
+                                and cond.get('status') == 'False'
+                                and cond.get('reason') in TERMINAL_CLAIM_READY_REASONS
+                            ):
+                                # The controller reported a failure it will not
+                                # retry; waiting out the timeout cannot succeed.
+                                raise SandboxClaimFailedError(
+                                    f"SandboxClaim '{claim_name}' failed with terminal reason "
+                                    f"{cond.get('reason')}: {cond.get('message', '')}"
+                                )
+                            if cond.get('type') == 'Ready' and cond.get('status') == 'True':
+                                ready = True
+
+                        sandbox_status = status.get('sandbox', {})
+                        # Support both 'name' (standard) and 'Name' (legacy, before CRD rename in #440)
+                        name = sandbox_status.get('name', '') or sandbox_status.get('Name', '')
+                        if name and (ready or not require_ready):
                             logging.info(
                                 f"Resolved sandbox name '{name}' from claim status"
-                                + (" (claim Ready)" if require_ready else ""))
+                                + (" (claim Ready)" if ready else ""))
                             return name
             except client.ApiException as e:
                 if e.status == 410:
@@ -331,22 +340,17 @@ class K8sHelper:
                 continue
 
     def delete_sandbox_claim(
-        self,
-        name: str,
-        namespace: str,
-        _request_timeout: float | tuple[float, float] | None = None,
-        *,
-        expected_uid: str | None = None,
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None,
+        *, expected_uid: str | None = None,
     ) -> None:
         """Deletes a SandboxClaim custom resource.
 
         Args:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3-based request.
-            expected_uid: Optional Kubernetes UID precondition. The apiserver
-                refuses to delete a same-name replacement with a different UID.
+            expected_uid: If provided, delete only the Claim with this UID.
         """
-        delete_kwargs: dict[str, object] = {}
+        delete_kwargs = {}
         if expected_uid is not None:
             delete_kwargs["body"] = client.V1DeleteOptions(
                 preconditions=client.V1Preconditions(uid=expected_uid)

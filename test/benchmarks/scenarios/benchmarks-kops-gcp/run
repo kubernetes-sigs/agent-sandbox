@@ -348,7 +348,7 @@ capture_control_plane_serial_port() {
 }
 
 validate_cluster() {
-  local wait_time="${1:-${STRESS_VALIDATE_WAIT:-15m}}"
+  local wait_time="${1:-${STRESS_VALIDATE_WAIT:-25m}}"
   echo "Waiting for cluster to be ready (timeout: ${wait_time})..."
   if ! kops validate cluster --wait "${wait_time}"; then
     capture_control_plane_serial_port
@@ -356,7 +356,11 @@ validate_cluster() {
   fi
 }
 
-validate_cluster "${STRESS_VALIDATE_WAIT:-15m}"
+# 25m default: GCE provisioning on shared boskos projects intermittently
+# stalls (resourceNotReady on the API ForwardingRule) and control-plane
+# static pods can still be starting at the 15m mark; those runs validate
+# fine given more headroom, and a longer wait only extends the failing path.
+validate_cluster "${STRESS_VALIDATE_WAIT:-25m}"
 
 if [[ "${CNI}" == "cilium" ]]; then
   # Raise Cilium's endpoint-create API rate limit. The agent rate-limits

@@ -368,6 +368,18 @@ class AsyncSandboxConnector:
                     response=e.response,
                 ) from e
             except httpx.HTTPError as e:
+                if (
+                    isinstance(e, httpx.TransportError)
+                    and method.upper() in RETRYABLE_METHODS
+                    and attempt < MAX_RETRIES
+                ):
+                    delay = BACKOFF_FACTOR * (2 ** attempt)
+                    logger.warning(
+                        f"Transport error from {url}: {e}, "
+                        f"attempt {attempt + 1}/{MAX_RETRIES + 1}, retrying in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 logger.error(f"Request to sandbox failed: {e}")
                 # Clear cached URLs that may have gone stale.
                 if isinstance(self.connection_config, SandboxGatewayConnectionConfig):

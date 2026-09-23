@@ -167,7 +167,7 @@ class AsyncSandboxConnector:
             (SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig),
         )
 
-        transport = httpx.AsyncHTTPTransport(retries=3)
+        transport = httpx.AsyncHTTPTransport()
         self.client = httpx.AsyncClient(
             transport=transport, timeout=httpx.Timeout(60.0)
         )
@@ -368,10 +368,9 @@ class AsyncSandboxConnector:
                     response=e.response,
                 ) from e
             except httpx.HTTPError as e:
-                if (
-                    isinstance(e, httpx.TransportError)
-                    and method.upper() in RETRYABLE_METHODS
-                    and attempt < MAX_RETRIES
+                if attempt < MAX_RETRIES and (
+                    isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+                    or method.upper() in RETRYABLE_METHODS
                 ):
                     delay = BACKOFF_FACTOR * (2 ** attempt)
                     logger.warning(

@@ -1718,6 +1718,36 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(reattached_handle.claim_name)
 
+    async def test_context_cleanup_can_retry_after_generator_exit(self):
+        self.client.sandbox_class = AsyncSandbox
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            return_value="resolved-id"
+        )
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        self.mock_k8s_helper.close = AsyncMock()
+        self.addAsyncCleanup(self.client.close)
+        handle = await self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        self.addAsyncCleanup(handle.close_connection)
+        interruption = GeneratorExit()
+
+        with patch.object(handle.connector.client, "aclose", side_effect=interruption):
+            with self.assertRaises(GeneratorExit) as raised:
+                async with self.client:
+                    pass
+
+        self.assertIs(raised.exception, interruption)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+        async with self.client:
+            pass
+        async with self.client:
+            pass
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_awaited_once_with(
+            CLAIM_NAME, NAMESPACE, expected_uid="claim-uid"
+        )
+
     async def test_retained_handle_cannot_delete_recreated_claim_after_cleanup(self):
         key = (NAMESPACE, CLAIM_NAME)
         retained_handle = AsyncSandbox.__new__(AsyncSandbox)
@@ -2228,22 +2258,72 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_retains_failed_connection_for_retry(self):
         """A failed connection close remains registered for a later retry."""
-        mock_sandbox = MagicMock()
-        mock_sandbox.close_connection = AsyncMock(
-            side_effect=[RuntimeError("close failed"), None]
+        self.client.sandbox_class = AsyncSandbox
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            return_value="resolved-id"
         )
-        self.client._active_connection_sandboxes[("ns", "claim")] = mock_sandbox
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
         self.mock_k8s_helper.close = AsyncMock()
+        self.addAsyncCleanup(self.client.close)
+        handle = await self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        self.addAsyncCleanup(handle.close_connection)
 
+        with patch.object(
+            handle.connector.client, "aclose", side_effect=RuntimeError("close failed")
+        ):
+            await self.client.close()
+
+        self.assertEqual(
+            await self.client.list_active_sandboxes(), [(NAMESPACE, CLAIM_NAME)]
+        )
         await self.client.close()
 
-        self.assertIn(("ns", "claim"), self.client._active_connection_sandboxes)
-        mock_sandbox.close_connection.assert_awaited_once()
+        self.assertFalse(handle.is_active)
+        self.assertEqual(await self.client.list_active_sandboxes(), [])
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
-        await self.client.close()
+    async def test_close_preserves_concurrently_replaced_handle(self):
+        self.client.sandbox_class = AsyncSandbox
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
+            return_value="resolved-id"
+        )
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        self.mock_k8s_helper.close = AsyncMock()
+        self.addAsyncCleanup(self.client.close)
+        handle = await self.client.get_sandbox(CLAIM_NAME, NAMESPACE)
+        self.addAsyncCleanup(handle.close_connection)
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+        close_http_client = handle.connector.client.aclose
 
-        self.assertNotIn(("ns", "claim"), self.client._active_connection_sandboxes)
-        self.assertEqual(mock_sandbox.close_connection.await_count, 2)
+        async def block_close():
+            close_started.set()
+            await release_close.wait()
+            await close_http_client()
+
+        with patch.object(handle.connector.client, "aclose", side_effect=block_close):
+            closing = asyncio.create_task(self.client.close())
+            try:
+                await asyncio.wait_for(close_started.wait(), timeout=5)
+                replacement_claim = claim_for_request()
+                replacement_claim["metadata"]["uid"] = "replacement-uid"
+                self.mock_k8s_helper.get_sandbox_claim.return_value = replacement_claim
+                self.mock_k8s_helper.resolve_sandbox_name.return_value = "replacement-id"
+                replacement = await asyncio.wait_for(
+                    self.client.get_sandbox(CLAIM_NAME, NAMESPACE), timeout=5
+                )
+                self.addAsyncCleanup(replacement.close_connection)
+            finally:
+                release_close.set()
+                await asyncio.wait_for(closing, timeout=5)
+
+        self.assertIs(
+            await self.client.get_sandbox(CLAIM_NAME, NAMESPACE), replacement
+        )
+        self.assertTrue(replacement.is_active)
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
 
     async def test_cancelled_handle_retirement_cannot_install_candidate(self):
         key = (NAMESPACE, CLAIM_NAME)

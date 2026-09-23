@@ -871,7 +871,7 @@ class AsyncSandboxClient(Generic[T]):
             await self._delete_claim_with_optional_uid(
                 claim_name, namespace, expected_uid
             )
-        except (Exception, asyncio.CancelledError):
+        except BaseException:
             async with self._lock:
                 self._claim_ownership.register_automatic(key, expected_uid)
             raise

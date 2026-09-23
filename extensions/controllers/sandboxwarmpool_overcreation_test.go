@@ -493,9 +493,13 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 // TestIsSandboxPodUnschedulable pins the decision table of the mirrored-condition
 // read directly, independent of reconcilePool. Only PodScheduled=False with reason
 // Unschedulable is a hold signal: a missing condition and an Unknown status are the
-// two shapes the mirror uses for "Pod absent" and "Pod state unknown", and any
-// other False reason (SchedulingGated) is a state the scheduler resolves itself, so
-// all of them must fall through to the stuck-sandbox path.
+// two shapes the mirror uses for "Pod absent" and "Pod state unknown", so both fall
+// through to the stuck-sandbox path.
+//
+// The reason set here is carried over unchanged from the Pod-reading version this
+// refactor replaces; it is not a claim that the set is complete. SchedulingGated in
+// particular is a known gap and is deliberately left out of this table so a fix can
+// add it without first overturning an assertion made here.
 func TestIsSandboxPodUnschedulable(t *testing.T) {
 	deleting := metav1.Now()
 
@@ -532,11 +536,6 @@ func TestIsSandboxPodUnschedulable(t *testing.T) {
 		{
 			name:       "True/PodScheduled (scheduled fine; stuck for another reason)",
 			conditions: cond(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled),
-			want:       false,
-		},
-		{
-			name:       "False/SchedulingGated (scheduler resolves this itself)",
-			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulingGated),
 			want:       false,
 		},
 		{

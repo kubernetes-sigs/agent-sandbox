@@ -849,11 +849,16 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // definitive PodScheduled=False/Unschedulable condition report false, preserving
 // the delete-and-replace behavior for genuinely stuck sandboxes.
 //
-// Only Unschedulable is a hold signal. The mirror carries every scheduler reason
-// verbatim, but any other False reason (SchedulingGated, for instance) is a state
-// the scheduler is expected to resolve on its own, so it falls through to the
-// stuck-sandbox path exactly as it did before. Widening the set of hold reasons is
-// a deliberate behavioral decision, not something this should infer.
+// Only Unschedulable is a hold signal, unchanged from the previous Pod-reading
+// implementation: the mirror carries every scheduler reason verbatim, but any
+// other False reason falls through to the stuck-sandbox path exactly as it did
+// before. This refactor deliberately preserves that set rather than widening it.
+//
+// SchedulingGated is a known gap in that set, not a deliberate exclusion — a
+// gated pod is parked by an external controller and only that controller will
+// release it, so reaping it forfeits its queue position (and, with Kueue,
+// orphans an Admitted Workload that keeps charging quota). Tracked separately;
+// fixing it here would mix a behavioral change into a refactor.
 //
 // The mirror is removed when the Pod is confirmed absent and reports Unknown on a
 // transient Pod lookup failure, so both cases fall through to false here — the

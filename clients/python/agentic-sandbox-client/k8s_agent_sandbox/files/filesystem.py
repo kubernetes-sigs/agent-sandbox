@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import io
 """Synchronous filesystem operations for legacy and sandboxd runtimes."""
+
+import io
 import logging
 import posixpath
 import secrets

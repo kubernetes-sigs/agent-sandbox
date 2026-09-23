@@ -1370,6 +1370,54 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             await connector.close()
 
 
+class DropConnectionHandler(BaseHTTPRequestHandler):
+    """Drops every connection before sending a response (a transport failure)."""
+
+    attempts = 0
+
+    def do_GET(self):
+        type(self).attempts += 1
+        self.connection.close()
+
+    def log_message(self, *args):
+        pass
+
+
+class TestAsyncConnectorTransportRetry(unittest.IsolatedAsyncioTestCase):
+    """A transport failure (no HTTP response) must be retried for idempotent
+    methods, matching the sync connector's urllib3 adapter."""
+
+    port: int
+    server: HTTPServer
+    server_thread: Thread
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.server_thread, cls.port = _start_stub_server(DropConnectionHandler)
+
+    @classmethod
+    def tearDownClass(cls):
+        _stop_stub_server(cls.server, cls.server_thread)
+
+    async def test_transport_failure_is_retried_for_idempotent_methods(self):
+        config = SandboxDirectConnectionConfig(
+            api_url=f"http://127.0.0.1:{self.port}", server_port=self.port
+        )
+        connector = AsyncSandboxConnector(
+            sandbox_id="test",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        try:
+            with patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "run")
+            self.assertGreater(DropConnectionHandler.attempts, 1)
+        finally:
+            await connector.close()
+
+
 class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):

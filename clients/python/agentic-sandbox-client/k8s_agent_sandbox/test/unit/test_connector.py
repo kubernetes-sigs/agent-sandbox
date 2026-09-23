@@ -697,5 +697,41 @@ class TestSandboxConnectorRetryExhaustion(unittest.TestCase):
         self.assertEqual(connector.connect(), f"http://10.0.0.99:{port}")
 
 
+class TestSandboxConnectorTransportRetry(unittest.TestCase):
+    """A transport failure (no HTTP response) must be retried by the urllib3
+    adapter for idempotent methods, not surfaced after a single attempt."""
+
+    def _serve_drop(self):
+        attempts = self.attempts = []
+
+        class _H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                attempts.append(1)
+                self.connection.close()  # drop before any response
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _H)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_transport_failure_is_retried_for_idempotent_methods(self):
+        from k8s_agent_sandbox.connector import SandboxRequestError
+        connector = SandboxConnector(
+            sandbox_id="sb",
+            namespace="ns",
+            connection_config=SandboxDirectConnectionConfig(api_url=self._serve_drop()),
+            k8s_helper=MagicMock(),
+        )
+
+        with patch("time.sleep"):
+            with self.assertRaises(SandboxRequestError):
+                connector.send_request("GET", "run")
+
+        self.assertGreater(len(self.attempts), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

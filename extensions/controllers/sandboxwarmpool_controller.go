@@ -850,15 +850,12 @@ func (r *SandboxWarmPoolReconciler) setNotProgressing(warmPool *extensionsv1beta
 // implementation this replaced. SchedulingGated is a known gap in that set,
 // tracked separately.
 //
-// Known limitation, carried deliberately: the mirror reports the Pod's
-// scheduling state, not its lifecycle. A Pod deleted externally but wedged
-// terminating keeps reporting Unschedulable while its Sandbox stays active, so
-// that member is held rather than replaced until the Pod finally goes away. The
-// Pod-reading version caught this via the Pod's own DeletionTimestamp. Closing
-// the gap needs a lifecycle signal on Sandbox.status that does not exist yet --
-// the condition's LastTransitionTime cannot substitute, because
-// meta.SetStatusCondition only advances it when Status changes, so a normally
-// pending Pod's timestamp is equally old.
+// Known limitation, tracked in #1748: the mirror reports the Pod's scheduling
+// state, not its lifecycle, so a Pod deleted but wedged terminating keeps
+// reporting Unschedulable while its Sandbox stays active and holds a pool slot
+// until the Pod goes away. Closing it needs a lifecycle signal on Sandbox.status;
+// the condition's LastTransitionTime cannot substitute, since
+// meta.SetStatusCondition only advances it when Status changes.
 func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 	// A terminating sandbox keeps its last mirrored condition until the sandbox
 	// controller observes the Pod's absence. Free the slot rather than holding it

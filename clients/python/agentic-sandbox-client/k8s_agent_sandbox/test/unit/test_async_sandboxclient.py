@@ -1351,8 +1351,9 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             k8s_helper=MagicMock(),
         )
         try:
-            with self.assertRaises(SandboxRequestError) as ctx:
-                await connector.send_request("POST", "run", timeout=1)
+            with patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()):
+                with self.assertRaises(SandboxRequestError) as ctx:
+                    await connector.send_request("POST", "run", timeout=1)
             self.assertIsNone(ctx.exception.status_code)
         finally:
             await connector.close()
@@ -1614,8 +1615,9 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         )
 
         try:
-            with self.assertRaises(SandboxRequestError):
-                await connector.send_request("GET", "test")
+            with patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "test")
 
             # Verify cache was cleared
             self.assertFalse(connector._pod_ip_resolved,
